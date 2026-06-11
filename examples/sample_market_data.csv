@@ -1,0 +1,5 @@
+date,ticker,tenor,value,data_type,source
+2026-06-10,UST_2Y,2Y,0.0430,yield,synthetic
+2026-06-10,UST_5Y,5Y,0.0415,yield,synthetic
+2026-06-10,UST_10Y,10Y,0.0420,yield,synthetic
+2026-06-10,UST_30Y,30Y,0.0440,yield,synthetic
