@@ -1,0 +1,47 @@
+name: Update CME CTD cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Optional CTD JSON/CSV source URL. Overrides CME_CTD_SOURCE_URL variable."
+        required: false
+        type: string
+  schedule:
+    # Weekdays after the US close / before Asia morning checks.
+    - cron: "20 23 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  update-cme-ctd-cache:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Refresh CTD cache
+        env:
+          CME_CTD_SOURCE_URL: ${{ github.event.inputs.source_url || vars.CME_CTD_SOURCE_URL || secrets.CME_CTD_SOURCE_URL }}
+        run: |
+          python scripts/update_cme_ctd.py --allow-empty
+
+      - name: Commit cache update if changed
+        run: |
+          if git diff --quiet data/cme_ctd_latest.json; then
+            echo "No CTD cache changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/cme_ctd_latest.json
+          git commit -m "Update CME CTD cache"
+          git push
