@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shiori Treasury Futures Yield Converter</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --card: #ffffff;
+      --ink: #1d2433;
+      --muted: #64748b;
+      --line: #dbe3ef;
+      --accent: #405f9f;
+      --danger: #b42318;
+      --good: #067647;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Noto Sans TC", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 32px auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(28px, 4vw, 44px);
+      letter-spacing: -0.03em;
+    }
+
+    .subtitle {
+      margin: 0 0 24px;
+      color: var(--muted);
+      max-width: 920px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 20px;
+      align-items: start;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+    }
+
+    .card h2 { margin: 0 0 14px; font-size: 20px; }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+
+    input, select, button, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 11px 12px;
+      font: inherit;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+
+    button {
+      cursor: pointer;
+      border-color: transparent;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+    }
+
+    button.secondary {
+      background: #eef2ff;
+      color: var(--accent);
+      border-color: #c7d2fe;
+    }
+
+    .row { display: flex; gap: 12px; align-items: center; }
+    .row > * { flex: 1; }
+    .full { grid-column: 1 / -1; }
+    .results { display: grid; gap: 12px; }
+
+    .result {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: #fbfdff;
+    }
+
+    .result .label { color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+    .result .value { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
+    .fineprint { color: var(--muted); font-size: 13px; margin-top: 16px; }
+
+    .status {
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 12px;
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+
+    .status.good { color: var(--good); background: #ecfdf3; }
+    .status.bad { color: var(--danger); background: #fff1f3; }
+
+    @media (max-width: 900px) {
+      .grid, .form-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Treasury Futures ↔ CTD Yield Converter</h1>
+    <p class="subtitle">
+      用 CTD coupon、maturity、conversion factor、last delivery date，把 CBOT Treasury futures price
+      換成 CTD implied yield；也可以反推「殖利率到某個水準時，期貨價格大概在哪」。這不是正式估值系統，是交易室快速 sanity check。
+    </p>
+
+    <div class="grid">
+      <section class="card">
+        <h2>1. CTD / Futures Inputs</h2>
+        <div class="form-grid">
+          <div class="full">
+            <label for="contractSelect">CTD cache contract</label>
+            <select id="contractSelect"></select>
+          </div>
+
+          <div>
+            <label for="futuresPrice">Futures price</label>
+            <input id="futuresPrice" value="110-16" placeholder="110-16, 110-16+, 110-165" />
+          </div>
+
+          <div>
+            <label for="conversionFactor">Conversion factor</label>
+            <input id="conversionFactor" value="0.9012" inputmode="decimal" />
+          </div>
+
+          <div>
+            <label for="couponRate">CTD coupon rate</label>
+            <input id="couponRate" value="4.00%" placeholder="4.00% or 0.04" />
+          </div>
+
+          <div>
+            <label for="maturityDate">CTD maturity date</label>
+            <input id="maturityDate" type="date" value="2034-05-15" />
+          </div>
+
+          <div>
+            <label for="settlementDate">Futures last delivery / settlement date</label>
+            <input id="settlementDate" type="date" value="2026-06-30" />
+          </div>
+
+          <div>
+            <label for="netBasis">Net basis adjustment</label>
+            <input id="netBasis" value="0" inputmode="decimal" />
+          </div>
+
+          <div>
+            <label for="targetYield">Target yield</label>
+            <input id="targetYield" value="4.35%" placeholder="4.35% or 0.0435" />
+          </div>
+
+          <div class="full row">
+            <button id="calculateButton">Calculate</button>
+            <button class="secondary" id="reloadCacheButton" type="button">Reload CTD cache</button>
+          </div>
+        </div>
+
+        <p class="fineprint">
+          方法口徑：CTD cash clean price ≈ futures price × conversion factor + net basis；再用半年度 coupon、Actual/Actual coupon accrual approximation 解 YTM。
+          CME Treasury Analytics 的口徑是用 CTD cash security 的 maturity、coupon、conversion factor、last delivery date 去算 futures implied yield。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>2. Results</h2>
+        <div class="results">
+          <div class="result"><div class="label">Parsed futures price</div><div class="value" id="parsedFuturesPrice">—</div></div>
+          <div class="result"><div class="label">CTD clean price from futures</div><div class="value" id="ctdCleanPrice">—</div></div>
+          <div class="result"><div class="label">Implied CTD yield</div><div class="value" id="impliedYield">—</div></div>
+          <div class="result"><div class="label">Futures price at target yield</div><div class="value" id="targetFuturesPrice">—</div></div>
+        </div>
+        <div class="status" id="status">Loading CTD cache…</div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top: 20px;">
+      <h2>3. Manual CTD JSON override</h2>
+      <p class="fineprint">
+        如果瀏覽器直接打開 HTML 時讀不到 repo 裡的 JSON，這很可能是瀏覽器對 file:// 的限制。可以用
+        <code>python -m http.server</code> 從 repo root 開，或把 CTD JSON 貼到下面。
+      </p>
+      <textarea id="manualJson" placeholder='{"records":[{"contract_code":"ZNM6", ...}]}'></textarea>
+      <div class="row" style="margin-top: 12px;">
+        <button class="secondary" id="loadManualJsonButton" type="button">Load pasted JSON</button>
+        <button class="secondary" id="useEmbeddedSampleButton" type="button">Use embedded sample</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const embeddedSample = {
+      updated_at: "2026-06-15T08:00:00Z",
+      source_url: null,
+      records: [
+        {
+          contract_code: "ZNM6", futures_symbol: "ZN", delivery_month: "2026-06",
+          ctd_cusip: "SAMPLE-ZN-CTD", coupon_rate: 0.04, maturity_date: "2034-05-15",
+          conversion_factor: 0.9012, last_delivery_date: "2026-06-30",
+          source: "synthetic sample", description: "Synthetic 10Y Treasury futures CTD example for development only"
+        },
+        {
+          contract_code: "ZBM6", futures_symbol: "ZB", delivery_month: "2026-06",
+          ctd_cusip: "SAMPLE-ZB-CTD", coupon_rate: 0.045, maturity_date: "2054-02-15",
+          conversion_factor: 0.7425, last_delivery_date: "2026-06-30",
+          source: "synthetic sample", description: "Synthetic Treasury bond futures CTD example for development only"
+        }
+      ]
+    };
+
+    let ctdCache = embeddedSample;
+    const ids = ["contractSelect", "futuresPrice", "conversionFactor", "couponRate", "maturityDate", "settlementDate", "netBasis", "targetYield", "parsedFuturesPrice", "ctdCleanPrice", "impliedYield", "targetFuturesPrice", "status", "manualJson"];
+    const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
+
+    function setStatus(message, kind = "") {
+      el.status.textContent = message;
+      el.status.className = `status ${kind}`.trim();
+    }
+
+    function parseRate(value) {
+      const text = String(value).trim();
+      if (text.endsWith("%")) return Number(text.slice(0, -1)) / 100;
+      const parsed = Number(text);
+      return Math.abs(parsed) > 1 ? parsed / 100 : parsed;
+    }
+
+    function parseTreasuryFuturesPrice(value) {
+      if (typeof value === "number") return value;
+      const text = String(value).trim().replace("'", "-");
+      if (!text) throw new Error("Futures price is empty.");
+      if (!text.includes("-")) return Number(text);
+      const [wholeText, rawFracText] = text.split("-");
+      let fracText = rawFracText.trim();
+      let plus = false;
+      if (fracText.endsWith("+")) { plus = true; fracText = fracText.slice(0, -1); }
+      let thirtySeconds;
+      if (fracText.includes(".")) thirtySeconds = Number(fracText);
+      else if (fracText.length >= 3) thirtySeconds = Number(fracText.slice(0, -1)) + Number(fracText.slice(-1)) / 10;
+      else thirtySeconds = Number(fracText || "0");
+      if (plus) thirtySeconds += 0.5;
+      if (thirtySeconds < 0 || thirtySeconds >= 32) throw new Error("32nds component must be in [0, 32).");
+      return Number(wholeText) + thirtySeconds / 32;
+    }
+
+    function formatTreasuryFuturesPrice(price) {
+      let whole = Math.floor(price);
+      const halfTicks = Math.round((price - whole) * 64);
+      let adjustedHalfTicks = halfTicks;
+      if (adjustedHalfTicks >= 64) { whole += 1; adjustedHalfTicks -= 64; }
+      const main = Math.floor(adjustedHalfTicks / 2);
+      const half = adjustedHalfTicks % 2;
+      return `${whole}-${String(main).padStart(2, "0")}${half ? "+" : ""}`;
+    }
+
+    function addMonths(date, months) {
+      const copied = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+      const originalDay = copied.getUTCDate();
+      copied.setUTCDate(1);
+      copied.setUTCMonth(copied.getUTCMonth() + months);
+      const lastDay = new Date(Date.UTC(copied.getUTCFullYear(), copied.getUTCMonth() + 1, 0)).getUTCDate();
+      copied.setUTCDate(Math.min(originalDay, lastDay));
+      return copied;
+    }
+
+    function parseIsoDate(value) {
+      const date = new Date(`${value}T00:00:00Z`);
+      if (Number.isNaN(date.getTime())) throw new Error(`Invalid date: ${value}`);
+      return date;
+    }
+
+    function daysBetween(a, b) { return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000)); }
+
+    function couponBounds(settlementDate, maturityDate) {
+      if (settlementDate >= maturityDate) throw new Error("Settlement date must be before maturity date.");
+      let nextCoupon = maturityDate;
+      while (addMonths(nextCoupon, -6) > settlementDate) nextCoupon = addMonths(nextCoupon, -6);
+      return { previousCoupon: addMonths(nextCoupon, -6), nextCoupon };
+    }
+
+    function accruedInterest(settlementDate, maturityDate, couponRate, par = 100) {
+      const { previousCoupon, nextCoupon } = couponBounds(settlementDate, maturityDate);
+      return (par * couponRate / 2) * daysBetween(previousCoupon, settlementDate) / daysBetween(previousCoupon, nextCoupon);
+    }
+
+    function cashflowDatesAfterSettlement(settlementDate, maturityDate) {
+      const { nextCoupon } = couponBounds(settlementDate, maturityDate);
+      const dates = [];
+      let current = nextCoupon;
+      while (current < maturityDate) { dates.push(current); current = addMonths(current, 6); }
+      dates.push(maturityDate);
+      return dates;
+    }
+
+    function sameDate(a, b) {
+      return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth() && a.getUTCDate() === b.getUTCDate();
+    }
+
+    function bondCleanPriceFromYield(yieldRate, settlementDate, maturityDate, couponRate, par = 100) {
+      if (yieldRate <= -0.99) throw new Error("Yield is too negative.");
+      const { nextCoupon } = couponBounds(settlementDate, maturityDate);
+      const previousToNext = addMonths(nextCoupon, -6);
+      const firstExponent = daysBetween(settlementDate, nextCoupon) / daysBetween(previousToNext, nextCoupon);
+      const periodYield = yieldRate / 2;
+      const couponCashflow = par * couponRate / 2;
+      let dirtyPrice = 0;
+      cashflowDatesAfterSettlement(settlementDate, maturityDate).forEach((cashflowDate, index) => {
+        let cashflow = couponCashflow;
+        if (sameDate(cashflowDate, maturityDate)) cashflow += par;
+        dirtyPrice += cashflow / ((1 + periodYield) ** (firstExponent + index));
+      });
+      return dirtyPrice - accruedInterest(settlementDate, maturityDate, couponRate, par);
+    }
+
+    function yieldFromBondCleanPrice(cleanPrice, settlementDate, maturityDate, couponRate) {
+      let low = -0.05;
+      let high = 0.25;
+      const objective = (rate) => bondCleanPriceFromYield(rate, settlementDate, maturityDate, couponRate) - cleanPrice;
+      let lowValue = objective(low);
+      let highValue = objective(high);
+      while (lowValue * highValue > 0 && high < 1.0) { high += 0.25; highValue = objective(high); }
+      if (lowValue * highValue > 0) throw new Error("Could not bracket yield solution.");
+      for (let i = 0; i < 200; i++) {
+        const mid = (low + high) / 2;
+        const midValue = objective(mid);
+        if (Math.abs(midValue) < 1e-10) return mid;
+        if (lowValue * midValue <= 0) { high = mid; highValue = midValue; }
+        else { low = mid; lowValue = midValue; }
+      }
+      return (low + high) / 2;
+    }
+
+    function refreshContractSelect() {
+      const records = ctdCache.records || [];
+      el.contractSelect.innerHTML = "";
+      records.forEach((record, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `${record.contract_code} | ${record.description || record.ctd_cusip || "CTD"}`;
+        el.contractSelect.appendChild(option);
+      });
+      if (records.length) applySelectedContract();
+    }
+
+    function applySelectedContract() {
+      const record = (ctdCache.records || [])[Number(el.contractSelect.value)];
+      if (!record) return;
+      el.conversionFactor.value = record.conversion_factor;
+      el.couponRate.value = `${(Number(record.coupon_rate) * 100).toFixed(3)}%`;
+      el.maturityDate.value = record.maturity_date;
+      el.settlementDate.value = record.last_delivery_date;
+    }
+
+    function calculate() {
+      try {
+        const futuresPrice = parseTreasuryFuturesPrice(el.futuresPrice.value);
+        const conversionFactor = Number(el.conversionFactor.value);
+        const couponRate = parseRate(el.couponRate.value);
+        const maturityDate = parseIsoDate(el.maturityDate.value);
+        const settlementDate = parseIsoDate(el.settlementDate.value);
+        const netBasis = Number(el.netBasis.value || 0);
+        const targetYield = parseRate(el.targetYield.value);
+        const cleanPrice = futuresPrice * conversionFactor + netBasis;
+        const impliedYield = yieldFromBondCleanPrice(cleanPrice, settlementDate, maturityDate, couponRate);
+        const targetCleanPrice = bondCleanPriceFromYield(targetYield, settlementDate, maturityDate, couponRate);
+        const targetFutures = (targetCleanPrice - netBasis) / conversionFactor;
+        el.parsedFuturesPrice.textContent = futuresPrice.toFixed(6);
+        el.ctdCleanPrice.textContent = cleanPrice.toFixed(4);
+        el.impliedYield.textContent = `${(impliedYield * 100).toFixed(4)}%`;
+        el.targetFuturesPrice.textContent = `${targetFutures.toFixed(6)} (${formatTreasuryFuturesPrice(targetFutures)})`;
+        setStatus("Calculation complete. Remember: this is a workflow check, not official valuation.", "good");
+      } catch (error) {
+        setStatus(error.message, "bad");
+      }
+    }
+
+    async function reloadCache() {
+      try {
+        const response = await fetch("../../data/cme_ctd_latest.json", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        ctdCache = await response.json();
+        refreshContractSelect();
+        calculate();
+        setStatus(`Loaded CTD cache. Updated at: ${ctdCache.updated_at || "unknown"}`, "good");
+      } catch (error) {
+        ctdCache = embeddedSample;
+        refreshContractSelect();
+        calculate();
+        setStatus(`Could not load ../../data/cme_ctd_latest.json, using embedded sample instead.\nReason: ${error.message}`, "bad");
+      }
+    }
+
+    function loadManualJson() {
+      try {
+        ctdCache = JSON.parse(el.manualJson.value);
+        if (!Array.isArray(ctdCache.records)) throw new Error("JSON must contain a records array.");
+        refreshContractSelect();
+        calculate();
+        setStatus("Loaded pasted CTD JSON.", "good");
+      } catch (error) {
+        setStatus(error.message, "bad");
+      }
+    }
+
+    document.getElementById("calculateButton").addEventListener("click", calculate);
+    document.getElementById("reloadCacheButton").addEventListener("click", reloadCache);
+    document.getElementById("loadManualJsonButton").addEventListener("click", loadManualJson);
+    document.getElementById("useEmbeddedSampleButton").addEventListener("click", () => {
+      ctdCache = embeddedSample;
+      refreshContractSelect();
+      calculate();
+      setStatus("Loaded embedded synthetic sample.", "good");
+    });
+    el.contractSelect.addEventListener("change", () => { applySelectedContract(); calculate(); });
+    reloadCache();
+  </script>
+</body>
+</html>
