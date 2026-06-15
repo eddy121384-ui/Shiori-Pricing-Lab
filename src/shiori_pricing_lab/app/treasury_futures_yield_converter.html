@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shiori Treasury Futures Yield Converter</title>
+  <style>
+    :root { --bg:#f7f8fb; --card:#fff; --ink:#1d2433; --muted:#64748b; --line:#dbe3ef; --accent:#405f9f; --bad:#b42318; --good:#067647; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif; line-height:1.5; }
+    main { width:min(1180px,calc(100vw - 32px)); margin:32px auto; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); letter-spacing:-.03em; }
+    .subtitle { margin:0 0 24px; color:var(--muted); max-width:920px; }
+    .grid { display:grid; grid-template-columns:1.1fr .9fr; gap:20px; align-items:start; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:20px; box-shadow:0 10px 30px rgba(15,23,42,.05); }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    label { display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
+    input,select,button,textarea { width:100%; border:1px solid var(--line); border-radius:12px; padding:11px 12px; font:inherit; background:#fff; color:var(--ink); }
+    textarea { min-height:110px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; font-size:12px; }
+    button { cursor:pointer; border-color:transparent; background:var(--accent); color:white; font-weight:700; }
+    button.secondary { background:#eef2ff; color:var(--accent); border-color:#c7d2fe; }
+    .row { display:flex; gap:12px; align-items:center; } .row>*{ flex:1; } .full{ grid-column:1/-1; }
+    .results { display:grid; gap:12px; }
+    .result { border:1px solid var(--line); border-radius:14px; padding:14px; background:#fbfdff; }
+    .result .label { color:var(--muted); font-size:13px; margin-bottom:4px; } .result .value { font-size:26px; font-weight:800; letter-spacing:-.02em; }
+    .fineprint { color:var(--muted); font-size:13px; margin-top:16px; }
+    .status { margin-top:12px; padding:12px; border-radius:12px; background:#f8fafc; color:var(--muted); font-size:13px; white-space:pre-wrap; }
+    .status.good { color:var(--good); background:#ecfdf3; } .status.bad { color:var(--bad); background:#fff1f3; }
+    @media (max-width:900px){ .grid,.form-grid{ grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Treasury Futures ↔ CTD Yield Converter</h1>
+  <p class="subtitle">用 CTD coupon、maturity、conversion factor、last delivery date，把 CBOT Treasury futures price 換成 CTD implied yield；也可以反推「殖利率到某個水準時，期貨價格大概在哪」。這是交易室快速 sanity check，不是正式估值系統。</p>
+  <div class="grid">
+    <section class="card">
+      <h2>1. Inputs</h2>
+      <div class="form-grid">
+        <div class="full"><label for="contractSelect">CTD cache contract</label><select id="contractSelect"></select></div>
+        <div><label for="futuresPrice">Futures price</label><input id="futuresPrice" value="110-16" placeholder="110-16, 110-16+, 110-165" /></div>
+        <div><label for="conversionFactor">Conversion factor</label><input id="conversionFactor" value="0.9012" /></div>
+        <div><label for="couponRate">CTD coupon rate</label><input id="couponRate" value="4.00%" placeholder="4.00% or 0.04" /></div>
+        <div><label for="maturityDate">CTD maturity date</label><input id="maturityDate" type="date" value="2034-05-15" /></div>
+        <div><label for="settlementDate">Last delivery / settlement date</label><input id="settlementDate" type="date" value="2026-06-30" /></div>
+        <div><label for="netBasis">Net basis adjustment</label><input id="netBasis" value="0" /></div>
+        <div><label for="targetYield">Target yield</label><input id="targetYield" value="4.35%" placeholder="4.35% or 0.0435" /></div>
+        <div class="full row"><button id="calculateButton">Calculate</button><button class="secondary" id="reloadCacheButton" type="button">Reload CTD cache</button></div>
+      </div>
+      <p class="fineprint">口徑：CTD clean price ≈ futures price × conversion factor + net basis；再用半年度 coupon、Actual/Actual coupon accrual approximation 解 YTM。</p>
+    </section>
+    <section class="card">
+      <h2>2. Results</h2>
+      <div class="results">
+        <div class="result"><div class="label">Parsed futures price</div><div class="value" id="parsedFuturesPrice">—</div></div>
+        <div class="result"><div class="label">CTD clean price from futures</div><div class="value" id="ctdCleanPrice">—</div></div>
+        <div class="result"><div class="label">Implied CTD yield</div><div class="value" id="impliedYield">—</div></div>
+        <div class="result"><div class="label">Futures price at target yield</div><div class="value" id="targetFuturesPrice">—</div></div>
+      </div>
+      <div class="status" id="status">Loading CTD cache…</div>
+    </section>
+  </div>
+  <section class="card" style="margin-top:20px;">
+    <h2>3. Manual CTD JSON override</h2>
+    <p class="fineprint">如果直接用 file:// 打開 HTML 讀不到 JSON，請從 repo root 執行 <code>python -m http.server 8000</code>，或把 CTD JSON 貼到下面。</p>
+    <textarea id="manualJson" placeholder='{"records":[{"contract_code":"ZNM6", ...}]}'></textarea>
+    <div class="row" style="margin-top:12px;"><button class="secondary" id="loadManualJsonButton" type="button">Load pasted JSON</button><button class="secondary" id="useEmbeddedSampleButton" type="button">Use embedded sample</button></div>
+  </section>
+</main>
+<script>
+const embeddedSample={updated_at:"2026-06-15T08:00:00Z",source_url:null,records:[{contract_code:"ZNM6",futures_symbol:"ZN",delivery_month:"2026-06",ctd_cusip:"SAMPLE-ZN-CTD",coupon_rate:.04,maturity_date:"2034-05-15",conversion_factor:.9012,last_delivery_date:"2026-06-30",source:"synthetic sample",description:"Synthetic 10Y Treasury futures CTD example"},{contract_code:"ZBM6",futures_symbol:"ZB",delivery_month:"2026-06",ctd_cusip:"SAMPLE-ZB-CTD",coupon_rate:.045,maturity_date:"2054-02-15",conversion_factor:.7425,last_delivery_date:"2026-06-30",source:"synthetic sample",description:"Synthetic Treasury bond futures CTD example"}]};
+let ctdCache=embeddedSample; const $=id=>document.getElementById(id);
+function status(msg,kind=""){ const el=$("status"); el.textContent=msg; el.className=`status ${kind}`.trim(); }
+function parseRate(v){ const t=String(v).trim(); if(t.endsWith("%")) return Number(t.slice(0,-1))/100; const n=Number(t); return Math.abs(n)>1?n/100:n; }
+function parseFut(v){ const t=String(v).trim().replace("'","-"); if(!t) throw Error("Futures price is empty."); if(!t.includes("-")) return Number(t); const [w,raw]=t.split("-"); let f=raw.trim(),plus=false; if(f.endsWith("+")){ plus=true; f=f.slice(0,-1); } let x; if(f.includes(".")) x=Number(f); else if(f.length>=3) x=Number(f.slice(0,-1))+Number(f.slice(-1))/10; else x=Number(f||"0"); if(plus) x+=.5; if(x<0||x>=32) throw Error("32nds component must be in [0, 32)."); return Number(w)+x/32; }
+function fmtFut(p){ let w=Math.floor(p); let h=Math.round((p-w)*64); if(h>=64){w++;h-=64;} const m=Math.floor(h/2), half=h%2; return `${w}-${String(m).padStart(2,"0")}${half?"+":""}`; }
+function d(s){ const x=new Date(`${s}T00:00:00Z`); if(Number.isNaN(x.getTime())) throw Error(`Invalid date: ${s}`); return x; }
+function addMonths(dt,m){ const x=new Date(Date.UTC(dt.getUTCFullYear(),dt.getUTCMonth(),dt.getUTCDate())); const day=x.getUTCDate(); x.setUTCDate(1); x.setUTCMonth(x.getUTCMonth()+m); const last=new Date(Date.UTC(x.getUTCFullYear(),x.getUTCMonth()+1,0)).getUTCDate(); x.setUTCDate(Math.min(day,last)); return x; }
+function days(a,b){ return Math.round((b-a)/(86400*1000)); }
+function bounds(settle,mat){ if(settle>=mat) throw Error("Settlement date must be before maturity date."); let next=mat; while(addMonths(next,-6)>settle) next=addMonths(next,-6); return {prev:addMonths(next,-6),next}; }
+function accrued(settle,mat,coupon){ const b=bounds(settle,mat); return (100*coupon/2)*days(b.prev,settle)/days(b.prev,b.next); }
+function cashDates(settle,mat){ const out=[]; let cur=bounds(settle,mat).next; while(cur<mat){ out.push(cur); cur=addMonths(cur,6); } out.push(mat); return out; }
+function same(a,b){ return a.getUTCFullYear()===b.getUTCFullYear()&&a.getUTCMonth()===b.getUTCMonth()&&a.getUTCDate()===b.getUTCDate(); }
+function cleanFromYield(y,set,mat,c){ const b=bounds(set,mat); const first=days(set,b.next)/days(addMonths(b.next,-6),b.next); let dirty=0; cashDates(set,mat).forEach((dt,i)=>{ let cf=100*c/2; if(same(dt,mat)) cf+=100; dirty+=cf/((1+y/2)**(first+i)); }); return dirty-accrued(set,mat,c); }
+function yieldFromClean(price,set,mat,c){ let lo=-.05,hi=.25; const obj=y=>cleanFromYield(y,set,mat,c)-price; let vlo=obj(lo),vhi=obj(hi); while(vlo*vhi>0&&hi<1){hi+=.25;vhi=obj(hi);} if(vlo*vhi>0) throw Error("Could not bracket yield solution."); for(let i=0;i<200;i++){ const mid=(lo+hi)/2, vm=obj(mid); if(Math.abs(vm)<1e-10) return mid; if(vlo*vm<=0){hi=mid;vhi=vm;}else{lo=mid;vlo=vm;} } return (lo+hi)/2; }
+function refreshSelect(){ const sel=$("contractSelect"); sel.innerHTML=""; (ctdCache.records||[]).forEach((r,i)=>{ const o=document.createElement("option"); o.value=String(i); o.textContent=`${r.contract_code} | ${r.description||r.ctd_cusip||"CTD"}`; sel.appendChild(o); }); applySelected(); }
+function applySelected(){ const r=(ctdCache.records||[])[Number($("contractSelect").value)]; if(!r) return; $("conversionFactor").value=r.conversion_factor; $("couponRate").value=`${(Number(r.coupon_rate)*100).toFixed(3)}%`; $("maturityDate").value=r.maturity_date; $("settlementDate").value=r.last_delivery_date; }
+function calculate(){ try{ const fut=parseFut($("futuresPrice").value), cf=Number($("conversionFactor").value), c=parseRate($("couponRate").value), mat=d($("maturityDate").value), set=d($("settlementDate").value), basis=Number($("netBasis").value||0), ty=parseRate($("targetYield").value); const clean=fut*cf+basis, y=yieldFromClean(clean,set,mat,c), targetClean=cleanFromYield(ty,set,mat,c), targetFut=(targetClean-basis)/cf; $("parsedFuturesPrice").textContent=fut.toFixed(6); $("ctdCleanPrice").textContent=clean.toFixed(4); $("impliedYield").textContent=`${(y*100).toFixed(4)}%`; $("targetFuturesPrice").textContent=`${targetFut.toFixed(6)} (${fmtFut(targetFut)})`; status("Calculation complete. Workflow check only, not official valuation.","good"); }catch(e){ status(e.message,"bad"); }}
+async function reload(){ try{ const res=await fetch("../../data/cme_ctd_latest.json",{cache:"no-store"}); if(!res.ok) throw Error(`HTTP ${res.status}`); ctdCache=await res.json(); refreshSelect(); calculate(); status(`Loaded CTD cache. Updated at: ${ctdCache.updated_at||"unknown"}`,"good"); }catch(e){ ctdCache=embeddedSample; refreshSelect(); calculate(); status(`Could not load ../../data/cme_ctd_latest.json, using embedded sample.\nReason: ${e.message}`,"bad"); }}
+$("calculateButton").addEventListener("click",calculate); $("reloadCacheButton").addEventListener("click",reload); $("contractSelect").addEventListener("change",()=>{applySelected();calculate();}); $("loadManualJsonButton").addEventListener("click",()=>{ try{ ctdCache=JSON.parse($("manualJson").value); if(!Array.isArray(ctdCache.records)) throw Error("JSON must contain a records array."); refreshSelect(); calculate(); status("Loaded pasted CTD JSON.","good"); }catch(e){status(e.message,"bad");}}); $("useEmbeddedSampleButton").addEventListener("click",()=>{ctdCache=embeddedSample;refreshSelect();calculate();status("Loaded embedded synthetic sample.","good");}); reload();
+</script>
+</body>
+</html>

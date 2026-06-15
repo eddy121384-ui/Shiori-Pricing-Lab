@@ -56,18 +56,61 @@ The exact stack can evolve, but the current direction is:
 - SQLite / DuckDB / Parquet for local storage and cache
 - pytest for tests
 
+## Treasury futures yield converter
+
+A first practical rates workflow tool is available at:
+
+```text
+src/shiori_pricing_lab/app/treasury_futures_yield_converter.html
+```
+
+It converts between Treasury futures prices and CTD implied yields using a normalized CTD cache, conversion factor, coupon, maturity date, and last delivery date.
+
+Local use:
+
+```bash
+python -m http.server 8000
+```
+
+Then open:
+
+```text
+http://localhost:8000/src/shiori_pricing_lab/app/treasury_futures_yield_converter.html
+```
+
+The current CTD cache lives at:
+
+```text
+data/cme_ctd_latest.json
+```
+
+Automatic CTD refresh is handled by:
+
+```text
+scripts/update_cme_ctd.py
+.github/workflows/update-cme-ctd.yml
+```
+
+Set `CME_CTD_SOURCE_URL` as a repository variable or secret when a permitted CME/public CTD data source is available. The repo intentionally does not hard-code credentials or entitlement-protected CME endpoints.
+
 ## Repository layout
 
 ```text
 .
 ├── AGENTS.md                    # Instructions for Codex / AI coding agents
 ├── README.md                    # Project overview
+├── data/
+│   └── cme_ctd_latest.json      # Normalized CTD cache for local tools
 ├── docs/
 │   ├── architecture.md          # System architecture
 │   ├── roadmap.md               # Development roadmap
-│   └── spec_v0.1.md             # First MVP specification
+│   ├── spec_v0.1.md             # First MVP specification
+│   └── spec_v0.2_treasury_futures_yield_converter.md
 ├── examples/
+│   ├── ctd_sample.json          # Synthetic CTD data for development
 │   └── sample_market_data.csv   # Toy data for development
+├── scripts/
+│   └── update_cme_ctd.py        # Refresh normalized CTD cache from configured source
 ├── src/
 │   └── shiori_pricing_lab/
 │       ├── data/                # Data providers and schemas
