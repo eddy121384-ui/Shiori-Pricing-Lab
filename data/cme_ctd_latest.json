@@ -1,0 +1,30 @@
+{
+  "updated_at": "2026-06-15T08:00:00Z",
+  "source_url": null,
+  "records": [
+    {
+      "contract_code": "ZNM6",
+      "futures_symbol": "ZN",
+      "delivery_month": "2026-06",
+      "ctd_cusip": "SAMPLE-ZN-CTD",
+      "coupon_rate": 0.04,
+      "maturity_date": "2034-05-15",
+      "conversion_factor": 0.9012,
+      "last_delivery_date": "2026-06-30",
+      "source": "synthetic sample",
+      "description": "Synthetic 10Y Treasury futures CTD example for development only"
+    },
+    {
+      "contract_code": "ZBM6",
+      "futures_symbol": "ZB",
+      "delivery_month": "2026-06",
+      "ctd_cusip": "SAMPLE-ZB-CTD",
+      "coupon_rate": 0.045,
+      "maturity_date": "2054-02-15",
+      "conversion_factor": 0.7425,
+      "last_delivery_date": "2026-06-30",
+      "source": "synthetic sample",
+      "description": "Synthetic Treasury bond futures CTD example for development only"
+    }
+  ]
+}
