@@ -22,7 +22,7 @@ class CurveScenarioResult:
         shocked = shocked.rename(columns={"value": "shocked_value"})
         merged = base.merge(shocked, on=["tenor", "years"], how="inner")
         merged["shock_bp"] = self.shock_bp
-        merged["change_bp"] = (merged["shocked_value"] - merged["base_value"]) * 10_000
+        merged["change_bp"] = ((merged["shocked_value"] - merged["base_value"]) * 10_000).round(10)
         return merged
 
 
