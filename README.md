@@ -86,6 +86,7 @@ Initial MVP scope:
 7. Build small, verify, then expand.
 8. Do not implement exotic products before the shared rates spine is stable.
 9. Do not let AI generate final pricing numbers without deterministic engine calls.
+10. Keep Python as the orchestration layer while allowing high-performance pricing backends behind stable interfaces.
 
 ## Suggested stack
 
@@ -99,6 +100,7 @@ The exact stack can evolve, but the current direction is:
 - FastAPI later if the app becomes a more formal service
 - Plotly or TradingView Lightweight Charts for visualization
 - SQLite / DuckDB / Parquet for local storage and cache
+- Numba / compiled backends later for proven numerical hot spots
 - pytest for tests
 
 ## Architecture documents
@@ -114,6 +116,7 @@ docs/04_product_definition_schema.md
 docs/05_backtesting_engine.md
 docs/06_ai_native_layer.md
 docs/07_ui_workbench.md
+docs/08_performance_engine_backend_strategy.md
 ```
 
 Legacy / supporting docs:
@@ -141,6 +144,7 @@ docs/runbook.md
 │   ├── 05_backtesting_engine.md
 │   ├── 06_ai_native_layer.md
 │   ├── 07_ui_workbench.md
+│   ├── 08_performance_engine_backend_strategy.md
 │   ├── architecture.md
 │   ├── roadmap.md
 │   ├── runbook.md
