@@ -36,6 +36,7 @@ Then read the relevant domain document:
 - Backtesting: `docs/05_backtesting_engine.md`
 - AI inquiry or script generation: `docs/06_ai_native_layer.md`
 - UI or charting: `docs/07_ui_workbench.md`
+- Performance or pricing backend design: `docs/08_performance_engine_backend_strategy.md`
 
 Legacy docs still exist:
 
@@ -75,6 +76,9 @@ The first durable milestone is Vanilla Rates Core:
 10. Write comments to explain financial assumptions, not obvious Python syntax.
 11. Do not use system date inside pricing engines. Valuation date must be explicit.
 12. Do not let AI inquiry code bypass deterministic pricing APIs.
+13. Keep Python as the orchestration layer and allow optimized or compiled pricing backends behind stable interfaces.
+14. Do not write large pure Python Monte Carlo or portfolio repricing loops without profiling and an explicit performance plan.
+15. Do not claim performance improvement without a benchmark and reference-result comparison.
 
 ## Financial correctness rules
 
