@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from shiori_pricing_lab.data.snapshot import MarketDataSnapshot
 
 _TENOR_TO_YEARS = {
     "1M": 1 / 12,
@@ -31,7 +35,7 @@ class RateCurve:
     points: pd.DataFrame
 
     @classmethod
-    def from_rates_points(cls, frame: pd.DataFrame, date: str | None = None) -> "RateCurve":
+    def from_rates_points(cls, frame: pd.DataFrame, date: str | None = None) -> RateCurve:
         if frame.empty:
             raise ValueError("Cannot build a curve from an empty frame")
 
@@ -44,10 +48,21 @@ class RateCurve:
         points = points.sort_values("years").reset_index(drop=True)
         return cls(date=selected_date, points=points)
 
+    @classmethod
+    def from_snapshot(cls, snapshot: MarketDataSnapshot) -> RateCurve:
+        """Build a curve from a market snapshot.
+
+        The curve always uses the snapshot's explicit ``valuation_date``; there is
+        deliberately no separate date argument so a snapshot can never be valued
+        under a different date.
+        """
+
+        return cls.from_rates_points(snapshot.rates_points, date=snapshot.valuation_date)
+
     def to_frame(self) -> pd.DataFrame:
         return self.points.copy()
 
-    def shocked_parallel(self, shock_bp: float) -> "RateCurve":
+    def shocked_parallel(self, shock_bp: float) -> RateCurve:
         """Return a parallel-shocked curve.
 
         shock_bp uses basis points. +1 bp = +0.0001 in decimal rate terms.
