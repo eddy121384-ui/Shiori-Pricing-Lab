@@ -124,3 +124,65 @@ def test_curve_construction_uses_snapshot_valuation_date():
     assert from_snapshot.date == "2026-06-10"
     assert from_context.date == "2026-06-10"
     assert list(from_snapshot.to_frame()["tenor"]) == ["2Y", "10Y"]
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_snapshot_rejects_blank_valuation_date(blank):
+    with pytest.raises(ValueError, match="non-empty"):
+        MarketDataSnapshot.from_rates_points(
+            _multi_date_frame(), valuation_date=blank, source="synthetic"
+        )
+
+
+def test_mutating_input_frame_does_not_change_snapshot():
+    frame = _multi_date_frame()
+    snapshot = MarketDataSnapshot.from_rates_points(
+        frame, valuation_date="2026-06-10", source="synthetic"
+    )
+    before = snapshot.rates_points["value"].tolist()
+
+    # Mutate the original input frame in place after snapshot creation.
+    frame.loc[:, "value"] = -1.0
+
+    assert snapshot.rates_points["value"].tolist() == before
+
+
+def test_mutating_exposed_rates_points_does_not_affect_snapshot_or_curve():
+    snapshot = _snapshot("2026-06-10")
+    before = snapshot.rates_points["value"].tolist()
+
+    # Mutate the frame returned by the snapshot.
+    exposed = snapshot.rates_points
+    exposed.loc[:, "value"] = -1.0
+
+    # Stored data is unchanged...
+    assert snapshot.rates_points["value"].tolist() == before
+    # ...and a curve built afterwards still reflects the original data.
+    curve = RateCurve.from_snapshot(snapshot)
+    assert curve.to_frame()["value"].tolist() == before
+
+
+def test_build_curve_works_after_removing_to_rate_curve():
+    snapshot = _snapshot("2026-06-10")
+    context = ValuationContext(valuation_date="2026-06-10", market_snapshot=snapshot)
+
+    # The data-layer helper was removed; curve construction lives in pricing.
+    assert not hasattr(snapshot, "to_rate_curve")
+    assert context.build_curve().date == "2026-06-10"
+
+
+def test_data_layer_does_not_import_pricing_at_runtime():
+    import sys
+
+    # Drop any pricing modules, import the data snapshot module fresh, and
+    # confirm the data layer pulls in no pricing module at runtime.
+    for name in list(sys.modules):
+        if name.startswith("shiori_pricing_lab.pricing") or name == (
+            "shiori_pricing_lab.data.snapshot"
+        ):
+            del sys.modules[name]
+
+    importlib = __import__("importlib")
+    importlib.import_module("shiori_pricing_lab.data.snapshot")
+
+    assert not any(name.startswith("shiori_pricing_lab.pricing") for name in sys.modules)

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from shiori_pricing_lab.data.snapshot import MarketDataSnapshot
-
-if TYPE_CHECKING:
-    from shiori_pricing_lab.pricing.curve import RateCurve
+from shiori_pricing_lab.pricing.curve import RateCurve
 
 
 @dataclass(frozen=True)
@@ -48,6 +45,11 @@ class ValuationContext:
             )
 
     def build_curve(self) -> RateCurve:
-        """Build the rates curve for this context's snapshot and valuation date."""
+        """Build the rates curve for this context's snapshot and valuation date.
 
-        return self.market_snapshot.to_rate_curve()
+        Curve construction lives in the pricing layer; the valuation layer simply
+        orchestrates it. The snapshot exposes a defensive copy of its rates
+        points, so the curve is always built from a safe copy.
+        """
+
+        return RateCurve.from_snapshot(self.market_snapshot)
