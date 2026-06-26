@@ -1,3 +1,5 @@
+import pytest
+
 from shiori_pricing_lab.data.providers import ManualMarketDataProvider
 from shiori_pricing_lab.pricing.curve import RateCurve, tenor_to_years
 from shiori_pricing_lab.pricing.scenario import run_parallel_curve_shock
@@ -56,4 +58,6 @@ def test_scenario_output_has_change_bp():
     frame = result.to_frame()
 
     assert set(["base_value", "shocked_value", "change_bp"]).issubset(frame.columns)
-    assert frame["change_bp"].tolist() == [5.0, 5.0]
+    # Compare with a tolerance: change_bp is derived from float arithmetic
+    # (rate + shock) * 10_000, which is not bit-exact across numpy/pandas builds.
+    assert frame["change_bp"].tolist() == pytest.approx([5.0, 5.0])
