@@ -126,6 +126,31 @@ def test_curve_construction_uses_snapshot_valuation_date():
     assert list(from_snapshot.to_frame()["tenor"]) == ["2Y", "10Y"]
 
 
+def test_from_snapshot_derives_valuation_date_and_defaults():
+    snapshot = _snapshot("2026-06-10")
+
+    context = ValuationContext.from_snapshot(snapshot)
+
+    assert context.valuation_date == snapshot.valuation_date
+    assert context.market_snapshot is snapshot
+    assert context.reporting_currency == "USD"
+    assert context.model_settings == {}
+    assert context.metadata == {}
+    assert context.scenario is None
+
+
+def test_from_snapshot_accepts_optional_overrides_without_sharing_mutables():
+    snapshot = _snapshot("2026-06-10")
+
+    a = ValuationContext.from_snapshot(snapshot, reporting_currency="EUR")
+    b = ValuationContext.from_snapshot(snapshot)
+
+    assert a.reporting_currency == "EUR"
+    # Optional dict overrides are copied, never shared between contexts.
+    assert a.model_settings is not b.model_settings
+    assert a.metadata is not b.metadata
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_snapshot_rejects_blank_valuation_date(blank):
     with pytest.raises(ValueError, match="non-empty"):
