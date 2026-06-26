@@ -53,3 +53,29 @@ class ValuationContext:
         """
 
         return RateCurve.from_snapshot(self.market_snapshot)
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: MarketDataSnapshot,
+        *,
+        reporting_currency: str = "USD",
+        model_settings: dict | None = None,
+        scenario: object | None = None,
+        metadata: dict | None = None,
+    ) -> ValuationContext:
+        """Build a context for a snapshot, deriving the valuation date from it.
+
+        This is the snapshot -> context connector for the standard flow. Taking
+        the valuation date straight from the snapshot guarantees the two always
+        agree and removes the chance of valuing a snapshot under a different date.
+        """
+
+        return cls(
+            valuation_date=snapshot.valuation_date,
+            market_snapshot=snapshot,
+            reporting_currency=reporting_currency,
+            model_settings=dict(model_settings) if model_settings is not None else {},
+            scenario=scenario,
+            metadata=dict(metadata) if metadata is not None else {},
+        )
