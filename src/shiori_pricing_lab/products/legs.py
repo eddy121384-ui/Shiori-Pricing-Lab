@@ -21,6 +21,7 @@ from shiori_pricing_lab.products.enums import (
     FloatingIndex,
     Frequency,
     PayReceive,
+    coerce_enum,
 )
 
 
@@ -36,6 +37,21 @@ class FixedLeg:
     fixed_rate: float
     payment_frequency: Frequency
     day_count: DayCount
+
+    def __post_init__(self) -> None:
+        # Coerce/validate enum-backed fields: type hints are not enforced at
+        # runtime, so a raw string must be turned into a real enum member here.
+        object.__setattr__(
+            self, "pay_receive", coerce_enum(self.pay_receive, PayReceive, "pay_receive")
+        )
+        object.__setattr__(
+            self,
+            "payment_frequency",
+            coerce_enum(self.payment_frequency, Frequency, "payment_frequency"),
+        )
+        object.__setattr__(
+            self, "day_count", coerce_enum(self.day_count, DayCount, "day_count")
+        )
 
 
 @dataclass(frozen=True)
@@ -62,3 +78,31 @@ class FloatingLeg:
     day_count: DayCount
     reset_frequency: Frequency | None = None
     compounding_method: CompoundingMethod = CompoundingMethod.NONE
+
+    def __post_init__(self) -> None:
+        # Coerce/validate enum-backed fields. ``reset_frequency`` stays optional:
+        # ``None`` means "no explicit reset" (e.g. an OIS daily reset), so only a
+        # supplied value is coerced.
+        object.__setattr__(
+            self, "pay_receive", coerce_enum(self.pay_receive, PayReceive, "pay_receive")
+        )
+        object.__setattr__(self, "index", coerce_enum(self.index, FloatingIndex, "index"))
+        object.__setattr__(
+            self,
+            "payment_frequency",
+            coerce_enum(self.payment_frequency, Frequency, "payment_frequency"),
+        )
+        object.__setattr__(
+            self, "day_count", coerce_enum(self.day_count, DayCount, "day_count")
+        )
+        if self.reset_frequency is not None:
+            object.__setattr__(
+                self,
+                "reset_frequency",
+                coerce_enum(self.reset_frequency, Frequency, "reset_frequency"),
+            )
+        object.__setattr__(
+            self,
+            "compounding_method",
+            coerce_enum(self.compounding_method, CompoundingMethod, "compounding_method"),
+        )

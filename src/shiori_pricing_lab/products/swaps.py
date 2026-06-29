@@ -18,13 +18,14 @@ schedules.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from shiori_pricing_lab.products.enums import (
     BusinessDayConvention,
     CompoundingMethod,
     Currency,
+    coerce_enum,
 )
 from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
 
@@ -47,6 +48,25 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field_name} must be an ISO date (YYYY-MM-DD): {value!r}") from exc
+
+
+def _coerce_swap_enums(swap: object) -> None:
+    """Coerce a swap's own enum-backed fields (legs coerce their own).
+
+    Mutates the frozen instance in place via ``object.__setattr__`` so the stored
+    fields are always real enum members, not raw strings.
+    """
+
+    object.__setattr__(
+        swap, "currency", coerce_enum(swap.currency, Currency, "currency")
+    )
+    object.__setattr__(
+        swap,
+        "business_day_convention",
+        coerce_enum(
+            swap.business_day_convention, BusinessDayConvention, "business_day_convention"
+        ),
+    )
 
 
 def _validate_common(
@@ -98,9 +118,12 @@ class InterestRateSwap:
     fixed_leg: FixedLeg
     floating_leg: FloatingLeg
     business_day_convention: BusinessDayConvention
-    product_type: str = "IRS"
+    # Fixed discriminator: not a constructor argument, so a caller cannot build
+    # an IRS-shaped trade that serializes as anything other than "IRS".
+    product_type: str = field(init=False, default="IRS")
 
     def __post_init__(self) -> None:
+        _coerce_swap_enums(self)
         _validate_common(
             self.product_id,
             self.effective_date,
@@ -137,9 +160,12 @@ class OvernightIndexedSwap:
     fixed_leg: FixedLeg
     floating_leg: FloatingLeg
     business_day_convention: BusinessDayConvention
-    product_type: str = "OIS"
+    # Fixed discriminator: not a constructor argument, so a caller cannot build
+    # an OIS-shaped trade that serializes as anything other than "OIS".
+    product_type: str = field(init=False, default="OIS")
 
     def __post_init__(self) -> None:
+        _coerce_swap_enums(self)
         _validate_common(
             self.product_id,
             self.effective_date,

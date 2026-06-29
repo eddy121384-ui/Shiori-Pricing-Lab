@@ -19,6 +19,33 @@ Scope notes:
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TypeVar
+
+_E = TypeVar("_E", bound=StrEnum)
+
+
+def coerce_enum(value: object, enum_cls: type[_E], field_name: str) -> _E:
+    """Coerce a raw value into ``enum_cls`` or raise a clear ``ValueError``.
+
+    Dataclass type hints are not enforced at runtime, so a product can be built
+    with an arbitrary string in an enum-typed field. This helper closes that gap:
+    it accepts an existing enum member as-is, coerces a valid raw string into the
+    matching member, and rejects blanks or unknown values with a message that
+    lists the allowed options. Keeping coercion explicit (rather than trusting
+    the annotation) means a definition always holds real enum members.
+    """
+
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str) and not value.strip():
+        raise ValueError(f"{field_name} must not be blank")
+    try:
+        return enum_cls(value)
+    except ValueError as exc:
+        allowed = ", ".join(member.value for member in enum_cls)
+        raise ValueError(
+            f"{field_name} must be one of {{{allowed}}}, got {value!r}"
+        ) from exc
 
 
 class PayReceive(StrEnum):

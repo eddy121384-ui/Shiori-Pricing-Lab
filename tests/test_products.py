@@ -204,6 +204,132 @@ def test_ois_requires_real_compounding_method():
         )
 
 
+# --- product_type is fixed and non-overridable -------------------------------
+
+
+def test_product_type_is_not_a_constructor_argument():
+    # product_type is a fixed discriminator, not an init field.
+    with pytest.raises(TypeError):
+        _irs(product_type="OIS")
+    with pytest.raises(TypeError):
+        _ois(product_type="IRS")
+
+
+def test_product_type_always_matches_the_class():
+    assert _irs().product_type == "IRS"
+    assert _ois().product_type == "OIS"
+    assert asdict(_irs())["product_type"] == "IRS"
+    assert asdict(_ois())["product_type"] == "OIS"
+
+
+# --- enum-backed fields are coerced / validated at runtime -------------------
+
+
+def test_valid_raw_strings_are_coerced_to_enum_members():
+    # Raw strings that match an enum value are accepted and stored as members.
+    irs = _irs(
+        currency="GBP",
+        business_day_convention="FOLLOWING",
+        fixed_leg=FixedLeg(
+            pay_receive="PAY",
+            fixed_rate=0.03,
+            payment_frequency="ANNUAL",
+            day_count="ACT_365_FIXED",
+        ),
+        floating_leg=FloatingLeg(
+            pay_receive="RECEIVE",
+            index="GBP_SONIA",
+            spread=0.0,
+            payment_frequency="QUARTERLY",
+            day_count="ACT_365_FIXED",
+            reset_frequency="QUARTERLY",
+        ),
+    )
+
+    assert irs.currency is Currency.GBP
+    assert irs.business_day_convention is BusinessDayConvention.FOLLOWING
+    assert irs.fixed_leg.pay_receive is PayReceive.PAY
+    assert irs.floating_leg.index is FloatingIndex.GBP_SONIA
+    assert irs.floating_leg.reset_frequency is Frequency.QUARTERLY
+
+
+def test_invalid_currency_string_rejected():
+    with pytest.raises(ValueError, match="currency must be one of"):
+        _irs(currency="ZZZ")
+
+
+def test_invalid_business_day_convention_string_rejected():
+    with pytest.raises(ValueError, match="business_day_convention must be one of"):
+        _irs(business_day_convention="ROLL_SOMEHOW")
+
+
+def test_invalid_pay_receive_string_rejected():
+    with pytest.raises(ValueError, match="pay_receive must be one of"):
+        FixedLeg(
+            pay_receive="BUY",
+            fixed_rate=0.03,
+            payment_frequency=Frequency.ANNUAL,
+            day_count=DayCount.ACT_360,
+        )
+
+
+def test_invalid_payment_frequency_string_rejected():
+    with pytest.raises(ValueError, match="payment_frequency must be one of"):
+        FixedLeg(
+            pay_receive=PayReceive.PAY,
+            fixed_rate=0.03,
+            payment_frequency="BIWEEKLY",
+            day_count=DayCount.ACT_360,
+        )
+
+
+def test_invalid_day_count_string_rejected():
+    with pytest.raises(ValueError, match="day_count must be one of"):
+        FixedLeg(
+            pay_receive=PayReceive.PAY,
+            fixed_rate=0.03,
+            payment_frequency=Frequency.ANNUAL,
+            day_count="ACT_999",
+        )
+
+
+def test_invalid_floating_index_string_rejected():
+    with pytest.raises(ValueError, match="index must be one of"):
+        FloatingLeg(
+            pay_receive=PayReceive.RECEIVE,
+            index="USD_FAKE",
+            spread=0.0,
+            payment_frequency=Frequency.QUARTERLY,
+            day_count=DayCount.ACT_360,
+            reset_frequency=Frequency.QUARTERLY,
+        )
+
+
+def test_invalid_compounding_method_string_rejected():
+    with pytest.raises(ValueError, match="compounding_method must be one of"):
+        FloatingLeg(
+            pay_receive=PayReceive.PAY,
+            index=FloatingIndex.EUR_ESTR,
+            spread=0.0,
+            payment_frequency=Frequency.ANNUAL,
+            day_count=DayCount.ACT_360,
+            compounding_method="ROLLED_UP",
+        )
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_enum_like_values_rejected(blank):
+    with pytest.raises(ValueError, match="currency must not be blank"):
+        _irs(currency=blank)
+    with pytest.raises(ValueError, match="pay_receive must not be blank"):
+        FixedLeg(
+            pay_receive=blank,
+            fixed_rate=0.03,
+            payment_frequency=Frequency.ANNUAL,
+            day_count=DayCount.ACT_360,
+        )
+
+
 # --- Serialization -----------------------------------------------------------
 
 
