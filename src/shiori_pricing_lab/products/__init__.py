@@ -10,14 +10,18 @@ Strict boundaries:
 - No market data, curves, fixings, valuation date, or pricing output lives here.
 - This package must not import the data, pricing, valuation, or AI layers.
 
-Currently provides IRS and OIS. CCS and FX Swap are intentionally deferred to a
-later PR (see ``docs/04_product_definition_schema.md``).
+Currently provides IRS, OIS, CCS, and FX Swap (schema only).
 """
 
 from __future__ import annotations
 
+from shiori_pricing_lab.products.cross_currency import (
+    CrossCurrencyLeg,
+    CrossCurrencySwap,
+)
 from shiori_pricing_lab.products.enums import (
     BusinessDayConvention,
+    BuySell,
     CompoundingMethod,
     Currency,
     DayCount,
@@ -25,14 +29,19 @@ from shiori_pricing_lab.products.enums import (
     Frequency,
     PayReceive,
 )
+from shiori_pricing_lab.products.fx_swap import FXSwap
 from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
 from shiori_pricing_lab.products.swaps import InterestRateSwap, OvernightIndexedSwap
 
 __all__ = [
     "BusinessDayConvention",
+    "BuySell",
     "CompoundingMethod",
+    "CrossCurrencyLeg",
+    "CrossCurrencySwap",
     "Currency",
     "DayCount",
+    "FXSwap",
     "FixedLeg",
     "FloatingIndex",
     "FloatingLeg",

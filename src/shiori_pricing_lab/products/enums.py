@@ -76,6 +76,19 @@ class Currency(StrEnum):
     CHF = "CHF"
     AUD = "AUD"
     CAD = "CAD"
+    TWD = "TWD"
+
+
+class BuySell(StrEnum):
+    """Direction of the near leg of an FX swap, from the trade owner's view.
+
+    ``BUY`` / ``SELL`` refer to the *base* currency on the near date. The far
+    leg is the opposite by construction, so only the near-leg direction is
+    stored on the product.
+    """
+
+    BUY = "BUY"
+    SELL = "SELL"
 
 
 class Frequency(StrEnum):
