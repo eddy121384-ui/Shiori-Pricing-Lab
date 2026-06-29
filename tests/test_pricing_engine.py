@@ -485,6 +485,39 @@ def test_missing_market_snapshot_raises_even_when_dates_mismatch():
         price(_irs(), ctx, _snap(valuation_date="2026-06-30"))
 
 
+def test_none_market_snapshot_on_context_raises_contract_error():
+    # market_snapshot present but None is still a malformed context.
+    ctx = SimpleNamespace(
+        valuation_date=_VALUATION_DATE, reporting_currency="USD", market_snapshot=None
+    )
+    with pytest.raises(PricingContractError, match="market_snapshot must not be None"):
+        price(_irs(), ctx, _snap())
+
+
+def test_none_market_snapshot_raises_even_when_dates_mismatch():
+    # The None check runs in the contract-guard phase, before the valuation-date
+    # mismatch return-path, so it raises rather than returning a FAILED result.
+    ctx = SimpleNamespace(
+        valuation_date="2026-06-29", reporting_currency="USD", market_snapshot=None
+    )
+    with pytest.raises(PricingContractError, match="market_snapshot must not be None"):
+        price(_irs(), ctx, _snap(valuation_date="2026-06-30"))
+
+
+def test_none_market_snapshot_does_not_call_any_engine():
+    registry = PricingEngineRegistry()
+    engine = _CountingEngine()
+    registry.register("IRS", engine)
+
+    ctx = SimpleNamespace(
+        valuation_date=_VALUATION_DATE, reporting_currency="USD", market_snapshot=None
+    )
+    with pytest.raises(PricingContractError, match="market_snapshot must not be None"):
+        price(_irs(), ctx, _snap(), registry=registry)
+
+    assert engine.calls == 0  # routing never happened
+
+
 # --- 5. Contract violations (raise-path) -------------------------------------
 
 

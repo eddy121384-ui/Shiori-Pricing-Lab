@@ -186,6 +186,11 @@ def price(
     context_snapshot = _require_attr(
         valuation_context, "market_snapshot", "valuation_context"
     )
+    # Present-but-None is still a malformed context: _require_attr only proves the
+    # attribute exists, so reject a None snapshot here as a contract violation
+    # before any return-path failure can mask it.
+    if context_snapshot is None:
+        raise PricingContractError("valuation_context.market_snapshot must not be None")
     snapshot_valuation_date = _require_attr(
         market_snapshot, "valuation_date", "market_snapshot"
     )
