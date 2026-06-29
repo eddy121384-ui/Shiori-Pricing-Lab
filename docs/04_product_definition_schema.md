@@ -17,15 +17,21 @@ Product definitions are required so the same pricing engine can be used for:
 
 ## Implementation status
 
-As of PR #19 (Issue #12, first slice):
+Issue #12 product-schema scope is **complete**. All four MVP vanilla rates
+product schemas exist in `src/shiori_pricing_lab/products/`, schema only — no
+pricing engine:
 
-- **IRS** (`InterestRateSwap`) and **OIS** (`OvernightIndexedSwap`) schemas exist
-  in `src/shiori_pricing_lab/products/`, with supporting legs and enums. Schema
-  only — no pricing engine.
-- **CCS** and **FX Swap** schemas are still **pending**.
+- **IRS** (`InterestRateSwap`) and **OIS** (`OvernightIndexedSwap`) — PR #19.
+- **CCS** (`CrossCurrencySwap`, with per-leg `CrossCurrencyLeg`) and **FX Swap**
+  (`FXSwap`) — PR #21.
+
+Remaining out of scope for this layer: the pricing engine, cashflow generation,
+schedules / calendars, curve bootstrapping, market data, valuation outputs, and
+product lifecycle events.
 
 The sections below remain the design reference for all products, including the
-ones not yet implemented.
+ones not yet implemented (swaptions, bond options, callable swaps, range
+accruals).
 
 ## Product definition vs valuation context
 
