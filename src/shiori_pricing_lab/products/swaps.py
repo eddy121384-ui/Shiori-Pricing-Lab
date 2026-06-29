@@ -18,6 +18,7 @@ schedules.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -25,9 +26,17 @@ from shiori_pricing_lab.products.enums import (
     BusinessDayConvention,
     CompoundingMethod,
     Currency,
+    Frequency,
     coerce_enum,
 )
 from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
+
+# A strict calendar date: four-digit year, two-digit month, two-digit day,
+# dash-separated. This deliberately excludes the other forms
+# ``date.fromisoformat`` accepts on Python 3.11+ (compact ``20260701`` and ISO
+# week dates such as ``2026-W27-3``) so a product always stores an explicit
+# ``YYYY-MM-DD`` string that round-trips unchanged.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _require_non_blank(value: str, field_name: str) -> None:
@@ -36,18 +45,27 @@ def _require_non_blank(value: str, field_name: str) -> None:
 
 
 def _parse_iso_date(value: str, field_name: str) -> date:
-    """Parse an explicit ISO date string (YYYY-MM-DD).
+    """Parse a strict ``YYYY-MM-DD`` calendar date string.
+
+    Two checks are applied. First the string must match ``YYYY-MM-DD`` exactly:
+    ``date.fromisoformat`` alone is too permissive on Python 3.11+ (it accepts
+    compact ``20260701`` and ISO week dates like ``2026-W27-3``), but a product
+    definition must store the explicit dash-separated form so it serializes back
+    unchanged. Second, the value must be a real calendar date.
 
     ``date.fromisoformat`` is pure parsing, not the system clock, so this does
-    not smuggle a valuation date or "today" into a product definition. It is
-    used only to validate format and ordering of the schedule dates.
+    not smuggle a valuation date or "today" into a product definition. It is used
+    only to validate the format, calendar validity, and ordering of the schedule
+    dates.
     """
 
     _require_non_blank(value, field_name)
+    if not _ISO_DATE_RE.match(value):
+        raise ValueError(f"{field_name} must be a YYYY-MM-DD date string: {value!r}")
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
-        raise ValueError(f"{field_name} must be an ISO date (YYYY-MM-DD): {value!r}") from exc
+        raise ValueError(f"{field_name} must be a YYYY-MM-DD date string: {value!r}") from exc
 
 
 def _coerce_swap_enums(swap: object) -> None:
@@ -149,7 +167,9 @@ class OvernightIndexedSwap:
     The floating leg references an overnight index whose daily fixings are
     combined over each coupon period, so ``floating_leg.compounding_method`` must
     be a real compounding method (``DAILY_COMPOUNDED`` or ``AVERAGED``), not
-    ``NONE``. The daily reset is implicit, so ``reset_frequency`` is optional.
+    ``NONE``. The reset is daily by nature, so ``reset_frequency`` must be either
+    ``None`` (implicit daily) or ``Frequency.DAILY``; a longer reset (monthly,
+    quarterly, ...) is not a valid OIS term.
     """
 
     product_id: str
@@ -177,6 +197,11 @@ class OvernightIndexedSwap:
         if self.floating_leg.compounding_method is CompoundingMethod.NONE:
             raise ValueError(
                 "OIS floating_leg.compounding_method must be DAILY_COMPOUNDED or AVERAGED"
+            )
+        if self.floating_leg.reset_frequency not in (None, Frequency.DAILY):
+            raise ValueError(
+                "OIS floating_leg.reset_frequency must be None or Frequency.DAILY "
+                f"(got {self.floating_leg.reset_frequency})"
             )
 
     @property

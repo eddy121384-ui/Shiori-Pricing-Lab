@@ -158,8 +158,36 @@ def test_blank_effective_date_rejected(blank):
 
 
 def test_non_iso_date_rejected():
-    with pytest.raises(ValueError, match="must be an ISO date"):
+    with pytest.raises(ValueError, match="must be a YYYY-MM-DD date string"):
         _irs(maturity_date="07/01/2031")
+
+
+def test_compact_date_rejected():
+    # date.fromisoformat accepts "20260701" on 3.11+, but a product must store
+    # the explicit dash-separated form.
+    with pytest.raises(ValueError, match="must be a YYYY-MM-DD date string"):
+        _irs(effective_date="20260701")
+
+
+def test_iso_week_date_rejected():
+    # ISO week dates (e.g. 2026-W27-3) are also accepted by fromisoformat and
+    # must be rejected.
+    with pytest.raises(ValueError, match="must be a YYYY-MM-DD date string"):
+        _irs(effective_date="2026-W27-3")
+
+
+def test_impossible_calendar_date_rejected():
+    # Right shape, but not a real calendar date.
+    with pytest.raises(ValueError, match="must be a YYYY-MM-DD date string"):
+        _irs(maturity_date="2031-13-40")
+
+
+def test_dates_round_trip_unchanged_through_asdict():
+    irs = _irs(effective_date="2026-07-01", maturity_date="2031-07-01")
+    data = asdict(irs)
+
+    assert data["effective_date"] == "2026-07-01"
+    assert data["maturity_date"] == "2031-07-01"
 
 
 def test_same_direction_legs_rejected():
@@ -202,6 +230,35 @@ def test_ois_requires_real_compounding_method():
                 compounding_method=CompoundingMethod.NONE,
             )
         )
+
+
+def _ois_floating(reset_frequency):
+    """OIS floating leg helper that varies only the reset frequency."""
+
+    return FloatingLeg(
+        pay_receive=PayReceive.PAY,
+        index=FloatingIndex.EUR_ESTR,
+        spread=0.0,
+        payment_frequency=Frequency.ANNUAL,
+        day_count=DayCount.ACT_360,
+        reset_frequency=reset_frequency,
+        compounding_method=CompoundingMethod.DAILY_COMPOUNDED,
+    )
+
+
+@pytest.mark.parametrize("reset", [None, Frequency.DAILY])
+def test_ois_allows_none_or_daily_reset(reset):
+    ois = _ois(floating_leg=_ois_floating(reset))
+    assert ois.floating_leg.reset_frequency is reset
+
+
+@pytest.mark.parametrize(
+    "reset",
+    [Frequency.MONTHLY, Frequency.QUARTERLY, Frequency.SEMI_ANNUAL, Frequency.ANNUAL],
+)
+def test_ois_rejects_non_daily_reset(reset):
+    with pytest.raises(ValueError, match="reset_frequency must be None or Frequency.DAILY"):
+        _ois(floating_leg=_ois_floating(reset))
 
 
 # --- product_type is fixed and non-overridable -------------------------------
