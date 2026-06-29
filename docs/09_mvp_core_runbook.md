@@ -94,8 +94,9 @@ Tests run without Bloomberg or any external dependency. Relevant test files:
 
 Net result: the reusable spine from `docs/00_vision.md`
 (`Product Definition + Valuation Context + Market Data Snapshot + Pricing
-Engine = Valuation Result`) exists for the rates curve case, minus the product
-definition piece (next step).
+Engine = Valuation Result`) exists for the rates curve case. The Product
+Definition piece now has its first slice too (IRS / OIS schemas, PR #19 —
+see section 7); the remaining gap is the pricing engine itself.
 
 ## 6. What is intentionally NOT done yet
 
@@ -110,22 +111,56 @@ Deliberately out of scope at this checkpoint:
 - Richer snapshot content (FX, vols, fixings, reference data) — rates points only.
 - Curve bootstrapping, calendars, day-count conventions.
 
-## 7. Recommended next development step
+## 7. Product schema checkpoint (PR #19, Issue #12 first slice)
 
-**Issue #12 — define vanilla rates product schemas (schema only).**
+The Product Definition piece of the spine now exists for vanilla swaps, in
+`src/shiori_pricing_lab/products/`. This is **schema only — there is still no
+pricing engine.**
 
-Add machine-readable product definitions for vanilla rates instruments (start
-with IRS / OIS, then CCS / FX Swap) as plain data structures: legs, schedule
-inputs, notional, fixed rate, floating index, pay/receive, currency.
+| Product | Schema status |
+| --- | --- |
+| IRS (`InterestRateSwap`) | ✅ Defined and validated |
+| OIS (`OvernightIndexedSwap`) | ✅ Defined and validated |
+| CCS | ❌ Not started |
+| FX Swap | ❌ Not started |
 
-Constraints for that step:
+Supporting types: `FixedLeg`, `FloatingLeg`, and the enums `PayReceive`,
+`Currency`, `Frequency`, `DayCount`, `BusinessDayConvention`, `FloatingIndex`,
+`CompoundingMethod`. Validated by `tests/test_products.py`
+(`python -m pytest -q` → 74 passed; `ruff` clean).
 
-- **Schema only — no pricing engine yet.** Define and validate the structures;
-  do not price them.
-- Product definitions describe the deal, not the market: no embedded market
-  data, no valuation date.
-- Keep it small, explicit, and additive; mirror the existing dataclass style.
-- Tests for construction and validation, synthetic only.
+What the schema enforces (from Codex review):
+
+- `product_type` is non-overridable (a fixed discriminator), so an IRS always
+  serializes as `"IRS"` and an OIS as `"OIS"`.
+- Enum-backed fields are coerced/validated at runtime; blanks and unknown
+  strings are rejected with clear errors.
+- Schedule dates require strict `YYYY-MM-DD`; compact and ISO week-date forms
+  are rejected.
+- OIS `floating_leg.reset_frequency` may only be `None` or `Frequency.DAILY`.
+
+Load-bearing invariant for this layer (keep it true):
+
+- **Product definitions describe the trade only.** They must not contain market
+  data, valuation date, PV, DV01, curves, discount factors, or any pricing
+  result. The `products` package imports no data/pricing/valuation module
+  (guarded by a test).
+
+## 8. Recommended next development step
+
+**Design preflight for the CCS / FX Swap product schema (still schema only).**
+
+Issue #12 is partially complete: IRS and OIS are done; CCS and FX Swap remain.
+Before writing CCS / FX Swap code, do a short design preflight that reuses the
+IRS/OIS pattern:
+
+- Confirm which existing enums/legs are reusable and what genuinely new terms
+  CCS (two currencies, two notionals, FX exchanges, basis spread) and FX Swap
+  (near/far dates and amounts) require — see `docs/04_product_definition_schema.md`.
+- Decide how multi-currency notionals and FX exchange flags are represented.
+- Keep the same boundaries: **schema only — no pricing engine yet**; no market
+  data, valuation date, or pricing results on products; small, explicit,
+  additive; tests for construction and validation, synthetic only.
 
 This slots cleanly into the spine: a future pricing engine will take a product
 definition plus a `ValuationContext` and return a valuation result, without

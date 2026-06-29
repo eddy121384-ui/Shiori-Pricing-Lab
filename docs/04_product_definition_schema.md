@@ -15,6 +15,18 @@ Product definitions are required so the same pricing engine can be used for:
 - AI-assisted inquiry;
 - reproducible testing.
 
+## Implementation status
+
+As of PR #19 (Issue #12, first slice):
+
+- **IRS** (`InterestRateSwap`) and **OIS** (`OvernightIndexedSwap`) schemas exist
+  in `src/shiori_pricing_lab/products/`, with supporting legs and enums. Schema
+  only — no pricing engine.
+- **CCS** and **FX Swap** schemas are still **pending**.
+
+The sections below remain the design reference for all products, including the
+ones not yet implemented.
+
 ## Product definition vs valuation context
 
 Product definition answers:
