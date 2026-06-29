@@ -63,11 +63,41 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   feature begins, so future work starts from a clear baseline.
 - **Intentionally not done:** Documentation only — no code changes.
 
+### PR #19 — IRS / OIS product schemas (Issue #12, first slice)
+
+- **What changed:** Added the `src/shiori_pricing_lab/products/` package with
+  schema-only product definitions: enums (`PayReceive`, `Currency`, `Frequency`,
+  `DayCount`, `BusinessDayConvention`, `FloatingIndex`, `CompoundingMethod`),
+  legs (`FixedLeg`, `FloatingLeg`), and products (`InterestRateSwap`,
+  `OvernightIndexedSwap`), plus `tests/test_products.py`.
+- **Why it mattered:** Supplies the **Product Definition** piece of the spine
+  (`Product Definition + Valuation Context + Market Data Snapshot + Pricing
+  Engine = Valuation Result`). This is **schema only — not a pricing engine**:
+  it defines and validates the trade terms a future engine will consume.
+- **Validation fixes from Codex review:**
+  - `product_type` is non-overridable — a `field(init=False)` discriminator, so
+    an IRS always serializes as `"IRS"` and an OIS as `"OIS"`.
+  - Enum-backed fields have runtime coercion/validation (`coerce_enum`): valid
+    raw strings coerce to members; blanks and unknown values are rejected with a
+    clear error, instead of relying on type hints alone.
+  - Schedule dates require strict `YYYY-MM-DD`; compact (`20260701`) and ISO
+    week (`2026-W27-3`) forms are rejected so dates round-trip unchanged.
+  - OIS `floating_leg.reset_frequency` allows only `None` or `Frequency.DAILY`
+    (the reset is daily / implicit); longer resets are rejected.
+- **Intentionally not done:** No pricing, PV, DV01, cashflows, schedules,
+  calendars, or day-count maths; no market data, valuation date, or curves on
+  products; no CCS or FX Swap schemas yet.
+- **Review / validation:** `python -m pytest -q` → 74 passed; `ruff` clean.
+  Issue #12 is only **partially complete** — IRS and OIS landed; **CCS and FX
+  Swap schemas remain.**
+
 ## Checkpoint summary
 
-- Issues #1 and #2 are ready to close after PR #18 is merged.
+- Issues #1 and #2 are closed (PR #18 merged).
 - MVP Core (Phase 1, Vanilla Rates Core spine) is complete: the
   `provider → snapshot → context → curve → scenario` flow is wired and tested.
-- Recommended next development step: **Issue #12 — define vanilla rates product
-  schemas, schema-only first** (no pricing engine yet). See section 7 of
-  `docs/09_mvp_core_runbook.md`.
+- Issue #12 is in progress: IRS and OIS product schemas landed (PR #19,
+  schema-only); CCS and FX Swap schemas remain.
+- Recommended next development step: a short design preflight for the **CCS / FX
+  Swap product schema** before coding, reusing the IRS/OIS schema pattern. See
+  section 8 of `docs/09_mvp_core_runbook.md`.
