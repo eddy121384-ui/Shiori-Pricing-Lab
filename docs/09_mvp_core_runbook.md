@@ -111,23 +111,30 @@ Deliberately out of scope at this checkpoint:
 - Richer snapshot content (FX, vols, fixings, reference data) — rates points only.
 - Curve bootstrapping, calendars, day-count conventions.
 
-## 7. Product schema checkpoint (PR #19, Issue #12 first slice)
+## 7. Product schema checkpoint (PR #19 + PR #21, Issue #12 complete)
 
-The Product Definition piece of the spine now exists for vanilla swaps, in
-`src/shiori_pricing_lab/products/`. This is **schema only — there is still no
-pricing engine.**
+The Product Definition piece of the spine now exists for all four MVP vanilla
+rates products, in `src/shiori_pricing_lab/products/`. **Issue #12's product-
+schema scope is complete.** This is **schema only — there is still no pricing
+engine.**
 
 | Product | Schema status |
 | --- | --- |
-| IRS (`InterestRateSwap`) | ✅ Defined and validated |
-| OIS (`OvernightIndexedSwap`) | ✅ Defined and validated |
-| CCS | ❌ Not started |
-| FX Swap | ❌ Not started |
+| IRS (`InterestRateSwap`) | ✅ Defined and validated (PR #19) |
+| OIS (`OvernightIndexedSwap`) | ✅ Defined and validated (PR #19) |
+| CCS (`CrossCurrencySwap`) | ✅ Defined and validated (PR #21) |
+| FX Swap (`FXSwap`) | ✅ Defined and validated (PR #21) |
 
-Supporting types: `FixedLeg`, `FloatingLeg`, and the enums `PayReceive`,
-`Currency`, `Frequency`, `DayCount`, `BusinessDayConvention`, `FloatingIndex`,
-`CompoundingMethod`. Validated by `tests/test_products.py`
-(`python -m pytest -q` → 74 passed; `ruff` clean).
+Supporting types: `FixedLeg`, `FloatingLeg`, `CrossCurrencyLeg`, and the enums
+`PayReceive`, `BuySell`, `Currency`, `Frequency`, `DayCount`,
+`BusinessDayConvention`, `FloatingIndex`, `CompoundingMethod`. Shared low-level
+validation helpers live in `products/_validation.py`. Validated by
+`tests/test_products.py` and `tests/test_products_ccs_fxswap.py`
+(`python -m pytest -q` → 129 passed; `ruff` clean).
+
+CCS carries **per-leg currency and notional** via `CrossCurrencyLeg` (two
+currencies, two notionals); FX Swap is a **flat** schema whose `near_rate` /
+`far_rate` are frozen trade terms, not live market data.
 
 What the schema enforces (from Codex review):
 
@@ -142,26 +149,32 @@ What the schema enforces (from Codex review):
 Load-bearing invariant for this layer (keep it true):
 
 - **Product definitions describe the trade only.** They must not contain market
-  data, valuation date, PV, DV01, curves, discount factors, or any pricing
-  result. The `products` package imports no data/pricing/valuation module
-  (guarded by a test).
+  data, valuation date, PV, DV01, curves, discount factors, fixings, or any
+  pricing result. This applies equally to the CCS and FX Swap schemas. The
+  `products` package imports no data/pricing/valuation module (guarded by a
+  test).
 
 ## 8. Recommended next development step
 
-**Design preflight for the CCS / FX Swap product schema (still schema only).**
+**Design preflight for the deterministic pricing engine interface.**
 
-Issue #12 is partially complete: IRS and OIS are done; CCS and FX Swap remain.
-Before writing CCS / FX Swap code, do a short design preflight that reuses the
-IRS/OIS pattern:
+Issue #12's product-schema scope is complete — IRS, OIS, CCS, and FX Swap are
+all defined and validated (still schema only). The next step is **not** more
+product-schema work. It is a short design preflight for the pricing engine
+interface that consumes those schemas:
 
-- Confirm which existing enums/legs are reusable and what genuinely new terms
-  CCS (two currencies, two notionals, FX exchanges, basis spread) and FX Swap
-  (near/far dates and amounts) require — see `docs/04_product_definition_schema.md`.
-- Decide how multi-currency notionals and FX exchange flags are represented.
-- Keep the same boundaries: **schema only — no pricing engine yet**; no market
-  data, valuation date, or pricing results on products; small, explicit,
-  additive; tests for construction and validation, synthetic only.
+```text
+Product Definition + ValuationContext + MarketDataSnapshot → Pricing Result
+```
 
-This slots cleanly into the spine: a future pricing engine will take a product
-definition plus a `ValuationContext` and return a valuation result, without
-changing any of the layers documented above.
+The preflight should define the engine boundary only — do not implement it yet:
+
+- How a product definition, a `ValuationContext`, and a `MarketDataSnapshot`
+  combine into a deterministic pricing result, with the system date never used.
+- What a minimal `Pricing Result` contains and where it lives (a new layer, not
+  on the product definition — products stay pricing-free).
+- Keep the existing boundaries: products carry no market data, valuation date,
+  or pricing results; the data layer does not import pricing.
+
+This slots cleanly into the spine documented above without changing any of the
+existing layers.

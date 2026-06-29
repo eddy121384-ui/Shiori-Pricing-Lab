@@ -91,13 +91,46 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   Issue #12 is only **partially complete** — IRS and OIS landed; **CCS and FX
   Swap schemas remain.**
 
+### PR #21 — CCS / FX Swap product schemas (Issue #12, second slice)
+
+- **What changed:** Added the CCS and FX Swap product schemas, completing the
+  vanilla-rates product-schema set:
+  - `CrossCurrencyLeg` — wraps a per-leg `currency` + `notional` around a reused
+    `FixedLeg` / `FloatingLeg`, so a CCS carries **per-leg currency and
+    notional** (its defining two-currency / two-notional shape) without changing
+    the single-currency legs.
+  - `CrossCurrencySwap` — `product_type = "CCS"`; holds `leg_1` / `leg_2`,
+    explicit `initial_exchange` / `final_exchange` booleans, schedule dates, and
+    business day convention. The basis spread reuses `FloatingLeg.spread`; there
+    is no separate `basis_spread` field.
+  - `FXSwap` — a **flat** schema (not built from `FixedLeg` / `FloatingLeg`) with
+    `near_date` / `far_date`, `base_notional`, `near_action`, and `near_rate` /
+    `far_rate` treated as **frozen trade terms, not live market data** (named
+    `near_rate`, not `spot`; forward points are not stored).
+  - `BuySell` enum (`BUY` / `SELL`) for the FX swap near-leg direction.
+  - `TWD` added to `Currency`.
+  - `_validation.py` now holds the shared low-level product validation helpers
+    (strict `YYYY-MM-DD` parsing, non-blank checks) reused by IRS / OIS / CCS /
+    FX Swap; the per-product validators stay product-specific.
+- **Why it mattered:** Completes the **Product Definition** piece of the spine
+  for all four MVP vanilla-rates products. This is still **schema only — not a
+  pricing engine**: no pricing, PV, DV01, cashflows, schedules, calendars,
+  curves, market data, or valuation logic was added.
+- **Intentionally not done:** No pricing engine or valuation outputs; no
+  cashflow/schedule/calendar generation; no curve bootstrapping, market data, or
+  product lifecycle events.
+- **Review / validation:** `python -m pytest -q` → **129 passed**; `ruff`
+  clean. Codex reviewed the PR and found no major issues. **Issue #12's
+  product-schema scope is now complete** (IRS, OIS, CCS, FX Swap).
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
 - MVP Core (Phase 1, Vanilla Rates Core spine) is complete: the
   `provider → snapshot → context → curve → scenario` flow is wired and tested.
-- Issue #12 is in progress: IRS and OIS product schemas landed (PR #19,
-  schema-only); CCS and FX Swap schemas remain.
-- Recommended next development step: a short design preflight for the **CCS / FX
-  Swap product schema** before coding, reusing the IRS/OIS schema pattern. See
-  section 8 of `docs/09_mvp_core_runbook.md`.
+- Issue #12 product-schema scope is **complete**: IRS and OIS (PR #19) plus CCS
+  and FX Swap (PR #21) are defined and validated, schema-only.
+- Recommended next development step: a design preflight for the **deterministic
+  pricing engine interface** —
+  `Product Definition + ValuationContext + MarketDataSnapshot → Pricing Result`.
+  See section 8 of `docs/09_mvp_core_runbook.md`.
