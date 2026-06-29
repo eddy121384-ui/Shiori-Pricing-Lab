@@ -112,6 +112,27 @@ class PricingMessage:
         object.__setattr__(self, "code", _coerce_message_code(self.code))
 
 
+def _normalize_messages(value: object, field_name: str) -> tuple[PricingMessage, ...]:
+    """Return a tuple of ``PricingMessage``, rejecting anything else.
+
+    A list or tuple of ``PricingMessage`` is accepted and converted to a tuple;
+    a tuple stays a tuple. A bare string (which is itself iterable) or any
+    non-``PricingMessage`` element is rejected with ``TypeError`` — strings are
+    never silently coerced into messages.
+    """
+
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise TypeError(
+            f"{field_name} must be a list or tuple of PricingMessage, got {type(value).__name__}"
+        )
+    for item in value:
+        if not isinstance(item, PricingMessage):
+            raise TypeError(
+                f"{field_name} items must be PricingMessage, got {type(item).__name__}: {item!r}"
+            )
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class PricingResult:
     """Structured output of a pricing call.
@@ -161,6 +182,14 @@ class PricingResult:
         # a result always serializes to a known status value.
         if not isinstance(self.status, PricingStatus):
             object.__setattr__(self, "status", PricingStatus(self.status))
+
+        # Normalize the message collections to tuples of real ``PricingMessage``
+        # objects. Type hints are not enforced at runtime, so an engine could
+        # hand back a list, or a tuple containing bare strings; both must be
+        # rejected/normalized to keep the structured-message contract and the
+        # frozen result immutable.
+        object.__setattr__(self, "warnings", _normalize_messages(self.warnings, "warnings"))
+        object.__setattr__(self, "errors", _normalize_messages(self.errors, "errors"))
 
     @property
     def is_success(self) -> bool:

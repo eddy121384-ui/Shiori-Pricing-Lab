@@ -173,11 +173,18 @@ def price(
     """
 
     # --- Contract guards (raise-path): basic call shape must be valid. -------
+    # Every required attribute is fetched here, before any return-path failure,
+    # so a malformed call shape always raises rather than being masked by a
+    # FAILED result. This includes valuation_context.market_snapshot, which the
+    # identity check below relies on.
     product_id = _require_attr(product, "product_id", "product")
     product_type = _require_attr(product, "product_type", "product")
     ctx_valuation_date = _require_attr(valuation_context, "valuation_date", "valuation_context")
     result_currency = _require_attr(
         valuation_context, "reporting_currency", "valuation_context"
+    )
+    context_snapshot = _require_attr(
+        valuation_context, "market_snapshot", "valuation_context"
     )
     snapshot_valuation_date = _require_attr(
         market_snapshot, "valuation_date", "market_snapshot"
@@ -208,11 +215,8 @@ def price(
     # The context carries its own snapshot (used by build_curve()), and the
     # engine also receives an explicit market_snapshot. If they are not the same
     # object, two different market states would be silently mixed even when their
-    # valuation dates happen to agree. Require the context to expose its snapshot
-    # and reject a mismatch before routing.
-    context_snapshot = _require_attr(
-        valuation_context, "market_snapshot", "valuation_context"
-    )
+    # valuation dates happen to agree. (The context's snapshot was already
+    # required as a contract guard above, so a missing one has raised by now.)
     if context_snapshot is not market_snapshot:
         return _failed(
             product_id=product_id,

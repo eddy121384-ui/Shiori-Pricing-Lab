@@ -243,6 +243,68 @@ def test_raw_status_string_is_coerced_to_enum():
     assert r.status is PricingStatus.FAILED
 
 
+# --- 1b. warnings / errors are normalized to tuples of PricingMessage --------
+
+
+def test_errors_list_is_normalized_to_tuple():
+    r = _result(
+        status=PricingStatus.FAILED,
+        errors=[PricingMessage(code=PricingErrorCode.ENGINE_ERROR, message="x")],
+    )
+    assert isinstance(r.errors, tuple)
+    assert r.errors[0].code is PricingErrorCode.ENGINE_ERROR
+
+
+def test_warnings_list_is_normalized_to_tuple():
+    r = _result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        warnings=[PricingMessage(code=PricingWarningCode.DATA_QUALITY, message="x")],
+    )
+    assert isinstance(r.warnings, tuple)
+    assert r.warnings[0].code is PricingWarningCode.DATA_QUALITY
+
+
+def test_valid_tuple_of_messages_still_works():
+    msgs = (
+        PricingMessage(code=PricingWarningCode.TRADE_MATURED, message="a"),
+        PricingMessage(code=PricingWarningCode.FORWARD_STARTING, message="b"),
+    )
+    r = _result(status=PricingStatus.SUCCESS_WITH_WARNINGS, warnings=msgs)
+    assert r.warnings == msgs
+
+
+def test_errors_with_bare_string_item_raises():
+    with pytest.raises(TypeError, match="errors items must be PricingMessage"):
+        _result(status=PricingStatus.FAILED, errors=("boom",))
+
+
+def test_warnings_with_bare_string_item_raises():
+    with pytest.raises(TypeError, match="warnings items must be PricingMessage"):
+        _result(status=PricingStatus.SUCCESS_WITH_WARNINGS, warnings=["warn"])
+
+
+def test_errors_as_bare_string_raises():
+    # A bare string is iterable but must never be treated as a message collection.
+    with pytest.raises(TypeError, match="errors must be a list or tuple"):
+        _result(status=PricingStatus.FAILED, errors="boom")
+
+
+def test_serialization_works_after_message_normalization():
+    r = _result(
+        status=PricingStatus.FAILED,
+        errors=[
+            PricingMessage(
+                code=PricingErrorCode.MISSING_MARKET_DATA,
+                message="no curve",
+                detail={"currency": "EUR"},
+            )
+        ],
+    )
+    data = asdict(r)
+    assert data["errors"][0]["code"] == "MISSING_MARKET_DATA"
+    assert json.loads(json.dumps(data))["errors"][0]["detail"]["currency"] == "EUR"
+
+
 # --- 2. Message structure ----------------------------------------------------
 
 
@@ -412,6 +474,15 @@ def test_context_without_market_snapshot_raises_contract_error():
     ctx = SimpleNamespace(valuation_date=_VALUATION_DATE, reporting_currency="USD")
     with pytest.raises(PricingContractError, match="missing required attribute"):
         price(_irs(), ctx, _snap())
+
+
+def test_missing_market_snapshot_raises_even_when_dates_mismatch():
+    # The contract guard for valuation_context.market_snapshot runs before any
+    # return-path failure, so a missing snapshot raises rather than being masked
+    # by a VALUATION_DATE_MISMATCH result.
+    ctx = SimpleNamespace(valuation_date="2026-06-29", reporting_currency="USD")
+    with pytest.raises(PricingContractError, match="missing required attribute"):
+        price(_irs(), ctx, _snap(valuation_date="2026-06-30"))
 
 
 # --- 5. Contract violations (raise-path) -------------------------------------
