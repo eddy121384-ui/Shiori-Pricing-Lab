@@ -43,6 +43,7 @@ class PricingErrorCode(StrEnum):
     UNSUPPORTED_PRODUCT = "UNSUPPORTED_PRODUCT"
     MISSING_MARKET_DATA = "MISSING_MARKET_DATA"
     VALUATION_DATE_MISMATCH = "VALUATION_DATE_MISMATCH"
+    MARKET_SNAPSHOT_MISMATCH = "MARKET_SNAPSHOT_MISMATCH"
     INVALID_PRODUCT = "INVALID_PRODUCT"
     ENGINE_ERROR = "ENGINE_ERROR"
 
@@ -59,19 +60,56 @@ class PricingWarningCode(StrEnum):
     DATA_QUALITY = "DATA_QUALITY"
 
 
+def _coerce_message_code(value: object) -> PricingErrorCode | PricingWarningCode:
+    """Coerce ``value`` into a known error or warning code, or raise ``ValueError``.
+
+    ``code`` is part of the contract: it must be a controlled machine-readable
+    code, never an arbitrary string. An existing enum member is accepted as-is; a
+    raw string is coerced by trying :class:`PricingErrorCode` first, then
+    :class:`PricingWarningCode`; anything else is rejected so an unknown code can
+    never serialize successfully.
+    """
+
+    if isinstance(value, (PricingErrorCode, PricingWarningCode)):
+        return value
+    try:
+        return PricingErrorCode(value)
+    except ValueError:
+        pass
+    try:
+        return PricingWarningCode(value)
+    except ValueError:
+        pass
+    allowed = ", ".join(
+        member.value
+        for member in (*PricingErrorCode, *PricingWarningCode)
+    )
+    raise ValueError(
+        f"PricingMessage.code must be a known error or warning code "
+        f"({{{allowed}}}), got {value!r}"
+    )
+
+
 @dataclass(frozen=True)
 class PricingMessage:
     """A single structured warning or error.
 
-    ``code`` is a controlled enum value so tests and the future AI layer can
-    branch on it; ``message`` is a human-readable explanation. ``detail`` is an
-    optional small dict for extra context (for example which currency's market
-    data was missing). Messages are never bare strings.
+    ``code`` is a controlled enum value (``PricingErrorCode`` or
+    ``PricingWarningCode``) so tests and the future AI layer can branch on it;
+    ``message`` is a human-readable explanation. ``detail`` is an optional small
+    dict for extra context (for example which currency's market data was
+    missing). Messages are never bare strings, and an unknown ``code`` is
+    rejected at construction.
     """
 
-    code: str
+    code: PricingErrorCode | PricingWarningCode
     message: str
     detail: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Type hints are not enforced at runtime; coerce/validate so a message
+        # always holds a real contract code, accepting valid raw strings too.
+        object.__setattr__(self, "code", _coerce_message_code(self.code))
 
 
 @dataclass(frozen=True)

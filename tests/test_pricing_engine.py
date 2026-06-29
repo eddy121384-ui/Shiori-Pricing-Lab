@@ -47,17 +47,31 @@ _VALUATION_DATE = "2026-06-29"
 # --- Lightweight fakes for context / snapshot --------------------------------
 # The front door only duck-types a few attributes, so simple namespaces are
 # enough and let us build an inconsistent valuation date (which a real
-# ValuationContext forbids at construction).
-
-
-def _ctx(valuation_date=_VALUATION_DATE, reporting_currency="USD"):
-    return SimpleNamespace(
-        valuation_date=valuation_date, reporting_currency=reporting_currency
-    )
+# ValuationContext forbids at construction). A real context carries the same
+# snapshot object the engine is handed, so the fakes mirror that: ``_ctx``
+# exposes ``market_snapshot`` and, by default, builds a consistent pair.
 
 
 def _snap(valuation_date=_VALUATION_DATE):
     return SimpleNamespace(valuation_date=valuation_date)
+
+
+def _ctx(snapshot=None, valuation_date=_VALUATION_DATE, reporting_currency="USD"):
+    if snapshot is None:
+        snapshot = _snap(valuation_date)
+    return SimpleNamespace(
+        valuation_date=valuation_date,
+        reporting_currency=reporting_currency,
+        market_snapshot=snapshot,
+    )
+
+
+def _consistent(valuation_date=_VALUATION_DATE, reporting_currency="USD"):
+    """Return a (context, snapshot) pair sharing one snapshot object."""
+
+    snap = _snap(valuation_date)
+    ctx = _ctx(snap, valuation_date=valuation_date, reporting_currency=reporting_currency)
+    return ctx, snap
 
 
 # --- Real product builders (for routing fidelity) ----------------------------
@@ -266,6 +280,41 @@ def test_success_with_warnings_has_warnings_and_no_errors():
     assert r.errors == ()
 
 
+# --- 2b. PricingMessage code is validated against the contract enums ---------
+
+
+def test_message_accepts_error_code_member():
+    msg = PricingMessage(code=PricingErrorCode.ENGINE_ERROR, message="x")
+    assert msg.code is PricingErrorCode.ENGINE_ERROR
+
+
+def test_message_accepts_warning_code_member():
+    msg = PricingMessage(code=PricingWarningCode.DATA_QUALITY, message="x")
+    assert msg.code is PricingWarningCode.DATA_QUALITY
+
+
+def test_message_coerces_valid_raw_error_string():
+    msg = PricingMessage(code="MISSING_MARKET_DATA", message="x")
+    assert msg.code is PricingErrorCode.MISSING_MARKET_DATA
+
+
+def test_message_coerces_valid_raw_warning_string():
+    msg = PricingMessage(code="TRADE_MATURED", message="x")
+    assert msg.code is PricingWarningCode.TRADE_MATURED
+
+
+def test_message_rejects_unknown_code_string():
+    with pytest.raises(ValueError, match="known error or warning code"):
+        PricingMessage(code="NOT_A_REAL_CODE", message="x")
+
+
+def test_message_code_serializes_to_plain_string():
+    msg = PricingMessage(code=PricingErrorCode.UNSUPPORTED_PRODUCT, message="x")
+    data = asdict(msg)
+    assert data["code"] == "UNSUPPORTED_PRODUCT"
+    assert json.loads(json.dumps(data))["code"] == "UNSUPPORTED_PRODUCT"
+
+
 # --- 3. Unsupported product path (empty default registry) --------------------
 
 
@@ -279,7 +328,8 @@ def test_success_with_warnings_has_warnings_and_no_errors():
     ],
 )
 def test_unsupported_product_for_all_current_schemas(product, expected_type):
-    result = price(product, _ctx(), _snap())
+    ctx, snap = _consistent()
+    result = price(product, ctx, snap)
 
     assert result.status is PricingStatus.FAILED
     assert result.product_type == expected_type
@@ -296,7 +346,13 @@ def test_unsupported_product_for_all_current_schemas(product, expected_type):
 
 
 def test_valuation_date_mismatch_returns_failed():
-    result = price(_irs(), _ctx(valuation_date="2026-06-29"), _snap(valuation_date="2026-06-30"))
+    # Date check fires before the snapshot-identity check, so a differing pair
+    # surfaces VALUATION_DATE_MISMATCH regardless of the snapshot objects.
+    result = price(
+        _irs(),
+        _ctx(valuation_date="2026-06-29"),
+        _snap(valuation_date="2026-06-30"),
+    )
 
     assert result.status is PricingStatus.FAILED
     assert result.errors[0].code is PricingErrorCode.VALUATION_DATE_MISMATCH
@@ -305,12 +361,66 @@ def test_valuation_date_mismatch_returns_failed():
     assert result.market_data_as_of == "2026-06-30"
 
 
+# --- 4b. Market snapshot identity mismatch -----------------------------------
+
+
+def test_mixed_snapshots_same_date_returns_market_snapshot_mismatch():
+    # Context built from snapshot A, but a different snapshot B is passed, with
+    # the same valuation date. This must be rejected, not silently mixed.
+    snap_a = _snap()
+    snap_b = _snap()  # same valuation_date, different object
+    ctx = _ctx(snap_a)
+
+    result = price(_irs(), ctx, snap_b)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.MARKET_SNAPSHOT_MISMATCH
+    assert result.errors[0].detail["context_valuation_date"] == _VALUATION_DATE
+    assert result.errors[0].detail["passed_snapshot_valuation_date"] == _VALUATION_DATE
+
+
+def test_snapshot_mismatch_does_not_call_any_engine():
+    registry = PricingEngineRegistry()
+    engine = _CountingEngine()
+    registry.register("IRS", engine)
+
+    snap_a = _snap()
+    snap_b = _snap()
+    ctx = _ctx(snap_a)
+
+    result = price(_irs(), ctx, snap_b, registry=registry)
+
+    assert result.errors[0].code is PricingErrorCode.MARKET_SNAPSHOT_MISMATCH
+    assert engine.calls == 0  # routing never happened
+
+
+def test_same_snapshot_object_reaches_routing():
+    registry = PricingEngineRegistry()
+    registry.register("IRS", _StubEngine())
+
+    # The exact same snapshot object on the context and as the argument.
+    ctx, snap = _consistent()
+    result = price(_irs(), ctx, snap, registry=registry)
+
+    assert result.status is PricingStatus.SUCCESS
+    assert result.engine_name == "stub"
+
+
+def test_context_without_market_snapshot_raises_contract_error():
+    # A consistent valuation date but no market_snapshot attribute is a wrong
+    # call shape, so it raises rather than returning a failed result.
+    ctx = SimpleNamespace(valuation_date=_VALUATION_DATE, reporting_currency="USD")
+    with pytest.raises(PricingContractError, match="missing required attribute"):
+        price(_irs(), ctx, _snap())
+
+
 # --- 5. Contract violations (raise-path) -------------------------------------
 
 
 def test_none_product_raises_contract_error():
+    ctx, snap = _consistent()
     with pytest.raises(PricingContractError, match="product must not be None"):
-        price(None, _ctx(), _snap())
+        price(None, ctx, snap)
 
 
 def test_none_context_raises_contract_error():
@@ -326,8 +436,9 @@ def test_none_snapshot_raises_contract_error():
 def test_missing_required_attribute_raises_contract_error():
     # A product-shaped object missing product_type.
     broken = SimpleNamespace(product_id="X-1")
+    ctx, snap = _consistent()
     with pytest.raises(PricingContractError, match="missing required attribute"):
-        price(broken, _ctx(), _snap())
+        price(broken, ctx, snap)
 
 
 def test_invalid_registration_raises_contract_error():
@@ -365,11 +476,23 @@ class _RaisingEngine:
         raise RuntimeError("boom")
 
 
+class _CountingEngine:
+    """Records how many times it is routed to, to prove non-routing paths."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def price(self, product, valuation_context, market_snapshot) -> PricingResult:
+        self.calls += 1
+        return _StubEngine().price(product, valuation_context, market_snapshot)
+
+
 def test_registered_engine_routes_correctly():
     registry = PricingEngineRegistry()
     registry.register("IRS", _StubEngine())
 
-    result = price(_irs(), _ctx(), _snap(), registry=registry)
+    ctx, snap = _consistent()
+    result = price(_irs(), ctx, snap, registry=registry)
 
     assert result.status is PricingStatus.SUCCESS
     assert result.engine_name == "stub"
@@ -381,7 +504,8 @@ def test_unregistered_type_still_unsupported_with_partial_registry():
     registry.register("IRS", _StubEngine())
 
     # OIS is not registered -> still unsupported, even though IRS is.
-    result = price(_ois(), _ctx(), _snap(), registry=registry)
+    ctx, snap = _consistent()
+    result = price(_ois(), ctx, snap, registry=registry)
     assert result.status is PricingStatus.FAILED
     assert result.errors[0].code is PricingErrorCode.UNSUPPORTED_PRODUCT
 
@@ -390,7 +514,8 @@ def test_registered_engine_that_raises_becomes_engine_error():
     registry = PricingEngineRegistry()
     registry.register("IRS", _RaisingEngine())
 
-    result = price(_irs(), _ctx(), _snap(), registry=registry)
+    ctx, snap = _consistent()
+    result = price(_irs(), ctx, snap, registry=registry)
     assert result.status is PricingStatus.FAILED
     assert result.errors[0].code is PricingErrorCode.ENGINE_ERROR
     assert result.errors[0].detail.get("exception_type") == "RuntimeError"
@@ -399,7 +524,8 @@ def test_registered_engine_that_raises_becomes_engine_error():
 def test_default_registry_is_empty_so_everything_is_unsupported():
     # No register_engine() calls happen in this slice, so the module-level front
     # door leaves all products unsupported.
-    assert price(_irs(), _ctx(), _snap()).errors[0].code is (
+    ctx, snap = _consistent()
+    assert price(_irs(), ctx, snap).errors[0].code is (
         PricingErrorCode.UNSUPPORTED_PRODUCT
     )
 

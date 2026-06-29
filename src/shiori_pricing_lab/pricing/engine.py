@@ -204,6 +204,35 @@ def price(
             method="unrouted",
         )
 
+    # --- Defensive market-snapshot identity (return-path). ------------------
+    # The context carries its own snapshot (used by build_curve()), and the
+    # engine also receives an explicit market_snapshot. If they are not the same
+    # object, two different market states would be silently mixed even when their
+    # valuation dates happen to agree. Require the context to expose its snapshot
+    # and reject a mismatch before routing.
+    context_snapshot = _require_attr(
+        valuation_context, "market_snapshot", "valuation_context"
+    )
+    if context_snapshot is not market_snapshot:
+        return _failed(
+            product_id=product_id,
+            product_type=product_type,
+            valuation_date=ctx_valuation_date,
+            result_currency=result_currency,
+            market_data_as_of=snapshot_valuation_date,
+            code=PricingErrorCode.MARKET_SNAPSHOT_MISMATCH,
+            message=(
+                "valuation_context.market_snapshot and the explicit "
+                "market_snapshot argument are not the same object, so two "
+                "different market states would be mixed"
+            ),
+            method="unrouted",
+            detail={
+                "context_valuation_date": ctx_valuation_date,
+                "passed_snapshot_valuation_date": snapshot_valuation_date,
+            },
+        )
+
     # --- Routing (return-path): no engine registered -> unsupported. --------
     engine = active_registry.get(product_type)
     if engine is None:
