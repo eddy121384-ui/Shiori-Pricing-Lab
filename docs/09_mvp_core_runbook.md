@@ -255,3 +255,13 @@ A possible next implementation slice:
 
 This slots cleanly into the spine documented above without changing any of the
 existing layers.
+
+### Preflight written: IRS reference engine
+
+This design preflight now exists as `docs/10_irs_reference_engine_preflight.md`.
+It scopes the **first per-product reference engine to IRS only** (vanilla
+fixed-vs-floating, single currency, regular schedule, synthetic data), defines
+the market-data, schedule/accrual, day-count, output, and failure behavior, and
+lists the tests the implementation slice must add. It is **docs only — no engine
+is implemented or registered**, so IRS still returns
+`FAILED + UNSUPPORTED_PRODUCT` today. Issue #10 remains open.
