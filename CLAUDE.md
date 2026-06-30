@@ -71,3 +71,54 @@ When responding after code changes, include:
 - what remains unfinished.
 
 Be explicit and boring. In this repo, boring code is a feature.
+
+Always summarize what changed in GitHub itself, not only in chat.
+
+## GitHub PR execution report requirement
+
+After opening or updating any pull request, Claude Code must leave a top-level GitHub PR comment with a self-contained execution report.
+
+Do not rely only on the chat reply. The GitHub PR conversation should contain the audit trail.
+
+The PR comment must include:
+
+1. PR / Branch
+   - PR number
+   - Branch name
+   - Base branch
+   - Related issue number, if any
+
+2. Intent
+   - What this PR is trying to accomplish
+   - Why the change exists
+
+3. Files changed
+   - Main files changed
+   - One short note per file
+
+4. What changed
+   - Specific implementation or documentation changes
+
+5. What intentionally did not change
+   - Explicit scope boundaries
+   - Anything deferred or intentionally left untouched
+
+6. Tests / checks
+   - Exact commands run
+   - Exact results
+   - If tests were not run, explain why
+
+7. Review status
+   - Whether Codex review was requested
+   - Whether prior Codex findings were addressed
+   - Whether human review is still needed
+
+8. Issue status
+   - Related issue status after this PR
+   - Whether the issue should remain open or can be closed
+
+9. Follow-up work
+   - What should happen next
+   - What remains out of scope
+
+The report should be understandable from GitHub alone, without requiring external chat context.
