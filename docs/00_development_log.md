@@ -179,8 +179,10 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   in `docs/09_mvp_core_runbook.md` (section 9) and in this log.
 - **Why it mattered:** PR #23 landed the pricing **contract** but no engine, so
   every product still returns `FAILED + UNSUPPORTED_PRODUCT`. Before writing the
-  first engine, this preflight fixes scope (narrow vanilla IRS), required market
-  data (one synthetic curve from the snapshot, no providers), the schedule/
+  first engine, this preflight fixes scope (narrow vanilla IRS, **USD-only** —
+  non-USD fails explicitly because the snapshot/curve layer has no enforceable
+  curve-currency metadata yet), required market data (one synthetic curve from
+  the snapshot, no providers), the schedule/
   accrual boundary (regular periods, no calendar, clean-division-or-fail),
   safe day counts (`ACT_360` / `ACT_365_FIXED`; others fail explicitly), the
   `PricingResult` output shape, explicit failure/warning behavior, and the tests
@@ -191,6 +193,11 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   *proposed* for the implementation slice). Issue #10 is **not** closed.
 - **Review / validation:** Documentation-only change; no test or lint impact.
   Existing suite remains green from PR #23 (`python -m pytest -q` → 175 passed).
+  Codex P2 addressed in a follow-up commit: the preflight no longer claims a
+  wrong-currency curve can be detected via `MISSING_MARKET_DATA` (the current
+  `rates_points` schema has no enforceable curve-currency field); the first slice
+  is now **USD-only** with non-USD products failing explicitly before curve
+  construction, and multi-currency curve selection is documented as future work.
 
 ## Checkpoint summary
 

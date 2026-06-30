@@ -62,7 +62,14 @@ description of what the *future* engine will compute, not a result.
 The first engine supports only:
 
 - a vanilla **fixed-vs-floating** interest rate swap;
-- **single currency** (both legs in `InterestRateSwap.currency`);
+- **USD-only for the first implementation slice** — both legs share
+  `InterestRateSwap.currency`, and that currency must be `Currency.USD`. A
+  non-USD product is out of scope and fails explicitly (see §3 and §7). This is
+  deliberately tighter than "single currency": the current snapshot/curve layer
+  carries **no enforceable curve-currency metadata** (see §3), so the engine
+  cannot safely tell which currency a snapshot's curve represents. Other
+  currencies stay out of scope until the snapshot/curve layer carries enforceable
+  curve-currency metadata and currency-tagged curve selection (see §9);
 - exactly **one fixed leg and one floating leg** (the existing
   `InterestRateSwap` schema shape — `fixed_leg: FixedLeg`,
   `floating_leg: FloatingLeg`);
@@ -140,14 +147,28 @@ If the snapshot lacks the rates points needed to build a usable curve (empty
 snapshot, no points, unmappable tenors), the engine returns
 `FAILED + MISSING_MARKET_DATA` (see §7) — it never invents a curve.
 
-### What about currency?
+### What about currency? (USD-only, no curve-currency detection)
 
-The MVP single-curve assumption means the engine uses *the* curve in the
-snapshot. The snapshot does not yet tag curves by currency, so the engine should
-treat the product currency as metadata recorded in `assumptions` and, if a
-future snapshot grows multiple currency curves, select by
-`product.currency`. For the first slice, a wrong/absent curve surfaces as
-`MISSING_MARKET_DATA`, not a silent mismatch.
+> **Current `MarketDataSnapshot.rates_points` does not carry an enforceable curve
+> currency field.** Its schema is `date, ticker, tenor, value, data_type,
+> source`, and `RateCurve.from_snapshot(...)` simply builds one curve from those
+> points with no notion of which currency it represents. Therefore the first IRS
+> engine must **not** attempt multi-currency curve selection, and it must **not**
+> claim it can detect a wrong-currency curve from the snapshot. It supports only
+> **USD synthetic data**; non-USD products **fail explicitly before any curve is
+> built** (see §7).
+
+Concretely, the engine checks `product.currency == Currency.USD` **before**
+calling `RateCurve.from_snapshot(...)`. If the product is non-USD it returns a
+structured `FAILED` result (see §7) rather than building the single synthetic
+curve and silently treating it as that currency. A genuinely missing/empty
+USD curve still surfaces as `MISSING_MARKET_DATA` (see §7) — but a
+*currency mismatch* is a product-side check, not something the engine can infer
+from curve data it cannot tag.
+
+Recording the product currency in `assumptions` is still useful for audit, but
+it is metadata only; it does not and cannot prove the snapshot's curve is in that
+currency. Multi-currency curve selection is deferred to future work (see §9).
 
 ---
 
@@ -310,9 +331,9 @@ The IRS engine assumes these already passed and does **not** re-implement them.
 | --- | --- |
 | Wrong product type routed in (defensive) | `UNSUPPORTED_PRODUCT` |
 | Out-of-scope IRS shape (amortizing, stub, etc.) | `INVALID_PRODUCT` (or proposed `UNSUPPORTED_STRUCTURE`) |
-| Empty snapshot / no rates points / no usable curve | `MISSING_MARKET_DATA` |
+| Non-USD IRS (first slice is USD-only) — checked **before** curve construction | `INVALID_PRODUCT` with `detail={"unsupported_currency": <ccy>}`, or a future `UNSUPPORTED_CURRENCY` code if added |
+| Empty snapshot / no rates points / no usable curve (USD) | `MISSING_MARKET_DATA` |
 | Curve cannot be built (unmappable tenors, empty frame) | `MISSING_MARKET_DATA` |
-| Wrong-currency / absent curve for the product | `MISSING_MARKET_DATA` |
 | Unsupported day count (e.g. `ACT_ACT_ISDA` in first slice) | proposed `UNSUPPORTED_DAY_COUNT`, else `INVALID_PRODUCT` |
 | Unsupported frequency for a regular schedule | proposed `UNSUPPORTED_FREQUENCY`, else `INVALID_PRODUCT` |
 | Dates/frequency do not divide cleanly (stub needed) | proposed `BAD_SCHEDULE`, else `INVALID_PRODUCT` |
@@ -332,14 +353,15 @@ The current `PricingErrorCode` set is `UNSUPPORTED_PRODUCT`,
 existing codes (mainly `INVALID_PRODUCT` plus a `detail` dict). For sharper
 machine-branching, the implementation slice **may propose** adding:
 
+- `UNSUPPORTED_CURRENCY`
 - `UNSUPPORTED_DAY_COUNT`
 - `UNSUPPORTED_FREQUENCY`
 - `BAD_SCHEDULE` (or `UNSUPPORTED_STRUCTURE`)
 
 These are **proposals only**. They are not added in this preflight PR. If the
 implementation slice does not add them, it must use `INVALID_PRODUCT` with a
-descriptive `message` and a `detail` dict (e.g.
-`{"day_count": "ACT_ACT_ISDA"}`) so the reason is still machine-inspectable.
+descriptive `message` and a `detail` dict (e.g. `{"day_count": "ACT_ACT_ISDA"}`
+or `{"unsupported_currency": "EUR"}`) so the reason is still machine-inspectable.
 
 ---
 
@@ -357,19 +379,25 @@ likely in `tests/test_pricing_irs_engine.py`, using **synthetic data only**:
    structurally; the rest of the world stays `UNSUPPORTED_PRODUCT`.
 4. **Missing market data** — empty snapshot / no usable curve returns
    `FAILED + MISSING_MARKET_DATA`, `pv is None`.
-5. **Unsupported day count** returns a structured `FAILED` (proposed
+5. **Non-USD IRS fails explicitly** — a non-USD `InterestRateSwap.currency`
+   (e.g. EUR / TWD / JPY) returns a structured `FAILED`
+   (`INVALID_PRODUCT` with `detail={"unsupported_currency": ...}`, or a future
+   `UNSUPPORTED_CURRENCY` code), `pv is None`, **and the engine does not build or
+   use the USD synthetic curve** (assert `RateCurve.from_snapshot` is not reached
+   / the curve is never consulted for a non-USD product).
+6. **Unsupported day count** returns a structured `FAILED` (proposed
    `UNSUPPORTED_DAY_COUNT`, else `INVALID_PRODUCT` with `detail`), `pv is None`.
-6. **Unsupported frequency / non-clean schedule** returns a structured `FAILED`
+7. **Unsupported frequency / non-clean schedule** returns a structured `FAILED`
    (proposed `UNSUPPORTED_FREQUENCY` / `BAD_SCHEDULE`, else `INVALID_PRODUCT`).
-7. **No system-date usage** — the engine module(s) contain no `date.today(` /
+8. **No system-date usage** — the engine module(s) contain no `date.today(` /
    `datetime.now(` (mirror the existing guard in
    `tests/test_pricing_engine.py::test_pricing_engine_modules_have_no_system_date`).
-8. **No provider imports** — importing the engine pulls in no
+9. **No provider imports** — importing the engine pulls in no
    `shiori_pricing_lab.data` provider / CSV / web module (extend the existing
    layering guard).
-9. **No mutation** — the engine does not mutate the product, context, or
-   snapshot (assert equality / identity of inputs before and after `price`).
-10. **No fake zero PV** — every unsupported / failed path returns `pv is None`,
+10. **No mutation** — the engine does not mutate the product, context, or
+    snapshot (assert equality / identity of inputs before and after `price`).
+11. **No fake zero PV** — every unsupported / failed path returns `pv is None`,
     never a misleading `0.0`.
 
 Do **not** add these tests in this docs-only preflight PR. (There is no existing
@@ -384,7 +412,7 @@ only**:
 
 - a single deterministic IRS reference engine registered via
   `register_engine("IRS", ...)` (or an explicit test registry);
-- the narrow product shape from §2 (vanilla fixed-vs-floating, single currency,
+- the narrow product shape from §2 (vanilla fixed-vs-floating, **USD-only**,
   regular schedule, positive notional);
 - minimal schedule/accrual support from §4 (regular periods, no BDC, no
   calendar, clean-division-or-fail);
@@ -399,6 +427,25 @@ only**:
 That slice slots into the spine without touching the data, valuation, products,
 or UI layers, and turns IRS from `UNSUPPORTED_PRODUCT` into a real (if minimal)
 priced product.
+
+### Deferred: multi-currency support
+
+Lifting the USD-only constraint is a **separate, later** slice, because the
+current snapshot/curve layer cannot tell curves apart by currency. It requires,
+at minimum:
+
+- **currency-tagged curves or snapshot metadata** — an enforceable curve-currency
+  field on `MarketDataSnapshot` (or its rates points), or named/identified curves,
+  so a curve's currency is known rather than assumed;
+- **curve selection by product currency** — the engine picking the correct curve
+  for `product.currency` instead of using "the" single curve;
+- **dedicated tests proving EUR / TWD / JPY products cannot accidentally use a USD
+  synthetic curve** — i.e. a non-USD product either selects its own currency's
+  curve or fails, but never silently prices off the USD curve.
+
+Until that lands, non-USD IRS products must keep failing explicitly (see §3, §7).
+This deferral does **not** touch `MarketDataSnapshot`, `RateCurve`, or the product
+schemas in this preflight.
 
 ---
 

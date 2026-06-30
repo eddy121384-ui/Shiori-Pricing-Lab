@@ -260,7 +260,9 @@ existing layers.
 
 This design preflight now exists as `docs/10_irs_reference_engine_preflight.md`.
 It scopes the **first per-product reference engine to IRS only** (vanilla
-fixed-vs-floating, single currency, regular schedule, synthetic data), defines
+fixed-vs-floating, **USD-only**, regular schedule, synthetic data — non-USD fails
+explicitly because the snapshot/curve layer has no enforceable curve-currency
+metadata yet), defines
 the market-data, schedule/accrual, day-count, output, and failure behavior, and
 lists the tests the implementation slice must add. It is **docs only — no engine
 is implemented or registered**, so IRS still returns
