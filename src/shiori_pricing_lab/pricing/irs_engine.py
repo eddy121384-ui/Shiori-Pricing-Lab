@@ -17,6 +17,7 @@ from shiori_pricing_lab.pricing.result import (
     PricingMessage,
     PricingResult,
     PricingStatus,
+    PricingWarningCode,
 )
 from shiori_pricing_lab.pricing.schedule import SchedulePeriod, generate_regular_schedule
 from shiori_pricing_lab.products.enums import Currency, DayCount, PayReceive
@@ -47,7 +48,7 @@ class IRSReferenceEngine:
                 market_snapshot,
                 PricingErrorCode.INVALID_PRODUCT,
                 "IRS reference engine supports USD products only",
-                {"currency": product.currency.value},
+                {"unsupported_currency": product.currency.value},
             )
 
         try:
@@ -62,6 +63,8 @@ class IRSReferenceEngine:
                 PricingErrorCode.INVALID_PRODUCT,
                 f"invalid IRS date: {exc}",
             )
+
+        is_forward_starting = valuation_date < effective
 
         if valuation_date > effective:
             return _failed(
@@ -143,16 +146,30 @@ class IRSReferenceEngine:
         )
         pv = fixed_pv + floating_pv
 
+        warnings = ()
+        if is_forward_starting:
+            warnings = (
+                PricingMessage(
+                    code=PricingWarningCode.FORWARD_STARTING,
+                    message="valuation_date is before IRS effective_date",
+                    detail={
+                        "valuation_date": str(valuation_date),
+                        "effective_date": product.effective_date,
+                    },
+                ),
+            )
+
         return PricingResult(
             product_id=product.product_id,
             product_type=product.product_type,
             valuation_date=valuation_context.valuation_date,
             result_currency=valuation_context.reporting_currency,
-            status=PricingStatus.SUCCESS,
+            status=PricingStatus.SUCCESS_WITH_WARNINGS if warnings else PricingStatus.SUCCESS,
             engine_name=ENGINE_NAME,
             engine_version=ENGINE_VERSION,
             method=METHOD,
             market_data_as_of=market_snapshot.valuation_date,
+            warnings=warnings,
             assumptions={
                 "product_currency": product.currency.value,
                 "curve_usage": "single curve used for both discount and forecast",

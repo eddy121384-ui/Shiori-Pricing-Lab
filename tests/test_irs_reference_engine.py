@@ -7,7 +7,12 @@ import pandas as pd
 import pytest
 
 from shiori_pricing_lab.data.snapshot import MarketDataSnapshot
-from shiori_pricing_lab.pricing import PricingErrorCode, PricingStatus, price
+from shiori_pricing_lab.pricing import (
+    PricingErrorCode,
+    PricingStatus,
+    PricingWarningCode,
+    price,
+)
 from shiori_pricing_lab.products import (
     BusinessDayConvention,
     CompoundingMethod,
@@ -82,11 +87,16 @@ def _irs(**overrides):
     return InterestRateSwap(**params)
 
 
-def test_usd_irs_happy_path_returns_pinned_deterministic_pv():
+def test_forward_starting_usd_irs_returns_warning_and_pinned_deterministic_pv():
     snap = _snapshot()
     result = price(_irs(), _ctx(snap), snap)
 
-    assert result.status is PricingStatus.SUCCESS
+    assert result.status is PricingStatus.SUCCESS_WITH_WARNINGS
+    assert result.warnings[0].code is PricingWarningCode.FORWARD_STARTING
+    assert result.warnings[0].detail == {
+        "valuation_date": _VALUATION_DATE,
+        "effective_date": "2026-07-01",
+    }
     assert result.pv == pytest.approx(1506.7928142153469, abs=1e-9)
     assert result.dv01 is None
     assert result.cashflows is None
@@ -104,8 +114,8 @@ def test_usd_irs_repeated_runs_produce_same_pv():
     first = price(product, ctx, snap)
     second = price(product, ctx, snap)
 
-    assert first.status is PricingStatus.SUCCESS
-    assert second.status is PricingStatus.SUCCESS
+    assert first.status is PricingStatus.SUCCESS_WITH_WARNINGS
+    assert second.status is PricingStatus.SUCCESS_WITH_WARNINGS
     assert first.pv == second.pv
 
 
@@ -192,7 +202,7 @@ def test_non_usd_irs_fails_before_curve_construction():
 
     assert result.status is PricingStatus.FAILED
     assert result.errors[0].code is PricingErrorCode.INVALID_PRODUCT
-    assert result.errors[0].detail == {"currency": "EUR"}
+    assert result.errors[0].detail == {"unsupported_currency": "EUR"}
     assert result.pv is None
 
 
@@ -254,7 +264,7 @@ def test_pricing_inputs_are_not_mutated():
 
     result = price(product, ctx, snap)
 
-    assert result.status is PricingStatus.SUCCESS
+    assert result.status is PricingStatus.SUCCESS_WITH_WARNINGS
     assert asdict(product) == before_product
     assert ctx.market_snapshot is snap
     assert ctx.metadata == before_ctx_metadata
