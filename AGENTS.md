@@ -120,6 +120,10 @@ When proposing larger changes:
 4. State test coverage.
 5. State remaining risks.
 
+When opening or updating a pull request:
+
+Leave a self-contained GitHub PR conversation comment that is understandable without reading the agent private chat session. Include the target issue / scope, changed files, implementation summary, tests and lint commands run with results, known limitations, explicitly deferred work, and any assumptions or financial-model choices that affect pricing or risk behavior.
+
 ## Style preference
 
 The codebase should be boring, explicit, and easy for another AI to edit. This is a feature, not a weakness.
