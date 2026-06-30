@@ -199,6 +199,51 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   is now **USD-only** with non-USD products failing explicitly before curve
   construction, and multi-currency curve selection is documented as future work.
 
+### PR #29 — First USD-only IRS reference engine (Issue #27)
+
+- **What changed:** Implemented the **first real per-product pricing engine**
+  behind the existing `price(product, valuation_context, market_snapshot)`
+  contract, per the preflight (`docs/10`).
+  - New `src/shiori_pricing_lab/pricing/irs_engine.py` (`IRSReferenceEngine`),
+    registered for `product_type == "IRS"` via
+    `register_engine("IRS", IRSReferenceEngine())` in
+    `pricing/__init__.py`.
+  - New deterministic regular-period schedule helper
+    `src/shiori_pricing_lab/pricing/schedule.py`
+    (`generate_regular_schedule`) — clean monthly / quarterly / semi-annual /
+    annual schedules only; stubs and unsupported frequencies raise.
+  - Tests in `tests/test_irs_reference_engine.py`, plus a small update to
+    `tests/test_pricing_engine.py` to reflect the one registered engine.
+- **Why it mattered:** PR #23 landed the contract but no engine, so every
+  product returned `FAILED + UNSUPPORTED_PRODUCT`. This turns a **supported USD
+  synthetic IRS** into a real, deterministic `SUCCESS` PV, while everything
+  out of scope keeps failing explicitly.
+- **Supported shape (deliberately narrow):** USD-only, synthetic data, one
+  `MarketDataSnapshot`-derived `RateCurve` used as **both** discount and forecast
+  curve (single curve, no bootstrapping, no calendar, no business-day
+  adjustment). PV is deterministic (linear zero-rate interpolation, discount
+  factor `1 / (1 + zero_rate * year_fraction)`); only `ACT_360` and
+  `ACT_365_FIXED` day counts are supported.
+- **Output:** a supported USD IRS returns a deterministic `pv`; `dv01` and
+  `cashflows` remain `None`. Unsupported / out-of-scope paths return a structured
+  `FAILED` with `pv is None` — never a fake `0.0`. Specifically: non-USD product
+  currency and non-USD reporting currency fail explicitly (`INVALID_PRODUCT`);
+  unsupported floating-leg conventions (anything other than a quarterly
+  `USD_SOFR_TERM_3M` leg with reset = payment frequency and no compounding) fail
+  explicitly; missing / unusable market data returns `MISSING_MARKET_DATA`.
+- **Intentionally not done:** OIS / CCS / FX Swap engines remain unsupported.
+  No calendars, business-day adjustment, stubs, bootstrapping, multi-curve,
+  currency-tagged curves, FX conversion, historical fixings, DV01, cashflows,
+  external data, UI, or AI layer. Issue #13 (historical valuation loop) and
+  Issue #14 (AI inquiry contract) remain downstream and unchanged.
+- **Review / validation:** `python -m pytest -q` → **190 passed** at merge
+  (final PR #29 state after the Claude Code P2 fixes; the earlier initial Codex
+  run reported 186); `ruff` clean. Codex review comments were addressed.
+  **Issue #27 and Issue #10 are both closed (completed).** IRS is the first of
+  the per-product engines; the remaining work is **not** Issue #10 itself but
+  downstream / follow-up engine work (OIS / CCS / FX Swap and deferred
+  extensions).
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
@@ -209,9 +254,15 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
 - Issue #10 first slice is **complete** (PR #23): the deterministic pricing
   engine **contract** exists —
   `Product Definition + ValuationContext + MarketDataSnapshot → price(...) →
-  PricingResult`. It is contract-only (no PV / DV01 / cashflows); all products
-  currently return `FAILED + UNSUPPORTED_PRODUCT`. Issue #10 remains open.
-- Recommended next development step: a design preflight for the **first
-  per-product reference engine** (likely the smallest IRS or OIS reference
-  pricing slice), not a jump into full valuation. See section 8 of
-  `docs/09_mvp_core_runbook.md`.
+  PricingResult`. **Issue #10 is now closed (completed)** — the per-product
+  engine work it tracked is downstream / follow-up (OIS / CCS / FX Swap and
+  deferred extensions), not Issue #10 itself.
+- Issue #27 is **closed** (PR #29): the **first per-product reference engine**
+  (USD-only IRS) is now registered behind `price(...)`. A supported USD IRS
+  returns a deterministic PV; `dv01` and `cashflows` stay `None`; every
+  out-of-scope path returns a structured `FAILED` with `pv is None`. OIS / CCS /
+  FX Swap remain unsupported.
+- Recommended next development step: the next per-product engine slice (OIS),
+  and/or the deferred IRS extensions (DV01, cashflows, multi-curve /
+  currency-tagged curves). The downstream historical valuation loop (#13) and AI
+  inquiry contract (#14) are unchanged.
