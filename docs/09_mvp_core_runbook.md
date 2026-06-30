@@ -19,6 +19,31 @@ flow: it loads sample data through a provider, freezes a snapshot for an
 explicitly chosen valuation date, builds a context, derives a curve, and applies
 a parallel shock.
 
+### Pricing contract seam (PR #23, Issue #10 first slice)
+
+The product-pricing spine now has its stable internal front door:
+
+```text
+Product Definition + ValuationContext + MarketDataSnapshot → price(...) → PricingResult
+```
+
+`price(product, valuation_context, market_snapshot)` (in
+`src/shiori_pricing_lab/pricing/engine.py`) is the single entry point that the
+UI, historical-valuation, backtesting, and AI layers will call. **It is
+contract-only — this is not yet real pricing.** The current front door is
+intentionally conservative: it
+
+- validates the call contract shape (raising on malformed input);
+- rejects a malformed context (missing or `None` `market_snapshot`);
+- rejects a context snapshot that is a different object from the passed
+  `market_snapshot` (`MARKET_SNAPSHOT_MISMATCH`), and a valuation-date mismatch;
+- routes by `product.product_type` through a registry;
+- returns `FAILED + UNSUPPORTED_PRODUCT` when no engine is registered.
+
+No per-product engines are registered yet, so IRS / OIS / CCS / FX Swap all
+return `FAILED + UNSUPPORTED_PRODUCT`. The real per-product reference engines are
+future work (see section 8).
+
 ## 2. What each layer owns
 
 | Layer | Module | Owns | Must not |
@@ -28,6 +53,7 @@ a parallel shock.
 | ValuationContext | `src/shiori_pricing_lab/valuation/context.py` | Bind valuation date + snapshot + reporting currency / model settings; enforce date consistency; orchestrate curve building | Use the system date; mutate the snapshot |
 | RateCurve | `src/shiori_pricing_lab/pricing/curve.py` | Represent a simple curve (tenor → rate) from snapshot/normalized points; tenor→years mapping; parallel shock | Read CSV / call providers; invent data |
 | Scenario shock | `src/shiori_pricing_lab/pricing/scenario.py` | Deterministic parallel curve shock and `change_bp` output | Call providers; depend on the valuation layer |
+| Pricing engine contract | `src/shiori_pricing_lab/pricing/result.py`, `errors.py`, `engine.py` | Define `PricingResult` / messages; the `PricingEngine` Protocol + registry; the front-door `price(...)` that validates inputs, routes by product type, and returns a structured result | Fetch market data; use the system date; import data providers / UI / AI; compute PV / DV01 (no engines registered yet) |
 
 ### Normalized rates-points schema
 
@@ -54,6 +80,30 @@ pass:
    context-derived inputs. The data layer also must not import the pricing layer.
 5. **Synthetic data only in the repo.** No real market data, Bloomberg output,
    positions, or secrets. Sample data is clearly labeled `source=synthetic`.
+
+### Do not break these invariants (pricing contract)
+
+These extend the rules above and apply to the pricing engine seam (PR #23):
+
+- **Product schemas must not import data / valuation / pricing.** The `products`
+  package stays pure (guarded by a test).
+- **Pricing engines must not fetch market data directly** and must consume a
+  normalized `MarketDataSnapshot` only — never providers, CSV, Bloomberg, or web
+  data.
+- **Pricing engines must not use `date.today()` / `datetime.now()`.** The
+  valuation date comes only from the passed objects.
+- **`ValuationContext.valuation_date` and `MarketDataSnapshot.valuation_date`
+  must remain explicit and consistent.**
+- **`valuation_context.market_snapshot` and the explicit `market_snapshot`
+  argument to `price(...)` must refer to the same object** (else
+  `MARKET_SNAPSHOT_MISMATCH`); a missing or `None` context snapshot is a contract
+  violation.
+- **No `pricing ↔ valuation` runtime import cycle** — the engine references
+  context / snapshot / product types only under `TYPE_CHECKING`.
+- **The AI layer must call deterministic pricing APIs** and must not invent
+  pricing outputs.
+- **Unsupported products must fail explicitly** (`FAILED + UNSUPPORTED_PRODUCT`),
+  never return a fake zero PV.
 
 ## 4. How to run tests
 
@@ -105,7 +155,9 @@ Deliberately out of scope at this checkpoint:
 - Bloomberg or any external market-data adapter.
 - Database / persistent storage (SQLite / DuckDB / Parquet).
 - AI-native inquiry / chat layer.
-- IRS / OIS / CCS / FX Swap pricing engines.
+- IRS / OIS / CCS / FX Swap pricing engines (the pricing *contract* exists as of
+  PR #23, but no per-product engine is implemented — every product returns
+  `FAILED + UNSUPPORTED_PRODUCT`).
 - Historical valuation and the backtesting loop.
 - Production UI (the Streamlit app is a prototype only).
 - Richer snapshot content (FX, vols, fixings, reference data) — rates points only.
@@ -154,27 +206,52 @@ Load-bearing invariant for this layer (keep it true):
   `products` package imports no data/pricing/valuation module (guarded by a
   test).
 
-## 8. Recommended next development step
+## 8. Pricing engine contract checkpoint (PR #23, Issue #10 first slice)
 
-**Design preflight for the deterministic pricing engine interface.**
+The deterministic pricing engine **contract** now exists, in
+`src/shiori_pricing_lab/pricing/`. This is the **boundary only — there is still
+no per-product pricing.**
 
-Issue #12's product-schema scope is complete — IRS, OIS, CCS, and FX Swap are
-all defined and validated (still schema only). The next step is **not** more
-product-schema work. It is a short design preflight for the pricing engine
-interface that consumes those schemas:
+| Piece | Status |
+| --- | --- |
+| `PricingResult` + `PricingStatus` / `PricingMessage` / error & warning codes (`result.py`) | ✅ Defined |
+| Raise-path exceptions (`errors.py`) | ✅ Defined |
+| `PricingEngine` Protocol, `PricingEngineRegistry`, `register_engine`, front-door `price(...)` (`engine.py`) | ✅ Defined |
+| IRS / OIS / CCS / FX Swap pricing engines | ❌ Not started (all return `FAILED + UNSUPPORTED_PRODUCT`) |
 
-```text
-Product Definition + ValuationContext + MarketDataSnapshot → Pricing Result
-```
+Validated by `tests/test_pricing_engine.py` (`python -m pytest -q` → 175 passed;
+`ruff` clean). The contract does **not** calculate values: `pv`, `dv01`,
+`cashflows`, and `scenario_results` exist on `PricingResult` but default to
+`None`. Failure handling is hybrid — domain failures return
+`PricingResult(status=FAILED, errors=[...])`; contract / programming violations
+raise from `pricing/errors.py`. See the contract invariants under section 3.
 
-The preflight should define the engine boundary only — do not implement it yet:
+Issue #10 status: **first slice complete; the issue remains open.** The
+remaining work is the per-product deterministic pricing engines.
 
-- How a product definition, a `ValuationContext`, and a `MarketDataSnapshot`
-  combine into a deterministic pricing result, with the system date never used.
-- What a minimal `Pricing Result` contains and where it lives (a new layer, not
-  on the product definition — products stay pricing-free).
-- Keep the existing boundaries: products carry no market data, valuation date,
-  or pricing results; the data layer does not import pricing.
+## 9. Recommended next development step
+
+**Design preflight for the first per-product reference engine — not full
+valuation.**
+
+The pricing contract is in place, so the next step is **not** to jump into full
+IRS / OIS / CCS / FX Swap valuation. It is a short design preflight for the
+*first* per-product reference engine, likely the smallest **IRS or OIS**
+reference pricing slice. The preflight should define, before any code:
+
+- the required market data and where it comes from (a normalized
+  `MarketDataSnapshot` only — no Bloomberg / external data);
+- the explicit assumptions the reference engine makes;
+- which cases are unsupported and must fail clearly (e.g. missing market data →
+  `FAILED + MISSING_MARKET_DATA`);
+- the deterministic tests that pin the result.
+
+A possible next implementation slice:
+
+- one product type only;
+- a simple deterministic reference engine registered behind `price(...)`;
+- explicit missing-market-data failures;
+- no Bloomberg / external data, no UI, no AI, no historical loop.
 
 This slots cleanly into the spine documented above without changing any of the
 existing layers.

@@ -123,6 +123,54 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   clean. Codex reviewed the PR and found no major issues. **Issue #12's
   product-schema scope is now complete** (IRS, OIS, CCS, FX Swap).
 
+### PR #23 — Deterministic pricing engine contract first slice
+
+- **What changed:** Added the first deterministic pricing engine **boundary** for
+  Issue #10 — the contract and routing seam only, no pricing maths.
+  - New modules: `src/shiori_pricing_lab/pricing/result.py`,
+    `src/shiori_pricing_lab/pricing/errors.py`,
+    `src/shiori_pricing_lab/pricing/engine.py`.
+  - Updated: `src/shiori_pricing_lab/pricing/__init__.py` and
+    `tests/test_pricing_engine.py`.
+  - Result contract: `PricingResult`, `PricingStatus`, `PricingMessage`,
+    `PricingErrorCode`, `PricingWarningCode`.
+  - Engine seam: `PricingEngine` Protocol, `PricingEngineRegistry`,
+    `register_engine(...)`, and the front-door
+    `price(product, valuation_context, market_snapshot)`.
+- **Why it mattered:** Supplies the **Pricing Engine** seam of the spine
+  (`Product Definition + ValuationContext + MarketDataSnapshot → price(...) →
+  PricingResult`). It is **contract only — it does not calculate values.** No
+  real product engines are registered yet, so all current products
+  (IRS / OIS / CCS / FX Swap) return `FAILED + UNSUPPORTED_PRODUCT`. The future
+  fields `pv`, `dv01`, `cashflows`, `scenario_results` exist on `PricingResult`
+  but default to `None`.
+- **Hybrid failure model:**
+  - Expected *domain* failures return `PricingResult(status=FAILED, errors=[...])`.
+  - *Contract / programming* violations raise pricing exceptions from
+    `pricing/errors.py`.
+- **Guardrails (from the design + Codex review):**
+  - No system date usage (`date.today()` / `datetime.now()`), no market-data
+    fetching inside pricing, no data-provider imports, and no UI / AI /
+    historical-loop dependency.
+  - No `pricing ↔ valuation` runtime import cycle (the engine references
+    context / snapshot / product types only under `TYPE_CHECKING`).
+  - `valuation_context.market_snapshot` must exist and must not be `None`
+    (contract violation otherwise).
+  - Same-date but different snapshot objects are rejected with
+    `MARKET_SNAPSHOT_MISMATCH`.
+  - `PricingMessage.code` must be a known `PricingErrorCode` or
+    `PricingWarningCode`.
+  - `PricingResult.warnings` and `errors` normalize to tuples of
+    `PricingMessage` (bare strings rejected).
+- **Intentionally not done:** No product pricing, PV, DV01, cashflows, curve
+  bootstrapping, calendars, data adapters, UI, AI, or historical valuation loop.
+- **Review / validation:** `python -m pytest -q` → **175 passed**;
+  `python -m ruff check src/shiori_pricing_lab tests` → **All checks passed**.
+  Codex reviewed across several rounds; all raised P2s were addressed.
+- **Issue #10 status:** **first slice complete; the issue remains open /
+  partially complete.** The remaining work is the per-product deterministic
+  pricing engines (one registered per product type).
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
@@ -130,7 +178,12 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   `provider → snapshot → context → curve → scenario` flow is wired and tested.
 - Issue #12 product-schema scope is **complete**: IRS and OIS (PR #19) plus CCS
   and FX Swap (PR #21) are defined and validated, schema-only.
-- Recommended next development step: a design preflight for the **deterministic
-  pricing engine interface** —
-  `Product Definition + ValuationContext + MarketDataSnapshot → Pricing Result`.
-  See section 8 of `docs/09_mvp_core_runbook.md`.
+- Issue #10 first slice is **complete** (PR #23): the deterministic pricing
+  engine **contract** exists —
+  `Product Definition + ValuationContext + MarketDataSnapshot → price(...) →
+  PricingResult`. It is contract-only (no PV / DV01 / cashflows); all products
+  currently return `FAILED + UNSUPPORTED_PRODUCT`. Issue #10 remains open.
+- Recommended next development step: a design preflight for the **first
+  per-product reference engine** (likely the smallest IRS or OIS reference
+  pricing slice), not a jump into full valuation. See section 8 of
+  `docs/09_mvp_core_runbook.md`.

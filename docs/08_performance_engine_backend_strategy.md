@@ -98,6 +98,8 @@ Different backend implementations may exist behind the same interface:
 
 The UI, backtesting layer, and AI inquiry layer should call the interface, not a backend-specific implementation.
 
+As of PR #23 (Issue #10, first slice) this stable interface concretely exists: the front-door `price(product, valuation_context, market_snapshot) -> PricingResult`, the `PricingEngine` Protocol, and a `PricingEngineRegistry`, in `src/shiori_pricing_lab/pricing/`. It is **contract-only** — no backend or per-product engine is registered yet, so every product returns `FAILED + UNSUPPORTED_PRODUCT`. Future reference and accelerated backends register behind this same interface; the front door, callers, and result schema do not change.
+
 ## Portfolio valuation strategy
 
 Portfolio valuation cost can explode:
