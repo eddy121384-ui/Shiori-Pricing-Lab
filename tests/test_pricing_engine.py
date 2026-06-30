@@ -1,9 +1,8 @@
-"""Tests for the deterministic pricing engine contract (Issue #10, first slice).
+"""Tests for the deterministic pricing engine contract.
 
-These exercise the *boundary* only: the ``PricingResult`` value type, structured
-messages, and the routing front door ``price(...)``. No product is actually
-priced — every product routes to ``UNSUPPORTED_PRODUCT`` until per-product
-engines are registered in later PRs.
+These exercise the ``PricingResult`` value type, structured messages, and the
+routing front door ``price(...)``. Product-specific valuation tests live in
+separate engine test modules; this file keeps boundary behavior pinned.
 """
 
 import json
@@ -383,13 +382,12 @@ def test_message_code_serializes_to_plain_string():
 @pytest.mark.parametrize(
     "product, expected_type",
     [
-        (_irs(), "IRS"),
         (_ois(), "OIS"),
         (_ccs(), "CCS"),
         (_fxswap(), "FX_SWAP"),
     ],
 )
-def test_unsupported_product_for_all_current_schemas(product, expected_type):
+def test_unsupported_product_for_unregistered_current_schemas(product, expected_type):
     ctx, snap = _consistent()
     result = price(product, ctx, snap)
 
@@ -625,11 +623,11 @@ def test_registered_engine_that_raises_becomes_engine_error():
     assert result.errors[0].detail.get("exception_type") == "RuntimeError"
 
 
-def test_default_registry_is_empty_so_everything_is_unsupported():
-    # No register_engine() calls happen in this slice, so the module-level front
-    # door leaves all products unsupported.
+def test_default_registry_registers_only_irs_engine():
+    # Issue #27 registers exactly one default engine: IRS. Other products remain
+    # unsupported until their own focused implementation slices.
     ctx, snap = _consistent()
-    assert price(_irs(), ctx, snap).errors[0].code is (
+    assert price(_ois(), ctx, snap).errors[0].code is (
         PricingErrorCode.UNSUPPORTED_PRODUCT
     )
 
