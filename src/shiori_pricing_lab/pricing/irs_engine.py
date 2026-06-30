@@ -20,7 +20,14 @@ from shiori_pricing_lab.pricing.result import (
     PricingWarningCode,
 )
 from shiori_pricing_lab.pricing.schedule import SchedulePeriod, generate_regular_schedule
-from shiori_pricing_lab.products.enums import Currency, DayCount, PayReceive
+from shiori_pricing_lab.products.enums import (
+    CompoundingMethod,
+    Currency,
+    DayCount,
+    FloatingIndex,
+    Frequency,
+    PayReceive,
+)
 
 if TYPE_CHECKING:
     from shiori_pricing_lab.data.snapshot import MarketDataSnapshot
@@ -49,6 +56,56 @@ class IRSReferenceEngine:
                 PricingErrorCode.INVALID_PRODUCT,
                 "IRS reference engine supports USD products only",
                 {"unsupported_currency": product.currency.value},
+            )
+
+        # USD-only reference engine: it has no FX conversion and no
+        # currency-tagged curve selection, so a non-USD reporting currency would
+        # mislabel an unconverted USD PV as another currency. Reject it instead.
+        reporting_currency = str(valuation_context.reporting_currency)
+        if reporting_currency != "USD":
+            return _failed(
+                product,
+                valuation_context,
+                market_snapshot,
+                PricingErrorCode.INVALID_PRODUCT,
+                "IRS reference engine supports a USD reporting currency only",
+                {
+                    "unsupported_reporting_currency": reporting_currency,
+                    "required_reporting_currency": "USD",
+                },
+            )
+
+        # Narrow supported floating-leg shape: a USD SOFR term 3M leg with a
+        # quarterly payment and reset, no OIS-like daily compounding. The engine
+        # prices one simple forward per period, so anything outside this shape
+        # (a different index, a reset that differs from the payment frequency, or
+        # a compounded convention) would be valued incorrectly. Reject it.
+        floating = product.floating_leg
+        reset_frequency = floating.reset_frequency
+        if (
+            floating.index is not FloatingIndex.USD_SOFR_TERM_3M
+            or floating.payment_frequency is not Frequency.QUARTERLY
+            or reset_frequency is not floating.payment_frequency
+            or floating.compounding_method is not CompoundingMethod.NONE
+        ):
+            return _failed(
+                product,
+                valuation_context,
+                market_snapshot,
+                PricingErrorCode.INVALID_PRODUCT,
+                "unsupported floating-leg convention for IRS reference engine",
+                {
+                    "floating_index": floating.index.value,
+                    "payment_frequency": floating.payment_frequency.value,
+                    "reset_frequency": (
+                        reset_frequency.value if reset_frequency is not None else None
+                    ),
+                    "compounding_method": floating.compounding_method.value,
+                    "required_floating_index": FloatingIndex.USD_SOFR_TERM_3M.value,
+                    "required_payment_frequency": Frequency.QUARTERLY.value,
+                    "required_reset_frequency": "equal to payment_frequency",
+                    "required_compounding_method": CompoundingMethod.NONE.value,
+                },
             )
 
         try:

@@ -244,6 +244,92 @@ def test_unsupported_frequency_returns_structured_failed():
     assert result.pv is None
 
 
+def test_non_usd_reporting_currency_fails_without_eur_labeled_pv():
+    snap = _snapshot()
+    # A USD IRS valued with a non-USD reporting currency: the engine has no FX
+    # conversion, so it must fail rather than label an unconverted USD PV as EUR.
+    ctx = ValuationContext.from_snapshot(snap, reporting_currency="EUR")
+
+    result = price(_irs(), ctx, snap)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.INVALID_PRODUCT
+    assert result.errors[0].detail == {
+        "unsupported_reporting_currency": "EUR",
+        "required_reporting_currency": "USD",
+    }
+    # No PV is returned at all, so nothing can be mistaken for a EUR-denominated PV.
+    assert result.pv is None
+
+
+def test_wrong_floating_index_returns_structured_failed():
+    snap = _snapshot()
+    product = _irs(
+        floating_leg=FloatingLeg(
+            pay_receive=PayReceive.RECEIVE,
+            index=FloatingIndex.EUR_EURIBOR_3M,
+            spread=0.0,
+            payment_frequency=Frequency.QUARTERLY,
+            day_count=DayCount.ACT_360,
+            reset_frequency=Frequency.QUARTERLY,
+        )
+    )
+
+    result = price(product, _ctx(snap), snap)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.INVALID_PRODUCT
+    assert result.errors[0].detail["floating_index"] == "EUR_EURIBOR_3M"
+    assert result.pv is None
+
+
+def test_reset_frequency_differs_from_payment_returns_structured_failed():
+    snap = _snapshot()
+    product = _irs(
+        floating_leg=FloatingLeg(
+            pay_receive=PayReceive.RECEIVE,
+            index=FloatingIndex.USD_SOFR_TERM_3M,
+            spread=0.0,
+            payment_frequency=Frequency.QUARTERLY,
+            day_count=DayCount.ACT_360,
+            reset_frequency=Frequency.SEMI_ANNUAL,
+        )
+    )
+
+    result = price(product, _ctx(snap), snap)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.INVALID_PRODUCT
+    assert result.errors[0].detail["payment_frequency"] == "QUARTERLY"
+    assert result.errors[0].detail["reset_frequency"] == "SEMI_ANNUAL"
+    assert result.pv is None
+
+
+def test_ois_like_compounded_floating_leg_returns_structured_failed():
+    snap = _snapshot()
+    # An OIS-like floating leg (overnight index, daily compounding) built under
+    # the IRS schema must be rejected, not valued as a USD term IRS.
+    product = _irs(
+        floating_leg=FloatingLeg(
+            pay_receive=PayReceive.RECEIVE,
+            index=FloatingIndex.USD_SOFR,
+            spread=0.0,
+            payment_frequency=Frequency.QUARTERLY,
+            day_count=DayCount.ACT_360,
+            reset_frequency=Frequency.QUARTERLY,
+            compounding_method=CompoundingMethod.DAILY_COMPOUNDED,
+        )
+    )
+
+    result = price(product, _ctx(snap), snap)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.INVALID_PRODUCT
+    assert result.errors[0].detail["floating_index"] == "USD_SOFR"
+    assert result.errors[0].detail["compounding_method"] == "DAILY_COMPOUNDED"
+    assert result.pv is None
+
+
 def test_non_clean_schedule_returns_structured_failed():
     snap = _snapshot()
     result = price(_irs(maturity_date="2027-08-01"), _ctx(snap), snap)
