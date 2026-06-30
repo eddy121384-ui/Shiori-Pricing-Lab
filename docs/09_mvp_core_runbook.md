@@ -40,9 +40,10 @@ intentionally conservative: it
 - routes by `product.product_type` through a registry;
 - returns `FAILED + UNSUPPORTED_PRODUCT` when no engine is registered.
 
-No per-product engines are registered yet, so IRS / OIS / CCS / FX Swap all
-return `FAILED + UNSUPPORTED_PRODUCT`. The real per-product reference engines are
-future work (see section 8).
+The first per-product engine is now registered (PR #29): a **USD-only IRS
+reference engine** prices a supported USD synthetic IRS to a deterministic PV.
+OIS / CCS / FX Swap still return `FAILED + UNSUPPORTED_PRODUCT`, and unsupported
+IRS shapes fail explicitly. See section 8 for the engine checkpoint.
 
 ## 2. What each layer owns
 
@@ -155,9 +156,9 @@ Deliberately out of scope at this checkpoint:
 - Bloomberg or any external market-data adapter.
 - Database / persistent storage (SQLite / DuckDB / Parquet).
 - AI-native inquiry / chat layer.
-- IRS / OIS / CCS / FX Swap pricing engines (the pricing *contract* exists as of
-  PR #23, but no per-product engine is implemented — every product returns
-  `FAILED + UNSUPPORTED_PRODUCT`).
+- OIS / CCS / FX Swap pricing engines (the pricing *contract* exists as of
+  PR #23 and a **USD-only IRS** engine is registered as of PR #29, but OIS / CCS
+  / FX Swap still return `FAILED + UNSUPPORTED_PRODUCT`).
 - Historical valuation and the backtesting loop.
 - Production UI (the Streamlit app is a prototype only).
 - Richer snapshot content (FX, vols, fixings, reference data) — rates points only.
@@ -217,7 +218,8 @@ no per-product pricing.**
 | `PricingResult` + `PricingStatus` / `PricingMessage` / error & warning codes (`result.py`) | ✅ Defined |
 | Raise-path exceptions (`errors.py`) | ✅ Defined |
 | `PricingEngine` Protocol, `PricingEngineRegistry`, `register_engine`, front-door `price(...)` (`engine.py`) | ✅ Defined |
-| IRS / OIS / CCS / FX Swap pricing engines | ❌ Not started (all return `FAILED + UNSUPPORTED_PRODUCT`) |
+| IRS pricing engine (USD-only reference) | ✅ Registered (PR #29, Issue #27) |
+| OIS / CCS / FX Swap pricing engines | ❌ Not started (all return `FAILED + UNSUPPORTED_PRODUCT`) |
 
 Validated by `tests/test_pricing_engine.py` (`python -m pytest -q` → 175 passed;
 `ruff` clean). The contract does **not** calculate values: `pv`, `dv01`,
@@ -227,7 +229,41 @@ Validated by `tests/test_pricing_engine.py` (`python -m pytest -q` → 175 passe
 raise from `pricing/errors.py`. See the contract invariants under section 3.
 
 Issue #10 status: **first slice complete; the issue remains open.** The
-remaining work is the per-product deterministic pricing engines.
+remaining work is the per-product deterministic pricing engines — the **first of
+which (USD-only IRS) now exists** (see section 8.1).
+
+### 8.1 IRS reference engine checkpoint (PR #29, Issue #27)
+
+The first real per-product engine is registered, in
+`src/shiori_pricing_lab/pricing/irs_engine.py` (`IRSReferenceEngine`), wired via
+`register_engine("IRS", IRSReferenceEngine())`. It uses a small deterministic
+schedule helper, `pricing/schedule.py` (`generate_regular_schedule`).
+
+What it does (deliberately narrow):
+
+- prices a **USD-only** synthetic fixed-vs-floating IRS to a **deterministic
+  `pv`** behind the existing `price(...)` contract;
+- builds **one** `RateCurve` from the snapshot (via `RateCurve.from_snapshot`)
+  and uses it as **both the discount and the forecast curve** — no bootstrapping,
+  no calendar, no business-day adjustment;
+- supports only `ACT_360` and `ACT_365_FIXED` day counts.
+
+What it returns:
+
+- a supported USD IRS → deterministic `pv`; **`dv01` and `cashflows` stay
+  `None`**;
+- every unsupported / out-of-scope path → a structured `FAILED` with
+  **`pv is None`** (never a fake `0.0`). This includes non-USD **product**
+  currency, non-USD **reporting** currency, unsupported floating-leg conventions
+  (only a quarterly `USD_SOFR_TERM_3M` leg with reset = payment frequency and no
+  compounding is supported), unsupported day count / frequency / non-clean
+  schedule (`INVALID_PRODUCT`), and missing / unusable market data
+  (`MISSING_MARKET_DATA`).
+
+Validated by `tests/test_irs_reference_engine.py` (`python -m pytest -q` → 186
+passed at merge; `ruff` clean). **Issue #27 is closed (completed).** OIS / CCS /
+FX Swap remain unsupported; the downstream historical valuation loop (#13) and
+AI inquiry contract (#14) are unchanged.
 
 ## 9. Recommended next development step
 
@@ -264,6 +300,9 @@ fixed-vs-floating, **USD-only**, regular schedule, synthetic data — non-USD fa
 explicitly because the snapshot/curve layer has no enforceable curve-currency
 metadata yet), defines
 the market-data, schedule/accrual, day-count, output, and failure behavior, and
-lists the tests the implementation slice must add. It is **docs only — no engine
-is implemented or registered**, so IRS still returns
-`FAILED + UNSUPPORTED_PRODUCT` today. Issue #10 remains open.
+lists the tests the implementation slice must add. The implementation slice
+described there has since landed (**PR #29, Issue #27**): the USD-only IRS
+reference engine is now registered, so a supported USD IRS returns a
+deterministic PV instead of `FAILED + UNSUPPORTED_PRODUCT`. See section 8.1 for
+the engine checkpoint. Issue #10 remains open (the remaining per-product
+engines).
