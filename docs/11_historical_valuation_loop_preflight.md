@@ -265,12 +265,6 @@ matching §5:
   rates so a missing-date slice can be priced. `pv` stays `None` and the error
   codes explain why (`MISSING_MARKET_DATA`, `UNSUPPORTED_PRODUCT`,
   `INVALID_PRODUCT`, …).
-- One bad date **must not** abort the run. The loop continues to the next date so
-  a single missing-data date does not lose the whole table.
-- The loop must **never** substitute a fake `0.0` PV, a previous date's PV, or an
-  interpolated value for a failed date. `pv` stays `None` and the error codes
-  explain why (`MISSING_MARKET_DATA`, `UNSUPPORTED_PRODUCT`, `INVALID_PRODUCT`,
-  …).
 - **Contract violations still raise.** If the caller hands the loop a malformed
   input (e.g. a `None` product, or a snapshot whose date disagrees with its key),
   that is a programming error and should surface as an exception — consistent with
