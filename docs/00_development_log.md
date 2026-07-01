@@ -268,6 +268,41 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   Issue #14 is not started; Issue #13 is not closed.
 - **Review / validation:** Documentation-only change; no test or lint impact.
 
+### PR #33 — Bond Linked Structured Pricer v1.3 reference specs (product pivot)
+
+- **What changed:** Merged the **authoritative BLI v1.3 reference specs** into
+  `docs/bond_linked_structured_pricer/` (`SPEC_v1.3.md`, `ANNEX_A_v1.3.md`,
+  `ANNEX_B_v1.3.md`, `ANNEX_C_v1.3.md`, `README.md`). Reference specs only — no
+  pricing, FTP, UI, Bloomberg, or QuantLib code.
+- **Why it mattered:** Records a **product-priority pivot**: the near-term
+  priority moves from the original **Vanilla Rates Core / IRS-first** path to the
+  **Bond Linked Structured Pricer (BLI) MVP**. This is a re-ordering, **not** a
+  teardown — the Rates Core / IRS work stays as the shared deterministic pricing
+  infrastructure, and the spine
+  (`Product Definition + ValuationContext + MarketDataSnapshot → price(...) →
+  PricingResult`) is unchanged. Annex A is the authoritative BLI pricing
+  methodology source; Annex B the reference FTP / market-data file spec; Annex C
+  the UI/UX and visual guidance reference.
+- **Review found real methodology defects (fixed in-PR):** Codex review caught
+  and PR #33 fixed three Annex A issues before any implementation — clean-price
+  tree coupon handling (§A.4.2), price-based put-call parity notional scaling
+  (§A.13.2), and the parity tolerance basis for full-PV checks (§A.13.2). Lesson
+  recorded: **authoritative methodology docs must get quant-style review before
+  implementation** (`docs/12_pr_review_rubric.md`), because a methodology defect
+  in code is wrong PV/risk, not a style nit.
+- **Priority re-sequencing:** Near-term priority is **no longer** the historical
+  valuation loop. Issue #13 is **deferred / reframed** for later EOD /
+  revaluation / warehouse valuation use (its `docs/11` preflight stays valid);
+  Issue #14 (AI inquiry) remains deferred. The near-term priority is **BLI
+  methodology teardown and integration preflight** — the next planned PR is
+  `docs/14_bond_linked_spec_teardown_and_integration_preflight.md`.
+- **Checkpoint doc:** `docs/13_bond_linked_pivot_checkpoint.md` records this pivot
+  and the current repo status.
+- **Intentionally not done:** **Docs only.** No code, tests, CI, pricing, FTP,
+  Bloomberg, QuantLib, or architecture rewrite; no implementation issues opened or
+  modified; the four BLI spec source files are not edited and their line endings /
+  whitespace are not normalized.
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).

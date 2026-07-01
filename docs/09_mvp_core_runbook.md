@@ -319,3 +319,28 @@ date over **synthetic** snapshots, and collects a stable per-date result table
 (failures included as rows, never a fake `0.0`). It is **docs only — no loop is
 implemented**; it creates no second pricing path, fetches no data, invents no
 rates, and does not start Issue #14. Issue #13 remains open.
+
+### Product-priority pivot: Bond Linked Structured Pricer (PR #33)
+
+The near-term product priority has **shifted** from the Vanilla Rates Core /
+IRS-first path to the **Bond Linked Structured Pricer (BLI) MVP**. This is a
+re-ordering, **not** a teardown: the Rates Core / IRS work stays as the shared
+deterministic pricing infrastructure, and the spine
+(`Product Definition + ValuationContext + MarketDataSnapshot → price(...) →
+PricingResult`) is unchanged — BLI will register behind the same `price(...)`
+front door.
+
+PR #33 merged the authoritative BLI **v1.3 reference specs** into
+`docs/bond_linked_structured_pricer/` (Annex A = pricing methodology, Annex B =
+FTP / market-data file spec, Annex C = UI/UX guidance). Codex review already
+found and fixed three Annex A methodology defects there (clean-price tree coupon
+handling; price-based put-call parity notional scaling; parity tolerance basis),
+which is why authoritative methodology docs must get **quant-style review before
+implementation**.
+
+As a result, the **near-term priority is BLI methodology teardown and an
+integration preflight**, not the historical valuation loop. **Issue #13 is
+deferred / reframed** for later EOD / revaluation / warehouse valuation use, and
+**Issue #14 stays deferred.** See `docs/13_bond_linked_pivot_checkpoint.md`; the
+next planned PR is
+`docs/14_bond_linked_spec_teardown_and_integration_preflight.md`.
