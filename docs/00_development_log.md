@@ -244,6 +244,30 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   downstream / follow-up engine work (OIS / CCS / FX Swap and deferred
   extensions).
 
+### PR (this) — Historical valuation loop design preflight (Issue #13)
+
+- **What changed:** Added `docs/11_historical_valuation_loop_preflight.md`, the
+  design preflight for the **first historical valuation loop skeleton**
+  (Issue #13), plus a short pointer in `docs/09_mvp_core_runbook.md` (section 9)
+  and this log entry.
+- **Why it mattered:** With the single-date `price(...)` contract and the first
+  engine (USD IRS) in place, the loop is the next downstream slice. The preflight
+  fixes, before any code: the minimal request shape, explicit `YYYY-MM-DD`
+  caller-supplied dates, synthetic per-date `MarketDataSnapshot` supply, per-date
+  reuse of `ValuationContext.from_snapshot` + the `price(...)` front door (same
+  snapshot object, so no `MARKET_SNAPSHOT_MISMATCH`), a stable per-date result
+  table, per-date failure rows, required provenance, the no-system-date /
+  no-future-data / no-external-data rules, and the deterministic tests the
+  implementation slice must add.
+- **Boundaries recorded:** one pricing path only (reuse `price(...)`, never call
+  engines directly), no market-data fetching, no invented rates, no second/toy
+  valuation path, synthetic data only; failed dates are structured `FAILED` rows
+  (`pv is None`), never a fake `0.0`.
+- **Intentionally not done:** **Docs only — no code.** No loop, no backtest
+  analytics (P&L / returns / charts), no persistence, no UI, no AI layer.
+  Issue #14 is not started; Issue #13 is not closed.
+- **Review / validation:** Documentation-only change; no test or lint impact.
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).

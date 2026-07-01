@@ -309,3 +309,13 @@ deterministic PV instead of `FAILED + UNSUPPORTED_PRODUCT`. See section 8.1 for
 the engine checkpoint. **Issue #10 is now closed (completed)**; the remaining
 per-product engine work (OIS / CCS / FX Swap and deferred extensions) is
 downstream / follow-up.
+
+### Preflight written: historical valuation loop (Issue #13)
+
+`docs/11_historical_valuation_loop_preflight.md` is the design preflight for the
+first **historical valuation loop skeleton** (Issue #13). It reuses the existing
+single-date `price(...)` contract once per explicit, caller-supplied valuation
+date over **synthetic** snapshots, and collects a stable per-date result table
+(failures included as rows, never a fake `0.0`). It is **docs only — no loop is
+implemented**; it creates no second pricing path, fetches no data, invents no
+rates, and does not start Issue #14. Issue #13 remains open.
