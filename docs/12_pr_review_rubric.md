@@ -52,11 +52,28 @@ Unnecessary complexity (see the IT lens, §3.2) is **P2 only if** it creates a
 **likely** performance, maintenance, testability, or future-editing risk.
 Otherwise it is **P3**. Do not inflate a stylistic preference into a blocker.
 
-### Financial / determinism issues are never "just style"
+### Number changes: escalate the wrong ones, not all of them
 
-Anything that changes a number, hides a pricing assumption, uses the system date
-in pricing, mixes market states, or lets AI/UI bypass the deterministic pricing
-API is at least P1 — never downgrade it to a readability nit.
+A PR that changes a PV, DV01, or other computed number is **not automatically
+P1**. Many PRs legitimately add or correct calculation logic, and the resulting
+number change is expected. Such a change is **acceptable** when it is:
+
+- **explicit** — the PR states the number moved and why;
+- **tested** — a deterministic test pins the new value (ideally hand-checked);
+- **deterministic** — same inputs give the same result;
+- **explained** — the assumption/method behind the change is recorded (e.g. in
+  `assumptions`, the PR body, or a comment), not hidden.
+
+**Escalate a number change to P1 (or P2)** only when it is **incorrect, hidden,
+unsafe, untested, or non-deterministic**, or when it **breaks a pricing/risk
+contract, fabricates data or results, or introduces look-ahead / data-leakage
+risk**. In those cases it is at least P1 — and a genuine financial-correctness,
+determinism, data-leakage, or safety issue is **never** downgraded to a
+readability nit.
+
+Likewise, hiding a pricing assumption, using the system date in pricing, mixing
+market states, or letting AI/UI **bypass** the deterministic pricing API is at
+least P1 regardless of whether a number visibly changed.
 
 ---
 
@@ -96,8 +113,12 @@ importantly, **unnecessary code weight**.
 Check for:
 
 - **Layering** — data adapters, valuation context, pricing engines, UI, and AI
-  stay separate; no `pricing → data.providers` import, no UI pricing directly, no
-  AI bypassing `price(...)`.
+  stay separate; no `pricing → data.providers` import. The **UI may orchestrate**:
+  it can call the deterministic pricing / scenario APIs (e.g. the Streamlit app
+  invoking `run_parallel_curve_shock` or `price(...)`). What is forbidden is
+  **implementing pricing logic inside UI code**, **hiding financial assumptions in
+  UI code**, or letting **UI or AI bypass the deterministic pricing APIs**. Flag
+  those, not a plain UI-to-API call.
 - **Broken contracts / regressions** — public function shapes, `PricingResult`
   fields, and existing invariants stay intact; new failures are structured, not
   raised where a `FAILED` result is expected (and vice-versa).
