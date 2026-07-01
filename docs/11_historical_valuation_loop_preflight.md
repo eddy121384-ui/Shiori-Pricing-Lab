@@ -126,13 +126,41 @@ calendar, which the repo does not have yet).
      rates-points frame containing several dates plus the ordered date list, and
      a thin helper slices it **per date** via the existing
      `MarketDataSnapshot.from_rates_points(frame, valuation_date, source=...)`,
-     which already filters the frame to that date and raises if the date has no
-     rows. The loop still values one date at a time against its own snapshot.
-- **The loop must not invent missing rates.** If a date has no usable market
-  data, that surfaces as a structured failure row (see §8) — the loop never
-  fabricates a curve or back-fills from a neighbouring date.
+     which already filters the frame to that date. The loop still values one date
+     at a time against its own snapshot.
+
+### Two distinct missing-data cases (do not conflate them)
+
+The supply layer must handle two different failures explicitly, because they
+happen at different points and only one of them can reach `price(...)`:
+
+1. **Snapshot constructible but unusable for pricing** — a `MarketDataSnapshot`
+   *can* be built for the date, but its rates points do not yield a usable curve
+   (unmappable tenors, no usable curve points, etc.). This case **goes through
+   the normal pricing path**: the loop builds the context and calls
+   `price(product, context, snapshot)`, and the engine returns
+   `FAILED + MISSING_MARKET_DATA` (see the IRS engine's curve check). The loop
+   records that returned `PricingResult` as a normal row (see §7, §8).
+
+2. **No rows for the date, so no snapshot can be constructed** — with the
+   multi-date-frame helper, `MarketDataSnapshot.from_rates_points(...)` **raises
+   `ValueError` on an empty slice** (`data/snapshot.py`), so there is no snapshot
+   to pass to `ValuationContext.from_snapshot(...)` or `price(...)`. In this case
+   the **frame-expansion helper / loop catches that construction failure and
+   emits a pre-pricing data-supply failure row** for the requested date with
+   `status = FAILED`, `pv is None`, and `error_codes` containing
+   `MISSING_MARKET_DATA` (see §7, §8). **No pricing is attempted**, so this is a
+   *snapshot-construction / data-supply* failure, **not** a second pricing path
+   (see §10).
+
+- **The loop must not invent missing rates.** In neither case does the loop
+  fabricate a curve, back-fill from a neighbouring date, or reach into a later
+  date's rows (no look-ahead — see §10). A missing or unusable date becomes a
+  structured failure row; it is never silently filled.
 - `source` on each snapshot must be a synthetic label (e.g. `"synthetic"`); it is
-  carried into provenance (see §9).
+  carried into provenance (see §9). For a pre-pricing data-supply failure row
+  (case 2) there is no snapshot, so `source` records the request's supply label
+  (e.g. `"synthetic"`) with `market_data_as_of` left empty/`None` (see §7).
 
 ---
 
@@ -166,23 +194,37 @@ collects. Registering engines is out of scope — whatever is registered globall
 
 The loop returns a **deterministic, ordered** table: exactly one row per input
 date, in input order, regardless of success or failure. No row is dropped on
-failure. The row shape below is a projection of `PricingResult` plus provenance;
-the concrete container (list of frozen rows / DataFrame) is decided in the
-implementation PR, but the columns are fixed here:
+failure. The concrete container (list of frozen rows / DataFrame) is decided in
+the implementation PR, but the columns are fixed here.
 
-| Column | Source | Notes |
+A row can arise in **two ways**, and the columns are the same for both so the
+table stays uniform:
+
+- **(a) Priced rows** — projected from a real `PricingResult` returned by
+  `price(...)` (success, success-with-warnings, or a pricing `FAILED`).
+- **(b) Pre-pricing data-supply failure rows** — for a requested date whose
+  multi-date-frame slice had no rows, so **no `MarketDataSnapshot` and no
+  `PricingResult` exist** (§5 case 2). The loop synthesizes this row directly.
+
+| Column | Priced row (a) source | Data-supply failure row (b) |
 | --- | --- | --- |
-| `valuation_date` | `PricingResult.valuation_date` | the explicit date valued |
-| `status` | `PricingResult.status` | `SUCCESS` / `SUCCESS_WITH_WARNINGS` / `FAILED` |
-| `is_success` | `PricingResult.is_success` | convenience; `False` only for `FAILED` |
-| `pv` | `PricingResult.pv` | `None` on failure (never a fake `0.0`) |
-| `result_currency` | `PricingResult.result_currency` | reporting currency |
-| `market_data_as_of` | `PricingResult.market_data_as_of` | snapshot date actually used |
-| `engine_name` / `engine_version` / `method` | `PricingResult` | engine provenance |
-| `error_codes` | `PricingResult.errors` | tuple of machine codes, empty on success |
-| `warning_codes` | `PricingResult.warnings` | tuple of machine codes |
-| `source` | snapshot `source` | e.g. `"synthetic"` (see §9) |
-| `run_metadata` | request metadata | copied verbatim; audit only |
+| `valuation_date` | `PricingResult.valuation_date` | the requested date |
+| `status` | `PricingResult.status` | `FAILED` |
+| `is_success` | `PricingResult.is_success` | `False` |
+| `pv` | `PricingResult.pv` (`None` on failure, never a fake `0.0`) | `None` |
+| `result_currency` | `PricingResult.result_currency` | request reporting currency |
+| `market_data_as_of` | `PricingResult.market_data_as_of` | empty / `None` (no snapshot) |
+| `engine_name` / `engine_version` / `method` | `PricingResult` | a loop-supply label, e.g. `engine_name="historical_loop"`, `method="data_supply"` (no engine ran) |
+| `error_codes` | `PricingResult.errors` codes (empty on success) | `("MISSING_MARKET_DATA",)` |
+| `warning_codes` | `PricingResult.warnings` codes | `()` |
+| `source` | snapshot `source`, e.g. `"synthetic"` (§9) | request supply label, e.g. `"synthetic"` |
+| `run_metadata` | request metadata (verbatim) | request metadata (verbatim) |
+
+Both row kinds are the only two ways a row is produced; a data-supply failure row
+(b) is a **recorded outcome, not a pricing result** — it explicitly marks that no
+pricing was attempted because no snapshot could be built. The implementation may
+add a small internal flag (e.g. `priced: bool`) to distinguish (a) from (b) for
+audit, but must not add analytics columns.
 
 The table must be **serializable and stable**: the same request produces an
 identical table every run (see §11). The loop adds **no derived analytics
@@ -192,14 +234,37 @@ columns** (no P&L, no diffs between dates) — that is backtesting, out of scope
 
 ## 8. How failures are represented per date
 
-Failure handling reuses the pricing contract; the loop invents no new failure
-model.
+Failure handling reuses the pricing contract for anything that reaches pricing;
+the loop invents no new pricing failure model. There are two failure origins,
+matching §5:
 
-- A per-date **domain failure** (unsupported product, non-USD IRS, missing market
-  data, unsupported convention, etc.) comes back from `price(...)` as a
-  `PricingResult` with `status == FAILED`, `pv is None`, and structured
-  `errors`. The loop records it as a normal row with `is_success == False`;
-  it **does not** raise, skip, or halt the loop.
+**Pricing-path failures (a snapshot exists).**
+
+- A per-date **domain failure** (unsupported product, non-USD IRS,
+  constructible-but-unusable market data, unsupported convention, etc.) comes back
+  from `price(...)` as a `PricingResult` with `status == FAILED`, `pv is None`,
+  and structured `errors`. The loop records it as a normal row with
+  `is_success == False`; it **does not** raise, skip, or halt the loop.
+- In particular, a snapshot that builds but yields no usable curve returns a
+  pricing `FAILED + MISSING_MARKET_DATA` **through `price(...)`** (§5 case 1) —
+  the loop does not pre-empt this check; it lets the engine make it.
+
+**Pre-pricing data-supply failures (no snapshot could be built).**
+
+- When the multi-date-frame helper finds **no rows for a requested date**,
+  `MarketDataSnapshot.from_rates_points(...)` raises before any snapshot exists
+  (§5 case 2). The helper/loop **catches that construction failure and emits a
+  data-supply failure row** (`status = FAILED`, `pv is None`,
+  `error_codes = ("MISSING_MARKET_DATA",)`) for that date — see §7 row kind (b).
+  **`price(...)` is never called**, so no second pricing path is created; the
+  single-pricing-path invariant only governs dates where a valid snapshot exists.
+- One bad date **must not** abort the run. The loop continues to the next date so
+  a single missing-data date (either origin) does not lose the whole table.
+- The loop must **never** substitute a fake `0.0` PV, a previous date's PV, or an
+  interpolated value for a failed date, and must **never** invent or back-fill
+  rates so a missing-date slice can be priced. `pv` stays `None` and the error
+  codes explain why (`MISSING_MARKET_DATA`, `UNSUPPORTED_PRODUCT`,
+  `INVALID_PRODUCT`, …).
 - One bad date **must not** abort the run. The loop continues to the next date so
   a single missing-data date does not lose the whole table.
 - The loop must **never** substitute a fake `0.0` PV, a previous date's PV, or an
@@ -210,11 +275,15 @@ model.
   input (e.g. a `None` product, or a snapshot whose date disagrees with its key),
   that is a programming error and should surface as an exception — consistent with
   the front door raising `PricingContractError` — not a silent `FAILED` row. The
-  loop should fail fast on a malformed *request*, but record per-date *domain*
-  failures as rows.
+  loop should fail fast on a malformed *request*, but record per-date *domain* and
+  *data-supply* failures as rows. An **empty-slice `ValueError`** from
+  `from_rates_points` is expected market-data absence, not a malformed request, so
+  it is **caught and converted to a data-supply failure row** (§5 case 2), not
+  re-raised.
 
-The three pricing statuses are the only per-date outcomes; there is no
-loop-specific status enum.
+Every per-date outcome is one of the three pricing statuses (`SUCCESS`,
+`SUCCESS_WITH_WARNINGS`, `FAILED`); there is no loop-specific status enum. A
+data-supply failure row reuses `FAILED` — it is not a new status.
 
 ---
 
@@ -225,17 +294,21 @@ explicit, boring):
 
 - **`valuation_date`** and **`market_data_as_of`** — the date valued and the
   snapshot date actually used (equal on the happy path; both recorded so a
-  mismatch is visible).
+  mismatch is visible). For a data-supply failure row (§7 kind (b))
+  `market_data_as_of` is empty/`None` because no snapshot existed.
 - **`source`** — the snapshot's `source` label (must be synthetic in this slice,
-  e.g. `"synthetic"`).
-- **`engine_name` / `engine_version` / `method`** — which engine produced the row
-  (e.g. `usd_irs_reference_engine` / contract version / method label), taken
-  straight from `PricingResult`.
+  e.g. `"synthetic"`); for a data-supply failure row it is the request's supply
+  label instead.
+- **`engine_name` / `engine_version` / `method`** — for a priced row, which engine
+  produced the row (e.g. `usd_irs_reference_engine` / contract version / method
+  label), taken straight from `PricingResult`; for a data-supply failure row, a
+  fixed loop-supply label (e.g. `historical_loop` / `data_supply`) marking that no
+  engine ran.
 - **`run_metadata`** — the request's metadata dict, copied verbatim (e.g.
   `run_id`, `dataset`). Metadata only — it must never influence pricing.
 
-No provenance field may be filled from the system clock or an external lookup;
-all of it comes from the request and the returned `PricingResult`.
+No provenance field may be filled from the system clock or an external lookup; it
+comes only from the request and, for priced rows, the returned `PricingResult`.
 
 ---
 
@@ -254,9 +327,16 @@ Load-bearing invariants for the loop (extending `docs/09` §3):
    `data.providers` / CSV / Bloomberg / web module and makes no network call. All
    market state arrives as pre-built synthetic `MarketDataSnapshot` objects.
 4. **No invented rates.** Missing market data for a date becomes a
-   `MISSING_MARKET_DATA` failure row, never a fabricated curve.
-5. **Single pricing path.** The loop calls `price(...)` only; it never registers,
-   imports, or calls an engine directly, and never re-implements pricing.
+   `MISSING_MARKET_DATA` failure row (a pricing `FAILED` when a snapshot exists,
+   or a pre-pricing data-supply row when it does not), never a fabricated or
+   back-filled curve.
+5. **Single pricing path — once a valid snapshot exists.** For every date whose
+   `MarketDataSnapshot` was constructed, the loop calls `price(...)` only; it
+   never registers, imports, or calls an engine directly, and never re-implements
+   pricing. Emitting a pre-pricing data-supply failure row for a date with **no
+   constructible snapshot** (§5 case 2) does **not** violate this invariant,
+   because **no pricing is attempted** on that date — it is a snapshot-construction
+   failure, not an alternative valuation.
 
 ---
 
@@ -270,23 +350,31 @@ likely in `tests/test_historical_valuation_loop.py`, **synthetic data only**:
 2. **Deterministic repeated runs** — running the same request twice yields
    identical tables (same rows, order, `pv`s, statuses, provenance). This is the
    core Issue #13 acceptance test.
-3. **Per-date failure is a row, not a crash** — a date with an empty / unusable
-   snapshot yields a `FAILED + MISSING_MARKET_DATA` row with `pv is None`, and the
+3. **Constructible-but-unusable snapshot → pricing failure through `price(...)`**
+   — a snapshot that builds but has no usable curve points yields a
+   `FAILED + MISSING_MARKET_DATA` row **returned by `price(...)`** (assert the
+   front door was actually called and produced the result), `pv is None`, and the
    loop still values the remaining dates.
-4. **Unsupported product still fails per date** — a non-IRS (or non-USD IRS)
+4. **Missing date in a multi-date frame → pre-pricing data-supply row without
+   calling `price(...)`** — a requested date with no rows in the frame yields a
+   data-supply failure row (`status = FAILED`, `pv is None`,
+   `error_codes` containing `MISSING_MARKET_DATA`) **without** `price(...)` being
+   called for that date (assert the front door is *not* invoked, e.g. via a spy /
+   registry with no engine call), and the loop still values the remaining dates.
+5. **Unsupported product still fails per date** — a non-IRS (or non-USD IRS)
    comes back as a structured `FAILED` row on every date; no fake `0.0`.
-5. **No look-ahead** — date `T`'s row depends only on `T`'s snapshot; changing a
+6. **No look-ahead** — date `T`'s row depends only on `T`'s snapshot; changing a
    *later* date's snapshot does not change an earlier date's row.
-6. **No system-date usage** — the loop module contains no `date.today(` /
+7. **No system-date usage** — the loop module contains no `date.today(` /
    `datetime.now(` (mirror
    `tests/test_pricing_engine.py::test_pricing_engine_modules_have_no_system_date`).
-7. **No provider imports** — importing the loop pulls in no
+8. **No provider imports** — importing the loop pulls in no
    `shiori_pricing_lab.data` provider / CSV / web module (extend the layering
    guard).
-8. **No mutation** — the loop does not mutate the product or any supplied
+9. **No mutation** — the loop does not mutate the product or any supplied
    snapshot (assert equality/identity before and after the run).
-9. **Provenance present** — every row carries `valuation_date`,
-   `market_data_as_of`, `source`, engine provenance, and `run_metadata`.
+10. **Provenance present** — every row carries `valuation_date`,
+    `market_data_as_of`, `source`, engine provenance, and `run_metadata`.
 
 Do **not** add these tests in this docs-only preflight PR. (There is no existing
 docs-only test/check convention; this PR adds documentation only.)
@@ -318,10 +406,16 @@ Deliberately deferred (do not implement under Issue #13's skeleton):
 
 Restating the load-bearing boundaries the implementation must not break:
 
-- **One pricing path only** — the loop reuses `price(...)`; it does not create a
-  second/toy valuation path and does not call engines directly.
+- **One pricing path only (once a snapshot exists)** — for any date with a
+  constructed `MarketDataSnapshot`, the loop reuses `price(...)`; it does not
+  create a second/toy valuation path and does not call engines directly. A date
+  with **no constructible snapshot** produces a pre-pricing data-supply failure
+  row and is never priced, so it does not introduce an alternative pricing path
+  (§5, §8, §10).
 - **No market-data fetching / no invented rates** — snapshots come in pre-built
-  and synthetic; missing data fails explicitly.
+  and synthetic; missing data fails explicitly (either a pricing
+  `MISSING_MARKET_DATA` result or a data-supply failure row), never a fabricated
+  or back-filled curve.
 - **No system date, no future data** — explicit caller-supplied dates, each date
   independent.
 - **No new external dependencies** — no Bloomberg / web / CSV-provider changes,
