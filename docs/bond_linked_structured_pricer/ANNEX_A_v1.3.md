@@ -601,7 +601,7 @@ C_PV - P_PV = DF × (F - K) × N / 100
 ```
 
 - Self-validation 必須以 **相同單位** 做 like-for-like 比較（同為 per-100，或同為 full PV）；混用單位會在 Bond Option Notional ≠ 100 時誤判 parity。
-- Internal Pricing Report 必須標明本次 parity 檢驗所用的單位（per-100 或 full PV）。
+- Internal Pricing Report 必須標明本次 parity 檢驗所用的 **單位（per-100 或 full PV）** 與 **tolerance basis（per-100 threshold，或已依 N / 100 縮放的 full-PV threshold）**。
 
 Yield-based parity（MODE_A 路徑）：
 
@@ -609,7 +609,13 @@ Yield-based parity（MODE_A 路徑）：
 C_yield - P_yield = DF × (YF - YK) × 10000 × DV01_expiry × N / 100
 ```
 
-- 差異 > 0.1% per 100 face → 顯示 critical warning。
+- **Tolerance threshold（維持 0.1% per 100 face，但比較前必須做單位正規化）：**
+  - 採 **per-100 parity** 時：直接用 per-100 residual 與 per-100 threshold（0.1% per 100 face）比較。
+  - 採 **full PV parity** 時：residual 為 full notional PV 單位，不可直接比 per-100 threshold，擇一：
+    1. 將 residual 正規化回 per-100：`residual_per100 = residual_full_pv × 100 / N`，再與 0.1% per 100 face 比較；或
+    2. 把門檻縮放到 full-PV 再比較 full-PV residual：`threshold_full_pv = threshold_per100 × N / 100`。
+  - 兩種做法等價。Bond Option Notional ≠ 100 時，若直接拿 full-PV residual 比 per-100 threshold，會有 N / 100 倍誤判。
+  - 超過門檻 → 顯示 critical warning。
 
 ---
 
