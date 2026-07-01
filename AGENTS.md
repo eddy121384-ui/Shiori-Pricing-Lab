@@ -124,6 +124,16 @@ When opening or updating a pull request:
 
 Leave a self-contained GitHub PR conversation comment that is understandable without reading the agent private chat session. Include the target issue / scope, changed files, implementation summary, tests and lint commands run with results, known limitations, explicitly deferred work, and any assumptions or financial-model choices that affect pricing or risk behavior.
 
+## Reviewing a pull request
+
+When reviewing (Codex, Claude, or any AI reviewer), read `docs/12_pr_review_rubric.md` and apply it. In short:
+
+- Ground every finding in the actual diff. Do not comment on code the PR does not change, and do not invent problems.
+- Apply only the review lenses that are relevant to the diff (quant/financial correctness, IT/engineering, trader/workflow, design/readability). These are **lenses, not roleplay personas** — do not narrate a persona and do not force every lens to speak on every PR.
+- Prefer concrete blockers, edge cases, missing tests, broken contracts, and misleading outputs over generic advice. Say nothing rather than pad the review.
+- Use the severity scale in the rubric (P0/P1 for wrong PV/risk, data leakage, determinism/contract breaks, future-data use, fake results, or safety; P2 for missing edge cases, unclear failures, missing tests, likely perf/maintenance risk; P3 for naming, docs, and small cleanups).
+- Keep reviews short by default. A clean PR can be approved briefly.
+
 ## Style preference
 
 The codebase should be boring, explicit, and easy for another AI to edit. This is a feature, not a weakness.
