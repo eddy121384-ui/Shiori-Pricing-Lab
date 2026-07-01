@@ -344,3 +344,21 @@ deferred / reframed** for later EOD / revaluation / warehouse valuation use, and
 **Issue #14 stays deferred.** See `docs/13_bond_linked_pivot_checkpoint.md`; the
 next planned PR is
 `docs/14_bond_linked_spec_teardown_and_integration_preflight.md`.
+
+### BLI methodology teardown / integration preflight complete (PR #35)
+
+`docs/14_bond_linked_spec_teardown_and_integration_preflight.md` is now merged
+(PR #35), **completing** the BLI methodology teardown and integration preflight.
+It is the **guide for BLI implementation issue sequencing**: it reviews the
+Annex A methodology, assesses market-data readiness (Annex B / SPEC §7), maps BLI
+onto the existing spine, and carries a severity-ranked risk list plus a §6
+roadmap. The **existing deterministic pricing spine remains the target** — BLI
+registers behind the same `price(...)` front door, not a parallel path.
+
+Next work (recorded, **not started here**):
+
+- **Convert the `docs/14` §6 roadmap into concrete GitHub issues.**
+- **Do not start pricing engine code yet.** The first implementation slice is
+  **prerequisites** — enum gap analysis, product schema, and the market-data
+  boundary — **not** the American tree, AI inquiry, UI, Bloomberg implementation,
+  or a QuantLib backend.

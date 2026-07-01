@@ -303,6 +303,35 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   modified; the four BLI spec source files are not edited and their line endings /
   whitespace are not normalized.
 
+### PR #35 — BLI v1.3 methodology teardown / integration preflight (complete)
+
+- **What changed:** Merged `docs/14_bond_linked_spec_teardown_and_integration_preflight.md`,
+  the docs-only teardown of the BLI v1.3 methodology (Annex A) plus a market-data
+  readiness review (Annex B / SPEC §7) and an integration map onto the existing
+  pricing spine (`price(...)`, `PricingResult`, `ValuationContext`,
+  `MarketDataSnapshot`, product schemas). This **completes the BLI methodology
+  teardown and integration preflight** the pivot checkpoint (`docs/13` §4) named
+  as the next step after PR #33/#34.
+- **Why it mattered:** `docs/14` is now the **guide for BLI implementation issue
+  sequencing** — it carries the severity-ranked risk list (P1/P2/P3 findings with
+  proposed targeted Annex amendments) and the §6 roadmap. The existing
+  deterministic pricing spine remains the target: BLI will register behind the
+  **same** `price(...)` front door as a per-product engine, not a parallel path.
+- **Review found and fixed real issues (Codex round 1):** two P1s were sharpened
+  before merge — unresolved missing required market data must **block or
+  `FAILED + MISSING_MARKET_DATA`**, never `SUCCESS_WITH_WARNINGS` and never a
+  fabricated value (F-15); and the MODE_A price-delta conversion needs an explicit
+  per-100-vs-full-PV **unit basis**, not just a symbol rename (F-02). Also added a
+  repo/specialness override-path finding (F-14) and a BLI enum-gap finding (F-16).
+- **Next work (no code yet):** convert the `docs/14` §6 roadmap into concrete
+  GitHub issues. The **first implementation slice is prerequisites** — enum gap
+  analysis, product schema, and the market-data boundary — **not** the American
+  tree, AI inquiry, UI, Bloomberg, or a QuantLib backend. **Do not start pricing
+  engine code yet.**
+- **Intentionally not done:** **Docs only.** No source, tests, CI, pricing, FTP,
+  Bloomberg, QuantLib, or UI; the four BLI source spec files are not edited; no
+  implementation issue opened yet.
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
@@ -321,7 +350,15 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   returns a deterministic PV; `dv01` and `cashflows` stay `None`; every
   out-of-scope path returns a structured `FAILED` with `pv is None`. OIS / CCS /
   FX Swap remain unsupported.
-- Recommended next development step: the next per-product engine slice (OIS),
-  and/or the deferred IRS extensions (DV01, cashflows, multi-curve /
-  currency-tagged curves). The downstream historical valuation loop (#13) and AI
-  inquiry contract (#14) are unchanged.
+- **Near-term priority pivoted to the Bond Linked Structured Pricer (BLI).** The
+  BLI v1.3 reference specs landed (PR #33), the pivot was recorded
+  (`docs/13`, PR #34), and the **methodology teardown / integration preflight is
+  now complete** (`docs/14`, PR #35). `docs/14` is the guide for BLI
+  implementation issue sequencing.
+- Recommended next development step: **convert the `docs/14` §6 roadmap into
+  concrete GitHub issues** — no pricing engine code yet. The **first slice is
+  prerequisites** (enum gap analysis, product schema, market-data boundary), not
+  the American tree, AI inquiry, UI, Bloomberg, or a QuantLib backend. The IRS
+  reference engine and the rest of the deterministic spine remain the shared
+  target; OIS / CCS / FX Swap engines, the historical valuation loop (#13), and
+  the AI inquiry contract (#14) stay downstream / deferred.
