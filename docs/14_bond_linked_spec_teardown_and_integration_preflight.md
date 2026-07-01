@@ -92,15 +92,26 @@ not re-litigated; the findings below are **new**.
   explicitly requires UI/report/audit to preserve it — no sign flip. Black-76
   price-option units in §A.2 are internally consistent: PV per 100 discounted by
   the Option Discount `DF`, then scaled `× N / 100`.
-- **F-02 (P2) — `DV01_expiry` vs `DV01_underlying` are used as if
-  interchangeable in §A.3 MODE_A.** The PV and yield-Greeks formulas use
-  `DV01_expiry` ("DV01 of underlying bond at expiry date, per 1bp per 100 face"),
-  but the price-delta conversion
-  `Price Delta = Yield Delta × (-1 / DV01_underlying)` introduces a second,
-  undefined symbol `DV01_underlying`. If they are the same quantity the naming
-  should be unified; if `DV01_underlying` is meant to be the **spot** (pricing
-  date) DV01 while `DV01_expiry` is the **expiry** DV01, the doc must say so,
-  because the two differ and produce different price deltas. See amendment A-02.
+- **F-02 (P1) — §A.3 MODE_A does not define the unit basis of the price-delta
+  conversion, so the reported price delta can be off by a fixed scale factor.**
+  This is **not** merely a `DV01_expiry` vs `DV01_underlying` naming/date
+  question. In MODE_A the `Yield Delta` has *already* been scaled by
+  `10000 × DV01_expiry × N / 100` (it is a full-PV, per-notional yield delta),
+  while `DV01_expiry` itself is defined "per 1bp, per 100 face". The stated
+  conversion `Price Delta = Yield Delta × (-1 / DV01_underlying)` divides that
+  fully-scaled yield delta by a bare, undefined `DV01_underlying` and so does
+  **not** reproduce a clean-price delta in any coherent unit — the `10000`
+  factor, the `N / 100` notional/per-100 basis, and the bp-vs-decimal basis are
+  all left dangling. A developer who implements the formula literally gets a
+  price delta wrong by a factor of `10000` and/or `N / 100` whenever the Greek is
+  reported. Annex A must state, before MODE_A Greeks are reported: (a) whether the
+  reported price delta is a **per-100 clean-price delta** or a **full-PV delta**;
+  (b) exactly how a `Yield Delta` already carrying `10000 × DV01_expiry × N / 100`
+  converts back to that clean-price basis; and (c) a denominator that includes the
+  matching `10000 / DV01 / notional / per-100` factors, or a single normalized
+  DV01 term that already bundles those units. This is a pre-implementation
+  methodology amendment (see A-02), required before any MODE_A price delta is
+  surfaced.
 
 ### 2.3 Price vs yield vol, and equivalent-price-vol conversion (§A.8)
 
@@ -145,8 +156,21 @@ not re-litigated; the findings below are **new**.
   in MVP, assumption explicitly stated), §3.5 (Option Discount vs Bond Reference
   vs Deposit vs Funding curves must not be mixed), and §A.7 physical settlement
   (payoff on clean at exercise; invoice on dirty at settlement; AI recomputed at
-  settlement when the lag crosses a coupon) are all internally coherent and
-  match SPEC §3.4–§3.6. No finding.
+  settlement when the lag crosses a coupon) are internally coherent and match
+  SPEC §3.4–§3.6.
+- **F-14 (P2) — the repo/specialness "use Trader override" escape hatch (§A.5.1)
+  has no override field defined anywhere in the spec.** §A.5.1 states that in
+  specialness-significant bonds (on-the-run treasuries, squeeze-period issues) the
+  MVP forward may deviate materially and "if necessary, use trader override" to
+  reconcile against a Bloomberg/vendor benchmark. But the SPEC §7.2 override
+  whitelist admits **only** bond clean price/yield, volatility, credit spread,
+  settlement lag, and shifted-Black epsilon — **not** repo, forward price, or a
+  specialness/carry adjustment. So an implementer facing exactly the case §A.5.1
+  names has **no deterministic, audited field** to reproduce the benchmark
+  discrepancy; the only way to force the forward is to abuse an unrelated input
+  (e.g. distort the bond clean price or credit spread), which corrupts DV01/CS01
+  provenance and the self-validation checks. This is a concrete boundary
+  contradiction between §A.5.1 and §7.2, not a "no finding". See amendment A-12.
 
 ### 2.6 DV01 / CS01 scaling and notional scaling (§A.9)
 
@@ -154,7 +178,7 @@ not re-litigated; the findings below are **new**.
   clear bump target per option family (§A.9.2–§A.9.3); price-based DV01 correctly
   re-derives the forward clean price through the Bond Reference Curve on the bump.
   Notional scaling is uniform `× N / 100` after the PR #33 parity fix. No new
-  finding beyond F-02 (the delta-conversion naming).
+  finding beyond F-02 (the MODE_A delta-conversion unit basis).
 
 ### 2.7 Put-call parity and self-validation (§A.13)
 
@@ -249,10 +273,30 @@ correctness.
   never overwrite FTP source data, always require a reason, are append-only
   `OverrideRecord`s, and only apply to the current run. The Market-Data-Blocking
   matrix (§7.6) is coherent: missing **yield curve / curve mapping** blocks
-  pricing; missing **bond price / vol / spread** is a warning the Trader can
-  override. This maps directly onto the result contract (§4.3): blocking →
-  `FAILED + MISSING_MARKET_DATA`; overridable-but-missing → either an override or
-  `SUCCESS_WITH_WARNINGS + DATA_QUALITY`.
+  pricing; missing **bond price / vol / spread** is *warned* so the Trader can
+  supply an override or a configured fallback.
+- **F-15 (P1) — "overridable" is not the same as "resolved"; an unresolved
+  required input must never yield a success result.** SPEC §7.6 marks missing
+  bond price / vol / spread as a **warning the Trader *can* override** — it does
+  **not** say the engine may price without a value. A BLI option PV cannot be
+  computed without a spot bond price/yield, a vol, and (for credit-sensitive
+  forwards) a spread; if none of override, an explicitly-configured fallback, or a
+  feed value has supplied one, the engine has **no deterministic input**. The
+  correct mapping onto the result contract is therefore three-way, and the engine
+  **must not fabricate** a price, vol, spread, curve, or fallback to fill the gap:
+
+  | Input state at pricing time | Result mapping |
+  | --- | --- |
+  | Present from feed | price normally (`SUCCESS`) |
+  | Missing, but a **resolved override or explicitly-configured fallback** supplies a deterministic value | `SUCCESS_WITH_WARNINGS` + `DATA_QUALITY` / `OVERRIDE_APPLIED` / `VOL_FALLBACK`, with provenance echoed |
+  | Missing **and unresolved** (no override, no configured fallback) | **block before pricing, or return `FAILED + MISSING_MARKET_DATA`** — never `SUCCESS_WITH_WARNINGS`, never a fabricated `0.0` |
+  | Yield curve / curve mapping missing (§7.6 hard block) | `FAILED + MISSING_MARKET_DATA` |
+
+  Returning `SUCCESS_WITH_WARNINGS` for an *unresolved* required input would
+  expose a PV that looks valid despite missing market data, which violates the
+  AGENTS.md / `docs/12` rule that missing market data must fail explicitly and
+  never be fabricated or hidden as a warning. See amendment A-13; §4.3 is updated
+  to carry this three-way mapping.
 - **F-09 (P2) — "override does not overwrite FTP" is a service-layer invariant the
   pricing engine cannot enforce, and the boundary is not drawn.** The engine
   receives a resolved snapshot; whether a value in it is FTP-origin or an
@@ -311,7 +355,24 @@ canonical codes per SPEC §22.3):
 - `ExerciseStyle` = `EUROPEAN | AMERICAN`
 - `SettlementType` = `CASH | PHYSICAL`
 - `Position` = `BUY | SELL`
-- reuse existing `Currency`, `DayCount`, `Frequency`, `BusinessDayConvention`.
+- reuse the existing **enum style and validation pattern** (`StrEnum` +
+  `coerce_enum`, per `products/enums.py`) where possible — but the existing
+  `Currency` / `DayCount` / `Frequency` / `BusinessDayConvention` members must
+  **not** be assumed sufficient. **F-16 (P2): a BLI enum gap analysis is required
+  before schema work.** Annex A/B reach beyond the current rates-focused
+  vocabularies: markets/currencies include NZ, KR, HK, SG (§A.6.2, §A.7.3) which
+  are not all in the current `Currency` enum, and day-count conventions include
+  `ACT/365`, `ACT/365F`, and market `ACT/ACT` variants (§A.6.2) that the current
+  `DayCount` set (`ACT_360`, `ACT_365_FIXED`, `THIRTY_360`, `ACT_ACT_ISDA`) does
+  not cleanly cover. If the first schema slice reuses these enums literally,
+  supported Bond Master records are either **rejected** or **silently coerced to
+  the wrong convention**, which corrupts yield-to-price (§A.6) and every
+  downstream Greek/AI result. The gap analysis must (a) extend the enums to the
+  Annex A/B markets and day counts actually in scope, and (b) require that any
+  unsupported value fail **explicitly** — `FAILED + INVALID_PRODUCT` for an
+  out-of-scope deal term, or a proposed `MISSING_REFERENCE_DATA` failure code
+  (new to `PricingErrorCode`) for an unrecognised Bond Master convention — and is
+  **never silently coerced**. See amendment A-14 and the §6.1 prerequisites.
 
 **Boundary decision (important):** the product carries the **bond identity**
 (ISIN) plus the **option terms** (strike, expiry, exercise style, settlement type
@@ -350,9 +411,13 @@ cover most of BLI's needs and its `pv` / `dv01` slots already exist:
 - `pv` ← option fair value / structured-product fair value;
 - `dv01` ← DV01 (§A.9.2); other Greeks (Gamma, Vega, Theta, CS01, yield/price
   delta) and the self-validation block do **not** have first-class fields.
-- `status` / `errors` / `warnings` ← blocking vs overridable market-data outcomes
-  (§3.3): `FAILED + MISSING_MARKET_DATA` for a blocked curve; `SUCCESS` /
-  `SUCCESS_WITH_WARNINGS` otherwise.
+- `status` / `errors` / `warnings` ← the **three-way** market-data outcome from
+  §3.3 / F-15, not a binary: `SUCCESS` when every required input is present from
+  the feed; `SUCCESS_WITH_WARNINGS` **only** when a missing input was *resolved*
+  by an override or an explicitly-configured fallback (with provenance echoed);
+  and `FAILED + MISSING_MARKET_DATA` when a required input (bond price/yield, vol,
+  spread, or a curve/curve-mapping) is **missing and unresolved** — the engine
+  blocks rather than fabricating a value or hiding the gap behind a warning.
 - `assumptions` ← surfaced methodology assumptions (no-repo forward §A.5.1,
   price-vol-on-clean-price note, JGB semi approximation §A.6.2), per AGENTS.md
   "assumptions are surfaced".
@@ -430,9 +495,10 @@ naming, report clarity, UI hint, or later cleanup.
 
 | ID | Sev | Section | Finding | Proposed amendment |
 | --- | --- | --- | --- | --- |
+| F-15 | **P1** | SPEC §7.6, §4.3 | Unresolved missing required input (bond price/vol/spread) must **block or `FAILED + MISSING_MARKET_DATA`**, not `SUCCESS_WITH_WARNINGS`; only a resolved override/configured fallback may succeed-with-warning; no fabricated price/vol/spread/curve/fallback. | A-13 |
 | F-04 | **P1** | §A.4.1/§A.4.3 | CRR tree forward/drift calibration unspecified; a naive `spot·e^{rT}` drift on clean price (or on yield) gives wrong American PV and corrupts the A.13.3 check. | A-04 |
+| F-02 | **P1** | §A.3 MODE_A | Price-delta conversion has no defined unit basis: `Yield Delta` already carries `10000 × DV01_expiry × N / 100`, so dividing by a bare `DV01_underlying` yields a delta wrong by a `10000` / notional / per-100 factor. Must define the per-100-vs-full-PV basis and the matching denominator before MODE_A Greeks are reported. | A-02 |
 | F-01 | P2 | §A.5.2/§A.6.3 | Coupon exactly on expiry (half-open interval) and ex-coupon negative-AI sign under-specified. | A-01 |
-| F-02 | P2 | §A.3 MODE_A | `DV01_expiry` vs `DV01_underlying` used interchangeably; price-delta conversion symbol undefined. | A-02 |
 | F-03 | P2 | §A.8.3 | MODE_2 convexity term's definition/units of `Convexity` not pinned; wrong units distort `σ_P`. | A-03 |
 | F-05 | P2 | §A.13.2 | No put-call parity check defined for European yield options under MODE_B; MODE_A DV01 form would false-fail. | A-05 |
 | F-06 | P2 | §A.13.3 vs §A.4.3 | Same American<European condition is "warning + raise step" in one section, "critical + blocked" in another; no tolerance/comparison basis. | A-06 |
@@ -440,6 +506,8 @@ naming, report clarity, UI hint, or later cleanup.
 | F-09 | P2 | SPEC §3.8/§7.2 | "Override never overwrites FTP" is a service-layer invariant; engine boundary and provenance carrying not drawn. | A-09 |
 | F-10 | P2 | §5.4.3/§B | Snapshot replay needs all feeds + mode switches frozen; current snapshot freezes only rates points. | (build req, §4.2) |
 | F-11 | P2 | §B.2/§B.3 vs §A.10/§A.12 | Precedence between feed `interpolation_method` and `CURVE_INTERP`/`VOL_INTERP_*` mode switches unspecified (determinism/audit). | A-10 |
+| F-14 | P2 | §A.5.1 vs §7.2 | Repo/specialness forward may need Trader override, but §7.2 whitelist has no repo/forward/specialness field; only workaround is abusing another input, corrupting DV01/CS01 provenance. | A-12 |
+| F-16 | P2 | §4.1, §A.6.2/§A.7.3 | BLI enum gap: Annex A/B markets (NZ/KR/HK/SG) and day counts (`ACT/365`, `ACT/365F`, market `ACT/ACT`) exceed current `Currency`/`DayCount` enums; reuse-as-is would reject or silently mis-map records. Extend enums and fail unsupported values explicitly, never coerce. | A-14 |
 | F-07 | P3 | §A.13 | Tolerances span three unit bases; report must print each with its unit. | A-07 |
 | F-12 | P3 | §A.6.2 | JGB "SEMI 近似" and other documented approximations must be surfaced in `assumptions`/report, not silent. | A-11 |
 | F-13 | P3 | §A.2.5/§14.3 | Vega unit reporting ("per 1.00 vol unit, UI ÷100" vs "±1 vol point") must be stated consistently in the report. | A-07 |
@@ -450,9 +518,16 @@ here):**
 - **A-01:** In §A.5.2, state whether a coupon paid on the expiry date is included
   in `PV(coupons before expiry)` and whether the expiry forward is ex-coupon;
   cross-reference the `ex_dividend_days` negative-AI case in §A.6.3.
-- **A-02:** In §A.3 MODE_A, define `DV01_underlying` explicitly (spot vs expiry)
-  or rename to `DV01_expiry` throughout; state the date at which each DV01 is
-  measured.
+- **A-02 (pre-implementation, before MODE_A Greeks are reported):** In §A.3
+  MODE_A, define the **unit basis** of the price-delta conversion, not just the
+  symbol name. Specifically: (a) state whether the reported price delta is a
+  per-100 clean-price delta or a full-PV delta; (b) show explicitly how a
+  `Yield Delta` already scaled by `10000 × DV01_expiry × N / 100` converts back to
+  that clean-price basis; and (c) give a denominator carrying the matching
+  `10000` / DV01 / notional / per-100 factors, or define a single normalized DV01
+  term that already bundles those units. Renaming `DV01_underlying` alone is
+  insufficient and would leave a factor-of-`10000`/notional error in the reported
+  delta.
 - **A-03:** In §A.8.3, define `Convexity` (annualized yield convexity, `1/yield²`
   units, per-100 basis) and show the dimensional check so `σ_P` is unambiguous.
 - **A-04:** In §A.4.1, require the CRR tree (price-state and yield-state) to be
@@ -478,6 +553,24 @@ here):**
   versa) — one effective method per run, recorded.
 - **A-11:** In §A.6.2, require documented approximations (JGB semi, par→zero
   simplification §A.10.3) to appear in the result `assumptions` / report.
+- **A-12:** In §A.5.1 / §7.2, resolve the specialness override contradiction —
+  **either** state explicitly that repo/specialness is unsupported and that a
+  materially-special bond is out-of-scope / blocking for MVP (removing the vague
+  "use trader override"), **or** add a controlled, whitelisted forward /
+  specialness override field with its own reason, provenance, and audit, so the
+  §A.5.1 case is reproducible without abusing another market-data input.
+- **A-13 (pre-implementation, gates the first engine):** In SPEC §7.6 / a
+  methodology-boundary note, state the three-way market-data rule — feed value →
+  `SUCCESS`; **resolved** override/configured fallback → `SUCCESS_WITH_WARNINGS`
+  with provenance; **unresolved** missing required input → block before pricing
+  or `FAILED + MISSING_MARKET_DATA` — and that no engine may fabricate a price,
+  vol, spread, curve, or fallback.
+- **A-14 (first schema slice):** Require a BLI enum gap analysis before schema
+  work: extend `Currency` / `DayCount` (and any market vocabulary) to the Annex
+  A/B markets and conventions actually in scope, and require unsupported values to
+  fail explicitly (`FAILED + INVALID_PRODUCT`, or a new `MISSING_REFERENCE_DATA`
+  code for unrecognised Bond Master conventions) rather than being silently
+  coerced.
 
 None of these are applied to the frozen source files in this PR; each is a
 proposal for a future, separately reviewed Annex revision.
@@ -488,7 +581,12 @@ proposal for a future, separately reviewed Annex revision.
 
 ### 6.1 What must be done **before** the first BLI pricing engine
 
-1. **Product schemas + enums** (§4.1): `BondOption`,
+1. **BLI enum gap analysis, then product schemas + enums** (§4.1, F-16/A-14):
+   *first* run the enum gap analysis — reconcile the Annex A/B markets
+   (NZ/KR/HK/SG …) and day counts (`ACT/365`, `ACT/365F`, market `ACT/ACT`)
+   against the current `Currency`/`DayCount` enums and extend them, requiring any
+   unsupported value to fail explicitly (`INVALID_PRODUCT` / `MISSING_REFERENCE_DATA`)
+   rather than be silently coerced. *Then* add `BondOption`,
    `BondLinkedStructuredProduct`, and the five new enums. Schema-level validation
    and tests only — no maths. (Mirrors the Issue #12 product-schema slice.)
 2. **Snapshot extension** (§4.2): add the BLI market-data categories to
@@ -499,7 +597,11 @@ proposal for a future, separately reviewed Annex revision.
    conversion (§A.6) honouring `yield_convention`/`m`/`day_count`; forward clean
    price (§A.5). These are the shared, testable building blocks every BLI option
    family reuses.
-4. **Resolve the P1/P2 methodology amendments** that touch the first engines —
+4. **Pin the market-data resolution rule** (F-15/A-13) as a shared engine
+   pre-check *before* any engine prices: feed value → success; resolved
+   override/configured fallback → success-with-warning + provenance; unresolved
+   required input → block / `FAILED + MISSING_MARKET_DATA`; never fabricate.
+5. **Resolve the P1/P2 methodology amendments** that touch the first engines —
    at minimum **A-04** (tree drift, before any American work) and **A-02/A-03**
    (before yield MODE_A Greeks and MODE_2) — as reviewed Annex amendments.
 
