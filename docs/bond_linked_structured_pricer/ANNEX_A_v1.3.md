@@ -238,8 +238,10 @@ Price Delta = Yield Delta × (-1 / DV01_underlying)
 
 **Price-state tree：**
 
-- 在每個 coupon payment date 對應的 tree slice 上，所有 node 的 clean price state **向下跳一個 coupon 金額（per 100 face）**。
-- 若 coupon date 落在 tree node 之間，採「**前移**」處理：將 coupon 效應提前到 **前一個 tree node** 執行（保守處理，避免 early exercise 時誤判 in-the-money）。
+- State variable 是 **clean price**，因此 coupon payment **不可**把 clean price node 機械性地向下平移一個 coupon 金額。coupon 發生時，真正下跳一個 coupon 金額的是 **dirty price**，同時 **accrued interest 歸零**；clean price 本身不因 coupon 而向下位移。
+- Payoff 比較仍然在 **clean price** 上進行（與 §A.4.1、§A.3.1 一致）。
+- 實物交割 invoice / dirty settlement 的處理仍由 **§A.7** 規範，不在 price-state tree 內用 coupon 位移來近似。
+- （實作備註）若未來實作改以 **dirty price** 為 state，則可在 coupon date 對 dirty price 施加 coupon cashflow，再扣除 accrued interest 還原 clean price；但 **MVP 的 price-state tree 一律以 clean price 為 state**，不套用 coupon 向下位移或「前移」規則。
 
 **Yield-state tree：**
 
@@ -584,11 +586,22 @@ d2 = d1 - σY √T
 
 - 適用：歐式 price-based 與 yield-based option。
 
-Price-based parity：
+Price-based parity（需標明單位，per-100 與 full PV 擇一，且比較時單位必須一致）：
+
+Per-100 parity：
 
 ```text
-C - P = DF × (F - K)
+C_per100 - P_per100 = DF × (F - K)
 ```
+
+Full PV parity（含 notional 縮放，與上方歐式定價及 yield-based parity 的 × N / 100 一致）：
+
+```text
+C_PV - P_PV = DF × (F - K) × N / 100
+```
+
+- Self-validation 必須以 **相同單位** 做 like-for-like 比較（同為 per-100，或同為 full PV）；混用單位會在 Bond Option Notional ≠ 100 時誤判 parity。
+- Internal Pricing Report 必須標明本次 parity 檢驗所用的單位（per-100 或 full PV）。
 
 Yield-based parity（MODE_A 路徑）：
 
