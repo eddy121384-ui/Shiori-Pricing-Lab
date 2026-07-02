@@ -524,3 +524,41 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   input bundle, deterministic payoff skeleton, QuantLib benchmark if
   needed, MVP runner example) — none started here. Issue #38 is not
   closed; `BondLinkedStructuredProduct` remains deferred.
+- **DepositLeg schema preflight written (Slice A), docs-only
+  (`docs/18_deposit_leg_schema_preflight.md`).** Incorporates the real
+  Treasury FTP rate matrix format (business_date × currency × tenor ×
+  quote_side → rate; percent-quoted, e.g. `3.5500` means `3.5500%` and must
+  convert to decimal `0.035500` for pricing; default quote side `MID`,
+  configurable; currencies without a bid/mid/offer breakdown are treated as
+  MID-equivalent, not inferred). Recommends an explicit `deposit_rate_mode`
+  vocabulary (`FIXED_RATE` / `TREASURY_FTP_REFERENCE` /
+  `MANUAL_VERIFIED_RATE`) rather than picking one source, with exactly the
+  matching fields required per mode. Recommends the narrowest MVP principal
+  repayment rule (`FULL_PRINCIPAL_AT_MATURITY` on the deposit leg, option
+  payoff calculated separately at the wrapper level); defers
+  `PRINCIPAL_AFFECTED_BY_OPTION_PAYOFF` and `PHYSICAL_BOND_DELIVERY`. Flags
+  a still-open gap: no controlled tenor vocabulary exists yet for FTP
+  tenors (`O/N`, `1W`...`3Y`), which blocks safe `TREASURY_FTP_REFERENCE`
+  validation until resolved. `day_count`/`business_day_convention`/
+  `calendar` remain deferred, same as `BondOption`. Restates
+  `participation_ratio` must be derived/validated against
+  `bond_option.notional / deposit_notional`. No `DepositLeg` code, FTP
+  parser, ingestion, wrapper, pricing engine, or tests were added.
+- **DepositLeg preflight tightened after Codex P2 review, docs-only
+  (`docs/18` update).** Three schema/market-data boundary issues fixed:
+  (1) `TREASURY_FTP_REFERENCE` no longer carries a `business_date` field —
+  renamed to `ftp_rate_selector` (currency/tenor/quote_side only); the
+  applicable business date is chosen from the pricing run's
+  `MarketDataSnapshot` / MVP input bundle, never frozen into the immutable
+  `DepositLeg`. (2) `MANUAL_VERIFIED_RATE` no longer carries the manual
+  rate or its audit metadata directly — renamed to
+  `manual_input_reference` (a reference marker only); the actual rate,
+  source, as-of date, and entered-by/run id live in the input-bundle /
+  audit-provenance layer, not on the product schema. A rate meant to be a
+  frozen trade term is `FIXED_RATE`, not this mode. (3) The "implement
+  with placeholder tenor validation" option for `TREASURY_FTP_REFERENCE`
+  was removed from the recommended next slice — a controlled FTP tenor
+  vocabulary (not the existing `Frequency` enum) must exist before that
+  mode can be enabled; the preferred sequencing now adds the tenor /
+  quote-side / deposit-rate-mode vocabularies first. No code, tests, or
+  other doc besides `docs/18`/`docs/09` was touched.
