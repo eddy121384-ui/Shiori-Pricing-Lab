@@ -310,3 +310,19 @@ class TreasuryFTPTenor(StrEnum):
     TWO_YEAR = "2Y"
     THREE_YEAR = "3Y"
     DEMAND_SAVINGS = "DEMAND_SAVINGS"
+
+
+class PrincipalRepaymentRule(StrEnum):
+    """How a ``DepositLeg``'s own principal is returned (docs/18 §6).
+
+    Deliberately narrow for the MVP: only ``FULL_PRINCIPAL_AT_MATURITY`` is
+    defined here. ``docs/18`` §6 recommends the deposit leg return its
+    principal explicitly and unconditionally, with any option payoff
+    computed separately at the future wrapper level — so
+    ``PRINCIPAL_PLUS_OPTION_PAYOFF`` (a wrapper-level combination, not a
+    deposit-leg repayment rule), ``PRINCIPAL_AFFECTED_BY_OPTION_PAYOFF``,
+    and ``PHYSICAL_BOND_DELIVERY`` are intentionally not added yet; adding
+    them requires their own reviewed methodology decision first.
+    """
+
+    FULL_PRINCIPAL_AT_MATURITY = "FULL_PRINCIPAL_AT_MATURITY"

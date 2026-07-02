@@ -10,13 +10,13 @@ Strict boundaries:
 - No market data, curves, fixings, valuation date, or pricing output lives here.
 - This package must not import the data, pricing, valuation, or AI layers.
 
-Currently provides IRS, OIS, CCS, FX Swap, and BondOption (schema only).
-``BondLinkedStructuredProduct`` is intentionally not provided yet — see
-``docs/15_bli_product_schema_preflight_issue_38.md`` §3. ``DepositRateMode``,
-``TreasuryFTPQuoteSide``, and ``TreasuryFTPTenor`` are controlled-vocabulary
-foundations for a future ``DepositLeg`` schema — see
-``docs/18_deposit_leg_schema_preflight.md``; no ``DepositLeg`` schema exists
-yet.
+Currently provides IRS, OIS, CCS, FX Swap, BondOption, and DepositLeg
+(schema only). ``BondLinkedStructuredProduct`` is intentionally not
+provided yet — see ``docs/15_bli_product_schema_preflight_issue_38.md`` §3
+and ``docs/18_deposit_leg_schema_preflight.md``. ``DepositLeg`` is a leg
+component consumed by that future wrapper, not a standalone product; it
+carries no Treasury FTP business date, resolved rate, or manual-rate
+provenance — see ``docs/18`` §4/§8.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from shiori_pricing_lab.products.cross_currency import (
     CrossCurrencyLeg,
     CrossCurrencySwap,
 )
+from shiori_pricing_lab.products.deposit_leg import DepositLeg, TreasuryFTPRateSelector
 from shiori_pricing_lab.products.enums import (
     BondYieldConvention,
     BusinessDayConvention,
@@ -41,6 +42,7 @@ from shiori_pricing_lab.products.enums import (
     PayoffBasis,
     PayReceive,
     Position,
+    PrincipalRepaymentRule,
     SettlementType,
     TreasuryFTPQuoteSide,
     TreasuryFTPTenor,
@@ -59,6 +61,7 @@ __all__ = [
     "CrossCurrencySwap",
     "Currency",
     "DayCount",
+    "DepositLeg",
     "DepositRateMode",
     "ExerciseStyle",
     "FXSwap",
@@ -72,7 +75,9 @@ __all__ = [
     "PayReceive",
     "PayoffBasis",
     "Position",
+    "PrincipalRepaymentRule",
     "SettlementType",
     "TreasuryFTPQuoteSide",
+    "TreasuryFTPRateSelector",
     "TreasuryFTPTenor",
 ]

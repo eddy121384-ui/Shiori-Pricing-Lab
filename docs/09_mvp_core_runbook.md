@@ -519,6 +519,35 @@ vocabulary a future `DepositLeg` implementation must validate against
 condition is now satisfied; the schema implementation itself is still a
 separate future slice).
 
+### `DepositLeg` schema landed — BLI MVP Slice A
+
+`DepositLeg` and `TreasuryFTPRateSelector`
+(`src/shiori_pricing_lab/products/deposit_leg.py`) are implemented as the
+schema `docs/18` §3/§4/§8 described, using `DepositRateMode`,
+`TreasuryFTPQuoteSide`, `TreasuryFTPTenor`, and a new, narrow
+`PrincipalRepaymentRule` enum (`FULL_PRINCIPAL_AT_MATURITY` only). Exactly
+one rate-source field (`fixed_deposit_rate` / `ftp_rate_selector` /
+`manual_input_reference`) is populated per `deposit_rate_mode`, and the
+other two must be `None`. `DepositLeg` carries a `leg_type` discriminator
+(not `product_type`), consistent with it being a leg component consumed by
+a future wrapper, not a standalone product.
+
+**`TREASURY_FTP_REFERENCE` mode still stores only a selector
+(currency/tenor/quote_side) — no `business_date`, `as_of_timestamp`,
+`source_file_name`, `loaded_at`, or resolved rate.** **`MANUAL_VERIFIED_RATE`
+mode still stores only a `manual_input_reference` marker — no manual rate
+value or its audit metadata.** Both remain resolved at pricing time from a
+future `MarketDataSnapshot` / MVP input bundle / audit-provenance layer, not
+from `DepositLeg` itself. Tests are in `tests/test_deposit_leg.py`,
+including a dataclass-fields boundary test asserting no market-data or
+pricing-run field exists on either `DepositLeg` or
+`TreasuryFTPRateSelector`.
+
+**No Treasury FTP parser, ingestion, `MarketDataSnapshot` implementation,
+MVP input bundle implementation, pricing engine, QuantLib, or
+`BondLinkedStructuredProduct` wrapper was added.** Issue #38 is unaffected.
+Before starting any of those, agents must still read `docs/18` and `docs/17`.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
