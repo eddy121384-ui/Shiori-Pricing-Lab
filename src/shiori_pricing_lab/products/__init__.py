@@ -10,11 +10,14 @@ Strict boundaries:
 - No market data, curves, fixings, valuation date, or pricing output lives here.
 - This package must not import the data, pricing, valuation, or AI layers.
 
-Currently provides IRS, OIS, CCS, and FX Swap (schema only).
+Currently provides IRS, OIS, CCS, FX Swap, and BondOption (schema only).
+``BondLinkedStructuredProduct`` is intentionally not provided yet — see
+``docs/15_bli_product_schema_preflight_issue_38.md`` §3.
 """
 
 from __future__ import annotations
 
+from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.products.cross_currency import (
     CrossCurrencyLeg,
     CrossCurrencySwap,
@@ -40,6 +43,7 @@ from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
 from shiori_pricing_lab.products.swaps import InterestRateSwap, OvernightIndexedSwap
 
 __all__ = [
+    "BondOption",
     "BondYieldConvention",
     "BusinessDayConvention",
     "BuySell",
