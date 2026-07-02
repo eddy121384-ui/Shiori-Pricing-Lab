@@ -362,3 +362,48 @@ Next work (recorded, **not started here**):
   **prerequisites** — enum gap analysis, product schema, and the market-data
   boundary — **not** the American tree, AI inquiry, UI, Bloomberg implementation,
   or a QuantLib backend.
+
+### BLI controlled-vocabulary enums landed (PR #45, Issue #37)
+
+**PR #45 is merged.** It is the code-level follow-up to the `docs/14` enum-gap
+preflight (F-16/A-14) — controlled vocabulary only, no schema, no snapshot, no
+pricing engine:
+
+- `Currency` gained `NZD`, `KRW`, `HKD`, `SGD` (Annex A/B markets NZ/KR/HK/SG).
+- Five new BLI product enums landed in `products/enums.py`, not yet referenced
+  by any schema: `PayoffBasis` (`PRICE`/`YIELD`), `OptionType` (`CALL`/`PUT`),
+  `ExerciseStyle` (`EUROPEAN`/`AMERICAN`), `SettlementType`
+  (`CASH`/`PHYSICAL`), `Position` (`BUY`/`SELL`).
+- `BondYieldConvention` landed (`SEMI_ANNUAL_COMPOUND`, `ANNUAL_COMPOUND`,
+  `SIMPLE_YIELD`, `JAPANESE_COMPOUND`, `OTHER`).
+- `PricingErrorCode.MISSING_REFERENCE_DATA` landed, for reference/static data
+  that is present but carries an unrecognised convention (distinct from
+  `MISSING_MARKET_DATA`, a required market observation that is absent).
+- Validated by `tests/test_bli_enums.py` (`python -m pytest -q` → 215 passed;
+  `ruff check .` clean).
+
+**Deliberately still deferred:**
+
+- **`DayCount` vocabulary** (`ACT_365`, `ACT_365F`, market `ACT/ACT` variants)
+  remains explicitly deferred pending a reviewed, Annex-driven decision
+  (`docs/14` §5, amendment A-14). The existing `ACT_360` / `ACT_365_FIXED` /
+  `THIRTY_360` / `ACT_ACT_ISDA` members are unchanged and not aliased.
+- **A Bond Master / jurisdiction enum** (beyond `Currency`) was not added and
+  stays deferred unless a future Bond Master or `MarketDataSnapshot` extension
+  issue actually needs one.
+
+**Status (precise):** PR #45 completed the **first code-level
+controlled-vocabulary slice** (currencies, BLI product enums,
+`BondYieldConvention`, `MISSING_REFERENCE_DATA`). **Issue #37 remains open**
+because the `DayCount` and market/jurisdiction vocabulary decisions above are
+**still deferred** — the enum-gap resolution is not finished until those are
+explicitly resolved or deliberately scoped into the next issue. **Issue #38**
+(BLI product schemas for `BondOption` / `BondLinkedStructuredProduct`) may be
+**prepared** next, but it **must not land product schemas that depend on
+unresolved `DayCount` / Bond Master convention assumptions**. Before #38 can be
+considered complete, **either** (1) #38 explicitly **excludes** `DayCount` /
+Bond Master convention fields and keeps them in the Bond Master / later issues,
+**or** (2) the `DayCount` vocabulary decision is made first in a reviewed
+prerequisite slice. Do **not** treat #38 as fully unblocked without that
+qualifier. **Do not start Issues #39–#42 yet, and do not start Black-76 /
+Issue #44 yet.**

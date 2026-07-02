@@ -332,6 +332,57 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   Bloomberg, QuantLib, or UI; the four BLI source spec files are not edited; no
   implementation issue opened yet.
 
+### PR #45 — BLI controlled-vocabulary enums (Issue #37 code slice)
+
+- **What changed:** Merged the code-level follow-up to the `docs/14` enum-gap
+  preflight (F-16/A-14): `Currency` gained `NZD`, `KRW`, `HKD`, `SGD`; five new
+  standalone BLI enums landed (`PayoffBasis`, `OptionType`, `ExerciseStyle`,
+  `SettlementType`, `Position`) plus `BondYieldConvention`
+  (`SEMI_ANNUAL_COMPOUND`, `ANNUAL_COMPOUND`, `SIMPLE_YIELD`,
+  `JAPANESE_COMPOUND`, `OTHER`); `PricingErrorCode.MISSING_REFERENCE_DATA` was
+  added for reference/static data that is present but carries an unrecognised
+  convention (distinct from `MISSING_MARKET_DATA`, a required observation that
+  is absent). `tests/test_bli_enums.py` covers all of the above plus unknown
+  values still failing through the existing `coerce_enum` path.
+- **Why it mattered:** This is the smallest useful slice the `docs/14`
+  preflight named as prerequisite work: the enums a future `BondOption` /
+  `BondLinkedStructuredProduct` schema needs now exist and are reviewed, ahead
+  of any schema, snapshot, or engine code.
+- **Deliberately deferred, not silently decided:**
+  - **`DayCount` is untouched.** `ACT_365`, `ACT_365F`, `ACT_ACT`, and
+    `ACT_ACT_ICMA` are not added, and `ACT_365_FIXED` / `ACT_ACT_ISDA` are not
+    aliased or renamed. These conventions diverge in ways that matter for
+    yield-to-price (fixed-vs-actual year length; ISDA vs ICMA `ACT/ACT`
+    variants), so the naming decision is deferred pending a reviewed,
+    Annex-driven amendment (`docs/14` §5, A-14) rather than guessed here.
+  - **No Bond Master / jurisdiction enum was added.** A market/jurisdiction
+    vocabulary (beyond `Currency`) stays deferred unless a future Bond Master
+    or `MarketDataSnapshot` extension issue actually needs one.
+- **Intentionally not done:** No `BondOption` / `BondLinkedStructuredProduct` /
+  Bond Master schema, no `MarketDataSnapshot` extension or market-data
+  resolver, no accrued interest / cashflows / yield-to-price / forward clean
+  price / Black-76 / American tree, no QuantLib, Bloomberg/FTP, UI, or AI
+  inquiry code.
+- **Review / validation:** `python -m pytest -q` → **215 passed**; `ruff check
+  .` → all checks passed; `git diff --check` → clean. Issue #37 was **not**
+  closed by this PR.
+- **Status (precise):** PR #45 completed the **first code-level
+  controlled-vocabulary slice** — currencies (`NZD`/`KRW`/`HKD`/`SGD`), the five
+  BLI product enums, `BondYieldConvention`, and
+  `PricingErrorCode.MISSING_REFERENCE_DATA`. **Issue #37 remains open** because
+  the **`DayCount` and market/jurisdiction vocabulary decisions are still
+  deferred** (see `docs/14` §5, A-14) — the enum-gap resolution is not finished
+  until those are explicitly resolved or deliberately scoped into the next
+  issue. **Issue #38** (BLI product schemas for `BondOption` /
+  `BondLinkedStructuredProduct`) **may be prepared next, but it must not land
+  product schemas that depend on unresolved `DayCount` / Bond Master convention
+  assumptions.** Before #38 can be considered complete, **either** (1) #38
+  explicitly **excludes** `DayCount` / Bond Master convention fields and keeps
+  them in the Bond Master / later issues, **or** (2) the `DayCount` vocabulary
+  decision is made first in a reviewed prerequisite slice. Do **not** treat #38
+  as fully unblocked without that qualifier. Issues **#39–#42 and #44
+  (Black-76) are not started** and should not be started before #38 lands.
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
@@ -362,3 +413,17 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   reference engine and the rest of the deterministic spine remain the shared
   target; OIS / CCS / FX Swap engines, the historical valuation loop (#13), and
   the AI inquiry contract (#14) stay downstream / deferred.
+- **Issue #37's first controlled-vocabulary code slice landed (PR #45).** New
+  BLI currencies (`NZD`, `KRW`, `HKD`, `SGD`), the five BLI product enums, and
+  `BondYieldConvention` exist and are tested; `PricingErrorCode` now carries
+  `MISSING_REFERENCE_DATA`. **Issue #37 remains open**: the `DayCount`
+  vocabulary and market/jurisdiction vocabulary decisions are **still deferred**
+  pending a reviewed Annex-driven decision (`docs/14` §5, A-14), and no Bond
+  Master / jurisdiction enum was added. **Issue #38** (BLI product schemas for
+  `BondOption` / `BondLinkedStructuredProduct`) may be **prepared** next, but it
+  **must not land product schemas that depend on unresolved `DayCount` / Bond
+  Master convention assumptions**. Before #38 can be considered complete,
+  **either** (1) #38 explicitly **excludes** `DayCount` / Bond Master convention
+  fields (keeping them in the Bond Master / later issues), **or** (2) the
+  `DayCount` vocabulary decision is made first in a reviewed prerequisite slice.
+  **Do not start Issues #39–#42 or #44 (Black-76) yet.**
