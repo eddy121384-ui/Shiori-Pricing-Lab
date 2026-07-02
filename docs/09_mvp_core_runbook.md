@@ -431,3 +431,13 @@ resolves the deposit-leg economic terms, the funding-curve-vs-fixed-rate
 question, and the `DayCount`/calendar decision. `docs/15` §6 lists the
 acceptance-criteria tests the future #38 implementation PR should add; none
 of that schema/test code is written yet.
+
+### Market-data ingestion terminology checkpoint
+
+- Before any future market-data ingestion, funding-curve, deposit-leg, or
+  Bloomberg connector issue, agents must read
+  `docs/16_market_data_ingestion_terminology.md`.
+- Do not build generic FTP market-data import unless explicitly scoped.
+- Do not confuse FTP/SFTP transport with Treasury FTP / Funding Curve.
+- Do not start broad ingestion work while working on Issue #38
+  BondOption-only schema.

@@ -250,6 +250,15 @@ correctness.
 | FTP batch control | §B.7 | Complete | Batch id, status vocabulary, reject counts — good audit spine. |
 | Downstream payload | §B.8 | Placeholder only (Phase 3) | Correctly reserved; out of MVP. |
 
+> **Terminology note (forward-looking).** The original BLI v1.3 source specs
+> (Annex B / SPEC §7) use "FTP" ambiguously to describe generic market-data
+> file ingestion. In the user's business context, "Treasury FTP" instead means
+> Funds Transfer Pricing / internal funding-cost curve — a different concept.
+> This teardown is **not** being rewritten and its findings are not being
+> reinterpreted; future implementation of any market-data ingestion, Bond
+> Master, or funding-curve work should follow the disambiguated terms in
+> `docs/16_market_data_ingestion_terminology.md`.
+
 ### 3.2 Bond Master — the yield-convention gap
 
 - **Consistent:** §B.5 rejects callable / sinkable / non-plain-vanilla / missing

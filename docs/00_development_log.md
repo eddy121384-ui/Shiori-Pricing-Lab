@@ -479,3 +479,17 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   acceptance-criteria tests the future #38 implementation PR should add,
   including deriving/validating `participation_ratio` against
   `bond_option.notional / deposit_notional` rather than storing it freely.
+- **Market-data ingestion terminology clarified, docs-only
+  (`docs/16_market_data_ingestion_terminology.md`).** Older "FTP file"
+  language inherited from the BLI v1.3 Annex B / SPEC specs should be
+  understood as legacy / ambiguous terminology, not a design decision.
+  Future docs and issues should use the disambiguated terms:
+  "FTP/SFTP transport," "Market Data Ingestion," "API Connector,"
+  "File-based Import," and "Treasury FTP" / "Funding Curve" (the latter is a
+  business funding-cost input, currency × tenor × rate — not generic
+  market-data file transport). System direction is **API-first /
+  file-minimal**: external market data should prefer API-based ingestion,
+  and **Treasury FTP / Funding Curve is the first likely MVP
+  manual-upload surface**, not bond price/yield, curves, vol, spread, Bond
+  Master, or calendar. Screenshot-assisted capture remains a future
+  fallback only. No code or implementation was changed.
