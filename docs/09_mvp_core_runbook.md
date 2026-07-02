@@ -407,3 +407,27 @@ Bond Master convention fields and keeps them in the Bond Master / later issues,
 prerequisite slice. Do **not** treat #38 as fully unblocked without that
 qualifier. **Do not start Issues #39–#42 yet, and do not start Black-76 /
 Issue #44 yet.**
+
+### BLI product-schema preflight for Issue #38
+
+`docs/15_bli_product_schema_preflight_issue_38.md` answers, before any #38
+code is written, whether `BondOption` / `BondLinkedStructuredProduct` can be
+pure deal-term schemas without the still-unresolved `DayCount` / Bond Master
+convention decision. **Conclusion:** `BondOption` can be defined as a fully
+pure deal-term schema (identity, option terms, strike/payoff-basis
+cross-field validation, dates, notional, position) with **no** `day_count`,
+`yield_convention`, or `compounding_frequency` field, and can proceed in
+#38. `BondLinkedStructuredProduct` **should be deferred** unless explicitly
+accepted as a **non-economic placeholder** — its deposit leg carries
+**contractual economic terms** (deposit rate/yield, principal repayment
+rule) that a schema cannot omit and still reproduce the customer's
+cashflows, which is a separate concern from (and in addition to) the
+`DayCount`/calendar blocker (A-14). If built at all in #38, the wrapper must
+be labeled incomplete for valuation and its `participation_ratio` must be
+derived from — or validated against — `bond_option.notional /
+deposit_notional`, never stored as an independent, freely-set field. A
+complete, economic wrapper requires a later, separately reviewed issue that
+resolves the deposit-leg economic terms, the funding-curve-vs-fixed-rate
+question, and the `DayCount`/calendar decision. `docs/15` §6 lists the
+acceptance-criteria tests the future #38 implementation PR should add; none
+of that schema/test code is written yet.

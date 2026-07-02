@@ -383,6 +383,45 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   as fully unblocked without that qualifier. Issues **#39–#42 and #44
   (Black-76) are not started** and should not be started before #38 lands.
 
+### PR (this) — BLI product schema preflight (Issue #38)
+
+- **What changed:** Added
+  `docs/15_bli_product_schema_preflight_issue_38.md`, a docs-only preflight
+  answering whether `BondOption` and `BondLinkedStructuredProduct` can be
+  defined as pure deal-term schemas without the still-unresolved `DayCount` /
+  Bond Master convention decision (Issue #37 remains open per PR #46).
+- **Conclusion:** **`BondOption` can proceed; `BondLinkedStructuredProduct`
+  should be deferred.** `BondOption` can be a fully pure deal-term schema
+  (identity, option terms, strike/payoff-basis cross-field validation, dates,
+  notional, position) with no `day_count`, `yield_convention`, or
+  `compounding_frequency` field — those are Bond Master reference data.
+  `BondLinkedStructuredProduct` is **not** safe to describe as a complete,
+  valuation-meaningful schema for #38: its deposit leg carries **contractual
+  economic terms** (deposit rate/yield, principal repayment rule) that a
+  schema cannot omit and still reproduce the customer's cashflows — this is
+  distinct from, and in addition to, the `DayCount`/calendar blocker. A
+  wrapper may be built **only** as an explicitly-labeled **non-economic
+  relationship shell** (deposit notional/currency/dates, an embedded
+  `BondOption`, and a `participation_ratio` that is derived from — or
+  validated against — `bond_option.notional / deposit_notional`, never
+  freely set). A real economic wrapper requires a later, separately reviewed
+  slice that resolves the deposit-leg economic terms, the funding-curve vs.
+  fixed-rate question, and the `DayCount`/calendar decision (A-14).
+- **Why it mattered:** Prevents #38 from (a) silently reusing the existing
+  rates-core `DayCount` enum on a deposit leg that was never reconciled
+  against Annex A/B — exactly the "silently coerced to the wrong convention"
+  failure Issue #37 exists to prevent (`docs/14` F-16) — and (b) shipping a
+  structured-product schema that looks complete but silently omits the
+  deposit rate/yield and repayment terms needed to reproduce customer
+  cashflows (Codex P2 review of this PR).
+- **Intentionally not done:** **Docs only.** No `BondOption` /
+  `BondLinkedStructuredProduct` code, no tests, no schema
+  registration/export changes, no pricing engine, no `MarketDataSnapshot`
+  change, no Bond Master schema, no `DayCount` enum decision (documented as
+  required, not made). Issues #39–#42 and #44 (Black-76) are not started.
+- **Review / validation:** Documentation-only change; `git diff --check` →
+  clean. No test or lint impact (no source changed).
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
@@ -427,3 +466,16 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   fields (keeping them in the Bond Master / later issues), **or** (2) the
   `DayCount` vocabulary decision is made first in a reviewed prerequisite slice.
   **Do not start Issues #39–#42 or #44 (Black-76) yet.**
+- **BLI product-schema preflight for Issue #38 is complete
+  (`docs/15_bli_product_schema_preflight_issue_38.md`).** Conclusion:
+  `BondOption` can proceed as a pure deal-term schema with no `DayCount` /
+  Bond Master convention fields. `BondLinkedStructuredProduct` should be
+  **deferred** unless explicitly built and labeled as a **non-economic
+  placeholder** — its deposit leg carries contractual economic terms
+  (deposit rate/yield, principal repayment rule) that a schema cannot omit
+  and still reproduce customer cashflows, on top of the still-unresolved
+  `DayCount`/calendar decision (A-14). A complete, economic wrapper requires
+  a later, separately reviewed slice. `docs/15` §6 lists the
+  acceptance-criteria tests the future #38 implementation PR should add,
+  including deriving/validating `participation_ratio` against
+  `bond_option.notional / deposit_notional` rather than storing it freely.
