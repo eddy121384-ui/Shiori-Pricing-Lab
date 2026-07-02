@@ -46,6 +46,12 @@ class PricingErrorCode(StrEnum):
     MARKET_SNAPSHOT_MISMATCH = "MARKET_SNAPSHOT_MISMATCH"
     INVALID_PRODUCT = "INVALID_PRODUCT"
     ENGINE_ERROR = "ENGINE_ERROR"
+    # Reference/static data (e.g. a Bond Master record) was present but carried
+    # an unrecognised convention value (docs/14 §3.2, F-08 / F-16). Distinct
+    # from ``MISSING_MARKET_DATA`` (a required market observation is absent):
+    # this is for reference data that exists but cannot be interpreted, so it
+    # must never be silently coerced to a default convention.
+    MISSING_REFERENCE_DATA = "MISSING_REFERENCE_DATA"
 
 
 class PricingWarningCode(StrEnum):

@@ -77,6 +77,10 @@ class Currency(StrEnum):
     AUD = "AUD"
     CAD = "CAD"
     TWD = "TWD"
+    NZD = "NZD"
+    KRW = "KRW"
+    HKD = "HKD"
+    SGD = "SGD"
 
 
 class BuySell(StrEnum):
@@ -166,3 +170,68 @@ class CompoundingMethod(StrEnum):
     NONE = "NONE"
     DAILY_COMPOUNDED = "DAILY_COMPOUNDED"
     AVERAGED = "AVERAGED"
+
+
+# --- Bond-linked (BLI) controlled vocabulary --------------------------------
+#
+# The following enums are the controlled-vocabulary preflight for Issue #37
+# (docs/14 F-16 / A-14, §4.1 / §6.1). They are added ahead of any BLI product
+# schema so that a future ``BondOption`` / ``BondLinkedStructuredProduct``
+# schema has a reviewed vocabulary to build on. Nothing here is referenced by
+# a product schema yet, and no pricing, snapshot, or market-data code is
+# added alongside them.
+
+
+class PayoffBasis(StrEnum):
+    """Whether a bond option's payoff is expressed in price or yield space."""
+
+    PRICE = "PRICE"
+    YIELD = "YIELD"
+
+
+class OptionType(StrEnum):
+    """Call or put, per SPEC/Annex A yield-and-price option direction rules."""
+
+    CALL = "CALL"
+    PUT = "PUT"
+
+
+class ExerciseStyle(StrEnum):
+    """Exercise style of a bond option."""
+
+    EUROPEAN = "EUROPEAN"
+    AMERICAN = "AMERICAN"
+
+
+class SettlementType(StrEnum):
+    """Cash or physical settlement of a bond option at exercise."""
+
+    CASH = "CASH"
+    PHYSICAL = "PHYSICAL"
+
+
+class Position(StrEnum):
+    """Buy or sell of a bond option, from the trade owner's perspective.
+
+    Kept distinct from :class:`BuySell` (the FX swap near-leg direction):
+    the two vocabularies describe different deal terms and are not
+    guaranteed to stay aligned if one evolves independently of the other.
+    """
+
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class BondYieldConvention(StrEnum):
+    """Bond Master yield-compounding convention (docs/14 §3.2, F-08).
+
+    Recorded as a deal/reference-data term only; deriving the compounding
+    frequency ``m`` from a member (or requiring an explicit ``m`` for
+    ``OTHER``) is future pricing-engine work, not this enum's concern.
+    """
+
+    SEMI_ANNUAL_COMPOUND = "SEMI_ANNUAL_COMPOUND"
+    ANNUAL_COMPOUND = "ANNUAL_COMPOUND"
+    SIMPLE_YIELD = "SIMPLE_YIELD"
+    JAPANESE_COMPOUND = "JAPANESE_COMPOUND"
+    OTHER = "OTHER"
