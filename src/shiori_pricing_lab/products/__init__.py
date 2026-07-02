@@ -20,20 +20,27 @@ from shiori_pricing_lab.products.cross_currency import (
     CrossCurrencySwap,
 )
 from shiori_pricing_lab.products.enums import (
+    BondYieldConvention,
     BusinessDayConvention,
     BuySell,
     CompoundingMethod,
     Currency,
     DayCount,
+    ExerciseStyle,
     FloatingIndex,
     Frequency,
+    OptionType,
+    PayoffBasis,
     PayReceive,
+    Position,
+    SettlementType,
 )
 from shiori_pricing_lab.products.fx_swap import FXSwap
 from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
 from shiori_pricing_lab.products.swaps import InterestRateSwap, OvernightIndexedSwap
 
 __all__ = [
+    "BondYieldConvention",
     "BusinessDayConvention",
     "BuySell",
     "CompoundingMethod",
@@ -41,12 +48,17 @@ __all__ = [
     "CrossCurrencySwap",
     "Currency",
     "DayCount",
+    "ExerciseStyle",
     "FXSwap",
     "FixedLeg",
     "FloatingIndex",
     "FloatingLeg",
     "Frequency",
     "InterestRateSwap",
+    "OptionType",
     "OvernightIndexedSwap",
     "PayReceive",
+    "PayoffBasis",
+    "Position",
+    "SettlementType",
 ]
