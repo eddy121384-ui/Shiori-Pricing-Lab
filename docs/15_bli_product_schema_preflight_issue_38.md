@@ -42,9 +42,12 @@ Issue #38's own body already anticipates this: its "out of scope" section
 lists "no bond coupon, coupon schedule, day count, yield convention,
 maturity, accrued interest, or cashflow generation inside product
 definitions." The question this preflight answers is whether that stated
-scope is actually achievable for **both** proposed schemas, or whether one of
-them (the structured wrapper) pulls `DayCount` back in through its deposit
-leg.
+scope is actually achievable for **both** proposed schemas. It is achievable
+for `BondOption` (§2). For the structured wrapper, the answer is more
+nuanced than a single `DayCount` blocker: the deposit leg also carries
+**contractual economic terms** (deposit rate/yield, principal repayment
+rule) that a schema cannot simply omit and still call itself a complete,
+valuation-meaningful `BondLinkedStructuredProduct` — see §3.
 
 ---
 
@@ -149,52 +152,91 @@ Issue #38's own text.
 
 ## 3. Structured wrapper boundary analysis — `BondLinkedStructuredProduct`
 
-### 3.1 Can it be a minimal wrapper?
+> **Revised per Codex P2 review.** The first version of this preflight
+> described a "minimal wrapper" (deposit notional/currency/dates, embedded
+> `BondOption`, `participation_ratio`) as **safe for #38**. That was too
+> optimistic. `Deposit Rate/Yield` and `Principal Repayment Rule` are
+> **contractual deposit-leg terms that determine the customer's return and
+> are needed to reproduce the deposit leg's cashflows** — they are not
+> optional decoration on top of a shell. A wrapper that omits them cannot be
+> called a complete, valuation-meaningful `BondLinkedStructuredProduct`; it
+> can, at most, be a clearly-labeled **non-economic relationship shell**.
+> §3.1–§3.3 below replace the original analysis.
+
+### 3.1 Why a "minimal wrapper" is not a safe economic schema
 
 SPEC §6.1.1 "Deposit Leg" lists: Deposit Notional, Deposit Currency, Start
 Date, Maturity Date, Tenor, **Deposit Rate / Yield**, **Day Count**,
-**Business Day Convention**, Principal Repayment Rule, **Deposit Curve ID**.
+**Business Day Convention**, **Principal Repayment Rule**, **Deposit Curve
+ID**. Of these, `Deposit Rate/Yield` and `Principal Repayment Rule` are not
+market data and not calendar/day-count mechanics — they are the terms that
+define what the customer actually receives back. A structured-product
+schema that carries `deposit_notional` and `deposit_currency` but not the
+rate/yield or the repayment rule cannot reproduce the deposit leg's
+cashflows, so it is not an economic representation of the trade — it is a
+container that happens to reference a `BondOption` and hold a notional.
 
-A **minimal** wrapper that stays inside the resolved boundary (§2) can carry:
+Two consequences follow, kept separate because they have different fixes:
 
-| Field | Type / enum | Notes |
+1. **`Deposit Rate/Yield` and `Principal Repayment Rule` are contractual
+   economic terms, not "market data to exclude."** They must not be
+   silently dropped from the schema and forgotten — they must be
+   **explicitly deferred** until their source and mechanics are decided
+   (see §3.2).
+2. Separately, **`Day Count` and `Business Day Convention`** remain blocked
+   by the unresolved Issue #37 vocabulary decision (A-14), independent of
+   whether the deposit rate is ever added.
+
+### 3.2 Field-by-field classification for the structured wrapper
+
+| SPEC §6.1 field | Classification | Reasoning |
 | --- | --- | --- |
-| `product_id` | `str` | non-blank |
-| `deposit_notional` | `float` | positive |
-| `deposit_currency` | `Currency` | deal term, matches the existing `Currency` pattern |
-| `start_date` / `maturity_date` | `str` (`YYYY-MM-DD`) | **only** if the wrapper does not need to compute a day-count fraction from them — i.e. they are recorded as trade-defining dates, not fed into an accrual formula at schema level. This is safe as long as no schema-level validation attempts a day-count computation (see §3.2). |
-| `bond_option` | embedded `BondOption` | mirrors the `CrossCurrencyLeg(leg: FixedLeg | FloatingLeg)` composition pattern already used by `CrossCurrencySwap` — the wrapper references/embeds a frozen `BondOption`, not a duplicate copy of its fields |
-| `participation_ratio` | `float` | `= Bond Option Notional / Deposit Notional` per SPEC §6.1; can be validated for consistency against the embedded `bond_option.notional` and `deposit_notional`, or simply stored and cross-checked — either way this is schema-level arithmetic, not pricing |
-| `position` (structured-product-level, if distinct from the embedded option's `Position`) | — | SPEC's "sold bond option" pattern (`docs/13`/`docs/14` reuse-invariant: "deposit leg + **sold** bond option") suggests the wrapper's embedded `bond_option.position` is fixed to `SELL` from the structured product's perspective; this can be a `__post_init__` check, not a new field |
+| `deposit_notional`, `deposit_currency` | Safe deal term | Plain identifiers/amounts, no accrual math, no market-data lookup. |
+| `start_date` / `maturity_date` | Safe deal term, **only if recorded and not used for accrual** | Storing the dates is fine; computing a day-count fraction from them at schema level is not (that requires the blocked `day_count` decision). |
+| `bond_option` (embedded) | Safe — composition | Mirrors the existing `CrossCurrencyLeg(leg: FixedLeg | FloatingLeg)` pattern: reference a frozen `BondOption`, no duplicated fields. |
+| **`deposit_rate` / `deposit_yield`** | **Ambiguous — must be resolved before a complete wrapper lands, not treated as simple "market data."** | Two distinct cases exist and the spec does not say which applies: (a) a rate **fixed at trade time** as a genuine contractual term (in which case it belongs on the schema, like `FXSwap.near_rate`, but still needs a day-count convention to turn into an accrual amount — blocked by A-14); or (b) a rate **resolved from an internal funding/deposit curve** at pricing time (in which case it is a market/funding-data input and must never live on the product schema, per `docs/04`). Until this ambiguity is resolved, the field cannot be safely added either way. |
+| **`principal_repayment_rule`** | **Contractual economic term — defer from #38, not optional decoration.** | Needed to reproduce how/when principal is returned (bullet vs. amortizing vs. linked-to-option-outcome). Previously mischaracterized as "cashflow-generation logic to exclude"; it is a deal term the trade cannot be economically reproduced without. Deferring it is correct, but it must be tracked as a **known gap in a non-economic wrapper**, not silently omitted. |
+| `day_count`, `business_day_convention` (deposit leg) | **Still blocked by the unresolved `DayCount`/calendar convention decision (A-14).** | Unchanged from the original analysis — reusing the existing rates-core `DayCount` enum here would repeat the exact "silently coerced to the wrong convention" failure Issue #37 exists to prevent (`docs/14` F-16). |
+| `deposit_curve_id` / any funding-curve reference | **Not a product-schema field unless a later market-data/funding-curve design explicitly models an internal funding/deposit curve reference.** | Pure market-data/funding-data reference (SPEC §6.1 "Market Data" section); must never live in a product schema per `docs/04`, and no such funding-curve design exists yet. |
+| `participation_ratio` | Safe **only if enforced as a derived/consistency-checked quantity**, not a freely-set field | See §3.3 — storing it independently of `bond_option.notional` and `deposit_notional` would allow silently contradictory terms. |
 
-### 3.2 What must be excluded from the wrapper (flagged explicitly)
+### 3.3 `participation_ratio` must be enforced, not merely positive
 
-The following SPEC §6.1 "Deposit Leg" fields **cannot** be added to the #38
-wrapper without pulling in the unresolved `DayCount` decision or live market
-data, and must be **explicitly flagged and deferred**, not silently added or
-silently reusing the existing rates-core `DayCount` enum:
+SPEC §6.1 defines `participation_ratio = Bond Option Notional / Deposit
+Notional`. A schema that stores `participation_ratio` as an independent
+field and only checks that it is positive would allow, for example,
+`deposit_notional=100`, `bond_option.notional=50`, `participation_ratio=2` —
+three internally contradictory numbers that all pass a naive positivity
+check. That is not a safe schema, even inside a non-economic shell. A future
+implementation must do **one** of:
 
-| SPEC §6.1 field | Why it cannot land in #38 |
-| --- | --- |
-| **Day Count** (deposit leg accrual convention) | This is exactly the unresolved vocabulary decision (`docs/14` A-14 / Issue #37). Reusing the existing `DayCount` enum here would be the "silent coercion" AGENTS.md/Issue #37 explicitly forbids — the deposit leg's accrual convention has not been reconciled against Annex A/B any more than the bond leg's has. |
-| **Business Day Convention** (deposit leg) | Depends on a settlement calendar to resolve, which Issue #38 already excludes ("no cashflow generation"); also entangled with the same day-count/calendar prerequisite. |
-| **Deposit Rate / Yield** | This is either a live market-data lookup (deposit curve) or, if entered as a fixed trade term, still requires a day-count convention to turn into an accrual amount — either path is out of scope until Day Count is resolved or the field is explicitly scoped as "recorded but not used for computation here" (which would be a confusing half-field, not recommended). |
-| **Deposit Curve ID** | Pure market-data reference (SPEC §6.1 "Market Data" section) — must never live in a product schema, per `docs/04`. |
-| **Principal Repayment Rule** | Not inherently blocked by `DayCount`, but it is deposit-leg cashflow-generation logic (how/when principal is returned), which Issue #38's "no cashflow generation" scope excludes. Worth flagging as a separate future field, not a `DayCount`-blocked one. |
+- **derive** `participation_ratio` from `bond_option.notional /
+  deposit_notional` (no independent field at all), or
+- **validate** that a stored `participation_ratio` equals
+  `bond_option.notional / deposit_notional` within an explicit, documented
+  tolerance, rejecting mismatches.
 
-**If a full deposit-leg schema (with real accrual mechanics) is wanted, it
-must be split into a later prerequisite or later issue** — it must not be
-silently added to #38 by reusing the existing rates-core `DayCount` enum
-just because it happens to type-check. That would repeat exactly the
-"silently coerced to the wrong convention" failure mode Issue #37 was opened
-to prevent (`docs/14` F-16).
+### 3.4 Revised conclusion for `BondLinkedStructuredProduct`
 
-**Conclusion for `BondLinkedStructuredProduct`: a genuinely minimal wrapper
-(§3.1) is safe for #38.** A full SPEC §6.1-shaped deposit leg is **not**
-safe for #38 as currently unblocked, because its Day Count / Business Day
-Convention / Deposit Curve fields hit the same unresolved decision. The
-wrapper's dates (`start_date` / `maturity_date`) may be recorded, but no
-schema-level day-count arithmetic may be attached to them in this issue.
+**`BondLinkedStructuredProduct` should not be described as safe for #38 as
+a complete economic schema.** A wrapper containing only deposit
+notional/currency/dates, an embedded `BondOption`, and a
+consistency-enforced `participation_ratio` may be documented as a
+**non-economic container / relationship shell** — useful for expressing
+"this option is sold as part of a structured note against this deposit,"
+but explicitly **not sufficient** for valuation, because it cannot
+reproduce the customer's actual return (no deposit rate/yield, no principal
+repayment rule).
+
+- If maintainers want `BondLinkedStructuredProduct` in #38 at all, it must
+  be built and labeled as this **non-economic placeholder**, with an
+  explicit code comment and test asserting it is incomplete for valuation.
+- A **real, economic** `BondLinkedStructuredProduct` — one that can
+  reproduce customer cashflows — must be **deferred** until the deposit-leg
+  boundary is resolved: the deposit rate/yield source (fixed term vs.
+  funding-curve lookup), the principal repayment rule, and the
+  `DayCount`/calendar convention decision (A-14). That resolution belongs in
+  a separate, reviewed slice — not folded into #38 by omission.
 
 ---
 
@@ -208,51 +250,64 @@ schema-level day-count arithmetic may be attached to them in this issue.
 | `expiry_date`, `exercise_start_date` | **Safe for #38** — strict `YYYY-MM-DD`, schema-level date ordering only |
 | `settlement_lag_days` (raw integer) | **Safe for #38** — recorded as a plain trade term, not resolved against a calendar |
 | `notional` (bond option face amount) | **Safe for #38** — positive-number check, same pattern as existing products |
-| `deposit_notional`, `deposit_currency`, `participation_ratio` (wrapper) | **Safe for #38** — pure deal-term arithmetic/identifiers, no accrual |
+| `deposit_notional`, `deposit_currency` | **Safe for #38** — pure deal-term identifiers/amounts, no accrual |
 | `bond option currency` (if fixed as a deal term rather than defaulted from the bond) | **Safe for #38**, with a documented assumption that "defaults to bond currency" (SPEC §6.1) is a market-data-resolution rule applied later, not schema logic |
 | `coupon`, `coupon_frequency`, `bond maturity_date`, `issue_date` | **Must be excluded from #38** — Bond Master static data, later issue |
 | `yield_convention`, `compounding_frequency` (`m`) | **Requires the `DayCount` / Bond Master convention decision first** — do not add to #38 even as an optional field |
 | `day_count` (bond leg or deposit leg) | **Requires the `DayCount` / Bond Master convention decision first** — the exact field this preflight exists to keep out of #38 |
 | `business_day_convention` for calendar-resolved settlement / deposit accrual | **Requires the `DayCount` / Bond Master convention decision first** (entangled with day-count/calendar prerequisites) |
-| `deposit rate/yield`, `principal repayment rule` (full deposit-leg accrual) | **Requires the `DayCount` / Bond Master convention decision first**, or must be deferred to a later issue regardless |
+| `deposit_rate` / `deposit_yield` | **Ambiguous — resolve before a complete wrapper lands.** May be a fixed contractual term (blocked by A-14 to compute an accrual) or a funding-curve lookup (market data, never schema). Not simply "market data" in all cases — do not classify it as either safe or excluded without first resolving which case applies (§3.2). |
+| `principal_repayment_rule` | **Contractual economic term — defer from #38.** Required to reproduce the deposit leg's cashflows; not optional decoration and not blocked by `DayCount` specifically, but still out of #38's safe scope (§3.2). |
+| `participation_ratio` (wrapper) | **Safe only if derived from `bond_option.notional / deposit_notional`, or validated to equal it within a documented tolerance** — a freely-set, independently-stored value is unsafe (§3.3) |
+| `deposit_curve_id` / any funding-curve reference | **Market data — must never live in product schema**, unless a later market-data/funding-curve design explicitly models it as such a reference (still not a product-schema field even then) |
 | `accrued_interest`, `clean_price`/`dirty_price`, `bond_yield` | **Market data — must never live in product schema** |
 | `vol`, `credit_spread` | **Market data — must never live in product schema** |
-| any `curve_id` (yield curve, option discount curve, bond reference curve, deposit curve) | **Market data — must never live in product schema** |
+| any `curve_id` (yield curve, option discount curve, bond reference curve) | **Market data — must never live in product schema** |
 | `market_data_snapshot_id` / snapshot reference | **Market data — must never live in product schema** (a product must not point back at a specific market state) |
 | pricing outputs (`pv`, Greeks, self-validation results) | **Market data / pricing output — must never live in product schema** |
+| **complete, valuation-meaningful `BondLinkedStructuredProduct`** (deposit rate/yield + principal repayment rule + day count/calendar all resolved) | **Defer until the deposit-leg contractual terms and the `DayCount`/funding-curve boundary are resolved in a separate, reviewed slice** |
+| **non-economic `BondLinkedStructuredProduct` relationship shell** (deposit notional/currency/dates, embedded `BondOption`, enforced `participation_ratio`, no rate/repayment terms) | **Possible for #38 only if explicitly labeled incomplete / non-economic / not sufficient for valuation**, and only if maintainers accept that limitation |
 
 ---
 
 ## 5. Recommended implementation path
 
-**#38 is safe to proceed, narrowly scoped.** The recommended smallest
-follow-up code slice for the Issue #38 implementation PR:
+**`BondOption` is safe to proceed, narrowly scoped. `BondLinkedStructuredProduct`
+is not, unless explicitly scoped as a non-economic placeholder.** The
+recommended #38 implementation PR:
 
-1. **`BondOption` schema first** — the full field list in §2.1, with the
+1. **Implement `BondOption` first** — the full field list in §2.1, with the
    cross-field validation in §2.3. This alone satisfies most of Issue #38's
    stated acceptance criteria (valid European cash-settled price-based
    schema; valid physical-delivery schema if represented at schema level;
    invalid enums rejected; product schema rejects market-data fields).
-2. **A deliberately minimal `BondLinkedStructuredProduct` wrapper**, using
-   only the fields in §3.1 (deposit notional/currency, start/maturity dates
-   recorded but not used for accrual, an embedded frozen `BondOption`,
-   `participation_ratio`). This wrapper must **not** attempt a real
-   deposit-leg accrual schema (§3.2) — no `day_count`, no
-   `business_day_convention` tied to calendar resolution, no `deposit
-   rate/yield`, no `deposit curve_id`.
-3. If the desk/maintainer wants the **full** SPEC §6.1 deposit leg (with real
-   Day Count / Business Day Convention / accrual), that must be **split into
-   a new, later issue** that depends on the `DayCount` vocabulary decision
-   (A-14) being made first — it is not part of #38's safe scope.
+2. **Do not implement `BondLinkedStructuredProduct` in #38** unless
+   maintainers explicitly accept it as a **non-economic placeholder** —
+   deposit notional/currency/dates, an embedded frozen `BondOption`, and a
+   consistency-enforced `participation_ratio` (§3.3), with no attempt at
+   `deposit_rate`/`deposit_yield`, `principal_repayment_rule`, `day_count`,
+   `business_day_convention`, or `deposit_curve_id` (§3.2). If built, the PR
+   must label it in code and tests as **incomplete for valuation**, not
+   a finished structured-product schema.
+3. **Prefer deferring `BondLinkedStructuredProduct` entirely** to a later
+   issue, after resolving:
+   - the deposit-leg economic terms (deposit rate/yield source, principal
+     repayment rule);
+   - the Treasury FTP / funding-curve vs. file-import-FTP terminology
+     (i.e., whether a deposit rate is a funding-desk input or a trade-level
+     fixed term — this ambiguity is unresolved, see §3.2);
+   - the `DayCount` / calendar convention decision (A-14).
 
 **Be explicit in the #38 implementation PR:** this must not become a stealth
 Bond Master schema (no coupon/yield-convention/compounding fields), a
-market-data snapshot change (no curve/vol/spread/snapshot-id fields), or a
-pricing engine (no PV/Greeks/self-validation fields). If the minimal wrapper
-in step 2 turns out, during implementation, to need *any* field from the
-"requires DayCount decision first" or "market data" rows of §4, that field
-must be dropped from the PR and recorded as deferred — not added and
-rationalized after the fact.
+market-data snapshot change (no curve/vol/spread/snapshot-id fields), a
+pricing engine (no PV/Greeks/self-validation fields), or an unlabeled
+economic structured-product schema that silently omits the deposit rate and
+repayment terms it would need to be valuation-meaningful. If a wrapper is
+built and turns out, during implementation, to need *any* field from the
+"requires DayCount decision first," "ambiguous," or "market data" rows of
+§4, that field must be dropped from the PR and recorded as deferred — not
+added and rationalized after the fact.
 
 ---
 
@@ -301,11 +356,30 @@ strict `YYYY-MM-DD`, positive-notional checks):
   in the test suite (mirroring the "`test_act_365_variants_are_not_added_to_
   day_count`" style guard already added in `tests/test_bli_enums.py` for the
   enum layer), not a one-time check.
-- `BondLinkedStructuredProduct` wrapper: constructing with a non-`BondOption`
-  value for its embedded option field raises `TypeError` (mirrors
-  `CrossCurrencyLeg`'s `leg` type check); `participation_ratio` is
-  positive; the wrapper does not accept a `day_count`, `business_day_
-  convention`, `deposit_rate`, or `deposit_curve_id` constructor argument.
+- **If `BondLinkedStructuredProduct` is implemented at all**, it must be
+  built and tested as the **non-economic placeholder** described in §3.4,
+  not a complete economic schema:
+  - constructing with a non-`BondOption` value for its embedded option
+    field raises `TypeError` (mirrors `CrossCurrencyLeg`'s `leg` type
+    check);
+  - the wrapper does not accept a `day_count`, `business_day_convention`,
+    `deposit_rate`, `deposit_yield`, `principal_repayment_rule`, or
+    `deposit_curve_id` constructor argument;
+  - **`participation_ratio` enforcement (§3.3):** either the field does not
+    exist and is derived as `bond_option.notional / deposit_notional` at
+    construction time, or a stored `participation_ratio` is validated to
+    equal that ratio within an explicit, documented tolerance — a bare
+    positivity check is not sufficient;
+  - a test **rejects contradictory terms**, e.g.
+    `deposit_notional=100`, `bond_option.notional=50`,
+    `participation_ratio=2` (which implies a ratio of `0.5`, not `2`) must
+    raise, not construct silently;
+  - a standing test/comment asserts the wrapper is **incomplete for
+    valuation** (no deposit rate/yield, no principal repayment rule) — a
+    complete economic structured-product schema must preserve all
+    contractual terms required to reproduce customer cashflows, or else be
+    explicitly labeled incomplete / non-economic; this assertion should not
+    be silently dropped if the wrapper is later extended.
 
 ---
 
