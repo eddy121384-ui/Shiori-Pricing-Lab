@@ -493,3 +493,18 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   manual-upload surface**, not bond price/yield, curves, vol, spread, Bond
   Master, or calendar. Screenshot-assisted capture remains a future
   fallback only. No code or implementation was changed.
+- **`BondOption` product schema implemented — Issue #38 partial
+  (`src/shiori_pricing_lab/products/bond_option.py`,
+  `tests/test_bond_option.py`).** Following `docs/15` §2/§5, `BondOption` is
+  a pure deal-term schema (`product_id`, `underlying_isin`, `currency`,
+  `payoff_basis`, `option_type`, `exercise_style`, `settlement_type`,
+  `settlement_lag_days`, `strike_price`/`strike_yield`, `expiry_date`,
+  `exercise_start_date`, `notional`, `position`) using the controlled
+  vocabulary landed in PR #45. It carries no `day_count`,
+  `yield_convention`, `compounding_frequency`, Bond Master, market-data, or
+  pricing-output field. **`BondLinkedStructuredProduct` remains deferred** —
+  not implemented, not even as a placeholder — pending the deposit-leg
+  economic terms (deposit rate/yield source, principal repayment rule), the
+  Treasury FTP / Funding Curve semantics (`docs/16`), and the
+  `DayCount`/calendar boundary (A-14). No pricing engine, market-data
+  ingestion, or UI code was touched by this slice.

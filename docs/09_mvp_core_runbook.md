@@ -432,6 +432,25 @@ question, and the `DayCount`/calendar decision. `docs/15` §6 lists the
 acceptance-criteria tests the future #38 implementation PR should add; none
 of that schema/test code is written yet.
 
+### `BondOption` schema landed — Issue #38 partial
+
+`BondOption` (`src/shiori_pricing_lab/products/bond_option.py`) is
+implemented as the pure deal-term schema described in `docs/15` §2/§5, using
+the controlled vocabulary from PR #45 (`PayoffBasis`, `OptionType`,
+`ExerciseStyle`, `SettlementType`, `Position`, `Currency`). It validates the
+`payoff_basis` / strike cross-field rule and the `exercise_style` /
+`exercise_start_date` rule from `docs/15` §2.3, and carries no `day_count`,
+`yield_convention`, `compounding_frequency`, Bond Master, market-data, or
+pricing-output field. Tests are in `tests/test_bond_option.py`.
+
+**`BondLinkedStructuredProduct` is still not implemented, not even as a
+placeholder.** It remains deferred until the deposit-leg economic terms
+(deposit rate/yield source, principal repayment rule), the Treasury FTP /
+Funding Curve semantics (`docs/16`), and the `DayCount`/calendar decision
+(A-14) are resolved in a separate, reviewed slice. This PR does not
+register any pricing engine for `BondOption`, does not touch market-data
+ingestion, and does not start Issues #39–#42 or #44.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
