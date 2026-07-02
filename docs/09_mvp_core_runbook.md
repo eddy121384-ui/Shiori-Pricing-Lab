@@ -451,6 +451,26 @@ Funding Curve semantics (`docs/16`), and the `DayCount`/calendar decision
 register any pricing engine for `BondOption`, does not touch market-data
 ingestion, and does not start Issues #39–#42 or #44.
 
+### BLI MVP vertical-slice checkpoint
+
+- Before starting any `BondLinkedStructuredProduct`, deposit leg, BLI
+  pricing engine, or BLI market-data/fixture work, agents must read
+  `docs/17_bli_mvp_vertical_slice_preflight.md`.
+- The MVP target is one plain-vanilla bond, one deposit leg, one embedded
+  `BondOption` leg, European exercise and cash settlement first — not the
+  full BLI v1.3 product/connector universe.
+- The deposit rate/yield source (fixed term vs. Treasury FTP / Funding
+  Curve lookup vs. both under an explicit mode) is an **open decision**;
+  do not silently pick one when implementing the deposit leg (`docs/17` §4).
+- `participation_ratio` on any future wrapper must be derived from, or
+  validated against, `bond_option.notional / deposit_notional` — never a
+  freely-set field (`docs/15` §3.3, `docs/17` §5).
+- QuantLib, if used, is a computational library only — it must not
+  silently define product methodology, and any QuantLib-based result must
+  be benchmarked before being treated as production-like (`docs/17` §8).
+- Implement in the small slices `docs/17` §11 proposes (A–G); do not fold
+  the whole BLI MVP into one PR.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
