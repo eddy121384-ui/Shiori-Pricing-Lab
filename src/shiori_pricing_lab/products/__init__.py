@@ -12,7 +12,11 @@ Strict boundaries:
 
 Currently provides IRS, OIS, CCS, FX Swap, and BondOption (schema only).
 ``BondLinkedStructuredProduct`` is intentionally not provided yet — see
-``docs/15_bli_product_schema_preflight_issue_38.md`` §3.
+``docs/15_bli_product_schema_preflight_issue_38.md`` §3. ``DepositRateMode``,
+``TreasuryFTPQuoteSide``, and ``TreasuryFTPTenor`` are controlled-vocabulary
+foundations for a future ``DepositLeg`` schema — see
+``docs/18_deposit_leg_schema_preflight.md``; no ``DepositLeg`` schema exists
+yet.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from shiori_pricing_lab.products.enums import (
     CompoundingMethod,
     Currency,
     DayCount,
+    DepositRateMode,
     ExerciseStyle,
     FloatingIndex,
     Frequency,
@@ -37,6 +42,8 @@ from shiori_pricing_lab.products.enums import (
     PayReceive,
     Position,
     SettlementType,
+    TreasuryFTPQuoteSide,
+    TreasuryFTPTenor,
 )
 from shiori_pricing_lab.products.fx_swap import FXSwap
 from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
@@ -52,6 +59,7 @@ __all__ = [
     "CrossCurrencySwap",
     "Currency",
     "DayCount",
+    "DepositRateMode",
     "ExerciseStyle",
     "FXSwap",
     "FixedLeg",
@@ -65,4 +73,6 @@ __all__ = [
     "PayoffBasis",
     "Position",
     "SettlementType",
+    "TreasuryFTPQuoteSide",
+    "TreasuryFTPTenor",
 ]

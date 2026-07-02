@@ -235,3 +235,78 @@ class BondYieldConvention(StrEnum):
     SIMPLE_YIELD = "SIMPLE_YIELD"
     JAPANESE_COMPOUND = "JAPANESE_COMPOUND"
     OTHER = "OTHER"
+
+
+# --- DepositLeg / Treasury FTP controlled vocabulary (docs/18, BLI MVP Slice A) --
+#
+# These enums are the controlled-vocabulary foundation for a future
+# ``DepositLeg`` schema (docs/18_deposit_leg_schema_preflight.md), added
+# ahead of that schema so ``TREASURY_FTP_REFERENCE`` mode has a reviewed
+# tenor/quote-side vocabulary to validate against instead of a placeholder
+# check (docs/18 §12). No ``DepositLeg`` schema, Treasury FTP parser, or
+# ingestion code is added alongside them.
+
+
+class DepositRateMode(StrEnum):
+    """How a future ``DepositLeg``'s rate/yield is sourced (docs/18 §4).
+
+    ``FIXED_RATE``: the rate is a fixed contractual trade term and may live
+    directly on ``DepositLeg``.
+
+    ``TREASURY_FTP_REFERENCE``: ``DepositLeg`` stores only a stable selector
+    (currency/tenor/quote_side); the resolved Treasury FTP rate and its
+    business date belong to ``MarketDataSnapshot`` / an MVP input bundle /
+    the audit trail, never the product schema (docs/18 §4.2).
+
+    ``MANUAL_VERIFIED_RATE``: ``DepositLeg`` stores only a reference to a
+    manually supplied pricing input; the rate value and its provenance
+    (source, as-of, entered-by) live outside the product schema
+    (docs/18 §4.3).
+    """
+
+    FIXED_RATE = "FIXED_RATE"
+    TREASURY_FTP_REFERENCE = "TREASURY_FTP_REFERENCE"
+    MANUAL_VERIFIED_RATE = "MANUAL_VERIFIED_RATE"
+
+
+class TreasuryFTPQuoteSide(StrEnum):
+    """Quote side of a Treasury FTP rate matrix entry (docs/18 §2.4, §5).
+
+    ``MID`` is the default policy where a currency has no bid/mid/offer
+    breakdown, the single available rate is treated as MID-equivalent — a
+    documented normalization, not an inference of ``BID``/``OFFER`` the
+    source sheet does not provide. This enum defines vocabulary only; no
+    quote-side selection policy is implemented here.
+    """
+
+    BID = "BID"
+    MID = "MID"
+    OFFER = "OFFER"
+
+
+class TreasuryFTPTenor(StrEnum):
+    """Tenor labels observed on the Treasury FTP rate sheet (docs/18 §2.3).
+
+    Deliberately separate from :class:`Frequency`: ``Frequency`` is a
+    payment/reset period vocabulary for vanilla rates legs
+    (``DAILY``/``MONTHLY``/``QUARTERLY``/...), not a tenor label set, and
+    does not cover ``O/N``, short weekly tenors, or ``9M``/``2Y``/``3Y``.
+    Reusing ``Frequency`` here would silently misrepresent a Treasury FTP
+    tenor as a payment frequency (docs/18 §2.3). Canonical string values
+    match the sheet's own labels exactly (e.g. ``"O/N"``, ``"1W"``); member
+    *names* are valid Python identifiers where the label itself is not.
+    """
+
+    OVERNIGHT = "O/N"
+    ONE_WEEK = "1W"
+    TWO_WEEK = "2W"
+    THREE_WEEK = "3W"
+    ONE_MONTH = "1M"
+    TWO_MONTH = "2M"
+    THREE_MONTH = "3M"
+    SIX_MONTH = "6M"
+    NINE_MONTH = "9M"
+    ONE_YEAR = "1Y"
+    TWO_YEAR = "2Y"
+    THREE_YEAR = "3Y"
+    DEMAND_SAVINGS = "DEMAND_SAVINGS"
