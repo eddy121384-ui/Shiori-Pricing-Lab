@@ -634,3 +634,20 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   the next slice — wrapper schema implementation only — with an acceptance
   checklist. No wrapper code, pricing, or tests were added. Issue #38
   remains open.
+- **BLI wrapper preflight tightened after Codex P2 review, docs-only
+  (`docs/19` update).** Two date/settlement boundary issues fixed: (1) the
+  date-consistency rule was `bond_option.expiry_date <=
+  deposit_leg.maturity_date`, which ignored `BondOption.settlement_lag_days`
+  — an option that expires exactly at deposit maturity but has a positive
+  settlement lag would actually settle after the deposit's life ends. Now
+  requires the option's **effective settlement date**
+  (`expiry_date + settlement_lag_days` calendar days, a documented
+  calendar-day approximation, no calendar engine) to be on or before
+  `deposit_leg.maturity_date`. (2) the doc left `bond_option.settlement_type
+  == CASH` as an optional, undecided wrapper check, which would have
+  silently allowed a physical-delivery BLI wrapper to construct despite
+  MVP being cash-settlement-first. Now **required**: construction must
+  raise unless `settlement_type` is `CASH`; physical delivery is deferred
+  to a later custody/settlement slice. `docs/09`'s wrapper checkpoint was
+  updated to match. No code, tests, or other doc besides `docs/19`/`docs/09`
+  was touched.

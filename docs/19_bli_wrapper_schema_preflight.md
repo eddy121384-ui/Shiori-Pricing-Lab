@@ -49,9 +49,10 @@ of a structured note funded by this `DepositLeg`." Concretely, it owns:
   docs/18 §1) — the wrapper *is* the tradeable product; `DepositLeg` and
   `BondOption` are its components.
 - **Cross-component consistency**: currency match, notional-derived
-  `participation_ratio` (§6), and date ordering across the two components
-  (§7) — none of which either component can check on its own, since each
-  only knows about itself.
+  `participation_ratio` (§6), date/effective-settlement-date ordering
+  across the two components (§7), and narrowing `BondOption` to
+  `SettlementType.CASH` for MVP (§8) — none of which either component can
+  check on its own, since each only knows about itself.
 - **The relationship between `principal_repayment_rule` and the option
   payoff** at the level of "how do these two components combine into what
   the customer receives" (§8) — not the payoff calculation itself, only
@@ -216,11 +217,42 @@ Required future validation, none of which either `DepositLeg` or
   component objects' own dates:
   - `deposit_leg.start_date < deposit_leg.maturity_date` — already
     enforced by `DepositLeg.__post_init__`; not re-checked by the wrapper.
-  - `bond_option.expiry_date <= deposit_leg.maturity_date` — **required.**
-    An option that expires after the deposit that funds it has already
-    matured cannot be settled against that deposit within the structured
-    note's own term; the deposit leg's maturity is the outer boundary of
-    the structure's life.
+  - **Not just `bond_option.expiry_date <= deposit_leg.maturity_date` —
+    this omits `settlement_lag_days`.** `BondOption` already carries
+    `settlement_lag_days` (PR #50) as an in-scope deal term. If
+    `bond_option.expiry_date == deposit_leg.maturity_date` and
+    `settlement_lag_days > 0`, the option's *actual settlement* falls
+    after the deposit has already matured — contradicting the very
+    rationale for this check (the option must settle within the
+    structured note's own life, with the deposit leg's maturity as the
+    outer boundary). **Required for MVP:** the wrapper must require the
+    option's **effective settlement date** to be on or before
+    `deposit_leg.maturity_date`, not just its expiry date. Because no
+    calendar engine exists yet (`docs/18` §7 precedent: no
+    calendar/holiday engine in this repo), the MVP schema should use a
+    conservative **calendar-day approximation**:
+
+    ```text
+    effective_option_settlement_date =
+        bond_option.expiry_date + settlement_lag_days calendar days
+
+    effective_option_settlement_date <= deposit_leg.maturity_date
+    ```
+
+    This is a **schema-level MVP guardrail, not full settlement-calendar
+    logic** — plain calendar-day addition, no business-day rolling, no
+    holiday calendar. A future calendar-aware settlement computation can
+    replace this approximation later without changing the wrapper's
+    validation *intent* (settlement must fall within the deposit's life),
+    only its precision. The wrapper must **not** import or build a
+    calendar engine in this slice — calendar-day arithmetic on the
+    existing `date` objects `_parse_iso_date` already returns is
+    sufficient and requires no new dependency. **If the implementation
+    slice chooses not to compute this approximate settlement date, it
+    must explicitly mark settlement-date-vs-maturity as an open/deferred
+    decision in code and docs — it must not silently fall back to
+    checking `expiry_date` alone and imply settlement timing was
+    considered when it was not.**
   - If `bond_option.exercise_style == AMERICAN`,
     `bond_option.exercise_start_date` must remain strictly before
     `bond_option.expiry_date` — already enforced by `BondOption`'s own
@@ -241,14 +273,30 @@ Required future validation, none of which either `DepositLeg` or
 
 ## 8. Principal repayment and payoff boundary
 
-- **MVP remains cash-settlement first**, per `docs/17` §2 — the wrapper
-  does not need to validate `bond_option.settlement_type` beyond what
-  `BondOption` already enforces; it is not re-derived or re-checked by the
-  wrapper for MVP. (A future slice could add a wrapper-level check that
-  `bond_option.settlement_type == SettlementType.CASH` if MVP wants to
-  reject physical delivery at the wrapper level, but that decision is
-  deferred here since `docs/17` §2 already frames cash-first as the MVP
-  choice, not a hard prohibition on the schema.)
+- **MVP requires CASH settlement — the wrapper must enforce this, not just
+  assume it.** `docs/17` §2 frames cash-first as the MVP scope choice, but
+  `BondOption` itself remains general enough to represent
+  `SettlementType.PHYSICAL` (PR #50), so leaving this unchecked at the
+  wrapper level would silently allow a physical-delivery BLI wrapper to
+  construct despite the stated MVP scope. **Required for MVP:**
+
+  ```text
+  bond_option.settlement_type must be SettlementType.CASH.
+  If it is not CASH, construction must raise.
+  ```
+
+  Physical-delivery BLI wrappers are **out of MVP scope** and can be
+  reconsidered in a later custody/settlement methodology slice, once bond
+  transfer/custody mechanics are actually designed — this doc does not
+  design that mechanics, it only excludes it from MVP construction. This
+  check belongs on the **wrapper**, not on `BondOption` itself:
+  cash-vs-physical settlement affects how the option component combines
+  with the deposit/principal relationship (a cash payoff nets against the
+  deposit's cash return; a physical delivery would not), which is exactly
+  the kind of cross-component concern §2 assigns to the wrapper.
+  `BondOption` stays general (both `CASH` and `PHYSICAL` remain valid
+  standalone bond-option deal terms); the BLI MVP wrapper is what narrows
+  it to `CASH` for this specific structure.
 - **`DepositLeg.principal_repayment_rule` should remain
   `FULL_PRINCIPAL_AT_MATURITY`** — the only member `PrincipalRepaymentRule`
   currently defines (PR #54). The wrapper does not add new
@@ -329,10 +377,10 @@ Explicitly not decided or built by this doc:
 - Whether `bond_option.expiry_date` must be on/after
   `deposit_leg.start_date` (§7) — open question, must be decided
   explicitly in the implementation slice, not silently chosen.
-- Whether the wrapper should validate `bond_option.settlement_type ==
-  CASH` at the wrapper level (§8) — not required by this doc; MVP cash-
-  first is a scope choice from `docs/17` §2, not enforced here as a hard
-  schema rule.
+- The exact calendar-day arithmetic implementation for
+  `effective_option_settlement_date` (§7) — this doc fixes the
+  approximation's *shape* (`expiry_date + settlement_lag_days` calendar
+  days, no business-day rolling), not the specific code that computes it.
 - A wrapper-level payoff linkage enum (§8) — explicitly deferred to a
   future payoff/pricing slice.
 - Multi-leg / multi-option wrappers, portfolio-level BLI structures — out
@@ -355,11 +403,16 @@ slice should:
 - derive or validate `participation_ratio` per the confirmed choice
   between Option A and Option B (§6);
 - enforce currency consistency and the date-consistency rules in §7,
-  explicitly deciding the open `expiry_date`-vs-`start_date` question
-  rather than leaving it unhandled;
-- add tests (valid construction, currency mismatch rejection, date
-  mismatch rejection, participation-ratio consistency/mismatch rejection,
-  a dataclass-fields boundary test mirroring `tests/test_deposit_leg.py`'s
+  including the effective-settlement-date-vs-deposit-maturity check
+  (`bond_option.expiry_date + settlement_lag_days` calendar days `<=
+  deposit_leg.maturity_date`), and explicitly deciding the open
+  `expiry_date`-vs-`start_date` question rather than leaving it unhandled;
+- enforce `bond_option.settlement_type == SettlementType.CASH` (§8) —
+  reject physical delivery at the wrapper level for MVP;
+- add tests (valid construction, currency mismatch rejection, date and
+  effective-settlement-date mismatch rejection, non-CASH settlement
+  rejection, participation-ratio consistency/mismatch rejection, a
+  dataclass-fields boundary test mirroring `tests/test_deposit_leg.py`'s
   "no market-data or pricing-run field" test);
 - export the wrapper from `products/__init__.py`.
 
@@ -381,8 +434,17 @@ A future wrapper-implementation PR should satisfy:
   `"BOND_LINKED_STRUCTURED_PRODUCT"` discriminator (`field(init=False)`),
   matching the existing `FXSwap`/`InterestRateSwap`/`BondOption` pattern.
 - `deposit_leg.currency == bond_option.currency`, or construction raises.
-- `bond_option.expiry_date <= deposit_leg.maturity_date`, or construction
-  raises.
+- The option's **effective settlement date** —
+  `bond_option.expiry_date + settlement_lag_days` calendar days, per §7's
+  approximation — is on or before `deposit_leg.maturity_date`, or
+  construction raises. A bare `bond_option.expiry_date <=
+  deposit_leg.maturity_date` check, ignoring `settlement_lag_days`, is
+  **not** sufficient. If the implementation does not compute the
+  approximate settlement date, it must say so explicitly (in code comment
+  and doc/PR body) as a deferred decision, not silently check expiry date
+  alone.
+- `bond_option.settlement_type == SettlementType.CASH`, or construction
+  raises — physical delivery is rejected at the wrapper level for MVP.
 - The `expiry_date`-vs-`start_date` question (§7) is resolved one way or
   the other, with the choice documented in the implementation, not left
   implicit.
