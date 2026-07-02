@@ -365,13 +365,23 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   inquiry code.
 - **Review / validation:** `python -m pytest -q` → **215 passed**; `ruff check
   .` → all checks passed; `git diff --check` → clean. Issue #37 was **not**
-  closed by this PR — left open pending maintainer confirmation that this slice
-  plus the `docs/14` preflight jointly satisfy #37's acceptance criteria.
-- **Status:** Issue #37's controlled-vocabulary work is now complete enough to
-  unblock **Issue #38** (BLI product schemas for `BondOption` /
-  `BondLinkedStructuredProduct`), the next active implementation issue. Issues
-  **#39–#42 and #44 (Black-76) are not started** and should not be started
-  before #38 lands.
+  closed by this PR.
+- **Status (precise):** PR #45 completed the **first code-level
+  controlled-vocabulary slice** — currencies (`NZD`/`KRW`/`HKD`/`SGD`), the five
+  BLI product enums, `BondYieldConvention`, and
+  `PricingErrorCode.MISSING_REFERENCE_DATA`. **Issue #37 remains open** because
+  the **`DayCount` and market/jurisdiction vocabulary decisions are still
+  deferred** (see `docs/14` §5, A-14) — the enum-gap resolution is not finished
+  until those are explicitly resolved or deliberately scoped into the next
+  issue. **Issue #38** (BLI product schemas for `BondOption` /
+  `BondLinkedStructuredProduct`) **may be prepared next, but it must not land
+  product schemas that depend on unresolved `DayCount` / Bond Master convention
+  assumptions.** Before #38 can be considered complete, **either** (1) #38
+  explicitly **excludes** `DayCount` / Bond Master convention fields and keeps
+  them in the Bond Master / later issues, **or** (2) the `DayCount` vocabulary
+  decision is made first in a reviewed prerequisite slice. Do **not** treat #38
+  as fully unblocked without that qualifier. Issues **#39–#42 and #44
+  (Black-76) are not started** and should not be started before #38 lands.
 
 ## Checkpoint summary
 
@@ -403,13 +413,17 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   reference engine and the rest of the deterministic spine remain the shared
   target; OIS / CCS / FX Swap engines, the historical valuation loop (#13), and
   the AI inquiry contract (#14) stay downstream / deferred.
-- **Issue #37's controlled-vocabulary code slice landed (PR #45).** New BLI
-  currencies (`NZD`, `KRW`, `HKD`, `SGD`), the five BLI product enums, and
+- **Issue #37's first controlled-vocabulary code slice landed (PR #45).** New
+  BLI currencies (`NZD`, `KRW`, `HKD`, `SGD`), the five BLI product enums, and
   `BondYieldConvention` exist and are tested; `PricingErrorCode` now carries
-  `MISSING_REFERENCE_DATA`. `DayCount` vocabulary remains **explicitly
-  deferred** pending a reviewed Annex-driven decision (A-14), and no Bond
-  Master / jurisdiction enum was added (deferred unless a Bond Master /
-  snapshot issue needs one). This is complete enough to unblock **Issue #38**
-  (BLI product schemas for `BondOption` / `BondLinkedStructuredProduct`), the
-  next active implementation issue. **Do not start Issues #39–#42 or #44
-  (Black-76) yet.**
+  `MISSING_REFERENCE_DATA`. **Issue #37 remains open**: the `DayCount`
+  vocabulary and market/jurisdiction vocabulary decisions are **still deferred**
+  pending a reviewed Annex-driven decision (`docs/14` §5, A-14), and no Bond
+  Master / jurisdiction enum was added. **Issue #38** (BLI product schemas for
+  `BondOption` / `BondLinkedStructuredProduct`) may be **prepared** next, but it
+  **must not land product schemas that depend on unresolved `DayCount` / Bond
+  Master convention assumptions**. Before #38 can be considered complete,
+  **either** (1) #38 explicitly **excludes** `DayCount` / Bond Master convention
+  fields (keeping them in the Bond Master / later issues), **or** (2) the
+  `DayCount` vocabulary decision is made first in a reviewed prerequisite slice.
+  **Do not start Issues #39–#42 or #44 (Black-76) yet.**

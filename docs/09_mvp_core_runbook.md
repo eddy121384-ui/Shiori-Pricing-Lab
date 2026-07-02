@@ -392,8 +392,18 @@ pricing engine:
   stays deferred unless a future Bond Master or `MarketDataSnapshot` extension
   issue actually needs one.
 
-**Status:** Issue #37's controlled-vocabulary implementation is now **complete
-enough to unblock Issue #38** (BLI product schemas for `BondOption` /
-`BondLinkedStructuredProduct`) — the **next active implementation issue**.
-**Do not start Issues #39–#42 yet, and do not start Black-76 / Issue #44
-yet.**
+**Status (precise):** PR #45 completed the **first code-level
+controlled-vocabulary slice** (currencies, BLI product enums,
+`BondYieldConvention`, `MISSING_REFERENCE_DATA`). **Issue #37 remains open**
+because the `DayCount` and market/jurisdiction vocabulary decisions above are
+**still deferred** — the enum-gap resolution is not finished until those are
+explicitly resolved or deliberately scoped into the next issue. **Issue #38**
+(BLI product schemas for `BondOption` / `BondLinkedStructuredProduct`) may be
+**prepared** next, but it **must not land product schemas that depend on
+unresolved `DayCount` / Bond Master convention assumptions**. Before #38 can be
+considered complete, **either** (1) #38 explicitly **excludes** `DayCount` /
+Bond Master convention fields and keeps them in the Bond Master / later issues,
+**or** (2) the `DayCount` vocabulary decision is made first in a reviewed
+prerequisite slice. Do **not** treat #38 as fully unblocked without that
+qualifier. **Do not start Issues #39–#42 yet, and do not start Black-76 /
+Issue #44 yet.**
