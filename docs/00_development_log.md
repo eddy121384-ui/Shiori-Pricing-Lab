@@ -582,3 +582,34 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   added. `TREASURY_FTP_REFERENCE` still does not imply an FTP parser or
   ingestion exists — only that the mode's controlled vocabulary is now
   available for a future `DepositLeg` implementation to validate against.
+- **`DepositLeg` product schema implemented — BLI MVP Slice A
+  (`src/shiori_pricing_lab/products/deposit_leg.py`,
+  `tests/test_deposit_leg.py`).** Following `docs/18` §3/§4/§8, `DepositLeg`
+  is a pure deal-term/rate-source-selector schema
+  (`deposit_leg_id`, `deposit_notional`, `currency`, `start_date`,
+  `maturity_date`, `deposit_rate_mode`, `principal_repayment_rule`, plus an
+  optional `tenor`), consumed as a leg component by a future
+  `BondLinkedStructuredProduct` wrapper — not a standalone product; it
+  carries a `leg_type` discriminator (`"DEPOSIT_LEG"`), not a
+  `product_type`. It uses the controlled vocabulary landed in the prior
+  slice: `DepositRateMode`, and a new, deliberately narrow
+  `PrincipalRepaymentRule` enum with only `FULL_PRINCIPAL_AT_MATURITY`
+  (`PRINCIPAL_PLUS_OPTION_PAYOFF` / `PRINCIPAL_AFFECTED_BY_OPTION_PAYOFF` /
+  `PHYSICAL_BOND_DELIVERY` remain deferred to the future wrapper, per
+  `docs/18` §6). Exactly one of `fixed_deposit_rate` /
+  `ftp_rate_selector` / `manual_input_reference` is required and the other
+  two must be `None`, matching `deposit_rate_mode`. `TREASURY_FTP_REFERENCE`
+  mode uses a new `TreasuryFTPRateSelector` value object
+  (currency/tenor/quote_side only, validated against `Currency` /
+  `TreasuryFTPTenor` / `TreasuryFTPQuoteSide`) — **it carries no
+  `business_date`, `as_of_timestamp`, `source_file_name`, `loaded_at`, or
+  resolved rate**; those remain deferred to a future `MarketDataSnapshot` /
+  MVP input bundle. `MANUAL_VERIFIED_RATE` mode stores only a
+  `manual_input_reference` marker — **no manual rate value or its audit
+  metadata (source, as-of, entered-by, run id) lives on `DepositLeg`**; that
+  provenance remains deferred to the input-bundle/audit-provenance layer.
+  `day_count`, `business_day_convention`, and `calendar` remain absent, same
+  as `BondOption`'s precedent, pending the A-14 decision. **No Treasury FTP
+  parser, ingestion, `MarketDataSnapshot`, pricing engine, QuantLib, or
+  `BondLinkedStructuredProduct` wrapper was added.** Issue #38 is
+  unaffected.
