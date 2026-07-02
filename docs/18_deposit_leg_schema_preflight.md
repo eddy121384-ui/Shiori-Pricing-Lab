@@ -73,6 +73,16 @@ force every downstream consumer to convert. `source_file_name` and
 (`docs/17` §10) — a rate that entered the system must be traceable back to
 which file and when.
 
+**This normalized record belongs to `MarketDataSnapshot` / an MVP input
+bundle / the audit-provenance layer — it does not belong to `DepositLeg`.**
+In particular, `business_date` is a **valuation-run-specific** value (which
+day's FTP sheet applied), not a fixed deal term, so it must never be frozen
+into the immutable product schema. `DepositLeg` may only carry a *stable
+selector* (currency/tenor/quote_side, §4.2) that says "look up Treasury FTP
+for this shape"; the dated record that answers that lookup for a specific
+pricing run is chosen from the market/funding-data snapshot at pricing
+time, not stored on the trade.
+
 ### 2.2 Percent-vs-decimal rule
 
 - The sheet quotes rates as **percentages**: `USD O/N = 3.5500` means
@@ -139,19 +149,23 @@ or MVP-input-bundle-supplied source, not a general file-import system.
 | `tenor` | Optional for MVP | Useful for `TREASURY_FTP_REFERENCE` lookups (§4.2) and audit/display; derivable from `start_date`/`maturity_date` in principle, but storing it explicitly avoids recomputing a tenor label from dates. Depends on the tenor-vocabulary gap in §2.3. |
 | `deposit_rate_mode` | Required for MVP | Controlled vocabulary: `FIXED_RATE` / `TREASURY_FTP_REFERENCE` / `MANUAL_VERIFIED_RATE` (§4). |
 | `fixed_deposit_rate` | Required only when `deposit_rate_mode == FIXED_RATE` | Decimal rate, finite-number validated; must be `None` otherwise. |
-| `ftp_rate_reference` | Required only when `deposit_rate_mode == TREASURY_FTP_REFERENCE` | A **reference** (business_date/currency/tenor/quote_side lookup key), not the rate itself — see the schema/market-data boundary in §9. Must be `None` otherwise. |
-| `manual_verified_rate` | Required only when `deposit_rate_mode == MANUAL_VERIFIED_RATE` | Decimal rate plus audit metadata (source, as-of, entered-by) — see §4.3. Must be `None` otherwise. |
+| `ftp_rate_selector` | Required only when `deposit_rate_mode == TREASURY_FTP_REFERENCE` | A **stable selector** (currency/tenor/quote_side, and optionally a `source_policy`/`curve_family` if needed later) — **not** a `business_date` and not the rate itself. See §4.2 and §8. Must be `None` otherwise. |
+| `manual_input_reference` | Required only when `deposit_rate_mode == MANUAL_VERIFIED_RATE` | A **reference marker only** (e.g. an identifier pointing at the manual pricing-input record). The actual manual rate and its audit metadata (source, as-of, entered-by, run id) live outside `DepositLeg` — see §4.3. Must be `None` otherwise. |
 | `principal_repayment_rule` | Required for MVP | Controlled vocabulary (§6). |
 | `day_count` | Deferred | Blocked by the unresolved Issue #37 `DayCount` vocabulary decision (A-14) — see §7. |
 | `business_day_convention` | Deferred | Same blocker as `day_count`; also needs a calendar to resolve, which is out of MVP scope. |
 | `calendar` | Deferred | No calendar engine exists in the repo; out of MVP scope (§7). |
 
-**Boundary:** `DepositLeg` may store a *reference* to the Treasury FTP rate
-source (`ftp_rate_reference`: the business_date/currency/tenor/quote_side
-lookup key) but must **not** embed the FTP rate table, a rate history, or
-any other market/funding-data payload. This mirrors the existing
-`docs/04`/`docs/16` rule that a product schema may point at a rate but must
-not carry the rate matrix itself.
+**Boundary:** `DepositLeg` may store a *stable selector* pointing at the
+Treasury FTP rate source (`ftp_rate_selector`: currency/tenor/quote_side,
+never `business_date`) but must **not** embed the FTP rate table, a rate
+history, a specific dated rate record, or any other market/funding-data
+payload. This mirrors the existing `docs/04`/`docs/16` rule that a product
+schema may point at a rate *shape* but must not carry the rate matrix, a
+specific business-date's value, or any other snapshot-specific data —
+those belong to `MarketDataSnapshot` / the MVP input bundle, resolved at
+pricing/revaluation time so that replay and scenario pricing can choose a
+different as-of date without mutating the immutable trade record.
 
 ---
 
@@ -182,18 +196,35 @@ Three options, evaluated as requested by `docs/17` §4 and §12:
 
 ### 4.2 Option B — `TREASURY_FTP_REFERENCE`
 
-- **Schema fields needed:** `ftp_rate_reference` — a structured reference
-  (`business_date`, `currency`, `tenor`, `quote_side`), not a rate value.
+- **Schema fields needed:** `ftp_rate_selector` — a structured, **stable**
+  selector (`currency`, `tenor`, `quote_side`, and optionally
+  `source_policy` / `curve_family` if a later design needs to distinguish
+  multiple FTP curve families for the same currency/tenor). **No
+  `business_date` field.** A `business_date` (or `as_of`) is
+  valuation-run-specific, not a trade term: which day's FTP sheet applies
+  is a property of a *pricing run* (today's valuation, a historical
+  replay, a scenario), not of the deposit leg itself. Freezing a
+  `business_date` into `DepositLeg` would make the trade record itself
+  change meaning depending on when it was priced, or would require a new
+  `DepositLeg` instance per valuation date — both wrong. `business_date`,
+  `as_of_timestamp`, `source_file_name`, `loaded_at`, and the resolved
+  rate value all belong to `MarketDataSnapshot`, the MVP input bundle, or
+  the audit/provenance layer (§2.1), never to the product schema.
 - **Validation required:** required iff `deposit_rate_mode ==
   TREASURY_FTP_REFERENCE`; `currency` must match the deposit leg's own
-  `currency` (no silent cross-currency lookup); `tenor` must map to the
-  FTP tenor vocabulary (§2.3 gap); `quote_side` must be one of
-  `BID`/`MID`/`OFFER`, defaulting to `MID` if unspecified (§5).
-- **What belongs outside the schema:** the actual rate matrix and the
-  resolved rate value — these are market/funding data, resolved at
-  pricing time against an MVP input bundle or (later) a live source, per
-  `docs/04`/`docs/16`. The product schema never carries the resolved
-  number.
+  `currency` (no silent cross-currency lookup); `tenor` must map to a
+  controlled FTP tenor vocabulary (§2.3) — **this vocabulary must exist
+  before `TREASURY_FTP_REFERENCE` is enabled**, not validated with a
+  placeholder check (§12); `quote_side` must be one of `BID`/`MID`/`OFFER`,
+  defaulting to `MID` if unspecified (§5).
+- **What belongs outside the schema:** the `business_date`, the actual
+  rate matrix, and the resolved rate value — all market/funding data,
+  resolved at pricing time against an MVP input bundle or (later) a live
+  source, per `docs/04`/`docs/16`. Revaluation, replay, and scenario
+  pricing choose the applicable FTP business/as-of date from the selected
+  market/funding-data snapshot for that run, not from the immutable
+  product schema. The product schema only ever says "use Treasury FTP for
+  this currency/tenor/side" — never "use the FTP rate as of this date."
 - **Pros:** matches the real Treasury FTP sheet format now that it is
   known (§2); keeps the schema honest about "this rate is looked up, not
   agreed," which is closer to actual desk practice for funding rates.
@@ -210,24 +241,48 @@ Three options, evaluated as requested by `docs/17` §4 and §12:
 
 ### 4.3 Option C — `MANUAL_VERIFIED_RATE`
 
-- **Schema fields needed:** `manual_verified_rate` (decimal, finite) plus
-  audit metadata: source description, as-of date, and (if available)
-  entered-by / run id — reusing the audit-trail field list from `docs/17`
-  §10 rather than inventing a parallel one.
+**Boundary correction:** the actual manually supplied rate must **not** be
+a `DepositLeg` field, for the same reason `business_date` must not be
+(§4.2). A manually verified rate is, by definition, an MVP **pricing
+input** supplied for a specific run — not a term the two counterparties
+agreed to at trade execution. If a rate is meant to be frozen into the
+trade itself, that is `FIXED_RATE` (§4.1), not this mode.
+
+- **Schema fields needed:** `manual_input_reference` only — an opaque
+  marker/identifier (e.g. "this deposit leg's rate is manually supplied;
+  see the referenced pricing-input record") that lets a pricing run find
+  the corresponding manual rate. **No `manual_verified_rate` field, no
+  source description, no as-of date, no entered-by/run id on
+  `DepositLeg`.**
 - **Validation required:** required iff `deposit_rate_mode ==
-  MANUAL_VERIFIED_RATE`; audit fields required alongside the rate (a
-  manual rate without provenance is exactly the "silent manual override"
+  MANUAL_VERIFIED_RATE`; `manual_input_reference` non-blank. The actual
+  rate value and its audit metadata (source description, as-of date,
+  entered-by, run id — reusing the audit-trail field list from `docs/17`
+  §10) are validated where they actually live: the MVP input bundle /
+  valuation context / `MarketDataSnapshot`-like structure and the
+  `PricingResult` audit trail, not on the product schema. A manual rate
+  without that provenance is exactly the "silent manual override"
   `docs/16` §1 warns against for Manual Override / Manual Entry, the final
-  fallback tier).
-- **What belongs outside the schema:** nothing structural, but the
-  *process* of who verifies the rate and how is outside this doc's scope.
+  fallback tier — but the fix is to require the provenance at the
+  input/audit layer, not to store it on the immutable trade.
+- **What belongs outside the schema:** the manual rate value itself, its
+  source description, as-of date, entered-by, and run id — all of it. Only
+  the reference marker lives on `DepositLeg`.
+- **Naming note:** if implementation finds `MANUAL_VERIFIED_RATE` reads as
+  implying the rate itself lives on the schema, a future slice may rename
+  it to `MANUAL_VERIFIED_RATE_REFERENCE` for clarity; either name is
+  acceptable as long as the field boundary above (reference only, no rate
+  value) is preserved.
 - **Pros:** unblocks MVP work before either a fixed-rate convention or a
   Treasury FTP reference-resolution path exists; matches `docs/16`'s
-  "MVP may use manually supplied, verified inputs" language.
-- **Cons:** weakest methodology guarantee of the three if audit fields are
-  ever made optional; must not become the permanent path.
-- **Risk of silent methodology drift:** medium — mitigated only if audit
-  fields are mandatory, not optional.
+  "MVP may use manually supplied, verified inputs" language, without
+  compromising the schema/market-data boundary.
+- **Cons:** weakest methodology guarantee of the three if the referenced
+  input/audit record is ever made optional or unverified; must not become
+  the permanent path.
+- **Risk of silent methodology drift:** medium — mitigated only if the
+  referenced manual pricing input and its audit metadata are mandatory,
+  not optional, at the input/audit layer.
 - **MVP suitability:** good as a **bridge** mode, not a destination.
 
 ### 4.4 Recommendation
@@ -247,10 +302,12 @@ MANUAL_VERIFIED_RATE
 ```
 
 with **exactly** the fields for the selected mode required, and the other
-modes' fields required to be `None` (§11). No implementation is added by
-this PR — this is the boundary a future `DepositLeg` implementation slice
-should follow, per `docs/15`'s precedent of deciding the boundary before
-writing schema code.
+modes' fields required to be `None` (§11). In every mode, `DepositLeg`
+itself carries only trade terms, stable selectors, or reference markers —
+never a `business_date`, a resolved market rate, or manual-input audit
+metadata (§4.2, §4.3, §8). No implementation is added by this PR — this is
+the boundary a future `DepositLeg` implementation slice should follow, per
+`docs/15`'s precedent of deciding the boundary before writing schema code.
 
 ---
 
@@ -360,14 +417,21 @@ Restated explicitly for `DepositLeg`, consistent with `docs/04` and
 
 - The product schema may carry **trade terms** (`deposit_notional`,
   `currency`, dates, `deposit_rate_mode`, a `fixed_deposit_rate` if that
-  mode is chosen) and **references** (`ftp_rate_reference`'s lookup key).
+  mode is chosen) and **stable selectors/references**
+  (`ftp_rate_selector`'s currency/tenor/quote_side, or
+  `manual_input_reference`'s marker) — never a `business_date`, a resolved
+  rate value, or manual-input audit metadata.
 - Treasury FTP / Funding Curve **rates are not product terms** unless
   explicitly fixed at trade time (`FIXED_RATE` mode, §4.1) — in
-  `TREASURY_FTP_REFERENCE` mode, the resolved rate is market/funding data,
-  resolved at pricing time, never stored on the schema.
+  `TREASURY_FTP_REFERENCE` mode, both the applicable `business_date` and
+  the resolved rate are market/funding data, resolved at pricing time from
+  the run's `MarketDataSnapshot` / MVP input bundle, never stored on the
+  schema. The same applies to `MANUAL_VERIFIED_RATE` mode: the manually
+  supplied rate and its audit trail live in the input/audit layer, not on
+  `DepositLeg` (§4.3).
 - Market/funding data must **not** be embedded silently into the product
-  schema — no full FTP rate table, no rate history, no cached resolved
-  value living on `DepositLeg`.
+  schema — no full FTP rate table, no rate history, no specific
+  business-date's rate, no cached resolved value living on `DepositLeg`.
 - **No generic file import is implied by this doc.** The Treasury FTP
   sheet format (§2) informs the *shape* of a future normalized record and
   a future MVP input bundle (`docs/17` §7/§11 slice D); it does not require
@@ -415,17 +479,29 @@ relationship so a future wrapper preflight/implementation can reference it.
 deposit_notional > 0
 start_date < maturity_date
 currency must use the existing Currency enum
-tenor must map to the available FTP tenor vocabulary if using TREASURY_FTP_REFERENCE
+DepositLeg must not accept a business_date / as_of field for TREASURY_FTP_REFERENCE
+  (that belongs to MarketDataSnapshot / the MVP input bundle, resolved per pricing run)
+ftp_rate_selector.tenor must map to a controlled FTP tenor vocabulary, not the
+  existing Frequency enum and not a placeholder/unchecked string
+  (e.g. "ON" vs "O/N" must be rejected before construction or reference
+  resolution, not silently accepted or silently normalized)
 quote_side must be BID / MID / OFFER if a side is available
 default quote_side = MID
 fixed_deposit_rate required only when deposit_rate_mode is FIXED_RATE
-ftp_rate_reference required only when deposit_rate_mode is TREASURY_FTP_REFERENCE
-manual_verified_rate required only when deposit_rate_mode is MANUAL_VERIFIED_RATE
+ftp_rate_selector required only when deposit_rate_mode is TREASURY_FTP_REFERENCE
+  (selector fields only: currency/tenor/quote_side[/source_policy]; never
+  business_date, never a resolved rate)
+manual_input_reference required only when deposit_rate_mode is MANUAL_VERIFIED_RATE
+  (reference marker only; never the manual rate value or its audit metadata)
 do not allow multiple rate sources at the same time (mutual exclusivity across modes)
 rate_percent must convert to decimal explicitly (divide by 100, not implicit)
+  -- applies to the MarketDataSnapshot / input-bundle record, not a DepositLeg field
 rate must reject blank / non-numeric / NaN / infinity
   (reuse the _require_finite_number pattern introduced for
-  BondOption.strike_yield, PR #50's Codex P2 fix)
+  BondOption.strike_yield, PR #50's Codex P2 fix) -- again at the
+  snapshot/input-bundle layer for TREASURY_FTP_REFERENCE and
+  MANUAL_VERIFIED_RATE modes, and on DepositLeg.fixed_deposit_rate itself
+  for FIXED_RATE mode
 principal_repayment_rule must be controlled vocabulary
 ```
 
@@ -464,15 +540,35 @@ tests
 
 - accepting the three-mode `deposit_rate_mode` design (§4.4) as the
   schema boundary (rather than picking a single mode), and
-- either (a) closing the tenor-vocabulary gap (§2.3) before enabling
-  `TREASURY_FTP_REFERENCE` mode, or (b) implementing `DepositLeg` with
-  `TREASURY_FTP_REFERENCE` mode present in the enum but validated only
-  against a minimal/placeholder tenor check until §2.3 is resolved
-  separately.
+- accepting the selector/reference-only field boundary for
+  `TREASURY_FTP_REFERENCE` (§4.2) and `MANUAL_VERIFIED_RATE` (§4.3) — no
+  `business_date`, no resolved rate, no manual-rate audit metadata on
+  `DepositLeg` itself.
 
-If neither condition is accepted, `DepositLeg` implementation should wait
-for a follow-up decision rather than proceeding with an unresolved tenor
-vocabulary or a single hard-coded rate-source mode.
+**`TREASURY_FTP_REFERENCE` must not be enabled with placeholder or
+unchecked tenor validation.** A controlled FTP tenor vocabulary (or an
+equivalently explicit, reviewed tenor-validation rule) must exist —
+**and must not reuse the existing `Frequency` enum**, which is a
+payment/reset period vocabulary, not a tenor label set (§2.3) — before
+`TREASURY_FTP_REFERENCE` mode can be enabled for product construction or
+reference resolution. Unsupported or misspelled tenors (e.g. `ON` vs
+`O/N`) must be rejected outright, not silently accepted or coerced.
+
+**Preferred sequencing:** the next slice should first add the controlled
+FTP tenor vocabulary, the quote-side vocabulary (`BID`/`MID`/`OFFER`), and
+the `deposit_rate_mode` vocabulary — either as their own small
+vocabulary-only PR (mirroring PR #45's controlled-vocabulary slice for the
+BLI product enums), or bundled into the `DepositLeg` schema implementation
+PR itself, as long as `TREASURY_FTP_REFERENCE` is not enabled before that
+vocabulary lands. This does **not** imply implementing the actual Treasury
+FTP parser or ingestion in that slice — only the controlled vocabulary and
+the `DepositLeg` schema fields/validation.
+
+If the tenor vocabulary is not ready, `DepositLeg` may still be implemented
+with `FIXED_RATE` and `MANUAL_VERIFIED_RATE` modes available, and
+`TREASURY_FTP_REFERENCE` present in the `deposit_rate_mode` enum but
+rejected/unavailable for construction until the tenor vocabulary lands —
+never accepted with a placeholder check.
 
 Slices B (Bond reference fixture), C (wrapper schema), D (manual MVP input
 bundle), E (deterministic payoff skeleton), F (QuantLib benchmark), and G

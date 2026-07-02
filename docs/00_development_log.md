@@ -544,3 +544,21 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   `participation_ratio` must be derived/validated against
   `bond_option.notional / deposit_notional`. No `DepositLeg` code, FTP
   parser, ingestion, wrapper, pricing engine, or tests were added.
+- **DepositLeg preflight tightened after Codex P2 review, docs-only
+  (`docs/18` update).** Three schema/market-data boundary issues fixed:
+  (1) `TREASURY_FTP_REFERENCE` no longer carries a `business_date` field —
+  renamed to `ftp_rate_selector` (currency/tenor/quote_side only); the
+  applicable business date is chosen from the pricing run's
+  `MarketDataSnapshot` / MVP input bundle, never frozen into the immutable
+  `DepositLeg`. (2) `MANUAL_VERIFIED_RATE` no longer carries the manual
+  rate or its audit metadata directly — renamed to
+  `manual_input_reference` (a reference marker only); the actual rate,
+  source, as-of date, and entered-by/run id live in the input-bundle /
+  audit-provenance layer, not on the product schema. A rate meant to be a
+  frozen trade term is `FIXED_RATE`, not this mode. (3) The "implement
+  with placeholder tenor validation" option for `TREASURY_FTP_REFERENCE`
+  was removed from the recommended next slice — a controlled FTP tenor
+  vocabulary (not the existing `Frequency` enum) must exist before that
+  mode can be enabled; the preferred sequencing now adds the tenor /
+  quote-side / deposit-rate-mode vocabularies first. No code, tests, or
+  other doc besides `docs/18`/`docs/09` was touched.
