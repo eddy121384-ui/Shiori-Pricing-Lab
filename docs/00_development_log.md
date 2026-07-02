@@ -383,6 +383,37 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   as fully unblocked without that qualifier. Issues **#39–#42 and #44
   (Black-76) are not started** and should not be started before #38 lands.
 
+### PR (this) — BLI product schema preflight (Issue #38)
+
+- **What changed:** Added
+  `docs/15_bli_product_schema_preflight_issue_38.md`, a docs-only preflight
+  answering whether `BondOption` and `BondLinkedStructuredProduct` can be
+  defined as pure deal-term schemas without the still-unresolved `DayCount` /
+  Bond Master convention decision (Issue #37 remains open per PR #46).
+- **Conclusion:** **Yes, with a boundary.** `BondOption` can be a fully pure
+  deal-term schema (identity, option terms, strike/payoff-basis cross-field
+  validation, dates, notional, position) with no `day_count`,
+  `yield_convention`, or `compounding_frequency` field — those are Bond
+  Master reference data. A **deliberately minimal**
+  `BondLinkedStructuredProduct` wrapper (deposit notional/currency/dates
+  recorded but not used for accrual, an embedded `BondOption`,
+  `participation_ratio`) is also safe. The **full** SPEC §6.1 deposit leg
+  (Day Count, Business Day Convention, Deposit Rate/Yield, Deposit Curve ID)
+  is **not** safe for #38 — those fields hit the same unresolved `DayCount`
+  decision (A-14) and/or are live market data, and must be split into a
+  later, separately reviewed issue.
+- **Why it mattered:** Prevents #38 from silently reusing the existing
+  rates-core `DayCount` enum on a deposit leg that was never reconciled
+  against Annex A/B — exactly the "silently coerced to the wrong convention"
+  failure Issue #37 exists to prevent (`docs/14` F-16).
+- **Intentionally not done:** **Docs only.** No `BondOption` /
+  `BondLinkedStructuredProduct` code, no tests, no schema
+  registration/export changes, no pricing engine, no `MarketDataSnapshot`
+  change, no Bond Master schema, no `DayCount` enum decision (documented as
+  required, not made). Issues #39–#42 and #44 (Black-76) are not started.
+- **Review / validation:** Documentation-only change; `git diff --check` →
+  clean. No test or lint impact (no source changed).
+
 ## Checkpoint summary
 
 - Issues #1 and #2 are closed (PR #18 merged).
@@ -427,3 +458,12 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   fields (keeping them in the Bond Master / later issues), **or** (2) the
   `DayCount` vocabulary decision is made first in a reviewed prerequisite slice.
   **Do not start Issues #39–#42 or #44 (Black-76) yet.**
+- **BLI product-schema preflight for Issue #38 is complete
+  (`docs/15_bli_product_schema_preflight_issue_38.md`).** Conclusion:
+  `BondOption` can be defined as a pure deal-term schema with no `DayCount` /
+  Bond Master convention fields; a **minimal** `BondLinkedStructuredProduct`
+  wrapper is also safe. The **full** SPEC §6.1 deposit leg (Day Count,
+  Business Day Convention, Deposit Rate/Yield, Deposit Curve ID) is **not**
+  safe for #38 and must be split into a later, separately reviewed issue
+  once the `DayCount` decision (A-14) is made. `docs/15` §6 lists the
+  acceptance-criteria tests the future #38 implementation PR should add.

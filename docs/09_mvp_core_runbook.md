@@ -407,3 +407,21 @@ Bond Master convention fields and keeps them in the Bond Master / later issues,
 prerequisite slice. Do **not** treat #38 as fully unblocked without that
 qualifier. **Do not start Issues #39–#42 yet, and do not start Black-76 /
 Issue #44 yet.**
+
+### BLI product-schema preflight for Issue #38
+
+`docs/15_bli_product_schema_preflight_issue_38.md` answers, before any #38
+code is written, whether `BondOption` / `BondLinkedStructuredProduct` can be
+pure deal-term schemas without the still-unresolved `DayCount` / Bond Master
+convention decision. **Conclusion:** `BondOption` can be defined as a fully
+pure deal-term schema (identity, option terms, strike/payoff-basis
+cross-field validation, dates, notional, position) with **no** `day_count`,
+`yield_convention`, or `compounding_frequency` field. A **deliberately
+minimal** `BondLinkedStructuredProduct` wrapper (deposit
+notional/currency/dates recorded but not used for accrual, an embedded
+`BondOption`, `participation_ratio`) is also safe. The **full** SPEC §6.1
+deposit leg (Day Count, Business Day Convention, Deposit Rate/Yield, Deposit
+Curve ID) is **not** safe for #38 and must be split into a later,
+separately reviewed issue once the `DayCount` decision (A-14) is made.
+`docs/15` §6 lists the acceptance-criteria tests the future #38
+implementation PR should add; none of that schema/test code is written yet.
