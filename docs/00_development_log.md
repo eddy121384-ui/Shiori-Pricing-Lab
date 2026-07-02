@@ -562,3 +562,23 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   mode can be enabled; the preferred sequencing now adds the tenor /
   quote-side / deposit-rate-mode vocabularies first. No code, tests, or
   other doc besides `docs/18`/`docs/09` was touched.
+- **DepositLeg / Treasury FTP controlled vocabulary landed
+  (`src/shiori_pricing_lab/products/enums.py`,
+  `tests/test_deposit_leg_vocab.py`).** Adds `DepositRateMode`
+  (`FIXED_RATE`/`TREASURY_FTP_REFERENCE`/`MANUAL_VERIFIED_RATE`),
+  `TreasuryFTPQuoteSide` (`BID`/`MID`/`OFFER`), and `TreasuryFTPTenor`
+  (`O/N` through `3Y`, plus `DEMAND_SAVINGS`) — the enum foundation
+  `docs/18` §12 required before `TREASURY_FTP_REFERENCE` mode can be
+  enabled. `TreasuryFTPTenor` is a deliberately separate vocabulary from
+  the existing `Frequency` enum (a payment/reset period vocabulary, not a
+  tenor label set); tests assert the two enums' value sets are disjoint.
+  Unsupported/ambiguous tenor spellings (`ON`, `O_N`, `1WK`, `12M`,
+  whitespace variants, blank) are rejected through the existing
+  `coerce_enum` path, matching the case-sensitive, exact-value coercion
+  convention already used for every other product enum — no new
+  coercion policy was introduced. **This PR adds vocabulary only:** no
+  `DepositLeg` schema, Treasury FTP parser, ingestion,
+  `BondLinkedStructuredProduct`, pricing engine, or market-data code was
+  added. `TREASURY_FTP_REFERENCE` still does not imply an FTP parser or
+  ingestion exists — only that the mode's controlled vocabulary is now
+  available for a future `DepositLeg` implementation to validate against.

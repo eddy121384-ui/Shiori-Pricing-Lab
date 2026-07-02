@@ -493,14 +493,31 @@ ingestion, and does not start Issues #39–#42 or #44.
   stores only a `manual_input_reference` marker. The dated rate, its
   resolution, and its provenance live in `MarketDataSnapshot` / the MVP
   input bundle / the audit trail (`docs/18` §4.2, §4.3, §8).
-- No controlled tenor vocabulary exists yet for FTP tenors (`O/N`, `1W`
-  ... `3Y`); **`TREASURY_FTP_REFERENCE` must not be enabled with
-  placeholder or unchecked tenor validation, and must not reuse the
-  existing `Frequency` enum.** A controlled FTP tenor vocabulary must land
-  first (`docs/18` §2.3, §12).
 - `day_count`, `business_day_convention`, and `calendar` remain deferred
   on the deposit leg, same reasoning as `BondOption` and the still-open
   A-14 decision.
+
+### DepositLeg / Treasury FTP controlled vocabulary landed
+
+`DepositRateMode`, `TreasuryFTPQuoteSide`, and `TreasuryFTPTenor`
+(`src/shiori_pricing_lab/products/enums.py`, tested in
+`tests/test_deposit_leg_vocab.py`) are the enum foundation `docs/18` §12
+required before `TREASURY_FTP_REFERENCE` mode can be enabled. **The
+tenor-vocabulary gap the checkpoint above used to flag is now closed at
+the vocabulary level:** `TreasuryFTPTenor` covers `O/N` through `3Y` plus
+`DEMAND_SAVINGS`, is deliberately separate from `Frequency` (a
+payment/reset period vocabulary, not a tenor label set — tests assert the
+two enums' value sets are disjoint), and rejects unsupported/ambiguous
+spellings (`ON`, `O_N`, `1WK`, `12M`, whitespace, blank) through the
+existing `coerce_enum` path.
+
+**This does not mean `TREASURY_FTP_REFERENCE` mode or a `DepositLeg`
+schema exists yet.** No `DepositLeg` schema, Treasury FTP parser,
+ingestion, or market-data code was added — only the controlled
+vocabulary a future `DepositLeg` implementation must validate against
+(`docs/18` §12's "controlled FTP tenor vocabulary must land first"
+condition is now satisfied; the schema implementation itself is still a
+separate future slice).
 
 ### Market-data ingestion terminology checkpoint
 

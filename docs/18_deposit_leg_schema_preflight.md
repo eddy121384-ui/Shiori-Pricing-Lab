@@ -103,6 +103,12 @@ time, not stored on the trade.
 O/N, 1W, 2W, 3W, 1M, 2M, 3M, 6M, 9M, 1Y, 2Y, 3Y, demand/savings (if applicable)
 ```
 
+> **Update:** `TreasuryFTPTenor` (`src/shiori_pricing_lab/products/enums.py`)
+> now exists as the controlled-vocabulary answer to the gap below, along
+> with `DepositRateMode` and `TreasuryFTPQuoteSide`. This still does not
+> add a `DepositLeg` schema, a parser, or ingestion — see the vocabulary
+> PR referenced from `docs/09`.
+
 No controlled-vocabulary enum for these tenors exists in the repo today
 (`Frequency` in `enums.py` is a payment/reset period vocabulary —
 `DAILY`/`MONTHLY`/`QUARTERLY`/`SEMI_ANNUAL`/`ANNUAL` — and is not a tenor
