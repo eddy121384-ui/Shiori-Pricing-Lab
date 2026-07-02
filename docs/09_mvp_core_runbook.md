@@ -471,6 +471,28 @@ ingestion, and does not start Issues #39–#42 or #44.
 - Implement in the small slices `docs/17` §11 proposes (A–G); do not fold
   the whole BLI MVP into one PR.
 
+### DepositLeg schema preflight checkpoint (Slice A)
+
+- Before any `DepositLeg`, wrapper, or Treasury FTP rate-parsing work,
+  agents must read `docs/18_deposit_leg_schema_preflight.md`.
+- The Treasury FTP sheet is a rate matrix (business_date × currency ×
+  tenor × quote_side → rate). Rates are quoted as **percent**
+  (`3.5500` = `3.5500%`); pricing code must use the decimal form
+  (`0.035500`), never the raw percent number.
+- Default quote side is `MID` and must be configurable; `BID`/`OFFER`
+  usage must never be silently chosen by code. Currencies without a
+  bid/mid/offer breakdown are treated as MID-equivalent — do not infer a
+  spread the sheet does not provide.
+- `deposit_rate_mode` (`FIXED_RATE` / `TREASURY_FTP_REFERENCE` /
+  `MANUAL_VERIFIED_RATE`) is the recommended schema boundary — do not
+  hard-code a single rate source.
+- No controlled tenor vocabulary exists yet for FTP tenors (`O/N`, `1W`
+  ... `3Y`); this blocks safe `TREASURY_FTP_REFERENCE` validation until
+  resolved (`docs/18` §2.3, §12).
+- `day_count`, `business_day_convention`, and `calendar` remain deferred
+  on the deposit leg, same reasoning as `BondOption` and the still-open
+  A-14 decision.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or

@@ -524,3 +524,23 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   input bundle, deterministic payoff skeleton, QuantLib benchmark if
   needed, MVP runner example) — none started here. Issue #38 is not
   closed; `BondLinkedStructuredProduct` remains deferred.
+- **DepositLeg schema preflight written (Slice A), docs-only
+  (`docs/18_deposit_leg_schema_preflight.md`).** Incorporates the real
+  Treasury FTP rate matrix format (business_date × currency × tenor ×
+  quote_side → rate; percent-quoted, e.g. `3.5500` means `3.5500%` and must
+  convert to decimal `0.035500` for pricing; default quote side `MID`,
+  configurable; currencies without a bid/mid/offer breakdown are treated as
+  MID-equivalent, not inferred). Recommends an explicit `deposit_rate_mode`
+  vocabulary (`FIXED_RATE` / `TREASURY_FTP_REFERENCE` /
+  `MANUAL_VERIFIED_RATE`) rather than picking one source, with exactly the
+  matching fields required per mode. Recommends the narrowest MVP principal
+  repayment rule (`FULL_PRINCIPAL_AT_MATURITY` on the deposit leg, option
+  payoff calculated separately at the wrapper level); defers
+  `PRINCIPAL_AFFECTED_BY_OPTION_PAYOFF` and `PHYSICAL_BOND_DELIVERY`. Flags
+  a still-open gap: no controlled tenor vocabulary exists yet for FTP
+  tenors (`O/N`, `1W`...`3Y`), which blocks safe `TREASURY_FTP_REFERENCE`
+  validation until resolved. `day_count`/`business_day_convention`/
+  `calendar` remain deferred, same as `BondOption`. Restates
+  `participation_ratio` must be derived/validated against
+  `bond_option.notional / deposit_notional`. No `DepositLeg` code, FTP
+  parser, ingestion, wrapper, pricing engine, or tests were added.
