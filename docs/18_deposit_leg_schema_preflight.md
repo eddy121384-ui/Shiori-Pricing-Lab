@@ -103,21 +103,24 @@ time, not stored on the trade.
 O/N, 1W, 2W, 3W, 1M, 2M, 3M, 6M, 9M, 1Y, 2Y, 3Y, demand/savings (if applicable)
 ```
 
-> **Update:** `TreasuryFTPTenor` (`src/shiori_pricing_lab/products/enums.py`)
-> now exists as the controlled-vocabulary answer to the gap below, along
-> with `DepositRateMode` and `TreasuryFTPQuoteSide`. This still does not
-> add a `DepositLeg` schema, a parser, or ingestion — see the vocabulary
-> PR referenced from `docs/09`.
-
-No controlled-vocabulary enum for these tenors exists in the repo today
-(`Frequency` in `enums.py` is a payment/reset period vocabulary —
+**As of the controlled-vocabulary slice after this preflight,
+`TreasuryFTPTenor` exists in `src/shiori_pricing_lab/products/enums.py`
+(alongside `DepositRateMode` and `TreasuryFTPQuoteSide`) and is the
+approved FTP tenor vocabulary for the observed labels above.** This closes
+the tenor-vocabulary gap **at the vocabulary level only**. `Frequency` in
+`enums.py` remains a payment/reset period vocabulary —
 `DAILY`/`MONTHLY`/`QUARTERLY`/`SEMI_ANNUAL`/`ANNUAL` — and is not a tenor
-label set; it does not include `O/N`, `1W`, `2W`, `3W`, `9M`, or `2Y`/`3Y`,
-and reusing it would silently misrepresent a Treasury FTP tenor as a
-payment frequency). **This is an open gap, not decided here**: a future
-slice must either add a small `FTPTenor`-style controlled vocabulary or
-define an explicit string-tenor validation rule before
-`TREASURY_FTP_REFERENCE` mode (§4.2) can be implemented safely.
+label set; it must **not** be reused as FTP tenor vocabulary, since it does
+not include `O/N`, `1W`, `2W`, `3W`, `9M`, or `2Y`/`3Y`, and reusing it
+would silently misrepresent a Treasury FTP tenor as a payment frequency.
+Unsupported variants such as `ON` (missing the slash) versus the canonical
+`O/N` must be rejected, not accepted or silently normalized.
+
+**This does not add a `DepositLeg` schema, a Treasury FTP parser, FTP
+ingestion, a `MarketDataSnapshot` implementation, or an MVP input-bundle
+implementation** — those remain deferred to later slices (§12). Only the
+tenor (and quote-side, and deposit-rate-mode) vocabulary a future
+`DepositLeg` schema needs to validate against now exists.
 
 ### 2.4 Quote side
 
@@ -552,29 +555,29 @@ tests
   `DepositLeg` itself.
 
 **`TREASURY_FTP_REFERENCE` must not be enabled with placeholder or
-unchecked tenor validation.** A controlled FTP tenor vocabulary (or an
-equivalently explicit, reviewed tenor-validation rule) must exist —
-**and must not reuse the existing `Frequency` enum**, which is a
-payment/reset period vocabulary, not a tenor label set (§2.3) — before
+unchecked tenor validation.** A controlled FTP tenor vocabulary — **and
+must not reuse the existing `Frequency` enum**, which is a payment/reset
+period vocabulary, not a tenor label set (§2.3) — must exist before
 `TREASURY_FTP_REFERENCE` mode can be enabled for product construction or
 reference resolution. Unsupported or misspelled tenors (e.g. `ON` vs
 `O/N`) must be rejected outright, not silently accepted or coerced.
 
-**Preferred sequencing:** the next slice should first add the controlled
-FTP tenor vocabulary, the quote-side vocabulary (`BID`/`MID`/`OFFER`), and
-the `deposit_rate_mode` vocabulary — either as their own small
-vocabulary-only PR (mirroring PR #45's controlled-vocabulary slice for the
-BLI product enums), or bundled into the `DepositLeg` schema implementation
-PR itself, as long as `TREASURY_FTP_REFERENCE` is not enabled before that
-vocabulary lands. This does **not** imply implementing the actual Treasury
-FTP parser or ingestion in that slice — only the controlled vocabulary and
-the `DepositLeg` schema fields/validation.
+**That vocabulary now exists** (§2.3): `DepositRateMode`,
+`TreasuryFTPQuoteSide`, and `TreasuryFTPTenor` landed in
+`src/shiori_pricing_lab/products/enums.py` in the controlled-vocabulary
+slice that followed this preflight. **After the vocabulary slice lands,
+the next slice can implement `DepositLeg` schema only**, using
+`DepositRateMode`, `TreasuryFTPQuoteSide`, and `TreasuryFTPTenor`.
+`TREASURY_FTP_REFERENCE` mode's `ftp_rate_selector` may now validate its
+`tenor` and `quote_side` fields against this controlled vocabulary instead
+of a placeholder check. That implementation slice still must not:
 
-If the tenor vocabulary is not ready, `DepositLeg` may still be implemented
-with `FIXED_RATE` and `MANUAL_VERIFIED_RATE` modes available, and
-`TREASURY_FTP_REFERENCE` present in the `deposit_rate_mode` enum but
-rejected/unavailable for construction until the tenor vocabulary lands —
-never accepted with a placeholder check.
+- store `business_date`, a resolved rate, `source_file_name`, an
+  `as_of_timestamp`, or manual-rate provenance (source, as-of,
+  entered-by, run id) on `DepositLeg` itself (§4.2, §4.3, §8);
+- implement a Treasury FTP parser, FTP ingestion, `MarketDataSnapshot`,
+  an MVP input bundle, a pricing engine, QuantLib, the
+  `BondLinkedStructuredProduct` wrapper, or any UI.
 
 Slices B (Bond reference fixture), C (wrapper schema), D (manual MVP input
 bundle), E (deterministic payoff skeleton), F (QuantLib benchmark), and G
