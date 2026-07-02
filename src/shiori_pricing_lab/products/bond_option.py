@@ -17,6 +17,7 @@ not implemented here; see ``docs/15`` §3 for why it must stay deferred.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from shiori_pricing_lab.products._validation import _parse_iso_date, _require_non_blank
@@ -29,6 +30,20 @@ from shiori_pricing_lab.products.enums import (
     SettlementType,
     coerce_enum,
 )
+
+
+def _require_finite_number(value: object, field_name: str) -> None:
+    """Reject anything that is not a real, finite ``int``/``float``.
+
+    ``bool`` is a ``int`` subclass in Python, so it is excluded explicitly.
+    This only checks "is this a usable real number" — it does not impose a
+    sign; callers apply their own positivity rules on top where needed.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -85,6 +100,7 @@ class BondOption:
         _require_non_blank(self.product_id, "product_id")
         _require_non_blank(self.underlying_isin, "underlying_isin")
 
+        _require_finite_number(self.notional, "notional")
         if not self.notional > 0:
             raise ValueError(f"notional must be positive, got {self.notional}")
 
@@ -124,6 +140,7 @@ class BondOption:
                 raise ValueError("strike_yield must be None when payoff_basis is PRICE")
             if self.strike_price is None:
                 raise ValueError("strike_price is required when payoff_basis is PRICE")
+            _require_finite_number(self.strike_price, "strike_price")
             if not self.strike_price > 0:
                 raise ValueError(f"strike_price must be positive, got {self.strike_price}")
         else:  # PayoffBasis.YIELD
@@ -131,3 +148,6 @@ class BondOption:
                 raise ValueError("strike_price must be None when payoff_basis is YIELD")
             if self.strike_yield is None:
                 raise ValueError("strike_yield is required when payoff_basis is YIELD")
+            # Zero and negative yields are legitimate (unlike a price), so only
+            # a finiteness/type check applies here, deliberately no sign check.
+            _require_finite_number(self.strike_yield, "strike_yield")

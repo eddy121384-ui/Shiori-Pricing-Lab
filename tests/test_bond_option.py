@@ -150,6 +150,15 @@ def test_yield_payoff_with_both_strike_yield_and_strike_price_rejected():
         _bond_option(payoff_basis=PayoffBasis.YIELD, strike_price=99.5, strike_yield=0.03)
 
 
+@pytest.mark.parametrize(
+    "strike_yield",
+    ["abc", float("nan"), float("inf"), float("-inf"), True],
+)
+def test_yield_payoff_rejects_non_finite_or_non_numeric_strike_yield(strike_yield):
+    with pytest.raises(ValueError, match="strike_yield must be a finite number"):
+        _bond_option(payoff_basis=PayoffBasis.YIELD, strike_price=None, strike_yield=strike_yield)
+
+
 # --- notional / settlement_lag_days ---------------------------------------
 
 
