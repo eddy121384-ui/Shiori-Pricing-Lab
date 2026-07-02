@@ -613,3 +613,24 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   parser, ingestion, `MarketDataSnapshot`, pricing engine, QuantLib, or
   `BondLinkedStructuredProduct` wrapper was added.** Issue #38 is
   unaffected.
+- **BLI wrapper schema preflight written, docs-only
+  (`docs/19_bli_wrapper_schema_preflight.md`).** Defines the future
+  `BondLinkedStructuredProduct` wrapper boundary: binds exactly one
+  `DepositLeg` and exactly one `BondOption` (embedded objects, not
+  reference IDs — no registry layer exists yet); recommends deriving
+  `participation_ratio` as a computed property from `bond_option.notional /
+  deposit_leg.deposit_notional` rather than accepting it as an input field,
+  unless a concrete consumer needs the optional-validated-input design
+  `docs/15` §3.3 also allows; requires `deposit_leg.currency ==
+  bond_option.currency` and `bond_option.expiry_date <=
+  deposit_leg.maturity_date`; explicitly flags (rather than silently
+  decides) whether `bond_option.expiry_date` must also be on/after
+  `deposit_leg.start_date`; keeps `DepositLeg.principal_repayment_rule` at
+  `FULL_PRINCIPAL_AT_MATURITY` with option payoff computed separately at
+  the wrapper/pricing level; recommends not adding a payoff-linkage enum
+  yet. Restates the full market-data/pricing-output exclusion list (FTP
+  business date, resolved rates, bond price/yield/vol/spread, PV, premium,
+  margin, customer return, ...) must never live on the wrapper. Recommends
+  the next slice — wrapper schema implementation only — with an acceptance
+  checklist. No wrapper code, pricing, or tests were added. Issue #38
+  remains open.
