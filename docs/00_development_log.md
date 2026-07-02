@@ -508,3 +508,19 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   Treasury FTP / Funding Curve semantics (`docs/16`), and the
   `DayCount`/calendar boundary (A-14). No pricing engine, market-data
   ingestion, or UI code was touched by this slice.
+- **BLI MVP vertical-slice preflight written, docs-only
+  (`docs/17_bli_mvp_vertical_slice_preflight.md`).** Defines the smallest
+  complete Bond Linked Structured Product MVP — one plain-vanilla bond, one
+  deposit leg, one embedded `BondOption` leg, European exercise and cash
+  settlement first — as a target for future implementation slices, not as
+  an implementation itself. It does not resolve the deposit rate/yield
+  source (fixed term vs. Treasury FTP / Funding Curve lookup vs. both under
+  an explicit mode) or the `DayCount`/calendar decision (A-14); both remain
+  open MVP decisions for the future `DepositLeg` preflight. It restates
+  that `participation_ratio` must be derived/validated, not freely set, and
+  adds a QuantLib usage policy (allowed as a computational library, never
+  as an unreviewed methodology owner). Proposes seven small future slices
+  (A–G: deposit leg, bond reference fixture, wrapper schema, manual MVP
+  input bundle, deterministic payoff skeleton, QuantLib benchmark if
+  needed, MVP runner example) — none started here. Issue #38 is not
+  closed; `BondLinkedStructuredProduct` remains deferred.
