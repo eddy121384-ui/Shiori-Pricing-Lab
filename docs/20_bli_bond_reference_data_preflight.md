@@ -454,8 +454,11 @@ only.** Still no pricing. That slice should:
 - implement required, non-null, strict-ISO-date validation for
   `first_coupon_date` and `last_coupon_date` — these are required
   reference-data fields, not optional (§4);
-- reject negative `coupon` values, and explicitly resolve whether
-  `coupon == 0` is MVP-pricing-eligible or out of scope (§5);
+- reject negative `coupon` values at reference-data validation, **accept
+  `coupon == 0` as valid reference data** (never reject it at that layer),
+  and separately, explicitly resolve whether a zero-coupon bond is
+  MVP-pricing-eligible or valid-but-ineligible for MVP pricing (§5) — a
+  pricing-eligibility decision, not a reference-data validation outcome;
 - add the plain-vanilla eligibility check (§5), resolving the
   floating/amortizing/convertible/etc. exclusion-mechanism open item
   explicitly, **and** explicitly keeping bonds with an irregular
@@ -512,11 +515,12 @@ A future Bond Reference Data implementation PR should satisfy:
   - an invalid `first_coupon_date` / `last_coupon_date` format is
     rejected (non-`YYYY-MM-DD` or non-calendar date);
   - a negative `coupon` is rejected;
-  - `coupon == 0` is either accepted as valid reference data with the
-    zero-coupon MVP-pricing-eligibility decision applied explicitly
-    (accepted or marked ineligible, per whichever choice §5 records), or
-    rejected — the test must reflect whichever explicit rule that slice
-    adopted, not an untested assumption;
+  - `coupon == 0` is accepted as valid reference data — a test must prove
+    construction succeeds, not that it is rejected; the future
+    implementation slice must explicitly decide whether zero-coupon bonds
+    are MVP-pricing-eligible or valid-but-ineligible for MVP pricing (a
+    separate eligibility-layer test, per whichever choice §5 records),
+    but reference-data validation itself must never reject `coupon == 0`;
   - irregular first/last coupon stub handling is exercised explicitly —
     either a test proving a detected-irregular bond is marked ineligible,
     or (if detection is not implemented) a test/comment documenting that
