@@ -10,17 +10,23 @@ Strict boundaries:
 - No market data, curves, fixings, valuation date, or pricing output lives here.
 - This package must not import the data, pricing, valuation, or AI layers.
 
-Currently provides IRS, OIS, CCS, FX Swap, BondOption, and DepositLeg
-(schema only). ``BondLinkedStructuredProduct`` is intentionally not
-provided yet — see ``docs/15_bli_product_schema_preflight_issue_38.md`` §3
-and ``docs/18_deposit_leg_schema_preflight.md``. ``DepositLeg`` is a leg
-component consumed by that future wrapper, not a standalone product; it
-carries no Treasury FTP business date, resolved rate, or manual-rate
-provenance — see ``docs/18`` §4/§8.
+Currently provides IRS, OIS, CCS, FX Swap, BondOption, DepositLeg, and
+BondLinkedStructuredProduct (schema only). ``DepositLeg`` and ``BondOption``
+are components consumed by ``BondLinkedStructuredProduct``, not standalone
+products in their own right — see ``docs/18_deposit_leg_schema_preflight.md``
+and ``docs/19_bli_wrapper_schema_preflight.md``. The wrapper owns the
+relationship between its two components (currency consistency, a
+derived-only ``participation_ratio``, CASH-settlement and
+effective-settlement-date guardrails) and carries no Treasury FTP business
+date, resolved rate, manual-rate provenance, or any pricing output — see
+``docs/19`` §3/§9.
 """
 
 from __future__ import annotations
 
+from shiori_pricing_lab.products.bond_linked_structured_product import (
+    BondLinkedStructuredProduct,
+)
 from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.products.cross_currency import (
     CrossCurrencyLeg,
@@ -52,6 +58,7 @@ from shiori_pricing_lab.products.legs import FixedLeg, FloatingLeg
 from shiori_pricing_lab.products.swaps import InterestRateSwap, OvernightIndexedSwap
 
 __all__ = [
+    "BondLinkedStructuredProduct",
     "BondOption",
     "BondYieldConvention",
     "BusinessDayConvention",
