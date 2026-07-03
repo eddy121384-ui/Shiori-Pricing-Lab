@@ -93,6 +93,10 @@ yield curve data / curve references
 deposit / FTP rate observation
   (per docs/18 §2, when DepositLeg.deposit_rate_mode is
   TREASURY_FTP_REFERENCE)
+option volatility / used volatility, with an explicit vol basis
+  (per SPEC §§3.2/3.3/7.4, §6.5)
+credit spread / spread adjustment, if required by mapping/methodology
+  (per SPEC §7.5, §6.6)
 quote side / price type
 status / data-quality flag
 ```
@@ -209,7 +213,14 @@ required bond price/yield market data is missing
 required curve mapping is missing                (SPEC §7.3: "若找不到 curve
                                                    mapping ... pricing blocked")
 required deposit / FTP rate is missing
+required option volatility is missing            (SPEC §§3.2/3.3/7.4, §6.5)
+required credit spread is missing                (SPEC §7.5, §6.6)
+volatility basis is ambiguous or unrecorded      (§6.5)
+credit spread treatment is ambiguous or unrecorded
+                                                  (§6.6)
 quote side is ambiguous
+an override or fallback (vol, spread, quote side, or otherwise) exists
+  without an explicit audit record
 data status is inactive / stale / invalid
 ```
 
@@ -288,6 +299,82 @@ Required when `DepositLeg.deposit_rate_mode` is `MANUAL_VERIFIED_RATE`
 (source, as-of, entered-by, run id) belong to this future input-bundle /
 audit layer, not `DepositLeg.manual_input_reference` (which stays an
 opaque marker only, unchanged).
+
+### 6.5 Option volatility input
+
+**Missing from the original version of this doc (Codex P2 review of
+PR #61) — added here.** BLI option valuation requires an explicit
+volatility input, or an explicitly audited override, for every priced
+option; this is not optional MVP scope creep, it is a required pricing
+input the frozen spec already states (SPEC §§3.2/3.3/7.4, `docs/17` §7).
+This doc does not implement volatility handling — it states the
+boundary a future bundle must satisfy:
+
+```text
+volatility (or "used volatility") must be an explicit market-data /
+  input-bundle field -- never invented, never silently defaulted.
+the volatility basis used for pricing must be explicit and recorded
+  (e.g. YIELD_VOL / PRICE_VOL / EQUIVALENT_PRICE_VOL, per SPEC §7.4's
+  vocabulary -- transcribed for context, not re-derived or extended
+  here).
+a yield-vol-to-price-vol conversion, if the selected pricing
+  methodology needs one, must be recorded as a conversion (basis,
+  mode, formula version), never silently substituted as if it were an
+  observed price vol (SPEC §3.3 point 4).
+no silent fallback to a flat vol (SPEC §3.3 point 5: "不得 silent
+  fallback 到 flat vol；任何 fallback 必須在 Internal Pricing Report
+  顯示") -- a flat-vol or manual-override fallback is only acceptable
+  if explicitly configured and explicitly recorded, never a silent
+  default (SPEC §7.4's vol hierarchy already lists "Flat Vol, only if
+  explicitly configured" and "Manual Override Vol" as the last two,
+  least-preferred tiers, not defaults).
+no use of stale volatility without an explicit stale-data policy /
+  assumption record (same "no stale data without an explicit
+  assumption" rule this doc already applies to every other market
+  observation, §7).
+if volatility is missing and required for the selected pricing
+  methodology, bundle construction must BLOCK -- it must never proceed
+  with an assumed, interpolated-from-nothing, or zero volatility.
+```
+
+**No volatility surface, vol interpolation, or yield-vol-to-price-vol
+conversion is implemented by this doc.** This section only states that
+a future `MarketDataSnapshot` / input bundle must carry an explicit
+volatility input and basis, and that a future bundle builder must block
+on a missing one — the actual vol surface/curve representation and
+conversion methodology are future implementation-slice work, out of
+scope here exactly as they were before this fix.
+
+### 6.6 Credit spread / spread adjustment
+
+**Also missing from the original version of this doc (Codex P2 review
+of PR #61) — added here.** Credit spread is a required market-data /
+input-bundle category **if required by the selected mapping or pricing
+methodology** (SPEC §7.5, `docs/17` §7) — not always required, but never
+silently assumed to be zero or "not applicable" when it is required.
+
+```text
+credit spread must not silently default to zero (SPEC §7.5: "Credit
+  spread 不可 silent default to zero，除非明確設定並顯示 assumption").
+if credit spread is required by the selected mapping/methodology and
+  missing, bundle construction must BLOCK.
+any spread override, fallback (e.g. down the SPEC §7.5 priority chain
+  of bond-specific -> issuer -> rating/sector proxy -> manual override),
+  or an explicit "spread not applicable" decision must be recorded as
+  an audited assumption, never applied silently.
+if credit spread is already embedded in a selected bond quote or curve
+  methodology (so no separate spread input is needed), that must be an
+  explicit statement made by the future implementation slice that
+  designs the actual bundle -- this doc does not assume embedding
+  either way, and a future bundle builder must not silently assume
+  "the curve probably already has it in there somewhere."
+```
+
+**No spread model, spread mapping table, or spread-to-price adjustment
+is implemented by this doc.** This section only states that a future
+bundle must carry an explicit credit-spread input (or an explicit,
+audited "not required" decision) when the methodology needs one, and
+that a missing required spread blocks bundle construction.
 
 ---
 
@@ -405,14 +492,21 @@ already exist:
 7. deposit rate available (FIXED_RATE value already on DepositLeg,
    or a resolved TREASURY_FTP_REFERENCE rate, or a MANUAL_VERIFIED_RATE
    audit record present) -- matching DepositLeg.deposit_rate_mode
-8. quote side explicit                     (never ambiguous or silently
+8. option volatility available, with an explicit recorded vol basis, OR
+   an explicit audited override / methodology exemption (§6.5) -- no
+   silent volatility fallback (no invented value, no silent flat-vol
+   default, no unrecorded yield-vol-to-price-vol conversion)
+9. credit spread available if required by the selected mapping/
+   methodology, OR an explicit audited "not required / embedded /
+   not applicable" decision (§6.6) -- no silent zero-spread fallback
+10. quote side explicit                    (never ambiguous or silently
                                             defaulted without recording
                                             which side was used, §7)
-9. source / status acceptable              (§7; a future implementation
+11. source / status acceptable             (§7; a future implementation
                                             slice defines the acceptable-
                                             status vocabulary, §11)
-10. no stale / inactive data, unless a future, explicit policy allows it
-                                            (§11 -- not decided here)
+12. no stale / inactive data, unless a future, explicit policy allows it
+                                            (§14 -- not decided here)
 ```
 
 Gates 1-2 already exist today at product-schema construction time; gates
@@ -437,6 +531,11 @@ missing bond market quote
 missing curve mapping
 missing curve tenor/rate
 missing FTP/deposit rate
+missing volatility input
+ambiguous volatility basis
+missing credit spread
+ambiguous credit spread treatment
+unauthorized silent fallback / default
 ambiguous quote side
 stale/as-of mismatch
 unsupported convention
@@ -447,11 +546,21 @@ Several of these already have a natural home in the existing pricing
 contract: `PricingErrorCode.MISSING_REFERENCE_DATA` (PR #45) fits
 "reference data not found/ineligible"; `PricingErrorCode.
 MISSING_MARKET_DATA` (existing, `docs/09` §8) fits "missing bond market
-quote / missing curve mapping / missing FTP rate." A future
-implementation slice should confirm whether these two existing codes are
-sufficient or whether BLI's bundle layer needs additional, more granular
-codes (e.g. distinguishing "curve mapping missing" from "curve mapping
-present but curve data invalid") — that is left open, not decided here.
+quote / missing curve mapping / missing FTP rate / missing volatility
+input / missing credit spread." **"unauthorized silent fallback /
+default" is added specifically for the vol/spread gap this section
+fixes (Codex P2 review of PR #61):** an unrecorded flat-vol substitution
+or an unrecorded zero-spread default are not the same failure as "data
+is absent" — they are a *methodology* violation (a value was used
+without the audit trail SPEC §3.3/§7.5 require), so a future
+implementation slice should confirm whether this needs its own code or
+folds into `MISSING_REFERENCE_DATA`/`MISSING_MARKET_DATA` with a
+distinguishing `detail` payload. A future implementation slice should
+confirm whether the existing codes are sufficient or whether BLI's
+bundle layer needs additional, more granular codes (e.g. distinguishing
+"curve mapping missing" from "curve mapping present but curve data
+invalid," or "volatility missing" from "volatility present but basis
+ambiguous") — that is left open, not decided here.
 
 ---
 
@@ -462,8 +571,13 @@ smallest useful version" pattern already used for every prior BLI slice:
 
 ```text
 1. MarketDataSnapshot schema docs/code preflight
-   -- confirm the BLI-scoped field list (§3/§6) against Annex B again,
-   resolve open items from §11 below, before any class is written.
+   -- confirm the BLI-scoped field list (§3/§6) against Annex B/SPEC
+   again, INCLUDING the volatility (§6.5, SPEC §§3.2/3.3/7.4) and
+   credit-spread (§6.6, SPEC §7.5) fields and their audit-record
+   treatment -- both must be confirmed and resolved before any class is
+   written, not treated as an afterthought once price/curve/FTP fields
+   are done. Resolve open items from §11/§14 below, before any class is
+   written.
 2. Minimal MarketDataSnapshot dataclass, synthetic fixture only
    -- mirrors BondReferenceData's PR #58 pattern: schema + validation +
    a small, manually reviewed synthetic fixture, no parser, no
@@ -504,6 +618,14 @@ None of steps 1-5 is started by this PR.
 - `docs/17` §7/§10: the original high-level "minimum market data" and
   "MVP audit trail" field lists this doc refines with the actual Annex B
   field names and the curve-purpose distinctions SPEC §3.5/§7.3 add.
+  `docs/17` §7 already named "volatility input" and "credit spread if
+  required" as minimum market-data inputs; §6.5/§6.6 (added by the
+  Codex P2 fix to this doc) are where that high-level naming is finally
+  detailed against the frozen spec, closing a gap this doc's original
+  version left open.
+- SPEC §§3.2/3.3/7.4 (volatility) and §7.5 (credit spread): frozen
+  methodology sections transcribed, not edited, for §6.5/§6.6's
+  no-silent-fallback and no-silent-zero-spread rules.
 
 ---
 
@@ -518,7 +640,7 @@ Explicitly not decided or built by this doc:
   list.
 - **The MVP input bundle class itself and its bundle builder** —
   slices 3/4 (§12).
-- **The acceptable-status vocabulary** (§7, §10 gate 9, §11) — this doc
+- **The acceptable-status vocabulary** (§7, §10 gate 11, §11) — this doc
   states that status must be checked, not what values are acceptable.
 - **Whether existing `PricingErrorCode` members are sufficient for the
   bundle layer, or new, more granular codes are needed** (§11).
@@ -526,8 +648,15 @@ Explicitly not decided or built by this doc:
   type/pricing purpose/effective date/status, per SPEC §7.3) — this doc
   states the required dimensions, not the concrete schema.
 - **Whether a stale-but-explicitly-allowed override policy will ever
-  exist** (§10 gate 10) — this doc does not design one; today, stale or
+  exist** (§10 gate 12) — this doc does not design one; today, stale or
   inactive data blocks.
+- **The concrete volatility-basis vocabulary and vol-hierarchy fallback
+  policy** (§6.5) and **the concrete credit-spread mapping priority
+  chain** (§6.6) — this doc states that both must be explicit and
+  audited when required, and carries the frozen spec's own vocabulary
+  (SPEC §§3.3/7.4/7.5) for context, but does not design the future
+  `MarketDataSnapshot`/bundle's concrete fields or fallback-selection
+  logic for either.
 - **The `DayCount` vocabulary decision (A-14)** and **`docs/14` F-08**
   (`m`/compounding-frequency gap) — unrelated to this doc, carried
   forward unresolved.

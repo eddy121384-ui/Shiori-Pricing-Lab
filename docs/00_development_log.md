@@ -961,3 +961,32 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     changed, so `python -m pytest -q` and `ruff` are unaffected by this
     PR (last known state: 493 passed, only the 2 pre-existing
     `products/bond_option.py` `E501` findings).
+- **`docs/22` fixed after Codex P2 review of PR #61: added missing
+  option-volatility and credit-spread input categories.** The original
+  version's required market-data list (bond price/yield, yield curves,
+  deposit/FTP rate, manual-rate audit input) omitted two pricing inputs
+  the frozen spec already requires (SPEC §§3.2/3.3/7.4 for volatility,
+  §7.5 for credit spread) — a gap that could let a future bundle builder
+  pass without either input, forcing a later pricing skeleton to either
+  fail on a "valid" bundle or fabricate a fallback. Added new §6.5
+  (Option volatility input) and §6.6 (Credit spread / spread
+  adjustment), restating the frozen spec's own rules verbatim: no silent
+  vol fallback to flat vol (SPEC §3.3), no silent zero-spread default
+  (SPEC §7.5), any override/fallback must be an audited assumption, and
+  bundle construction must block if either is required and missing.
+  Propagated through §3's conceptual field list, §5.1's
+  must-not-construct conditions, §10's validation gates (renumbered to
+  12, adding explicit vol/spread gates and a no-silent-fallback gate),
+  §11's error/audit categories (missing volatility input, ambiguous
+  volatility basis, missing credit spread, ambiguous credit spread
+  treatment, unauthorized silent fallback/default), §12's recommended
+  sequence, §13's prior-docs relationships, and §14's deferred items.
+  **Still docs-only: no `MarketDataSnapshot`, MVP input bundle, bundle
+  builder, pricing engine, volatility surface, or credit-spread model
+  was added; `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+  `BondReferenceData`, and `resolve_bond_reference_data` remain
+  unmodified.** Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 493 passed (unchanged); `ruff` → the same 2
+    pre-existing `products/bond_option.py` `E501` findings remain the
+    only findings.
