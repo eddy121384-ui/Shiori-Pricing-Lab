@@ -651,3 +651,28 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   to a later custody/settlement slice. `docs/09`'s wrapper checkpoint was
   updated to match. No code, tests, or other doc besides `docs/19`/`docs/09`
   was touched.
+- **`BondLinkedStructuredProduct` wrapper schema implemented — wrapper
+  schema only
+  (`src/shiori_pricing_lab/products/bond_linked_structured_product.py`,
+  `tests/test_bond_linked_structured_product.py`).** Following `docs/19`,
+  the wrapper binds exactly one `DepositLeg` and exactly one `BondOption`
+  as embedded objects, with a fixed `product_type =
+  "BOND_LINKED_STRUCTURED_PRODUCT"` discriminator. `participation_ratio`
+  is a **derived-only property** (`bond_option.notional /
+  deposit_leg.deposit_notional`) — not a constructor field, so no
+  independently stored value can ever contradict the two notionals it is
+  computed from. Validation enforces: `deposit_leg.currency ==
+  bond_option.currency` (no cross-currency BLI wrapper); `bond_option.
+  settlement_type == SettlementType.CASH` (physical delivery rejected at
+  the wrapper level, deferred to a later custody/settlement slice);
+  `deposit_leg.principal_repayment_rule ==
+  PrincipalRepaymentRule.FULL_PRINCIPAL_AT_MATURITY`; `bond_option.
+  expiry_date >= deposit_leg.start_date` (the open question `docs/19` §7
+  left for this implementation slice, resolved conservatively); and the
+  mandatory **effective settlement date guardrail** —
+  `bond_option.expiry_date + settlement_lag_days` calendar days must be
+  on or before `deposit_leg.maturity_date`, not just the bare expiry date
+  (a plain calendar-day approximation, no business-day rolling, no
+  holiday calendar, no calendar engine). **No pricing, payoff calculation,
+  QuantLib, `MarketDataSnapshot`, MVP input bundle, Treasury FTP parser,
+  ingestion, or UI was added.** Issue #38 remains open.

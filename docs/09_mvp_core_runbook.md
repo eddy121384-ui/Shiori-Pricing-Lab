@@ -586,6 +586,29 @@ Before starting any of those, agents must still read `docs/18` and `docs/17`.
   `MarketDataSnapshot`, MVP input bundle, or UI exists yet. Issue #38
   remains open.
 
+### `BondLinkedStructuredProduct` wrapper schema landed
+
+`BondLinkedStructuredProduct`
+(`src/shiori_pricing_lab/products/bond_linked_structured_product.py`) is
+implemented as the wrapper schema `docs/19` described — **wrapper schema
+only**, per the checkpoint above. It binds exactly one embedded
+`DepositLeg` and one embedded `BondOption`; `participation_ratio` is a
+**derived-only property**, not a constructor field. Validation enforces
+currency consistency, `SettlementType.CASH`-only settlement,
+`PrincipalRepaymentRule.FULL_PRINCIPAL_AT_MATURITY`, `bond_option.
+expiry_date >= deposit_leg.start_date` (this implementation's resolution
+of the open question above), and the mandatory effective-settlement-date
+guardrail (`expiry_date + settlement_lag_days` calendar days `<=
+deposit_leg.maturity_date`). Tests are in
+`tests/test_bond_linked_structured_product.py`, including a
+dataclass-fields boundary test asserting no duplicated component field or
+market-data/pricing field exists on the wrapper.
+
+**Still no pricing engine, payoff skeleton, QuantLib,
+`MarketDataSnapshot`, MVP input bundle, Treasury FTP parser, ingestion, or
+UI.** Those remain future slices per `docs/17` §11 (B–G). Issue #38 is
+unaffected and remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
