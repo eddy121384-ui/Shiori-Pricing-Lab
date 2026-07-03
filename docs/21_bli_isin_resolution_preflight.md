@@ -223,12 +223,57 @@ MarketDataSnapshot (or any reference to one)
 ```
 
 A resolver answers "does this ISIN correspond to an MVP-eligible bond,"
-which is a **static, valuation-date-independent** question (the same
-record resolves the same way regardless of which day pricing runs on).
-If a future need arises to know whether a specific bond has market data
-available *for a specific valuation date*, that is a materially
-different question belonging to a future `MarketDataSnapshot` / MVP
-input bundle design, not this resolver.
+given whatever reference-data set it was called with. It does not
+itself observe a market, a curve, or a price. If a future need arises to
+know whether a specific bond has market data available *for a specific
+valuation date*, that is a materially different question belonging to a
+future `MarketDataSnapshot` / MVP input bundle design, not this
+resolver.
+
+### 7.1 Point-in-time / as-of boundary (Codex P2 review of PR #59)
+
+An earlier draft of this section described resolution as universally
+"valuation-date-independent." That was too broad: `BondReferenceData.
+status` (`ACTIVE`/`INACTIVE`) is part of `is_mvp_pricing_eligible`
+(docs/20, PR #58), and a Bond Master record's status can itself change
+over time (a bond active today may be marked inactive later, or vice
+versa). If a future historical valuation resolved every date's pricing
+against whichever reference-data set happens to be "current" at
+resolver-call time, a later status change could leak into an earlier
+valuation date — a look-ahead bias bug, not merely a style concern.
+
+This doc draws the boundary as follows:
+
+- **For the current MVP synthetic fixture:** it is acceptable to treat
+  `SYNTHETIC_BOND_FIXTURES` as static and deterministic. It has no
+  valuation-date dimension today — there is exactly one fixture, not one
+  per date, and nothing in this slice changes that.
+- **For any future historical valuation or real reference-data source:**
+  the `fixtures` / `Iterable[BondReferenceData]` passed into the
+  resolver **must already be point-in-time / as-of-correct for the
+  intended valuation date** before the resolver is ever called. The
+  resolver must **not** choose "the latest" reference data on a
+  historical valuation's behalf, must **not** introduce or infer
+  `business_date`, `valuation_date`, or `as_of_timestamp` (or any other
+  market-data field, per this section's exclusion list) to make that
+  choice itself, and must **not** otherwise become the place a
+  point-in-time decision gets made. Selecting the as-of-correct
+  reference-data set for a given valuation date is the responsibility of
+  a future caller / input-resolution layer (upstream of the resolver),
+  not the resolver.
+- **The resolver's job stays exactly as narrow as §6 already states:**
+  look up `underlying_isin` within whatever reference-data iterable it
+  was already given, and call `is_mvp_pricing_eligible` on a match. It
+  never decides *which* reference-data set is the right one for a
+  valuation date — that decision is made before the resolver is called,
+  by whoever calls it.
+
+In short: for the current synthetic MVP fixture, resolution has no
+valuation-date dimension. For future historical valuation, the
+caller/input-resolution layer must supply an as-of-correct
+reference-data iterable before calling the resolver — the resolver
+itself never reasons about valuation dates, "latest" data, or as-of
+timestamps.
 
 ---
 
@@ -339,6 +384,12 @@ Explicitly not decided or built by this doc:
 - **Any real source system beyond `SYNTHETIC_BOND_FIXTURES`** (Bloomberg,
   an internal bond master, a vendor security master) — `docs/20` §7
   already listed these for context only; this doc does not change that.
+- **How a future caller / input-resolution layer selects an
+  as-of-correct reference-data iterable for a given historical valuation
+  date** (§7.1) — this doc states that the resolver itself must not make
+  that choice, but does not design the selection mechanism (e.g. a
+  future point-in-time-versioned Bond Master), which belongs to whatever
+  future historical-valuation slice needs it.
 - **The `DayCount` vocabulary decision (A-14)** and **`docs/14` F-08** —
   unrelated to resolution, carried forward unresolved.
 
