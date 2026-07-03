@@ -805,3 +805,41 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     `python -m ruff check src/shiori_pricing_lab tests` → the 2
     pre-existing `E501` findings in `products/bond_option.py` (untouched)
     remain the only findings.
+- **BLI ISIN resolution preflight written, docs-only
+  (`docs/21_bli_isin_resolution_preflight.md`).** Defines the boundary
+  for the next BLI MVP slice: resolving `BondOption.underlying_isin`
+  against `BondReferenceData` — the lookup/resolution mechanism `docs/20`
+  §11 explicitly deferred. States that product schemas must not embed
+  `BondReferenceData` and that `BondReferenceData` stays reference data,
+  not product or market data (both restated, not re-opened). Fixes the
+  MVP resolution source at `SYNTHETIC_BOND_FIXTURES` only — no Bloomberg/
+  API connector, file parser, database, generic ingestion, or
+  screenshot/OCR capture. Defines exact-match-only lookup behavior for
+  every required case (exact match, missing ISIN, duplicate ISIN in the
+  fixture, inactive bond, valid-but-ineligible bond, unsupported
+  `bond_type`, callable/sinkable, zero-coupon, `yield_convention ==
+  OTHER`) — critically, a resolver must call the existing
+  `is_mvp_pricing_eligible` once per found record rather than
+  re-implementing any eligibility rule itself, and a duplicate ISIN is a
+  fixture data-integrity error that must fail explicitly, never resolved
+  by "return the first match." Restates and details the blocking rule
+  (`docs/20` §8): a missing or ineligible bond must block, with no
+  guessing, no fallback bond, no silent downgrade, no partial pricing,
+  and no fuzzy ISIN matching. Separates resolution from both pricing (the
+  resolver only answers found/not-found, the record, eligible/ineligible,
+  and the blocking reason — never PV/DV01/cashflows/a schedule) and
+  market data (no `business_date`, `valuation_date`, resolved rate, or
+  any of `docs/20` §3's exclusion-list fields on a resolution result).
+  Sketches, non-bindingly, a `resolve_bond_reference_data(underlying_isin,
+  fixtures)` function and a conceptual result shape (requested ISIN,
+  resolution status, matched record, eligibility reasons, block reason,
+  source fixture name — no market-data field) as the smallest next coding
+  slice. **No resolver code, pricing, payoff skeleton, cash-flow
+  generation, schedule engine, `MarketDataSnapshot`, MVP input bundle,
+  Treasury FTP parser, ingestion, Bloomberg/API connector, QuantLib, UI,
+  screenshot capture, or product-schema change was added.** No frozen BLI
+  v1.3 source spec file was edited. Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; no source file
+    changed, so `python -m pytest -q` and `ruff` are unaffected by this
+    PR (last known state: 461 passed, only the 2 pre-existing
+    `products/bond_option.py` `E501` findings).
