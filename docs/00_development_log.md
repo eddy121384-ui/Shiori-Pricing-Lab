@@ -880,3 +880,31 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     tests` → the 2 pre-existing `E501` findings in
     `products/bond_option.py` (untouched) remain the only findings; the
     new resolver module and test file are clean.
+- **ISIN resolver fixed after Codex review of PR #60 (2 P2, 1 P3).**
+  (1) `source_fixture_name` no longer defaults to the literal
+  `"SYNTHETIC_BOND_FIXTURES"` string regardless of what `fixtures` was
+  passed — it now defaults to `None`, and a new `_resolve_source_fixture_name`
+  helper resolves it to `"SYNTHETIC_BOND_FIXTURES"` only when `fixtures`
+  is genuinely (by identity) the module-level default, or to the generic
+  `"caller_supplied_fixtures"` for any other unlabeled iterable, so a
+  caller resolving against a custom or future point-in-time-versioned
+  source is never mislabeled; the resolved label is used consistently in
+  the result, the not-found `block_reason`, and the duplicate-ISIN error
+  message. (2) `BondReferenceResolutionResult`, a public directly
+  constructible type, now validates its own invariant in
+  `__post_init__` so a hand-built result can never contradict
+  `status`/`eligibility_reasons` (e.g. `FOUND_INELIGIBLE` with a
+  `block_reason` that silently drops a reason, or a status/
+  `bond_reference_data`/`eligibility_reasons` combination that cannot
+  occur from `resolve_bond_reference_data` itself) — raises `ValueError`
+  on a bad direct construction; results the resolver itself builds are
+  unaffected. (3) `reference_data/__init__.py`'s docstring no longer
+  says ISIN resolution is deferred — it now says the resolver lives in
+  this package while pricing-engine wiring remains future work. 11 new
+  tests added. **No pricing, product-schema change, or new architecture
+  was added; scope stays the minimal resolver.** Issue #38 remains open.
+  - **Review / validation:** `python -m pytest -q` → 493 passed (482
+    previous + 11 new); `python -m ruff check src/shiori_pricing_lab
+    tests` → the same 2 pre-existing `E501` findings in
+    `products/bond_option.py` remain the only findings; the modified
+    resolver module and test file are clean.

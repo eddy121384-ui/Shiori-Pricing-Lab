@@ -13,14 +13,20 @@ Strict boundaries, mirroring the ``products`` package's own rules:
 - No market observation, valuation date, resolved rate, or pricing
   output lives here (docs/20 §3).
 - No product schema (``BondOption``, ``DepositLeg``,
-  ``BondLinkedStructuredProduct``) is modified or duplicated here; a
-  future pricing engine is responsible for resolving
-  ``BondOption.underlying_isin`` against this package's fixture, not this
-  package itself (docs/20 §8, §11 -- the lookup/resolution mechanism is
-  explicitly deferred).
+  ``BondLinkedStructuredProduct``) embeds or resolves
+  ``BondReferenceData`` itself, and none of the three is modified or
+  duplicated here. ``BondOption`` still stores ``underlying_isin`` only
+  (docs/15 §2.1/§2.2, unchanged). **Resolving** that ISIN against a
+  reference-data iterable is now implemented in this package
+  (``resolve_bond_reference_data``, docs/21 §8, PR #60) -- what remains
+  future work is *wiring* that resolver into a pricing engine's
+  input-resolution layer, which does not exist yet.
 - No pricing, cash-flow generation, schedule engine, QuantLib,
   ``MarketDataSnapshot``, MVP input bundle, file parser, ingestion, or
-  Bloomberg/API connector is implemented here.
+  Bloomberg/API connector is implemented here. The resolver only answers
+  found/not-found, the record, eligible/ineligible, and the blocking
+  reason (docs/21 §6) -- it is not pricing and is not called from any
+  product schema or pricing engine by this slice.
 
 Provides ``BondReferenceData`` (the schema), ``BondType`` / ``BondStatus``
 (the controlled vocabulary this slice adds), ``is_mvp_pricing_eligible`` /
@@ -32,8 +38,6 @@ separate from reference-data validation), ``SYNTHETIC_BOND_FIXTURES``
 docs/21 ISIN resolution slice: exact-ISIN-match lookup against a
 caller-supplied reference-data iterable, reusing
 ``is_mvp_pricing_eligible`` rather than re-implementing eligibility).
-The resolver is a lookup step only -- it is not wired into any pricing
-engine, `BondOption`, or `BondLinkedStructuredProduct` by this slice.
 """
 
 from __future__ import annotations

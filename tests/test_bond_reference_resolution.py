@@ -264,20 +264,164 @@ def test_resolution_result_requested_isin_preserved_on_every_status():
     assert not_found.requested_isin == "XS_MISSING"
 
 
-# --- source_fixture_name: audit-only label -----------------------------------
+# --- source_fixture_name: audit-only label, must not mislabel a custom
+# iterable as SYNTHETIC_BOND_FIXTURES (Codex P2 review of PR #60) ------------
 
 
-def test_source_fixture_name_defaults_to_synthetic_bond_fixtures_label():
+def test_source_fixture_name_defaults_to_synthetic_bond_fixtures_with_explicit_default_fixtures():
     result = resolve_bond_reference_data(_VANILLA_BULLET_ISIN, SYNTHETIC_BOND_FIXTURES)
     assert result.source_fixture_name == "SYNTHETIC_BOND_FIXTURES"
 
 
-def test_source_fixture_name_is_overridable_for_a_custom_iterable():
+def test_source_fixture_name_defaults_to_synthetic_bond_fixtures_when_fixtures_argument_omitted():
+    # fixtures omitted entirely -> uses the SYNTHETIC_BOND_FIXTURES default,
+    # and the label must reflect that truthfully.
+    result = resolve_bond_reference_data(_VANILLA_BULLET_ISIN)
+    assert result.source_fixture_name == "SYNTHETIC_BOND_FIXTURES"
+
+
+def test_custom_iterable_without_explicit_label_uses_generic_caller_supplied_label():
+    bond = _bond(isin="XS_GENERIC_LABEL")
+    result = resolve_bond_reference_data("XS_GENERIC_LABEL", (bond,))
+    # Must NOT be mislabeled as "SYNTHETIC_BOND_FIXTURES" -- this is a
+    # different, caller-supplied iterable.
+    assert result.source_fixture_name == "caller_supplied_fixtures"
+
+
+def test_custom_iterable_with_explicit_source_fixture_name_preserves_it():
     bond = _bond(isin="XS_CUSTOM_SOURCE")
     result = resolve_bond_reference_data(
-        "XS_CUSTOM_SOURCE", (bond,), source_fixture_name="test-fixture"
+        "XS_CUSTOM_SOURCE", (bond,), source_fixture_name="as_of_2026_07_03_fixture"
     )
-    assert result.source_fixture_name == "test-fixture"
+    assert result.source_fixture_name == "as_of_2026_07_03_fixture"
+
+
+def test_duplicate_isin_error_uses_resolved_label_not_synthetic_default():
+    duplicate_a = _bond(isin="XS_DUP_LABEL")
+    duplicate_b = _bond(isin="XS_DUP_LABEL", issuer="A Different Issuer")
+
+    with pytest.raises(DuplicateBondReferenceDataError, match="caller_supplied_fixtures"):
+        resolve_bond_reference_data("XS_DUP_LABEL", (duplicate_a, duplicate_b))
+
+
+def test_duplicate_isin_error_with_explicit_label_uses_it_not_the_default():
+    duplicate_a = _bond(isin="XS_DUP_LABEL_2")
+    duplicate_b = _bond(isin="XS_DUP_LABEL_2", issuer="A Different Issuer")
+
+    with pytest.raises(DuplicateBondReferenceDataError, match="my_custom_source"):
+        resolve_bond_reference_data(
+            "XS_DUP_LABEL_2",
+            (duplicate_a, duplicate_b),
+            source_fixture_name="my_custom_source",
+        )
+
+
+# --- BondReferenceResolutionResult direct construction validation
+# (Codex P2 review of PR #60): block_reason must never contradict
+# status/eligibility_reasons, even for a hand-built result. -----------------
+
+
+def test_direct_construction_found_eligible_with_block_reason_rejected():
+    bond = _bond(isin="XS_DIRECT_1")
+    with pytest.raises(
+        ValueError, match="block_reason must be None when status is FOUND_ELIGIBLE"
+    ):
+        BondReferenceResolutionResult(
+            requested_isin="XS_DIRECT_1",
+            status=BondResolutionStatus.FOUND_ELIGIBLE,
+            bond_reference_data=bond,
+            eligibility_reasons=(),
+            block_reason="unexpected",
+            source_fixture_name="test",
+        )
+
+
+def test_direct_construction_found_eligible_without_bond_reference_data_rejected():
+    with pytest.raises(
+        ValueError, match="bond_reference_data must not be None when status is FOUND_ELIGIBLE"
+    ):
+        BondReferenceResolutionResult(
+            requested_isin="XS_DIRECT_1B",
+            status=BondResolutionStatus.FOUND_ELIGIBLE,
+            bond_reference_data=None,
+            eligibility_reasons=(),
+            block_reason=None,
+            source_fixture_name="test",
+        )
+
+
+def test_direct_construction_found_ineligible_missing_reasons_rejected():
+    bond = _bond(isin="XS_DIRECT_2", callable_flag=True)
+    with pytest.raises(
+        ValueError, match="eligibility_reasons must be non-empty when status is FOUND_INELIGIBLE"
+    ):
+        BondReferenceResolutionResult(
+            requested_isin="XS_DIRECT_2",
+            status=BondResolutionStatus.FOUND_INELIGIBLE,
+            bond_reference_data=bond,
+            eligibility_reasons=(),
+            block_reason=None,
+            source_fixture_name="test",
+        )
+
+
+def test_direct_construction_found_ineligible_mismatched_block_reason_rejected():
+    bond = _bond(isin="XS_DIRECT_3", callable_flag=True, sinkable_flag=True)
+    # eligibility_reasons has two reasons, but block_reason silently drops
+    # the sinkable one -- this must be rejected, not accepted.
+    with pytest.raises(ValueError, match="block_reason must equal"):
+        BondReferenceResolutionResult(
+            requested_isin="XS_DIRECT_3",
+            status=BondResolutionStatus.FOUND_INELIGIBLE,
+            bond_reference_data=bond,
+            eligibility_reasons=(
+                "callable bonds are not MVP-pricing-eligible",
+                "sinkable bonds are not MVP-pricing-eligible",
+            ),
+            block_reason="callable bonds are not MVP-pricing-eligible",
+            source_fixture_name="test",
+        )
+
+
+def test_direct_construction_not_found_with_bond_reference_data_rejected():
+    bond = _bond(isin="XS_DIRECT_4")
+    with pytest.raises(
+        ValueError, match="bond_reference_data must be None when status is NOT_FOUND"
+    ):
+        BondReferenceResolutionResult(
+            requested_isin="XS_DIRECT_4",
+            status=BondResolutionStatus.NOT_FOUND,
+            bond_reference_data=bond,
+            eligibility_reasons=(),
+            block_reason="no bond found",
+            source_fixture_name="test",
+        )
+
+
+def test_direct_construction_not_found_with_blank_block_reason_rejected():
+    with pytest.raises(
+        ValueError, match="block_reason must be a non-blank string when status is NOT_FOUND"
+    ):
+        BondReferenceResolutionResult(
+            requested_isin="XS_DIRECT_5",
+            status=BondResolutionStatus.NOT_FOUND,
+            bond_reference_data=None,
+            eligibility_reasons=(),
+            block_reason=None,
+            source_fixture_name="test",
+        )
+
+
+def test_resolver_created_results_still_construct_and_pass_validation():
+    # Sanity: the validation added for direct construction must not reject
+    # results the resolver itself builds.
+    eligible = resolve_bond_reference_data(_VANILLA_BULLET_ISIN, SYNTHETIC_BOND_FIXTURES)
+    ineligible = resolve_bond_reference_data(_CALLABLE_ISIN, SYNTHETIC_BOND_FIXTURES)
+    not_found = resolve_bond_reference_data("XS_DOES_NOT_EXIST_2", SYNTHETIC_BOND_FIXTURES)
+
+    assert eligible.status is BondResolutionStatus.FOUND_ELIGIBLE
+    assert ineligible.status is BondResolutionStatus.FOUND_INELIGIBLE
+    assert not_found.status is BondResolutionStatus.NOT_FOUND
 
 
 # --- Export -------------------------------------------------------------

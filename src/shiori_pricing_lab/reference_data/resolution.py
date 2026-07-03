@@ -87,9 +87,18 @@ class BondReferenceResolutionResult:
     resolution status, the matched record (``None`` unless
     ``FOUND_ELIGIBLE``/``FOUND_INELIGIBLE``), every eligibility reason
     from ``is_mvp_pricing_eligible`` (empty when eligible or not found),
-    a short derived block reason (``None`` only when ``FOUND_ELIGIBLE``),
-    and an audit-only label for which reference-data source was searched.
-    No market-data field (``docs/21`` §7's exclusion list) lives here.
+    a block reason consistent with ``status``/``eligibility_reasons``
+    (``None`` only when ``FOUND_ELIGIBLE``), and an audit-only label for
+    which reference-data source was searched. No market-data field
+    (``docs/21`` §7's exclusion list) lives here.
+
+    ``BondReferenceResolutionResult`` is a public, directly constructible
+    type (Codex P2 review of PR #60): ``__post_init__`` enforces that
+    ``block_reason`` cannot contradict ``status``/``eligibility_reasons``
+    even when a caller builds one by hand rather than through
+    :func:`resolve_bond_reference_data` -- e.g. it rejects a
+    ``FOUND_INELIGIBLE`` result whose ``block_reason`` silently drops a
+    reason.
     """
 
     requested_isin: str
@@ -99,12 +108,80 @@ class BondReferenceResolutionResult:
     block_reason: str | None
     source_fixture_name: str
 
+    def __post_init__(self) -> None:
+        if self.status == BondResolutionStatus.FOUND_ELIGIBLE:
+            if self.bond_reference_data is None:
+                raise ValueError(
+                    "bond_reference_data must not be None when status is FOUND_ELIGIBLE"
+                )
+            if self.eligibility_reasons != ():
+                raise ValueError(
+                    "eligibility_reasons must be empty when status is FOUND_ELIGIBLE, "
+                    f"got {self.eligibility_reasons!r}"
+                )
+            if self.block_reason is not None:
+                raise ValueError(
+                    f"block_reason must be None when status is FOUND_ELIGIBLE, "
+                    f"got {self.block_reason!r}"
+                )
+        elif self.status == BondResolutionStatus.FOUND_INELIGIBLE:
+            if self.bond_reference_data is None:
+                raise ValueError(
+                    "bond_reference_data must not be None when status is FOUND_INELIGIBLE"
+                )
+            if not self.eligibility_reasons:
+                raise ValueError(
+                    "eligibility_reasons must be non-empty when status is FOUND_INELIGIBLE"
+                )
+            expected_block_reason = "; ".join(self.eligibility_reasons)
+            if self.block_reason != expected_block_reason:
+                raise ValueError(
+                    "block_reason must equal '; '.join(eligibility_reasons) "
+                    f"({expected_block_reason!r}) when status is FOUND_INELIGIBLE, "
+                    f"got {self.block_reason!r}"
+                )
+        else:  # BondResolutionStatus.NOT_FOUND
+            if self.bond_reference_data is not None:
+                raise ValueError(
+                    "bond_reference_data must be None when status is NOT_FOUND"
+                )
+            if self.eligibility_reasons != ():
+                raise ValueError(
+                    f"eligibility_reasons must be empty when status is NOT_FOUND, "
+                    f"got {self.eligibility_reasons!r}"
+                )
+            if not self.block_reason:
+                raise ValueError(
+                    "block_reason must be a non-blank string when status is NOT_FOUND"
+                )
+
+
+def _resolve_source_fixture_name(
+    fixtures: Iterable[BondReferenceData],
+    source_fixture_name: str | None,
+) -> str:
+    """Return a truthful audit label for ``fixtures`` (Codex P2 review of PR #60).
+
+    An explicit ``source_fixture_name`` always wins. Otherwise, the label
+    is only ``"SYNTHETIC_BOND_FIXTURES"`` when ``fixtures`` genuinely *is*
+    that module-level object (identity, not equality, since a caller
+    could coincidentally pass an equal-valued but different iterable);
+    any other caller-supplied iterable is labeled generically rather than
+    mislabeled as the synthetic MVP fixture.
+    """
+
+    if source_fixture_name is not None:
+        return source_fixture_name
+    if fixtures is SYNTHETIC_BOND_FIXTURES:
+        return "SYNTHETIC_BOND_FIXTURES"
+    return "caller_supplied_fixtures"
+
 
 def resolve_bond_reference_data(
     underlying_isin: str,
     fixtures: Iterable[BondReferenceData] = SYNTHETIC_BOND_FIXTURES,
     *,
-    source_fixture_name: str = "SYNTHETIC_BOND_FIXTURES",
+    source_fixture_name: str | None = None,
 ) -> BondReferenceResolutionResult:
     """Resolve ``underlying_isin`` against ``fixtures`` by exact ISIN match.
 
@@ -112,20 +189,27 @@ def resolve_bond_reference_data(
     parameter (docs/21 §3) so a future real reference-data source can be
     substituted without changing this function. ``source_fixture_name``
     is an audit-only label describing where ``fixtures`` came from; it is
-    never derived from ``fixtures`` itself (a plain iterable has no name
-    of its own) -- a caller passing a non-default ``fixtures`` should
-    also pass a matching ``source_fixture_name``.
+    never derived from ``fixtures``' *contents* (a plain iterable has no
+    name of its own). Leaving ``source_fixture_name`` unset resolves to
+    ``"SYNTHETIC_BOND_FIXTURES"`` only when ``fixtures`` is genuinely the
+    module-level default; any other unlabeled iterable resolves to the
+    generic ``"caller_supplied_fixtures"`` rather than being mislabeled as
+    the synthetic MVP fixture (Codex P2 review of PR #60) -- a caller
+    resolving against a real or point-in-time-versioned source should pass
+    its own ``source_fixture_name``.
 
     Raises :class:`DuplicateBondReferenceDataError` if more than one
     record in ``fixtures`` shares ``underlying_isin``. Never raises for a
     legitimately missing ISIN -- that is the ``NOT_FOUND`` status.
     """
 
+    resolved_source_fixture_name = _resolve_source_fixture_name(fixtures, source_fixture_name)
+
     matches = [bond for bond in fixtures if bond.isin == underlying_isin]
 
     if len(matches) > 1:
         raise DuplicateBondReferenceDataError(
-            f"{len(matches)} BondReferenceData records in {source_fixture_name} "
+            f"{len(matches)} BondReferenceData records in {resolved_source_fixture_name} "
             f"share isin {underlying_isin!r} -- duplicate ISIN is a fixture "
             "data-integrity bug, not a normal lookup outcome (docs/21 §4)"
         )
@@ -138,9 +222,9 @@ def resolve_bond_reference_data(
             eligibility_reasons=(),
             block_reason=(
                 f"no BondReferenceData found for isin {underlying_isin!r} "
-                f"in {source_fixture_name}"
+                f"in {resolved_source_fixture_name}"
             ),
-            source_fixture_name=source_fixture_name,
+            source_fixture_name=resolved_source_fixture_name,
         )
 
     bond = matches[0]
@@ -153,7 +237,7 @@ def resolve_bond_reference_data(
             bond_reference_data=bond,
             eligibility_reasons=(),
             block_reason=None,
-            source_fixture_name=source_fixture_name,
+            source_fixture_name=resolved_source_fixture_name,
         )
 
     return BondReferenceResolutionResult(
@@ -162,5 +246,5 @@ def resolve_bond_reference_data(
         bond_reference_data=bond,
         eligibility_reasons=eligibility.reasons,
         block_reason="; ".join(eligibility.reasons),
-        source_fixture_name=source_fixture_name,
+        source_fixture_name=resolved_source_fixture_name,
     )
