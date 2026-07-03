@@ -843,3 +843,68 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     changed, so `python -m pytest -q` and `ruff` are unaffected by this
     PR (last known state: 461 passed, only the 2 pre-existing
     `products/bond_option.py` `E501` findings).
+- **ISIN resolver implemented — BLI resolution slice
+  (`src/shiori_pricing_lab/reference_data/resolution.py`,
+  `tests/test_bond_reference_resolution.py`).** Implements the minimal
+  resolver `docs/21` §8 recommended: `resolve_bond_reference_data(
+  underlying_isin, fixtures=SYNTHETIC_BOND_FIXTURES,
+  *, source_fixture_name=...)` does an exact-ISIN-string-match scan
+  (no fuzzy/partial/case-insensitive matching) and returns a frozen
+  `BondReferenceResolutionResult` (`requested_isin`, `status`,
+  `bond_reference_data`, `eligibility_reasons`, `block_reason`,
+  `source_fixture_name`) with a three-value `BondResolutionStatus`
+  (`FOUND_ELIGIBLE` / `FOUND_INELIGIBLE` / `NOT_FOUND`). A single match
+  calls the existing `is_mvp_pricing_eligible` **once** — the resolver
+  does not re-implement any callable/sinkable/zero-coupon/`OTHER`/
+  `bond_type`/inactive-status rule — and preserves every eligibility
+  reason (joined into `block_reason` when ineligible, never collapsed to
+  the first one). A missing ISIN returns `NOT_FOUND` (never raises); more
+  than one record sharing the requested `isin` raises a new local
+  `DuplicateBondReferenceDataError` (a fixture data-integrity bug, not
+  resolved by picking the first or last match) — defined locally in
+  `resolution.py` rather than imported from `pricing/errors.py`, keeping
+  `reference_data` independent of the `pricing` package. No
+  `business_date`, `valuation_date`, `as_of_timestamp`, or other
+  market-data field exists anywhere in the resolver's inputs or result
+  (`docs/21` §7); the resolver never chooses "the latest" reference data
+  and never reasons about a valuation date (`docs/21` §7.1) — `fixtures`
+  is a plain caller-supplied parameter. `BondOption`, `DepositLeg`, and
+  `BondLinkedStructuredProduct` are unmodified, and the resolver is not
+  wired into any pricing engine by this slice. **No pricing, payoff
+  skeleton, cash-flow generation, schedule engine, `MarketDataSnapshot`,
+  MVP input bundle, Treasury FTP parser, ingestion, Bloomberg/API
+  connector, QuantLib, UI, screenshot capture, or product-schema change
+  was added.** Issue #38 remains open.
+  - **Review / validation:** `python -m pytest -q` → 482 passed (461
+    previous + 21 new); `python -m ruff check src/shiori_pricing_lab
+    tests` → the 2 pre-existing `E501` findings in
+    `products/bond_option.py` (untouched) remain the only findings; the
+    new resolver module and test file are clean.
+- **ISIN resolver fixed after Codex review of PR #60 (2 P2, 1 P3).**
+  (1) `source_fixture_name` no longer defaults to the literal
+  `"SYNTHETIC_BOND_FIXTURES"` string regardless of what `fixtures` was
+  passed — it now defaults to `None`, and a new `_resolve_source_fixture_name`
+  helper resolves it to `"SYNTHETIC_BOND_FIXTURES"` only when `fixtures`
+  is genuinely (by identity) the module-level default, or to the generic
+  `"caller_supplied_fixtures"` for any other unlabeled iterable, so a
+  caller resolving against a custom or future point-in-time-versioned
+  source is never mislabeled; the resolved label is used consistently in
+  the result, the not-found `block_reason`, and the duplicate-ISIN error
+  message. (2) `BondReferenceResolutionResult`, a public directly
+  constructible type, now validates its own invariant in
+  `__post_init__` so a hand-built result can never contradict
+  `status`/`eligibility_reasons` (e.g. `FOUND_INELIGIBLE` with a
+  `block_reason` that silently drops a reason, or a status/
+  `bond_reference_data`/`eligibility_reasons` combination that cannot
+  occur from `resolve_bond_reference_data` itself) — raises `ValueError`
+  on a bad direct construction; results the resolver itself builds are
+  unaffected. (3) `reference_data/__init__.py`'s docstring no longer
+  says ISIN resolution is deferred — it now says the resolver lives in
+  this package while pricing-engine wiring remains future work. 11 new
+  tests added. **No pricing, product-schema change, or new architecture
+  was added; scope stays the minimal resolver.** Issue #38 remains open.
+  - **Review / validation:** `python -m pytest -q` → 493 passed (482
+    previous + 11 new); `python -m ruff check src/shiori_pricing_lab
+    tests` → the same 2 pre-existing `E501` findings in
+    `products/bond_option.py` remain the only findings; the modified
+    resolver module and test file are clean.

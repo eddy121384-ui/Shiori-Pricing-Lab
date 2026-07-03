@@ -710,6 +710,27 @@ parser, ingestion, or Bloomberg/API connector was added. Tests are in
   code, pricing, `MarketDataSnapshot`, MVP input bundle, or product
   schema change exists. Issue #38 remains open.
 
+### ISIN resolver landed — BLI resolution slice
+
+`resolve_bond_reference_data` and `BondReferenceResolutionResult`
+(`src/shiori_pricing_lab/reference_data/resolution.py`) implement the
+minimal resolver `docs/21` §8 recommended. Matching is exact-ISIN-string
+only; `fixtures` is a plain parameter defaulting to
+`SYNTHETIC_BOND_FIXTURES`. A single match calls the existing
+`is_mvp_pricing_eligible` once and returns `FOUND_ELIGIBLE` or
+`FOUND_INELIGIBLE` (with every eligibility reason preserved, joined into
+`block_reason`); no match returns `NOT_FOUND` (never an exception); more
+than one match for the same `isin` raises
+`DuplicateBondReferenceDataError` — a fixture data-integrity bug, never
+resolved by picking the first or last record. The result carries
+`requested_isin`, `status`, `bond_reference_data`, `eligibility_reasons`,
+`block_reason`, and an audit-only `source_fixture_name` — no
+`business_date`, `valuation_date`, `as_of_timestamp`, or other
+market-data field. `BondOption`, `DepositLeg`, and
+`BondLinkedStructuredProduct` are unmodified; the resolver is not yet
+wired into any pricing engine. Tests are in
+`tests/test_bond_reference_resolution.py`. Issue #38 remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
