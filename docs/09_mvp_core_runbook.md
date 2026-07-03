@@ -731,6 +731,52 @@ market-data field. `BondOption`, `DepositLeg`, and
 wired into any pricing engine. Tests are in
 `tests/test_bond_reference_resolution.py`. Issue #38 remains open.
 
+### BLI market data / MVP input bundle preflight checkpoint
+
+- Before implementing any `MarketDataSnapshot` (BLI-scoped), MVP input
+  bundle, or bundle builder, agents must read
+  `docs/22_bli_market_data_input_bundle_preflight.md`.
+- Defines the four-layer boundary: product terms
+  (`BondLinkedStructuredProduct`/`DepositLeg`/`BondOption`) → reference
+  data (`BondReferenceData`/`resolve_bond_reference_data`/
+  `is_mvp_pricing_eligible`) → market data (bond price/yield, yield
+  curves, deposit/FTP rate observations, curve mapping, pricing date,
+  source/status) → the future MVP input bundle a pricing engine
+  consumes. None of the first three layers is modified by `docs/22`.
+- Grounds the required market-data field lists in the frozen
+  `docs/bond_linked_structured_pricer/ANNEX_B_v1.3.md` §B.1 (Bond
+  Price/Yield File) and §B.2 (Yield Curve File), and the frozen
+  `SPEC_v1.3.md` §3.5/§7.3 curve-purpose rules: **Option Discount Curve
+  and Bond Reference Curve must never be mixed**, and **the deposit leg
+  must not silently reuse the Option Discount Curve** unless an explicit
+  mapping rule says so. Missing curve mapping or missing curve data
+  blocks pricing (SPEC §7.3), restated as a hard block on future bundle
+  construction, not a warning.
+- The future MVP input bundle must not be constructed if: product
+  validation fails; the ISIN is not found or resolves ineligible
+  (`docs/21`); required bond price/yield, curve mapping, or deposit/FTP
+  rate data is missing; quote side is ambiguous; or data status is
+  inactive/stale/invalid. A bundle either exists complete and valid, or
+  does not exist — no partial-bundle concept.
+- Restates and extends the `docs/21` §7.1 point-in-time boundary (the
+  Codex P2 fix from PR #59) one layer up: `MarketDataSnapshot` is
+  point-in-time; market data and reference data must share a coherent
+  valuation context; a future bundle builder must not mix "latest"
+  reference data with historical market data — no look-ahead bias.
+- Restates the Treasury FTP percent-vs-decimal rule (`3.5500` means
+  `3.5500%` = decimal `0.035500`) and the quote-side policy (`docs/18`
+  §2.4/§5) — no silent quote-side choice, no silent BID→MID conversion,
+  no silent use of latest/stale data.
+- Recommends five future implementation slices (MarketDataSnapshot
+  preflight → minimal MarketDataSnapshot dataclass with a synthetic
+  fixture → MVP input bundle → bundle builder → pricing engine skeleton)
+  — none started here.
+- No `MarketDataSnapshot`, MVP input bundle, bundle builder, pricing
+  engine, or any code change exists yet. `BondOption`, `DepositLeg`,
+  `BondLinkedStructuredProduct`, `BondReferenceData`, and
+  `resolve_bond_reference_data` are all unmodified. Issue #38 remains
+  open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
