@@ -641,6 +641,40 @@ unaffected and remains open.
 - No Bond Master code, fixture, parser, pricing, `MarketDataSnapshot`,
   MVP input bundle, QuantLib, or UI exists yet. Issue #38 remains open.
 
+### `BondReferenceData` schema landed — BLI MVP Slice B
+
+`BondReferenceData` (`src/shiori_pricing_lab/reference_data/`) is
+implemented as the Bond Master reference-data schema `docs/20` described.
+**Package decision (explicit):** it lives in a new top-level package,
+`shiori_pricing_lab.reference_data`, a sibling to `products`, not part of
+it — nothing is exported from `products/__init__.py`, and no existing
+product schema is touched. It carries every required Annex B §B.5 field
+(`docs/20` §4), reusing the existing `Currency` / `Frequency` / `DayCount`
+/ `BusinessDayConvention` / `BondYieldConvention` enums, plus two new
+enums this slice adds: `BondType` (only `FIXED_COUPON_BULLET` is
+MVP-pricing-eligible; the other members exist so non-vanilla bonds are
+still representable as reference data) and `BondStatus`
+(`ACTIVE`/`INACTIVE`).
+
+`coupon >= 0` is enforced at construction (`coupon == 0` is accepted as
+valid reference data); `first_coupon_date` / `last_coupon_date` are
+required constructor arguments, non-null, strict `YYYY-MM-DD`.
+**MVP pricing eligibility is a separate function**
+(`reference_data.eligibility.is_mvp_pricing_eligible`), not part of
+construction validation — a callable, sinkable, zero-coupon, or
+`OTHER`-yield-convention bond all construct successfully but are marked
+ineligible with an explicit reason. Zero-coupon bonds are explicitly
+**valid-but-ineligible** for this slice (the stricter of `docs/20` §5's
+two allowed choices). Irregular first/last coupon stub detection is
+**not** implemented (no schedule engine exists); instead the small,
+manually reviewed synthetic fixture (`reference_data/fixtures.py`, four
+bonds covering eligible-plain-vanilla, zero-coupon, callable, and
+floating-rate-note cases) is limited to regular-coupon, no-stub bonds by
+construction. No lookup-by-ISIN helper, pricing, cash-flow generation,
+schedule engine, QuantLib, `MarketDataSnapshot`, MVP input bundle, file
+parser, ingestion, or Bloomberg/API connector was added. Tests are in
+`tests/test_bond_reference_data.py`. Issue #38 remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or

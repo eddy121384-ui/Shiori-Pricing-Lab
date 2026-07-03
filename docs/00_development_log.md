@@ -724,4 +724,84 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   slice, not left ambiguous. Propagated through the field table, the
   eligibility section, the validation checklist, the deferred-items
   section, the next-slice recommendation, and the acceptance checklist.
+- **`BondReferenceData` schema implemented — BLI MVP Slice B
+  (`src/shiori_pricing_lab/reference_data/`,
+  `tests/test_bond_reference_data.py`).** Following `docs/20`, adds a new
+  top-level package, **sibling to `products`, not part of it** — the
+  explicit package decision `docs/20` §7/§11/§12 left open, made because
+  Bond Reference Data describes the underlying bond's own static terms
+  (what the issuer promised), not a traded deal's terms and not market
+  data. No existing product schema (`BondOption`, `DepositLeg`,
+  `BondLinkedStructuredProduct`) is modified, and nothing is exported from
+  `products/__init__.py`.
+  - `BondReferenceData` carries every required field from Annex B §B.5 /
+    `docs/20` §4 (`isin`, `issuer`, `currency`, `coupon`,
+    `coupon_frequency`, `maturity_date`, `issue_date`, `day_count`,
+    `business_day_convention`, `redemption_amount`, `callable_flag`,
+    `sinkable_flag`, `bond_type`, `yield_convention`, `ex_dividend_days`,
+    `first_coupon_date`, `last_coupon_date`, `status`), reusing the
+    existing `Currency` / `Frequency` / `DayCount` /
+    `BusinessDayConvention` / `BondYieldConvention` enums — no new members
+    added to any of them.
+  - Two new controlled-vocabulary enums resolve the open items `docs/20`
+    §4/§11 left to this slice: `BondType` (`FIXED_COUPON_BULLET`,
+    `FLOATING_RATE_NOTE`, `AMORTIZING`, `CONVERTIBLE`,
+    `INFLATION_LINKED`, `PERPETUAL`, `STRUCTURED_NOTE`) and `BondStatus`
+    (`ACTIVE`, `INACTIVE`).
+  - `coupon >= 0` is enforced at construction (negative rejected);
+    `coupon == 0` constructs successfully as valid reference data.
+    `first_coupon_date` / `last_coupon_date` are required constructor
+    arguments (omitting either raises `TypeError`) and must be non-null,
+    strict `YYYY-MM-DD` dates.
+  - **MVP pricing eligibility is a separate function**,
+    `reference_data.eligibility.is_mvp_pricing_eligible`, deliberately not
+    part of `__post_init__` — a callable, sinkable, zero-coupon, or
+    `OTHER`-yield-convention bond all construct successfully as reference
+    data but are marked ineligible with an explicit reason. This resolves
+    three open decisions explicitly: (1) floating-rate/amortizing/
+    convertible/inflation-linked/perpetual/structured-note exclusion uses
+    `bond_type` as the signal (only `FIXED_COUPON_BULLET` is eligible);
+    (2) zero-coupon bonds are **valid-but-ineligible** for this
+    implementation slice (the stricter of `docs/20` §5's two allowed
+    choices); (3) irregular first/last coupon stub detection is **not**
+    implemented (no schedule engine exists, and a wrong heuristic would be
+    worse than none) — instead the small, manually reviewed synthetic
+    fixture (`reference_data/fixtures.py`, four bonds: one eligible
+    plain-vanilla bullet, one zero-coupon, one callable, one floating-rate
+    note) is limited to regular-coupon, no-stub bonds by construction, and
+    a test documents that limitation.
+  - No lookup-by-ISIN helper was added (`docs/20` §11 explicitly defers
+    designing a lookup/resolution mechanism to a future pricing-engine
+    slice). No pricing, cash-flow generation, schedule engine, QuantLib,
+    `MarketDataSnapshot`, MVP input bundle, file parser, ingestion, or
+    Bloomberg/API connector was added. Issue #38 is unaffected and
+    **remains open**.
+  - **Review / validation:** `python -m pytest -q` → 455 passed;
+    `python -m ruff check src/shiori_pricing_lab tests` → clean for every
+    file this slice touches (2 pre-existing `E501` findings in
+    `products/bond_option.py`, untouched by this slice, remain).
   No code, fixture, or tests were added.
+- **`BondReferenceData` / `is_mvp_pricing_eligible` fixed after Codex P2
+  review of PR #58.** Three gaps closed, no scope added: (1)
+  `is_mvp_pricing_eligible` did not check `status`, so a `BondStatus.
+  INACTIVE` bond could be marked MVP-pricing-eligible — it now adds an
+  explicit "status INACTIVE is not MVP-pricing-eligible" reason, matching
+  the existing valid-but-ineligible pattern used for callable/sinkable/
+  zero-coupon/non-vanilla bonds. (2) `BondReferenceData` only checked
+  each coupon date's format, not its ordering, so impossible static
+  records could construct (`first_coupon_date` on/before `issue_date`,
+  `last_coupon_date` after `maturity_date`, or `first_coupon_date` after
+  `last_coupon_date`) — three new checks enforce
+  `issue_date < first_coupon_date <= last_coupon_date <= maturity_date`.
+  This is explicitly **not** schedule generation, stub detection, or
+  business-day rolling — only a static-date-order sanity check; the
+  zero-coupon fixture bond (`first_coupon_date == last_coupon_date ==
+  maturity_date`) still satisfies the invariant and still constructs. (3)
+  Because those two gaps are fixed, an impossible or inactive record can
+  no longer be reported eligible. Six new tests cover both fixes. **No
+  pricing, schedule engine, product-schema change, or lookup mechanism
+  was added; Issue #38 remains open.**
+  - **Review / validation:** `python -m pytest -q` → 461 passed;
+    `python -m ruff check src/shiori_pricing_lab tests` → the 2
+    pre-existing `E501` findings in `products/bond_option.py` (untouched)
+    remain the only findings.
