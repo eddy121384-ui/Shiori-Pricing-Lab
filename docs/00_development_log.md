@@ -908,3 +908,56 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     tests` → the same 2 pre-existing `E501` findings in
     `products/bond_option.py` remain the only findings; the modified
     resolver module and test file are clean.
+- **BLI market data / MVP input bundle preflight written, docs-only
+  (`docs/22_bli_market_data_input_bundle_preflight.md`).** Defines the
+  boundary for the next BLI MVP slices: a BLI-scoped `MarketDataSnapshot`
+  and the MVP input bundle a future pricing engine will consume, built
+  from one `BondLinkedStructuredProduct` + resolved `BondReferenceData` +
+  resolver/eligibility status + one point-in-time market snapshot +
+  explicit curve mappings + explicit assumptions/validation results.
+  States the four-layer boundary (product terms / reference data /
+  market data / input bundle) and restates, without changing, the
+  existing product-schema and reference-data exclusion lists (`docs/15`,
+  `docs/18` §8, `docs/19` §9, `docs/20` §3) plus a new market-data
+  exclusion: market data must never rewrite a bond's static terms
+  (coupon, maturity, first/last coupon date, bond type, callable/
+  sinkable flags) or a product's deal terms (notional, strike,
+  settlement rules) — any mismatch is a blocking validation error, never
+  a silent overwrite. Grounds the required market-data field lists in
+  the frozen `ANNEX_B_v1.3.md` §B.1 (Bond Price/Yield File) and §B.2
+  (Yield Curve File), and restates the frozen `SPEC_v1.3.md` §3.5/§7.3
+  curve-purpose rules verbatim: Option Discount Curve and Bond Reference
+  Curve must never be mixed; the deposit leg must not silently reuse the
+  Option Discount Curve unless an explicit mapping rule says so; missing
+  curve mapping or invalid curve data blocks pricing. Lists ten
+  conceptual bundle-validation gates (product valid, wrapper currency
+  consistent, resolver status `FOUND_ELIGIBLE`, market snapshot present
+  and coherent, bond price/yield available for the exact resolved ISIN,
+  curve mapping available per purpose, deposit/FTP rate or manual-rate
+  audit present, quote side explicit, source/status acceptable, no
+  stale/inactive data) — any single failed gate blocks bundle creation
+  entirely, no partial-bundle concept. Extends the `docs/21` §7.1
+  point-in-time boundary (the Codex P2 fix from PR #59) one layer up:
+  market data and reference data must share a coherent valuation
+  context, and a future bundle builder must not mix "latest" reference
+  data with historical market data (no look-ahead bias). Restates the
+  Treasury FTP percent-vs-decimal rule and quote-side policy (`docs/18`
+  §2.2/§2.4/§5) without changing them. Sketches conceptual error/audit
+  categories (mapping some onto the existing `PricingErrorCode.
+  MISSING_REFERENCE_DATA`/`MISSING_MARKET_DATA` members, leaving open
+  whether more granular codes are needed) and recommends five future
+  implementation slices (`MarketDataSnapshot` preflight → minimal
+  dataclass with a synthetic fixture → MVP input bundle → bundle builder
+  → pricing engine skeleton). **No `MarketDataSnapshot`, MVP input
+  bundle, bundle builder, pricing engine, payoff skeleton, cash-flow
+  generation, schedule engine, yield-to-price calculation, curve
+  interpolation, Treasury FTP parser, ingestion, Bloomberg/API
+  connector, QuantLib adapter, UI, or screenshot capture was added.**
+  `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+  `BondReferenceData`, and `resolve_bond_reference_data` are all
+  unmodified. No frozen BLI v1.3 source spec file was edited. Issue #38
+  remains open.
+  - **Review / validation:** Documentation-only change; no source file
+    changed, so `python -m pytest -q` and `ruff` are unaffected by this
+    PR (last known state: 493 passed, only the 2 pre-existing
+    `products/bond_option.py` `E501` findings).
