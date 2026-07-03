@@ -34,6 +34,11 @@ implementation slice:
   regular-coupon, no-stub bonds by construction; any known stub/irregular
   bond is out of MVP pricing scope by construction, not by runtime
   detection.
+- **Inactive Bond Master status** (Codex P2 review of PR #58): a bond
+  with ``status is not BondStatus.ACTIVE`` (i.e. ``INACTIVE``) constructs
+  successfully as valid reference data but is not MVP-pricing-eligible --
+  the same valid-but-ineligible pattern already used for callable /
+  sinkable / zero-coupon / non-vanilla bonds.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ from dataclasses import dataclass
 
 from shiori_pricing_lab.products.enums import BondYieldConvention
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
-from shiori_pricing_lab.reference_data.enums import BondType
+from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 
 
 @dataclass(frozen=True)
@@ -87,5 +92,7 @@ def is_mvp_pricing_eligible(bond: BondReferenceData) -> EligibilityResult:
             "zero-coupon bonds are valid reference data but are not "
             "MVP-pricing-eligible for this implementation slice (docs/20 §5)"
         )
+    if bond.status is not BondStatus.ACTIVE:
+        reasons.append(f"status {bond.status.value} is not MVP-pricing-eligible")
 
     return EligibilityResult(eligible=not reasons, reasons=tuple(reasons))

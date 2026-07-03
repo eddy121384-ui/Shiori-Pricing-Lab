@@ -781,3 +781,27 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     file this slice touches (2 pre-existing `E501` findings in
     `products/bond_option.py`, untouched by this slice, remain).
   No code, fixture, or tests were added.
+- **`BondReferenceData` / `is_mvp_pricing_eligible` fixed after Codex P2
+  review of PR #58.** Three gaps closed, no scope added: (1)
+  `is_mvp_pricing_eligible` did not check `status`, so a `BondStatus.
+  INACTIVE` bond could be marked MVP-pricing-eligible — it now adds an
+  explicit "status INACTIVE is not MVP-pricing-eligible" reason, matching
+  the existing valid-but-ineligible pattern used for callable/sinkable/
+  zero-coupon/non-vanilla bonds. (2) `BondReferenceData` only checked
+  each coupon date's format, not its ordering, so impossible static
+  records could construct (`first_coupon_date` on/before `issue_date`,
+  `last_coupon_date` after `maturity_date`, or `first_coupon_date` after
+  `last_coupon_date`) — three new checks enforce
+  `issue_date < first_coupon_date <= last_coupon_date <= maturity_date`.
+  This is explicitly **not** schedule generation, stub detection, or
+  business-day rolling — only a static-date-order sanity check; the
+  zero-coupon fixture bond (`first_coupon_date == last_coupon_date ==
+  maturity_date`) still satisfies the invariant and still constructs. (3)
+  Because those two gaps are fixed, an impossible or inactive record can
+  no longer be reported eligible. Six new tests cover both fixes. **No
+  pricing, schedule engine, product-schema change, or lookup mechanism
+  was added; Issue #38 remains open.**
+  - **Review / validation:** `python -m pytest -q` → 461 passed;
+    `python -m ruff check src/shiori_pricing_lab tests` → the 2
+    pre-existing `E501` findings in `products/bond_option.py` (untouched)
+    remain the only findings.

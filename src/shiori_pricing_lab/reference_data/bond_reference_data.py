@@ -135,8 +135,32 @@ class BondReferenceData:
         # from them -- see reference_data.eligibility and
         # reference_data.fixtures for how irregular-stub bonds are kept out
         # of the MVP pricing pool without a schedule engine.
-        _parse_iso_date(self.first_coupon_date, "first_coupon_date")
-        _parse_iso_date(self.last_coupon_date, "last_coupon_date")
+        first_coupon = _parse_iso_date(self.first_coupon_date, "first_coupon_date")
+        last_coupon = _parse_iso_date(self.last_coupon_date, "last_coupon_date")
+
+        # Basic static date-order sanity (Codex P2 review of PR #58): this is
+        # not schedule generation, stub detection, or business-day rolling --
+        # it only rejects impossible static Bond Master records (a first
+        # coupon on/before issue, a last coupon after maturity, or a first
+        # coupon after the last one). The invariant is
+        # issue_date < first_coupon_date <= last_coupon_date <= maturity_date;
+        # a zero-coupon bond with first_coupon_date == last_coupon_date ==
+        # maturity_date still satisfies it.
+        if first_coupon <= issue:
+            raise ValueError(
+                f"first_coupon_date ({self.first_coupon_date}) must be after "
+                f"issue_date ({self.issue_date})"
+            )
+        if last_coupon > maturity:
+            raise ValueError(
+                f"last_coupon_date ({self.last_coupon_date}) must be on or "
+                f"before maturity_date ({self.maturity_date})"
+            )
+        if first_coupon > last_coupon:
+            raise ValueError(
+                f"first_coupon_date ({self.first_coupon_date}) must be on or "
+                f"before last_coupon_date ({self.last_coupon_date})"
+            )
 
         _require_finite_number(self.redemption_amount, "redemption_amount")
         if not self.redemption_amount > 0:

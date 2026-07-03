@@ -169,6 +169,38 @@ def test_invalid_last_coupon_date_format_rejected():
         _bond(last_coupon_date="not-a-date")
 
 
+# --- coupon date ordering: reject impossible static Bond Master records ---
+#
+# Invariant: issue_date < first_coupon_date <= last_coupon_date <=
+# maturity_date. This is basic static date-order sanity, not schedule
+# generation, stub detection, or business-day rolling (Codex P2 review of
+# PR #58).
+
+
+def test_first_coupon_date_on_or_before_issue_date_rejected():
+    with pytest.raises(ValueError, match="first_coupon_date .* must be after issue_date"):
+        _bond(first_coupon_date="2025-05-01")  # equal to default issue_date
+
+
+def test_last_coupon_date_after_maturity_date_rejected():
+    with pytest.raises(
+        ValueError, match="last_coupon_date .* must be on or before maturity_date"
+    ):
+        _bond(last_coupon_date="2031-05-02")  # after default maturity_date 2031-05-01
+
+
+def test_first_coupon_date_after_last_coupon_date_rejected():
+    with pytest.raises(
+        ValueError, match="first_coupon_date .* must be on or before last_coupon_date"
+    ):
+        _bond(first_coupon_date="2030-12-01", last_coupon_date="2030-11-01")
+
+
+def test_zero_coupon_first_equals_last_equals_maturity_still_constructs():
+    bond = _bond(coupon=0.0, first_coupon_date="2031-05-01", last_coupon_date="2031-05-01")
+    assert bond.first_coupon_date == bond.last_coupon_date == bond.maturity_date == "2031-05-01"
+
+
 # --- redemption_amount -----------------------------------------------------
 
 
@@ -198,6 +230,18 @@ def test_callable_bond_is_valid_reference_data_but_ineligible():
     result = is_mvp_pricing_eligible(bond)
     assert result.eligible is False
     assert any("callable" in reason for reason in result.reasons)
+
+
+def test_inactive_status_bond_constructs_successfully():
+    bond = _bond(status=BondStatus.INACTIVE)
+    assert bond.status is BondStatus.INACTIVE
+
+
+def test_inactive_status_bond_is_valid_reference_data_but_ineligible():
+    bond = _bond(status=BondStatus.INACTIVE)
+    result = is_mvp_pricing_eligible(bond)
+    assert result.eligible is False
+    assert any("status INACTIVE" in reason for reason in result.reasons)
 
 
 def test_sinkable_bond_is_valid_reference_data_but_ineligible():
