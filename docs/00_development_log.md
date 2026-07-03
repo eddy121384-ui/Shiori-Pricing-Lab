@@ -704,3 +704,24 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   implementation only, still no pricing. No code, fixture, parser, or
   tests were added. No frozen BLI v1.3 source spec file was edited. Issue
   #38 remains open.
+- **BLI bond reference data preflight tightened after Codex P2 review,
+  docs-only (`docs/20` update).** Three findings fixed: (1)
+  `first_coupon_date` / `last_coupon_date` were mis-classified as
+  "Optional for MVP" despite Annex B §B.5 listing both as required — now
+  **Required**, with non-null strict-ISO-date validation, matching Annex
+  B and preventing a future implementation from losing its only signal
+  for detecting an irregular first/last coupon period. (2) Added an
+  explicit MVP eligibility rule that bonds with an irregular first/last
+  coupon period must be marked ineligible for MVP pricing until a future
+  cash-flow generation slice supports them — the reference-data schema
+  still does not calculate schedules or add a calendar engine; it only
+  prevents a stub bond from silently entering the MVP pricing pool,
+  either via irregularity detection or by limiting the MVP fixture to
+  regular-coupon, no-stub bonds by construction. (3) `coupon` validation
+  now requires `coupon >= 0` (negative coupons rejected outright);
+  `coupon == 0` remains valid reference data, but zero-coupon MVP-pricing
+  eligibility must be an explicit decision recorded by the implementation
+  slice, not left ambiguous. Propagated through the field table, the
+  eligibility section, the validation checklist, the deferred-items
+  section, the next-slice recommendation, and the acceptance checklist.
+  No code, fixture, or tests were added.
