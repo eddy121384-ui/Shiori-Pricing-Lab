@@ -247,12 +247,14 @@ Required future validation, none of which either `DepositLeg` or
     only its precision. The wrapper must **not** import or build a
     calendar engine in this slice — calendar-day arithmetic on the
     existing `date` objects `_parse_iso_date` already returns is
-    sufficient and requires no new dependency. **If the implementation
-    slice chooses not to compute this approximate settlement date, it
-    must explicitly mark settlement-date-vs-maturity as an open/deferred
-    decision in code and docs — it must not silently fall back to
-    checking `expiry_date` alone and imply settlement timing was
-    considered when it was not.**
+    sufficient and requires no new dependency. **The future wrapper
+    implementation must compute this calendar-day approximation and
+    enforce it. It must not silently fall back to checking `expiry_date`
+    alone, and it must not mark this guardrail as deferred in the wrapper
+    schema slice.** This is a required MVP validation rule, not an
+    optional refinement — only the future replacement of the calendar-day
+    approximation with a business-day/holiday-calendar-aware calculation
+    is deferred (§10), not the guardrail itself.
   - If `bond_option.exercise_style == AMERICAN`,
     `bond_option.exercise_start_date` must remain strictly before
     `bond_option.expiry_date` — already enforced by `BondOption`'s own
@@ -377,10 +379,15 @@ Explicitly not decided or built by this doc:
 - Whether `bond_option.expiry_date` must be on/after
   `deposit_leg.start_date` (§7) — open question, must be decided
   explicitly in the implementation slice, not silently chosen.
-- The exact calendar-day arithmetic implementation for
-  `effective_option_settlement_date` (§7) — this doc fixes the
-  approximation's *shape* (`expiry_date + settlement_lag_days` calendar
-  days, no business-day rolling), not the specific code that computes it.
+- **Not deferred: the wrapper schema must enforce the calendar-day
+  effective-settlement-date guardrail** (§7) — this is a required MVP
+  validation rule, not optional. **Deferred only:** replacing the MVP
+  calendar-day approximation (`expiry_date + settlement_lag_days` calendar
+  days, no business-day rolling, no holiday calendar) with a future
+  business-day/holiday-calendar-aware settlement calculation — this doc
+  fixes the approximation's *shape*, not the exact code that computes it,
+  and leaves room for a more precise future calculation without changing
+  the validation's intent.
 - A wrapper-level payoff linkage enum (§8) — explicitly deferred to a
   future payoff/pricing slice.
 - Multi-leg / multi-option wrappers, portfolio-level BLI structures — out
@@ -402,11 +409,14 @@ slice should:
 - validate the embedded `DepositLeg` and `BondOption` (type checks, §7);
 - derive or validate `participation_ratio` per the confirmed choice
   between Option A and Option B (§6);
-- enforce currency consistency and the date-consistency rules in §7,
-  including the effective-settlement-date-vs-deposit-maturity check
-  (`bond_option.expiry_date + settlement_lag_days` calendar days `<=
-  deposit_leg.maturity_date`), and explicitly deciding the open
-  `expiry_date`-vs-`start_date` question rather than leaving it unhandled;
+- enforce currency consistency and the date-consistency rules in §7;
+- **enforce the effective-settlement-date-vs-deposit-maturity check:**
+  `bond_option.expiry_date + settlement_lag_days` calendar days `<=
+  deposit_leg.maturity_date` — this is mandatory, not optional; a bare
+  `expiry_date <= maturity_date` check is not sufficient and this slice
+  must not skip or defer it;
+- explicitly decide the open `expiry_date`-vs-`start_date` question
+  rather than leaving it unhandled;
 - enforce `bond_option.settlement_type == SettlementType.CASH` (§8) —
   reject physical delivery at the wrapper level for MVP;
 - add tests (valid construction, currency mismatch rejection, date and
@@ -434,15 +444,14 @@ A future wrapper-implementation PR should satisfy:
   `"BOND_LINKED_STRUCTURED_PRODUCT"` discriminator (`field(init=False)`),
   matching the existing `FXSwap`/`InterestRateSwap`/`BondOption` pattern.
 - `deposit_leg.currency == bond_option.currency`, or construction raises.
-- The option's **effective settlement date** —
-  `bond_option.expiry_date + settlement_lag_days` calendar days, per §7's
-  approximation — is on or before `deposit_leg.maturity_date`, or
-  construction raises. A bare `bond_option.expiry_date <=
-  deposit_leg.maturity_date` check, ignoring `settlement_lag_days`, is
-  **not** sufficient. If the implementation does not compute the
-  approximate settlement date, it must say so explicitly (in code comment
-  and doc/PR body) as a deferred decision, not silently check expiry date
-  alone.
+- The wrapper implementation must compute the approximate **effective
+  settlement date** using calendar-day arithmetic
+  (`bond_option.expiry_date + settlement_lag_days` calendar days, per
+  §7's approximation) and reject construction when it is after
+  `deposit_leg.maturity_date`. A bare `bond_option.expiry_date <=
+  deposit_leg.maturity_date` check is **not** sufficient. This is a
+  required MVP validation rule — the future code slice must not skip it
+  or mark it as deferred.
 - `bond_option.settlement_type == SettlementType.CASH`, or construction
   raises — physical delivery is rejected at the wrapper level for MVP.
 - The `expiry_date`-vs-`start_date` question (§7) is resolved one way or
