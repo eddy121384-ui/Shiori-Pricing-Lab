@@ -548,6 +548,44 @@ MVP input bundle implementation, pricing engine, QuantLib, or
 `BondLinkedStructuredProduct` wrapper was added.** Issue #38 is unaffected.
 Before starting any of those, agents must still read `docs/18` and `docs/17`.
 
+### BLI wrapper schema preflight checkpoint
+
+- Before implementing `BondLinkedStructuredProduct`, agents must read
+  `docs/19_bli_wrapper_schema_preflight.md`.
+- The wrapper binds exactly one `DepositLeg` and exactly one `BondOption`
+  as **embedded objects** (not reference IDs) — no registry/persistence
+  layer exists yet.
+- `participation_ratio`: recommended as a **derived property** from
+  `bond_option.notional / deposit_leg.deposit_notional`, not a freely-set
+  input field, unless a concrete consumer needs the optional-validated
+  design (`docs/19` §6). Either way, the canonical mismatch case
+  (inconsistent stored ratio) must be rejected, never silently accepted.
+- Required cross-component checks: `deposit_leg.currency ==
+  bond_option.currency`; the option's **effective settlement date**
+  (`bond_option.expiry_date + settlement_lag_days` calendar days, a
+  calendar-day approximation — no calendar engine) must be on or before
+  `deposit_leg.maturity_date`. A bare `expiry_date <= maturity_date`
+  check that ignores `settlement_lag_days` is **not** sufficient
+  (`docs/19` §7). Whether `bond_option.expiry_date` must also be on/after
+  `deposit_leg.start_date` is a **separate open question** the
+  implementation slice must decide explicitly, not silently choose
+  (`docs/19` §7).
+- **`bond_option.settlement_type` must be `SettlementType.CASH`** for the
+  MVP wrapper — construction must raise otherwise. Physical delivery is
+  out of MVP scope and deferred to a later custody/settlement slice;
+  `BondOption` itself stays general, the wrapper narrows it (`docs/19`
+  §8).
+- `DepositLeg.principal_repayment_rule` stays `FULL_PRINCIPAL_AT_MATURITY`;
+  option payoff is computed separately at the wrapper/pricing level, never
+  folded into `DepositLeg`. Do not add a payoff-linkage enum yet
+  (`docs/19` §8).
+- The wrapper must never carry market data, resolved rates, or pricing
+  output (`docs/19` §9's full exclusion list) — same boundary already
+  enforced on `DepositLeg` and `BondOption`, restated for the wrapper.
+- No wrapper code, pricing engine, QuantLib, payoff skeleton,
+  `MarketDataSnapshot`, MVP input bundle, or UI exists yet. Issue #38
+  remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
