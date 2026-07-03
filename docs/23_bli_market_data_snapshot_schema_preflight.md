@@ -432,10 +432,29 @@ one resolved eligible ISIN                (reuse an existing
 one bond quote for that ISIN
 one Bond Reference Curve
 one Option Discount Curve
-one Deposit Curve or FTP observation       (matching whichever
-                                            DepositLeg.deposit_rate_mode
-                                            the synthetic DepositLeg
-                                            fixture uses)
+one Deposit Curve                          (Codex P2 review of PR #62:
+                                            required regardless of
+                                            deposit_rate_mode, for the
+                                            deposit leg's own
+                                            discounting/funding
+                                            calculation when the future
+                                            methodology requires it --
+                                            see the note below; not a
+                                            substitute for the
+                                            deposit-rate input below,
+                                            and not substituted by it)
+plus one deposit-rate input matching the synthetic DepositLeg's
+  own deposit_rate_mode (docs/18 §4) -- exactly one of:
+    - FIXED_RATE: the rate is already on DepositLeg itself; no separate
+      market-data input is needed for the rate value (it is a deal
+      term, docs/18 §4.1), but the Deposit Curve above is still
+      required for discounting.
+    - TREASURY_FTP_REFERENCE: one matching FTP observation resolving
+      the leg's ftp_rate_selector (currency/tenor/quote_side, docs/18
+      §4.2) -- this FTP observation resolves the *rate*, it does not
+      replace the Deposit Curve, which is a separate discounting input.
+    - MANUAL_VERIFIED_RATE: one manual verified rate audit record
+      resolving the leg's manual_input_reference (docs/18 §4.3).
 one explicit volatility input
 one explicit credit spread treatment       (either a value, or an
                                             explicit audited
@@ -475,13 +494,33 @@ required dates/timestamps (business_date/valuation_date, as_of_timestamp)
   _parse_iso_date pattern where a calendar date is expected.
 no system date fallback -- never date.today()/datetime.now() anywhere
   in this module, per the existing repo-wide invariant (docs/09 §3).
-no duplicate curve purpose without explicit handling -- if the snapshot
-  carries a curve collection (§4.3), two records claiming the same
-  curve_purpose for the same currency is either rejected outright or
-  requires an explicit selection rule; it must not be silently resolved
-  by "use whichever one is first/last" (mirrors the duplicate-ISIN
-  rejection already implemented in resolve_bond_reference_data,
-  docs/21 §4, PR #60).
+curve records are tenor/rate rows, not one row per curve (Codex P2
+  review of PR #62 -- corrected from an earlier, too-broad version of
+  this rule): Annex B §B.2 models a curve as multiple tenor nodes (e.g.
+  1Y/2Y/5Y/10Y) sharing the same `currency` + `curve_purpose`, so
+  repeated `currency` + `curve_purpose` values across records are
+  **expected and valid**, not duplicates. Duplicate detection must
+  instead be keyed at the curve-node level -- conceptually
+  `business_date`/`valuation_date` + `curve_id`/`curve_name` +
+  `currency` + `curve_purpose` + `tenor` (+ `source_system`/version if
+  more than one source or version could otherwise collide). Future
+  implementation must reject:
+    - a duplicate tenor row within the same curve identity (two rows
+      claiming the same curve_id/curve_name + tenor for the same
+      valuation context);
+    - conflicting rates for the same curve identity + tenor + valuation
+      context (two rows agreeing on identity and tenor but disagreeing
+      on rate);
+    - ambiguous multiple curve IDs claiming the same curve_purpose for
+      the same currency/valuation context without an explicit mapping
+      rule to choose between them (§7's "curve purpose must be carried
+      explicitly... never inferred from currency alone" already
+      implies this, restated here as a validation rule).
+  None of these three cases may be silently resolved by "use whichever
+  row is first/last" (same no-silent-first/last-match principle as the
+  duplicate-ISIN rejection already implemented in
+  resolve_bond_reference_data, docs/21 §4, PR #60) -- reject outright or
+  require an explicit selection rule.
 no negative clean price (reuse _require_finite_number + positivity,
   same pattern as BondOption.notional / BondReferenceData.
   redemption_amount).

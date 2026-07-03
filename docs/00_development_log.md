@@ -1038,3 +1038,27 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     changed, so `python -m pytest -q` and `ruff` are unaffected by this
     PR (last known state: 493 passed, only the 2 pre-existing
     `products/bond_option.py` `E501` findings).
+- **`docs/23` fixed after Codex P2 review of PR #62.** Two findings:
+  (1) the §12 validation checklist's "no duplicate curve purpose"
+  rule was too broad — Annex B §B.2 models a curve as multiple tenor
+  rows sharing the same `currency` + `curve_purpose` (e.g. 1Y/2Y/5Y/10Y
+  under one Option Discount Curve), so repeated `currency` +
+  `curve_purpose` values are expected, not duplicates. Corrected to key
+  duplicate detection at the curve-node level (valuation context +
+  curve identity + currency + curve_purpose + tenor), rejecting a
+  duplicate tenor row within one curve identity, conflicting rates for
+  the same node, or an ambiguous unmapped multiple-curve-ID case — never
+  resolved by picking the first/last row. (2) The §11.1 positive
+  synthetic fixture said "one Deposit Curve or FTP observation," treating
+  the two as substitutes; they are not — `docs/22` already separates
+  the Deposit Curve (a discounting input) from the deposit-rate input
+  (fixed rate / FTP observation / manual-verified-rate audit, per
+  `docs/18` §4's three modes). Corrected to require the Deposit Curve
+  unconditionally, plus a separate deposit-rate input matching whichever
+  `deposit_rate_mode` the synthetic `DepositLeg` fixture uses. **Still
+  docs-only: no class, fixture, or code of any kind was added.** Issue
+  #38 remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 493 passed (unchanged); `ruff` → the same 2
+    pre-existing `products/bond_option.py` `E501` findings remain the
+    only findings.
