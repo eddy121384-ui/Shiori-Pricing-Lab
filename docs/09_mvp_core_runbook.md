@@ -675,6 +675,41 @@ schedule engine, QuantLib, `MarketDataSnapshot`, MVP input bundle, file
 parser, ingestion, or Bloomberg/API connector was added. Tests are in
 `tests/test_bond_reference_data.py`. Issue #38 remains open.
 
+### BLI ISIN resolution preflight checkpoint
+
+- Before implementing any resolver that maps `BondOption.underlying_isin`
+  to a `BondReferenceData` record, agents must read
+  `docs/21_bli_isin_resolution_preflight.md`.
+- The MVP resolution source is `SYNTHETIC_BOND_FIXTURES`
+  (`shiori_pricing_lab.reference_data.fixtures`) only — no Bloomberg/API
+  connector, file parser, database, generic ingestion, or
+  screenshot/OCR capture in this slice.
+- Matching is **exact ISIN string match only** — no fuzzy/partial
+  matching, no check-digit correction.
+- A missing ISIN is a **not-found** result; a duplicate ISIN across
+  fixture records is a **fixture data-integrity error**, not a normal
+  lookup outcome, and must fail explicitly rather than silently
+  returning the first match.
+- **Eligibility is not re-implemented at the resolver layer.** A future
+  resolver calls the existing `reference_data.eligibility.
+  is_mvp_pricing_eligible(bond)` once per found record and reports all
+  of its reasons — callable, sinkable, zero-coupon, `OTHER` yield
+  convention, non-`FIXED_COUPON_BULLET` `bond_type`, and inactive status
+  are all already covered there (`docs/20`, PR #58).
+- A missing or ineligible bond must **block** explicitly — no guessing,
+  no fallback bond, no silent downgrade, no partial pricing (`docs/20`
+  §8, restated and detailed in `docs/21` §5).
+- The resolver only answers found/not-found, the record, eligible/
+  ineligible, and the blocking reason — it must never compute PV, DV01,
+  cashflows, or a coupon schedule, and it must never carry
+  `business_date`, `valuation_date`, a resolved rate, or any other
+  market-data field (`docs/21` §6/§7).
+- `docs/21` §8 sketches (non-bindingly) a
+  `resolve_bond_reference_data(underlying_isin, fixtures)` function as
+  the smallest next coding slice — **not implemented yet**. No resolver
+  code, pricing, `MarketDataSnapshot`, MVP input bundle, or product
+  schema change exists. Issue #38 remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
