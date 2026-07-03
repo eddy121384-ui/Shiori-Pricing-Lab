@@ -609,6 +609,38 @@ market-data/pricing field exists on the wrapper.
 UI.** Those remain future slices per `docs/17` §11 (B–G). Issue #38 is
 unaffected and remains open.
 
+### BLI bond reference data preflight checkpoint (Slice B)
+
+- Before implementing a Bond Reference Data / Bond Master schema or
+  fixture, agents must read
+  `docs/20_bli_bond_reference_data_preflight.md`.
+- The required field list is transcribed from
+  `docs/bond_linked_structured_pricer/ANNEX_B_v1.3.md` §B.5 — a future
+  implementation slice must confirm it against Annex A/B again before
+  writing code, not just trust this doc's transcription.
+- Bond Reference Data holds the bond's own static terms (coupon,
+  maturity, day count, business day convention, yield convention,
+  redemption amount, callable/sinkable flags) — it must never carry
+  market observations, a valuation date, or pricing output (`docs/20` §3),
+  same exclusion pattern already used for `DepositLeg` and the wrapper.
+- MVP plain-vanilla eligibility rejects callable, sinkable, and (by
+  default) `OTHER`-yield-convention bonds; how floating-rate/amortizing/
+  convertible/etc. bonds are excluded (no direct Annex B field exists for
+  them) is an **open item** the implementation slice must resolve
+  explicitly, not silently assume (`docs/20` §5).
+- For MVP, reference data is a small, manually reviewed fixture — no
+  parser, no generic file import, no Bloomberg/API connector in this
+  slice (`docs/20` §7).
+- Future pricing resolves `bond_option.underlying_isin` against this
+  fixture and must **block** — not guess or silently downgrade — on a
+  missing or ineligible bond (`docs/20` §8).
+- Carries forward, without resolving, `docs/14` F-08 (no
+  `m`/compounding-frequency field for `yield_convention = OTHER`) and the
+  still-open `DayCount` vocabulary question (A-14) as applied to the
+  bond's own accrual convention (`docs/20` §6, §11).
+- No Bond Master code, fixture, parser, pricing, `MarketDataSnapshot`,
+  MVP input bundle, QuantLib, or UI exists yet. Issue #38 remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or

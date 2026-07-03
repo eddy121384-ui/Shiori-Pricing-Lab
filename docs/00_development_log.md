@@ -676,3 +676,31 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   holiday calendar, no calendar engine). **No pricing, payoff calculation,
   QuantLib, `MarketDataSnapshot`, MVP input bundle, Treasury FTP parser,
   ingestion, or UI was added.** Issue #38 remains open.
+- **BLI bond reference data preflight written (Slice B), docs-only
+  (`docs/20_bli_bond_reference_data_preflight.md`).** Defines the minimal
+  Bond Reference Data / Bond Master fixture boundary for the underlying
+  bond a `BondOption` references, transcribing the required field list
+  from `docs/bond_linked_structured_pricer/ANNEX_B_v1.3.md` §B.5 (isin,
+  issuer, currency, coupon, coupon_frequency, maturity_date, issue_date,
+  day_count, business_day_convention, redemption_amount, callable_flag,
+  sinkable_flag, bond_type, yield_convention, ex_dividend_days,
+  first/last_coupon_date, status) and classifying each as MVP required/
+  optional. Recommends the MVP plain-vanilla eligibility rule (reject
+  callable, sinkable, and default-ineligible `OTHER` yield convention),
+  explicitly flagging that floating-rate/amortizing/convertible/
+  inflation-linked/perpetual/structured-note exclusion has no direct
+  Annex B field mapping and must be resolved explicitly by the
+  implementation slice (via `bond_type` vocabulary or construction-time
+  narrowing), not silently assumed. Recommends a small, manually reviewed
+  fixture for MVP — no parser, no file import, no connector. States that
+  future pricing must resolve `bond_option.underlying_isin` against the
+  fixture and **block** (not guess or silently downgrade) on a missing or
+  ineligible bond. Restates the market-data/pricing exclusion list and the
+  reference-data-vs-input-bundle distinction. Carries forward, without
+  resolving, `docs/14` F-08 (no `m`/compounding-frequency field for
+  `yield_convention = OTHER`) and the still-open `DayCount` vocabulary
+  question (A-14) as it applies to the bond's own accrual convention.
+  Recommends the next slice — minimal `BondReferenceData` schema/fixture
+  implementation only, still no pricing. No code, fixture, parser, or
+  tests were added. No frozen BLI v1.3 source spec file was edited. Issue
+  #38 remains open.
