@@ -777,6 +777,79 @@ wired into any pricing engine. Tests are in
   `resolve_bond_reference_data` are all unmodified. Issue #38 remains
   open.
 
+### BLI `MarketDataSnapshot` schema preflight checkpoint
+
+- Before implementing the BLI-scoped `MarketDataSnapshot` class or its
+  synthetic fixture, agents must read
+  `docs/23_bli_market_data_snapshot_schema_preflight.md`.
+- **Recommended module location:** a new module inside the existing
+  `data/` package — `src/shiori_pricing_lab/data/bli_snapshot.py` — not
+  a new top-level package, and not fields bolted onto the existing
+  vanilla-rates-core `MarketDataSnapshot` (`data/snapshot.py`). Market
+  data already has a designated home (`AGENTS.md` rule 2); the BLI
+  snapshot needs its own module because its shape (bond quote, curves by
+  purpose, FTP observation, volatility, credit spread) is structurally
+  unrelated to the existing DataFrame-of-rates-points class.
+- **Recommended class name:** `BLIMarketDataSnapshot`, not
+  `MarketDataSnapshot` — deliberately distinct from the existing class
+  in `data/snapshot.py` to avoid import confusion between two
+  same-named but structurally different classes. Either recommendation
+  may be overridden by the implementation slice if it states a reason.
+- Narrows `docs/22`'s conceptual field list into per-sub-observation
+  groups (snapshot-level; bond quote; curves; deposit/FTP; volatility;
+  credit spread) with a proposed field name for each, and recommends
+  storing both `ftp_rate_percent_value` and `ftp_rate_decimal_value`
+  explicitly (matching `docs/18` §2.1's own recommendation) rather than
+  one ambiguous rate field.
+- Curve purpose (Bond Reference Curve / Option Discount Curve / Deposit
+  Curve / Funding Curve) must be carried explicitly per curve record —
+  restates that the Option Discount Curve and Bond Reference Curve must
+  never be mixed and that the deposit leg must not silently reuse the
+  Option Discount Curve without an explicit mapping rule (SPEC §3.5).
+- Volatility and credit spread must each be explicit fields with an
+  audit trail for any override/fallback — no invented value, no silent
+  flat-vol fallback, no silent zero-spread default (restated from
+  `docs/22` §6.5/§6.6, SPEC §§3.2/3.3/7.4/7.5).
+- Proposes a minimal five-value status vocabulary
+  (`ACTIVE`/`STALE`/`INVALID`/`MISSING`/`MANUAL_VERIFIED`) as a starting
+  point, explicitly not finalized — the implementation slice must
+  confirm or replace it.
+- Scopes (but does not build) a minimal synthetic-fixture shape: one
+  valuation date, one resolved eligible ISIN, one bond quote, one Bond
+  Reference Curve, one Option Discount Curve, **one Deposit Curve plus
+  one separate deposit-rate input matching `DepositLeg.
+  deposit_rate_mode`** — the Deposit Curve is the deposit leg's own
+  discounting/funding curve input, distinct from the deposit-rate input
+  itself: for `FIXED_RATE` the rate is already on `DepositLeg` (but the
+  Deposit Curve may still be required for discounting); for
+  `TREASURY_FTP_REFERENCE` a matching FTP observation resolves the rate
+  (it does not replace the Deposit Curve); for `MANUAL_VERIFIED_RATE` a
+  manual verified rate audit record is required — plus one explicit
+  volatility input and one explicit credit-spread treatment, so the
+  positive fixture is complete enough for the future `docs/22` bundle
+  gates. Also lists negative-fixture concepts for future tests (missing
+  quote/curve/FTP-rate/volatility/spread, stale/invalid status,
+  ambiguous quote side).
+- Lists a validation-rules checklist for the future dataclass, including
+  **curve duplicate detection keyed at the curve-node level, not merely
+  `currency + curve_purpose`**: Annex B models a curve as multiple
+  tenor/rate rows, so a normal curve has several rows sharing the same
+  currency and curve purpose across different tenors — that is expected
+  and valid, not a duplicate. The duplicate key is conceptually
+  `business_date`/`valuation_date` + `curve_id`/`curve_name` +
+  `currency` + `curve_purpose` + `tenor` (+ `source_system`/version if
+  relevant); future implementation must reject a duplicate or
+  conflicting row for the same curve identity + tenor + valuation
+  context, never by silently picking the first/last row. The checklist
+  also covers no system date, exact ISIN match with the resolver's
+  result, explicit FTP percent/decimal consistency, and no silent
+  override without an audit field — none implemented here.
+- No `BLIMarketDataSnapshot` class, MVP input bundle, bundle builder,
+  pricing engine, or any code change exists yet. `BondOption`,
+  `DepositLeg`, `BondLinkedStructuredProduct`, `BondReferenceData`, and
+  `resolve_bond_reference_data` are all unmodified. Issue #38 remains
+  open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
