@@ -990,3 +990,51 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 493 passed (unchanged); `ruff` → the same 2
     pre-existing `products/bond_option.py` `E501` findings remain the
     only findings.
+- **BLI `MarketDataSnapshot` schema preflight written, docs-only
+  (`docs/23_bli_market_data_snapshot_schema_preflight.md`).** Narrows
+  `docs/22`'s conceptual boundary into an implementable schema shape for
+  the next PR. **Recommends a new module,
+  `src/shiori_pricing_lab/data/bli_snapshot.py`, inside the existing
+  `data/` package** (not a new top-level package, and not fields added
+  to the existing vanilla-rates-core `MarketDataSnapshot` in
+  `data/snapshot.py`, whose DataFrame-of-rates-points shape is
+  structurally unrelated) — reasoning: `AGENTS.md` rule 2 already
+  designates `data/` as market data's home, so a new sibling package
+  would fragment that rule the way `reference_data/` correctly did NOT
+  need to when it split off `products/` for a genuinely non-market-data
+  concept. **Recommends a distinct class name, `BLIMarketDataSnapshot`**,
+  to avoid import confusion with the existing `MarketDataSnapshot`.
+  Breaks `docs/22` §3/§6's field list into six proposed groups
+  (snapshot-level; bond quote; curves; deposit/FTP; volatility; credit
+  spread), recommending `ftp_rate_percent_value` +
+  `ftp_rate_decimal_value` as two explicit fields (matching `docs/18`
+  §2.1's own recommendation) rather than one ambiguous rate field.
+  Restates the curve-purpose-separation, volatility, and credit-spread
+  rules from `docs/22` §6.5/§6.6/§7 as concrete field-level
+  consequences (e.g. "a non-blank override value with a blank audit
+  field must be rejected"). Proposes a minimal five-value status
+  vocabulary (`ACTIVE`/`STALE`/`INVALID`/`MISSING`/`MANUAL_VERIFIED`),
+  explicitly not finalized. Scopes a minimal positive synthetic-fixture
+  shape (one valuation date, one resolved eligible ISIN, one bond quote,
+  one Bond Reference Curve, one Option Discount Curve, one Deposit
+  Curve/FTP observation, one volatility input, one credit-spread
+  treatment) plus negative-fixture concepts for future tests. Lists a
+  validation-rules checklist (no system date, no duplicate curve purpose
+  without explicit handling, exact-ISIN match with the resolver's
+  result, explicit FTP percent/decimal consistency, no silent
+  override/fallback without an audit field) mirroring `docs/18`
+  §10/`docs/20` §10's acceptance-criteria style. Restates that this
+  snapshot is not the MVP input bundle (`docs/22` §5) and does not
+  design the bundle in detail. **No `BLIMarketDataSnapshot` class, MVP
+  input bundle, bundle builder, pricing engine, payoff skeleton,
+  cash-flow generation, schedule engine, yield-to-price calculation,
+  curve interpolation, volatility surface, credit spread model, Treasury
+  FTP parser, ingestion, Bloomberg/API connector, QuantLib adapter, UI,
+  or screenshot/OCR capture was added.** `BondOption`, `DepositLeg`,
+  `BondLinkedStructuredProduct`, `BondReferenceData`, and
+  `resolve_bond_reference_data` are all unmodified. No frozen BLI v1.3
+  source spec file was edited. Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; no source file
+    changed, so `python -m pytest -q` and `ruff` are unaffected by this
+    PR (last known state: 493 passed, only the 2 pre-existing
+    `products/bond_option.py` `E501` findings).
