@@ -25,8 +25,15 @@ Strict boundaries, mirroring the ``products`` package's own rules:
 Provides ``BondReferenceData`` (the schema), ``BondType`` / ``BondStatus``
 (the controlled vocabulary this slice adds), ``is_mvp_pricing_eligible`` /
 ``EligibilityResult`` (the plain-vanilla MVP eligibility check, kept
-separate from reference-data validation), and
-``SYNTHETIC_BOND_FIXTURES`` (the small, manually reviewed fixture).
+separate from reference-data validation), ``SYNTHETIC_BOND_FIXTURES``
+(the small, manually reviewed fixture), and
+``resolve_bond_reference_data`` / ``BondReferenceResolutionResult`` /
+``BondResolutionStatus`` / ``DuplicateBondReferenceDataError`` (the
+docs/21 ISIN resolution slice: exact-ISIN-match lookup against a
+caller-supplied reference-data iterable, reusing
+``is_mvp_pricing_eligible`` rather than re-implementing eligibility).
+The resolver is a lookup step only -- it is not wired into any pricing
+engine, `BondOption`, or `BondLinkedStructuredProduct` by this slice.
 """
 
 from __future__ import annotations
@@ -35,12 +42,22 @@ from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceD
 from shiori_pricing_lab.reference_data.eligibility import EligibilityResult, is_mvp_pricing_eligible
 from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
+from shiori_pricing_lab.reference_data.resolution import (
+    BondReferenceResolutionResult,
+    BondResolutionStatus,
+    DuplicateBondReferenceDataError,
+    resolve_bond_reference_data,
+)
 
 __all__ = [
     "SYNTHETIC_BOND_FIXTURES",
     "BondReferenceData",
+    "BondReferenceResolutionResult",
+    "BondResolutionStatus",
     "BondStatus",
     "BondType",
+    "DuplicateBondReferenceDataError",
     "EligibilityResult",
     "is_mvp_pricing_eligible",
+    "resolve_bond_reference_data",
 ]
