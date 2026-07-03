@@ -816,16 +816,34 @@ wired into any pricing engine. Tests are in
   confirm or replace it.
 - Scopes (but does not build) a minimal synthetic-fixture shape: one
   valuation date, one resolved eligible ISIN, one bond quote, one Bond
-  Reference Curve, one Option Discount Curve, one Deposit Curve/FTP
-  observation, one explicit volatility input, one explicit credit-spread
-  treatment — plus a list of negative-fixture concepts for future tests
-  (missing quote/curve/FTP-rate/volatility/spread, stale/invalid status,
+  Reference Curve, one Option Discount Curve, **one Deposit Curve plus
+  one separate deposit-rate input matching `DepositLeg.
+  deposit_rate_mode`** — the Deposit Curve is the deposit leg's own
+  discounting/funding curve input, distinct from the deposit-rate input
+  itself: for `FIXED_RATE` the rate is already on `DepositLeg` (but the
+  Deposit Curve may still be required for discounting); for
+  `TREASURY_FTP_REFERENCE` a matching FTP observation resolves the rate
+  (it does not replace the Deposit Curve); for `MANUAL_VERIFIED_RATE` a
+  manual verified rate audit record is required — plus one explicit
+  volatility input and one explicit credit-spread treatment, so the
+  positive fixture is complete enough for the future `docs/22` bundle
+  gates. Also lists negative-fixture concepts for future tests (missing
+  quote/curve/FTP-rate/volatility/spread, stale/invalid status,
   ambiguous quote side).
-- Lists a validation-rules checklist for the future dataclass (no system
-  date, no duplicate curve purpose without explicit handling, exact ISIN
-  match with the resolver's result, explicit FTP percent/decimal
-  consistency, no silent override without an audit field) — none
-  implemented here.
+- Lists a validation-rules checklist for the future dataclass, including
+  **curve duplicate detection keyed at the curve-node level, not merely
+  `currency + curve_purpose`**: Annex B models a curve as multiple
+  tenor/rate rows, so a normal curve has several rows sharing the same
+  currency and curve purpose across different tenors — that is expected
+  and valid, not a duplicate. The duplicate key is conceptually
+  `business_date`/`valuation_date` + `curve_id`/`curve_name` +
+  `currency` + `curve_purpose` + `tenor` (+ `source_system`/version if
+  relevant); future implementation must reject a duplicate or
+  conflicting row for the same curve identity + tenor + valuation
+  context, never by silently picking the first/last row. The checklist
+  also covers no system date, exact ISIN match with the resolver's
+  result, explicit FTP percent/decimal consistency, and no silent
+  override without an audit field — none implemented here.
 - No `BLIMarketDataSnapshot` class, MVP input bundle, bundle builder,
   pricing engine, or any code change exists yet. `BondOption`,
   `DepositLeg`, `BondLinkedStructuredProduct`, `BondReferenceData`, and
