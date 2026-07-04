@@ -850,6 +850,74 @@ wired into any pricing engine. Tests are in
   `resolve_bond_reference_data` are all unmodified. Issue #38 remains
   open.
 
+### `BLIMarketDataSnapshot` schema and synthetic fixture landed
+
+`BLIMarketDataSnapshot` (`src/shiori_pricing_lab/data/bli_snapshot.py`)
+is implemented as the minimal BLI-scoped market-data schema `docs/23`
+described. **Module and class name follow `docs/23` §3.3/§3.4 exactly:**
+a new module inside the existing `data/` package, with a class name
+deliberately distinct from the existing vanilla-rates-core
+`MarketDataSnapshot` (`data/snapshot.py`) — the two remain unrelated and
+unmodified by each other.
+
+Component objects: `BLIBondQuote`, `BLICurvePoint`,
+`BLIDepositRateObservation`, `BLIVolatilityInput`,
+`BLICreditSpreadInput` — all frozen dataclasses, all required to carry
+their own `source_system` and per-sub-observation `status`
+(`BLIMarketDataStatus`: `ACTIVE`/`STALE`/`INVALID`/`MISSING`/
+`MANUAL_VERIFIED`, docs/23 §10's proposed minimal vocabulary, not
+finalized). `BLICurvePurpose` (`BOND_REFERENCE_CURVE`/
+`OPTION_DISCOUNT_CURVE`/`DEPOSIT_CURVE`/`FUNDING_CURVE`) is carried
+explicitly on every curve record, never inferred from currency alone.
+`BLIVolatilityBasis` and `BLICreditSpreadTreatment` are new controlled
+vocabularies; `PayoffBasis` (bond quote price/yield), `TreasuryFTPQuoteSide`,
+and `TreasuryFTPTenor` are reused from `products.enums` rather than
+duplicated.
+
+**Validation landed, per `docs/23` §12:** frozen dataclasses throughout;
+no `date.today()`/`datetime.now()` anywhere (`valuation_date` is parsed
+only for `YYYY-MM-DD` format validity); required string fields reject
+blank/whitespace; numeric fields reject NaN/infinity; `BLIBondQuote`
+requires exactly one of `clean_price_per_100`/`yield_value`, matching
+`price_type`; the Treasury FTP percent/decimal pair
+(`ftp_rate_percent_value`/`ftp_rate_decimal_value`) must agree within a
+small tolerance (`3.5500` ⇔ `0.0355`) or construction is rejected;
+curve-node duplicate/conflict detection is keyed at `curve_id` + `tenor`
+(so multiple tenor rows sharing one `currency` + `curve_purpose` are
+expected and pass — not a duplicate-detection false positive), while a
+duplicate or conflicting tenor row, or an ambiguous set of different
+`curve_id`s claiming the same `currency` + `curve_purpose`, is rejected;
+`BLIVolatilityInput`/`BLICreditSpreadInput`'s
+`override_or_fallback_audit` must be non-blank whenever populated, and
+credit-spread `EMBEDDED`/`NOT_REQUIRED` treatments require a non-blank
+audit explanation — no silent zero/default spread, no silent flat-vol
+fallback. `require_exact_isin_match(snapshot, expected_isin)` is a small
+module-level helper for exact (never fuzzy/prefix) ISIN comparison
+against a future resolver result.
+
+**Synthetic fixture:**
+`src/shiori_pricing_lab/data/bli_snapshot_fixtures.SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT`
+reuses the existing eligible `XS0000000001` bond from
+`reference_data.fixtures.SYNTHETIC_BOND_FIXTURES` and carries one bond
+quote, one Bond Reference Curve and one Option Discount Curve (each
+with two tenor rows), one Deposit Curve **plus** a separate
+`TREASURY_FTP_REFERENCE`-style deposit-rate observation (the Deposit
+Curve is never a substitute for the FTP observation, or vice versa,
+per docs/23 §11.1's Codex-P2-fixed rule), one explicit volatility
+input, and one explicit (`OBSERVED`) credit-spread treatment.
+
+Tests are in `tests/test_bli_market_data_snapshot.py` (`python -m
+pytest -q` → 559 passed; `ruff check` on the new files → clean).
+
+**Explicitly not built here (`docs/23` §17):** no MVP input bundle,
+bundle builder, pricing engine, payoff skeleton, cash-flow generation,
+schedule engine, yield-to-price calculation, curve interpolation,
+volatility surface, credit spread model, Treasury FTP parser,
+ingestion, Bloomberg/API connector, QuantLib adapter, or UI. `BondOption`,
+`DepositLeg`, `BondLinkedStructuredProduct`, `BondReferenceData`, and
+`resolve_bond_reference_data` are all unmodified. **Issue #38 remains
+open.**
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
