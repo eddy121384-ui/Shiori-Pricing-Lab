@@ -25,12 +25,12 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIDepositRateObservation,
     BLIMarketDataSnapshot,
     BLIMarketDataStatus,
+    BLIQuoteBasis,
     BLIVolatilityBasis,
     BLIVolatilityInput,
 )
 from shiori_pricing_lab.products.enums import (
     Currency,
-    PayoffBasis,
     TreasuryFTPQuoteSide,
     TreasuryFTPTenor,
 )
@@ -45,7 +45,7 @@ _SYNTHETIC_VALUATION_DATE = "2026-07-01"
 _SYNTHETIC_BOND_QUOTE = BLIBondQuote(
     isin=_SYNTHETIC_ELIGIBLE_ISIN,
     currency=Currency.USD,
-    price_type=PayoffBasis.PRICE,
+    price_type=BLIQuoteBasis.PRICE,
     quote_side=TreasuryFTPQuoteSide.MID,
     source_system="SYNTHETIC_BOND_QUOTE_FEED",
     status=BLIMarketDataStatus.ACTIVE,

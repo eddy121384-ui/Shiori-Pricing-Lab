@@ -869,17 +869,24 @@ their own `source_system` and per-sub-observation `status`
 finalized). `BLICurvePurpose` (`BOND_REFERENCE_CURVE`/
 `OPTION_DISCOUNT_CURVE`/`DEPOSIT_CURVE`/`FUNDING_CURVE`) is carried
 explicitly on every curve record, never inferred from currency alone.
-`BLIVolatilityBasis` and `BLICreditSpreadTreatment` are new controlled
-vocabularies; `PayoffBasis` (bond quote price/yield), `TreasuryFTPQuoteSide`,
-and `TreasuryFTPTenor` are reused from `products.enums` rather than
-duplicated.
+`BLIVolatilityBasis`, `BLICreditSpreadTreatment`, and `BLIQuoteBasis`
+(bond quote price/yield basis, **`data`-local, Codex P3 review of
+PR #63** — deliberately not `products.enums.PayoffBasis`, which
+documents an unrelated bond-option-payoff concept) are new controlled
+vocabularies local to this module; `TreasuryFTPQuoteSide` and
+`TreasuryFTPTenor` are reused from `products.enums`.
 
-**Validation landed, per `docs/23` §12:** frozen dataclasses throughout;
-no `date.today()`/`datetime.now()` anywhere (`valuation_date` is parsed
+**Validation landed, per `docs/23` §12 (as corrected by Codex P2 review
+of PR #63):** frozen dataclasses throughout; no
+`date.today()`/`datetime.now()` anywhere (`valuation_date` is parsed
 only for `YYYY-MM-DD` format validity); required string fields reject
-blank/whitespace; numeric fields reject NaN/infinity; `BLIBondQuote`
-requires exactly one of `clean_price_per_100`/`yield_value`, matching
-`price_type`; the Treasury FTP percent/decimal pair
+blank/whitespace; numeric fields reject NaN/infinity; **`BLIBondQuote`
+requires at least one of `clean_price_per_100`/`yield_value` — both may
+be present, since docs/23 §4.2 describes the field as "and/or" and a
+real feed may report both for one observation; each field is validated
+independently when present, and `price_type` no longer forces the other
+field to be absent — no yield-to-price or price-to-yield conversion is
+ever performed**; the Treasury FTP percent/decimal pair
 (`ftp_rate_percent_value`/`ftp_rate_decimal_value`) must agree within a
 small tolerance (`3.5500` ⇔ `0.0355`) or construction is rejected;
 curve-node duplicate/conflict detection is keyed at `curve_id` + `tenor`
@@ -891,7 +898,12 @@ duplicate or conflicting tenor row, or an ambiguous set of different
 `override_or_fallback_audit` must be non-blank whenever populated, and
 credit-spread `EMBEDDED`/`NOT_REQUIRED` treatments require a non-blank
 audit explanation — no silent zero/default spread, no silent flat-vol
-fallback. `require_exact_isin_match(snapshot, expected_isin)` is a small
+fallback. **Only `ACTIVE` status is accepted at construction, for the
+snapshot and every nested observation** — `STALE`/`INVALID`/`MISSING`
+are rejected outright, and `MANUAL_VERIFIED` is also rejected for now
+(with its own distinct error message) because the audit policy that
+would make it acceptable (docs/23 §10) is not implemented in this
+slice. `require_exact_isin_match(snapshot, expected_isin)` is a small
 module-level helper for exact (never fuzzy/prefix) ISIN comparison
 against a future resolver result.
 
@@ -904,10 +916,12 @@ with two tenor rows), one Deposit Curve **plus** a separate
 `TREASURY_FTP_REFERENCE`-style deposit-rate observation (the Deposit
 Curve is never a substitute for the FTP observation, or vice versa,
 per docs/23 §11.1's Codex-P2-fixed rule), one explicit volatility
-input, and one explicit (`OBSERVED`) credit-spread treatment.
+input, and one explicit (`OBSERVED`) credit-spread treatment. Every
+sub-observation in the fixture is `ACTIVE`, consistent with the
+construction-time status gating above.
 
 Tests are in `tests/test_bli_market_data_snapshot.py` (`python -m
-pytest -q` → 559 passed; `ruff check` on the new files → clean).
+pytest -q` → 589 passed; `ruff check` on the new files → clean).
 
 **Explicitly not built here (`docs/23` §17):** no MVP input bundle,
 bundle builder, pricing engine, payoff skeleton, cash-flow generation,

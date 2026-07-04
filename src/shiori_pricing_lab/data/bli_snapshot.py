@@ -49,7 +49,6 @@ from shiori_pricing_lab.data._validation import (
 )
 from shiori_pricing_lab.products.enums import (
     Currency,
-    PayoffBasis,
     TreasuryFTPQuoteSide,
     TreasuryFTPTenor,
     coerce_enum,
@@ -66,12 +65,18 @@ class BLIMarketDataStatus(StrEnum):
     """Per-sub-observation data-quality status (docs/23 §10).
 
     A minimal, explicitly-not-finalized starting vocabulary, modeled on the
-    existing ``BondStatus`` (``docs/20``) precedent. Only ``ACTIVE`` is
-    expected to permit future bundle construction; ``STALE``/``INVALID``/
-    ``MISSING`` are expected to block it, and ``MANUAL_VERIFIED`` is
-    acceptable only with manual-rate audit metadata -- none of that gating
-    is implemented here (docs/23 §10: it is a future bundle-layer concern,
-    not a snapshot-construction-time rule).
+    existing ``BondStatus`` (``docs/20``) precedent. **Construction-time
+    gating (Codex P2 review of PR #63, narrowing docs/23 §12's "not
+    accepted at construction absent an explicit policy" rule):** only
+    ``ACTIVE`` is accepted when building the snapshot or any nested
+    observation. ``STALE``/``INVALID``/``MISSING`` are rejected outright.
+    ``MANUAL_VERIFIED`` is also rejected for now -- accepting it requires a
+    future, explicit manual-verification audit policy (audit metadata,
+    who/when/why) that does not exist yet; it is not accepted merely by
+    naming the status. The enum keeps all five members because a future
+    bundle-layer policy may still need to represent/report a non-active
+    status it observed elsewhere -- only *this module's* construction path
+    is restricted to ``ACTIVE``.
     """
 
     ACTIVE = "ACTIVE"
@@ -79,6 +84,29 @@ class BLIMarketDataStatus(StrEnum):
     INVALID = "INVALID"
     MISSING = "MISSING"
     MANUAL_VERIFIED = "MANUAL_VERIFIED"
+
+
+def _require_active_status(status: BLIMarketDataStatus, context: str) -> None:
+    """Reject any status other than ``ACTIVE`` at construction (docs/23 §12).
+
+    ``MANUAL_VERIFIED`` gets its own message: it is not rejected because it
+    is treated the same as stale/invalid/missing data, but because this
+    slice does not yet implement the audit policy (docs/23 §10) that would
+    make it acceptable.
+    """
+
+    if status is BLIMarketDataStatus.ACTIVE:
+        return
+    if status is BLIMarketDataStatus.MANUAL_VERIFIED:
+        raise ValueError(
+            f"{context} status MANUAL_VERIFIED is not accepted yet -- manual verified "
+            "status requires a future explicit audit policy (docs/23 §10), not yet "
+            "implemented"
+        )
+    raise ValueError(
+        f"{context} status must be ACTIVE, got {status.value} -- STALE/INVALID/MISSING "
+        "data is not accepted at construction (docs/23 §12)"
+    )
 
 
 class BLICurvePurpose(StrEnum):
@@ -123,19 +151,44 @@ class BLICreditSpreadTreatment(StrEnum):
     NOT_REQUIRED = "NOT_REQUIRED"
 
 
+class BLIQuoteBasis(StrEnum):
+    """Bond quote basis vocabulary: is the quote expressed as price or yield?
+
+    Deliberately **not** ``products.enums.PayoffBasis`` (Codex P3 review of
+    PR #63): ``PayoffBasis`` documents a bond *option's payoff* basis, a
+    product/methodology concept, not a market-data quote's basis. Reusing
+    it here would couple this market-data schema to a product enum whose
+    meaning is unrelated, so a future ``PayoffBasis`` change made for
+    option-payoff reasons could silently change what quote basis this
+    snapshot accepts. This enum is local to the ``data`` package and used
+    only to label which basis a bond quote was primarily observed in --
+    it no longer gates which of ``clean_price_per_100`` / ``yield_value``
+    may be populated (see ``BLIBondQuote``).
+    """
+
+    PRICE = "PRICE"
+    YIELD = "YIELD"
+
+
 @dataclass(frozen=True)
 class BLIBondQuote:
     """One bond price/yield observation (docs/23 §4.2, Annex B §B.1).
 
-    Exactly one of ``clean_price_per_100`` / ``yield_value`` is populated,
-    matching ``price_type`` -- the same "exactly one of price/yield" pattern
-    already used by ``BondOption.strike_price`` / ``strike_yield``.
-    ``quote_side`` is always explicit; there is no default.
+    At least one of ``clean_price_per_100`` / ``yield_value`` is required;
+    **both may be present** (Codex P2 review of PR #63): docs/23 §4.2
+    describes the field as "clean_price_per_100 and/or yield", and a bond
+    price/yield feed may validly report both for the same observation.
+    This schema preserves whatever was observed -- it never performs a
+    yield-to-price or price-to-yield conversion, and never infers or
+    discards one value in favor of the other. ``price_type`` records which
+    basis the quote was primarily reported in; it no longer requires the
+    other field to be absent. ``quote_side`` is always explicit; there is
+    no default.
     """
 
     isin: str
     currency: Currency
-    price_type: PayoffBasis
+    price_type: BLIQuoteBasis
     quote_side: TreasuryFTPQuoteSide
     source_system: str
     status: BLIMarketDataStatus
@@ -146,7 +199,7 @@ class BLIBondQuote:
     def __post_init__(self) -> None:
         object.__setattr__(self, "currency", coerce_enum(self.currency, Currency, "currency"))
         object.__setattr__(
-            self, "price_type", coerce_enum(self.price_type, PayoffBasis, "price_type")
+            self, "price_type", coerce_enum(self.price_type, BLIQuoteBasis, "price_type")
         )
         object.__setattr__(
             self, "quote_side", coerce_enum(self.quote_side, TreasuryFTPQuoteSide, "quote_side")
@@ -154,25 +207,24 @@ class BLIBondQuote:
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
         )
+        _require_active_status(self.status, "bond_quote")
 
         _require_non_blank(self.isin, "isin")
         _require_non_blank(self.source_system, "source_system")
 
-        if self.price_type is PayoffBasis.PRICE:
-            if self.yield_value is not None:
-                raise ValueError("yield_value must be None when price_type is PRICE")
-            if self.clean_price_per_100 is None:
-                raise ValueError("clean_price_per_100 is required when price_type is PRICE")
+        if self.clean_price_per_100 is None and self.yield_value is None:
+            raise ValueError(
+                "at least one of clean_price_per_100 / yield_value is required"
+            )
+
+        if self.clean_price_per_100 is not None:
             _require_finite_number(self.clean_price_per_100, "clean_price_per_100")
             if not self.clean_price_per_100 > 0:
                 raise ValueError(
                     f"clean_price_per_100 must be positive, got {self.clean_price_per_100}"
                 )
-        else:  # PayoffBasis.YIELD
-            if self.clean_price_per_100 is not None:
-                raise ValueError("clean_price_per_100 must be None when price_type is YIELD")
-            if self.yield_value is None:
-                raise ValueError("yield_value is required when price_type is YIELD")
+
+        if self.yield_value is not None:
             _require_finite_number(self.yield_value, "yield_value")
 
         if self.accrued_interest_per_100 is not None:
@@ -212,6 +264,7 @@ class BLICurvePoint:
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
         )
+        _require_active_status(self.status, "curve_point")
 
         _require_non_blank(self.curve_id, "curve_id")
         _require_non_blank(self.curve_name, "curve_name")
@@ -250,6 +303,7 @@ class BLIDepositRateObservation:
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
         )
+        _require_active_status(self.status, "deposit_rate_observation")
 
         _require_non_blank(self.source_system, "source_system")
         _require_finite_number(self.ftp_rate_percent_value, "ftp_rate_percent_value")
@@ -294,6 +348,7 @@ class BLIVolatilityInput:
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
         )
+        _require_active_status(self.status, "volatility_input")
 
         _require_non_blank(self.source_system, "source_system")
 
@@ -338,6 +393,7 @@ class BLICreditSpreadInput:
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
         )
+        _require_active_status(self.status, "credit_spread_input")
 
         _require_non_blank(self.source_system, "source_system")
 
@@ -453,6 +509,7 @@ class BLIMarketDataSnapshot:
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
         )
+        _require_active_status(self.status, "snapshot")
 
         # valuation_date is explicit and parsed only for format validation --
         # never date.today()/datetime.now() anywhere in this module (docs/09 §3).

@@ -21,6 +21,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIDepositRateObservation,
     BLIMarketDataSnapshot,
     BLIMarketDataStatus,
+    BLIQuoteBasis,
     BLIVolatilityBasis,
     BLIVolatilityInput,
     require_exact_isin_match,
@@ -28,7 +29,6 @@ from shiori_pricing_lab.data.bli_snapshot import (
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 from shiori_pricing_lab.products.enums import (
     Currency,
-    PayoffBasis,
     TreasuryFTPQuoteSide,
     TreasuryFTPTenor,
 )
@@ -38,7 +38,7 @@ def _bond_quote(**overrides) -> BLIBondQuote:
     params = dict(
         isin="XS0000000001",
         currency=Currency.USD,
-        price_type=PayoffBasis.PRICE,
+        price_type=BLIQuoteBasis.PRICE,
         quote_side=TreasuryFTPQuoteSide.MID,
         source_system="TEST_FEED",
         status=BLIMarketDataStatus.ACTIVE,
@@ -409,22 +409,151 @@ def test_require_exact_isin_match_rejects_fuzzy_prefix_match():
         require_exact_isin_match(SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, "XS00000000")
 
 
-# --- Quote side / price type explicitness -----------------------------------
+# --- Quote side / price-and-yield semantics (docs/23 §4.2 "and/or") ---------
+#
+# Codex P2 review of PR #63: a bond price/yield feed may validly report both
+# clean_price_per_100 and yield_value for the same observation. The snapshot
+# preserves whichever of the two were actually observed -- it never performs
+# a yield-to-price or price-to-yield conversion, and never discards one in
+# favor of the other.
 
 
-def test_bond_quote_price_type_price_requires_clean_price():
-    with pytest.raises(ValueError, match="clean_price_per_100 is required"):
-        _bond_quote(price_type=PayoffBasis.PRICE, clean_price_per_100=None)
+def test_bond_quote_price_only_passes():
+    quote = _bond_quote(price_type=BLIQuoteBasis.PRICE, clean_price_per_100=101.25)
+    assert quote.clean_price_per_100 == 101.25
+    assert quote.yield_value is None
 
 
-def test_bond_quote_price_type_yield_requires_yield_value():
-    quote = _bond_quote(price_type=PayoffBasis.YIELD, clean_price_per_100=None, yield_value=0.041)
+def test_bond_quote_yield_only_passes():
+    quote = _bond_quote(
+        price_type=BLIQuoteBasis.YIELD, clean_price_per_100=None, yield_value=0.041
+    )
+    assert quote.yield_value == 0.041
+    assert quote.clean_price_per_100 is None
+
+
+def test_bond_quote_both_price_and_yield_pass():
+    quote = _bond_quote(
+        price_type=BLIQuoteBasis.PRICE, clean_price_per_100=101.25, yield_value=0.041
+    )
+    assert quote.clean_price_per_100 == 101.25
     assert quote.yield_value == 0.041
 
 
-def test_bond_quote_price_type_yield_rejects_clean_price_present():
-    with pytest.raises(ValueError, match="clean_price_per_100 must be None"):
-        _bond_quote(price_type=PayoffBasis.YIELD, yield_value=0.041)
+def test_bond_quote_neither_price_nor_yield_rejected():
+    with pytest.raises(
+        ValueError, match="at least one of clean_price_per_100 / yield_value is required"
+    ):
+        _bond_quote(clean_price_per_100=None, yield_value=None)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_bond_quote_yield_value_rejects_non_finite(value):
+    with pytest.raises(ValueError, match="yield_value must be a finite number"):
+        _bond_quote(clean_price_per_100=None, yield_value=value)
+
+
+def test_bond_quote_price_type_no_longer_requires_absence_of_the_other_field():
+    # price_type still records the primarily-reported basis, but no longer
+    # gates which of the two observed fields may be populated.
+    quote = _bond_quote(
+        price_type=BLIQuoteBasis.YIELD, clean_price_per_100=101.25, yield_value=0.041
+    )
+    assert quote.price_type is BLIQuoteBasis.YIELD
+    assert quote.clean_price_per_100 == 101.25
+
+
+# --- Status acceptance: only ACTIVE passes at construction (docs/23 §12) ---
+#
+# Codex P2 review of PR #63: STALE/INVALID/MISSING must not construct
+# successfully -- a frozen snapshot with a stale/invalid/missing nested
+# observation is dangerous because future bundle code may trust it.
+# MANUAL_VERIFIED is also rejected for now, with a distinct message, since
+# the audit policy that would make it acceptable is not implemented yet.
+
+_NON_ACTIVE_STATUSES = [
+    BLIMarketDataStatus.STALE,
+    BLIMarketDataStatus.INVALID,
+    BLIMarketDataStatus.MISSING,
+]
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_snapshot_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="snapshot status must be ACTIVE"):
+        _snapshot(status=status)
+
+
+def test_snapshot_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _snapshot(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_bond_quote_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="bond_quote status must be ACTIVE"):
+        _bond_quote(status=status)
+
+
+def test_bond_quote_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _bond_quote(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_curve_point_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="curve_point status must be ACTIVE"):
+        _curve_point(status=status)
+
+
+def test_curve_point_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _curve_point(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_deposit_rate_observation_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="deposit_rate_observation status must be ACTIVE"):
+        _deposit_rate_observation(status=status)
+
+
+def test_deposit_rate_observation_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _deposit_rate_observation(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_volatility_input_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="volatility_input status must be ACTIVE"):
+        _volatility_input(status=status)
+
+
+def test_volatility_input_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _volatility_input(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_credit_spread_input_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="credit_spread_input status must be ACTIVE"):
+        _credit_spread_input(status=status)
+
+
+def test_credit_spread_input_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _credit_spread_input(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+def test_synthetic_fixture_status_is_active_everywhere():
+    # The fixture must stay constructible under the new gating -- every
+    # sub-observation (including nested curve points) is ACTIVE.
+    snapshot = SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
+    assert snapshot.status is BLIMarketDataStatus.ACTIVE
+    assert snapshot.bond_quote.status is BLIMarketDataStatus.ACTIVE
+    assert all(point.status is BLIMarketDataStatus.ACTIVE for point in snapshot.curve_points)
+    assert snapshot.volatility_input.status is BLIMarketDataStatus.ACTIVE
+    assert snapshot.credit_spread_input.status is BLIMarketDataStatus.ACTIVE
+    assert snapshot.deposit_rate_observation.status is BLIMarketDataStatus.ACTIVE
 
 
 # --- Frozen dataclasses ------------------------------------------------------
