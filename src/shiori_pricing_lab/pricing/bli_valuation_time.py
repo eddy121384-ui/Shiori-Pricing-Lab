@@ -17,15 +17,25 @@ for BLI.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
 
+_ISO_DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
 
 def _parse_iso_date(value: str, field_name: str) -> date:
+    # date.fromisoformat also accepts ISO basic ("20260706") and ISO week-date
+    # ("2026-W28-1") forms on Python 3.11 -- this slice's contract is strict
+    # YYYY-MM-DD only, so the shape is checked before calendar validation.
+    if not isinstance(value, str) or not _ISO_DATE_SHAPE.fullmatch(value):
+        raise ValueError(
+            f"{field_name} must be an ISO date string (YYYY-MM-DD), got {value!r}"
+        )
     try:
         return date.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(
             f"{field_name} must be an ISO date string (YYYY-MM-DD), got {value!r}"
         ) from exc

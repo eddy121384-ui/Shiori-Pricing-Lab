@@ -9,6 +9,7 @@ yield-conversion/volatility/QuantLib-shaped logic.
 from __future__ import annotations
 
 import inspect
+from datetime import date
 
 import pytest
 
@@ -34,9 +35,7 @@ def test_one_year_future_expiry_with_365_day_span_returns_one():
 def test_leap_year_spanning_pair_still_uses_days_over_365():
     # 2027-07-06 -> 2028-07-06 spans the 2028-02-29 leap day, so the span is
     # 366 days -- ACT/365F still divides by 365.0, not 366.0.
-    days = (
-        __import__("datetime").date(2028, 7, 6) - __import__("datetime").date(2027, 7, 6)
-    ).days
+    days = (date(2028, 7, 6) - date(2027, 7, 6)).days
     assert days == 366
     assert year_fraction_to_expiry("2027-07-06", "2028-07-06") == pytest.approx(366 / 365.0)
 
@@ -65,6 +64,18 @@ def test_expiry_before_valuation_date_raises_value_error():
         ("not-a-date", "2026-07-07"),
         ("2026-07-06", "not-a-date"),
         ("2026-13-01", "2026-07-07"),
+        # ISO basic form (no dashes) -- date.fromisoformat accepts this on
+        # Python 3.11, but this slice's contract is strict YYYY-MM-DD only.
+        ("20260706", "2026-07-07"),
+        ("2026-07-06", "20260707"),
+        # ISO week-date form -- same reasoning as ISO basic form above.
+        ("2026-W28-1", "2026-07-07"),
+        ("2026-07-06", "2026-W28-1"),
+        # non-zero-padded date.
+        ("2026-7-6", "2026-07-07"),
+        # non-string input.
+        (None, "2026-07-07"),
+        ("2026-07-06", None),
     ],
 )
 def test_malformed_date_strings_raise(valuation_date, expiry_date):
