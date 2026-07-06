@@ -59,7 +59,7 @@ arbitrary restriction this doc is inventing:
 | Narrowing rule | Annex A / SPEC basis |
 | --- | --- |
 | European only | §A.2 has no early-exercise logic; American requires the CRR tree (§A.4), a materially larger, still-undesigned-for-BLI seam. |
-| Price-based only | §A.2 needs only `F`/`K`/`σ`/`T`/`DF` — no yield-to-price conversion, no DV01-based mode switch (§A.3's `YIELD_OPTION_MODE`), no equivalent-price-vol conversion (§A.8) unless the vol input already is a price vol. |
+| Price-based only | §A.2 needs only `F`/`K`/`σ`/`T`/`DF` — no yield-to-price conversion, no DV01-based mode switch (§A.3's `YIELD_OPTION_MODE`). On vol: `BLIVolatilityBasis.PRICE_VOL` and `EQUIVALENT_PRICE_VOL` can both be used directly as `σ` in §A.2's formula as-is (a `PRICE_VOL` observation needs no conversion; an `EQUIVALENT_PRICE_VOL` value is, by definition, already in the right units if one has already been supplied upstream). `YIELD_VOL` is the one basis that is **not** directly usable here — Annex A §A.8's equivalent-price-vol conversion (MODE_1/MODE_2) would first need to turn it into a price vol, and that conversion is dependency 6 (§4), not implemented. Since no conversion exists yet, this slice's destination must require an already price-compatible vol input (`PRICE_VOL` or a pre-supplied `EQUIVALENT_PRICE_VOL`) and leave `YIELD_VOL` inputs blocked until dependency 6 lands — it does not implement any vol conversion itself. |
 | Cash-settled only | §A.7 (physical delivery invoice, settlement-date accrued interest) is a separate, additive concern (SPEC §3.6) not needed to compute an option PV. |
 | Deterministic happy-path fixture only | `SYNTHETIC_BLI_MVP_INPUT_BUNDLE` (`data/bli_mvp_input_bundle_fixtures.py`) already exists, is `PayoffBasis.PRICE` (via `products/fixtures.py`'s `SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT` — see §3), and requires no new fixture content. |
 | No American exercise | Same as "European only" above. |
@@ -391,14 +391,15 @@ tests/test_bli_valuation_time.py                        (new)
 **Expected tests:**
 
 ```text
-- same-day pair (valuation_date == expiry_date) -> T == 0.0 (boundary,
-  not yet the "blocked" case -- Annex A §A.2.4 requires T > 0 strictly,
-  so this specific case's blocking behavior must also be pinned, see
-  the next bullet).
-- expiry_date on or before valuation_date -> raises ValueError (Annex A
-  §A.2.4: "T > 0... 否則 pricing blocked"). This includes both the
-  same-day case and expiry strictly before valuation_date.
-- one-day, one-year, and a leap-year-spanning pair -> exact expected
+- same-day pair (valuation_date == expiry_date) -> raises ValueError
+  (Annex A §A.2.4 requires T > 0 strictly; T == 0 is exactly as blocked
+  as a negative T, since the option has already expired by the time it
+  would be priced -- there is no "boundary but not yet blocked" case).
+- expired option (expiry_date < valuation_date) -> raises ValueError
+  (same §A.2.4 rule).
+- only a strictly future expiry_date (expiry_date > valuation_date)
+  returns a value, and only then is it an ACT/365F year fraction --
+  one-day, one-year, and a leap-year-spanning pair -> exact expected
   ACT/365F fraction (days / 365.0), matching
   pricing/irs_engine.py::_year_fraction's existing ACT_365_FIXED
   behavior for the same day-count convention.
