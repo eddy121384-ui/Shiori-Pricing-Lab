@@ -1637,11 +1637,14 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   separate slices per docs/26 §4/§6. Issue #38 remains open.
   New tests: `tests/test_bli_valuation_time.py` (ACT/365F happy path
   including a leap-year-spanning pair, the same-day/expired blocking
-  rule, malformed-date rejection, a no-system-date-use check, a
+  rule, malformed-date rejection -- including strict `YYYY-MM-DD`-shape
+  rejection of ISO basic (`20260706`), ISO week-date (`2026-W28-1`),
+  non-zero-padded, and non-string forms that `date.fromisoformat` would
+  otherwise silently accept -- a no-system-date-use check, a
   module-boundary check for curve/discount/forward-price/vol-shaped
   names, and the bundle convenience function against the existing
   `SYNTHETIC_BLI_MVP_INPUT_BUNDLE` fixture with no new fixture content).
-  - **Review / validation:** `python -m pytest -q` → 681 passed (667
-    prior + 14 new in `tests/test_bli_valuation_time.py`); `ruff check
+  - **Review / validation:** `python -m pytest -q` → 688 passed (667
+    prior + 21 new in `tests/test_bli_valuation_time.py`); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
