@@ -1328,3 +1328,48 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 35 new in `tests/test_bli_mvp_input_bundle.py`); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **`BLIMVPInputBundle` fixed after Codex P1/P2 review of PR #65.**
+  Three findings, all in `src/shiori_pricing_lab/data/bli_mvp_input_bundle.py`,
+  fixed narrowly with no builder/pricing/scope change: (1) **P1 —
+  reference-data eligibility was only trusted from the caller-supplied
+  `resolution_status`/`eligibility_reasons`, not verified against the
+  actual `BondReferenceData`.** A stale or hand-assembled resolver
+  result (e.g. `resolution_status=FOUND_ELIGIBLE`, `eligibility_reasons
+  =()`) could therefore bundle an actually-ineligible bond (a callable
+  fixture bond, in the added test). Fixed: `__post_init__` now also
+  calls the existing `is_mvp_pricing_eligible(resolved_bond_reference_
+  data)` directly and rejects construction if it disagrees with the
+  supplied status — both checks must now agree, neither is trusted
+  alone. (2) **P1 — the no-look-ahead gate's
+  `datetime.fromisoformat(as_of_timestamp).date()` silently used the
+  timestamp's *local* calendar date for timezone-offset-aware inputs**,
+  so `"2026-07-01T23:30:00-05:00"` (already `"2026-07-02"` in UTC) could
+  incorrectly pass a `valuation_date` of `"2026-07-01"`. Fixed: only a
+  bare date, a naive datetime, or a UTC datetime (`utcoffset()` exactly
+  zero — `"Z"` or explicit `"+00:00"`) are now accepted; any other
+  timezone offset is rejected outright with a clear error, rather than
+  silently misread. (3) **P2 — no currency-coherence gate existed**, so
+  ISIN identity alone let a caller combine a different-currency
+  product/reference-data/market-data trio (e.g. an EUR product against
+  a USD-resolved bond and USD market data) and have it accepted as
+  valuation-ready. Fixed: added explicit currency-equality checks —
+  `product.bond_option.currency` must equal `resolved_bond_reference_
+  data.currency`; `market_data_snapshot.bond_quote.currency` must equal
+  that same currency; each required MVP curve purpose must have at
+  least one `curve_points` row in that currency specifically. No FX
+  conversion or cross-currency fallback is implemented or implied — any
+  mismatch is a hard rejection. All three fixes preserve the bundle's
+  existing scope and behavior unchanged: exact ISIN matching,
+  valuation-date equality, the product-specific deposit-rate gate, the
+  required MVP curve-purpose gate, `MANUAL_VERIFIED_RATE` rejection, no
+  builder, no pricing, no curve interpolation, no yield/price
+  conversion, no connector/UI. Added 9 new tests (35 → 44 in
+  `tests/test_bli_mvp_input_bundle.py`), covering the ineligible-bond
+  override case, UTC-offset/naive/non-UTC-offset timestamp variants,
+  and each new currency-coherence gate (plus confirming the existing
+  synthetic bundle fixture still passes all of them). Updated the
+  module docstring, `docs/09`'s checkpoint, and this entry accordingly.
+  - **Review / validation:** `python -m pytest -q` → 633 passed (624
+    prior + 9 net new in `tests/test_bli_mvp_input_bundle.py`); `ruff
+    check src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.

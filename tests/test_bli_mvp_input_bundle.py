@@ -51,6 +51,7 @@ from shiori_pricing_lab.products.enums import (
     TreasuryFTPTenor,
 )
 from shiori_pricing_lab.products.fixtures import SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT
+from shiori_pricing_lab.reference_data.eligibility import is_mvp_pricing_eligible
 from shiori_pricing_lab.reference_data.resolution import (
     BondResolutionStatus,
     resolve_bond_reference_data,
@@ -384,6 +385,26 @@ def test_eligibility_reasons_must_be_empty_when_found_eligible():
         _bundle(eligibility_reasons=("some stale reason",))
 
 
+def test_stale_found_eligible_status_cannot_override_actually_ineligible_bond():
+    # Codex P1 review of PR #65: resolution_status/eligibility_reasons are
+    # caller-supplied metadata, not re-derived by the bundle -- a stale or
+    # hand-assembled resolver result could claim FOUND_ELIGIBLE for a bond
+    # that is not actually MVP-pricing eligible (here, a real callable
+    # fixture bond). The bundle must independently re-verify eligibility
+    # from resolved_bond_reference_data itself via is_mvp_pricing_eligible,
+    # never trust the supplied status/reasons alone.
+    callable_bond = resolve_bond_reference_data(_CALLABLE_INELIGIBLE_ISIN).bond_reference_data
+    assert not is_mvp_pricing_eligible(callable_bond).eligible
+    callable_product = _product(bond_option=_bond_option(underlying_isin=_CALLABLE_INELIGIBLE_ISIN))
+    with pytest.raises(ValueError, match="is not actually MVP-pricing eligible"):
+        _bundle(
+            product=callable_product,
+            resolved_bond_reference_data=callable_bond,
+            resolution_status=BondResolutionStatus.FOUND_ELIGIBLE,
+            eligibility_reasons=(),
+        )
+
+
 # --- 5. Valuation-date gates ------------------------------------------------
 
 
@@ -416,8 +437,37 @@ def test_as_of_timestamp_earlier_than_valuation_date_passes():
 
 def test_unparseable_as_of_timestamp_rejected():
     unparseable_snapshot = _snapshot(as_of_timestamp="not-a-timestamp")
-    with pytest.raises(ValueError, match="must be an ISO-8601 date or datetime string"):
+    with pytest.raises(ValueError, match="must be an ISO-8601 date"):
         _bundle(market_data_snapshot=unparseable_snapshot)
+
+
+def test_as_of_timestamp_explicit_utc_offset_same_date_passes():
+    # "+00:00" is UTC, exactly like "Z" -- must be accepted, not rejected as
+    # a "non-UTC offset".
+    utc_offset_snapshot = _snapshot(as_of_timestamp="2026-07-01T16:00:00+00:00")
+    bundle = _bundle(market_data_snapshot=utc_offset_snapshot)
+    assert bundle.market_data_snapshot.as_of_timestamp == "2026-07-01T16:00:00+00:00"
+
+
+def test_as_of_timestamp_naive_datetime_passes():
+    naive_snapshot = _snapshot(as_of_timestamp="2026-07-01T16:00:00")
+    bundle = _bundle(market_data_snapshot=naive_snapshot)
+    assert bundle.market_data_snapshot.as_of_timestamp == "2026-07-01T16:00:00"
+
+
+def test_as_of_timestamp_non_utc_negative_offset_rejected():
+    # 2026-07-01T23:30:00-05:00 is already 2026-07-02 in UTC -- accepting
+    # its *local* calendar date (2026-07-01) would silently violate the
+    # no-look-ahead policy for a valuation_date of 2026-07-01.
+    non_utc_snapshot = _snapshot(as_of_timestamp="2026-07-01T23:30:00-05:00")
+    with pytest.raises(ValueError, match="non-UTC timezone offsets are not supported"):
+        _bundle(market_data_snapshot=non_utc_snapshot)
+
+
+def test_as_of_timestamp_non_utc_positive_offset_rejected():
+    non_utc_snapshot = _snapshot(as_of_timestamp="2026-07-02T08:00:00+08:00")
+    with pytest.raises(ValueError, match="non-UTC timezone offsets are not supported"):
+        _bundle(market_data_snapshot=non_utc_snapshot)
 
 
 # --- 7. Product-specific deposit-rate market-data gates ---------------------
@@ -512,7 +562,58 @@ def test_funding_curve_not_required():
     assert BLICurvePurpose.FUNDING_CURVE not in present_purposes
 
 
-# --- 9. Scope: no pricing engine, no builder, no conversion -----------------
+# --- 9. Currency coherence gates ---------------------------------------------
+
+
+def test_product_currency_mismatch_vs_reference_data_rejected():
+    # The eligible fixture bond (XS0000000001) is USD; build an otherwise
+    # internally-consistent EUR product referencing the same ISIN.
+    eur_bond_option = _bond_option(currency=Currency.EUR)
+    eur_deposit_leg = _deposit_leg(
+        currency=Currency.EUR,
+        ftp_rate_selector=TreasuryFTPRateSelector(
+            currency=Currency.EUR,
+            tenor=TreasuryFTPTenor.THREE_MONTH,
+            quote_side=TreasuryFTPQuoteSide.MID,
+        ),
+    )
+    eur_product = _product(bond_option=eur_bond_option, deposit_leg=eur_deposit_leg)
+    with pytest.raises(ValueError, match="product currency .* does not match"):
+        _bundle(product=eur_product)
+
+
+def test_market_data_quote_currency_mismatch_rejected():
+    eur_quote_snapshot = _snapshot(bond_quote=_bond_quote(currency=Currency.EUR))
+    with pytest.raises(ValueError, match="bond_quote.currency .* does not match"):
+        _bundle(market_data_snapshot=eur_quote_snapshot)
+
+
+def test_required_curve_purpose_currency_mismatch_rejected():
+    # All three required purposes are present, but only in EUR -- the
+    # product/reference data are USD, so this must still be rejected as
+    # "missing" for the product's actual currency, not silently accepted
+    # because *some* row of each purpose exists.
+    eur_curve_points = tuple(
+        _curve_point(
+            curve_id=f"EUR_{point.curve_purpose.value}",
+            curve_purpose=point.curve_purpose,
+            currency=Currency.EUR,
+        )
+        for point in _all_required_curve_points()
+    )
+    eur_curve_snapshot = _snapshot(curve_points=eur_curve_points)
+    with pytest.raises(ValueError, match="missing required curve purpose.*currency USD"):
+        _bundle(market_data_snapshot=eur_curve_snapshot)
+
+
+def test_synthetic_bundle_fixture_still_passes_currency_gates():
+    bundle = SYNTHETIC_BLI_MVP_INPUT_BUNDLE
+    assert bundle.product.bond_option.currency is Currency.USD
+    assert bundle.resolved_bond_reference_data.currency is Currency.USD
+    assert bundle.market_data_snapshot.bond_quote.currency is Currency.USD
+
+
+# --- 10. Scope: no pricing engine, no builder, no conversion -----------------
 
 
 def test_bundle_has_no_pricing_or_duplicated_fields():

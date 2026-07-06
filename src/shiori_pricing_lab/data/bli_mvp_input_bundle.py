@@ -58,10 +58,8 @@ decisions, not re-litigated):**
 - **Market-data as-of / no-look-ahead policy is a minimal, deterministic
   calendar-date comparison**, not an intraday or settlement-aware rule:
   ``market_data_snapshot.as_of_timestamp`` is parsed with
-  ``datetime.fromisoformat`` (Python 3.11+ natively accepts a trailing
-  ``Z``, matching the existing synthetic fixture's
-  ``"2026-07-01T16:00:00Z"`` shape) and only its **calendar date** is
-  compared against ``valuation_date``; an as-of date strictly after
+  ``datetime.fromisoformat`` and only its **calendar date** is compared
+  against ``valuation_date``; an as-of date strictly after
   ``valuation_date`` is rejected, an as-of date on or before
   ``valuation_date`` is accepted. No current-time lookup
   (``date.today()``/``datetime.now()``) is ever used -- both dates being
@@ -69,9 +67,53 @@ decisions, not re-litigated):**
   narrower policy than a real no-look-ahead rule would eventually need**
   (no intraday cutoff time, no settlement-aware T+0/T+1 handling) --
   recorded as a still-open limitation, not silently treated as final.
+  **Only three timestamp shapes are accepted (Codex P1 review of
+  PR #65):** a bare date (``"2026-07-01"``), a naive datetime with no
+  timezone offset (``"2026-07-01T16:00:00"``), or a UTC datetime whose
+  ``utcoffset()`` is exactly zero (``"2026-07-01T16:00:00Z"`` or the
+  equivalent ``"...+00:00"`` spelling). Any *other* timezone offset
+  (e.g. ``"2026-07-01T23:30:00-05:00"``, ``"2026-07-02T08:00:00+08:00"``)
+  is rejected outright, never silently accepted: ``fromisoformat(...)
+  .date()`` on an offset-aware datetime returns that offset's *local*
+  calendar date, which can legitimately differ from the UTC calendar
+  date the no-look-ahead gate needs (``"2026-07-01T23:30:00-05:00"`` is
+  already ``"2026-07-02"`` in UTC) -- correctly normalizing an arbitrary
+  offset is future work, not guessed at here.
 - **``BLICurvePurpose.FUNDING_CURVE`` is not required**: `docs/24` §6
   only requires it "if the product/mapping explicitly calls for a
   funding adjustment," and no such mapping exists in this codebase yet.
+- **Reference-data eligibility is re-verified from the actual
+  ``BondReferenceData``, not only trusted from the supplied
+  ``resolution_status``/``eligibility_reasons`` (Codex P1 review of
+  PR #65):** the original implementation accepted any
+  ``BondReferenceData`` as long as the caller separately claimed
+  ``resolution_status=FOUND_ELIGIBLE`` with empty ``eligibility_reasons``
+  -- stale or hand-assembled resolver metadata could therefore
+  contradict the reference data it was supposedly describing (e.g. a
+  callable bond bundled with a manually overridden "eligible" status).
+  ``__post_init__`` now also calls the existing
+  ``is_mvp_pricing_eligible(resolved_bond_reference_data)`` directly and
+  rejects construction if it disagrees, regardless of what the supplied
+  ``resolution_status``/``eligibility_reasons`` claim. The
+  ``resolution_status``/``eligibility_reasons`` gate is kept alongside
+  this, unchanged -- both must agree, neither is trusted alone.
+- **Currency coherence gates (Codex P2 review of PR #65):** ISIN
+  identity alone does not prove the bundle's inputs describe one
+  coherent instrument in one coherent currency. ``__post_init__`` now
+  also requires ``product.bond_option.currency`` (already, by
+  ``BondLinkedStructuredProduct``'s own construction, equal to
+  ``product.deposit_leg.currency``) to equal
+  ``resolved_bond_reference_data.currency``, requires
+  ``market_data_snapshot.bond_quote.currency`` to equal that same
+  currency, and requires each required MVP curve purpose (see below) to
+  have at least one ``curve_points`` row in that currency specifically
+  -- a same-purpose row in a different currency does not satisfy the
+  gate. ``deposit_rate_observation.currency`` was already required to
+  match ``ftp_rate_selector.currency`` (which ``DepositLeg`` itself
+  already requires to equal ``deposit_leg.currency``, i.e. the same
+  product currency), so no separate deposit-rate currency check was
+  needed. No FX conversion is implemented or implied by any of this --
+  a currency mismatch is always a hard rejection, never a fallback.
 
 **Hard non-goals (unchanged from `docs/24` §10):** no bundle builder, no
 pricing engine, no payoff skeleton, no cash-flow generation, no schedule
@@ -88,7 +130,7 @@ unmodified.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from shiori_pricing_lab.data._validation import _parse_iso_date, _require_non_blank
 from shiori_pricing_lab.data.bli_snapshot import (
@@ -101,6 +143,7 @@ from shiori_pricing_lab.products.bond_linked_structured_product import (
 )
 from shiori_pricing_lab.products.enums import DepositRateMode, coerce_enum
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
+from shiori_pricing_lab.reference_data.eligibility import is_mvp_pricing_eligible
 from shiori_pricing_lab.reference_data.resolution import BondResolutionStatus
 
 # Curve purposes required for the MVP BLI pricing path (docs/24 §6):
@@ -119,20 +162,36 @@ _REQUIRED_MVP_CURVE_PURPOSES: frozenset[BLICurvePurpose] = frozenset(
 def _parse_as_of_calendar_date(as_of_timestamp: str, field_name: str) -> date:
     """Parse ``as_of_timestamp`` and return its calendar date only.
 
-    Minimal, deterministic ISO-8601 parsing (docs/24 §6/§11) -- accepts
-    both a bare date (``"2026-07-01"``) and a full timestamp
-    (``"2026-07-01T16:00:00Z"``, matching the existing synthetic fixture).
+    Minimal, deterministic ISO-8601 parsing (docs/24 §6/§11, Codex P1
+    review of PR #65) -- accepts a bare date (``"2026-07-01"``), a naive
+    datetime with no timezone offset (``"2026-07-01T16:00:00"``), or a UTC
+    datetime whose ``utcoffset()`` is exactly zero (``"2026-07-01T16:00:00Z"``
+    or the equivalent ``"...+00:00"`` spelling, matching the existing
+    synthetic fixture's shape). Any other timezone offset is rejected
+    outright -- ``fromisoformat(...).date()`` on an offset-aware datetime
+    returns that offset's *local* calendar date, which can silently differ
+    from the UTC calendar date this no-look-ahead check needs (e.g.
+    ``"2026-07-01T23:30:00-05:00"`` is already ``"2026-07-02"`` in UTC).
     Never falls back to the current date/time; a value that cannot be
-    parsed is rejected outright rather than silently ignored.
+    parsed, or that carries an unsupported non-UTC offset, is rejected
+    outright rather than silently accepted or misread.
     """
 
     try:
-        return datetime.fromisoformat(as_of_timestamp).date()
+        parsed = datetime.fromisoformat(as_of_timestamp)
     except ValueError as exc:
         raise ValueError(
-            f"{field_name} must be an ISO-8601 date or datetime string for the "
-            f"no-look-ahead check, got {as_of_timestamp!r}"
+            f"{field_name} must be an ISO-8601 date, a naive datetime, or a UTC "
+            f"('Z'-suffixed) datetime for the no-look-ahead check, got {as_of_timestamp!r}"
         ) from exc
+
+    if parsed.tzinfo is not None and parsed.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{field_name} must be a bare date, a naive datetime, or a UTC "
+            "('Z'-suffixed) timestamp for the no-look-ahead check -- non-UTC timezone "
+            f"offsets are not supported yet, got {as_of_timestamp!r}"
+        )
+    return parsed.date()
 
 
 @dataclass(frozen=True)
@@ -194,6 +253,23 @@ class BLIMVPInputBundle:
                 f"FOUND_ELIGIBLE, got {self.eligibility_reasons!r}"
             )
 
+        # Re-verify eligibility directly from the reference data itself
+        # (Codex P1 review of PR #65) -- the checks above only trust
+        # whatever resolution_status/eligibility_reasons the caller
+        # supplied, which a stale or hand-assembled resolver result could
+        # contradict (e.g. a callable bond bundled with a manually
+        # overridden "eligible" status). is_mvp_pricing_eligible is the
+        # single existing source of truth for MVP eligibility
+        # (reference_data.eligibility, docs/20 §5); it must agree with the
+        # supplied status, never be bypassed by it.
+        actual_eligibility = is_mvp_pricing_eligible(self.resolved_bond_reference_data)
+        if not actual_eligibility.eligible:
+            raise ValueError(
+                "resolved_bond_reference_data is not actually MVP-pricing eligible "
+                f"(is_mvp_pricing_eligible reasons: {'; '.join(actual_eligibility.reasons)}), "
+                f"despite supplied resolution_status={self.resolution_status.value}"
+            )
+
         # ISIN gates -- plain string equality only, no fuzzy/prefix/
         # case-insensitive matching anywhere (docs/24 §6, docs/21 §4).
         if self.product.bond_option.underlying_isin != self.resolved_bond_reference_data.isin:
@@ -204,6 +280,28 @@ class BLIMVPInputBundle:
                 f"({self.resolved_bond_reference_data.isin!r})"
             )
         require_exact_isin_match(self.market_data_snapshot, self.resolved_bond_reference_data.isin)
+
+        # Currency coherence gates (Codex P2 review of PR #65): ISIN
+        # identity alone does not prove the bundle's inputs share one
+        # coherent currency. BondLinkedStructuredProduct.__post_init__
+        # already enforces bond_option.currency == deposit_leg.currency
+        # (docs/19), so bond_option.currency is used as the single
+        # "product currency" reference point here. No FX conversion is
+        # implemented or implied -- a mismatch is always a hard rejection.
+        product_currency = self.product.bond_option.currency
+        if self.resolved_bond_reference_data.currency is not product_currency:
+            raise ValueError(
+                "product currency "
+                f"({product_currency.value}) does not match "
+                "resolved_bond_reference_data.currency "
+                f"({self.resolved_bond_reference_data.currency.value})"
+            )
+        if self.market_data_snapshot.bond_quote.currency is not product_currency:
+            raise ValueError(
+                "market_data_snapshot.bond_quote.currency "
+                f"({self.market_data_snapshot.bond_quote.currency.value}) does not match "
+                f"product currency ({product_currency.value})"
+            )
 
         # Valuation-date coherence -- equality alone, restated from docs/24
         # §6: it is necessary but (per the as-of check below) not sufficient.
@@ -293,16 +391,23 @@ class BLIMVPInputBundle:
         Presence only -- never tenor-node selection, never interpolation.
         A non-empty ``curve_points`` (already guaranteed by
         ``BLIMarketDataSnapshot`` itself) is not the same as "the required
-        purposes are present."
+        purposes are present." A required purpose present only under a
+        *different* currency does not satisfy this gate either (Codex P2
+        review of PR #65, currency-coherence gates): a USD Deposit Curve
+        row does not make an EUR product's Deposit Curve requirement
+        satisfied.
         """
 
-        present_purposes = {
-            point.curve_purpose for point in self.market_data_snapshot.curve_points
+        product_currency = self.product.bond_option.currency
+        present_purposes_in_product_currency = {
+            point.curve_purpose
+            for point in self.market_data_snapshot.curve_points
+            if point.currency is product_currency
         }
-        missing_purposes = _REQUIRED_MVP_CURVE_PURPOSES - present_purposes
+        missing_purposes = _REQUIRED_MVP_CURVE_PURPOSES - present_purposes_in_product_currency
         if missing_purposes:
             missing_names = sorted(purpose.value for purpose in missing_purposes)
             raise ValueError(
                 "market_data_snapshot.curve_points is missing required curve "
-                f"purpose(s): {missing_names}"
+                f"purpose(s) in currency {product_currency.value}: {missing_names}"
             )
