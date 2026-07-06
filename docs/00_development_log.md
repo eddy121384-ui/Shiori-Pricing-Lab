@@ -1258,3 +1258,73 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 589 passed (unchanged); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **`BLIMVPInputBundle` dataclass landed (`docs/24` implementation
+  slice).** Added `src/shiori_pricing_lab/data/bli_mvp_input_bundle.py`:
+  the frozen `BLIMVPInputBundle` dataclass binding one
+  `BondLinkedStructuredProduct`, one resolved `BondReferenceData`, and
+  one `BLIMarketDataSnapshot` **by reference only**. Fields:
+  `bundle_id`, `valuation_date`, `product`,
+  `resolved_bond_reference_data` (an explicit naming departure from
+  `docs/24` §7's sketched `bond_reference_data`, documented in the
+  module docstring), `resolution_status`, `eligibility_reasons` (kept
+  as two plain fields rather than the whole
+  `BondReferenceResolutionResult` object — another explicit,
+  documented departure), and `market_data_snapshot`.
+  - **Validation gates implemented (`docs/24` §6):** `isinstance` checks
+    on `product`/`resolved_bond_reference_data`/`market_data_snapshot`
+    (each already fully self-validates at its own construction, so no
+    re-validation is needed); `resolution_status` must be
+    `FOUND_ELIGIBLE` with empty `eligibility_reasons`; exact-string-only
+    ISIN matching between `product.bond_option.underlying_isin`,
+    `resolved_bond_reference_data.isin`, and
+    `market_data_snapshot.bond_quote.isin` (reusing the existing
+    `require_exact_isin_match` helper for the latter); valuation-date
+    equality between the bundle and the snapshot; a **market-data as-of
+    / no-look-ahead gate** (`as_of_timestamp` parsed via
+    `datetime.fromisoformat`, comparing only the calendar date against
+    `valuation_date` — same-date and earlier accepted, after rejected;
+    no current-time lookup; documented as a deliberately minimal policy,
+    not a final intraday/settlement-aware rule); a
+    **product-specific deposit-rate gate**
+    (`TREASURY_FTP_REFERENCE` requires a matching, selector-consistent
+    `deposit_rate_observation`; `FIXED_RATE` requires none;
+    `MANUAL_VERIFIED_RATE` is rejected outright with a clear
+    "not supported yet" error); and a **required MVP curve-purpose
+    gate** (at least one `curve_points` row for each of
+    `BOND_REFERENCE_CURVE`/`OPTION_DISCOUNT_CURVE`/`DEPOSIT_CURVE`,
+    presence only, `FUNDING_CURVE` not required). Construction raises
+    `ValueError`/`TypeError` on any failed gate, matching every other
+    frozen dataclass in this codebase — resolving `docs/24` §11's open
+    "raise vs. structured result" question for the dataclass itself.
+  - **Fixture gap resolved:** added
+    `src/shiori_pricing_lab/products/fixtures.py`
+    (`SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT`), a synthetic
+    `BondLinkedStructuredProduct` whose `bond_option.underlying_isin` is
+    `"XS0000000001"` — matching the ISIN both
+    `reference_data.fixtures.SYNTHETIC_BOND_FIXTURES` and
+    `data.bli_snapshot_fixtures.SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT`
+    already used, closing the mismatch `docs/24` §8.2/§11 found.
+    `tests/test_bond_linked_structured_product.py`'s own inline helper
+    (ISIN `"US912828ZZ11"`) is unchanged. Added
+    `src/shiori_pricing_lab/data/bli_mvp_input_bundle_fixtures.py`
+    (`SYNTHETIC_BLI_MVP_INPUT_BUNDLE`), combining all three fixtures by
+    calling `resolve_bond_reference_data` directly at fixture-definition
+    time — not a reusable bundle-builder function.
+  - **Explicit non-goals (unchanged from `docs/24` §10):** no bundle
+    builder / construction helper, pricing engine, payoff skeleton,
+    cash-flow generation, schedule engine, yield-to-price calculation,
+    curve interpolation, volatility surface, credit spread model,
+    Treasury FTP parser, ingestion, Bloomberg/API connector, QuantLib
+    adapter, or UI was added. `BondOption`, `DepositLeg`,
+    `BondLinkedStructuredProduct`, `BondReferenceData`,
+    `resolve_bond_reference_data`, `is_mvp_pricing_eligible`, and
+    `BLIMarketDataSnapshot` (and its component classes) remain
+    unmodified. Package exports (`products/__init__.py`,
+    `reference_data/__init__.py`, `data/__init__.py`) are unchanged —
+    the new modules are imported directly from their submodules,
+    matching the existing `data/` package convention. **Issue #38
+    remains open.**
+  - **Review / validation:** `python -m pytest -q` → 624 passed (589
+    prior + 35 new in `tests/test_bli_mvp_input_bundle.py`); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
