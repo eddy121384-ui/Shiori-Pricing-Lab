@@ -1170,3 +1170,47 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     `ruff check src/shiori_pricing_lab tests` → only the same 2
     pre-existing, unrelated `products/bond_option.py` `E501` findings
     remain.
+- **BLI MVP input bundle preflight written, docs-only
+  (`docs/24_bli_mvp_input_bundle_preflight.md`).** The concrete
+  follow-up to `docs/22` §12 step 3, now re-derived against the actual
+  implemented `BLIMarketDataSnapshot` classes (PR #63) instead of
+  `docs/22`'s pre-implementation placeholder field list. Defines the
+  MVP input bundle as a deterministic, immutable valuation context for
+  exactly one `BondLinkedStructuredProduct` binding: the product,
+  a resolved `BondReferenceData` (via `resolve_bond_reference_data`),
+  and a `BLIMarketDataSnapshot` — with **cross-checks only** (ISIN
+  identity across all three; `FOUND_ELIGIBLE` resolution status;
+  valuation-date coherence), since each input is already
+  independently valid at its own construction. **Recommends a new
+  class, `BLIMVPInputBundle`, inside a new module,
+  `src/shiori_pricing_lab/data/bli_mvp_input_bundle.py`** (same
+  `data/`-package-location reasoning `docs/23` §3.3 used for the
+  snapshot). Sketches a tentative field list (bundle-level
+  `valuation_date`, references to the product/reference-data/snapshot
+  objects, the resolver's status/eligibility audit trail — no
+  duplicated field from any of the three, no pv/dv01/cashflows).
+  **Found and recorded, but did not fix (docs-only slice), a concrete
+  fixture gap:** `tests/test_bond_linked_structured_product.py`'s
+  inline `BondOption` helper uses ISIN `"US912828ZZ11"`, which does not
+  match the `"XS0000000001"` ISIN both `SYNTHETIC_BOND_FIXTURES` and
+  `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT` already use — flagged in §11 as
+  the first thing the next implementation slice must add (new fixture
+  content, not a schema change). Lists a validation-rules checklist
+  (§6), a data-flow diagram (§5), a fixture plan (§8), a test plan (§9),
+  and an "open questions / implementation risks" section (§11) covering
+  curve-mapping selection, reference-data valuation-date coherence, and
+  the bundle's raise-vs-structured-result error shape — none resolved,
+  all left for the implementation slice. **No `BLIMVPInputBundle` class,
+  bundle builder, pricing engine, payoff skeleton, cash-flow generation,
+  schedule engine, yield-to-price calculation, curve interpolation,
+  volatility surface, credit spread model, Treasury FTP parser,
+  ingestion, Bloomberg/API connector, QuantLib adapter, or UI was
+  added.** `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+  `BondReferenceData`, `resolve_bond_reference_data`,
+  `is_mvp_pricing_eligible`, and `BLIMarketDataSnapshot` are all
+  unmodified. No frozen BLI v1.3 source spec file was edited. Package
+  exports are unchanged. Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; no source or
+    test file changed, so `python -m pytest -q` and `ruff` are
+    unaffected by this PR (last known state: 589 passed, only the 2
+    pre-existing `products/bond_option.py` `E501` findings).

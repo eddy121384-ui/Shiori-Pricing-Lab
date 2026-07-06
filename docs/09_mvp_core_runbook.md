@@ -932,6 +932,40 @@ ingestion, Bloomberg/API connector, QuantLib adapter, or UI. `BondOption`,
 `resolve_bond_reference_data` are all unmodified. **Issue #38 remains
 open.**
 
+### BLI MVP input bundle preflight checkpoint
+
+- Before implementing an MVP input bundle class or bundle builder,
+  agents must read `docs/24_bli_mvp_input_bundle_preflight.md`.
+- **Recommended class/module:** `BLIMVPInputBundle` in a new
+  `src/shiori_pricing_lab/data/bli_mvp_input_bundle.py` — same
+  `data/`-package-location reasoning `docs/23` §3.3 used for the
+  snapshot; the "MVP" in the name signals this is the MVP slice's
+  shape, not necessarily a final one.
+- The bundle binds one already-validated `BondLinkedStructuredProduct`,
+  one resolved `BondReferenceData` (via `resolve_bond_reference_data`),
+  and one `BLIMarketDataSnapshot` — by **reference**, never by copying
+  fields out of any of them. Its only job is cross-checking what the
+  three individually-valid objects agree or disagree on: ISIN identity
+  across all three, `BondResolutionStatus.FOUND_ELIGIBLE`, and
+  valuation-date coherence between the bundle and the snapshot. It must
+  not price anything, must not interpolate curves, and must not convert
+  yield to price or vice versa.
+- **Concrete fixture gap found (not fixed, docs-only):**
+  `tests/test_bond_linked_structured_product.py`'s inline `BondOption`
+  helper uses ISIN `"US912828ZZ11"`, which does not match the
+  `"XS0000000001"` ISIN both `reference_data.fixtures.
+  SYNTHETIC_BOND_FIXTURES` and `data.bli_snapshot_fixtures.
+  SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT` already use. The next
+  implementation slice must add new synthetic
+  `BondLinkedStructuredProduct` fixture content using
+  `"XS0000000001"` before a combined positive bundle fixture is
+  possible — this is new fixture content, not a schema change.
+- No `BLIMVPInputBundle` class, bundle builder, pricing engine, or any
+  code change exists yet. `BondOption`, `DepositLeg`,
+  `BondLinkedStructuredProduct`, `BondReferenceData`,
+  `resolve_bond_reference_data`, `is_mvp_pricing_eligible`, and
+  `BLIMarketDataSnapshot` are all unmodified. Issue #38 remains open.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
