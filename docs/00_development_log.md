@@ -1502,3 +1502,62 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 651 passed (unchanged); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI pricing engine skeleton landed
+  (`src/shiori_pricing_lab/pricing/bli_pricing_engine.py`,
+  `price_bli_mvp`).** The first implementation slice of
+  `docs/25_bli_pricing_engine_skeleton_preflight.md`. Accepts only an
+  already-validated `BLIMVPInputBundle` — never a raw
+  `BondLinkedStructuredProduct` / `BondReferenceData` /
+  `BLIMarketDataSnapshot` / ISIN / curve / deposit observation — and
+  never calls `resolve_bond_reference_data` or
+  `build_bli_mvp_input_bundle`; every input-readiness gate already lives
+  in `BLIMVPInputBundle.__post_init__` and its builder, so this module
+  re-derives none of them.
+  **`docs/25` §4's three required questions, answered:** (1) the shared
+  `PricingResult`/`PricingStatus`/`PricingErrorCode` are reused **as-is**
+  — zero changes to `pricing/result.py`, `pricing/errors.py`, or
+  `pricing/engine.py` — because `PricingErrorCode.UNSUPPORTED_PRODUCT`
+  already means exactly this case (the same code the front door already
+  returns for OIS/CCS/FX Swap, which also have no real engine yet); no
+  `BLIPricingResult`/`BLIPricingStatus` was introduced. (2) A
+  `BLIMVPInputBundle`-based entrypoint does **not** adapt to the
+  existing `PricingEngine.price(product, valuation_context,
+  market_snapshot)` Protocol shape without fabricating a synthetic
+  `valuation_context`-like object BLI has no real use for — the bundle
+  merges product + reference data + market data into one object by
+  design (`docs/24` §2), so this skeleton is not registered on
+  `PricingEngineRegistry` and does not implement the `PricingEngine`
+  Protocol. (3) `price_bli_mvp` is **the explicit, direct bundle-based
+  entrypoint for the BLI MVP path** — this PR does not register it on
+  `PricingEngineRegistry` and does not implement the `PricingEngine`
+  Protocol for BLI. This does **not** reopen `docs/14` §4.5 / `docs/24`
+  §2's shared-spine assumption, because the shared *result value type*
+  is still reused unchanged; only the entrypoint's routing differs.
+  **Whether a future slice registers a bundle-unpacking adapter behind
+  `price(...)` for BLI remains an open design decision** — this skeleton
+  PR takes no position on it either way and does not foreclose it.
+  **Not-implemented behavior chosen:** for a valid bundle, returns a
+  deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` — never raises for a
+  valid bundle, since "not implemented yet" is not a contract violation.
+  A wrong input type (a raw product/reference-data/snapshot instead of a
+  `BLIMVPInputBundle`) raises `TypeError` instead, mirroring
+  `BLIMVPInputBundle.__post_init__`'s own `isinstance` checks. `pv`,
+  `dv01`, `cashflows`, and `scenario_results` all stay `None` — no fake
+  numeric output of any kind.
+  **No real valuation math, payoff formula, cash-flow generation,
+  schedule engine, yield-to-price/price-to-yield conversion, curve
+  interpolation, volatility surface, credit spread model, Treasury FTP
+  parser, ingestion, Bloomberg/API connector, QuantLib adapter, or UI was
+  added.** `BLIMVPInputBundle`, `build_bli_mvp_input_bundle`,
+  `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+  `BondReferenceData`, `resolve_bond_reference_data`,
+  `is_mvp_pricing_eligible`, `BLIMarketDataSnapshot`, and the existing
+  vanilla-rates-core `pricing/result.py`/`errors.py`/`engine.py`/
+  `irs_engine.py` are all unmodified. Issue #38 remains open (this
+  skeleton does not price anything; real BLI valuation math is future
+  work).
+  - **Review / validation:** `python -m pytest -q` → 667 passed (651
+    prior + 16 new in `tests/test_bli_pricing_engine.py`); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.

@@ -1296,3 +1296,96 @@ spread — remains future work**, scoped next by
 - Do not confuse FTP/SFTP transport with Treasury FTP / Funding Curve.
 - Do not start broad ingestion work while working on Issue #38
   BondOption-only schema.
+
+### BLI pricing engine skeleton landed
+
+`price_bli_mvp` (`src/shiori_pricing_lab/pricing/bli_pricing_engine.py`)
+is implemented as the pricing-engine **skeleton**
+`docs/25_bli_pricing_engine_skeleton_preflight.md` scoped — the first
+callable seam a future PR can register real BLI valuation logic behind.
+**No real valuation math exists yet.**
+
+**Input boundary:** accepts only an already-validated `BLIMVPInputBundle`
+— never a raw `BondLinkedStructuredProduct` / `BondReferenceData` /
+`BLIMarketDataSnapshot` / ISIN / curve / deposit observation. It calls
+neither `resolve_bond_reference_data` nor `build_bli_mvp_input_bundle`:
+every input-readiness gate (ISIN identity, eligibility, currency
+coherence, valuation-date/as-of coherence, deposit-rate consistency,
+curve-purpose presence) already lives in `BLIMVPInputBundle.__post_init__`
+and its builder (see the checkpoint above), so this module re-derives
+none of them. Bundle construction remains entirely the calling code's
+responsibility, per the checkpoint above — nothing changes about that.
+
+**Shared pricing-spine reuse decision (`docs/25` §4's three required
+questions, answered explicitly, not silently picked):**
+
+1. **Can `PricingResult`/`PricingStatus`/`PricingErrorCode` be reused
+   as-is? Yes — with zero changes to `pricing/result.py`,
+   `pricing/errors.py`, or `pricing/engine.py`.** Every field the
+   skeleton needs already has a direct source on the bundle
+   (`product.product_id`/`product.product_type`, `bundle.valuation_date`,
+   `product.bond_option.currency`,
+   `bundle.market_data_snapshot.as_of_timestamp`). The existing
+   `PricingErrorCode.UNSUPPORTED_PRODUCT` already means exactly this
+   case — it is the same code the front door returns today for OIS / CCS
+   / FX Swap, which also have no real per-product engine yet (section 8
+   above). No `BLIPricingResult`/`BLIPricingStatus` was introduced.
+2. **Can a `BLIMVPInputBundle`-based entrypoint adapt to the existing
+   `PricingEngine.price(product, valuation_context, market_snapshot)`
+   Protocol shape? No, not without fabricating structure that does not
+   exist.** `BLIMVPInputBundle` deliberately merges product + resolved
+   reference data + market data into **one** pre-validated object
+   (`docs/24` §2); there is no BLI equivalent of the vanilla-rates-core
+   `ValuationContext` (reporting currency, model settings, a
+   `.market_snapshot` back-reference) for the front door's
+   `valuation_context` parameter to bind to. Building a synthetic shim
+   purely to satisfy the Protocol's three-argument arity would invent a
+   second, parallel object with no real BLI use. This skeleton is
+   therefore **not** registered on `PricingEngineRegistry` and does not
+   implement the `PricingEngine` Protocol; `pricing/engine.py` is
+   unmodified.
+3. **Is the separate `price_bli_mvp` entrypoint a temporary stopgap or a
+   deliberate, permanent path?** `price_bli_mvp` is **the explicit,
+   direct bundle-based entrypoint for the BLI MVP path** — this PR does
+   not register it on `PricingEngineRegistry` and does not implement the
+   `PricingEngine` Protocol for BLI. This does **not** reopen `docs/14`
+   §4.5's or `docs/24` §2's shared-spine assumption: the shared *result
+   value type* is still reused unchanged — only the entrypoint's routing
+   differs, because BLI's natural caller already holds a validated
+   `BLIMVPInputBundle`, not a bare `(product, valuation_context,
+   market_snapshot)` triple. **Whether a future slice registers a
+   bundle-unpacking adapter behind `price(...)` for BLI remains an open
+   design decision** — this skeleton PR takes no position on it either
+   way and does not foreclose it.
+
+**Not-implemented behavior chosen:** for a valid bundle, `price_bli_mvp`
+returns a deterministic `PricingResult(status=FAILED,
+errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` — it never raises for a
+valid bundle, since "not implemented yet" is a statement about the
+engine's own current capability, not a contract/programming violation.
+**Wrong input type raises `TypeError`** (a raw
+`BondLinkedStructuredProduct` / `BondReferenceData` /
+`BLIMarketDataSnapshot` instead of a `BLIMVPInputBundle`), mirroring
+`BLIMVPInputBundle.__post_init__`'s own `isinstance` checks. `pv`,
+`dv01`, `cashflows`, and `scenario_results` all stay `None` on every
+call — no fake numeric output of any kind.
+
+Tests are in `tests/test_bli_pricing_engine.py` (16 tests; `python -m
+pytest -q` → 667 passed; `ruff check src/shiori_pricing_lab tests` →
+only the same 2 pre-existing, unrelated `products/bond_option.py`
+`E501` findings remain).
+
+**Explicitly not built here (`docs/25` §7, unchanged):** real valuation
+math, payoff formula, bond pricing, option pricing, deposit payoff
+calculation, cash-flow generation, schedule engine, yield-to-price or
+price-to-yield conversion, curve interpolation, curve construction,
+volatility surface, credit spread model, Treasury FTP parser, ingestion,
+Bloomberg/API connector, QuantLib adapter, UI, debug viewer, scenario
+engine, or hedge/Greeks/DV01. `BLIMVPInputBundle`,
+`build_bli_mvp_input_bundle`, `BondOption`, `DepositLeg`,
+`BondLinkedStructuredProduct`, `BondReferenceData`,
+`resolve_bond_reference_data`, `is_mvp_pricing_eligible`,
+`BLIMarketDataSnapshot`, and the existing vanilla-rates-core
+`pricing/result.py`/`errors.py`/`engine.py`/`irs_engine.py` are all
+unmodified. **Issue #38 remains open** — this skeleton does not price
+anything; real BLI valuation math is future work.
