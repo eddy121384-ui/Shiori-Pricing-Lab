@@ -1441,8 +1441,10 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   no-look-ahead policy, the Treasury FTP deposit-rate-observation gate,
   and required MVP curve-purpose presence. Scopes (but does not
   implement) the **next** slice — a pricing engine **skeleton** only:
-  a future `price_bli_mvp(bundle: BLIMVPInputBundle) -> BLIPricingResult`
-  entrypoint in a new `src/shiori_pricing_lab/pricing/
+  a future `price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult`
+  entrypoint (defaulting to the shared pricing spine's result type; a
+  BLI-specific `BLIPricingResult` is a fallback only, if reuse is
+  disproven) in a new `src/shiori_pricing_lab/pricing/
   bli_pricing_engine.py` module, accepting only an already-validated
   `BLIMVPInputBundle` (never a raw product/reference-data/snapshot/ISIN,
   never calling `resolve_bond_reference_data` or

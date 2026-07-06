@@ -146,7 +146,10 @@ src/shiori_pricing_lab/pricing/bli_pricing_engine.py
      already exists and already exports the vanilla-rates-core pricing
      contract modules listed in §1).
 
-entrypoint: price_bli_mvp(bundle: BLIMVPInputBundle) -> BLIPricingResult
+entrypoint: price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult
+  -- default-to-reuse (see below): only return a BLIPricingResult
+     (S5's fallback sketch) if the implementation PR proves the
+     shared PricingResult contract cannot fit.
 ```
 
 **Naming rationale (for the implementation slice to confirm or
@@ -227,6 +230,13 @@ Sketch only, **not implemented by this doc**, for the implementation
 slice to confirm or amend if and only if it is actually needed:
 
 ```text
+fallback-only entrypoint, if and only if §4's reuse question resolves
+against the shared contract:
+price_bli_mvp(bundle: BLIMVPInputBundle) -> BLIPricingResult
+  -- NOT the recommended default (see §4). Introducing this return type
+     means the implementation PR is reopening docs/14 §4.5's and
+     docs/24 §2's prior shared-spine assumption, and it must say so.
+
 BLIPricingStatus (StrEnum, sketch):
   NOT_IMPLEMENTED   -- the only value this skeleton slice needs.
   (SUCCESS / FAILED / etc., if ever added, are future-slice work once
