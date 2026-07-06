@@ -1062,3 +1062,111 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 493 passed (unchanged); `ruff` → the same 2
     pre-existing `products/bond_option.py` `E501` findings remain the
     only findings.
+- **`BLIMarketDataSnapshot` schema and synthetic fixture landed
+  (`docs/23` implementation slice).** Added
+  `src/shiori_pricing_lab/data/bli_snapshot.py`: frozen dataclasses
+  `BLIBondQuote`, `BLICurvePoint`, `BLIDepositRateObservation`,
+  `BLIVolatilityInput`, `BLICreditSpreadInput`, and
+  `BLIMarketDataSnapshot`, plus the controlled vocabularies
+  `BLIMarketDataStatus` (`ACTIVE`/`STALE`/`INVALID`/`MISSING`/
+  `MANUAL_VERIFIED`), `BLICurvePurpose`, `BLIVolatilityBasis`, and
+  `BLICreditSpreadTreatment`. Reuses the existing `PayoffBasis` (bond
+  quote price/yield), `TreasuryFTPQuoteSide`, and `TreasuryFTPTenor`
+  enums from `products.enums` rather than inventing parallel
+  vocabulary. Added `src/shiori_pricing_lab/data/_validation.py`
+  (duplicated small helpers, matching the existing
+  `products`/`reference_data` sibling-package convention) and
+  `src/shiori_pricing_lab/data/bli_snapshot_fixtures.py`
+  (`SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT`) — one valuation date, one bond
+  quote for the existing eligible `XS0000000001` fixture ISIN
+  (`reference_data.fixtures.SYNTHETIC_BOND_FIXTURES`), one Bond
+  Reference Curve and one Option Discount Curve (each with two tenor
+  rows), one Deposit Curve, one separate `TREASURY_FTP_REFERENCE`-style
+  deposit-rate observation, one explicit volatility input, and one
+  explicit (`OBSERVED`) credit-spread treatment. Also added
+  `require_exact_isin_match(snapshot, expected_isin)`, a small helper
+  for exact (never fuzzy/prefix) ISIN comparison against a future
+  resolver result.
+  - **Validation implemented:** frozen dataclasses throughout; no
+    `date.today()`/`datetime.now()` anywhere (`valuation_date` is
+    parsed only for `YYYY-MM-DD` format validation); required string
+    fields reject blank/whitespace; numeric fields reject
+    NaN/infinity via a shared finite-number check; `clean_price_per_100`
+    / `yield_value` on `BLIBondQuote` follow the same "exactly one,
+    matching the explicit discriminator" pattern as
+    `BondOption.strike_price`/`strike_yield`; FTP
+    `ftp_rate_percent_value` / `ftp_rate_decimal_value` must agree
+    within a small tolerance (`3.5500` ⇔ `0.0355`), rejecting an
+    inconsistent pair; curve duplicate/conflict detection is keyed at
+    the curve-node level (`curve_id` + `tenor`) so multi-tenor curves
+    sharing one `currency` + `curve_purpose` pass, while a duplicate or
+    conflicting tenor row, or an ambiguous set of different `curve_id`s
+    claiming the same `currency` + `curve_purpose`, is rejected;
+    `BLIVolatilityInput.override_or_fallback_audit` and
+    `BLICreditSpreadInput.override_or_fallback_audit` must be non-blank
+    whenever populated, and credit-spread `EMBEDDED`/`NOT_REQUIRED`
+    treatments require a non-blank audit explanation (never a silent
+    zero/default).
+  - **Explicit non-goals (unchanged from `docs/23` §17):** no MVP input
+    bundle, bundle builder, pricing engine, payoff skeleton, cash-flow
+    generation, schedule engine, yield-to-price calculation, curve
+    interpolation, volatility surface, credit spread model, Treasury
+    FTP parser, ingestion, Bloomberg/API connector, QuantLib adapter,
+    or UI was added. `BondOption`, `DepositLeg`,
+    `BondLinkedStructuredProduct`, `BondReferenceData`, and
+    `resolve_bond_reference_data` remain unmodified. **Issue #38
+    remains open.**
+  - **Review / validation:** `python -m pytest -q` → 559 passed
+    (493 prior + 66 new in `tests/test_bli_market_data_snapshot.py`);
+    `ruff check` on the new/changed files → clean (the 2 pre-existing
+    `products/bond_option.py` `E501` findings are unrelated and
+    untouched by this PR).
+- **`BLIMarketDataSnapshot` fixed after Codex P2/P3 review of PR #63.**
+  Three findings, all in `src/shiori_pricing_lab/data/bli_snapshot.py`:
+  (1) **P2 — `BLIBondQuote` wrongly required exactly one of
+  `clean_price_per_100`/`yield_value`.** `docs/23` §4.2 describes the
+  field as "clean_price_per_100 and/or yield", and a real bond
+  price/yield feed may validly report both for the same observation;
+  the old "exactly one, matching `price_type`" rule would have
+  discarded an observed value. Fixed: at least one of the two is now
+  required, both may be present, each is validated independently when
+  present (`clean_price_per_100` finite and positive, `yield_value`
+  finite, signed allowed), and `price_type` no longer gates which
+  field may be populated — it only records which basis was primarily
+  reported. No yield-to-price or price-to-yield conversion is
+  performed anywhere; the snapshot still only preserves what was
+  observed. (2) **P2 — `STALE`/`INVALID`/`MISSING` statuses
+  constructed successfully.** `docs/23` §12 expects stale/invalid data
+  not to be accepted at construction absent an explicit policy; the
+  original implementation only coerced the enum and never gated on it,
+  so a frozen snapshot could carry a stale/invalid/missing nested
+  observation that a future bundle layer might wrongly trust. Fixed: a
+  shared `_require_active_status` check now runs in every dataclass's
+  `__post_init__` (the snapshot and all five nested observation types)
+  and rejects anything other than `ACTIVE`. `MANUAL_VERIFIED` is also
+  rejected for now, with its own distinct error message, because the
+  audit policy (docs/23 §10) that would make it acceptable is not
+  implemented in this slice — accepting it would require its own
+  reviewed audit-metadata design, which is out of scope here. The
+  `BLIMarketDataStatus` enum itself is unchanged (still five members);
+  only construction-time acceptance is narrowed. (3) **P3 —
+  `BLIBondQuote.price_type` was typed as `products.enums.PayoffBasis`.**
+  `PayoffBasis` documents a bond *option's payoff* basis (a product/
+  methodology concept), not a market-data quote's basis; reusing it
+  coupled this market-data schema to an unrelated product enum. Fixed:
+  added a small, `data`-package-local `BLIQuoteBasis` enum
+  (`PRICE`/`YIELD`) and switched `BLIBondQuote.price_type` to it;
+  `products.enums.PayoffBasis` is untouched. Updated the synthetic
+  fixture and all affected tests accordingly (30 new tests added,
+  covering price-only/yield-only/both/neither for the bond quote, and
+  `STALE`/`INVALID`/`MISSING`/`MANUAL_VERIFIED` rejection for the
+  snapshot and every nested observation type). **No MVP input bundle,
+  bundle builder, pricing engine, or any other out-of-scope surface was
+  touched.** `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+  `BondReferenceData`, and `resolve_bond_reference_data` remain
+  unmodified. Issue #38 remains open.
+  - **Review / validation:** `python -m pytest -q` → 589 passed (559
+    prior + 30 net new in `tests/test_bli_market_data_snapshot.py`);
+    `ruff check src/shiori_pricing_lab tests` → only the same 2
+    pre-existing, unrelated `products/bond_option.py` `E501` findings
+    remain.
