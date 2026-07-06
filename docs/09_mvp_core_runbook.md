@@ -1472,3 +1472,64 @@ anything; real BLI valuation math is future work.
   src/shiori_pricing_lab tests` → only the same 2 pre-existing,
   unrelated `products/bond_option.py` `E501` findings remain.
 - **Issue #38 remains open.**
+
+### BLI curve interpolation preflight checkpoint
+
+- Before implementing curve interpolation or discount-factor access,
+  agents must read `docs/27_bli_curve_interpolation_preflight.md`.
+- **Existing curve inputs inventoried, nothing invented:** `BLICurvePoint`
+  (`curve_id`/`curve_name`/`currency`/`curve_purpose`/`tenor`/`rate`/
+  `source_system`/`status`, `tenor` a bare non-blank string with no
+  parser); `BLIMarketDataSnapshot`'s duplicate-node and ambiguous-
+  curve-identity checks (keyed on `(curve_id, tenor)` and
+  `(currency, curve_purpose)` respectively); `BLIMVPInputBundle`'s
+  presence-only curve-purpose gate (`BOND_REFERENCE_CURVE`/
+  `OPTION_DISCOUNT_CURVE`/`DEPOSIT_CURVE` required, each with at least
+  one row in the product's own currency). The existing fixture has two
+  tenor rows each for the Bond Reference/Option Discount curves but only
+  **one** for the Deposit Curve — a real single-tenor-point case any
+  future interpolation design must handle explicitly.
+- **Reuse assessment:** `pricing/curve.py::RateCurve` is **not directly
+  reusable without an adapter** — it is built from a `pandas.DataFrame`
+  of rows (unrelated vanilla-rates-core `MarketDataSnapshot` shape), not
+  from `BLICurvePoint` dataclass tuples, and has no `curve_purpose`
+  concept at all. Its module-level `tenor_to_years` helper, however, is
+  flagged as a real candidate for direct reuse by call (same
+  `str -> float` shape as `BLICurvePoint.tenor`; whether to import it
+  directly or keep a BLI-local copy is left as an open, small
+  implementation-time choice). `irs_engine.py::_discount_factor` is
+  flagged as **methodologically incompatible** for BLI as-is: simple
+  compounding (`1/(1+rT)`) vs. Annex A §A.10.2's required continuously-
+  compounded zero rates for BLI.
+- **Curve-purpose boundary decided:** selection must take an explicit
+  `(currency, curve_purpose)` pair, never guess/default; missing
+  required points must raise; duplicates/ambiguity are already rejected
+  upstream; multiple purposes present in one snapshot is normal.
+- **Tenor-parsing boundary decided:** first slice supports only strict
+  `<int>M`/`<int>Y` labels (covers every tenor the existing fixture
+  uses); week/overnight/malformed forms must raise.
+- **Interpolation boundary decided:** linear interpolation on zero
+  rates, per Annex A §A.10.2 exactly. Spline interpolation,
+  bootstrapping, and a multi-curve framework are excluded. Flat
+  extrapolation with a fallback flag is Annex-A-pinned but deliberately
+  deferred (no flagging mechanism exists yet) — the first slice should
+  raise on out-of-range targets instead.
+- **Discount-factor boundary decided conservatively:** the next slice
+  computes only the interpolated zero rate, not a discount factor, even
+  though Annex A's continuous-compounding convention is unambiguous
+  (`DF = exp(-zero_rate × T)`, cited for a future PR) — kept separate to
+  avoid conflating it with `irs_engine.py`'s incompatible simple-
+  compounding formula in the same change.
+- **Next implementation slice chosen: a `BLICurvePoint`
+  tenor-to-year-fraction parser only** (`pricing/bli_curve_tenor.py`,
+  suggested branch `claude/bli-curve-tenor-parser`) — zero design
+  ambiguity beyond the already-decided label set, a mechanical
+  adaptation of `pricing/curve.py::tenor_to_years`'s existing pattern,
+  and directly exercisable against the existing fixture's tenor labels
+  with no new fixture content.
+- No curve interpolation, discount factor, forward clean price, coupon
+  schedule, accrued interest, volatility conversion, yield-to-price
+  conversion, QuantLib adapter, Bloomberg/API connector, or UI exists
+  yet from this doc. `price_bli_mvp` and every existing BLI/vanilla-
+  rates-core module are unmodified; `pricing/bli_valuation_time.py`
+  remains unwired to anything. **Issue #38 remains open.**
