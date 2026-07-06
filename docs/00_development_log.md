@@ -1608,3 +1608,43 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 667 passed (unchanged); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI time-to-expiry ACT/365F utility added, unwired
+  (`src/shiori_pricing_lab/pricing/bli_valuation_time.py`, new).**
+  Implements docs/26's chosen next slice: a single pure function,
+  `year_fraction_to_expiry(valuation_date: str, expiry_date: str) ->
+  float`, computing Annex A §A.2.2's `T = (expiry_date -
+  valuation_date).days / 365.0` (ACT/365F), mechanically mirroring
+  `pricing/irs_engine.py::_year_fraction`'s existing `ACT_365_FIXED`
+  precedent (PR #29). Per Annex A §A.2.4's `T > 0` blocking rule,
+  `expiry_date <= valuation_date` raises `ValueError` — same-day expiry
+  and already-expired options are both rejected, never silently returned
+  as `0.0` or a negative value. Malformed / non-ISO date strings also
+  raise `ValueError`. A tiny convenience wrapper,
+  `year_fraction_to_bond_option_expiry(bundle: BLIMVPInputBundle) ->
+  float`, reads only `bundle.valuation_date` and
+  `bundle.product.bond_option.expiry_date`, does not mutate the bundle,
+  and calls no pricing engine, curve, volatility, credit-spread, bond
+  reference, or deposit-data logic. **This slice does not wire the
+  utility into `price_bli_mvp`** — `bli_pricing_engine.py` is
+  unmodified, and `price_bli_mvp` keeps returning its existing
+  deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` unchanged for every
+  valid bundle. No `PricingResult`/`PricingStatus`/`PricingErrorCode`/
+  `BLIPricingResult`/`BLIPricingStatus` was added or changed. No curve
+  interpolation, discount factor, forward clean price, coupon schedule,
+  accrued interest, volatility conversion, yield-to-price conversion,
+  Black-76, PV, or Greeks logic was added — those remain future,
+  separate slices per docs/26 §4/§6. Issue #38 remains open.
+  New tests: `tests/test_bli_valuation_time.py` (ACT/365F happy path
+  including a leap-year-spanning pair, the same-day/expired blocking
+  rule, malformed-date rejection -- including strict `YYYY-MM-DD`-shape
+  rejection of ISO basic (`20260706`), ISO week-date (`2026-W28-1`),
+  non-zero-padded, and non-string forms that `date.fromisoformat` would
+  otherwise silently accept -- a no-system-date-use check, a
+  module-boundary check for curve/discount/forward-price/vol-shaped
+  names, and the bundle convenience function against the existing
+  `SYNTHETIC_BLI_MVP_INPUT_BUNDLE` fixture with no new fixture content).
+  - **Review / validation:** `python -m pytest -q` → 688 passed (667
+    prior + 21 new in `tests/test_bli_valuation_time.py`); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
