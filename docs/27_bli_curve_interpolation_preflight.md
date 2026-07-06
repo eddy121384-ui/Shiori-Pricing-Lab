@@ -305,6 +305,16 @@ slice.
   narrow "all curve points in the snapshot" down to "the rows for one
   requested purpose," not to reject a snapshot for containing more than
   one purpose.
+- **What a selector may and may not claim about its output (Codex P2,
+  see §6.1):** a `(currency, curve_purpose)` selector is a purely
+  structural filter — narrowing `curve_points` to the matching rows —
+  and is probably safe to implement on that basis alone. **It must not,
+  however, claim or imply that the `rate` values it returns are already
+  continuously-compounded zero rates.** `curve_purpose` states what the
+  curve is *used for*, not what basis its `rate` values are quoted in
+  (§6.1) — a selector's docstring/return type must not blur that
+  distinction, even though the selector itself does not interpret
+  `rate` and is not blocked by §6.1's open question.
 
 None of this selection/filtering logic is implemented by this PR.
 
@@ -362,10 +372,9 @@ No tenor parser is implemented by this PR.
   - spline interpolation (not what Annex A specifies — would be a
     silent methodology deviation, not a simplification);
   - bootstrapping / curve construction (Annex A §A.10.3: MVP does not
-    build its own bootstrapping engine; a `BLICurvePoint` row is already
-    assumed to be a usable zero-rate node, not a par-curve input needing
-    par→zero conversion — that par→zero conversion, if ever needed, is
-    separately scoped in §A.10.3 and not part of this dependency);
+    build its own bootstrapping engine). **This does not mean a
+    `BLICurvePoint` row can be assumed usable as a zero-rate node —
+    see §6.1 below, which blocks that assumption explicitly**;
   - a multi-curve framework (one purpose's curve is interpolated in
     isolation; no cross-curve basis-spread logic);
   - **extrapolation beyond the curve's tenor range: explicitly decided
@@ -394,10 +403,80 @@ No tenor parser is implemented by this PR.
     discount factor is computed from the interpolated rate — see §6.1
     below, deferred).
 
-### 6.1 Discount-factor boundary (required question 6)
+### 6.1 Curve-rate-basis blocker (Codex P2, blocks zero-rate interpolation)
 
-**Decided: the next implementation slice should compute only the
-interpolated zero rate — not a discount factor.**
+**Annex A §A.10.2 requires piecewise linear interpolation on
+continuously-compounded zero rates. The current `BLICurvePoint` schema
+does not prove that `rate` already *is* a continuously-compounded zero
+rate — this is a real gap, not a restated non-goal, and it blocks any
+"interpolated zero rate" helper until it is resolved.**
+
+`BLICurvePoint` (`data/bli_snapshot.py`, §2.1) has exactly these fields:
+`curve_id`, `curve_name`, `currency`, `curve_purpose`, `tenor`, `rate`,
+`source_system`, `status`. `rate` is validated only as a finite number
+(`_require_finite_number`) — there is no `rate_basis`,
+`curve_rate_basis`, `zero_vs_par`, `compounding`, or any other field
+that states whether a given row's `rate` is already a zero rate, a par
+rate, a swap rate, a bond yield, a funding rate, or any other source
+curve's native quoting basis. `curve_purpose` states *what the curve is
+used for* (`BOND_REFERENCE_CURVE` / `OPTION_DISCOUNT_CURVE` /
+`DEPOSIT_CURVE` / `FUNDING_CURVE`), not *what basis its rates are
+quoted in* — the two are independent questions, and this schema only
+answers the first one today.
+
+**Corrected assumption (replacing this doc's earlier, unsafe wording,
+"a `BLICurvePoint` row is already assumed to be a usable zero-rate
+node, not a par-curve input needing par→zero conversion"):** Annex A
+requires usable zero-rate nodes for interpolation, but the current
+`BLICurvePoint` schema does not prove that `rate` is already a
+continuously-compounded zero rate. A future implementation must either
+receive an explicit zero-rate basis / normalization contract, or
+introduce a reviewed par-to-zero / source-to-zero conversion slice
+before interpolation. **Implementing an "interpolated zero rate" helper
+is therefore blocked until the rate basis is made explicit** — not a
+matter of "which formula," but of "is the input already the right
+economic quantity at all."
+
+**Acceptable ways to unblock this later (a following PR must choose
+one, not invent a fourth without documenting it):**
+
+```text
+1. Add / validate an explicit input basis (e.g. a future field or a
+   documented, enforced upstream contract) indicating the relevant
+   BLICurvePoint.rate values are continuously-compounded zero rates.
+2. Treat imported BLI curve points as already normalized zero-rate
+   nodes only if that normalization is explicitly documented and
+   audited upstream (i.e. the ingestion/source-system boundary, not
+   this codebase, already guarantees and records it) -- not merely
+   assumed because the values "look like" plausible rates.
+3. Add a separate, reviewed par-to-zero / source-curve-to-zero
+   conversion slice if the source curves are par curves or otherwise
+   not already zero rates (this is the Annex A §A.10.3 territory
+   already excluded from this dependency, restated here as the
+   fallback path if option 1/2 turn out not to hold).
+4. Do not silently infer zero-rate status from curve_purpose,
+   curve_name, curve_id, or source_system -- none of those fields
+   assert a rate basis, and treating any of them as an implicit proxy
+   for "this is already a zero rate" would be exactly the kind of
+   silent assumption this section blocks.
+```
+
+This blocker sits strictly between the tenor parser (§9, still safe —
+see below) and any future interpolated-rate/discount-factor helper: the
+tenor parser never reads or interprets `rate` at all, so it is
+unaffected by this open question.
+
+### 6.2 Discount-factor boundary (required question 6)
+
+**Decided: a discount-factor helper remains out of scope for the
+foreseeable next several slices, strictly behind both the curve-purpose
+selector and an interpolated-zero-rate helper — the latter itself
+already blocked by §6.1's curve-rate-basis gap.** Even independent of
+that blocker, this section's own sequencing reasoning (below) would
+still keep interpolation and discount-factor computation in separate
+PRs; §6.1 simply means the interpolated-rate step itself cannot start
+yet either, so the discount-factor step is blocked at least as far out
+again.
 
 Reasoning for being conservative here even though Annex A §A.10.2 does
 name continuous compounding for the zero rate:
@@ -417,14 +496,16 @@ name continuous compounding for the zero rate:
   in separate, sequential slices makes the compounding-convention
   distinction an explicit, single-purpose PR's entire subject, not a
   side effect of a larger change.
-- If a following PR does implement the BLI discount factor, the formula
-  to review is already unambiguous from Annex A §A.10.2 + §A.2.2:
-  `DF = exp(-zero_rate × T)`, where `zero_rate` is the interpolated
-  continuously-compounded zero rate from this slice's helper and `T` is
-  the ACT/365F year fraction from `pricing/bli_valuation_time.py`'s
-  existing `year_fraction_to_expiry` (already landed, PR #70) — no new
-  design decision would be needed for that follow-up PR's formula
-  itself, only its own tests and error boundary.
+- *If and only if* §6.1's curve-rate-basis question is resolved first
+  (rate confirmed or normalized to a continuously-compounded zero rate),
+  the discount-factor formula to review is already unambiguous from
+  Annex A §A.10.2 + §A.2.2: `DF = exp(-zero_rate × T)`, where
+  `zero_rate` is the interpolated continuously-compounded zero rate and
+  `T` is the ACT/365F year fraction from
+  `pricing/bli_valuation_time.py`'s existing `year_fraction_to_expiry`
+  (already landed, PR #70). The formula itself would need no new design
+  decision at that point — only its own tests and error boundary — but
+  that PR cannot be attempted before §6.1 is resolved.
 
 No interpolation and no discount factor is implemented by this PR.
 
@@ -482,6 +563,15 @@ Decided future behavior, not implemented by this PR:
   A future curve-interpolation helper operating on an already-valid
   bundle's market_data_snapshot does not need to re-implement any of
   that; it only needs its own tenor-shape and range checks (above).
+- Unknown / unconfirmed curve-rate basis (Codex P2, §6.1): a future
+  zero-rate interpolation helper must raise or otherwise block if it
+  cannot confirm the curve points it is about to interpolate are
+  continuously-compounded zero rates -- via one of §6.1's acceptable
+  unblocking paths (an explicit basis field/contract, a documented and
+  audited upstream normalization guarantee, or a separate reviewed
+  par-to-zero/source-to-zero conversion slice). It must never proceed
+  by silently assuming the basis from curve_purpose, curve_name,
+  curve_id, or source_system.
 ```
 
 None of these errors are implemented by this PR.
@@ -508,6 +598,8 @@ no scenario engine
 no bootstrapping / curve construction (Annex A §A.10.3 territory)
 no multi-curve basis-spread framework
 no flat-extrapolation-with-fallback-flag mechanism (deferred, §6)
+no assumption that BLICurvePoint.rate is already a continuously-
+  compounded zero rate (blocked pending an explicit basis, §6.1)
 no wiring of year_fraction_to_expiry into price_bli_mvp or anything else
 no change to price_bli_mvp
 no QuantLib adapter
@@ -551,7 +643,41 @@ implementation-time choice per §3.3, not decided by this doc).
   later PR reviewable on its own single subject, mirroring `docs/26`'s
   own sequencing discipline.
 
-### 9.2 Suggested next implementation PR
+### 9.2 Future dependency sequencing (Codex P2 correction)
+
+The dependency chain after this PR is **not** "tenor parser, then
+interpolation, then discount factor" in uninterrupted succession — §6.1
+inserts a real blocker partway through. Restated explicitly:
+
+```text
+A. Safe next code slice (this PR recommends starting it):
+   - BLI curve tenor parser only (tenor_to_year_fraction(tenor: str) ->
+     float). Converts labels like "3M"/"2Y"/"5Y" into year fractions.
+     Never reads or interprets `rate` -- no economic interpretation of
+     the curve at all, so it is entirely unaffected by §6.1's open
+     question.
+
+B. Still blocked after that (in this order):
+   - Curve-purpose selector (filter curve_points by (currency,
+     curve_purpose)): probably safe to implement as a purely structural
+     selector, but it must not claim or imply that the rates it returns
+     are already zero rates (§4's new bullet, §6.1).
+   - Interpolated zero-rate helper: BLOCKED until curve-rate basis is
+     made explicit (§6.1) -- via an explicit basis field/contract, a
+     documented and audited upstream normalization guarantee, or a
+     reviewed par-to-zero/source-to-zero conversion slice.
+   - Discount-factor helper: BLOCKED until the interpolated zero-rate
+     helper above is itself safe to implement (§6.2) -- it consumes
+     that helper's output, so it cannot be unblocked first.
+   - Forward clean price (Annex A §A.5.2/§A.5.3, docs/26 §4 item 5):
+     remains blocked after that -- it depends on curve discounting
+     (this whole dependency), coupon schedule generation, and accrued
+     interest, none of which exist yet.
+```
+
+None of B's items are implemented by this PR; A is scoped in §9.3 below.
+
+### 9.3 Suggested next implementation PR
 
 ```text
 Suggested branch:     claude/bli-curve-tenor-parser
@@ -631,6 +757,10 @@ per this repo's standing PR-description convention.
     in §5, with no silent extension to week/overnight/other forms?
 [ ] Are unsupported tenor shapes rejected (raise), never silently
     mapped to 0.0, None, or a nearby supported label?
+[ ] Does the module read or interpret BLICurvePoint.rate anywhere? It
+    must not -- this slice is a tenor-label parser only, and any
+    reading of `rate` would blur into §6.1's blocked zero-rate-basis
+    question.
 [ ] Is date.today()/datetime.now() absent (trivially -- confirm no date
     arithmetic was added at all in this slice)?
 [ ] Is price_bli_mvp's return value byte-for-byte unchanged before/after

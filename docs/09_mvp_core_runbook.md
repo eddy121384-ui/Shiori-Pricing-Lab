@@ -1514,15 +1514,32 @@ anything; real BLI valuation math is future work.
   extrapolation with a fallback flag is Annex-A-pinned but deliberately
   deferred (no flagging mechanism exists yet) — the first slice should
   raise on out-of-range targets instead.
-- **Discount-factor boundary decided conservatively:** the next slice
-  computes only the interpolated zero rate, not a discount factor, even
-  though Annex A's continuous-compounding convention is unambiguous
-  (`DF = exp(-zero_rate × T)`, cited for a future PR) — kept separate to
-  avoid conflating it with `irs_engine.py`'s incompatible simple-
-  compounding formula in the same change.
-- **Next implementation slice chosen: a `BLICurvePoint`
+- **Curve-rate-basis blocker (Codex P2 review of PR #71):**
+  `BLICurvePoint` has no `rate_basis`/`curve_rate_basis`/`zero_vs_par`/
+  `compounding` field, so nothing today confirms `rate` is already a
+  continuously-compounded zero rate — `curve_purpose` says what a curve
+  is *used for*, not what basis its rates are quoted in. **An
+  interpolated-zero-rate helper is blocked** until a future PR resolves
+  this via an explicit basis field/contract, a documented and audited
+  upstream normalization guarantee, or a separate reviewed
+  par-to-zero/source-to-zero conversion slice — never by silently
+  inferring the basis from `curve_purpose`/`curve_name`/`curve_id`/
+  `source_system`. A curve-purpose selector is still probably safe as a
+  purely structural filter, but must not claim its output rates are
+  already zero rates.
+- **Discount-factor boundary decided conservatively, now doubly
+  blocked:** a discount-factor helper stays out of scope for the
+  foreseeable next several slices — behind both the curve-purpose
+  selector and the interpolated-zero-rate helper, itself blocked by the
+  curve-rate-basis gap above. If that gap is resolved, the formula to
+  review is already unambiguous (`DF = exp(-zero_rate × T)`) — kept
+  separate to avoid conflating it with `irs_engine.py`'s incompatible
+  simple-compounding formula in the same change.
+- **Next implementation slice chosen (unchanged): a `BLICurvePoint`
   tenor-to-year-fraction parser only** (`pricing/bli_curve_tenor.py`,
-  suggested branch `claude/bli-curve-tenor-parser`) — zero design
+  suggested branch `claude/bli-curve-tenor-parser`) — it never reads or
+  interprets `rate`, so it is entirely unaffected by the curve-rate-basis
+  blocker. Zero design
   ambiguity beyond the already-decided label set, a mechanical
   adaptation of `pricing/curve.py::tenor_to_years`'s existing pattern,
   and directly exercisable against the existing fixture's tenor labels
