@@ -1373,3 +1373,57 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 9 net new in `tests/test_bli_mvp_input_bundle.py`); `ruff
     check src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **`build_bli_mvp_input_bundle` builder landed (`docs/24` §12 step 5
+  implementation slice).** Added
+  `src/shiori_pricing_lab/data/bli_mvp_input_bundle_builder.py`: a
+  keyword-only function (`bundle_id`, `valuation_date`, `product`,
+  `bond_reference_data_universe`, `market_data_snapshot`) that extracts
+  `product.bond_option.underlying_isin`, calls the existing
+  `resolve_bond_reference_data` against the supplied universe, and
+  constructs `BLIMVPInputBundle` from the result — the first normal,
+  callable construction path into the bundle, replacing what was
+  previously hand-wired resolver-call-plus-field-unpacking. Checks
+  `product` is a `BondLinkedStructuredProduct` before reading its ISIN
+  (clear `TypeError`, not an `AttributeError` from inside the resolver
+  call); raises `ValueError` (including the resolver's own status and
+  `block_reason`) whenever resolution is not `FOUND_ELIGIBLE` — covering
+  both `NOT_FOUND` and `FOUND_INELIGIBLE` — never silently returning
+  `None`, never building a partial bundle, never coercing an
+  ineligible/missing result into an eligible one, never bypassing
+  `is_mvp_pricing_eligible` or any of `BLIMVPInputBundle`'s own gates.
+  **Deliberately does not re-validate any `BLIMVPInputBundle` gate**
+  (ISIN, currency, valuation-date/as-of no-look-ahead, deposit-rate
+  consistency, curve-purpose presence, all from PR #65) — those raise
+  directly from `BLIMVPInputBundle.__post_init__`, uncaught and
+  un-rewrapped by the builder, resolving `docs/24` §11's "raise vs.
+  structured result" open question for the builder the same way PR #65
+  resolved it for the dataclass itself (raise, not a structured
+  found/not-found object). `DuplicateBondReferenceDataError` likewise
+  propagates unchanged.
+  - **Fixture updated:**
+    `src/shiori_pricing_lab/data/bli_mvp_input_bundle_fixtures.py`'s
+    `SYNTHETIC_BLI_MVP_INPUT_BUNDLE` now calls
+    `build_bli_mvp_input_bundle` directly instead of hand-wiring
+    `resolve_bond_reference_data` + `BLIMVPInputBundle(...)` — no
+    circular-import or side-effect risk was found (the builder module
+    only imports from `data.bli_mvp_input_bundle`,
+    `products.bond_linked_structured_product`, `data.bli_snapshot`, and
+    `reference_data`, none of which import back), so the fixture was
+    updated in place rather than duplicated. It remains exactly one
+    hand-picked positive case, not a general fixture factory.
+  - **Explicit non-goals (unchanged from `docs/24` §10):** no pricing
+    engine, payoff skeleton, cash-flow generation, schedule engine,
+    yield-to-price calculation, curve interpolation, curve *selection*
+    methodology beyond the existing bundle gates, volatility surface,
+    credit spread model, Treasury FTP parser, ingestion, Bloomberg/API
+    connector, QuantLib adapter, debug viewer, or any other UI was
+    added. `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+    `BondReferenceData`, `resolve_bond_reference_data`,
+    `is_mvp_pricing_eligible`, `BLIMarketDataSnapshot`, and
+    `BLIMVPInputBundle` (and its component classes) remain unmodified.
+    Package exports are unchanged. **Issue #38 remains open.**
+  - **Review / validation:** `python -m pytest -q` → 651 passed (633
+    prior + 18 new in `tests/test_bli_mvp_input_bundle_builder.py`);
+    `ruff check src/shiori_pricing_lab tests` → only the same 2
+    pre-existing, unrelated `products/bond_option.py` `E501` findings
+    remain.
