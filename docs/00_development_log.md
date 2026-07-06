@@ -1214,3 +1214,47 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     test file changed, so `python -m pytest -q` and `ruff` are
     unaffected by this PR (last known state: 589 passed, only the 2
     pre-existing `products/bond_option.py` `E501` findings).
+- **PR #64 revised after Codex P2 review — three findings, all in
+  `docs/24_bli_mvp_input_bundle_preflight.md`, strengthening the
+  bundle's future validation requirements (still docs-only, no
+  implementation added).** (1) The "market data snapshot must be
+  internally valid" bullet in §6 read as if an `isinstance` check on
+  `BLIMarketDataSnapshot` were sufficient; `BLIMarketDataSnapshot.
+  __post_init__` only proves internal well-formedness and has no
+  concept of which product it is for, so a `TREASURY_FTP_REFERENCE`-
+  mode `DepositLeg` could have been bundled with a snapshot carrying no
+  matching `deposit_rate_observation`. Fixed: §6 now requires explicit
+  product-specific market-data presence gates — a matching deposit-rate
+  observation when `deposit_rate_mode` is `TREASURY_FTP_REFERENCE`
+  (present, and consistent with `ftp_rate_selector`), with `FIXED_RATE`
+  needing no separate rate observation and `MANUAL_VERIFIED_RATE`'s
+  audit record flagged as not yet representable (an open item). (2) §6
+  also let a snapshot with non-empty but wrong-purpose `curve_points`
+  (e.g. only `FUNDING_CURVE`) count as valuation-ready. Fixed: §6 now
+  requires an explicit required-MVP-curve-purpose gate — at least one
+  `curve_points` row for each of `BLICurvePurpose.BOND_REFERENCE_CURVE`,
+  `OPTION_DISCOUNT_CURVE`, and `DEPOSIT_CURVE` (`FUNDING_CURVE` only if
+  mapped), presence only, no tenor selection or interpolation. (3) §6's
+  valuation-date rule treated `bundle.valuation_date ==
+  market_data_snapshot.valuation_date` as sufficient coherence, but
+  `BLIMarketDataSnapshot.as_of_timestamp` is only checked for
+  non-blankness today, so a historical bundle could carry market data
+  whose as-of timestamp is after the valuation date. Fixed: §6 now
+  states an explicit market-data as-of / no-look-ahead policy —
+  `as_of_timestamp` must also be validated under a no-look-ahead cutoff
+  rule, with the exact rule (calendar-date vs. intraday vs.
+  settlement-aware) left as a required, explicit policy decision for
+  the implementation slice (§11), not something a future pricing engine
+  may silently interpret differently. All three fixes remain
+  presence/consistency checks only — no curve interpolation, no
+  yield/price conversion, no FTP parsing, no pricing, no silent
+  fallback; the bundle's deterministic/immutable/by-reference/
+  cross-check-only/no-duplicated-fields/no-pricing design and the
+  documented (not fixed) fixture-ISIN-mismatch gap are all unchanged.
+  §9's test plan and §8.3's negative-fixture list were extended to
+  match the three new gates. `docs/09` gained a corresponding summary
+  under its BLI MVP input bundle preflight checkpoint.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 589 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.

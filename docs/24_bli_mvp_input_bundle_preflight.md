@@ -53,8 +53,22 @@ date, produced by binding together:
   one internally-valid BLIMarketDataSnapshot           (market data)
 
 plus the cross-checks that only make sense once all three are present
-together (ISIN identity across all three, valuation-date coherence).
+together (ISIN identity across all three, product-specific market-data
+presence per §6, valuation-date and as-of/no-look-ahead coherence
+per §6).
 ```
+
+**Internal validity is necessary but not sufficient** (Codex P2 review
+of PR #64): `BLIMarketDataSnapshot.__post_init__` only proves the
+snapshot is well-formed *in isolation* (non-empty `curve_points`, no
+duplicate/conflicting/ambiguous curve nodes, FTP percent/decimal
+consistency, `ACTIVE`-only status) — it has no notion of "which
+product is this snapshot for," so it cannot and does not check that
+the snapshot actually carries what *this specific product* needs (a
+matching deposit-rate observation, the required curve purposes, etc.).
+§6 states this as an explicit, additional bundle-construction gate, not
+something an `isinstance` check on `BLIMarketDataSnapshot` already
+covers.
 
 It answers exactly one question:
 
@@ -337,23 +351,144 @@ reference data must be MVP-pricing eligible -- the bundle constructor
 
 market data snapshot must be internally valid before bundling -- this
   is automatically true for any BLIMarketDataSnapshot instance (its own
-  __post_init__ already enforces this, docs/23 §12); the bundle
-  constructor's only obligation is an isinstance check, not
-  re-validation.
+  __post_init__ already enforces internal well-formedness, docs/23
+  §12: non-empty curve_points, no duplicate/conflicting/ambiguous curve
+  nodes, FTP percent/decimal consistency, ACTIVE-only status). An
+  isinstance check confirms this much, but **this is necessary, not
+  sufficient** (Codex P2 review of PR #64): internal well-formedness
+  says nothing about whether the snapshot carries what *this specific
+  product* needs -- BLIMarketDataSnapshot's own validation has no
+  concept of "which product is this for," so a product-specific gate
+  can only live at the bundle layer, never be delegated back to the
+  snapshot. The bundle constructor must additionally check, beyond
+  isinstance:
 
-valuation date / as-of timestamp handling must be explicit -- the
-  bundle's own valuation_date must be a required, explicit,
-  non-defaulted field (same "no date.today()" invariant already
-  enforced everywhere else in this repo, docs/09 §3), and it must be
-  validated for exact equality against BLIMarketDataSnapshot.
-  valuation_date. Whether the bundle also cross-checks against a
-  reference-data "as of" concept is an open question (§9) -- today's
-  BondReferenceData / resolve_bond_reference_data carry no valuation-
-  date field of their own (docs/21 §7.1's conclusion: point-in-time
-  correctness of the *fixtures iterable* is the caller's job, not the
-  resolver's or the bundle's), so there is no second date to reconcile
-  against yet, only the caller's obligation to supply an already-
-  as-of-correct fixtures iterable in the first place.
+    bond quote for the resolved ISIN -- market_data_snapshot.bond_quote
+      is a required (non-Optional) field on every BLIMarketDataSnapshot,
+      so this gate reduces to the ISIN-match rule already listed above
+      (BLIMarketDataSnapshot.bond_quote.isin ==
+      bond_reference_data.isin); restated here only so the
+      product-specific gate list is complete, not because it needs new
+      logic beyond that ISIN check.
+
+    deposit-rate observation, product-conditional on
+      DepositLeg.deposit_rate_mode (docs/18 §4) -- this is the concrete
+      gap Codex flagged: BLIMarketDataSnapshot.deposit_rate_observation
+      is optional and unconditionally allowed to be None (docs/23), so
+      nothing today stops a TREASURY_FTP_REFERENCE-mode DepositLeg from
+      being bundled with a snapshot that carries no matching FTP
+      observation. The bundle must require:
+        - DepositRateMode.TREASURY_FTP_REFERENCE: market_data_snapshot.
+          deposit_rate_observation must be present (non-None), and its
+          currency/tenor/quote_side must match
+          product.deposit_leg.ftp_rate_selector -- presence and
+          selector consistency only; the bundle does not re-resolve,
+          parse, or recompute the rate itself.
+        - DepositRateMode.FIXED_RATE: the rate is already a deal term
+          on DepositLeg (docs/18 §4.1); no deposit_rate_observation is
+          required for the *rate* itself, though the Deposit Curve
+          (below) may still be required for discounting.
+        - DepositRateMode.MANUAL_VERIFIED_RATE: a manual-verified-rate
+          audit record is required per docs/18 §4.3 -- not yet
+          representable anywhere in BLIMarketDataSnapshot today; this
+          is an open item (§11), not resolved by this doc.
+
+    required MVP curve-purpose presence -- see the dedicated gate list
+      immediately below; a non-empty curve_points is not the same as
+      "the required curves are present."
+
+  All of these are **presence and consistency checks only** (Codex P2
+  review of PR #64's explicit boundary): the bundle confirms *that* a
+  required component exists and matches the product's own selector, and
+  performs no curve interpolation, no yield/price conversion, no
+  Treasury FTP parsing, no pricing, and no fallback construction of a
+  missing value.
+
+required MVP curve-purpose gates -- restated as its own explicit gate
+  because `BLIMarketDataSnapshot.curve_points` being non-empty (docs/23
+  §12) only proves *some* curve data exists, not that the *right*
+  curve purposes exist for MVP BLI valuation (Codex P2 review of
+  PR #64: a snapshot carrying only, say, a lone
+  BLICurvePurpose.FUNDING_CURVE row is internally valid today but
+  useless for the MVP pricing path). Using the actual enum members
+  already defined on BLICurvePurpose (data/bli_snapshot.py), the bundle
+  must require, by presence only:
+
+    at least one curve_points row with
+      curve_purpose == BLICurvePurpose.BOND_REFERENCE_CURVE -- required
+      for the bond leg / bond option's own bond-side valuation context
+      (SPEC §3.5, docs/22 §6.2).
+    at least one curve_points row with
+      curve_purpose == BLICurvePurpose.OPTION_DISCOUNT_CURVE -- required
+      for discounting the option-side valuation (SPEC §3.5, docs/22
+      §6.2). Restated, unchanged: the Option Discount Curve and Bond
+      Reference Curve are separate concepts and must never be treated
+      as interchangeable (docs/23 §7, SPEC §3.5) -- the bundle checks
+      for both purposes independently, never accepting one curve_id as
+      satisfying both gates.
+    at least one curve_points row with
+      curve_purpose == BLICurvePurpose.DEPOSIT_CURVE -- required for
+      the deposit leg's own discounting/funding calculation (docs/22
+      §6.2, docs/23 §11.1) regardless of deposit_rate_mode. This is a
+      separate discounting input from the deposit-rate observation
+      above; neither substitutes for the other (docs/23 §11.1's
+      Codex-P2-fixed rule, restated, not re-opened).
+    curve_purpose == BLICurvePurpose.FUNDING_CURVE -- required only if
+      the product/mapping explicitly calls for a funding adjustment;
+      this doc does not decide when that mapping applies (docs/22
+      §6.2/§14 already leaves the curve-mapping-table shape open,
+      restated in §11, not re-opened here).
+
+  The bundle checks **presence of at least one row for each required
+  purpose only** -- never which specific tenor node a future pricing
+  engine should read, and never how to interpolate between tenors.
+  Selecting a tenor node and interpolating between tenors remain future
+  pricing-engine work, entirely out of scope for the bundle (same "no
+  curve interpolation inside the bundle" rule stated below, restated
+  here for emphasis since this is exactly the boundary Codex's review
+  asked to keep intact).
+
+valuation date / as-of timestamp handling must be explicit, and
+  **valuation-date equality alone is not sufficient** (Codex P2 review
+  of PR #64, correcting an earlier version of this doc that treated
+  `bundle.valuation_date == market_data_snapshot.valuation_date` as
+  enough valuation-context coherence):
+
+    the bundle's own valuation_date must be a required, explicit,
+      non-defaulted field (same "no date.today()" invariant already
+      enforced everywhere else in this repo, docs/09 §3).
+    market_data_snapshot.valuation_date must equal the bundle's
+      valuation_date (unchanged from the earlier version of this doc).
+    market_data_snapshot.as_of_timestamp must ALSO be validated under
+      an explicit no-look-ahead rule, not merely checked for
+      non-blankness. Today, BLIMarketDataSnapshot.__post_init__ only
+      requires as_of_timestamp to be a non-blank string (docs/23) -- it
+      is never parsed as a timestamp or compared against
+      valuation_date, so nothing currently stops a snapshot whose
+      as_of_timestamp is, in substance, *after* the valuation date it
+      claims to represent. For a historical-valuation bundle, market
+      data whose as_of_timestamp falls after the valuation date's
+      allowed market-data cutoff must be rejected -- a bundle must
+      never be built from market data that "looked ahead" of the
+      valuation date it represents (restated from docs/22 §8's
+      no-look-ahead principle, now made concrete as a bundle-
+      construction gate rather than a general policy statement).
+    the exact cutoff rule (e.g. "as_of_timestamp's calendar date must
+      be <= valuation_date," vs. an intraday cutoff time, vs. a
+      settlement-aware T+0/T+1 rule) is **not decided by this doc** --
+      this is an explicit, required policy decision the implementation
+      slice must make and document, not something a future pricing
+      engine may silently interpret differently on each call. Recorded
+      as an open item in §11, not resolved here.
+    whether the bundle also needs a reference-data "as of" concept
+      remains open (unchanged from the earlier version of this doc) --
+      BondReferenceData / resolve_bond_reference_data carry no
+      valuation-date field of their own today (docs/21 §7.1's
+      conclusion: point-in-time correctness of the *fixtures iterable*
+      supplied to the resolver is the caller's job, not the resolver's
+      or the bundle's), so there is no second date to reconcile against
+      yet, only the caller's obligation to supply an already-as-of-
+      correct fixtures iterable in the first place.
 
 no fuzzy ISIN matching anywhere in the bundle -- every ISIN comparison
   in this doc is plain string equality, never prefix, case-insensitive,
@@ -487,6 +622,13 @@ Negative fixture concepts for future tests (not built here, mirroring
     snapshot bond_quote referencing a different ISIN than the
       reference data
     mismatched valuation_date between the bundle and the snapshot
+    a snapshot variant with one required curve_purpose row removed
+      (e.g. no DEPOSIT_CURVE row) -- needed for §9 test 10
+    a TREASURY_FTP_REFERENCE-mode product paired with a snapshot whose
+      deposit_rate_observation is None -- needed for §9 test 11
+    a snapshot whose as_of_timestamp violates whatever no-look-ahead
+      cutoff rule the implementation slice decides (§11) -- needed for
+      §9 test 12, and cannot be built until that rule is decided
 ```
 
 ---
@@ -515,7 +657,23 @@ its own implementation slice.
 8. market data snapshot is not a BLIMarketDataSnapshot instance rejects.
 9. mismatched valuation_date rejects: bundle.valuation_date !=
    market_data_snapshot.valuation_date.
-10. no pricing engine invoked anywhere in these tests -- assert the
+10. missing required curve-purpose row rejects (§6's new gate): a
+    snapshot whose curve_points omits BLICurvePurpose.DEPOSIT_CURVE (or
+    BOND_REFERENCE_CURVE, or OPTION_DISCOUNT_CURVE) must block bundle
+    construction, even though that same snapshot is perfectly
+    internally valid on its own.
+11. missing deposit-rate observation for TREASURY_FTP_REFERENCE mode
+    rejects (§6's new gate): a product whose DepositLeg.deposit_rate_mode
+    is TREASURY_FTP_REFERENCE, bundled with a snapshot whose
+    deposit_rate_observation is None, must be rejected. A FIXED_RATE
+    DepositLeg bundled with deposit_rate_observation=None must still be
+    accepted (no separate rate observation is required for that mode).
+12. market-data as-of look-ahead violation rejects (§6's new gate) --
+    this test cannot be fully specified until the implementation slice
+    decides the exact cutoff rule (§11); at minimum, once that rule is
+    chosen, add a case where as_of_timestamp is after the allowed
+    cutoff for valuation_date and assert construction is rejected.
+13. no pricing engine invoked anywhere in these tests -- assert the
     bundle has no pv/dv01/cashflows attribute (a dataclass-fields
     boundary test, mirroring the existing pattern in
     tests/test_deposit_leg.py / tests/test_bond_reference_data.py /
@@ -619,16 +777,39 @@ writing the dataclass, rather than re-discovering them mid-implementation.
   future Bond Master versioning concept is ever needed is out of scope
   here and not decided.
 
-- Curve mapping selection (restated from docs/22 §14, still open): this
-  doc's §6 only requires that a snapshot exists and that ISINs agree --
-  it does not decide *how* a future bundle or pricing engine picks
-  "the" Bond Reference Curve / Option Discount Curve / Deposit Curve out
-  of BLIMarketDataSnapshot.curve_points for a specific product (today's
-  fixture happens to have exactly one curve_id per purpose, so no
-  selection logic is needed yet, but a real multi-curve-per-purpose
-  scenario would need an explicit mapping rule that does not exist in
-  code today). This is unchanged from docs/22 §6.2/§14 and is not
-  resolved by this doc.
+- Curve mapping selection (restated from docs/22 §14, still open, and
+  now explicitly distinguished from §6's new curve-purpose *presence*
+  gates, Codex P2 review of PR #64): §6 requires that at least one
+  curve_points row of each required curve_purpose is *present*, which
+  is a narrower, cheaper check than curve *selection*. This doc does
+  not decide *how* a future bundle or pricing engine picks "the" one
+  curve_id to actually use for a purpose when more than one otherwise-
+  valid curve_id could serve it (today's fixture happens to have
+  exactly one curve_id per purpose, and BLIMarketDataSnapshot already
+  rejects an *ambiguous* set of different curve_ids sharing one
+  currency+curve_purpose at construction time, docs/23 §12 -- but a
+  real multi-source scenario with, say, two independently-valid
+  currency/purpose combinations resolved through different explicit
+  mappings would still need a mapping rule this doc does not design).
+  This is unchanged from docs/22 §6.2/§14 and is not resolved by this
+  doc.
+
+- Market-data as-of / no-look-ahead cutoff rule (new, Codex P2 review
+  of PR #64, §6): this doc now requires that a bundle reject market
+  data whose as_of_timestamp violates a no-look-ahead rule relative to
+  the bundle's valuation_date, but it deliberately does **not** decide
+  what that rule is -- whether the check is a plain calendar-date
+  comparison (as_of_timestamp's date <= valuation_date), an intraday
+  cutoff time (e.g. "as of 17:00 valuation-date local time"), or a
+  settlement-aware T+0/T+1 rule tied to a specific market's
+  conventions. `BLIMarketDataSnapshot.as_of_timestamp` is stored as a
+  plain non-blank string today (docs/23) with no required format beyond
+  that, so the implementation slice must also decide (or further defer,
+  explicitly) what timestamp format/parsing the bundle can rely on
+  before it can even compare as_of_timestamp against valuation_date.
+  This is a required policy decision for that slice to make and
+  document explicitly -- not a detail a future pricing engine may
+  silently interpret differently each time it runs.
 
 - Whether resolution_status/eligibility_reasons belong on the bundle at
   all, vs. being re-derivable on demand: §7's sketch keeps them as

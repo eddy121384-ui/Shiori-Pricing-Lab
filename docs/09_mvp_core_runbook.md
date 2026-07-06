@@ -950,6 +950,33 @@ open.**
   valuation-date coherence between the bundle and the snapshot. It must
   not price anything, must not interpolate curves, and must not convert
   yield to price or vice versa.
+- **Strengthened after Codex P2 review of PR #64:** an `isinstance`
+  check on `BLIMarketDataSnapshot` alone is **not** sufficient —
+  `BLIMarketDataSnapshot.__post_init__` only proves internal
+  well-formedness, it has no notion of which product it is for. The
+  bundle must additionally gate on:
+  - **product-specific market-data presence** — if
+    `DepositLeg.deposit_rate_mode` is `TREASURY_FTP_REFERENCE`, the
+    bundle requires a matching `deposit_rate_observation` (present, and
+    consistent with `ftp_rate_selector`); `FIXED_RATE` needs no separate
+    rate observation; `MANUAL_VERIFIED_RATE` needs an audit record not
+    yet representable in `BLIMarketDataSnapshot` (an open item);
+  - **required MVP curve-purpose gates** — at least one `curve_points`
+    row for each of `BLICurvePurpose.BOND_REFERENCE_CURVE`,
+    `OPTION_DISCOUNT_CURVE`, and `DEPOSIT_CURVE` must be present
+    (`FUNDING_CURVE` only if mapped); presence only, no tenor selection
+    or interpolation;
+  - **market-data as-of / no-look-ahead policy** — `valuation_date`
+    equality between the bundle and the snapshot is **not** enough;
+    `as_of_timestamp` must also be validated against an explicit
+    no-look-ahead cutoff rule (today only checked for non-blankness by
+    `BLIMarketDataSnapshot`), with the exact cutoff rule left as a
+    required policy decision for the implementation slice, not
+    something a future pricing engine may silently interpret
+    differently each time.
+  All of these remain presence/consistency checks only — no curve
+  interpolation, no yield/price conversion, no FTP parsing, no pricing,
+  no silent fallback.
 - **Concrete fixture gap found (not fixed, docs-only):**
   `tests/test_bond_linked_structured_product.py`'s inline `BondOption`
   helper uses ISIN `"US912828ZZ11"`, which does not match the
