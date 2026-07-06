@@ -1170,3 +1170,91 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     `ruff check src/shiori_pricing_lab tests` → only the same 2
     pre-existing, unrelated `products/bond_option.py` `E501` findings
     remain.
+- **BLI MVP input bundle preflight written, docs-only
+  (`docs/24_bli_mvp_input_bundle_preflight.md`).** The concrete
+  follow-up to `docs/22` §12 step 3, now re-derived against the actual
+  implemented `BLIMarketDataSnapshot` classes (PR #63) instead of
+  `docs/22`'s pre-implementation placeholder field list. Defines the
+  MVP input bundle as a deterministic, immutable valuation context for
+  exactly one `BondLinkedStructuredProduct` binding: the product,
+  a resolved `BondReferenceData` (via `resolve_bond_reference_data`),
+  and a `BLIMarketDataSnapshot` — with **cross-checks only** (ISIN
+  identity across all three; `FOUND_ELIGIBLE` resolution status;
+  valuation-date coherence), since each input is already
+  independently valid at its own construction. **Recommends a new
+  class, `BLIMVPInputBundle`, inside a new module,
+  `src/shiori_pricing_lab/data/bli_mvp_input_bundle.py`** (same
+  `data/`-package-location reasoning `docs/23` §3.3 used for the
+  snapshot). Sketches a tentative field list (bundle-level
+  `valuation_date`, references to the product/reference-data/snapshot
+  objects, the resolver's status/eligibility audit trail — no
+  duplicated field from any of the three, no pv/dv01/cashflows).
+  **Found and recorded, but did not fix (docs-only slice), a concrete
+  fixture gap:** `tests/test_bond_linked_structured_product.py`'s
+  inline `BondOption` helper uses ISIN `"US912828ZZ11"`, which does not
+  match the `"XS0000000001"` ISIN both `SYNTHETIC_BOND_FIXTURES` and
+  `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT` already use — flagged in §11 as
+  the first thing the next implementation slice must add (new fixture
+  content, not a schema change). Lists a validation-rules checklist
+  (§6), a data-flow diagram (§5), a fixture plan (§8), a test plan (§9),
+  and an "open questions / implementation risks" section (§11) covering
+  curve-mapping selection, reference-data valuation-date coherence, and
+  the bundle's raise-vs-structured-result error shape — none resolved,
+  all left for the implementation slice. **No `BLIMVPInputBundle` class,
+  bundle builder, pricing engine, payoff skeleton, cash-flow generation,
+  schedule engine, yield-to-price calculation, curve interpolation,
+  volatility surface, credit spread model, Treasury FTP parser,
+  ingestion, Bloomberg/API connector, QuantLib adapter, or UI was
+  added.** `BondOption`, `DepositLeg`, `BondLinkedStructuredProduct`,
+  `BondReferenceData`, `resolve_bond_reference_data`,
+  `is_mvp_pricing_eligible`, and `BLIMarketDataSnapshot` are all
+  unmodified. No frozen BLI v1.3 source spec file was edited. Package
+  exports are unchanged. Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; no source or
+    test file changed, so `python -m pytest -q` and `ruff` are
+    unaffected by this PR (last known state: 589 passed, only the 2
+    pre-existing `products/bond_option.py` `E501` findings).
+- **PR #64 revised after Codex P2 review — three findings, all in
+  `docs/24_bli_mvp_input_bundle_preflight.md`, strengthening the
+  bundle's future validation requirements (still docs-only, no
+  implementation added).** (1) The "market data snapshot must be
+  internally valid" bullet in §6 read as if an `isinstance` check on
+  `BLIMarketDataSnapshot` were sufficient; `BLIMarketDataSnapshot.
+  __post_init__` only proves internal well-formedness and has no
+  concept of which product it is for, so a `TREASURY_FTP_REFERENCE`-
+  mode `DepositLeg` could have been bundled with a snapshot carrying no
+  matching `deposit_rate_observation`. Fixed: §6 now requires explicit
+  product-specific market-data presence gates — a matching deposit-rate
+  observation when `deposit_rate_mode` is `TREASURY_FTP_REFERENCE`
+  (present, and consistent with `ftp_rate_selector`), with `FIXED_RATE`
+  needing no separate rate observation and `MANUAL_VERIFIED_RATE`'s
+  audit record flagged as not yet representable (an open item). (2) §6
+  also let a snapshot with non-empty but wrong-purpose `curve_points`
+  (e.g. only `FUNDING_CURVE`) count as valuation-ready. Fixed: §6 now
+  requires an explicit required-MVP-curve-purpose gate — at least one
+  `curve_points` row for each of `BLICurvePurpose.BOND_REFERENCE_CURVE`,
+  `OPTION_DISCOUNT_CURVE`, and `DEPOSIT_CURVE` (`FUNDING_CURVE` only if
+  mapped), presence only, no tenor selection or interpolation. (3) §6's
+  valuation-date rule treated `bundle.valuation_date ==
+  market_data_snapshot.valuation_date` as sufficient coherence, but
+  `BLIMarketDataSnapshot.as_of_timestamp` is only checked for
+  non-blankness today, so a historical bundle could carry market data
+  whose as-of timestamp is after the valuation date. Fixed: §6 now
+  states an explicit market-data as-of / no-look-ahead policy —
+  `as_of_timestamp` must also be validated under a no-look-ahead cutoff
+  rule, with the exact rule (calendar-date vs. intraday vs.
+  settlement-aware) left as a required, explicit policy decision for
+  the implementation slice (§11), not something a future pricing engine
+  may silently interpret differently. All three fixes remain
+  presence/consistency checks only — no curve interpolation, no
+  yield/price conversion, no FTP parsing, no pricing, no silent
+  fallback; the bundle's deterministic/immutable/by-reference/
+  cross-check-only/no-duplicated-fields/no-pricing design and the
+  documented (not fixed) fixture-ISIN-mismatch gap are all unchanged.
+  §9's test plan and §8.3's negative-fixture list were extended to
+  match the three new gates. `docs/09` gained a corresponding summary
+  under its BLI MVP input bundle preflight checkpoint.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 589 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
