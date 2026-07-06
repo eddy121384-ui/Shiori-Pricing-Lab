@@ -1218,6 +1218,75 @@ connector, QuantLib adapter, a debug viewer, or any other UI.
 `BLIMVPInputBundle` (and its component classes) remain unmodified.
 **Issue #38 remains open.**
 
+### BLI bundle construction: the canonical path (post-PR #66)
+
+With PR #65 (`BLIMVPInputBundle`) and PR #66
+(`build_bli_mvp_input_bundle`) both merged, the canonical, only-supported
+way to obtain a valuation-ready BLI input is now:
+
+```text
+product (BondLinkedStructuredProduct)
+  + bond_reference_data_universe (an Iterable[BondReferenceData])
+  + market_data_snapshot (BLIMarketDataSnapshot)
+        │
+        ▼
+build_bli_mvp_input_bundle(...)   -- data/bli_mvp_input_bundle_builder.py
+        │
+        ▼
+BLIMVPInputBundle                 -- data/bli_mvp_input_bundle.py
+```
+
+**Upstream orchestration code, test setup, fixtures, or future
+application-layer callers must use `build_bli_mvp_input_bundle` to
+obtain a `BLIMVPInputBundle` before invoking pricing** — never call
+`resolve_bond_reference_data` directly, and never hand-construct a
+`BLIMVPInputBundle` by unpacking a resolver result themselves. The
+builder is the only place that maps a raw
+`BondReferenceResolutionResult` onto the bundle's fields; duplicating
+that mapping anywhere else risks the two drifting apart.
+
+**The pricing engine itself is explicitly excluded from the sentence
+above (Codex P2 review of PR #67):** it must not call the builder or
+the resolver — it receives the already-validated bundle as its sole
+input, built by whatever upstream code is invoking it. See the next
+paragraph.
+
+**Every input-readiness gate already lives in the bundle/dataclass
+layer, not in any future consumer:**
+
+- resolver status / eligibility (`resolution_status` must be
+  `FOUND_ELIGIBLE`, independently re-verified against
+  `is_mvp_pricing_eligible` — a stale or hand-assembled resolver result
+  cannot override this);
+- exact ISIN match across `product`, `resolved_bond_reference_data`,
+  and `market_data_snapshot` (no fuzzy/prefix matching);
+- currency coherence across all three, including per-required-curve-
+  purpose currency;
+- valuation-date equality between the bundle and the snapshot;
+- the market-data as-of / no-look-ahead policy (calendar-date
+  comparison; non-UTC timezone offsets rejected);
+- the Treasury-FTP-reference deposit-rate-observation presence/
+  consistency gate (`FIXED_RATE` needs none; `MANUAL_VERIFIED_RATE` is
+  rejected outright, pending a future audit policy);
+- required MVP curve-purpose presence (`BOND_REFERENCE_CURVE`,
+  `OPTION_DISCOUNT_CURVE`, `DEPOSIT_CURVE`, in the product's own
+  currency).
+
+**A future pricing engine must accept only an already-validated
+`BLIMVPInputBundle` as its sole input.** It must not call
+`resolve_bond_reference_data`, must not call
+`build_bli_mvp_input_bundle`, must not hand-construct a
+`BLIMVPInputBundle` by any other means, and must not re-implement or
+second-guess any of the gates above — by the time pricing code sees a
+`BLIMVPInputBundle` instance, every one of those checks has already
+passed (a `BLIMVPInputBundle` cannot exist in an invalid state; its
+`__post_init__` would have raised). Bundle construction is entirely the
+calling code's responsibility, not the pricing engine's. **All real
+valuation math — PV, payoff, cash-flow generation, schedule generation,
+yield/price conversion, curve interpolation, volatility, credit
+spread — remains future work**, scoped next by
+`docs/25_bli_pricing_engine_skeleton_preflight.md`.
+
 ### Market-data ingestion terminology checkpoint
 
 - Before any future market-data ingestion, funding-curve, deposit-leg, or
