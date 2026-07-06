@@ -1427,3 +1427,39 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     `ruff check src/shiori_pricing_lab tests` → only the same 2
     pre-existing, unrelated `products/bond_option.py` `E501` findings
     remain.
+- **BLI pricing engine skeleton preflight written, docs-only
+  (`docs/25_bli_pricing_engine_skeleton_preflight.md`).** Checkpoint
+  after PR #65 (`BLIMVPInputBundle`) and PR #66
+  (`build_bli_mvp_input_bundle`), both merged. The current verified
+  construction path is: `product + reference-data universe +
+  market-data snapshot → build_bli_mvp_input_bundle → BLIMVPInputBundle`.
+  The bundle/dataclass layer now owns every input-readiness gate: resolver
+  status / eligibility (re-verified directly via
+  `is_mvp_pricing_eligible`, not only trusted from supplied metadata),
+  exact ISIN match across product/reference-data/market-data, currency
+  coherence, valuation-date equality, the market-data as-of /
+  no-look-ahead policy, the Treasury FTP deposit-rate-observation gate,
+  and required MVP curve-purpose presence. Scopes (but does not
+  implement) the **next** slice — a pricing engine **skeleton** only:
+  a future `price_bli_mvp(bundle: BLIMVPInputBundle) -> BLIPricingResult`
+  entrypoint in a new `src/shiori_pricing_lab/pricing/
+  bli_pricing_engine.py` module, accepting only an already-validated
+  `BLIMVPInputBundle` (never a raw product/reference-data/snapshot/ISIN,
+  never calling `resolve_bond_reference_data` or
+  `build_bli_mvp_input_bundle` itself), returning a deterministic
+  "not implemented" result or raising a named not-implemented
+  exception — the implementation slice picks one. Flags, as an explicit
+  open question for that slice, whether the future BLI engine should
+  reuse the existing generic `pricing/result.py`
+  (`PricingResult`/`PricingStatus`/`PricingErrorCode`) /
+  `pricing/engine.py` (`PricingEngine` Protocol / registry) contract
+  already used by the IRS reference engine, or define its own
+  `BLIPricingResult`/`BLIPricingStatus` — not decided here. **No pricing
+  module, result dataclass, valuation math, payoff logic, curve
+  interpolation, yield/price conversion, QuantLib, connector, ingestion,
+  or UI was added.** No source or test file was changed. Issue #38
+  remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 651 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
