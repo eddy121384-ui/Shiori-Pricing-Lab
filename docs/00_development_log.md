@@ -1527,13 +1527,15 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
   merges product + reference data + market data into one object by
   design (`docs/24` §2), so this skeleton is not registered on
   `PricingEngineRegistry` and does not implement the `PricingEngine`
-  Protocol. (3) The separate `price_bli_mvp` entrypoint is a
-  **deliberate, permanent** bundle-based calling convention, not a
-  temporary stopgap — this does **not** reopen `docs/14` §4.5 / `docs/24`
+  Protocol. (3) `price_bli_mvp` is **the explicit, direct bundle-based
+  entrypoint for the BLI MVP path** — this PR does not register it on
+  `PricingEngineRegistry` and does not implement the `PricingEngine`
+  Protocol for BLI. This does **not** reopen `docs/14` §4.5 / `docs/24`
   §2's shared-spine assumption, because the shared *result value type*
   is still reused unchanged; only the entrypoint's routing differs.
-  Whether a future slice also registers a bundle-unpacking adapter
-  behind `price(...)` is left open, not decided here.
+  **Whether a future slice registers a bundle-unpacking adapter behind
+  `price(...)` for BLI remains an open design decision** — this skeleton
+  PR takes no position on it either way and does not foreclose it.
   **Not-implemented behavior chosen:** for a valid bundle, returns a
   deterministic `PricingResult(status=FAILED,
   errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` — never raises for a

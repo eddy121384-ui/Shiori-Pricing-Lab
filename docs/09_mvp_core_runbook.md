@@ -1345,15 +1345,18 @@ questions, answered explicitly, not silently picked):**
    implement the `PricingEngine` Protocol; `pricing/engine.py` is
    unmodified.
 3. **Is the separate `price_bli_mvp` entrypoint a temporary stopgap or a
-   deliberate, permanent path? Deliberate and permanent for the
-   bundle-based calling convention.** This does **not** reopen `docs/14`
+   deliberate, permanent path?** `price_bli_mvp` is **the explicit,
+   direct bundle-based entrypoint for the BLI MVP path** — this PR does
+   not register it on `PricingEngineRegistry` and does not implement the
+   `PricingEngine` Protocol for BLI. This does **not** reopen `docs/14`
    §4.5's or `docs/24` §2's shared-spine assumption: the shared *result
    value type* is still reused unchanged — only the entrypoint's routing
    differs, because BLI's natural caller already holds a validated
    `BLIMVPInputBundle`, not a bare `(product, valuation_context,
-   market_snapshot)` triple. Whether a future slice also registers a
-   bundle-unpacking adapter behind `price(...)` for BLI is left open, not
-   decided here.
+   market_snapshot)` triple. **Whether a future slice registers a
+   bundle-unpacking adapter behind `price(...)` for BLI remains an open
+   design decision** — this skeleton PR takes no position on it either
+   way and does not foreclose it.
 
 **Not-implemented behavior chosen:** for a valid bundle, `price_bli_mvp`
 returns a deterministic `PricingResult(status=FAILED,

@@ -59,18 +59,20 @@ picked):**
    ``PricingEngineRegistry`` and does not implement the ``PricingEngine``
    Protocol; ``pricing/engine.py`` is unmodified.
 3. *Given (2), is the separate ``price_bli_mvp`` entrypoint a temporary
-   adapter-shaped stopgap or a deliberate, permanent path?* **Deliberate
-   and permanent for the bundle-based calling convention, not a stopgap
-   pending removal.** This does **not** reopen docs/14 §4.5's or docs/24
-   §2's prior assumption: the shared *result value type* is still reused
-   exactly as those docs required ("not a second, parallel contract") --
-   only the *entrypoint routing* differs, because BLI's natural caller
-   already holds a validated ``BLIMVPInputBundle``, not a bare
-   ``(product, valuation_context, market_snapshot)`` triple. Whether a
-   future slice additionally registers a bundle-unpacking adapter behind
-   ``price(...)`` for BLI (so the generic front door can also route to
-   it) is a separate, later design decision this skeleton does not make
-   or foreclose.
+   adapter-shaped stopgap or a deliberate, permanent path?* ``price_bli_mvp``
+   is **the explicit, direct bundle-based entrypoint for the BLI MVP
+   path** -- this PR does not register it on ``PricingEngineRegistry``
+   and does not implement the ``PricingEngine`` Protocol for BLI. This
+   does **not** reopen docs/14 §4.5's or docs/24 §2's prior assumption:
+   the shared *result value type* is still reused exactly as those docs
+   required ("not a second, parallel contract") -- only the *entrypoint
+   routing* differs, because BLI's natural caller already holds a
+   validated ``BLIMVPInputBundle``, not a bare ``(product,
+   valuation_context, market_snapshot)`` triple. **Whether a future slice
+   additionally registers a bundle-unpacking adapter behind ``price(...)``
+   for BLI (so the generic front door can also route to it) remains an
+   open design decision** -- this skeleton takes no position on it either
+   way and does not foreclose it.
 
 **Not-implemented behavior chosen (docs/25 §6):** for a valid bundle,
 return a deterministic ``PricingResult(status=FAILED,
