@@ -1463,3 +1463,40 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 651 passed (unchanged); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **PR #67 revised after Codex P2 review — two findings, still
+  docs-only, no code/test changed.** (1) `docs/09`'s new "BLI bundle
+  construction" checkpoint said "future callers (including the pricing
+  engine skeleton) must call `build_bli_mvp_input_bundle`," directly
+  contradicting the same checkpoint's later "a future pricing engine
+  must accept only an already-validated `BLIMVPInputBundle`" sentence
+  and `docs/25` §3's ban on the skeleton calling the builder. Fixed:
+  reworded to separate responsibilities explicitly — upstream
+  orchestration code, test setup, fixtures, or application-layer callers
+  build the bundle via `build_bli_mvp_input_bundle`; the pricing engine
+  itself must not call the builder or the resolver, and receives the
+  already-validated bundle as its sole input. (2) `docs/25` made a
+  separate `BLIPricingResult`/`BLIPricingStatus` the default working
+  assumption, but `docs/14` §4.5 ("A BLI engine is a `PricingEngine`
+  Protocol implementer... identical to the IRS pattern") and `docs/24`
+  §2 ("not a second, parallel contract") already commit BLI to reusing
+  the shared `price(...)`/`PricingResult` spine. Fixed: `docs/25` §1/§4
+  now state reuse of the existing `pricing/result.py`/`pricing/
+  engine.py` contract as the standing architectural assumption to
+  disprove, not a free choice; a BLI-specific result type is allowed
+  only if the implementation PR explicitly documents why the shared
+  contract cannot fit **and** states that doing so reopens `docs/14`
+  §4.5 / `docs/24` §2's prior assumption. §4 now lists three questions
+  the implementation PR must explicitly answer (can `PricingResult`/
+  `PricingStatus` be reused as-is; can a `BLIMVPInputBundle`-based
+  entrypoint adapt to the existing `PricingEngine.price(...)` shape;
+  if not, is a separate entrypoint temporary or permanent), and §9's
+  reading list now includes `docs/14` §4.5 and `docs/24` §2 alongside
+  the existing `pricing/` module list. §5's `BLIPricingResult` sketch is
+  now explicitly framed as a fallback that only applies if reuse is
+  disproven. **Still docs-only: no pricing module, result dataclass,
+  valuation math, or any other code was added or changed; no test file
+  was touched.** Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 651 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.

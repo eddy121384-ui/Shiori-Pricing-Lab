@@ -53,18 +53,30 @@ in this repo yet consumes a `BLIMVPInputBundle` to produce a valuation
 result of any kind.
 
 Separately, the **vanilla-rates-core** pricing spine already has a
-working, generic contract for a different product family (IRS/OIS/CCS/
-FX Swap): `src/shiori_pricing_lab/pricing/result.py`
+working, generic contract: `src/shiori_pricing_lab/pricing/result.py`
 (`PricingResult`/`PricingStatus`/`PricingErrorCode`/`PricingMessage`),
 `pricing/errors.py` (`PricingContractError`/`EngineRegistrationError`,
 the raise-path), and `pricing/engine.py` (the `PricingEngine` Protocol,
 `PricingEngineRegistry`, and the `price(product, valuation_context,
 market_snapshot)` front door, currently routing a registered **USD-only
-IRS reference engine**, `pricing/irs_engine.py`). This existing
-contract is built around the `Product + ValuationContext +
-MarketDataSnapshot` triad, not around `BLIMVPInputBundle` — see §4's
-open question for why this preflight does not assume BLI should reuse
-it as-is.
+IRS reference engine**, `pricing/irs_engine.py`).
+
+**This is not a contract for "a different product family" that BLI is
+free to ignore — prior architecture decisions already say BLI is meant
+to reuse it.** `docs/14` §4.5 ("What can reuse the existing `price(...)`
+front door") states plainly: *"All of it. A BLI engine is a
+`PricingEngine` Protocol implementer... registered per product type...
+identical to the IRS pattern. ... No front-door change is required."*
+`docs/24` §2 restates the same intent one layer down, at the bundle
+level: the future input bundle "mirror[s] the existing spine contract
+already documented in `docs/09` §1... the BLI bundle is the
+BLI-specific instantiation of 'everything `price(...)` needs to
+actually price this product,' **not a second, parallel contract**."
+`docs/09`'s own "Product-priority pivot" checkpoint says the same:
+"BLI will register behind the same `price(...)` front door." **Reuse of
+the shared spine is therefore the standing architectural assumption,
+not an open-ended choice** — see §4 for how the next slice must confirm
+or explicitly reopen it.
 
 ---
 
@@ -140,47 +152,79 @@ entrypoint: price_bli_mvp(bundle: BLIMVPInputBundle) -> BLIPricingResult
 **Naming rationale (for the implementation slice to confirm or
 override, stating why, per the same "recommendation only" caveat
 `docs/23` §3.4 and `docs/24` §3.1 already used):** `price_bli_mvp`
-mirrors `is_mvp_pricing_eligible`'s "MVP" labeling and keeps this
-function visibly distinct from the generic `pricing.engine.price(...)`
-front door, which takes a different argument shape entirely (see the
-open question below).
+mirrors `is_mvp_pricing_eligible`'s "MVP" labeling. Whether it ends up
+being a thin, separately-named wrapper around the shared contract, or
+something more distinct, depends on how the default-to-reuse question
+below resolves.
 
-**Open question this doc does not resolve — the implementation slice
-must decide explicitly, not silently pick one:**
+**Default-to-reuse (Codex P2 review of PR #67, correcting an earlier
+version of this doc that made a separate `BLIPricingResult` the working
+assumption):** per §1, `docs/14` §4.5 and `docs/24` §2 already commit
+BLI to reusing the shared `price(...)`/`PricingResult` spine, not
+building a second one. The next implementation slice must therefore
+**first evaluate whether BLI can fit behind the existing
+`pricing/result.py` and `pricing/engine.py` contract as-is** —
+`PricingResult`/`PricingStatus`/`PricingErrorCode`/`PricingMessage`,
+routed through the existing `PricingEngine` Protocol and
+`PricingEngineRegistry` — before introducing anything BLI-specific. A
+BLI-specific `BLIPricingResult`/`BLIPricingStatus` (§5's sketch) is
+**allowed only if the implementation PR explicitly documents why the
+shared contract cannot safely represent a `BLIMVPInputBundle`-based
+skeleton**, and states plainly that doing so **reopens** `docs/14`
+§4.5's and `docs/24` §2's prior assumption, not merely deviates from an
+open question. This preflight must not bias the next session toward a
+separate BLI-only pricing island by default.
+
+**The implementation PR must explicitly answer all three of the
+following, not silently pick an answer for any of them:**
 
 ```text
-Should the future BLI pricing engine reuse the existing generic
-  pricing/result.py (PricingResult / PricingStatus / PricingErrorCode /
-  PricingMessage) and pricing/engine.py (PricingEngine Protocol /
-  PricingEngineRegistry) contract already used by the IRS reference
-  engine -- or does BLI need its own distinct BLIPricingResult /
-  BLIPricingStatus (§6), given that BLIMVPInputBundle is structurally
-  incompatible with the existing PricingEngine.price(product,
-  valuation_context, market_snapshot) signature?
+1. Can the BLI skeleton reuse the shared PricingResult / PricingStatus
+   / PricingErrorCode as-is (return-path), and PricingContractError /
+   EngineRegistrationError as-is (raise-path) -- with no new BLI-only
+   result or status type at all?
 
-If BLI defines its own contract (this doc's working assumption, per
-  the task that produced it), is price_bli_mvp ever expected to also
-  be reachable through the shared pricing.engine.price(...) front door
-  (e.g. via a future adapter that wraps a BLIMVPInputBundle-consuming
-  engine to satisfy the generic PricingEngine Protocol) -- or does BLI
-  stay on a deliberately separate entrypoint indefinitely, given its
-  fundamentally different input shape (one bundle object vs. three
-  separate arguments)?
+2. Can a BLIMVPInputBundle-based entrypoint adapt to the existing
+   PricingEngine.price(product, valuation_context, market_snapshot)
+   Protocol shape -- e.g. by registering under a product_type key with
+   an adapter that unpacks a BLIMVPInputBundle into that three-argument
+   shape -- or is BLIMVPInputBundle's single-object shape genuinely
+   incompatible with that Protocol without a change to the Protocol
+   itself?
+
+3. If reuse is not possible for either of the above, is a separate
+   price_bli_mvp entrypoint / BLIPricingResult type intended as a
+   temporary adapter-shaped stopgap (with a stated plan to fold back
+   into the shared spine later), or a deliberate, permanent, separate
+   pricing path for BLI going forward? Silence on this question is not
+   an acceptable answer.
 ```
 
-Read `src/shiori_pricing_lab/pricing/result.py`, `errors.py`, and
-`engine.py` before writing the skeleton, specifically to answer this
-question with a stated reason — do not silently default to "obviously
-BLI needs its own contract" without at least confirming the existing
-one truly cannot fit (or deliberately should not, to keep the two
-product families decoupled).
+Read `src/shiori_pricing_lab/pricing/result.py`, `errors.py`,
+`engine.py`, and `irs_engine.py` before writing the skeleton (§9), plus
+`docs/14` §4.5 and `docs/24` §2, specifically to answer the three
+questions above with a stated reason each — do not silently default to
+either "obviously BLI needs its own contract" or "obviously BLI reuses
+the existing one" without actually checking whether
+`BLIMVPInputBundle`'s shape fits the existing `PricingEngine` Protocol.
 
 ---
 
-## 5. Proposed result shape
+## 5. Proposed result shape (fallback only, if reuse is disproven)
 
-Recommended, but **not implemented by this doc** — a sketch only, for
-the implementation slice to confirm or amend:
+**This section applies only if the implementation slice concludes, and
+explicitly documents why, that §4's default-to-reuse question resolves
+against reusing `pricing/result.py`'s existing
+`PricingResult`/`PricingStatus`.** If the existing contract fits (the
+default expectation), this section does not apply and no
+`BLIPricingResult`/`BLIPricingStatus` should be introduced at all — the
+skeleton should instead return a `PricingResult` with a status/error
+code that means "not implemented yet" (e.g. a new
+`PricingErrorCode`/`PricingStatus` member, or reuse of an existing one,
+per whatever §4's answer turns out to be).
+
+Sketch only, **not implemented by this doc**, for the implementation
+slice to confirm or amend if and only if it is actually needed:
 
 ```text
 BLIPricingStatus (StrEnum, sketch):
@@ -235,9 +279,13 @@ whichever result shape the implementation slice ultimately picks.
 For a valid `BLIMVPInputBundle`, the skeleton should **either**:
 
 ```text
-(a) return a deterministic BLIPricingResult with status
-    NOT_IMPLEMENTED; or
-(b) raise a named BLIPricingNotImplementedError.
+(a) return a deterministic result object with a status meaning
+    "not implemented" -- reusing PricingResult/PricingStatus if §4's
+    reuse question resolves that way, or a BLIPricingResult (§5's
+    fallback sketch) only if it does not; or
+(b) raise a named not-implemented exception (e.g.
+    BLIPricingNotImplementedError, or an existing pricing.errors type
+    if one already fits).
 ```
 
 **Choose one in the next implementation, based on repo conventions** —
@@ -366,17 +414,30 @@ engine skeleton implementation) should read, in this order:
    path test should reuse rather than duplicate.
 7. src/shiori_pricing_lab/pricing/result.py, errors.py, engine.py, and
    irs_engine.py -- the existing generic pricing contract and its one
-   registered engine, needed to answer §4's open question about whether
-   BLI reuses or diverges from it.
+   registered engine. Read these BEFORE assuming BLI needs its own
+   result type -- §4's default is reuse, not divergence.
+8. docs/14_bond_linked_spec_teardown_and_integration_preflight.md §4.5
+   ("What can reuse the existing price(...) front door") -- already
+   states BLI is meant to register as a PricingEngine Protocol
+   implementer, identical to the IRS pattern.
+9. docs/24_bli_mvp_input_bundle_preflight.md §2 -- already states the
+   bundle "mirror[s] the existing spine contract... not a second,
+   parallel contract."
 ```
 
 The next slice should then implement the pricing engine skeleton
 described in §2-§8 above **in a separate code PR** — this preflight
 adds no code itself. That implementation PR should:
 
-- confirm or amend §4's module/naming/contract-reuse decision, stating
-  a reason either way;
-- confirm or amend §5's result-shape sketch;
+- explicitly answer all three questions in §4 (can the shared
+  `PricingResult`/`PricingStatus` be reused as-is; can a
+  `BLIMVPInputBundle`-based entrypoint adapt to the existing
+  `PricingEngine.price(...)` shape; if not, is a separate entrypoint
+  temporary or permanent) — and if choosing a BLI-specific contract,
+  state explicitly that it reopens `docs/14` §4.5 / `docs/24` §2's
+  prior assumption, and why;
+- confirm or amend §5's result-shape sketch **only if reuse was
+  disproven**;
 - pick exactly one of §6's two not-implemented behaviors, stating why;
 - add the tests scoped in §8;
 - update `docs/00_development_log.md` and `docs/09_mvp_core_runbook.md`

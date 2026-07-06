@@ -1236,13 +1236,20 @@ build_bli_mvp_input_bundle(...)   -- data/bli_mvp_input_bundle_builder.py
 BLIMVPInputBundle                 -- data/bli_mvp_input_bundle.py
 ```
 
-**Future callers (including the pricing engine skeleton, `docs/25`)
-must call `build_bli_mvp_input_bundle` to obtain a bundle — never
+**Upstream orchestration code, test setup, fixtures, or future
+application-layer callers must use `build_bli_mvp_input_bundle` to
+obtain a `BLIMVPInputBundle` before invoking pricing** — never call
 `resolve_bond_reference_data` directly, and never hand-construct a
-`BLIMVPInputBundle` by unpacking a resolver result themselves.** The
+`BLIMVPInputBundle` by unpacking a resolver result themselves. The
 builder is the only place that maps a raw
 `BondReferenceResolutionResult` onto the bundle's fields; duplicating
 that mapping anywhere else risks the two drifting apart.
+
+**The pricing engine itself is explicitly excluded from the sentence
+above (Codex P2 review of PR #67):** it must not call the builder or
+the resolver — it receives the already-validated bundle as its sole
+input, built by whatever upstream code is invoking it. See the next
+paragraph.
 
 **Every input-readiness gate already lives in the bundle/dataclass
 layer, not in any future consumer:**
@@ -1266,15 +1273,18 @@ layer, not in any future consumer:**
   currency).
 
 **A future pricing engine must accept only an already-validated
-`BLIMVPInputBundle`.** It must not resolve reference data itself, must
-not construct a bundle internally, and must not re-implement or
+`BLIMVPInputBundle` as its sole input.** It must not call
+`resolve_bond_reference_data`, must not call
+`build_bli_mvp_input_bundle`, must not hand-construct a
+`BLIMVPInputBundle` by any other means, and must not re-implement or
 second-guess any of the gates above — by the time pricing code sees a
 `BLIMVPInputBundle` instance, every one of those checks has already
 passed (a `BLIMVPInputBundle` cannot exist in an invalid state; its
-`__post_init__` would have raised). **All real valuation math — PV,
-payoff, cash-flow generation, schedule generation, yield/price
-conversion, curve interpolation, volatility, credit spread — remains
-future work**, scoped next by
+`__post_init__` would have raised). Bundle construction is entirely the
+calling code's responsibility, not the pricing engine's. **All real
+valuation math — PV, payoff, cash-flow generation, schedule generation,
+yield/price conversion, curve interpolation, volatility, credit
+spread — remains future work**, scoped next by
 `docs/25_bli_pricing_engine_skeleton_preflight.md`.
 
 ### Market-data ingestion terminology checkpoint
