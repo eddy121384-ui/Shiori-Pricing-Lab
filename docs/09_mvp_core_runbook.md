@@ -1389,3 +1389,45 @@ engine, or hedge/Greeks/DV01. `BLIMVPInputBundle`,
 `pricing/result.py`/`errors.py`/`engine.py`/`irs_engine.py` are all
 unmodified. **Issue #38 remains open** — this skeleton does not price
 anything; real BLI valuation math is future work.
+
+### BLI first valuation slice preflight checkpoint
+
+- Before implementing any real BLI valuation math, agents must read
+  `docs/26_bli_first_valuation_slice_preflight.md`.
+- **First real valuation slice scoped (not implemented):** Annex A
+  §A.2's European, price-based, cash-settled bond option (Black-76 on
+  forward clean price), priced only for `bundle.product.bond_option` —
+  the deposit leg stays structurally present on the bundle but its
+  economics are not computed. This is a *valuation-scope* boundary, not
+  an input-schema change: `BLIMVPInputBundle.product` stays typed
+  `BondLinkedStructuredProduct` (which requires a `DepositLeg`), matching
+  SPEC §6.2's "Bond Option Standalone Pricing Tool."
+- **Eight missing dependencies identified, none implemented:**
+  time-to-expiry year fraction; curve interpolation / discount-factor
+  access (confirmed **not** served by the existing
+  `pricing/curve.py::RateCurve`, which is built from the unrelated
+  vanilla-rates-core `MarketDataSnapshot` DataFrame shape, not
+  `BLICurvePoint`); coupon/cash-flow schedule generation; accrued
+  interest; forward clean price derivation; volatility selection /
+  equivalent-price-vol conversion; yield-to-price conversion;
+  settlement / physical delivery invoice logic.
+- **Next implementation slice chosen: the time-to-expiry year-fraction
+  utility only** (Annex A §A.2.2, ACT/365F) — zero market-data
+  dependency, zero design ambiguity, and a mechanical adaptation of the
+  already-reviewed `pricing/irs_engine.py::_year_fraction` ACT_365_FIXED
+  precedent (PR #29). `docs/26` §7 sketches that PR's suggested branch
+  (`claude/bli-time-to-expiry-year-fraction`), target files, expected
+  tests, acceptance criteria, and a Codex review checklist — none of it
+  implemented by the preflight.
+- **`price_bli_mvp` keeps its current behavior unchanged**: deterministic
+  `PricingResult(status=FAILED, errors=[PricingErrorCode.
+  UNSUPPORTED_PRODUCT])` for every valid bundle. The time-to-expiry
+  slice is a pure, unwired utility that does not touch
+  `bli_pricing_engine.py`; a narrower dependency-gated dispatch is
+  deferred to a later, undecided PR once enough dependencies exist to
+  attempt a real PV for the narrow §2 slice.
+- No pricing module, valuation math, curve interpolation, cash-flow
+  generation, schedule engine, yield/price conversion, QuantLib
+  adapter, Bloomberg/API connector, or UI exists yet from this doc.
+  `price_bli_mvp` and every existing BLI/vanilla-rates-core module are
+  unmodified. **Issue #38 remains open.**
