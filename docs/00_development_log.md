@@ -1561,3 +1561,50 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 16 new in `tests/test_bli_pricing_engine.py`); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI first valuation slice preflight written, docs-only
+  (`docs/26_bli_first_valuation_slice_preflight.md`).** Checkpoint after
+  PR #68 (`price_bli_mvp` skeleton, merged `445f710`). Scopes the *next*
+  several BLI valuation slices without implementing any of them, so no
+  future agent attempts the full Annex A v1.3 methodology in one PR.
+  **First real valuation slice chosen:** Annex A §A.2's European,
+  price-based, cash-settled bond option (Black-76 on forward clean
+  price), priced only for the `bond_option` leg already embedded in the
+  existing `BLIMVPInputBundle.product` — the deposit leg stays
+  structurally present (the wrapper requires it) but its economics are
+  explicitly not computed. Since `BLIMVPInputBundle.product` is typed
+  `BondLinkedStructuredProduct` (which requires a `DepositLeg` at
+  construction), "standalone bond option" is scoped as a *valuation-scope*
+  boundary, not an input-schema change — directly sanctioned by SPEC
+  §6.2's "Bond Option Standalone Pricing Tool." **Existing bundle inputs
+  inventoried in full** (product/bond_option/deposit_leg fields, resolved
+  `BondReferenceData` fields, `BLIMarketDataSnapshot`'s bond quote/curve
+  points/vol input/credit spread input) — nothing invented, only what
+  already exists and is already validated. **Eight missing dependencies
+  identified** (time-to-expiry year fraction; curve interpolation /
+  discount-factor access; coupon/cash-flow schedule generation; accrued
+  interest; forward clean price derivation; vol selection / equivalent-
+  price-vol conversion; yield-to-price conversion; settlement / physical
+  delivery invoice) — none implemented anywhere today, and
+  `pricing/curve.py`'s existing `RateCurve` is confirmed **not**
+  reusable as-is for BLI curves (different data shape:
+  vanilla-rates-core `MarketDataSnapshot`'s DataFrame vs.
+  `BLICurvePoint` objects). **Next implementation slice chosen: the
+  time-to-expiry year-fraction utility only** (Annex A §A.2.2, ACT/365F)
+  — zero market-data dependency, zero design ambiguity (the convention
+  is already pinned by Annex A), and a mechanical adaptation of the
+  already-reviewed `pricing/irs_engine.py::_year_fraction` ACT_365_FIXED
+  precedent (PR #29). Scopes that PR's target files, expected tests,
+  acceptance criteria, and a Codex review checklist without writing any
+  of it. **Confirms `price_bli_mvp` keeps returning its existing
+  deterministic `FAILED + UNSUPPORTED_PRODUCT` unchanged** — the
+  time-to-expiry slice is a pure, unwired utility, not yet consumed by
+  the engine; a narrower dependency-gated dispatch is deferred to a
+  later, undecided PR once enough dependencies exist to attempt a real
+  PV. **No pricing module, valuation math, curve interpolation, cash-flow
+  generation, schedule engine, yield/price conversion, QuantLib,
+  connector, or UI was added.** No source or test file was changed;
+  `price_bli_mvp`'s behavior is unchanged. Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 667 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
