@@ -24,17 +24,48 @@ principal/redemption slice this module does not implement.
 literally to `ql.ActualActual(ql.ActualActual.ISDA)` -- never to the
 ISMA/bond-basis variant. No new `DayCount` member is introduced here.
 
-**Irregular stubs (docs/29 §5):** an irregular first or last coupon
-period (detected by comparing `first_coupon_date`/`last_coupon_date`
-against the unadjusted regular-frequency-implied dates) raises
-`BLIBondScheduleError` -- the regular-coupon-period formula above is
-never silently applied to a bond with a real stub.
+**Irregular stubs and inconsistent coupon grids (docs/29 §5, Codex P2
+review of PR #81):** `issue_date` through `maturity_date` must land on
+one consistent regular coupon grid -- the span between them must be an
+exact whole number of `coupon_frequency` periods, stepping by that
+period from `issue_date` must land exactly on `maturity_date`, and the
+declared `first_coupon_date`/`last_coupon_date` must equal that same
+grid's first and second-to-last dates. Checking only the two endpoints
+in isolation is not sufficient: it is possible for
+`first_coupon_date == issue_date + one period` and
+`last_coupon_date == maturity_date - one period` to both hold even
+though `issue_date` to `maturity_date` is *not* an exact multiple of
+the period (each endpoint's own arithmetic happens to "look regular"
+while the two ends silently disagree on the grid in between). Any of
+these mismatches raises `BLIBondScheduleError` -- the regular-coupon
+formulas below are never silently applied to a bond whose grid is
+irregular or internally inconsistent.
+
+**Accrued interest is prorated from the fixed coupon amount, not
+computed as an independent day-count fraction (Codex P2 review of PR
+#81):** `AI(as_of) = period_coupon_amount * elapsed_fraction /
+full_period_fraction`, where both fractions come from the same
+`day_counter.yearFraction` call so the result is always consistent
+with -- and never diverges from, or exceeds -- the fixed coupon amount
+actually paid at the end of the period. A day-count convention whose
+full-period year fraction is not exactly `1 / periods_per_year` (e.g.
+`ACT_360` over an 182/183/184/185-actual-day semi-annual period) would
+otherwise silently accrue a slightly wrong amount under a naive
+`coupon * yearFraction(period_start, as_of) * 100` formula.
 
 **Ex-dividend window (docs/29 §6):** `accrued_interest_per_100` raises
 `BLIBondExDividendWindowError` for any `as_of_date` inside a bond's
 ex-dividend window (`ex_dividend_days` calendar days immediately before
 a coupon date). Negative accrued interest is not implemented by this
 slice.
+
+**Maturity-date coupon window (Codex P2 review of PR #81):**
+`coupon_flows_before` raises `BLIBondMaturityCashflowUnsupportedError`
+if the requested window would reach `maturity_date` -- the final
+coupon-at-maturity cashflow combines with principal redemption, which
+this adapter slice does not implement, so that window is refused
+outright rather than silently returned with the maturity coupon
+missing.
 
 **No system clock (docs/29 §2):** every date this module touches is an
 explicit caller-supplied ISO date string on `BondReferenceData` or a
@@ -86,6 +117,16 @@ class BLIBondExDividendWindowError(ValueError):
 
     Negative accrued interest during an ex-dividend period is not
     implemented by this adapter slice.
+    """
+
+
+class BLIBondMaturityCashflowUnsupportedError(ValueError):
+    """Raised when a requested coupon window would reach `maturity_date`.
+
+    The final coupon-at-maturity cashflow combines with principal
+    redemption, which this adapter slice does not implement -- rather
+    than silently omitting that cashflow from an otherwise-matching
+    window, a window that reaches `maturity_date` is refused outright.
     """
 
 
@@ -172,15 +213,43 @@ def _check_regular_schedule(
     last_coupon: date,
     months: int,
 ) -> None:
+    # Checking only the two endpoints in isolation (first_coupon_date vs.
+    # issue_date + one period, last_coupon_date vs. maturity_date - one
+    # period) is not sufficient (Codex P2 review of PR #81): both checks
+    # can pass even though issue_date to maturity_date is not an exact
+    # multiple of the coupon period, because each endpoint's own
+    # arithmetic is computed independently and can "look regular" in
+    # isolation while silently disagreeing with the other end's grid.
+    # This checks the whole grid, anchored at issue_date, in one pass.
+    total_months = (maturity.year - issue.year) * 12 + (maturity.month - issue.month)
+    if total_months <= 0 or total_months % months != 0:
+        raise BLIBondScheduleError(
+            f"bond {bond.isin!r} has an irregular coupon grid: issue_date "
+            f"({bond.issue_date!r}) to maturity_date ({bond.maturity_date!r}) is not an "
+            f"exact multiple of the {months}-month coupon_frequency period, so no "
+            "consistent regular schedule exists (no stub approximation is computed)"
+        )
+
+    periods = total_months // months
+    grid_maturity = _add_months(issue, periods * months)
+    if grid_maturity != maturity:
+        raise BLIBondScheduleError(
+            f"bond {bond.isin!r} has an irregular coupon grid: stepping {periods} regular "
+            f"{months}-month period(s) from issue_date ({bond.issue_date!r}) lands on "
+            f"{grid_maturity.isoformat()!r}, not maturity_date ({bond.maturity_date!r}) -- "
+            "no consistent regular schedule exists (no stub approximation is computed)"
+        )
+
     expected_first = _add_months(issue, months)
-    expected_last = _add_months(maturity, -months)
+    expected_last = _add_months(issue, (periods - 1) * months)
     if first_coupon != expected_first or last_coupon != expected_last:
         raise BLIBondScheduleError(
             f"bond {bond.isin!r} has an irregular first/last coupon period, which this "
             "adapter slice does not support (no stub approximation is computed): expected "
             f"first_coupon_date {expected_first.isoformat()!r} (got "
             f"{bond.first_coupon_date!r}), expected last_coupon_date "
-            f"{expected_last.isoformat()!r} (got {bond.last_coupon_date!r})"
+            f"{expected_last.isoformat()!r} (got {bond.last_coupon_date!r}), both on the "
+            "regular grid anchored at issue_date"
         )
 
 
@@ -228,12 +297,17 @@ def coupon_flows_before(
 ) -> tuple[BLIBondCouponFlow, ...]:
     """Return coupon flows with payment date in `(after_date, on_or_before_date]`.
 
-    Only regular coupon dates strictly between `first_coupon_date` and
-    `last_coupon_date` (inclusive of both) are ever returned -- the final
+    Only regular coupon dates between `first_coupon_date` and
+    `last_coupon_date` (both inclusive) are ever returned -- the final
     coupon-at-maturity event (which combines with principal redemption)
-    is out of scope for this slice (docs/29 §5/§8) and is never included,
-    regardless of the requested window. Raises `BLIBondScheduleError` for
-    a bond with an irregular first/last coupon period.
+    is out of scope for this slice (docs/29 §5/§8). Rather than silently
+    omitting that final cashflow whenever a caller's window happens to
+    reach it, a window where `maturity_date` falls in
+    `(after_date, on_or_before_date]` raises
+    `BLIBondMaturityCashflowUnsupportedError` outright (Codex P2 review
+    of PR #81) -- narrow the window to end before `maturity_date` to
+    avoid this. Raises `BLIBondScheduleError` for a bond whose coupon
+    grid is irregular or internally inconsistent.
     """
 
     _require_quantlib()
@@ -262,6 +336,15 @@ def coupon_flows_before(
             f"after_date ({after_date!r})"
         )
 
+    if after < maturity <= on_or_before:
+        raise BLIBondMaturityCashflowUnsupportedError(
+            f"requested window (after_date={after_date!r}, "
+            f"on_or_before_date={on_or_before_date!r}) reaches bond {bond.isin!r}'s "
+            f"maturity_date ({bond.maturity_date!r}) -- the final coupon-at-maturity "
+            "cashflow combines with principal redemption, which this adapter slice does "
+            "not implement; narrow on_or_before_date to end before maturity_date"
+        )
+
     schedule_dates = _schedule_dates(issue, maturity, months)
     coupon_dates = [d for d in schedule_dates[1:] if first_coupon <= d <= last_coupon]
 
@@ -278,11 +361,17 @@ def coupon_flows_before(
 def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> float:
     """Return accrued interest per 100 face at the explicit `as_of_date`.
 
+    Prorates the fixed per-period coupon amount
+    (`coupon * 100 / periods_per_year`) by the ratio of elapsed to full
+    day-count fraction within the bracketing coupon period, so the
+    result is always consistent with -- and never diverges from, or
+    exceeds -- the fixed coupon amount actually paid at the end of that
+    period (Codex P2 review of PR #81; see the module docstring).
     `as_of_date` must lie in `[issue_date, maturity_date]`. Raises
-    `BLIBondScheduleError` for a bond with an irregular first/last coupon
-    period, and `BLIBondExDividendWindowError` if `as_of_date` falls
-    inside the bond's ex-dividend window -- negative accrued interest is
-    not implemented by this slice.
+    `BLIBondScheduleError` for a bond whose coupon grid is irregular or
+    internally inconsistent, and `BLIBondExDividendWindowError` if
+    `as_of_date` falls inside the bond's ex-dividend window -- negative
+    accrued interest is not implemented by this slice.
     """
 
     _require_quantlib()
@@ -337,5 +426,21 @@ def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> flo
             )
 
     day_counter = _day_counter(bond.day_count)
-    year_fraction = day_counter.yearFraction(_to_ql_date(period_start), _to_ql_date(as_of))
-    return bond.coupon * year_fraction * 100
+    period_start_ql = _to_ql_date(period_start)
+    elapsed_fraction = day_counter.yearFraction(period_start_ql, _to_ql_date(as_of))
+    full_period_fraction = day_counter.yearFraction(period_start_ql, _to_ql_date(period_end))
+    if full_period_fraction <= 0:
+        # Defensive guard (Codex P2 review of PR #81): unreachable given
+        # period_start < period_end and a sane day counter, but proration
+        # below would divide by zero (or silently flip sign) if it ever
+        # were not, so this is rejected explicitly rather than computed.
+        raise ValueError(
+            f"bond {bond.isin!r}'s day_count ({bond.day_count!r}) produced a non-positive "
+            f"full-period year fraction ({full_period_fraction!r}) for the coupon period "
+            f"[{period_start.isoformat()!r}, {period_end.isoformat()!r}] -- accrued "
+            "interest cannot be prorated"
+        )
+
+    periods_per_year = 12 // months
+    period_coupon_amount = bond.coupon * 100 / periods_per_year
+    return period_coupon_amount * elapsed_fraction / full_period_fraction

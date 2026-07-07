@@ -4,10 +4,14 @@ Covers the four QuantLib-bond-mechanics outputs docs/29 §2/§8 scope this
 adapter to (regular coupon schedule dates, per-100 coupon cashflow
 amounts, accrued interest at an explicit date, and the clean/dirty
 arithmetic identity), the calendar/day-count/coupon-unit/ex-dividend/
-stub decisions docs/29 §2/§4/§5/§6 pin, and the module-boundary checks
-that slice requires so this adapter cannot silently grow curve,
-discount-factor, forward-price, yield-conversion, or Black-76 logic, or
-get wired into `price_bli_mvp`.
+stub decisions docs/29 §2/§4/§5/§6 pin, the three Codex P2 findings on
+PR #81 (accrued-interest proration against the fixed coupon amount, a
+whole-grid coupon-consistency check rather than an endpoints-only one,
+and refusing rather than silently truncating a coupon window that
+reaches `maturity_date`), and the module-boundary checks that slice
+requires so this adapter cannot silently grow curve, discount-factor,
+forward-price, yield-conversion, or Black-76 logic, or get wired into
+`price_bli_mvp`.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
     BLIBondCouponFlow,
     BLIBondExDividendWindowError,
+    BLIBondMaturityCashflowUnsupportedError,
     BLIBondScheduleError,
     BLIQuantLibNotAvailableError,
     accrued_interest_per_100,
@@ -86,6 +91,61 @@ def _odd_first_stub_bond() -> BondReferenceData:
         ex_dividend_days=0,
         first_coupon_date="2025-05-15",
         last_coupon_date="2029-07-15",
+        status=BondStatus.ACTIVE,
+    )
+
+
+def _act_360_bond() -> BondReferenceData:
+    # A regular semi-annual bond (grid-consistent, no stub) using ACT_360 --
+    # its full-period year fraction (actual_days / 360) is never exactly
+    # 1/2, unlike ACT_ACT_ISDA over a single non-leap year, which is
+    # exactly what exposes the Codex P2 accrued-interest proration bug.
+    return BondReferenceData(
+        isin="XS0TEST-ACT360",
+        issuer="Synthetic ACT/360 Test Issuer",
+        currency=Currency.USD,
+        coupon=0.05,
+        coupon_frequency=Frequency.SEMI_ANNUAL,
+        maturity_date="2030-01-15",
+        issue_date="2025-01-15",
+        day_count=DayCount.ACT_360,
+        business_day_convention=BusinessDayConvention.MODIFIED_FOLLOWING,
+        redemption_amount=100.0,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        yield_convention=BondYieldConvention.SEMI_ANNUAL_COMPOUND,
+        ex_dividend_days=0,
+        first_coupon_date="2025-07-15",
+        last_coupon_date="2029-07-15",
+        status=BondStatus.ACTIVE,
+    )
+
+
+def _inconsistent_grid_bond() -> BondReferenceData:
+    # Codex P2 regression case: both endpoints individually "look regular"
+    # (first_coupon_date == issue_date + 6mo; last_coupon_date ==
+    # maturity_date - 6mo), but issue_date (2025-01-15) to maturity_date
+    # (2030-02-15) spans 61 months, not an exact multiple of 6 -- there is
+    # no single consistent regular grid connecting all four dates.
+    return BondReferenceData(
+        isin="XS0TEST-INCONSISTENT-GRID",
+        issuer="Synthetic Inconsistent-Grid Test Issuer",
+        currency=Currency.USD,
+        coupon=0.04,
+        coupon_frequency=Frequency.SEMI_ANNUAL,
+        maturity_date="2030-02-15",
+        issue_date="2025-01-15",
+        day_count=DayCount.ACT_ACT_ISDA,
+        business_day_convention=BusinessDayConvention.MODIFIED_FOLLOWING,
+        redemption_amount=100.0,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        yield_convention=BondYieldConvention.SEMI_ANNUAL_COMPOUND,
+        ex_dividend_days=0,
+        first_coupon_date="2025-07-15",
+        last_coupon_date="2029-08-15",
         status=BondStatus.ACTIVE,
     )
 
@@ -164,12 +224,30 @@ def test_full_regular_window_matches_hand_written_literal_coupon_dates():
     assert all(isinstance(flow, BLIBondCouponFlow) for flow in flows)
 
 
-def test_maturity_date_coupon_is_never_included():
-    # The final coupon-at-maturity (2030-06-15) combines with principal
-    # redemption -- out of scope for this slice (docs/29 §5/§8) -- so even
-    # a window spanning all the way to maturity must not include it.
+def test_window_reaching_maturity_date_raises_instead_of_silently_omitting_it():
+    # Codex P2 review of PR #81: the final coupon-at-maturity (2030-06-15)
+    # combines with principal redemption -- out of scope for this slice
+    # (docs/29 §5/§8) -- so a window reaching maturity_date must raise
+    # rather than silently return the flows before it, which would
+    # understate the true coupon cashflows without any signal.
+    with pytest.raises(BLIBondMaturityCashflowUnsupportedError, match="maturity_date"):
+        coupon_flows_before(
+            _ELIGIBLE_BOND, after_date="2029-12-15", on_or_before_date="2030-06-15"
+        )
+
+
+def test_window_reaching_past_maturity_date_also_raises():
+    with pytest.raises(BLIBondMaturityCashflowUnsupportedError, match="maturity_date"):
+        coupon_flows_before(
+            _ELIGIBLE_BOND, after_date="2029-12-15", on_or_before_date="2031-01-01"
+        )
+
+
+def test_window_ending_strictly_before_maturity_date_does_not_raise():
+    # A window that ends before maturity_date is unaffected -- only a
+    # window that actually reaches maturity_date is refused.
     flows = coupon_flows_before(
-        _ELIGIBLE_BOND, after_date="2029-12-15", on_or_before_date="2030-06-15"
+        _ELIGIBLE_BOND, after_date="2029-12-15", on_or_before_date="2030-06-14"
     )
     assert flows == ()
 
@@ -224,28 +302,48 @@ def test_accrued_interest_is_zero_on_a_coupon_date():
 
 
 def test_accrued_interest_one_day_after_a_coupon_date():
-    expected = _ELIGIBLE_BOND.coupon * (1 / 365) * 100
+    # Accrued interest is the fixed period coupon amount (1.625) prorated
+    # by elapsed/full-period days -- not an independent day-count fraction
+    # of the annual coupon (Codex P2 review of PR #81).
+    period_start = date(2026, 6, 15)
+    period_end = date(2026, 12, 15)
+    elapsed_days = (date(2026, 6, 16) - period_start).days
+    full_period_days = (period_end - period_start).days
+    expected = _EXPECTED_AMOUNT_PER_100 * elapsed_days / full_period_days
     actual = accrued_interest_per_100(_ELIGIBLE_BOND, as_of_date="2026-06-16")
     assert actual == pytest.approx(expected)
     assert actual > 0.0
 
 
-def test_accrued_interest_mid_period_matches_hand_computed_act_act_isda():
-    # 2026-06-15 -> 2026-09-15 is entirely inside the single non-leap
-    # calendar year 2026, so ACT/ACT ISDA's year fraction reduces exactly
-    # to actual_days / 365 -- no leap-year splitting needed for this case.
-    days = (date(2026, 9, 15) - date(2026, 6, 15)).days
-    expected = _ELIGIBLE_BOND.coupon * (days / 365) * 100
+def test_accrued_interest_mid_period_matches_hand_computed_proration():
+    # 2026-06-15 -> 2026-12-15 is entirely inside the single non-leap
+    # calendar year 2026, so ACT/ACT ISDA's yearFraction reduces exactly
+    # to actual_days / 365 for both the elapsed and full-period spans --
+    # so the elapsed/full ratio reduces to elapsed_days / full_period_days,
+    # matching the fixed-coupon proration formula exactly.
+    period_start = date(2026, 6, 15)
+    period_end = date(2026, 12, 15)
+    elapsed_days = (date(2026, 9, 15) - period_start).days
+    full_period_days = (period_end - period_start).days
+    expected = _EXPECTED_AMOUNT_PER_100 * elapsed_days / full_period_days
     actual = accrued_interest_per_100(_ELIGIBLE_BOND, as_of_date="2026-09-15")
     assert actual == pytest.approx(expected)
+    # The fixed period coupon amount (1.625) is the correct upper bound as
+    # elapsed_days approaches full_period_days -- the prior, unprorated
+    # formula (coupon * yearFraction * 100 = 0.819...) is a different,
+    # incorrect number for this exact period (183 actual days != 182.5).
+    assert actual != pytest.approx(_ELIGIBLE_BOND.coupon * (92 / 365) * 100)
 
 
 def test_accrued_interest_at_valuation_and_expiry_dates_of_existing_fixture():
     bundle = SYNTHETIC_BLI_MVP_INPUT_BUNDLE
-    valuation_days = (date(2026, 7, 1) - date(2026, 6, 15)).days
-    expiry_days = (date(2026, 9, 29) - date(2026, 6, 15)).days
-    expected_valuation_ai = _ELIGIBLE_BOND.coupon * (valuation_days / 365) * 100
-    expected_expiry_ai = _ELIGIBLE_BOND.coupon * (expiry_days / 365) * 100
+    period_start = date(2026, 6, 15)
+    period_end = date(2026, 12, 15)
+    full_period_days = (period_end - period_start).days
+    valuation_days = (date(2026, 7, 1) - period_start).days
+    expiry_days = (date(2026, 9, 29) - period_start).days
+    expected_valuation_ai = _EXPECTED_AMOUNT_PER_100 * valuation_days / full_period_days
+    expected_expiry_ai = _EXPECTED_AMOUNT_PER_100 * expiry_days / full_period_days
 
     assert accrued_interest_per_100(
         _ELIGIBLE_BOND, as_of_date=bundle.valuation_date
@@ -253,6 +351,46 @@ def test_accrued_interest_at_valuation_and_expiry_dates_of_existing_fixture():
     assert accrued_interest_per_100(
         _ELIGIBLE_BOND, as_of_date=bundle.product.bond_option.expiry_date
     ) == pytest.approx(expected_expiry_ai)
+
+
+def test_accrued_interest_never_exceeds_fixed_period_coupon_amount():
+    # The proration formula guarantees AI approaches, but never exceeds,
+    # the fixed period coupon amount as as_of_date approaches period_end
+    # (Codex P2 review of PR #81). 2026-12-13 (two days before the next
+    # coupon) is the closest date outside XS0000000001's 1-day
+    # ex-dividend window this adapter will compute accrued interest for.
+    period_start = date(2026, 6, 15)
+    period_end = date(2026, 12, 15)
+    as_of = date(2026, 12, 13)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    expected = _EXPECTED_AMOUNT_PER_100 * elapsed_days / full_period_days
+
+    actual = accrued_interest_per_100(_ELIGIBLE_BOND, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+    assert actual < _EXPECTED_AMOUNT_PER_100
+
+
+def test_accrued_interest_act_360_diverges_from_naive_unprorated_formula():
+    # Codex P2 regression: under a day count whose full-period year
+    # fraction is not exactly 1/periods_per_year (ACT_360's 181/360 for
+    # this specific semi-annual period, not 0.5), the old, unprorated
+    # formula (coupon * yearFraction(period_start, as_of) * 100) gives a
+    # different, wrong number from the fixed-coupon-consistent proration.
+    bond = _act_360_bond()
+    period_start = date(2026, 1, 15)
+    period_end = date(2026, 7, 15)
+    as_of = date(2026, 5, 1)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    period_coupon_amount = bond.coupon * 100 / 2  # periods_per_year = 2
+
+    expected_prorated = period_coupon_amount * elapsed_days / full_period_days
+    naive_unprorated = bond.coupon * (elapsed_days / 360) * 100
+
+    actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected_prorated)
+    assert actual != pytest.approx(naive_unprorated)
 
 
 def test_accrued_interest_out_of_range_as_of_date_raises():
@@ -310,6 +448,22 @@ def test_odd_last_stub_bond_raises_on_coupon_flows_before():
 def test_odd_last_stub_bond_raises_on_accrued_interest():
     with pytest.raises(BLIBondScheduleError, match="irregular"):
         accrued_interest_per_100(_odd_last_stub_bond(), as_of_date="2026-01-01")
+
+
+def test_inconsistent_grid_bond_raises_on_coupon_flows_before():
+    # Codex P2 regression: first_coupon_date/last_coupon_date each look
+    # regular against their own endpoint in isolation, but issue_date to
+    # maturity_date is not an exact multiple of the coupon period -- no
+    # single consistent grid connects all four dates.
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        coupon_flows_before(
+            _inconsistent_grid_bond(), after_date="2025-01-15", on_or_before_date="2029-08-15"
+        )
+
+
+def test_inconsistent_grid_bond_raises_on_accrued_interest():
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        accrued_interest_per_100(_inconsistent_grid_bond(), as_of_date="2026-01-01")
 
 
 # --- 8. Clean/dirty arithmetic identity --------------------------------------
