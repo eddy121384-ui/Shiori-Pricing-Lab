@@ -1720,3 +1720,57 @@ anything; real BLI valuation math is future work.
   check src/shiori_pricing_lab tests` → only the same 2 pre-existing,
   unrelated `products/bond_option.py` `E501` findings remain.
 - **Issue #38 remains open.**
+
+### BLI continuous zero-rate curve node preparation helper landed
+
+- **This is a real implementation slice, not a preflight.** Continuing
+  the dependency chain built by PR #72 (tenor parser), PR #73
+  (curve-purpose selector), and PR #75 (required `rate_basis`
+  contract): `src/shiori_pricing_lab/pricing/bli_zero_curve_nodes.py`
+  (new module) adds `build_continuous_zero_curve_nodes(curve_points) ->
+  tuple[BLIContinuousZeroCurveNode, ...]`, converting already-selected
+  `BLICurvePoint` rows into sorted, validated continuous-zero-rate
+  curve nodes — the calculation-preparation step between "pick one
+  curve's rows" (`select_curve_points_by_purpose`) and any future
+  interpolation helper.
+- `BLIContinuousZeroCurveNode` (frozen dataclass): `year_fraction`,
+  `zero_rate`, `source_tenor`, `source_curve_id`.
+- **Rate-basis gate:** every input row must already have `rate_basis is
+  BLICurveRateBasis.CONTINUOUS_ZERO_RATE` — any other basis raises
+  `ValueError` naming the offending tenor, curve_id, actual basis, and
+  expected `CONTINUOUS_ZERO_RATE`. Nothing is converted, and nothing
+  infers continuous-zero status from `curve_purpose`/`curve_id`/
+  `curve_name`/`source_system`/tenor.
+- **Tenor parsing** delegates to the existing
+  `pricing/bli_curve_tenor.py::tenor_to_year_fraction` — no other tenor
+  parser is used or defined.
+- Rejects empty input and any non-`BLICurvePoint` element, rejects
+  duplicate parsed `year_fraction` values (e.g. `"12M"`/`"1Y"` both
+  mapping to `1.0`), and returns nodes **sorted by `year_fraction`
+  ascending regardless of input order**. Signed rates are preserved
+  as-is.
+- **This helper does not select curve purpose or currency, does not
+  interpolate, does not extrapolate, does not compute a discount
+  factor, forward clean price, or PV, and is not wired into
+  `price_bli_mvp`.** `pricing/bli_pricing_engine.py`,
+  `pricing/bli_valuation_time.py`, `pricing/bli_curve_tenor.py`, and
+  `pricing/bli_curve_selector.py` are all unmodified; `price_bli_mvp`
+  still returns its existing deterministic
+  `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` for every valid
+  bundle.
+- Tests: `tests/test_bli_zero_curve_nodes.py` (Option Discount Curve
+  and Deposit Curve nodes built from the existing fixture via
+  `select_curve_points_by_purpose`, matching exact expected
+  year-fraction/rate pairs; sorting with reversed input;
+  empty-input/non-`BLICurvePoint` rejection; every non-continuous
+  `BLICurveRateBasis` member rejected; raw-string-coerced continuous
+  basis working; duplicate parsed year-fraction rejection; signed-rate
+  preservation; and module-boundary checks confirming no
+  `pricing.curve`/`RateCurve`/`tenor_to_years`/
+  `BLIMVPInputBundle`/`price_bli_mvp` import, and no
+  interpolation/discount-factor/forward-price/Black-76/PV-shaped
+  names). `python -m pytest -q` → 758 passed; `ruff check
+  src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+  unrelated `products/bond_option.py` `E501` findings remain.
+- **Issue #38 remains open.**
