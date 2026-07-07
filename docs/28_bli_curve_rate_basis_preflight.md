@@ -102,10 +102,13 @@ basis:
   `"USD_BOND_REFERENCE_CURVE"`, `data/bli_snapshot_fixtures.py`) whose
   string content is not validated against any basis vocabulary and could
   say anything a source system chose to name it.
-- `source_system` (e.g. `"BLOOMBERG_MOCK"`, `"TREASURY_FTP_MOCK"` in the
-  fixture) identifies *where* a value came from, not *what basis* it is
-  quoted in — the same source system can plausibly emit both zero
-  curves and par curves depending on instrument/tenor.
+- `source_system` (e.g. `"SYNTHETIC_CURVE_FEED"` on every existing
+  `BLICurvePoint` row, and `"SYNTHETIC_TREASURY_FTP_FEED"` on the
+  separate FTP deposit-rate observation, both in
+  `data/bli_snapshot_fixtures.py`) identifies *where* a value came from,
+  not *what basis* it is quoted in — the same source system can
+  plausibly emit both zero curves and par curves depending on
+  instrument/tenor.
 - `tenor` (`"3M"`, `"2Y"`, `"5Y"`) is an x-axis label (`docs/27`'s prior
   slice, PR #72) with zero connection to the y-axis quoting convention.
 
