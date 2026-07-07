@@ -26,6 +26,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICreditSpreadTreatment,
     BLICurvePoint,
     BLICurvePurpose,
+    BLICurveRateBasis,
     BLIDepositRateObservation,
     BLIMarketDataSnapshot,
     BLIMarketDataStatus,
@@ -166,6 +167,7 @@ def _curve_point(**overrides) -> BLICurvePoint:
         curve_purpose=BLICurvePurpose.BOND_REFERENCE_CURVE,
         tenor="2Y",
         rate=0.035,
+        rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
         source_system="TEST_FEED",
         status=BLIMarketDataStatus.ACTIVE,
     )

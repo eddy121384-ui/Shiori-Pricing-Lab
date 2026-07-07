@@ -124,6 +124,34 @@ class BLICurvePurpose(StrEnum):
     FUNDING_CURVE = "FUNDING_CURVE"
 
 
+class BLICurveRateBasis(StrEnum):
+    """Economic/quoting basis of a `BLICurvePoint.rate` value (docs/28 §5/§6).
+
+    Deliberately separate from ``BLICurvePurpose``: ``curve_purpose``
+    states what a curve is *used for* (discounting the option leg,
+    discounting bond coupons, ...); ``rate_basis`` states what a given
+    row's ``rate`` value *means* (a continuously-compounded zero rate,
+    a par rate, a swap rate, ...). The two questions are independent --
+    a ``BOND_REFERENCE_CURVE`` row could in principle carry a par rate
+    just as easily as a zero rate, and nothing about ``curve_purpose``
+    (or ``curve_name``/``curve_id``/``source_system``/``tenor``) answers
+    that (docs/28 §2.1). Annex A §A.10.2 requires interpolation on
+    continuously-compounded zero rates; a future interpolation helper
+    must reject any row whose ``rate_basis`` is not
+    ``CONTINUOUS_ZERO_RATE`` (or route it through a separately reviewed
+    conversion slice, docs/28 §5 Path C) rather than silently treating
+    it as one.
+    """
+
+    CONTINUOUS_ZERO_RATE = "CONTINUOUS_ZERO_RATE"
+    SIMPLE_ZERO_RATE = "SIMPLE_ZERO_RATE"
+    PAR_RATE = "PAR_RATE"
+    SWAP_RATE = "SWAP_RATE"
+    BOND_YIELD = "BOND_YIELD"
+    FUNDING_RATE = "FUNDING_RATE"
+    OTHER = "OTHER"
+
+
 class BLIVolatilityBasis(StrEnum):
     """Volatility basis vocabulary (docs/23 §8, SPEC §7.4)."""
 
@@ -243,6 +271,13 @@ class BLICurvePoint:
     A curve is a collection of these rows sharing ``curve_id`` -- repeated
     ``currency`` + ``curve_purpose`` values across rows with different
     ``tenor`` are expected and valid, not duplicates (docs/23 §12).
+
+    ``rate_basis`` is required, with no default (docs/28 §6): a
+    ``BLICurvePoint`` cannot be constructed without explicitly stating
+    what its ``rate`` value means. There is no "if missing, assume
+    zero rate" fallback anywhere in this class -- a caller must always
+    supply ``rate_basis`` explicitly, and an unrecognized value raises
+    rather than being silently coerced to a default.
     """
 
     curve_id: str
@@ -251,6 +286,7 @@ class BLICurvePoint:
     curve_purpose: BLICurvePurpose
     tenor: str
     rate: float
+    rate_basis: BLICurveRateBasis
     source_system: str
     status: BLIMarketDataStatus
 
@@ -260,6 +296,11 @@ class BLICurvePoint:
             self,
             "curve_purpose",
             coerce_enum(self.curve_purpose, BLICurvePurpose, "curve_purpose"),
+        )
+        object.__setattr__(
+            self,
+            "rate_basis",
+            coerce_enum(self.rate_basis, BLICurveRateBasis, "rate_basis"),
         )
         object.__setattr__(
             self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")

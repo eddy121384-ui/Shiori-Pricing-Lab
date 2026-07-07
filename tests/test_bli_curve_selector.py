@@ -13,7 +13,12 @@ import inspect
 
 import pytest
 
-from shiori_pricing_lab.data.bli_snapshot import BLICurvePoint, BLICurvePurpose, BLIMarketDataStatus
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLICurvePoint,
+    BLICurvePurpose,
+    BLICurveRateBasis,
+    BLIMarketDataStatus,
+)
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 from shiori_pricing_lab.pricing import bli_curve_selector as bli_curve_selector_module
 from shiori_pricing_lab.pricing.bli_curve_selector import select_curve_points_by_purpose
@@ -204,6 +209,7 @@ def test_selector_does_not_sort_by_tenor():
             curve_purpose=BLICurvePurpose.FUNDING_CURVE,
             tenor="5Y",
             rate=0.01,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
             source_system="test",
             status=BLIMarketDataStatus.ACTIVE,
         ),
@@ -214,6 +220,7 @@ def test_selector_does_not_sort_by_tenor():
             curve_purpose=BLICurvePurpose.FUNDING_CURVE,
             tenor="1Y",
             rate=0.02,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
             source_system="test",
             status=BLIMarketDataStatus.ACTIVE,
         ),
