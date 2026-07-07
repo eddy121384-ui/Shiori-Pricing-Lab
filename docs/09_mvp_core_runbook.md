@@ -1841,3 +1841,37 @@ anything; real BLI valuation math is future work.
   pre-existing, unrelated `products/bond_option.py` `E501` findings
   remain.
 - **Issue #38 remains open.**
+
+### BLI continuous-compounding discount-factor helper landed
+
+- **Another real implementation slice, not a preflight.**
+  `src/shiori_pricing_lab/pricing/bli_discount_factor.py` (new module)
+  adds `continuous_discount_factor(zero_rate: float, year_fraction:
+  float) -> float`, returning `exp(-zero_rate * year_fraction)` (Annex
+  A §A.10.2's continuous-compounding convention).
+- **Consumes an already-resolved continuous zero rate and a positive
+  year fraction** — two plain numbers, not a curve, not a
+  `BLIContinuousZeroCurveNode`, not a `BLICurvePoint`. Raises
+  `ValueError` for a non-finite `zero_rate`, and for a non-finite or
+  non-positive `year_fraction`; signed zero rates are allowed.
+- **It does not interpolate, does not select curve points, does not
+  compute forward clean price, does not compute PV, and is not wired
+  into `price_bli_mvp`.** `pricing/bli_curve_selector.py`,
+  `pricing/bli_zero_rate_interpolation.py`,
+  `pricing/bli_zero_curve_nodes.py`, `pricing/bli_pricing_engine.py`,
+  and `pricing/bli_valuation_time.py` are all unmodified; `price_bli_mvp`
+  still returns its existing deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` for every valid
+  bundle.
+- Tests: `tests/test_bli_discount_factor.py` (a positive-rate case, a
+  zero-rate case returning exactly `1.0`, a negative-rate case proving
+  signed rates are allowed, a very-short-year-fraction case, every
+  invalid `zero_rate` rejected, every invalid `year_fraction` rejected,
+  and module-boundary checks confirming no import of
+  `bli_curve_selector`/`bli_zero_rate_interpolation`/
+  `BLIContinuousZeroCurveNode`/`BLICurvePoint`/`BLIMVPInputBundle`/
+  `price_bli_mvp`, and no PV/forward-price/Black-76-shaped names).
+  `python -m pytest -q` → 800 passed; `ruff check
+  src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+  unrelated `products/bond_option.py` `E501` findings remain.
+- **Issue #38 remains open.**
