@@ -214,8 +214,10 @@ def test_full_regular_window_matches_hand_written_literal_coupon_dates():
     # Deliberately asks for every coupon date the regular schedule can
     # produce (a window strictly wider than [first_coupon_date,
     # last_coupon_date]) -- this window uses NullCalendar/unadjusted dates
-    # only (docs/29 §2): the fixture's own coupon dates fall on Mon/Tue/etc.
-    # in this synthetic data with no calendar roll applied by this adapter.
+    # only (docs/29 §2). Several of these dates (e.g. 2029-12-15, a
+    # Saturday) fall on a weekend in this synthetic data; the literal list
+    # below is the unadjusted date regardless, since this adapter never
+    # rolls a coupon date onto a business day.
     flows = coupon_flows_before(
         _ELIGIBLE_BOND, after_date="2025-06-15", on_or_before_date="2029-12-15"
     )
