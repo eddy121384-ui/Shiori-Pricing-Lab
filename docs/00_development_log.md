@@ -1967,3 +1967,57 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 18 new); `ruff check src/shiori_pricing_lab tests` → only
     the same 2 pre-existing, unrelated `products/bond_option.py`
     `E501` findings remain.
+- **BLI continuous zero-rate interpolation helper added
+  (`src/shiori_pricing_lab/pricing/bli_zero_rate_interpolation.py`,
+  new).** Another real implementation slice (not a preflight),
+  consuming the prepared `BLIContinuousZeroCurveNode` values PR #76
+  produces. `interpolate_continuous_zero_rate(nodes:
+  Iterable[BLIContinuousZeroCurveNode], target_year_fraction: float) ->
+  float` performs piecewise-linear interpolation on continuously-
+  compounded zero rates, exactly per Annex A §A.10.2: an exact node
+  match returns that node's `zero_rate` directly; a target strictly
+  between two adjacent nodes returns `r1 + (r2 - r1) * (T - t1) / (t2 -
+  t1)`; a target outside the node range returns the nearest endpoint's
+  `zero_rate` (**flat extrapolation, rate only — no fallback-flag
+  object, no audit output, no warning**, left for a future slice per
+  Annex A's own "並標示 fallback flag" wording); a single-node curve
+  (matching the existing Deposit Curve fixture) returns that node's
+  rate for any valid target. Validates its own input independently of
+  `build_continuous_zero_curve_nodes`: rejects empty `nodes`
+  (`ValueError`), a non-`BLIContinuousZeroCurveNode` element
+  (`TypeError`), a non-finite or non-positive `target_year_fraction`
+  or node `year_fraction`, a non-finite node `zero_rate`, and duplicate
+  node `year_fraction` values (all `ValueError`) — sorts nodes
+  internally so input order never matters. Signed zero rates are
+  preserved; no non-negative constraint is imposed. **This module
+  consumes only `BLIContinuousZeroCurveNode` values — it does not parse
+  tenors, does not select curve purpose, does not inspect
+  `BLICurvePoint` or `BLICurveRateBasis` at all, does not convert par
+  rates, does not compute a discount factor, forward clean price, or
+  PV, and is not wired into `price_bli_mvp`.**
+  `pricing/bli_curve_tenor.py`, `pricing/bli_curve_selector.py`,
+  `pricing/bli_zero_curve_nodes.py`, `pricing/bli_pricing_engine.py`,
+  and `pricing/bli_valuation_time.py` are all unmodified; `price_bli_mvp`
+  keeps returning its existing deterministic
+  `PricingResult(status=FAILED, errors=[PricingErrorCode.
+  UNSUPPORTED_PRODUCT])` unchanged for every valid bundle. Issue #38
+  remains open.
+  New tests: `tests/test_bli_zero_rate_interpolation.py` (exact node
+  match and interpolation between the existing Option Discount Curve
+  fixture's nodes with a hand-computed expected value; reversed-node-
+  order invariance; flat extrapolation both below and above the node
+  range; the single-node Deposit Curve fixture returning its rate for
+  three different targets; empty-input and non-node-element rejection;
+  every invalid `target_year_fraction`/node `year_fraction` value
+  (zero, negative, NaN, ±infinity) rejected; invalid node `zero_rate`
+  rejected; duplicate node `year_fraction` rejected; signed zero-rate
+  preservation across an interpolated midpoint; and module-boundary
+  checks confirming no import of `BLICurvePoint`/`BLICurveRateBasis`/
+  `build_continuous_zero_curve_nodes`/`select_curve_points_by_purpose`/
+  `tenor_to_year_fraction`/`pricing.curve`/`RateCurve`/
+  `BLIMVPInputBundle`/`price_bli_mvp`, and no discount-factor/
+  forward-price/Black-76/PV-shaped names).
+  - **Review / validation:** `python -m pytest -q` → 786 passed (758
+    prior + 28 new); `ruff check src/shiori_pricing_lab tests` → only
+    the same 2 pre-existing, unrelated `products/bond_option.py`
+    `E501` findings remain.
