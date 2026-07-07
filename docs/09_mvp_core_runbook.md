@@ -1550,3 +1550,37 @@ anything; real BLI valuation math is future work.
   yet from this doc. `price_bli_mvp` and every existing BLI/vanilla-
   rates-core module are unmodified; `pricing/bli_valuation_time.py`
   remains unwired to anything. **Issue #38 remains open.**
+
+### BLI curve tenor-to-year-fraction parser landed (pure utility)
+
+- `docs/27`'s chosen next slice is implemented in
+  `src/shiori_pricing_lab/pricing/bli_curve_tenor.py` (new module):
+  `tenor_to_year_fraction(tenor: str) -> float` converts a strict
+  `<int>M`/`<int>Y` tenor label into a year fraction (`"3M" -> 0.25`,
+  `"2Y" -> 2.0`), mirroring `pricing/curve.py::tenor_to_years`'s
+  existing pattern in a BLI-local module. Zero/negative values,
+  whitespace padding, lowercase units, week tenors, `"O/N"`, bare
+  numbers, and non-string input all raise `ValueError` with the
+  offending tenor in the message.
+- **This module does not read or interpret `BLICurvePoint.rate` at
+  all.** It has no notion of zero rates, par rates, swap rates, bond
+  yields, or funding rates — `docs/27` §6.1's curve-rate-basis blocker
+  is entirely untouched. This slice **does not unblock zero-rate
+  interpolation, does not implement curve-purpose selection, does not
+  implement interpolation, and does not implement a discount factor.**
+- `pricing/bli_pricing_engine.py` and `pricing/bli_valuation_time.py`
+  are both unmodified; `price_bli_mvp` still returns its existing
+  deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` for every valid
+  bundle.
+- Tests: `tests/test_bli_curve_tenor.py` (every documented valid M/Y
+  label; every tenor label present in
+  `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.curve_points` with no new fixture
+  content; every documented rejection case; a check that the module
+  never reads wall-clock time or imports `BLICurvePoint`/
+  `BLIMarketDataSnapshot`/`BLIMVPInputBundle`; and a module-boundary
+  check against curve-selection/interpolation/discount-factor/zero-rate/
+  par-rate-shaped names). `python -m pytest -q` → 716 passed; `ruff
+  check src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+  unrelated `products/bond_option.py` `E501` findings remain.
+- **Issue #38 remains open.**

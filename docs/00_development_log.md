@@ -1725,3 +1725,43 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 688 passed (unchanged); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI curve tenor-to-year-fraction parser added, pure utility
+  (`src/shiori_pricing_lab/pricing/bli_curve_tenor.py`, new).**
+  Implements `docs/27`'s chosen next slice: a single pure function,
+  `tenor_to_year_fraction(tenor: str) -> float`, converting a strict
+  `<int>M`/`<int>Y` tenor label into a year fraction
+  (`"3M" -> 0.25`, `"2Y" -> 2.0`), mechanically mirroring
+  `pricing/curve.py::tenor_to_years`'s existing dict-lookup/raise
+  pattern but scoped to a BLI-local module. Only a positive integer
+  followed by `M` or `Y` is accepted — zero/negative values, whitespace
+  padding, lowercase units, week tenors (`"1W"`/`"2W"`/`"3W"`),
+  overnight (`"O/N"`), bare numbers, and non-string input all raise
+  `ValueError` with the offending tenor in the message; nothing is
+  silently rounded to a nearby supported label. **This module does not
+  read or interpret `BLICurvePoint.rate` at all** — it has no notion of
+  whether a curve's rates are zero rates, par rates, swap rates, bond
+  yields, funding rates, or anything else, so `docs/27` §6.1's
+  curve-rate-basis blocker is entirely untouched by this slice: it does
+  not unblock zero-rate interpolation, does not implement curve-purpose
+  selection, does not implement interpolation, and does not implement a
+  discount factor. `pricing/bli_pricing_engine.py` and
+  `pricing/bli_valuation_time.py` are both unmodified; `price_bli_mvp`
+  keeps returning its existing deterministic
+  `PricingResult(status=FAILED, errors=[PricingErrorCode.
+  UNSUPPORTED_PRODUCT])` unchanged for every valid bundle. No
+  `PricingResult`/`PricingStatus`/`PricingErrorCode` change. Issue #38
+  remains open.
+  New tests: `tests/test_bli_curve_tenor.py` (every documented valid
+  M/Y label; every tenor label present in
+  `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.curve_points` with no new fixture
+  content; every documented rejection case — week/overnight/malformed/
+  zero/negative/whitespace/lowercase/non-string forms; a source check
+  that the module never reads wall-clock time or imports any `datetime`
+  symbol; a check that the module never imports `BLICurvePoint`/
+  `BLIMarketDataSnapshot`/`BLIMVPInputBundle`; and a module-boundary
+  check against curve-selection/interpolation/discount-factor/zero-rate/
+  par-rate/PV/Black-76-shaped names).
+  - **Review / validation:** `python -m pytest -q` → 716 passed (688
+    prior + 28 new in `tests/test_bli_curve_tenor.py`); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
