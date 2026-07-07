@@ -1853,3 +1853,59 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     pytest -q` → 732 passed (unchanged); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI curve rate-basis contract added
+  (`src/shiori_pricing_lab/data/bli_snapshot.py`).** Implements
+  `docs/28`'s recommended next slice (Path A): a new
+  `BLICurveRateBasis(StrEnum)` (`CONTINUOUS_ZERO_RATE` /
+  `SIMPLE_ZERO_RATE` / `PAR_RATE` / `SWAP_RATE` / `BOND_YIELD` /
+  `FUNDING_RATE` / `OTHER`) and a new **required** field,
+  `BLICurvePoint.rate_basis: BLICurveRateBasis`, validated via the
+  project's existing `coerce_enum` pattern (mirroring `curve_purpose`'s
+  own coercion) in `__post_init__`. **No default value exists** — a
+  `BLICurvePoint` cannot be constructed without explicitly stating
+  `rate_basis`; there is no "if missing, assume zero rate" fallback
+  anywhere in the class, and omitting the field fails loudly
+  (`TypeError`, the dataclass's own missing-required-argument error).
+  `BLICurveRateBasis` is deliberately separate from `BLICurvePurpose` —
+  `curve_purpose` states what a curve is used for, `rate_basis` states
+  what a row's `rate` value means; the two questions remain independent
+  per `docs/28` §2.1's reasoning. Every existing
+  `BLICurvePoint`-constructing site was updated to supply an explicit
+  value: all five rows in
+  `data/bli_snapshot_fixtures.py`'s `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT`
+  now carry `rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE`
+  (a reviewed synthetic-fixture assumption for the current BLI path
+  only, stated explicitly rather than inferred from `source_system`/
+  `curve_id`/`curve_name`/`curve_purpose`/tenor), as do every
+  `_curve_point()` test helper in `tests/test_bli_market_data_snapshot.py`,
+  `tests/test_bli_mvp_input_bundle.py`, and
+  `tests/test_bli_mvp_input_bundle_builder.py`, and the two
+  hand-built `BLICurvePoint` instances in
+  `tests/test_bli_curve_selector.py`. **This slice does not implement
+  interpolation, does not implement a discount factor, and does not
+  implement any par-to-zero or source-to-zero conversion** — it only
+  makes the rate-basis question a machine-checkable, per-row fact; a
+  future interpolation helper must still separately reject any row
+  whose `rate_basis` is not `CONTINUOUS_ZERO_RATE`.
+  `pricing/bli_pricing_engine.py`, `pricing/bli_valuation_time.py`,
+  `pricing/bli_curve_tenor.py`, and `pricing/bli_curve_selector.py` are
+  all unmodified — the selector continues to filter only by
+  `(currency, curve_purpose)` and does not read `rate_basis` or `rate`.
+  `price_bli_mvp` keeps returning its existing deterministic
+  `PricingResult(status=FAILED, errors=[PricingErrorCode.
+  UNSUPPORTED_PRODUCT])` unchanged for every valid bundle; adding
+  `rate_basis` gives it nothing new to dispatch on. Issue #38 remains
+  open.
+  New/updated tests: `tests/test_bli_market_data_snapshot.py` gained
+  the happy-path basis check, raw-string coercion, invalid/blank
+  `rate_basis` rejection (both naming `rate_basis` in the error), a
+  missing-required-field construction test (bypassing the test helper's
+  default on purpose), a check that every
+  `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT` curve point states
+  `CONTINUOUS_ZERO_RATE`, and a module-boundary check that
+  `data/bli_snapshot.py` still defines no interpolation/discount-factor/
+  zero-rate/par-rate/forward-price/Black-76/PV-shaped names.
+  - **Review / validation:** `python -m pytest -q` → 740 passed (732
+    prior + 8 new); `ruff check src/shiori_pricing_lab tests` → only
+    the same 2 pre-existing, unrelated `products/bond_option.py`
+    `E501` findings remain.

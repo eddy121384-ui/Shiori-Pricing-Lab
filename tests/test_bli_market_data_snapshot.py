@@ -18,6 +18,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICreditSpreadTreatment,
     BLICurvePoint,
     BLICurvePurpose,
+    BLICurveRateBasis,
     BLIDepositRateObservation,
     BLIMarketDataSnapshot,
     BLIMarketDataStatus,
@@ -56,6 +57,7 @@ def _curve_point(**overrides) -> BLICurvePoint:
         curve_purpose=BLICurvePurpose.BOND_REFERENCE_CURVE,
         tenor="2Y",
         rate=0.035,
+        rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
         source_system="TEST_FEED",
         status=BLIMarketDataStatus.ACTIVE,
     )
@@ -223,6 +225,75 @@ def test_ftp_percent_value_rejects_non_finite(value):
 def test_volatility_rejects_non_positive():
     with pytest.raises(ValueError, match="volatility must be positive"):
         _volatility_input(volatility=0.0)
+
+
+# --- 3b. rate_basis: required, explicit, no default (docs/28 §6) -----------
+
+
+def test_curve_point_happy_path_rate_basis_is_continuous_zero_rate():
+    point = _curve_point()
+    assert point.rate_basis is BLICurveRateBasis.CONTINUOUS_ZERO_RATE
+
+
+def test_curve_point_accepts_raw_string_rate_basis():
+    point = _curve_point(rate_basis="CONTINUOUS_ZERO_RATE")
+    assert point.rate_basis is BLICurveRateBasis.CONTINUOUS_ZERO_RATE
+
+
+def test_curve_point_rejects_invalid_rate_basis_string():
+    with pytest.raises(ValueError, match="rate_basis"):
+        _curve_point(rate_basis="NOT_A_RATE_BASIS")
+
+
+@pytest.mark.parametrize("value", ["", " "])
+def test_curve_point_rejects_blank_rate_basis_string(value):
+    with pytest.raises(ValueError, match="rate_basis"):
+        _curve_point(rate_basis=value)
+
+
+def test_curve_point_requires_rate_basis_field():
+    # Deliberately not using _curve_point(), whose params dict always
+    # supplies a default rate_basis -- this asserts the dataclass field
+    # itself has no default, so omitting it entirely fails loudly.
+    params = dict(
+        curve_id="USD_BOND_REFERENCE_CURVE",
+        curve_name="USD Bond Reference Curve",
+        currency=Currency.USD,
+        curve_purpose=BLICurvePurpose.BOND_REFERENCE_CURVE,
+        tenor="2Y",
+        rate=0.035,
+        source_system="TEST_FEED",
+        status=BLIMarketDataStatus.ACTIVE,
+    )
+    with pytest.raises(TypeError):
+        BLICurvePoint(**params)
+
+
+def test_fixture_curve_points_all_state_continuous_zero_rate_basis():
+    for point in SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.curve_points:
+        assert point.rate_basis is BLICurveRateBasis.CONTINUOUS_ZERO_RATE
+
+
+def test_rate_basis_does_not_imply_interpolation_or_discount_factor():
+    # rate_basis is a data-contract field only (docs/28 §6) -- its
+    # presence must not, by itself, make any pricing possible.
+    from shiori_pricing_lab.data import bli_snapshot as bli_snapshot_module
+
+    module_names = set(dir(bli_snapshot_module))
+    forbidden_names = {
+        "interpolate",
+        "interpolate_curve",
+        "discount_factor",
+        "zero_rate",
+        "par_rate",
+        "forward_price",
+        "forward_clean_price",
+        "convert_par_to_zero",
+        "black76",
+        "black_76",
+        "compute_pv",
+    }
+    assert module_names.isdisjoint(forbidden_names)
 
 
 # --- 4. FTP percent/decimal consistency -----------------------------------
