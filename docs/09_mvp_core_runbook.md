@@ -1774,3 +1774,70 @@ anything; real BLI valuation math is future work.
   src/shiori_pricing_lab tests` → only the same 2 pre-existing,
   unrelated `products/bond_option.py` `E501` findings remain.
 - **Issue #38 remains open.**
+
+### BLI continuous zero-rate interpolation helper landed
+
+- **Another real implementation slice, not a preflight.**
+  `src/shiori_pricing_lab/pricing/bli_zero_rate_interpolation.py` (new
+  module) adds `interpolate_continuous_zero_rate(nodes:
+  Iterable[BLIContinuousZeroCurveNode], target_year_fraction: float) ->
+  float`, consuming the `BLIContinuousZeroCurveNode` values PR #76
+  prepares.
+- **Piecewise-linear interpolation on continuously-compounded zero
+  rates, per Annex A §A.10.2 exactly.** An exact node match returns
+  that node's `zero_rate`. A target strictly between two adjacent nodes
+  returns `r1 + (r2 - r1) * (T - t1) / (t2 - t1)`.
+- **Codex P2 correction (PR #77 review):** this helper originally
+  attempted rate-only flat extrapolation for out-of-range targets.
+  Codex P2 correctly noted that flat extrapolation must preserve
+  fallback visibility — Annex A §A.10.2 requires flat extrapolation
+  outside the curve's range to carry a fallback flag ("並標示 fallback
+  flag"), and silently returning a bare endpoint rate would make an
+  extrapolated value indistinguishable from an ordinary in-range
+  interpolated one. **This helper now rejects any out-of-range
+  `target_year_fraction` with `ValueError`** — including for a
+  single-node curve (matching the existing Deposit Curve fixture),
+  where any target other than the node's own `year_fraction` would
+  require the same extrapolation. Flat extrapolation with a fallback
+  flag is deferred to a future, separate contract slice. This helper
+  now supports only: exact node match, and in-range piecewise-linear
+  interpolation.
+- Validates its own input independently of
+  `build_continuous_zero_curve_nodes`: rejects empty `nodes`, a
+  non-`BLIContinuousZeroCurveNode` element, a non-finite/non-positive
+  `target_year_fraction` or node `year_fraction`, a non-finite node
+  `zero_rate`, and duplicate node `year_fraction` values; sorts nodes
+  internally so input order never matters. Signed zero rates are
+  preserved.
+- **This module does not compute discount factors, does not compute
+  forward clean price, does not compute PV, does not produce a
+  fallback report, and is not wired into `price_bli_mvp`.** It consumes
+  only `BLIContinuousZeroCurveNode` values — no tenor parsing, no
+  curve-purpose selection, no `BLICurvePoint`/`BLICurveRateBasis`
+  inspection, no par-rate conversion. `pricing/bli_curve_tenor.py`,
+  `pricing/bli_curve_selector.py`, `pricing/bli_zero_curve_nodes.py`,
+  `pricing/bli_pricing_engine.py`, and `pricing/bli_valuation_time.py`
+  are all unmodified; `price_bli_mvp` still returns its existing
+  deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` for every valid
+  bundle.
+- Tests: `tests/test_bli_zero_rate_interpolation.py` (exact node match
+  and interpolation between the existing Option Discount Curve
+  fixture's nodes with a hand-computed expected value; reversed-node-
+  order invariance; out-of-range targets below and above range raising
+  `ValueError` mentioning extrapolation; the single-node Deposit Curve
+  fixture returning its rate for an exact target and raising for any
+  other target; empty-input/non-node rejection; every invalid
+  target/node `year_fraction` value rejected; invalid node `zero_rate`
+  rejected; duplicate node `year_fraction` rejected; signed zero-rate
+  preservation across an in-range interpolated midpoint; and
+  module-boundary checks confirming no import of
+  `BLICurvePoint`/`BLICurveRateBasis`/
+  `build_continuous_zero_curve_nodes`/`select_curve_points_by_purpose`/
+  `tenor_to_year_fraction`/`pricing.curve`/`RateCurve`/
+  `BLIMVPInputBundle`/`price_bli_mvp`, and no discount-factor/
+  forward-price/Black-76/PV-shaped names). `python -m pytest -q` → 786
+  passed; `ruff check src/shiori_pricing_lab tests` → only the same 2
+  pre-existing, unrelated `products/bond_option.py` `E501` findings
+  remain.
+- **Issue #38 remains open.**
