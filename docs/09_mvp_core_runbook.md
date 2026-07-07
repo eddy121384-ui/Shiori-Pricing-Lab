@@ -1875,3 +1875,53 @@ anything; real BLI valuation math is future work.
   src/shiori_pricing_lab tests` → only the same 2 pre-existing,
   unrelated `products/bond_option.py` `E501` findings remain.
 - **Issue #38 remains open.**
+
+### BLI curve discount-factor resolver landed
+
+- **Another real implementation slice, not a preflight.**
+  `src/shiori_pricing_lab/pricing/bli_curve_discount_factor.py` (new
+  module) adds `discount_factor_from_continuous_zero_curve(
+  curve_points, *, currency, curve_purpose, target_year_fraction) ->
+  float`, **composing** the four already-reviewed helpers this
+  dependency chain has built: `select_curve_points_by_purpose` →
+  `build_continuous_zero_curve_nodes` →
+  `interpolate_continuous_zero_rate` → `continuous_discount_factor`.
+- **Does not re-implement, duplicate, or re-validate any of those four
+  steps.** Every error each one already raises (missing curve
+  purpose/currency, a non-`BLICurvePoint` element, a
+  non-`CONTINUOUS_ZERO_RATE` basis, an out-of-range target, an invalid
+  target year fraction) propagates unchanged through this resolver.
+- **Out-of-range targets remain rejected until a fallback-flag/
+  structured-result contract exists** (per PR #77's Codex P2
+  correction) — this resolver does not implement flat extrapolation
+  itself, does not parse tenors directly, does not read
+  `BLICurvePoint.rate`/`rate_basis` directly, does not compute a
+  forward clean price, does not compute a PV, and is not wired into
+  `price_bli_mvp`.
+- `pricing/bli_curve_selector.py`, `pricing/bli_zero_curve_nodes.py`,
+  `pricing/bli_zero_rate_interpolation.py`,
+  `pricing/bli_discount_factor.py`, `pricing/bli_pricing_engine.py`,
+  and `pricing/bli_valuation_time.py` are all unmodified; `price_bli_mvp`
+  still returns its existing deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` for every valid
+  bundle.
+- Tests: `tests/test_bli_curve_discount_factor.py` (an in-range
+  interpolated Option Discount Curve case and an exact-node case
+  matching hand-computed expected discount factors; reversed
+  `curve_points` order giving the same result; an exact single-node
+  Deposit Curve case; an out-of-range Option Discount Curve target and
+  a non-exact single-node Deposit Curve target each raising
+  `ValueError` mentioning extrapolation; a missing curve purpose and a
+  missing currency each raising `ValueError` propagated from the
+  selector; a hand-built `PAR_RATE` curve raising `ValueError`
+  mentioning `CONTINUOUS_ZERO_RATE`, propagated from node preparation;
+  every invalid target year fraction rejected; and module-boundary
+  checks confirming the module calls all four expected helper
+  functions, does not import `BLIMVPInputBundle`/`price_bli_mvp`/
+  `PricingResult`/`PricingStatus`/`PricingErrorCode`, and defines no
+  forward-price/PV/Black-76-shaped or duplicate interpolation/
+  discount-factor logic of its own). `python -m pytest -q` → 817
+  passed; `ruff check src/shiori_pricing_lab tests` → only the same 2
+  pre-existing, unrelated `products/bond_option.py` `E501` findings
+  remain.
+- **Issue #38 remains open.**
