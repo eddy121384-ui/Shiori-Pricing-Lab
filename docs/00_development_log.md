@@ -1648,3 +1648,80 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 21 new in `tests/test_bli_valuation_time.py`); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI curve interpolation preflight written, docs-only
+  (`docs/27_bli_curve_interpolation_preflight.md`).** Checkpoint after
+  PR #70 (`year_fraction_to_expiry` time-to-expiry utility, merged
+  `4f99b61`). Scopes `docs/26`'s dependency 2 — curve interpolation /
+  discount-factor access from a `BLICurvePoint` collection — without
+  implementing any of it. **Existing BLI curve inputs inventoried in
+  full:** `BLICurvePoint` fields and validation, `BLIMarketDataSnapshot`
+  duplicate-node/ambiguous-curve-identity checks, `BLIMVPInputBundle`'s
+  presence-only curve-purpose gate (`BOND_REFERENCE_CURVE`/
+  `OPTION_DISCOUNT_CURVE`/`DEPOSIT_CURVE` required in the product's own
+  currency), and the existing fixture's exact tenor shape (two tenor
+  rows each for the Bond Reference/Option Discount curves, **one** tenor
+  row for the Deposit Curve — a real single-point case, not invented).
+  **Reuse assessment:** `pricing/curve.py::RateCurve` is **not directly
+  reusable without an adapter** (DataFrame-of-rows input vs.
+  `BLICurvePoint` dataclass tuples; no `curve_purpose` concept at all);
+  its module-level `tenor_to_years`/`_TENOR_TO_YEARS` helper, by
+  contrast, is a plain `str -> float` function with the same input shape
+  as `BLICurvePoint.tenor` and is flagged as a real candidate for direct
+  reuse by call (decision on whether to actually import it vs. define a
+  BLI-local copy left open, not forced). `irs_engine.py::_discount_factor`
+  is flagged as **methodologically incompatible** for BLI as-is: it uses
+  simple compounding (`1/(1+rT)`), while Annex A §A.10.2 requires
+  continuously-compounded zero rates for BLI — this mismatch is the
+  specific reason discount-factor computation is kept out of the next
+  slice. **Curve-purpose boundary decided:** selection must take an
+  explicit `(currency, curve_purpose)` pair, never guess or default;
+  missing required points must raise; duplicate/ambiguous points are
+  already rejected upstream; multiple purposes present in one snapshot
+  is normal, not an error. **Tenor-parsing boundary decided:** first
+  slice supports only strict `<int>M`/`<int>Y` labels (matching every
+  tenor the existing fixture uses); week/overnight/malformed forms must
+  raise, never silently round to a nearby label. **Interpolation
+  boundary decided:** linear interpolation on zero rates, per Annex A
+  §A.10.2 exactly — spline interpolation, bootstrapping, and a
+  multi-curve framework are excluded; flat extrapolation with a fallback
+  flag is Annex-A-pinned but deliberately deferred (no flagging
+  mechanism exists yet) in favor of raising on out-of-range targets in
+  the first slice. **Curve-rate-basis blocker added (Codex P2 review of
+  PR #71):** `BLICurvePoint` has no `rate_basis`/`curve_rate_basis`/
+  `zero_vs_par`/`compounding` field or any other way to confirm that
+  `rate` is already a continuously-compounded zero rate — `curve_purpose`
+  states what a curve is used for, not what basis its rates are quoted
+  in. An "interpolated zero rate" helper is therefore **blocked** until a
+  future PR resolves this via an explicit basis field/contract, a
+  documented and audited upstream normalization guarantee, or a separate
+  reviewed par-to-zero/source-to-zero conversion slice — never by
+  silently inferring zero-rate status from `curve_purpose`/`curve_name`/
+  `curve_id`/`source_system`. **Discount-factor boundary decided
+  conservatively, and now doubly blocked:** a discount-factor helper
+  remains out of scope for the foreseeable next several slices —
+  strictly behind both the curve-purpose selector and the
+  interpolated-zero-rate helper, the latter itself blocked by the
+  curve-rate-basis gap above. If that gap is resolved, the formula to
+  review is already unambiguous (`DF = exp(-zero_rate × T)`), keeping the
+  compounding-convention distinction from `irs_engine.py`'s incompatible
+  simple-compounding formula as its own single-purpose, reviewable PR
+  rather than a side effect of a larger change. **Next implementation
+  slice chosen (unchanged): a `BLICurvePoint` tenor-to-year-fraction
+  parser only** (`pricing/bli_curve_tenor.py`, suggested branch
+  `claude/bli-curve-tenor-parser`) — it never reads or interprets `rate`
+  at all, so it is entirely unaffected by the curve-rate-basis blocker.
+  Zero design ambiguity beyond the label set already decided, a
+  mechanical adaptation of
+  `pricing/curve.py::tenor_to_years`'s existing pattern, and directly
+  exercisable against the existing fixture's tenor labels with no new
+  fixture content. **Confirms `price_bli_mvp` keeps returning its
+  existing deterministic `FAILED + UNSUPPORTED_PRODUCT` unchanged**, and
+  that `pricing/bli_valuation_time.py` is not wired into anything by
+  this doc. **No curve interpolation, discount factor, forward clean
+  price, coupon schedule, accrued interest, volatility conversion,
+  yield-to-price conversion, QuantLib, connector, or UI was added.** No
+  source or test file was changed. Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 688 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
