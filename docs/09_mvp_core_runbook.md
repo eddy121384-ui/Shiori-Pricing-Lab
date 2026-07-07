@@ -1626,3 +1626,43 @@ anything; real BLI valuation math is future work.
   check src/shiori_pricing_lab tests` → only the same 2 pre-existing,
   unrelated `products/bond_option.py` `E501` findings remain.
 - **Issue #38 remains open.**
+
+### BLI curve-rate basis preflight checkpoint
+
+- Before implementing anything that reads or interprets
+  `BLICurvePoint.rate` as a zero rate, agents must read
+  `docs/28_bli_curve_rate_basis_preflight.md`.
+- **The curve-rate basis remains the blocker before zero-rate
+  interpolation.** The existing time-to-expiry utility
+  (`year_fraction_to_expiry`, PR #70), curve tenor parser
+  (`tenor_to_year_fraction`, PR #72), and curve-purpose selector
+  (`select_curve_points_by_purpose`, PR #73) all exist and are all
+  unmodified by this checkpoint, but **none of them solves the basis
+  question** — time-to-expiry only handles dates, the tenor parser only
+  handles the curve's x-axis label, and the selector only filters rows
+  structurally; none reads or interprets `rate`.
+- **Annex A restated precisely:** §A.10.2 pins piecewise-linear
+  interpolation on continuously-compounded zero rates; §A.10.3 names a
+  par→zero conversion for the "FTP gives a par curve" case but gives no
+  data-model mechanism for recording which case a given
+  `BLICurvePoint` row is in — that recording mechanism, not the
+  conversion formula, is the actual gap.
+- **Four candidate unblocking paths evaluated:** (A) a required
+  `rate_basis` field + `BLICurveRateBasis` enum on `BLICurvePoint` —
+  recommended; (B) a documented-only upstream normalization contract —
+  rejected, not machine-checkable; (C) a separate par-to-zero/
+  source-to-zero conversion slice — correctly sequenced after A, not
+  instead of it; (D) a temporary fixture-only assumption — explicitly
+  rejected, satisfies none of `docs/27` §6.1's acceptable-unblocking
+  criteria.
+- **Selected next slice: a small, required `rate_basis` field (Path
+  A)** — enum + field + validation + tests only, every existing
+  fixture/test construction site updated to supply an explicit value.
+  No interpolation, no conversion math, no par→zero formula. Suggested
+  next branch `claude/bli-curve-rate-basis-contract`, suggested PR
+  title "Add BLI curve rate-basis contract" — not started by this
+  checkpoint.
+- **No runtime behavior changed by this preflight.** No file under
+  `src/` or `tests/` was modified. No rate-basis enum or field was
+  added. No fixture was changed. `price_bli_mvp` and every existing BLI
+  module remain unmodified. **Issue #38 remains open.**

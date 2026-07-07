@@ -1811,3 +1811,45 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 16 new in `tests/test_bli_curve_selector.py`); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI curve-rate basis preflight written, docs-only
+  (`docs/28_bli_curve_rate_basis_preflight.md`).** Checkpoint after PR
+  #73 (curve-purpose selector, merged `63cdace`). Resolves the
+  preflight `docs/27` §6.1 explicitly deferred: how the project should
+  make `BLICurvePoint.rate` safe for future zero-rate interpolation
+  under Annex A §A.10.2. **Confirms the existing helpers
+  (`year_fraction_to_expiry` PR #70, `tenor_to_year_fraction` PR #72,
+  `select_curve_points_by_purpose` PR #73) do not, individually or
+  combined, resolve the rate-basis question** — time-to-expiry only
+  handles dates, the tenor parser only handles the curve's x-axis
+  label, and the selector only filters rows structurally; none of them
+  reads or interprets `rate`. **Annex A requirement restated
+  precisely:** §A.10.2 pins piecewise-linear interpolation on
+  continuously-compounded zero rates; §A.10.3 names a par→zero
+  conversion for the "FTP gives a par curve" case but gives no
+  data-model mechanism for recording which case a given row is in —
+  that data-model gap, not the conversion formula itself, is what
+  currently blocks safe use of `rate`. **Four candidate unblocking
+  paths compared:** (A) a required `rate_basis` field +
+  `BLICurveRateBasis` enum on `BLICurvePoint`; (B) a documented-only
+  upstream normalization contract (rejected — not machine-checkable,
+  reintroduces the exact silent-inference risk `docs/27` §6.1 already
+  forbade); (C) a separate par-to-zero/source-to-zero conversion slice
+  (correctly sequenced *after* A, not instead of it — it needs to know
+  which rows need converting, and its own methodology isn't pinned
+  precisely enough yet); (D) a temporary fixture-only assumption
+  (explicitly rejected — satisfies none of `docs/27` §6.1's three
+  acceptable-unblocking criteria and risks quietly becoming a de facto
+  production assumption). **Recommendation: Path A** — a small,
+  required (no default) `rate_basis` field, scoped to enum + field +
+  validation + tests only, with every existing fixture/test
+  construction site updated to supply an explicit value; no
+  interpolation, no conversion math, no par→zero formula implemented.
+  Suggested next branch `claude/bli-curve-rate-basis-contract`,
+  suggested PR title "Add BLI curve rate-basis contract" — not started
+  by this doc. **No `src/` or `tests/` file was modified. No rate-basis
+  enum or field was added. No fixture was changed. `price_bli_mvp`
+  remains unchanged.** Issue #38 remains open.
+  - **Review / validation:** Documentation-only change; `python -m
+    pytest -q` → 732 passed (unchanged); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
