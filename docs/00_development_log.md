@@ -1765,3 +1765,49 @@ For architecture rationale, see `docs/01`–`docs/03`; this log does not repeat 
     prior + 28 new in `tests/test_bli_curve_tenor.py`); `ruff check
     src/shiori_pricing_lab tests` → only the same 2 pre-existing,
     unrelated `products/bond_option.py` `E501` findings remain.
+- **BLI curve-purpose selector added, pure structural filter
+  (`src/shiori_pricing_lab/pricing/bli_curve_selector.py`, new).**
+  Implements `docs/27`'s next slice in its dependency sequence: a
+  single pure function,
+  `select_curve_points_by_purpose(curve_points, *, currency,
+  curve_purpose) -> tuple[BLICurvePoint, ...]`, narrowing a collection
+  of `BLICurvePoint` rows down to exactly the ones matching
+  `point.currency == currency` and `point.curve_purpose ==
+  curve_purpose`, preserving input order. Accepts either an already-
+  coerced enum member or a raw string for `currency`/`curve_purpose`
+  (using the project's existing `coerce_enum` pattern, mirroring
+  `BLICurvePoint.__post_init__`'s own coercion). Raises `TypeError` for
+  a non-`BLICurvePoint` element, and `ValueError` — naming the
+  requested currency and curve purpose — for an empty `curve_points`
+  collection or a `(currency, curve_purpose)` pair with no matching
+  rows; never silently falls back to a different currency or purpose.
+  **This selector is purely structural: it does not parse tenor, does
+  not call `bli_curve_tenor.tenor_to_year_fraction`, does not sort or
+  dedupe by tenor, and does not read or interpret any curve point's
+  rate value at all.** It does not claim the rates it returns are zero
+  rates, and it does not unblock `docs/27` §6.1's curve-rate-basis
+  question — that remains fully open. This slice does not implement
+  interpolation and does not implement a discount factor.
+  `pricing/bli_pricing_engine.py`, `pricing/bli_valuation_time.py`, and
+  `pricing/bli_curve_tenor.py` are all unmodified; `price_bli_mvp` keeps
+  returning its existing deterministic `PricingResult(status=FAILED,
+  errors=[PricingErrorCode.UNSUPPORTED_PRODUCT])` unchanged for every
+  valid bundle. Issue #38 remains open.
+  New tests: `tests/test_bli_curve_selector.py` (selecting each of the
+  three MVP-required curve purposes from
+  `SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.curve_points` with no new fixture
+  content; input-order preservation, including with a reversed input
+  ordering and a two-row non-fixture case that is deliberately not
+  tenor-sorted; string-vs-enum currency/curve_purpose coercion; a
+  missing-purpose case and a missing-currency case, each asserting the
+  error message names the missing value; empty-input and non-
+  `BLICurvePoint`-element rejection; invalid currency/purpose string
+  rejection; and module-boundary checks confirming the module never
+  imports `bli_curve_tenor`, never reads a curve point's rate value,
+  never calls wall-clock time, and defines no
+  interpolation/discount-factor/zero-rate/par-rate/forward-price/
+  Black-76/PV-shaped names).
+  - **Review / validation:** `python -m pytest -q` → 732 passed (716
+    prior + 16 new in `tests/test_bli_curve_selector.py`); `ruff check
+    src/shiori_pricing_lab tests` → only the same 2 pre-existing,
+    unrelated `products/bond_option.py` `E501` findings remain.
