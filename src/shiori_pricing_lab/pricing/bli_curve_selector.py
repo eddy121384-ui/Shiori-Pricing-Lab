@@ -47,7 +47,10 @@ def select_curve_points_by_purpose(
 
     points = tuple(curve_points)
     if not points:
-        raise ValueError("curve_points must not be empty")
+        raise ValueError(
+            "curve_points must not be empty for currency="
+            f"{currency.value!r} curve_purpose={curve_purpose.value!r}"
+        )
 
     for point in points:
         if not isinstance(point, BLICurvePoint):

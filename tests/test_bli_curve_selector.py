@@ -119,11 +119,12 @@ def test_absent_currency_raises_value_error_with_details():
 # --- 3. Type / boundary cases ---------------------------------------------
 
 
-def test_empty_curve_points_raises_value_error():
-    with pytest.raises(ValueError):
+def test_empty_curve_points_raises_value_error_with_details():
+    with pytest.raises(ValueError, match="USD") as exc_info:
         select_curve_points_by_purpose(
             (), currency=Currency.USD, curve_purpose=BLICurvePurpose.DEPOSIT_CURVE
         )
+    assert "DEPOSIT_CURVE" in str(exc_info.value)
 
 
 def test_non_curve_point_entry_raises_type_error():
