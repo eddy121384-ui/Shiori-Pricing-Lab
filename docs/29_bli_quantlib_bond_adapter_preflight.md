@@ -122,6 +122,36 @@ outputs:**
    to be explicit that no *other* clean/dirty mechanic (e.g. settlement
    invoicing, §A.7) is in scope.
 
+**Calendar / business-day convention for coupon schedule generation
+(Codex review of PR #80):** the first adapter slice generates and
+returns **unadjusted** schedule dates only — QuantLib's `Schedule` is
+built with `ql.NullCalendar()` (no holiday adjustment), regardless of
+`BondReferenceData.business_day_convention`. `business_day_convention`
+(`MODIFIED_FOLLOWING`, `FOLLOWING`, ...) is recorded on `BondReferenceData`
+as a deal term only — that module's own docstring already states
+"resolving it requires a holiday calendar, which is out of scope for
+this schema" — and no reviewed holiday-calendar source (which markets'
+holidays, which calendar library/data feed, how a currency maps to a
+specific trading calendar) exists anywhere in this repo yet. Silently
+picking a QuantLib built-in calendar (e.g.
+`ql.UnitedStates(ql.UnitedStates.GovernmentBond)`) to honor
+`business_day_convention` would fabricate a holiday-calendar decision
+this codebase has never reviewed, for a market `currency` alone does
+not uniquely determine. **The adapter must not do this.** Coupon
+payment dates returned by the first slice are therefore exactly the
+schedule's unadjusted calendar dates (`first_coupon_date`, then each
+subsequent regular-frequency date, ..., `last_coupon_date`,
+`maturity_date`) — the eligible fixture's coupon dates (6/15, 12/15)
+happen not to fall on a weekend in this synthetic data, so unadjusted
+and calendar-adjusted dates coincide for it *by construction of the
+fixture*, not because the adapter applied any calendar logic.
+Calendar-adjusted payment dates are out of scope until a separate,
+reviewed calendar-source contract exists (e.g. a future preflight
+deciding which calendar library/data feed is authoritative and how it
+maps `currency`/`issuer` to a specific holiday calendar) — this doc
+does not invent one now, and the next implementation PR must not
+either.
+
 **QuantLib is never given:**
 
 - A curve, a discount factor, or any interpolation input/output.
@@ -222,8 +252,8 @@ one:
   exactly as spelled. Simple, matches the field's own name, but may
   diverge from Bloomberg/vendor accrued-interest figures for the
   government/corporate bonds Annex A §A.6.2 actually enumerates,
-  failing §A.13.4's Bloomberg benchmark check at 2%–5%+ variance for
-  no good reason.
+  risking §A.13.4's Bloomberg benchmark check at 2%–5%+ variance for a
+  bond where the market convention is genuinely ICMA/bond-basis.
 - **Option 2 — treat `ACT_ACT_ISDA` as this repo's placeholder label
   for "actual/actual, bond-schedule-aware" and map it to
   `ql.ActualActual(ql.ActualActual.ISMA, schedule)`.** Matches
@@ -233,19 +263,40 @@ one:
   grepping for "ISDA" in the adapter would not expect an ISMA/bond-basis
   call underneath it without reading this doc.
 
-**Recommendation carried into §7: Option 2, with the mismatch recorded
-loudly in the adapter's own module docstring** (not silently), because
-the accrued-interest number this mapping produces is the one Annex A
-§A.13.4 will benchmark against Bloomberg/vendor data, and matching that
-benchmark is a stated MVP self-validation requirement — a literal-name
-mapping that fails the benchmark for a documented, foreseeable reason
-would be a worse outcome than a well-documented name/behavior mismatch.
-Renaming the enum member itself (e.g. to `ACT_ACT_ICMA`) is out of
-scope here: it is a breaking schema change to `BondReferenceData`,
-touches every existing fixture and test that references
-`DayCount.ACT_ACT_ISDA` by name, and is not needed to unblock the
-adapter — the mapping can be corrected later without a rename if the
-project decides the name itself was wrong.
+**Recommendation (revised, Codex review of PR #80): Option 1 — map
+`DayCount.ACT_ACT_ISDA` literally to `ql.ActualActual(ql.ActualActual.
+ISDA)`, with no ISMA/bond-basis substitution anywhere in the adapter.**
+This doc's earlier draft recommended Option 2; that recommendation is
+**withdrawn**. Silently mapping an enum member spelled `ACT_ACT_ISDA`
+to QuantLib's `ISMA`/`Bond` variant would hide a different day-count
+convention behind a name that says otherwise — exactly the kind of
+undocumented, unauditable substitution `docs/27`/`docs/28`'s "do not
+silently infer [basis] from [an adjacent field]" discipline already
+forbids for curve rate basis, and there is no principled reason to
+permit it here merely because the mismatch sits between two
+`ActualActual` sub-conventions rather than between a par rate and a
+zero rate. The adapter maps the name to what it literally says, and
+nothing else.
+
+This is a **real, stated limitation carried forward, not a deferred
+convenience**: for a bond where the market convention is genuinely
+ICMA/bond-basis actual/actual (as Annex A §A.6.2's per-market table
+implies for several listed markets), literal-ISDA accrued interest may
+diverge from Bloomberg/vendor figures. That divergence is exactly what
+Annex A §A.13.4's Bloomberg/vendor benchmark check exists to catch —
+surfacing a real, *measured* discrepancy through the self-validation
+framework the desk already has, rather than this doc silently
+deciding the "more correct" convention on the desk's behalf with no
+benchmark evidence at all. **If and when a benchmark run reveals a
+genuine ISDA-vs-ICMA divergence for a specific bond/market, the correct
+fix is a new, distinct `BondReferenceData.day_count` enum member (e.g.
+`ACT_ACT_ICMA` or `ACT_ACT_BOND_BASIS`), added in its own reviewed
+slice — never a silent behavior change under the existing
+`ACT_ACT_ISDA` name.** Until that member exists, `ACT_ACT_ISDA` means
+ISDA, and only ISDA; no enum rename and no new day-count member is
+added by this doc or by the next implementation PR (§8) — introducing
+`ACT_ACT_ICMA` is deferred until an actual benchmark run demonstrates
+the need, not guessed at here.
 
 ---
 
@@ -257,27 +308,60 @@ project decides the name itself was wrong.
 decimals, not per-100 numbers). Per-period, per-100-face coupon cash is
 not stored anywhere and is not computed by any existing code.
 
-**Decision: the adapter computes per-period coupon cash as
-`coupon × redemption_amount / periods_per_year`, where
-`periods_per_year` comes from `coupon_frequency`
-(`SEMI_ANNUAL -> 2`, `ANNUAL -> 1`, `QUARTERLY -> 4`, `MONTHLY -> 12`,
-`DAILY` -> rejected as an invalid bond coupon frequency, since no
-fixture or Annex A citation uses a daily-coupon bond).** For the
-fixture bond this is `0.0325 × 100.0 / 2 = 1.625` per coupon, per 100
-face. `redemption_amount` (not a hardcoded `100.0`) is used as the
-face-amount base because `BondReferenceData.__post_init__` already
-requires it to be positive and it is the schema's own record of the
-bond's par/redemption amount — using a different base than what the
-bond actually redeems at would be a silent, undocumented assumption.
+**Decision (revised, Codex review of PR #80): the adapter computes
+per-period coupon cash on a fixed per-100-face basis, as
+`coupon × 100 / periods_per_year`, where `periods_per_year` comes from
+`coupon_frequency` (`SEMI_ANNUAL -> 2`, `ANNUAL -> 1`, `QUARTERLY -> 4`,
+`MONTHLY -> 12`, `DAILY` -> rejected as an invalid bond coupon
+frequency, since no fixture or Annex A citation uses a daily-coupon
+bond).** For the fixture bond this is `0.0325 × 100 / 2 = 1.625` per
+coupon, per 100 face.
 
-This is a **regular-coupon approximation**: it does not detect or
-special-case an irregular first/last stub period. Every existing
-fixture bond is manually constructed with regular first/last coupon
-periods (`reference_data/fixtures.py`'s own docstring states this
-explicitly), so no existing test data would expose a stub miscalculation
-today — but the adapter's own contract must say, not silently assume,
-that a bond with an actual irregular stub is out of scope until a
-stub-aware cashflow rule is separately reviewed.
+**`redemption_amount` is not used in this formula, and coupon flows
+are never scaled by it.** This doc's earlier draft used
+`redemption_amount` as the coupon base; that was wrong, for the same
+reason Annex A quotes clean price "per 100" throughout (§A.1: "Clean
+price per 100 報價慣例") — every curve, discount-factor, and
+forward-price helper already built in this dependency chain (§1)
+operates on a fixed per-100 convention, and `amount_per_100`'s own
+field name (§8) promises a per-100 number, not a per-`redemption_amount`
+one. Mixing the two conventions inside one coupon-flow helper would
+silently break that convention for any bond whose
+`redemption_amount != 100.0` — none of the current fixtures have this,
+but nothing in `BondReferenceData.__post_init__` forbids it; it only
+requires `redemption_amount > 0`.
+
+`redemption_amount`'s only legitimate use is principal/redemption-leg
+logic (the final repayment amount at maturity, and any invoice/
+settlement amount computed against it, per Annex A §A.7.2) — a
+separate concern this adapter's first slice does not implement at all
+(no principal cashflow, no redemption logic, no settlement invoicing).
+**If a future bond with `redemption_amount != 100.0` creates a genuine
+ambiguity about how per-100 coupon flows and principal-at-
+`redemption_amount` should interact, that ambiguity must be gated
+(explicitly rejected, not guessed) in whatever future slice adds
+principal/redemption logic — it is not solved here by scaling coupon
+flows.**
+
+This coupon formula is a **regular-coupon approximation, valid only
+when every coupon period is regular.** Every existing fixture bond is
+manually constructed with regular first/last coupon periods
+(`reference_data/fixtures.py`'s own docstring states this explicitly),
+so no existing fixture would expose a stub miscalculation today — but
+the adapter's first slice must not silently apply this formula to a
+bond it has not verified is regular. **The adapter must detect an
+irregular first or last coupon period and raise a documented,
+unsupported-stub error rather than approximate it.** Detection compares
+`first_coupon_date` against `issue_date` plus one unadjusted
+`coupon_frequency` period (per §2's `NullCalendar` decision), and
+`last_coupon_date` against `maturity_date` minus one unadjusted
+`coupon_frequency` period; any mismatch means an odd-first or odd-last
+stub is present, and the adapter raises instead of computing a coupon
+amount for that period. This is a hard requirement carried into §8's
+test list below, not a "future review" deferral — silently returning a
+regular-period coupon amount for a bond with a real stub would be a
+wrong number returned with no signal that anything was approximated,
+which is worse than refusing outright.
 
 ---
 
@@ -373,7 +457,7 @@ recommends it start from):**
 @dataclass(frozen=True)
 class BLIBondCouponFlow:
     payment_date: str          # ISO YYYY-MM-DD
-    amount_per_100: float      # per redemption_amount=100 face; see §5
+    amount_per_100: float      # fixed per-100 face, never redemption_amount; see §5
 
 def is_quantlib_available() -> bool: ...
 
@@ -399,6 +483,16 @@ argument shape mirrors Annex A §A.5.2's own `coupon_date_i ∈ (pricing
 date, expiry date]` window exactly, so a caller does not need to
 reinterpret inclusivity.
 
+**Calendar note (§2):** `coupon_flows_before`'s and
+`accrued_interest_per_100`'s internal schedule construction uses
+`ql.NullCalendar()` only — no calendar parameter is exposed on this
+API, and none should be added until a reviewed calendar-source contract
+exists. **Stub note (§5):** both functions raise a documented
+unsupported-stub error (e.g. a dedicated exception or a `ValueError`
+naming the bond and the irregular period) if `bond`'s first or last
+coupon period is irregular per §5's detection rule — neither function
+silently falls back to the regular-period formula for such a bond.
+
 **Deterministic tests to add:**
 
 ```text
@@ -412,7 +506,11 @@ reinterpret inclusivity.
   2028-06-15, 2028-12-15, 2029-06-15, 2029-12-15 (first_coupon_date
   through last_coupon_date inclusive, per the fixture's own manually
   constructed regular schedule) -- expected values computed by hand in
-  the test, not accepted from whatever QuantLib returns.
+  the test, not accepted from whatever QuantLib returns. **These are
+  asserted as unadjusted dates (§2): the test build must use
+  ql.NullCalendar() and must not pass any other calendar to the
+  Schedule construction**, and the test docstring/comment says so
+  explicitly rather than leaving the calendar choice implicit.
 - coupon_flows_before(bond, after_date="2026-07-01",
   on_or_before_date="2026-09-29") returns () for XS0000000001 -- this
   is the existing MVP fixture's own window, and must return empty per
@@ -435,6 +533,17 @@ reinterpret inclusivity.
   ex-dividend window (1 calendar day before a coupon date, per
   ex_dividend_days=1) raises the documented error from §6 -- proving
   the gate is real, not just described.
+- Irregular stub rejection: a hand-built BondReferenceData with an
+  odd-first coupon period (first_coupon_date earlier than issue_date
+  plus one unadjusted coupon_frequency period) and a separate
+  hand-built bond with an odd-last coupon period (last_coupon_date
+  later than maturity_date minus one unadjusted coupon_frequency
+  period) each raise the documented unsupported-stub error from §5
+  when passed to coupon_flows_before and to accrued_interest_per_100
+  -- proving the regular-coupon approximation is never silently
+  applied to an irregular bond. The test asserts an exception is
+  raised, not that some fallback/approximate number is returned; no
+  simple coupon/frequency approximation is computed for either case.
 - Clean/dirty identity: for a hand-picked clean price, dirty(d) -
   clean(d) == accrued_interest_per_100(bond, as_of_date=d) at both a
   valuation-date-shaped and an expiry-date-shaped input.
@@ -467,12 +576,24 @@ no Black-76, no option PV, no Greeks
 no wiring into price_bli_mvp
 no negative-accrued-interest / ex-dividend-window support (§6 defers
   this; the PR gates/raises instead)
+no calendar-adjusted coupon/payment dates -- unadjusted / NullCalendar
+  only (§2); no calendar parameter is added to the adapter API
+no irregular-stub coupon-amount approximation -- a stub bond must
+  raise a documented error, never approximate a coupon amount for the
+  irregular period (§5)
+no principal/redemption cashflow or settlement-invoice logic, and no
+  use of redemption_amount anywhere in coupon-flow generation (§5)
+no new BondReferenceData.day_count enum member (e.g. ACT_ACT_ICMA) --
+  ACT_ACT_ISDA maps literally to QuantLib ISDA only (§4); a new member
+  is deferred until a Bloomberg/vendor benchmark run demonstrates the
+  need
 no cross-check against BLIBondQuote.accrued_interest_per_100 (§7
   defers this to a later slice that has visibility into market data)
 no change to BondReferenceData, BLIBondQuote, BLIMarketDataSnapshot,
   or BLIMVPInputBundle schemas
-no change to the DayCount enum member names (§4's Option 2 is a
-  mapping-table decision inside the adapter, not a schema rename)
+no change to the DayCount enum member names -- ACT_ACT_ISDA's mapping
+  to ql.ActualActual(ISDA) is a mapping-table decision inside the
+  adapter (§4), not a schema rename or a new enum member
 no required dependency change -- QuantLib stays under
   [project.optional-dependencies].quant
 no edits to SPEC_v1.3.md / ANNEX_A_v1.3.md / ANNEX_B_v1.3.md /
