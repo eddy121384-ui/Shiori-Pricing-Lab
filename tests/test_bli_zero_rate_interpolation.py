@@ -1,11 +1,13 @@
 """Tests for `pricing/bli_zero_rate_interpolation.py`.
 
 Covers piecewise-linear interpolation on continuously-compounded zero
-rates (Annex A §A.10.2), exact node matches, flat extrapolation
-(rate only, no fallback-flag object), single-node curves, input/node
-validation, and the module-boundary checks confirming this slice stays
-a narrow interpolation helper -- no tenor parsing, curve-purpose
-selection, discount factor, forward price, or pricing logic.
+rates (Annex A §A.10.2), exact node matches, out-of-range target
+rejection (Codex P2 review of PR #77 -- extrapolation is deferred to a
+future fallback-flag contract, not silently returned as an ordinary
+rate), single-node curves, input/node validation, and the
+module-boundary checks confirming this slice stays a narrow
+interpolation helper -- no tenor parsing, curve-purpose selection,
+discount factor, forward price, or pricing logic.
 """
 
 from __future__ import annotations
@@ -78,27 +80,36 @@ def test_reversed_node_order_gives_same_result():
     assert interpolate_continuous_zero_rate(reversed_nodes, 3.5) == pytest.approx(expected)
 
 
-# --- 4/5. Flat extrapolation -------------------------------------------------
+# --- 4/5. Out-of-range targets rejected (Codex P2: no silent extrapolation) --
 
 
-def test_flat_extrapolation_below_range():
+def test_out_of_range_target_rejected_until_fallback_flag_contract_exists():
     nodes = _option_discount_nodes()
-    assert interpolate_continuous_zero_rate(nodes, 1.0) == pytest.approx(0.0341)
+    with pytest.raises(ValueError, match="extrapolation"):
+        interpolate_continuous_zero_rate(nodes, 1.0)
 
 
-def test_flat_extrapolation_above_range():
+def test_out_of_range_target_above_range_rejected():
     nodes = _option_discount_nodes()
-    assert interpolate_continuous_zero_rate(nodes, 10.0) == pytest.approx(0.0353)
+    with pytest.raises(ValueError, match="extrapolation"):
+        interpolate_continuous_zero_rate(nodes, 10.0)
 
 
 # --- 6. Single-node behavior -------------------------------------------------
 
 
-@pytest.mark.parametrize("target", [0.25, 1.0, 0.01])
-def test_single_node_deposit_curve_returns_its_rate_for_any_target(target):
+def test_single_node_deposit_curve_exact_target_returns_its_rate():
     nodes = _deposit_nodes()
     assert len(nodes) == 1
-    assert interpolate_continuous_zero_rate(nodes, target) == pytest.approx(0.0350)
+    assert interpolate_continuous_zero_rate(nodes, 0.25) == pytest.approx(0.0350)
+
+
+@pytest.mark.parametrize("target", [1.0, 0.01])
+def test_single_node_curve_rejects_non_exact_target_without_fallback_flag(target):
+    nodes = _deposit_nodes()
+    assert len(nodes) == 1
+    with pytest.raises(ValueError, match="extrapolation"):
+        interpolate_continuous_zero_rate(nodes, target)
 
 
 # --- 7. Empty nodes rejected --------------------------------------------------

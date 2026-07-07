@@ -3,21 +3,29 @@
 Scope: a single narrow helper -- given prepared
 `BLIContinuousZeroCurveNode` values and a target year fraction, return
 the continuously-compounded zero rate via piecewise-linear
-interpolation on zero rates (Annex A §A.10.2), with flat extrapolation
-outside the node range. This module consumes only
-`BLIContinuousZeroCurveNode` values; it does not parse tenors, does not
-select curve purpose, does not inspect `BLICurvePoint` or
-`BLICurveRateBasis` at all, and does not convert par rates -- all of
-that already happened upstream, in
+interpolation on zero rates (Annex A §A.10.2), for targets within the
+node range only. This module consumes only `BLIContinuousZeroCurveNode`
+values; it does not parse tenors, does not select curve purpose, does
+not inspect `BLICurvePoint` or `BLICurveRateBasis` at all, and does not
+convert par rates -- all of that already happened upstream, in
 `pricing/bli_curve_tenor.py`/`pricing/bli_curve_selector.py`/
 `pricing/bli_zero_curve_nodes.py`, before a caller ever reaches this
 helper.
 
-**Flat extrapolation, rate only (Annex A §A.10.2):** Annex A pins flat
-extrapolation outside the curve's range, "並標示 fallback flag" (and
-flags the fallback). This module implements only the rate calculation
-for that case -- no fallback-flag object, no audit output, no warning.
-That is a separate, future concern, not part of this slice.
+**Out-of-range targets are rejected, not flat-extrapolated (Codex P2
+review of PR #77).** Annex A §A.10.2 requires flat extrapolation
+outside the curve's range to carry a fallback flag ("並標示 fallback
+flag") -- returning a bare endpoint rate for an out-of-range target
+would make an extrapolated, fallback-flagged value indistinguishable
+from an ordinary in-range interpolated one, which downstream pricing
+code must never silently consume as equivalent. Until a fallback-flag
+or structured-result contract exists, this helper raises
+:class:`ValueError` for any `target_year_fraction` outside
+`[min node year_fraction, max node year_fraction]` -- including for a
+single-node curve, where any target other than the node's own
+`year_fraction` would require exactly that same extrapolation. Flat
+extrapolation with a fallback flag is deferred to a future, separate
+contract slice; this module does not implement it.
 
 This module is not imported by, and does not change the behavior of,
 `pricing/bli_pricing_engine.py::price_bli_mvp`.
@@ -40,10 +48,13 @@ def interpolate_continuous_zero_rate(
     Piecewise-linear interpolation on zero rates between the two
     adjacent nodes bracketing ``target_year_fraction`` (Annex A
     §A.10.2); an exact node match returns that node's ``zero_rate``
-    directly; a target outside the node range returns the nearest
-    endpoint's ``zero_rate`` (flat extrapolation, rate only -- no
-    fallback-flag object). A single-node input returns that node's
-    ``zero_rate`` for any valid target.
+    directly. A target outside ``[min node year_fraction, max node
+    year_fraction]`` raises :class:`ValueError` -- extrapolation is not
+    performed here (see the module docstring: Annex A requires a
+    fallback flag for that case, which does not yet exist). A
+    single-node input returns that node's ``zero_rate`` only for a
+    target exactly equal to its ``year_fraction``; any other target
+    raises for the same reason.
 
     Validates its own input even though callers are expected to already
     have used `build_continuous_zero_curve_nodes` to prepare ``nodes``:
@@ -89,10 +100,15 @@ def interpolate_continuous_zero_rate(
         if node.year_fraction == target_year_fraction:
             return node.zero_rate
 
-    if target_year_fraction < sorted_nodes[0].year_fraction:
-        return sorted_nodes[0].zero_rate
-    if target_year_fraction > sorted_nodes[-1].year_fraction:
-        return sorted_nodes[-1].zero_rate
+    if (
+        target_year_fraction < sorted_nodes[0].year_fraction
+        or target_year_fraction > sorted_nodes[-1].year_fraction
+    ):
+        raise ValueError(
+            f"target_year_fraction {target_year_fraction!r} is outside the node range "
+            f"[{sorted_nodes[0].year_fraction!r}, {sorted_nodes[-1].year_fraction!r}] -- "
+            "extrapolation requires a future fallback-flag contract, not implemented here"
+        )
 
     for left, right in zip(sorted_nodes, sorted_nodes[1:], strict=False):
         if left.year_fraction < target_year_fraction < right.year_fraction:
