@@ -111,21 +111,53 @@ The MVP supports, and only supports:
 - a `PRICE_VOL` or `EQUIVALENT_PRICE_VOL` volatility feed (used directly as
   sigma, with no yield-vol conversion).
 
-## 8. Intentionally unsupported
+## 8. Intentionally unsupported / out of MVP
 
-The MVP intentionally does not support, and fails explicitly (deterministic
-`FAILED` results, never a fabricated number) for:
+The MVP boundary has three different kinds of "not supported" -- they do not
+all behave the same way, and this document never claims otherwise:
+
+### 8.1 Engine guard rejections
+
+These reach `price_bli_mvp` and return a deterministic
+`PricingResult(status=FAILED, ...)`:
 
 - American exercise;
 - yield-based payoff;
-- yield-vol conversion (`YIELD_VOL` volatility basis);
-- physical delivery;
-- principal/redemption economics;
+- an unsupported volatility basis such as `YIELD_VOL`.
+
+See `tests/test_bli_pricing_engine.py`'s guard-rejection-path tests for the
+deterministic proof of each: `test_unsupported_exercise_style_fails`,
+`test_unsupported_payoff_basis_fails`, `test_unsupported_volatility_basis_fails`.
+
+### 8.2 Construction-time / schema-level rejection
+
+These may be blocked before a `BLIMVPInputBundle` -- and therefore a
+`PricingResult` -- can even exist, by existing product/schema validation:
+
+- physical delivery (`BondLinkedStructuredProduct.__post_init__` already
+  rejects `SettlementType.PHYSICAL` at construction; see
+  `tests/test_bond_linked_structured_product.py::test_wrapper_rejects_physical_settlement`).
+
+Do not assume every unsupported case reaches `price_bli_mvp` as a
+`PricingResult` -- some never get that far.
+
+### 8.3 Scope omissions (not modeled here at all)
+
+These are simply not part of the MVP's scope. They are not engine failures --
+there is no guard reason for them, because the engine never attempts to
+price them:
+
 - Greeks (`dv01` stays `None`);
-- full structured-product valuation (the deposit leg is never priced here);
+- full structured-product valuation;
+- deposit leg valuation;
+- principal/redemption economics;
 - Bloomberg / FTP / warehouse / audit integration.
 
-See `tests/test_bli_pricing_engine.py`'s guard-rejection-path tests
-(`test_unsupported_exercise_style_fails`, `test_unsupported_payoff_basis_fails`,
-`test_unsupported_volatility_basis_fails`) for the deterministic proof of each
-boundary above.
+### 8.4 Ground rules across all three
+
+- The engine never fabricates a number for any of the above.
+- "Unsupported" never means "silently priced anyway" -- it means either an
+  explicit `FAILED` result (8.1), a rejection before a bundle/result can
+  exist (8.2), or something the engine was never asked to model (8.3).
+- The option-leg-only `pv` from section 6 must never be read as a
+  full-structured-product PV.
