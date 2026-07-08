@@ -25,6 +25,12 @@ list).
   explicitly approved as supported per docs/26 §2.1 (no conversion
   required); see ``test_equivalent_price_vol_accepted`` instead of a
   rejection test.
+- missing ``volatility_input`` (no vol object at all, distinct from an
+  unsupported ``volatility_basis`` on a *present* vol object): **not
+  reachable here** -- ``BLIMarketDataSnapshot.__post_init__`` already
+  rejects a ``None``/wrong-type ``volatility_input`` before a
+  ``BLIMVPInputBundle`` can exist; see
+  ``test_missing_volatility_input_cannot_reach_guard``.
 - missing required curve (Bond Reference / Option Discount): **not
   reachable here** -- ``BLIMVPInputBundle.__post_init__`` already
   requires both in the product's currency before a bundle can exist; see
@@ -175,6 +181,16 @@ def test_price_vol_accepted():
     )
     result = check_bli_mvp_required_inputs(SYNTHETIC_BLI_MVP_INPUT_BUNDLE)
     assert result.supported is True
+
+
+def test_missing_volatility_input_cannot_reach_guard():
+    # Distinct from test_yield_vol_rejected: this proves a missing vol
+    # *object* (not merely an unsupported basis on a present object)
+    # cannot reach the guard at all -- BLIMarketDataSnapshot.__post_init__
+    # already rejects it, so no BLIMVPInputBundle carrying it can exist
+    # for check_bli_mvp_required_inputs to be called on.
+    with pytest.raises(TypeError, match="volatility_input"):
+        replace(SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, volatility_input=None)
 
 
 # --- Combined reachable failures ---------------------------------------------
