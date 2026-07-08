@@ -126,6 +126,7 @@ docs/spec_v0.1.md
 docs/architecture.md
 docs/roadmap.md
 docs/runbook.md
+docs/30_bli_mvp_demo_runbook.md  # European bond option (BLI) MVP demo + expected values
 ```
 
 ## Repository layout
