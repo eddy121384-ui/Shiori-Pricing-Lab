@@ -1,0 +1,154 @@
+"""BLI Black-76 clean-price option premium helper (Issue #83, MVP-7 under #82).
+
+Scope: compute the European, price-based bond option premium per 100,
+using Black-76 on an already-resolved forward clean price, per Annex A
+§A.2.2/§A.2.3 exactly:
+
+```text
+d1 = [ln(F / K) + 0.5 * sigma^2 * T] / (sigma * sqrt(T))
+d2 = d1 - sigma * sqrt(T)
+
+Call PV per 100 = DF * [F * Phi(d1) - K * Phi(d2)]
+Put  PV per 100 = DF * [K * Phi(-d2) - F * Phi(-d1)]
+```
+
+where Phi is the standard normal CDF, computed here via `math.erf`
+(stdlib, exact, deterministic) -- no `scipy` or other new dependency is
+added. Only Phi (CDF) is implemented; the standard normal PDF (phi) is
+used solely by Annex A §A.2.5's closed-form Greeks, which are explicitly
+out of scope for this slice, so it is not added.
+
+**Zero composition, by design (unlike `bli_forward_clean_price.py`):**
+this module does not import `bli_forward_clean_price`,
+`bli_curve_discount_factor`, `bli_curve_selector`, `bli_valuation_time`,
+`bli_quantlib_bond_adapter`, `BLIMVPInputBundle`, or any curve/market-data
+type. Every one of F, K, sigma, T, DF is received as a plain,
+already-resolved ``float`` -- this helper has no notion of dates, curves,
+or bundles at all. Assembling those five numbers from a
+`BLIMVPInputBundle` (forward clean price, strike, volatility, time to
+expiry, and Option Discount Curve discount factor) is explicitly #44's
+job (engine wiring), not this helper's.
+
+**Output is PV per 100 only** -- matching every other helper in this
+dependency chain (`forward_clean_price_per_100`, coupon amounts,
+discount factors). This function does not accept, and does not apply,
+Bond Option Notional (`N`); Annex A §A.2.3's separate
+"Option PV = (PV per 100) * N / 100" line is a trivial scaling step left
+to a future engine-wiring slice, not implemented here.
+
+**No pricing math beyond this one formula is added here.** No forward
+clean price construction, no volatility conversion, no yield-based
+option, no Greeks, no American exercise, no physical delivery. This
+module is not imported by, and does not change the behavior of,
+`pricing/bli_pricing_engine.py::price_bli_mvp`.
+
+**No system clock, and no dates of any kind:** `time_to_expiry` is
+received as an already-computed year fraction (``float``) -- this module
+never reads an ISO date string, and the current wall-clock date/time is
+never read.
+"""
+
+from __future__ import annotations
+
+from math import erf, isfinite, log, sqrt
+
+from shiori_pricing_lab.products.enums import OptionType, coerce_enum
+
+
+def _require_finite_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    if not isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def _require_positive(value: float, field_name: str) -> float:
+    if not value > 0:
+        raise ValueError(
+            f"{field_name} must be positive, got {value!r} -- pricing is blocked rather "
+            "than producing a fabricated option value"
+        )
+    return value
+
+
+def _standard_normal_cdf(x: float) -> float:
+    """Return Phi(x), the standard normal CDF, via `math.erf`.
+
+    ``Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))`` -- exact and deterministic,
+    no external dependency. Only Phi is implemented; the standard normal
+    PDF is not needed by Annex A §A.2.3's PV formula (only by §A.2.5's
+    Greeks, out of scope here).
+    """
+
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
+
+def black76_price_option_pv_per_100(
+    *,
+    forward_clean_price: float,
+    strike_clean_price: float,
+    price_volatility: float,
+    time_to_expiry: float,
+    discount_factor: float,
+    option_type: OptionType | str,
+) -> float:
+    """Return the Black-76 European price-based bond option PV per 100.
+
+    ``forward_clean_price`` (F), ``strike_clean_price`` (K),
+    ``price_volatility`` (sigma), ``time_to_expiry`` (T, a year fraction),
+    and ``discount_factor`` (DF, from the Option Discount Curve -- never
+    the Bond Reference Curve) are all plain, already-resolved floats; this
+    function performs no date, curve, or market-data lookup of any kind.
+    ``option_type`` is coerced via the existing
+    `products.enums.OptionType` vocabulary (``CALL``/``PUT``).
+
+    Per Annex A §A.2.4, F > 0, K > 0, sigma > 0, and T > 0 are all
+    required -- any violation raises `ValueError` ("pricing blocked")
+    rather than returning a fabricated number. ``discount_factor`` is not
+    explicitly listed in §A.2.4's boundary set, but is validated the same
+    way (finite, strictly positive) as a defensive fail-fast measure,
+    consistent with the discount-factor validation already reviewed in
+    `bli_forward_clean_price.py` (#42) -- a zero, negative, NaN, or
+    infinite discount factor never silently produces an option value.
+
+    Returns PV **per 100** only -- no Bond Option Notional scaling is
+    accepted or applied (Annex A's separate ``PV per 100 * N / 100`` step
+    is left to a future engine-wiring slice).
+    """
+
+    option_type = coerce_enum(option_type, OptionType, "option_type")
+
+    forward_clean_price = _require_positive(
+        _require_finite_number(forward_clean_price, "forward_clean_price"),
+        "forward_clean_price",
+    )
+    strike_clean_price = _require_positive(
+        _require_finite_number(strike_clean_price, "strike_clean_price"), "strike_clean_price"
+    )
+    price_volatility = _require_positive(
+        _require_finite_number(price_volatility, "price_volatility"), "price_volatility"
+    )
+    time_to_expiry = _require_positive(
+        _require_finite_number(time_to_expiry, "time_to_expiry"), "time_to_expiry"
+    )
+    discount_factor = _require_positive(
+        _require_finite_number(discount_factor, "discount_factor"), "discount_factor"
+    )
+
+    sqrt_t = sqrt(time_to_expiry)
+    d1 = (
+        log(forward_clean_price / strike_clean_price)
+        + 0.5 * price_volatility**2 * time_to_expiry
+    ) / (price_volatility * sqrt_t)
+    d2 = d1 - price_volatility * sqrt_t
+
+    if option_type is OptionType.CALL:
+        return discount_factor * (
+            forward_clean_price * _standard_normal_cdf(d1)
+            - strike_clean_price * _standard_normal_cdf(d2)
+        )
+    return discount_factor * (
+        strike_clean_price * _standard_normal_cdf(-d2)
+        - forward_clean_price * _standard_normal_cdf(-d1)
+    )
