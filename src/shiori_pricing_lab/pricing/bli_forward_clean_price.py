@@ -162,7 +162,11 @@ def forward_clean_price_per_100(
     unsupported maturity/principal boundary, ex-dividend-window date,
     ...). ``curve_points`` is read only for ``bond.currency`` /
     ``BLICurvePurpose.BOND_REFERENCE_CURVE`` rows -- no other currency or
-    curve purpose is ever selected.
+    curve purpose is ever selected. Each coupon's own discount factor is
+    validated (finite and strictly positive) before it is used to value
+    that coupon -- a zero, negative, or non-finite coupon discount factor
+    (e.g. from an extreme interpolated zero rate) raises ``ValueError``
+    immediately rather than silently valuing that coupon at zero.
     """
 
     if not isinstance(bond, BondReferenceData):
@@ -188,6 +192,15 @@ def forward_clean_price_per_100(
             curve_purpose=_FORWARD_CLEAN_PRICE_CURVE_PURPOSE,
             target_year_fraction=coupon_year_fraction,
         )
+        coupon_discount_factor = _require_finite_number(
+            coupon_discount_factor, f"coupon_discount_factor({flow.payment_date})"
+        )
+        if not coupon_discount_factor > 0:
+            raise ValueError(
+                f"coupon_discount_factor({flow.payment_date}) must be positive, got "
+                f"{coupon_discount_factor!r} -- a zero, negative, or non-finite coupon "
+                "discount factor is never used to silently value that coupon at zero"
+            )
         coupon_pv += flow.amount_per_100 * coupon_discount_factor
 
     expiry_year_fraction = year_fraction_to_expiry(valuation_date, expiry_date)

@@ -322,6 +322,29 @@ def test_one_coupon_before_expiry_matches_recomputed_annex_a_formula():
     assert result != pytest.approx(without_coupon_pv)
 
 
+@_requires_quantlib
+def test_invalid_coupon_discount_factor_fails_before_producing_a_price():
+    # An extreme (but validly interpolated) zero rate underflows
+    # exp(-rate * year_fraction) to exactly 0.0 for the coupon target --
+    # a genuinely reachable degenerate curve input, not a fabricated
+    # bypass. This must raise before that coupon is ever added into
+    # coupon_pv, and must never silently value the coupon at zero.
+    valuation_date = "2026-07-01"
+    expiry_date = "2027-01-20"
+    curve_points = _local_bond_reference_curve_points(
+        _ELIGIBLE_BOND.currency, one_month_rate=100_000.0, one_year_rate=100_000.0
+    )
+
+    with pytest.raises(ValueError, match="coupon_discount_factor"):
+        forward_clean_price_per_100(
+            bond=_ELIGIBLE_BOND,
+            spot_clean_price=101.25,
+            valuation_date=valuation_date,
+            expiry_date=expiry_date,
+            curve_points=curve_points,
+        )
+
+
 # --- 4. Valuation/expiry accrued-interest inclusion --------------------------
 
 
