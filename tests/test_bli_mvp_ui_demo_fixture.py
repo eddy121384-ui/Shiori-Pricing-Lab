@@ -19,6 +19,7 @@ from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
 from shiori_pricing_lab.data.bli_mvp_input_bundle_fixtures import (
     SYNTHETIC_BLI_MVP_INPUT_BUNDLE,
 )
+from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.pricing.result import PricingErrorCode, PricingStatus
@@ -36,6 +37,20 @@ def test_demo_bundles_are_bli_mvp_input_bundles():
 
 def test_curve_range_error_demo_is_the_unmodified_shared_fixture():
     assert SYNTHETIC_UI_DEMO_BUNDLE_CURVE_RANGE_ERROR is SYNTHETIC_BLI_MVP_INPUT_BUNDLE
+    assert (
+        SYNTHETIC_UI_DEMO_BUNDLE_CURVE_RANGE_ERROR.market_data_snapshot
+        is SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
+    )
+
+
+def test_happy_path_demo_snapshot_has_distinct_identity_from_shared_snapshot():
+    # Codex P2 review of PR #90: the demo snapshot's curve_points differ
+    # from the shared snapshot's, so it must not inherit the shared
+    # snapshot's identity unchanged.
+    demo_snapshot = SYNTHETIC_UI_DEMO_BUNDLE.market_data_snapshot
+    assert demo_snapshot.snapshot_id != SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.snapshot_id
+    assert demo_snapshot.source_system != SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.source_system
+    assert demo_snapshot.snapshot_id == "UI_DEMO_BLI_SNAPSHOT_SUCCESS_0001"
 
 
 def test_happy_path_demo_reuses_shared_product_and_bundle_id():

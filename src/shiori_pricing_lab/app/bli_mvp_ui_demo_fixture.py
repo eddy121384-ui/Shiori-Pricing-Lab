@@ -14,7 +14,10 @@ module is modified:
   deterministic *success* path for this product shape. That pattern is
   deliberately kept test-local there (out of scope for #44's PR); this
   module gives the UI its own copy so the happy-path demo does not depend
-  on test code, without touching the shared fixture itself.
+  on test code, without touching the shared fixture itself. Its snapshot
+  also carries its own ``snapshot_id``/``source_system`` (distinct from
+  the shared ``SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT``'s), since its
+  ``curve_points`` differ from that shared snapshot's own.
 - ``SYNTHETIC_UI_DEMO_BUNDLE_CURVE_RANGE_ERROR``: an alias for the
   unmodified ``SYNTHETIC_BLI_MVP_INPUT_BUNDLE``, reused as-is. Its
   ``"2Y"``/``"5Y"`` curve nodes do not bracket its own short expiry, so
@@ -94,8 +97,17 @@ def _short_tenor_curve_points(currency: Currency) -> tuple[BLICurvePoint, ...]:
 
 
 def _build_ui_demo_bundle() -> BLIMVPInputBundle:
+    # Codex P2 review of PR #90: this snapshot's curve_points differ from
+    # the shared SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, so it must carry its
+    # own snapshot_id/source_system rather than inheriting the original
+    # snapshot's identity unchanged -- otherwise a caller could mistake
+    # this UI-demo-only curve data for the shared, reviewed snapshot.
+    # as_of_timestamp is left unchanged: it describes when the underlying
+    # market observations were taken, which this demo does not alter.
     local_snapshot = replace(
         SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT,
+        snapshot_id="UI_DEMO_BLI_SNAPSHOT_SUCCESS_0001",
+        source_system="UI_DEMO_LOCAL_CURVE",
         curve_points=_short_tenor_curve_points(
             SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.currency
         ),

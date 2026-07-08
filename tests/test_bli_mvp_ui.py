@@ -18,8 +18,11 @@ import inspect
 import pytest
 
 from shiori_pricing_lab.app import bli_mvp_ui as bli_mvp_ui_module
-from shiori_pricing_lab.app.bli_mvp_ui import prepare_bli_mvp_display
-from shiori_pricing_lab.app.bli_mvp_ui_demo_fixture import SYNTHETIC_UI_DEMO_BUNDLE
+from shiori_pricing_lab.app.bli_mvp_ui import prepare_bli_mvp_context, prepare_bli_mvp_display
+from shiori_pricing_lab.app.bli_mvp_ui_demo_fixture import (
+    SYNTHETIC_UI_DEMO_BUNDLE,
+    SYNTHETIC_UI_DEMO_BUNDLE_CURVE_RANGE_ERROR,
+)
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.pricing.result import (
@@ -41,6 +44,7 @@ _requires_quantlib = pytest.mark.skipif(
 def test_module_imports_cleanly():
     assert hasattr(bli_mvp_ui_module, "render_bli_mvp_page")
     assert hasattr(bli_mvp_ui_module, "prepare_bli_mvp_display")
+    assert hasattr(bli_mvp_ui_module, "prepare_bli_mvp_context")
 
 
 # --- 2. prepare_bli_mvp_display maps PricingResult verbatim ------------------
@@ -94,6 +98,10 @@ def test_prepare_display_maps_success_result_verbatim():
     assert display["status"] == "SUCCESS"
     assert display["method"] == _SUCCESS_RESULT.method
     assert display["pv"] == _SUCCESS_RESULT.pv
+    assert display["product_id"] == _SUCCESS_RESULT.product_id
+    assert display["product_type"] == _SUCCESS_RESULT.product_type
+    assert display["valuation_date"] == _SUCCESS_RESULT.valuation_date
+    assert display["market_data_as_of"] == _SUCCESS_RESULT.market_data_as_of
     for key in (
         "forward_clean_price_per_100",
         "black76_pv_per_100",
@@ -114,6 +122,10 @@ def test_prepare_display_maps_failed_result_verbatim():
     assert display["status"] == "FAILED"
     assert display["pv"] is None
     assert display["forward_clean_price_per_100"] is None
+    # Codex P2 review of PR #90: valuation context must still be present
+    # (and read verbatim) on a FAILED result, not just on SUCCESS.
+    assert display["valuation_date"] == _FAILED_RESULT.valuation_date
+    assert display["market_data_as_of"] == _FAILED_RESULT.market_data_as_of
     assert display["errors"] == [
         {
             "code": "ENGINE_ERROR",
@@ -134,6 +146,26 @@ def test_prepare_display_on_real_engine_success_result():
         == result.assumptions["forward_clean_price_per_100"]
     )
     assert display["black76_pv_per_100"] == result.assumptions["black76_pv_per_100"]
+
+
+# --- 2b. prepare_bli_mvp_context maps bundle fields verbatim (snapshot_id) --
+
+
+def test_prepare_context_reads_snapshot_id_and_bundle_id_verbatim():
+    context = prepare_bli_mvp_context(SYNTHETIC_UI_DEMO_BUNDLE)
+
+    assert context["bundle_id"] == SYNTHETIC_UI_DEMO_BUNDLE.bundle_id
+    assert context["snapshot_id"] == SYNTHETIC_UI_DEMO_BUNDLE.market_data_snapshot.snapshot_id
+
+
+def test_prepare_context_distinguishes_the_two_demo_bundles():
+    success_context = prepare_bli_mvp_context(SYNTHETIC_UI_DEMO_BUNDLE)
+    error_context = prepare_bli_mvp_context(SYNTHETIC_UI_DEMO_BUNDLE_CURVE_RANGE_ERROR)
+
+    # No recomputation: this is just each bundle's own snapshot_id, and
+    # the two demo bundles' snapshots have distinct identities (Codex P2
+    # review of PR #90).
+    assert success_context["snapshot_id"] != error_context["snapshot_id"]
 
 
 # --- 3. No pricing-math / valuation logic in the UI module -------------------

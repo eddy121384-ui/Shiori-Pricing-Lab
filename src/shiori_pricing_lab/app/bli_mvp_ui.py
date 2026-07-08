@@ -21,6 +21,7 @@ from shiori_pricing_lab.app.bli_mvp_ui_demo_fixture import (
     SYNTHETIC_UI_DEMO_BUNDLE,
     SYNTHETIC_UI_DEMO_BUNDLE_CURVE_RANGE_ERROR,
 )
+from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.pricing.result import PricingResult, PricingStatus
@@ -46,6 +47,10 @@ def prepare_bli_mvp_display(result: PricingResult) -> dict:
         "status": result.status.value,
         "method": result.method,
         "pv": result.pv,
+        "product_id": result.product_id,
+        "product_type": result.product_type,
+        "valuation_date": result.valuation_date,
+        "market_data_as_of": result.market_data_as_of,
         "forward_clean_price_per_100": assumptions.get("forward_clean_price_per_100"),
         "black76_pv_per_100": assumptions.get("black76_pv_per_100"),
         "option_discount_factor": assumptions.get("option_discount_factor"),
@@ -58,6 +63,22 @@ def prepare_bli_mvp_display(result: PricingResult) -> dict:
             {"code": message.code.value, "message": message.message}
             for message in result.errors
         ],
+    }
+
+
+def prepare_bli_mvp_context(bundle: BLIMVPInputBundle) -> dict:
+    """Return audit/reproducibility context read verbatim from ``bundle``.
+
+    ``snapshot_id`` and ``bundle_id`` live on the bundle, not on
+    ``PricingResult`` -- Codex P2 review of PR #90: kept as a separate
+    small helper (rather than added to ``prepare_bli_mvp_display``) so
+    that helper stays a pure function of the *result*, matching what
+    ``price_bli_mvp`` actually returns.
+    """
+
+    return {
+        "bundle_id": bundle.bundle_id,
+        "snapshot_id": bundle.market_data_snapshot.snapshot_id,
     }
 
 
@@ -92,6 +113,19 @@ def render_bli_mvp_page() -> None:
 
     result = price_bli_mvp(bundle)
     display = prepare_bli_mvp_display(result)
+    context = prepare_bli_mvp_context(bundle)
+
+    # Audit/reproducibility context (Codex P2 review of PR #90): shown for
+    # both SUCCESS and FAILED so a caller can always tell which bundle/
+    # snapshot/valuation date a result came from, without recomputing
+    # anything -- every value here is read verbatim from the bundle or
+    # PricingResult.
+    st.caption(
+        f"bundle: `{context['bundle_id']}` | snapshot: `{context['snapshot_id']}` | "
+        f"valuation date: `{display['valuation_date']}` | "
+        f"market data as of: `{display['market_data_as_of']}` | "
+        f"product: `{display['product_id']}` ({display['product_type']})"
+    )
 
     if result.status is PricingStatus.FAILED:
         st.error(f"Pricing FAILED (method: {display['method']})")
