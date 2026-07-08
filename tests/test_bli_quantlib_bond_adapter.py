@@ -550,10 +550,19 @@ def test_pricing_engine_module_does_not_import_this_adapter():
     assert "bli_quantlib_bond_adapter" not in source
 
 
-def test_price_bli_mvp_behavior_unchanged_for_existing_fixture():
+def test_price_bli_mvp_still_fails_for_existing_fixture():
+    # Issue #44 (MVP-8) wired price_bli_mvp to real methodology: this
+    # fixture now passes #41's required-input guard (it is exactly the
+    # supported shape) and fails downstream instead, because its
+    # BOND_REFERENCE_CURVE only carries "2Y"/"5Y" nodes -- too far out to
+    # bracket its own ~0.24-year bond option expiry (a known, pre-existing
+    # gap, see tests/test_bli_forward_clean_price.py and
+    # tests/test_bli_pricing_engine.py). Still FAILED, just with a
+    # different, more specific error code than the old "not implemented
+    # yet" skeleton behavior this test used to pin.
     result = price_bli_mvp(SYNTHETIC_BLI_MVP_INPUT_BUNDLE)
     assert result.status is PricingStatus.FAILED
-    assert result.errors[0].code is PricingErrorCode.UNSUPPORTED_PRODUCT
+    assert result.errors[0].code is PricingErrorCode.ENGINE_ERROR
 
 
 # --- 11. Type / boundary cases -----------------------------------------------
