@@ -43,10 +43,14 @@ crash" test.
   `tests/test_bond_linked_structured_product.py::
   test_wrapper_rejects_physical_settlement` (existing, cited, not
   duplicated here).
-- missing clean price -> FAILED/UNSUPPORTED_PRODUCT:
-  `test_missing_clean_price_fails`.
-- unsupported volatility basis -> FAILED/UNSUPPORTED_PRODUCT:
-  `test_unsupported_volatility_basis_fails`.
+- missing clean price -> FAILED/MISSING_MARKET_DATA (Codex P2 review of
+  PR #89: a reachable data-remediation failure, distinct from an
+  unsupported product shape): `test_missing_clean_price_fails`.
+- unsupported volatility basis -> FAILED/UNSUPPORTED_PRODUCT (an
+  unsupported basis with no conversion available, not merely absent
+  data): `test_unsupported_volatility_basis_fails`.
+- combined shape-and-data failure -> FAILED/UNSUPPORTED_PRODUCT wins
+  over MISSING_MARKET_DATA: `test_combined_shape_and_data_failure_prefers_unsupported_product`.
 - missing `volatility_input` object: **not reachable**; see
   `tests/test_bli_mvp_required_input_guard.py::
   test_missing_volatility_input_cannot_reach_guard` (existing, cited).
@@ -84,18 +88,8 @@ from shiori_pricing_lab.data.bli_snapshot import (
 )
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 from shiori_pricing_lab.pricing import bli_pricing_engine as bli_pricing_engine_module
-from shiori_pricing_lab.pricing.bli_black76_price_option import (
-    black76_price_option_pv_per_100,
-)
-from shiori_pricing_lab.pricing.bli_curve_discount_factor import (
-    discount_factor_from_continuous_zero_curve,
-)
-from shiori_pricing_lab.pricing.bli_forward_clean_price import (
-    forward_clean_price_per_100_for_bundle,
-)
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
-from shiori_pricing_lab.pricing.bli_valuation_time import year_fraction_to_expiry
 from shiori_pricing_lab.pricing.result import PricingErrorCode, PricingResult, PricingStatus
 from shiori_pricing_lab.products.enums import ExerciseStyle, PayoffBasis
 from shiori_pricing_lab.products.fixtures import SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT
@@ -164,44 +158,92 @@ def _local_supported_bundle() -> BLIMVPInputBundle:
     return replace(SYNTHETIC_BLI_MVP_INPUT_BUNDLE, market_data_snapshot=local_snapshot)
 
 
-def _recompute_expected_pv(bundle: BLIMVPInputBundle) -> tuple[float, float]:
-    """Independently recompute (pv_per_100, pv) via the same reviewed helpers."""
-
-    bond_option = bundle.product.bond_option
-    forward_clean_price = forward_clean_price_per_100_for_bundle(bundle)
-    time_to_expiry = year_fraction_to_expiry(bundle.valuation_date, bond_option.expiry_date)
-    option_discount_factor = discount_factor_from_continuous_zero_curve(
-        bundle.market_data_snapshot.curve_points,
-        currency=bond_option.currency,
-        curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
-        target_year_fraction=time_to_expiry,
-    )
-    pv_per_100 = black76_price_option_pv_per_100(
-        forward_clean_price=forward_clean_price,
-        strike_clean_price=bond_option.strike_price,
-        price_volatility=bundle.market_data_snapshot.volatility_input.volatility,
-        time_to_expiry=time_to_expiry,
-        discount_factor=option_discount_factor,
-        option_type=bond_option.option_type,
-    )
-    return pv_per_100, pv_per_100 * bond_option.notional / 100.0
-
-
 # --- 1. Supported case: success + deterministic full PV ---------------------
+#
+# Codex P2 review of PR #89: the expected values below are pinned literal
+# constants, independently derived by hand from Annex A's own formulas
+# and the local test fixture's documented inputs -- NOT computed inside
+# this test by calling forward_clean_price_per_100_for_bundle /
+# discount_factor_from_continuous_zero_curve / black76_price_option_pv_per_100
+# (the same production helpers price_bli_mvp itself wires), so a
+# formula/unit regression in the composed methodology cannot be silently
+# reproduced into the "expected" value here.
+#
+# Derivation (all inputs are the local test fixture's own documented
+# constants -- bond XS0000000001: SEMI_ANNUAL coupon 0.0325, coupon
+# period [2026-06-15, 2026-12-15], day_count ACT_ACT_ISDA; bond_option:
+# valuation_date 2026-07-01, expiry_date 2026-09-29, strike 99.5, CALL,
+# notional 50.0; spot clean price 101.25; sigma 0.18; local curve nodes
+# BOND_REFERENCE_CURVE "1M"=0.030/"1Y"=0.035, OPTION_DISCOUNT_CURVE
+# "1M"=0.028/"1Y"=0.032):
+#
+# 1. Accrued interest (ACT_ACT_ISDA, period entirely within the single
+#    non-leap calendar year 2026, so this reduces to a plain day-count
+#    ratio -- the /365 year-fraction factor cancels out of both the
+#    elapsed and full-period fractions):
+#      period_coupon_amount = 0.0325 * 100 / 2 = 1.625
+#      full_period_days = (2026-12-15 - 2026-06-15) = 183 days
+#      AI(valuation=2026-07-01) = 1.625 * (2026-07-01 - 2026-06-15).days / 183
+#                                = 1.625 * 16 / 183 = 0.14207650273224043
+#      AI(expiry=2026-09-29)    = 1.625 * (2026-09-29 - 2026-06-15).days / 183
+#                                = 1.625 * 106 / 183 = 0.9412568306010929
+#    No coupon payment date falls in (2026-07-01, 2026-09-29] (next
+#    coupon is 2026-12-15), so PV(coupons before expiry) = 0.
+# 2. T = (2026-09-29 - 2026-07-01).days / 365 = 90 / 365 = 0.2465753424657534
+# 3. Bond Reference Curve zero rate at T, piecewise-linear between
+#    ("1M"=1/12, 0.030) and ("1Y"=1.0, 0.035):
+#      zero_rate = 0.030 + 0.005 * (T - 1/12) / (1 - 1/12) = 0.03089041095890411
+#      DF_bondref = exp(-zero_rate * T) = 0.992412120754784
+# 4. Spot dirty = 101.25 + 0.14207650273224043 = 101.39207650273224
+#    Forward dirty = 101.39207650273224 / 0.992412120754784 = 102.16730971163268
+#    Forward clean (F) = 102.16730971163268 - 0.9412568306010929 = 101.22605288103159
+# 5. Option Discount Curve zero rate at T, piecewise-linear between
+#    ("1M"=1/12, 0.028) and ("1Y"=1.0, 0.032):
+#      zero_rate = 0.028 + 0.004 * (T - 1/12) / (1 - 1/12) = 0.028712328767123287
+#      DF_option = exp(-zero_rate * T) = 0.9929452501091504
+# 6. Black-76 (CALL), K=99.5, sigma=0.18, T=0.2465753424657534:
+#      d1 = [ln(F/K) + 0.5*sigma^2*T] / (sigma*sqrt(T)) = 0.23710784472196783
+#      d2 = d1 - sigma*sqrt(T) = 0.1477264087529121
+#      pv_per_100 = DF_option * [F*Phi(d1) - K*Phi(d2)] = 4.474769848529296
+# 7. pv = pv_per_100 * notional / 100 = 4.474769848529296 * 50.0 / 100 = 2.237384924264648
+#
+# (Steps 1-2 and 4-7 above were computed independently using plain
+# `math`/`datetime` arithmetic, not by calling the production wrapper
+# functions; the resulting values were then cross-checked once against
+# the real forward_clean_price_per_100_for_bundle /
+# discount_factor_from_continuous_zero_curve / black76_price_option_pv_per_100
+# call path during development to confirm no transcription error -- that
+# check is not part of this test file.)
+
+_EXPECTED_FORWARD_CLEAN_PRICE_PER_100 = 101.22605288103159
+_EXPECTED_TIME_TO_EXPIRY = 0.2465753424657534
+_EXPECTED_OPTION_DISCOUNT_FACTOR = 0.9929452501091504
+_EXPECTED_BLACK76_PV_PER_100 = 4.474769848529296
+_EXPECTED_PV = 2.237384924264648
 
 
 @_requires_quantlib
-def test_supported_case_returns_success_with_recomputed_pv():
+def test_supported_case_returns_success_with_pinned_pv():
     bundle = _local_supported_bundle()
-    expected_pv_per_100, expected_pv = _recompute_expected_pv(bundle)
 
     result = price_bli_mvp(bundle)
 
     assert isinstance(result, PricingResult)
     assert result.status is PricingStatus.SUCCESS
     assert result.errors == ()
-    assert result.pv == pytest.approx(expected_pv)
-    assert result.assumptions["black76_pv_per_100"] == pytest.approx(expected_pv_per_100)
+    assert result.assumptions["forward_clean_price_per_100"] == pytest.approx(
+        _EXPECTED_FORWARD_CLEAN_PRICE_PER_100
+    )
+    assert result.assumptions["time_to_expiry_year_fraction"] == pytest.approx(
+        _EXPECTED_TIME_TO_EXPIRY
+    )
+    assert result.assumptions["option_discount_factor"] == pytest.approx(
+        _EXPECTED_OPTION_DISCOUNT_FACTOR
+    )
+    assert result.assumptions["black76_pv_per_100"] == pytest.approx(
+        _EXPECTED_BLACK76_PV_PER_100
+    )
+    assert result.pv == pytest.approx(_EXPECTED_PV)
     assert result.dv01 is None
     assert result.cashflows is None
     assert result.method == "black76_forward_clean_price_v1"
@@ -214,9 +256,15 @@ def test_pv_equals_pv_per_100_times_notional_over_100():
 
     notional = bundle.product.bond_option.notional
     assert notional != 100.0  # otherwise this test would not distinguish scaling
-    expected_pv = result.assumptions["black76_pv_per_100"] * notional / 100.0
+    assert notional == 50.0
 
-    assert result.pv == pytest.approx(expected_pv)
+    assert result.assumptions["black76_pv_per_100"] == pytest.approx(
+        _EXPECTED_BLACK76_PV_PER_100
+    )
+    assert result.pv == pytest.approx(
+        result.assumptions["black76_pv_per_100"] * notional / 100.0
+    )
+    assert result.pv == pytest.approx(_EXPECTED_PV)
     assert result.pv != pytest.approx(result.assumptions["black76_pv_per_100"])
     assert result.assumptions["notional"] == notional
     assert result.assumptions["pv_scaling_formula"] == "pv = black76_pv_per_100 * notional / 100"
@@ -236,6 +284,19 @@ def test_success_assumptions_document_units_and_curve_usage():
     assert "OPTION_DISCOUNT_CURVE" in assumptions["option_discount_curve_purpose"]
     assert assumptions["volatility_basis"] in ("PRICE_VOL", "EQUIVALENT_PRICE_VOL")
     assert assumptions["position_sign_applied"] is False
+
+
+@_requires_quantlib
+def test_success_assumptions_document_priced_component_scope():
+    bundle = _local_supported_bundle()
+    result = price_bli_mvp(bundle)
+
+    assumptions = result.assumptions
+    assert assumptions["priced_component"] == "bond_option_leg"
+    assert assumptions["priced_component_scope"] == "option_leg_only_not_full_structured_product"
+    assert "deposit_leg" in assumptions["excluded_components"]
+    assert "principal_redemption" in assumptions["excluded_components"]
+    assert "physical_delivery" in assumptions["excluded_components"]
 
 
 # --- 2. Shared fixture curve-range gap: helper exception -> FAILED/ENGINE_ERROR --
@@ -310,7 +371,11 @@ def test_missing_clean_price_fails():
     result = price_bli_mvp(bundle)
 
     assert result.status is PricingStatus.FAILED
-    assert result.errors[0].code is PricingErrorCode.UNSUPPORTED_PRODUCT
+    # Codex P2 review of PR #89: a missing clean price is a reachable
+    # data-remediation failure (the product shape itself is otherwise
+    # fully supported), not an unsupported product shape -- so this maps
+    # to MISSING_MARKET_DATA, not UNSUPPORTED_PRODUCT.
+    assert result.errors[0].code is PricingErrorCode.MISSING_MARKET_DATA
     assert any(
         "clean_price_per_100" in reason for reason in result.errors[0].detail["reasons"]
     )
@@ -333,6 +398,38 @@ def test_unsupported_volatility_basis_fails():
     assert any(
         "volatility_basis" in reason for reason in result.errors[0].detail["reasons"]
     )
+
+
+def test_combined_shape_and_data_failure_prefers_unsupported_product():
+    # Both an unsupported exercise style AND a missing clean price are
+    # present at once -- UNSUPPORTED_PRODUCT must win, since a caller
+    # should not be told "just supply the missing price" when the
+    # product shape itself is also unsupported.
+    bond_option = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option,
+        exercise_style=ExerciseStyle.AMERICAN,
+        exercise_start_date="2026-06-01",
+    )
+    product = replace(SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT, bond_option=bond_option)
+
+    yield_only_quote = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.market_data_snapshot.bond_quote,
+        clean_price_per_100=None,
+        yield_value=0.035,
+    )
+    snapshot = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.market_data_snapshot, bond_quote=yield_only_quote
+    )
+
+    bundle = replace(SYNTHETIC_BLI_MVP_INPUT_BUNDLE, product=product, market_data_snapshot=snapshot)
+
+    result = price_bli_mvp(bundle)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.UNSUPPORTED_PRODUCT
+    reasons = result.errors[0].detail["reasons"]
+    assert any("exercise_style" in reason for reason in reasons)
+    assert any("clean_price_per_100" in reason for reason in reasons)
 
 
 def test_guard_rejection_produces_no_fake_numeric_output():

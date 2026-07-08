@@ -35,13 +35,22 @@ translating outcomes into a `PricingResult`.
 - Wrong ``bundle`` type: raises ``TypeError`` -- a contract violation,
   not a domain outcome (unchanged from the prior skeleton).
 - Guard rejects the bundle (``supported=False``): returns
-  ``PricingResult(status=FAILED, errors=[PricingErrorCode.
-  UNSUPPORTED_PRODUCT])``, with the guard's full ``reasons`` tuple
-  preserved verbatim in the message ``detail`` -- never string-sniffed
-  or split across multiple error codes. Every guard rejection, whatever
-  the specific reason, maps to this one code; no reason-code taxonomy is
-  added to ``RequiredInputGuardResult``, and ``pricing/result.py`` is not
-  modified.
+  ``PricingResult(status=FAILED, ...)`` with the guard's full
+  ``reasons`` tuple preserved verbatim in the message ``detail``. The
+  error code is picked by ``_classify_guard_rejection``, a small local
+  classifier reading **typed bundle fields directly** (never
+  string-sniffing the guard's plain-text ``reasons``): an unsupported
+  product shape (exercise style, payoff basis, settlement type, or an
+  unsupported volatility basis such as ``YIELD_VOL`` -- a basis with no
+  conversion available, not merely absent data) maps to
+  ``PricingErrorCode.UNSUPPORTED_PRODUCT``; a bundle whose shape is
+  otherwise supported but whose ``bond_quote.clean_price_per_100`` is
+  absent maps to ``PricingErrorCode.MISSING_MARKET_DATA``. When both
+  kinds of problem are present at once, ``UNSUPPORTED_PRODUCT`` wins --
+  a caller should not be told "just supply the missing price" when the
+  product shape itself is also unsupported. No reason-code taxonomy is
+  added to ``RequiredInputGuardResult``, and ``pricing/result.py`` is
+  not modified.
 - A downstream helper raises ``ValueError`` (covers
   ``BLIBondScheduleError``, ``BLIBondExDividendWindowError``,
   ``BLIBondMaturityCashflowUnsupportedError`` -- all ``ValueError``
@@ -69,6 +78,16 @@ term; BUY/SELL P&L sign convention belongs to a future reporting/
 settlement layer, not this engine. ``assumptions["position_sign_applied"]``
 records this explicitly as ``False`` on every success result.
 
+**Priced component is the bond option leg only** (Codex P2 review of PR
+#89): ``PricingResult.product_type`` still identifies the wrapper
+``BondLinkedStructuredProduct`` (unchanged, since that is what the
+bundle actually holds), but this engine only values
+``product.bond_option`` -- never the deposit leg, never a combined
+structured-product payoff. ``assumptions["priced_component"]``,
+``["priced_component_scope"]``, and ``["excluded_components"]`` make
+this explicit and machine-readable on every success result, so a caller
+cannot mistake the returned ``pv`` for a whole-structured-product value.
+
 **Unchanged from the prior skeleton:** ``price_bli_mvp`` still accepts
 only a ``BLIMVPInputBundle`` (never calls ``resolve_bond_reference_data``
 or ``build_bli_mvp_input_bundle``), never mutates ``bundle``, is not
@@ -88,7 +107,7 @@ reporting, and any portfolio/scenario engine.
 from __future__ import annotations
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
-from shiori_pricing_lab.data.bli_snapshot import BLICurvePurpose
+from shiori_pricing_lab.data.bli_snapshot import BLICurvePurpose, BLIVolatilityBasis
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
     black76_price_option_pv_per_100,
 )
@@ -99,6 +118,7 @@ from shiori_pricing_lab.pricing.bli_forward_clean_price import (
     forward_clean_price_per_100_for_bundle,
 )
 from shiori_pricing_lab.pricing.bli_mvp_required_input_guard import (
+    RequiredInputGuardResult,
     check_bli_mvp_required_inputs,
 )
 from shiori_pricing_lab.pricing.bli_valuation_time import year_fraction_to_expiry
@@ -108,6 +128,7 @@ from shiori_pricing_lab.pricing.result import (
     PricingResult,
     PricingStatus,
 )
+from shiori_pricing_lab.products.enums import ExerciseStyle, PayoffBasis, SettlementType
 
 ENGINE_NAME = "bli_mvp_black76_forward_clean_price_engine"
 ENGINE_VERSION = "1.0.0"
@@ -118,6 +139,58 @@ ENGINE_VERSION = "1.0.0"
 # diagnostics metadata can branch on this.
 _METHOD_NOT_SUPPORTED = "not_supported"
 _METHOD_BLACK76_FORWARD_CLEAN_PRICE = "black76_forward_clean_price_v1"
+
+# Volatility bases this engine can use as sigma without any conversion --
+# a local mirror of #41's own (private) allowlist, kept here rather than
+# imported so RequiredInputGuardResult's module stays untouched (Codex
+# P2 review of PR #89: this classifier reads typed bundle fields, not
+# guard reason text).
+_SUPPORTED_VOLATILITY_BASES = (
+    BLIVolatilityBasis.PRICE_VOL,
+    BLIVolatilityBasis.EQUIVALENT_PRICE_VOL,
+)
+
+
+def _classify_guard_rejection(
+    bundle: BLIMVPInputBundle, guard_result: RequiredInputGuardResult
+) -> PricingErrorCode:
+    """Return the ``PricingErrorCode`` for a guard-rejected ``bundle``.
+
+    Reads typed bundle fields directly -- never the guard's plain-text
+    ``reasons`` strings (Codex P2 review of PR #89: string-sniffing the
+    guard's human-readable reasons would be fragile, since a wording
+    change in #41's module could silently break classification here).
+
+    An unsupported product shape (exercise style, payoff basis,
+    settlement type, or a volatility basis with no conversion available)
+    always wins over a merely-missing market-data value: a caller should
+    not be told "just supply the missing price" when the product shape
+    itself is also unsupported.
+    """
+
+    bond_option = bundle.product.bond_option
+    volatility_basis = bundle.market_data_snapshot.volatility_input.volatility_basis
+
+    shape_supported = (
+        bond_option.exercise_style is ExerciseStyle.EUROPEAN
+        and bond_option.payoff_basis is PayoffBasis.PRICE
+        and bond_option.settlement_type is SettlementType.CASH
+        and volatility_basis in _SUPPORTED_VOLATILITY_BASES
+    )
+    if not shape_supported:
+        return PricingErrorCode.UNSUPPORTED_PRODUCT
+
+    if bundle.market_data_snapshot.bond_quote.clean_price_per_100 is None:
+        return PricingErrorCode.MISSING_MARKET_DATA
+
+    # Every other guard-rejection reason still in scope for this
+    # classifier (missing bond reference data, missing required curve
+    # purposes, a blank valuation date/expiry/strike/notional) is
+    # defensive/unreachable for a bundle that constructed successfully
+    # at all (see #41's own module docstring) -- default to
+    # UNSUPPORTED_PRODUCT, matching the prior, pre-Codex-review behavior
+    # for these unreachable branches.
+    return PricingErrorCode.UNSUPPORTED_PRODUCT
 
 
 def price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult:
@@ -148,13 +221,14 @@ def price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult:
 
     guard_result = check_bli_mvp_required_inputs(bundle)
     if not guard_result.supported:
+        error_code = _classify_guard_rejection(bundle, guard_result)
         return PricingResult(
             **common_fields,
             status=PricingStatus.FAILED,
             method=_METHOD_NOT_SUPPORTED,
             errors=(
                 PricingMessage(
-                    code=PricingErrorCode.UNSUPPORTED_PRODUCT,
+                    code=error_code,
                     message=(
                         "BLI required-input guard rejected this bundle: "
                         f"{'; '.join(guard_result.reasons)}"
@@ -227,5 +301,12 @@ def price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult:
             "option PV discount factor)",
             "option_type": bond_option.option_type.value,
             "position_sign_applied": False,
+            "priced_component": "bond_option_leg",
+            "priced_component_scope": "option_leg_only_not_full_structured_product",
+            "excluded_components": [
+                "deposit_leg",
+                "principal_redemption",
+                "physical_delivery",
+            ],
         },
     )
