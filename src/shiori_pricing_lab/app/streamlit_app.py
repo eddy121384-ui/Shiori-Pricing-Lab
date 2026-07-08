@@ -5,6 +5,7 @@ from pathlib import Path
 import plotly.express as px
 import streamlit as st
 
+from shiori_pricing_lab.app.bli_mvp_ui import render_bli_mvp_page
 from shiori_pricing_lab.charts.series import curve_to_chart_series, scenario_to_chart_series
 from shiori_pricing_lab.data.providers import CSVMarketDataProvider
 from shiori_pricing_lab.data.snapshot import MarketDataSnapshot
@@ -15,8 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SAMPLE_DATA = PROJECT_ROOT / "examples" / "sample_market_data.csv"
 
 
-def main() -> None:
-    st.set_page_config(page_title="Shiori Pricing Lab", layout="wide")
+def render_rates_curve_demo_page() -> None:
     st.title("Shiori Pricing Lab")
     st.caption(
         "Local prototype: load sample rates data, build a simple curve, "
@@ -52,6 +52,17 @@ def main() -> None:
     st.subheader("Scenario output")
     scenario_series = scenario_to_chart_series(scenario)
     st.dataframe(scenario_series, use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Shiori Pricing Lab", layout="wide")
+    page = st.sidebar.radio(
+        "Page", ["Rates Curve Demo", "Bond Option (BLI MVP)"]
+    )
+    if page == "Rates Curve Demo":
+        render_rates_curve_demo_page()
+    else:
+        render_bli_mvp_page()
 
 
 if __name__ == "__main__":
