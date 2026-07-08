@@ -385,6 +385,6 @@ def test_pricing_modules_have_no_provider_csv_bloomberg_or_web_imports():
         "urllib",
     )
     for path in sorted(pricing_dir.glob("*.py")):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for fragment in forbidden_fragments:
             assert fragment not in text, f"{path.name} contains forbidden import/use {fragment}"
