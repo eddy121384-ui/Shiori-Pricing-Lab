@@ -681,6 +681,6 @@ def test_pricing_engine_modules_have_no_system_date():
 
     pricing_dir = Path(pricing_pkg.__file__).parent
     for path in sorted(pricing_dir.glob("*.py")):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert "date.today(" not in text, f"{path.name} uses date.today()"
         assert "datetime.now(" not in text, f"{path.name} uses datetime.now()"
