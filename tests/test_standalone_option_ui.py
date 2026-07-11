@@ -1,26 +1,29 @@
 """Tests for the standalone bond-option trader workbench UI (Issue #97, PR B).
 
-Page behavior is exercised with ``streamlit.testing.v1.AppTest.from_function``
-targeting ``render_standalone_option_workbench_page`` directly, rather than
-re-executing the whole ``streamlit_app.py``. That keeps these tests scoped to
-the page under test and avoids importing the unrelated ``bli_mvp`` demo
-fixture, whose module-level rebuild is sensitive to ``sys.modules`` state left
-by earlier import-isolation suites (see the module-level note below). Upload
-decoding, ``retrieved_at`` mapping, navigation wiring, and the "no pricing
-math / no shortcut / no broad except / no client-quote label" guarantees are
-proven with pure-helper and source-level assertions. File-upload widgets are
-not reliably drivable via AppTest in this Streamlit version, so upload
-decoding is proven with the pure decode helper (per the Issue #97 PR B
-decision).
+Isolation strategy (see the full-suite interference note below):
 
-Navigation is verified with a source assertion on ``streamlit_app.py`` rather
-than by executing it: running the whole legacy app pulls in the ``bli_mvp``
-demo-fixture rebuild, which is unrelated to this page and is fragile under the
-``del sys.modules[...]`` import-isolation performed by ``test_products`` /
-``test_pricing_engine`` (those delete ``products``/``data`` but leave
-``reference_data`` cached, splitting the ``Currency`` enum identity that
-``BLIMVPInputBundle`` compares with ``is``). This UI change touches none of
-that; the source assertion checks the wiring without inheriting the hazard.
+- **Page wiring** is exercised with ``AppTest.from_function`` targeting the
+  page directly, never by re-executing the whole ``streamlit_app.py`` (which
+  would pull in the unrelated ``bli_mvp`` demo-fixture rebuild).
+- **Render correctness** (SUCCESS metrics, FAILED errors, ``retrieved_at``
+  separation) is exercised by rendering **real display dicts built once at
+  import time** (before any test body runs) through
+  ``AppTest.from_function`` with ``kwargs``. Rendering a plain display dict
+  does no BLI construction, so these assertions are strong *and* immune to
+  the process-state hazard described below.
+- **Navigation** is verified with a source assertion on ``streamlit_app.py``.
+
+Full-suite interference (root cause, not fixed here): the import-isolation
+suites ``test_products`` / ``test_products_ccs_fxswap`` / ``test_pricing_engine``
+call ``del sys.modules[...]`` for ``products``/``data``/``app`` prefixes to
+assert layering, but never delete ``reference_data`` and never restore
+``sys.modules``. That leaves ``reference_data`` cached while ``products`` is
+rebuilt, producing two distinct ``Currency`` enum objects; ``BLIMVPInputBundle``
+/ ``BLIStandaloneBondOptionRequest`` compare currency with ``is``, so any
+*fresh* construction mixing the two raises. These UI tests avoid triggering a
+fresh construction after that state by building their pricing inputs at import
+time and only re-rendering them. The underlying leak is an existing-test /
+schema concern, reported separately; nothing here modifies it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from shiori_pricing_lab.app.standalone_option_ui import (
     _retrieved_at_or_none,
     render_standalone_option_workbench_page,
 )
+from shiori_pricing_lab.app.standalone_option_workbench import price_standalone_option_case
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 
 _QUANTLIB_AVAILABLE = is_quantlib_available()
@@ -52,17 +56,56 @@ _EXAMPLE_PATH = _REPO_ROOT / "examples" / "standalone_option_case.json"
 
 _EXPECTED_PV = 2.237384924264648
 _EXPECTED_BLACK76_PV_PER_100 = 4.474769848529296
+_RETRIEVED_AT = "2026-07-11T09:00:00Z"
+_SOURCE_AS_OF = "2026-07-01T16:00:00Z"
+
+
+def _yield_vol_case_text() -> str:
+    envelope = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    envelope["volatility_input"] = {
+        **envelope["volatility_input"],
+        "volatility_basis": "YIELD_VOL",
+    }
+    return json.dumps(envelope)
+
+
+# Real display contexts, built at import time (before any test body runs, so the
+# module graph is consistent). Rendering these does no BLI construction.
+# A YIELD_VOL case is a guard rejection -> FAILED, and needs no QuantLib.
+_FAILED_DISPLAY = price_standalone_option_case(
+    _yield_vol_case_text(), retrieved_at=_RETRIEVED_AT
+)[2]
+_FAILED_DISPLAY_NO_RETRIEVED = price_standalone_option_case(_yield_vol_case_text())[2]
+_SUCCESS_DISPLAY = (
+    price_standalone_option_case(_load_example_case_text(), retrieved_at=_RETRIEVED_AT)[2]
+    if _QUANTLIB_AVAILABLE
+    else None
+)
+
+
+def _render_display_script(display: dict) -> None:
+    # Self-contained AppTest.from_function entry point: renders a prepared
+    # display dict via the real page render helper. No BLI construction.
+    from shiori_pricing_lab.app.standalone_option_ui import _render_pricing_result
+
+    _render_pricing_result(display)
 
 
 def _render_page_script() -> None:
-    # Self-contained entry point for AppTest.from_function: it re-execs this
-    # function's source, so it imports the (collection-time cached) page
-    # module itself rather than relying on this test module's globals.
+    # Self-contained AppTest.from_function entry point for the full page.
     from shiori_pricing_lab.app.standalone_option_ui import (
         render_standalone_option_workbench_page,
     )
 
     render_standalone_option_workbench_page()
+
+
+def _run_render(display: dict) -> AppTest:
+    at = AppTest.from_function(
+        _render_display_script, kwargs={"display": display}, default_timeout=60
+    )
+    at.run()
+    return at
 
 
 def _run_page() -> AppTest:
@@ -76,22 +119,8 @@ def _set_case_json(at: AppTest, text: str) -> None:
     text_area.set_value(text).run()
 
 
-def _set_retrieved_at(at: AppTest, text: str) -> None:
-    field = next(t for t in at.text_input if t.label.startswith("retrieved_at"))
-    field.set_value(text).run()
-
-
 def _press_price(at: AppTest) -> None:
     next(b for b in at.button if b.label == "Price standalone option").click().run()
-
-
-def _yield_vol_case_text() -> str:
-    envelope = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
-    envelope["volatility_input"] = {
-        **envelope["volatility_input"],
-        "volatility_basis": "YIELD_VOL",
-    }
-    return json.dumps(envelope)
 
 
 # --- 1. Module + helpers ------------------------------------------------------
@@ -126,14 +155,12 @@ def test_decode_uploaded_json_text_strict_utf8():
         _decode_uploaded_json_text(b"\xff\xfe invalid utf-8")
 
 
-# --- 2. Editable-JSON success path (AppTest.from_function) --------------------
+# --- 2. SUCCESS render: premium per-100 vs total notional (separate) ---------
 
 
 @_requires_quantlib
-def test_editable_success_renders_pinned_premium_metrics():
-    at = _run_page()
-    _press_price(at)  # prices the prefilled example verbatim
-
+def test_success_render_shows_separate_premium_metrics():
+    at = _run_render(_SUCCESS_DISPLAY)
     assert not at.exception
     assert any("Pricing SUCCESS" in s.value for s in at.success)
 
@@ -148,71 +175,65 @@ def test_editable_success_renders_pinned_premium_metrics():
     )
     # Per-100 and total are unmistakably separate, different values.
     assert metrics["Model fair premium per 100"] != metrics["Total notional model fair premium"]
+    # Also renders the required intermediates.
+    for label in (
+        "Forward clean price per 100",
+        "Black-76 PV per 100",
+        "Option discount factor",
+        "Time to expiry (years)",
+    ):
+        assert label in metrics
 
 
-# --- 3. Malformed input path -------------------------------------------------
+# --- 3. FAILED render: no premium, structured error detail preserved ---------
+
+
+def test_failed_render_shows_no_premium_and_preserves_error_detail():
+    at = _run_render(_FAILED_DISPLAY)
+    assert not at.exception
+
+    assert any("Pricing FAILED" in e.value for e in at.error)
+    assert len(at.metric) == 0  # no premium/intermediate metrics on a failure
+    assert any("UNSUPPORTED_PRODUCT" in m.value for m in at.markdown)
+
+    json_blocks = [json.loads(j.value) for j in at.json]
+    context = json_blocks[0]
+    assert context["status"] == "FAILED"
+    detail_blocks = json_blocks[1:]
+    assert any("product_id" in block and "reasons" in block for block in detail_blocks)
+
+
+# --- 4. retrieved_at stays separate from source-as-of ------------------------
+
+
+def test_retrieved_at_supplied_is_separate_from_source_as_of():
+    at = _run_render(_FAILED_DISPLAY)
+    context = json.loads(at.json[0].value)
+    assert context["retrieved_at"] == _RETRIEVED_AT
+    assert context["source_as_of"] == _SOURCE_AS_OF
+    assert context["retrieved_at"] != context["source_as_of"]
+
+
+def test_retrieved_at_empty_maps_to_none_in_context():
+    at = _run_render(_FAILED_DISPLAY_NO_RETRIEVED)
+    context = json.loads(at.json[0].value)
+    assert context["retrieved_at"] is None
+    assert context["source_as_of"] == _SOURCE_AS_OF
+
+
+# --- 5. Full-page wiring: button triggers the workflow (malformed input) ------
 
 
 def test_malformed_json_renders_exception_and_no_metrics():
+    # Full page: proves the button press routes to price_standalone_option_case
+    # and that a raised local-input exception is rendered without pricing.
     at = _run_page()
     _set_case_json(at, "{ this is not valid json ")
     _press_price(at)
 
     assert not at.exception  # handled at the UI boundary, not raised
     assert len(at.error) >= 1
-    assert len(at.metric) == 0  # no pricing metrics on invalid input
-
-
-# --- 4. Pricing FAILED path --------------------------------------------------
-
-
-def test_pricing_failed_renders_no_premium_and_preserves_error_detail():
-    at = _run_page()
-    _set_case_json(at, _yield_vol_case_text())
-    _press_price(at)
-
-    assert not at.exception
-    # Clear FAILED banner, no premium/intermediate metrics.
-    assert any("Pricing FAILED" in e.value for e in at.error)
     assert len(at.metric) == 0
-
-    # Error code + message rendered.
-    assert any("UNSUPPORTED_PRODUCT" in m.value for m in at.markdown)
-
-    # Structured error detail preserved (code/message already shown; detail here).
-    json_blocks = [json.loads(j.value) for j in at.json]
-    context = json_blocks[0]
-    assert context["status"] == "FAILED"
-    detail_blocks = json_blocks[1:]
-    assert any(
-        "product_id" in block and "reasons" in block for block in detail_blocks
-    )
-
-
-# --- 5. retrieved_at stays separate from source-as-of ------------------------
-
-
-def test_retrieved_at_supplied_is_separate_from_source_as_of():
-    at = _run_page()
-    _set_case_json(at, _yield_vol_case_text())  # FAILED path renders context w/o QuantLib
-    _set_retrieved_at(at, "2026-07-11T09:00:00Z")
-    _press_price(at)
-
-    context = json.loads(at.json[0].value)
-    assert context["retrieved_at"] == "2026-07-11T09:00:00Z"
-    assert context["source_as_of"] == "2026-07-01T16:00:00Z"
-    assert context["retrieved_at"] != context["source_as_of"]
-
-
-def test_retrieved_at_empty_maps_to_none_in_context():
-    at = _run_page()
-    _set_case_json(at, _yield_vol_case_text())
-    # leave retrieved_at empty (default "")
-    _press_price(at)
-
-    context = json.loads(at.json[0].value)
-    assert context["retrieved_at"] is None
-    assert context["source_as_of"] == "2026-07-01T16:00:00Z"
 
 
 # --- 6. Navigation wiring (source assertion; see module docstring) -----------
@@ -253,6 +274,15 @@ def test_ui_calls_only_headless_workflow_for_execution():
         "providers",
     ):
         assert forbidden not in source, f"unexpected reference to {forbidden!r}"
+
+
+def test_ui_upload_no_file_does_not_fall_back():
+    source = inspect.getsource(ui_module)
+    # An explicit no-file message exists, and the upload branch decodes the
+    # uploaded file (never implicitly reusing the textarea/example).
+    assert "No file uploaded" in source
+    assert "case_text = _decode_uploaded_json_text(" in source
+    assert "case_text = textarea_text" in source
 
 
 def test_ui_has_no_pricing_math_provider_or_system_clock():
