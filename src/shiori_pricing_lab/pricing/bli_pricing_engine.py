@@ -99,11 +99,17 @@ container and delegate to the private, container-agnostic
 ``_classify_guard_rejection_from_fields`` and the same
 ``forward_clean_price_per_100`` / Black-76 chain), so no pricing formula is
 duplicated. For economically identical inputs the two paths produce an
-identical ``PricingResult`` except ``product_id`` / ``product_type`` (the
-standalone result uses the bare ``BondOption``'s own ``"BOND_OPTION"``
-discriminator, never a new one) and the context-specific error ``detail``
-identifiers (the bundle path keeps ``bundle_id``; the standalone path
-carries only ``product_id``).
+identical ``PricingResult`` -- every numeric output and every other
+assumption key matches -- except for three intentional, non-numeric
+differences: ``product_id`` / ``product_type`` (the standalone result uses
+the bare ``BondOption``'s own ``"BOND_OPTION"`` discriminator, never a new
+one); the single explanatory ``assumptions["bond_reference_curve_purpose"]``
+label (the bundle path preserves its exact legacy string naming
+``forward_clean_price_per_100_for_bundle`` as an observable-result
+contract, while the standalone path names the ``forward_clean_price_per_100``
+primitive it actually reaches -- Sophira Red-zone review of PR #105); and
+the context-specific error ``detail`` identifiers (the bundle path keeps
+``bundle_id``; the standalone path carries only ``product_id``).
 
 **Unchanged from the prior skeleton:** ``price_bli_mvp`` still accepts
 only a ``BLIMVPInputBundle`` (never calls ``resolve_bond_reference_data``
@@ -166,6 +172,25 @@ ENGINE_VERSION = "1.0.0"
 # diagnostics metadata can branch on this.
 _METHOD_NOT_SUPPORTED = "not_supported"
 _METHOD_BLACK76_FORWARD_CLEAN_PRICE = "black76_forward_clean_price_v1"
+
+# Path-specific value for assumptions["bond_reference_curve_purpose"]. This
+# is the ONE intentional success-result difference between the two
+# entrypoints (Sophira Red-zone review of PR #105): the bundle path's exact
+# legacy string is preserved verbatim as an observable-result contract
+# (even though the shared composition now calls forward_clean_price_per_100
+# directly rather than the _for_bundle wrapper), while the standalone path
+# names the primitive it actually reaches. Everything else in the
+# assumptions mapping -- and every numeric output -- is identical across
+# both paths. Passed explicitly into the shared composition; no pricing
+# math is duplicated to vary this label.
+_BUNDLE_BOND_REFERENCE_CURVE_PURPOSE_NOTE = (
+    "BOND_REFERENCE_CURVE (used only for forward clean price, via "
+    "forward_clean_price_per_100_for_bundle)"
+)
+_STANDALONE_BOND_REFERENCE_CURVE_PURPOSE_NOTE = (
+    "BOND_REFERENCE_CURVE (used only for forward clean price, via "
+    "forward_clean_price_per_100)"
+)
 
 # Volatility bases this engine can use as sigma without any conversion --
 # a local mirror of #41's own (private) allowlist, kept here rather than
@@ -233,6 +258,7 @@ def _price_bli_mvp_from_fields(
     common_fields: dict,
     error_detail_base: dict,
     subject_label: str,
+    bond_reference_curve_purpose_note: str,
 ) -> PricingResult:
     """Shared, container-agnostic pricing composition (Issue #95).
 
@@ -250,8 +276,12 @@ def _price_bli_mvp_from_fields(
     merged into each failure message's ``detail`` (the bundle path adds
     ``bundle_id``; the standalone path carries only ``product_id``), and
     ``subject_label`` is the noun used in the guard-rejection message
-    ("bundle" / "request"). Everything else is byte-for-byte identical
-    across both callers.
+    ("bundle" / "request"). ``bond_reference_curve_purpose_note`` is the
+    one intentional success-``assumptions`` difference between the two
+    paths (Sophira Red-zone review of PR #105): the bundle path passes its
+    exact preserved legacy string, the standalone path names the primitive
+    it actually reaches. Everything else -- every numeric output and every
+    other assumption key -- is identical across both callers.
     """
 
     if not guard_result.supported:
@@ -336,8 +366,7 @@ def _price_bli_mvp_from_fields(
             "black76_pv_per_100": pv_per_100,
             "notional": bond_option.notional,
             "pv_scaling_formula": "pv = black76_pv_per_100 * notional / 100",
-            "bond_reference_curve_purpose": "BOND_REFERENCE_CURVE (used only for forward "
-            "clean price, via forward_clean_price_per_100)",
+            "bond_reference_curve_purpose": bond_reference_curve_purpose_note,
             "option_discount_curve_purpose": "OPTION_DISCOUNT_CURVE (used only for the "
             "option PV discount factor)",
             "option_type": bond_option.option_type.value,
@@ -392,6 +421,7 @@ def price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult:
         common_fields=common_fields,
         error_detail_base={"bundle_id": bundle.bundle_id, "product_id": product.product_id},
         subject_label="bundle",
+        bond_reference_curve_purpose_note=_BUNDLE_BOND_REFERENCE_CURVE_PURPOSE_NOTE,
     )
 
 
@@ -405,10 +435,13 @@ def price_bli_mvp_standalone_option(
     for anything else -- and reaches the identical reviewed guard +
     forward-clean-price + curve + Black-76 + result composition via the same
     shared :func:`_price_bli_mvp_from_fields`. For economically identical
-    inputs it reproduces the bundle path's premium and intermediate outputs
-    exactly; the only intentional differences are ``product_id`` /
-    ``product_type`` (taken from the bare ``BondOption`` -- ``"BOND_OPTION"``,
-    never a new discriminator) and the context-specific error ``detail``
+    inputs it reproduces the bundle path's premium and every intermediate
+    numeric output exactly; the only intentional differences are
+    ``product_id`` / ``product_type`` (taken from the bare ``BondOption`` --
+    ``"BOND_OPTION"``, never a new discriminator), the single explanatory
+    ``assumptions["bond_reference_curve_purpose"]`` label (which truthfully
+    names ``forward_clean_price_per_100`` here, vs the bundle path's exact
+    preserved legacy string), and the context-specific error ``detail``
     identifiers (``product_id`` only, no ``bundle_id`` and no request id).
     Never mutates ``request``; reads no deposit leg and requires no Deposit
     Curve.
@@ -442,4 +475,5 @@ def price_bli_mvp_standalone_option(
         common_fields=common_fields,
         error_detail_base={"product_id": bond_option.product_id},
         subject_label="request",
+        bond_reference_curve_purpose_note=_STANDALONE_BOND_REFERENCE_CURVE_PURPOSE_NOTE,
     )

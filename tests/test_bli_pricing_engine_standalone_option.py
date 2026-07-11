@@ -68,6 +68,20 @@ _EXPECTED_OPTION_DISCOUNT_FACTOR = 0.9929452501091504
 _EXPECTED_BLACK76_PV_PER_100 = 4.474769848529296
 _EXPECTED_PV = 2.237384924264648
 
+# The one intentional success-``assumptions`` difference between the two
+# entrypoints (Sophira Red-zone review of PR #105). The bundle path
+# preserves its exact legacy string (naming the _for_bundle wrapper) as an
+# observable-result contract; the standalone path names the primitive it
+# actually reaches. Both are pinned exactly below.
+_BUNDLE_CURVE_PURPOSE_NOTE = (
+    "BOND_REFERENCE_CURVE (used only for forward clean price, via "
+    "forward_clean_price_per_100_for_bundle)"
+)
+_STANDALONE_CURVE_PURPOSE_NOTE = (
+    "BOND_REFERENCE_CURVE (used only for forward clean price, via "
+    "forward_clean_price_per_100)"
+)
+
 
 def _local_short_tenor_curve_points(currency) -> tuple[BLICurvePoint, ...]:
     """Short-tenor curves that bracket the fixture's ~0.24y expiry.
@@ -173,6 +187,12 @@ def test_standalone_supported_case_returns_success_with_pinned_pv():
     assert result.pv == pytest.approx(_EXPECTED_PV)
     assert result.dv01 is None
     assert result.method == "black76_forward_clean_price_v1"
+    # Standalone path names the primitive it actually reaches (Sophira
+    # Red-zone review of PR #105) -- exact, and distinct from the bundle
+    # path's preserved legacy string.
+    assert (
+        result.assumptions["bond_reference_curve_purpose"] == _STANDALONE_CURVE_PURPOSE_NOTE
+    )
 
 
 @_requires_quantlib
@@ -203,13 +223,33 @@ def test_standalone_result_equivalent_to_bundle_result():
     assert bundle_result.product_type == "BOND_LINKED_STRUCTURED_PRODUCT"
     assert standalone_result.product_id != bundle_result.product_id
 
-    # Everything else -- pv, assumptions, currency, dates, provenance,
-    # warnings/errors -- is identical. Normalizing only the two identity
-    # fields and asserting full dataclass equality proves that exactly.
+    # The single intentional success-``assumptions`` difference (Sophira
+    # Red-zone review of PR #105): both exact strings asserted separately.
+    assert bundle_result.assumptions["bond_reference_curve_purpose"] == _BUNDLE_CURVE_PURPOSE_NOTE
+    assert (
+        standalone_result.assumptions["bond_reference_curve_purpose"]
+        == _STANDALONE_CURVE_PURPOSE_NOTE
+    )
+    assert (
+        standalone_result.assumptions["bond_reference_curve_purpose"]
+        != bundle_result.assumptions["bond_reference_curve_purpose"]
+    )
+
+    # Everything else -- pv, every other numeric output, every OTHER
+    # assumption key, currency, dates, provenance, warnings/errors -- is
+    # identical. Normalize ONLY product_id / product_type and that one
+    # explanatory assumption key (not the whole assumptions mapping), then
+    # assert full dataclass equality: any drift in any other assumption key
+    # or numeric field would fail this.
+    normalized_assumptions = {
+        **standalone_result.assumptions,
+        "bond_reference_curve_purpose": bundle_result.assumptions["bond_reference_curve_purpose"],
+    }
     normalized = replace(
         standalone_result,
         product_id=bundle_result.product_id,
         product_type=bundle_result.product_type,
+        assumptions=normalized_assumptions,
     )
     assert normalized == bundle_result
 
