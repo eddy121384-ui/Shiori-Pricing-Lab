@@ -1,0 +1,119 @@
+{
+  "bond_option": {
+    "product_id": "BONDOPT-SYNTHETIC-0001",
+    "underlying_isin": "XS0000000001",
+    "currency": "USD",
+    "payoff_basis": "PRICE",
+    "option_type": "CALL",
+    "exercise_style": "EUROPEAN",
+    "settlement_type": "CASH",
+    "settlement_lag_days": 2,
+    "expiry_date": "2026-09-29",
+    "notional": 50.0,
+    "position": "BUY",
+    "strike_price": 99.5,
+    "strike_yield": null,
+    "exercise_start_date": null
+  },
+  "bond_reference_data_universe": [
+    {
+      "isin": "XS0000000001",
+      "issuer": "Synthetic Test Issuer A",
+      "currency": "USD",
+      "coupon": 0.0325,
+      "coupon_frequency": "SEMI_ANNUAL",
+      "maturity_date": "2030-06-15",
+      "issue_date": "2025-06-15",
+      "day_count": "ACT_ACT_ISDA",
+      "business_day_convention": "MODIFIED_FOLLOWING",
+      "redemption_amount": 100.0,
+      "callable_flag": false,
+      "sinkable_flag": false,
+      "bond_type": "FIXED_COUPON_BULLET",
+      "yield_convention": "SEMI_ANNUAL_COMPOUND",
+      "ex_dividend_days": 1,
+      "first_coupon_date": "2025-12-15",
+      "last_coupon_date": "2029-12-15",
+      "status": "ACTIVE"
+    }
+  ],
+  "valuation_date": "2026-07-01",
+  "as_of_timestamp": "2026-07-01T16:00:00Z",
+  "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
+  "snapshot_id": "SANITIZED_SYNTHETIC_STANDALONE_SNAPSHOT_0001",
+  "snapshot_status": "ACTIVE",
+  "bond_quote": {
+    "isin": "XS0000000001",
+    "currency": "USD",
+    "price_type": "PRICE",
+    "quote_side": "MID",
+    "source_system": "SYNTHETIC_BOND_QUOTE_FEED",
+    "status": "ACTIVE",
+    "clean_price_per_100": 101.25,
+    "yield_value": null,
+    "accrued_interest_per_100": 0.42
+  },
+  "curve_points": [
+    {
+      "curve_id": "SANITIZED_BOND_REFERENCE_CURVE",
+      "curve_name": "SANITIZED_BOND_REFERENCE_CURVE",
+      "currency": "USD",
+      "curve_purpose": "BOND_REFERENCE_CURVE",
+      "tenor": "1M",
+      "rate": 0.03,
+      "rate_basis": "CONTINUOUS_ZERO_RATE",
+      "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
+      "status": "ACTIVE"
+    },
+    {
+      "curve_id": "SANITIZED_BOND_REFERENCE_CURVE",
+      "curve_name": "SANITIZED_BOND_REFERENCE_CURVE",
+      "currency": "USD",
+      "curve_purpose": "BOND_REFERENCE_CURVE",
+      "tenor": "1Y",
+      "rate": 0.035,
+      "rate_basis": "CONTINUOUS_ZERO_RATE",
+      "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
+      "status": "ACTIVE"
+    },
+    {
+      "curve_id": "SANITIZED_OPTION_DISCOUNT_CURVE",
+      "curve_name": "SANITIZED_OPTION_DISCOUNT_CURVE",
+      "currency": "USD",
+      "curve_purpose": "OPTION_DISCOUNT_CURVE",
+      "tenor": "1M",
+      "rate": 0.028,
+      "rate_basis": "CONTINUOUS_ZERO_RATE",
+      "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
+      "status": "ACTIVE"
+    },
+    {
+      "curve_id": "SANITIZED_OPTION_DISCOUNT_CURVE",
+      "curve_name": "SANITIZED_OPTION_DISCOUNT_CURVE",
+      "currency": "USD",
+      "curve_purpose": "OPTION_DISCOUNT_CURVE",
+      "tenor": "1Y",
+      "rate": 0.032,
+      "rate_basis": "CONTINUOUS_ZERO_RATE",
+      "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
+      "status": "ACTIVE"
+    }
+  ],
+  "volatility_input": {
+    "volatility": 0.18,
+    "volatility_basis": "PRICE_VOL",
+    "source_system": "SYNTHETIC_VOL_FEED",
+    "status": "ACTIVE",
+    "override_or_fallback_audit": null
+  },
+  "credit_spread_input": {
+    "spread_treatment": "OBSERVED",
+    "source_system": "SYNTHETIC_CREDIT_SPREAD_FEED",
+    "status": "ACTIVE",
+    "credit_spread": 0.0125,
+    "credit_spread_basis": "BPS_OVER_USD_BOND_REFERENCE_CURVE",
+    "override_or_fallback_audit": null
+  },
+  "deposit_rate_observation": null,
+  "bond_reference_source_name": "SANITIZED_SYNTHETIC_REFERENCE_UNIVERSE"
+}
