@@ -342,6 +342,29 @@ def test_pricing_failed_preserves_none_pv_and_errors():
     assert display["errors"][0]["code"] == "UNSUPPORTED_PRODUCT"
 
 
+def test_failed_display_preserves_structured_error_detail_verbatim():
+    # Sophira review of PR #107: each displayed error must preserve the full
+    # structured PricingMessage (code, message, AND detail) verbatim -- detail
+    # carries actionable machine-readable context (product_id / reasons /
+    # exception_type) and must not be dropped or remapped.
+    envelope = _example_envelope()
+    envelope["volatility_input"] = {
+        **envelope["volatility_input"],
+        "volatility_basis": "YIELD_VOL",
+    }
+    _request, result, display = price_standalone_option_case(envelope)
+
+    assert result.status is PricingStatus.FAILED
+    assert len(display["errors"]) == len(result.errors)
+    for displayed, original in zip(display["errors"], result.errors, strict=True):
+        assert displayed["code"] == original.code.value
+        assert displayed["message"] == original.message
+        assert displayed["detail"] == original.detail
+    # detail actually carries content (proves it is not silently dropped).
+    assert display["errors"][0]["detail"]["product_id"]
+    assert display["errors"][0]["detail"]["reasons"]
+
+
 # --- 8. No provider / network / clock / pricing math in the app layer --------
 
 

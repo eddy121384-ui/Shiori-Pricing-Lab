@@ -201,9 +201,12 @@ def prepare_standalone_display(
     caller-supplied workbench value, kept strictly separate from
     ``source_as_of`` (the snapshot's ``as_of_timestamp``) and never sourced
     from a clock. ``pv`` (total notional model fair premium) stays ``None`` on
-    a failed result, and the original ``errors`` are preserved -- no
-    replacement value is ever fabricated. The model fair premium is never
-    labeled a client quote.
+    a failed result, and each original error is preserved **verbatim and
+    complete** -- ``code``, ``message``, and the full structured ``detail``
+    (e.g. ``product_id`` / ``reasons`` / ``exception_type``) exactly as the
+    engine produced them, never interpreted or remapped and never fabricating
+    a replacement value. The model fair premium is never labeled a client
+    quote.
     """
 
     assumptions = result.assumptions
@@ -235,7 +238,11 @@ def prepare_standalone_display(
         "engine_name": result.engine_name,
         "engine_version": result.engine_version,
         "errors": [
-            {"code": message.code.value, "message": message.message}
+            {
+                "code": message.code.value,
+                "message": message.message,
+                "detail": message.detail,
+            }
             for message in result.errors
         ],
     }
