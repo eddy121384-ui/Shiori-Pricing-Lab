@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -58,3 +58,38 @@ def _require_finite_number(value: object, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a finite number, got {value!r}")
     if not math.isfinite(value):
         raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+
+
+def _parse_as_of_calendar_date(as_of_timestamp: str, field_name: str) -> date:
+    """Parse ``as_of_timestamp`` and return its calendar date only.
+
+    Minimal, deterministic ISO-8601 parsing (docs/24 §6/§11, Codex P1
+    review of PR #65) -- accepts a bare date (``"2026-07-01"``), a naive
+    datetime with no timezone offset (``"2026-07-01T16:00:00"``), or a UTC
+    datetime whose ``utcoffset()`` is exactly zero (``"2026-07-01T16:00:00Z"``
+    or the equivalent ``"...+00:00"`` spelling, matching the existing
+    synthetic fixture's shape). Any other timezone offset is rejected
+    outright -- ``fromisoformat(...).date()`` on an offset-aware datetime
+    returns that offset's *local* calendar date, which can silently differ
+    from the UTC calendar date this no-look-ahead check needs (e.g.
+    ``"2026-07-01T23:30:00-05:00"`` is already ``"2026-07-02"`` in UTC).
+    Never falls back to the current date/time; a value that cannot be
+    parsed, or that carries an unsupported non-UTC offset, is rejected
+    outright rather than silently accepted or misread.
+    """
+
+    try:
+        parsed = datetime.fromisoformat(as_of_timestamp)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} must be an ISO-8601 date, a naive datetime, or a UTC "
+            f"('Z'-suffixed) datetime for the no-look-ahead check, got {as_of_timestamp!r}"
+        ) from exc
+
+    if parsed.tzinfo is not None and parsed.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{field_name} must be a bare date, a naive datetime, or a UTC "
+            "('Z'-suffixed) timestamp for the no-look-ahead check -- non-UTC timezone "
+            f"offsets are not supported yet, got {as_of_timestamp!r}"
+        )
+    return parsed.date()

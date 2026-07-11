@@ -287,6 +287,21 @@ def test_success_assumptions_document_units_and_curve_usage():
 
 
 @_requires_quantlib
+def test_bundle_bond_reference_curve_purpose_assumption_is_exact_legacy_string():
+    # Regression pin (Sophira Red-zone review of PR #105): the bundle
+    # entrypoint's assumptions["bond_reference_curve_purpose"] is an
+    # observable-result contract and must retain its EXACT legacy value,
+    # even though the shared composition now reaches the
+    # forward_clean_price_per_100 primitive directly rather than the
+    # forward_clean_price_per_100_for_bundle wrapper this string names.
+    result = price_bli_mvp(_local_supported_bundle())
+    assert result.assumptions["bond_reference_curve_purpose"] == (
+        "BOND_REFERENCE_CURVE (used only for forward clean price, via "
+        "forward_clean_price_per_100_for_bundle)"
+    )
+
+
+@_requires_quantlib
 def test_success_assumptions_document_priced_component_scope():
     bundle = _local_supported_bundle()
     result = price_bli_mvp(bundle)

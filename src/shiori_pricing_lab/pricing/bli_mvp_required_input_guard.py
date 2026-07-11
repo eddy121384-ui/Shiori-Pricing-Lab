@@ -68,7 +68,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
-from shiori_pricing_lab.data.bli_snapshot import BLIVolatilityBasis
+from shiori_pricing_lab.data.bli_snapshot import BLIMarketDataSnapshot, BLIVolatilityBasis
+from shiori_pricing_lab.data.bli_standalone_option_request import (
+    BLIStandaloneBondOptionRequest,
+)
+from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.products.enums import ExerciseStyle, PayoffBasis, SettlementType
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
@@ -107,24 +111,32 @@ class RequiredInputGuardResult:
     reasons: tuple[str, ...]
 
 
-def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGuardResult:
-    """Return whether ``bundle`` is the narrow MVP-supported bond option case.
+def _check_bli_mvp_required_inputs_from_fields(
+    *,
+    bond_option: BondOption,
+    valuation_date: str,
+    resolved_bond_reference_data: BondReferenceData,
+    market_data_snapshot: BLIMarketDataSnapshot,
+) -> RequiredInputGuardResult:
+    """Shared, container-agnostic MVP required-input checklist.
 
-    Pure function: never mutates ``bundle`` (it is already frozen), never
-    looks at market data or reference data beyond what ``bundle`` already
-    carries, never calls ``resolve_bond_reference_data`` or
-    ``build_bli_mvp_input_bundle``, and computes no forward price, no
-    Black-76 premium, and no other pricing output. Raises ``TypeError``
-    for a non-``BLIMVPInputBundle`` argument -- a contract violation, not
-    a domain "unsupported case" outcome.
+    The single reviewable checklist body, run against already-unpacked
+    fields so both the ``BLIMVPInputBundle`` path
+    (:func:`check_bli_mvp_required_inputs`) and the standalone request path
+    (:func:`check_bli_mvp_standalone_option_required_inputs`) reuse *exactly*
+    the same reasons, with no duplicated logic (Issue #95). Pure: never
+    mutates its arguments, never looks at anything beyond the fields
+    passed, and computes no pricing output.
+
+    Some items below are defensive for the bundle path (already guaranteed
+    by ``BLIMVPInputBundle`` / ``BondLinkedStructuredProduct`` construction)
+    but genuinely reachable for the standalone path, where a bare
+    ``BondOption`` is not wrapped by ``BondLinkedStructuredProduct`` and so
+    may legally be PHYSICAL-settled, etc. The checklist rejects those cases
+    identically regardless of which caller supplied the fields.
     """
 
-    if not isinstance(bundle, BLIMVPInputBundle):
-        raise TypeError(f"bundle must be a BLIMVPInputBundle, got {type(bundle).__name__}")
-
     reasons: list[str] = []
-
-    bond_option = bundle.product.bond_option
 
     # --- Supported product shape only (reachable: neither BondOption nor
     # BondLinkedStructuredProduct constrains exercise_style/payoff_basis) --
@@ -137,10 +149,13 @@ def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGua
         reasons.append(
             f"bond_option.payoff_basis must be PRICE, got {bond_option.payoff_basis.value}"
         )
-    # Defensive: BondLinkedStructuredProduct.__post_init__ already rejects
-    # a PHYSICAL-settled bond_option (docs/19), so this cannot fail for a
-    # bundle that exists at all -- see
-    # tests/test_bond_linked_structured_product.py::test_wrapper_rejects_physical_settlement.
+    # For the bundle path this is defensive: BondLinkedStructuredProduct.
+    # __post_init__ already rejects a PHYSICAL-settled bond_option (docs/19),
+    # so it cannot fail for a bundle that exists at all (see
+    # tests/test_bond_linked_structured_product.py::test_wrapper_rejects_physical_settlement).
+    # For the standalone path it is genuinely reachable: a bare BondOption is
+    # not wrapped, so PHYSICAL settlement is constructible and must be
+    # rejected here as an explicit unsupported-case reason (Issue #95).
     if bond_option.settlement_type is not SettlementType.CASH:
         reasons.append(
             f"bond_option.settlement_type must be CASH, got {bond_option.settlement_type.value}"
@@ -149,8 +164,8 @@ def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGua
     # --- Explicit deal terms (defensive: all required, validated,
     # non-None fields already -- see BondOption.__post_init__ and
     # tests/test_bond_option.py) -----------------------------------------
-    if not bundle.valuation_date:
-        reasons.append("bundle.valuation_date must be explicit and non-blank")
+    if not valuation_date:
+        reasons.append("valuation_date must be explicit and non-blank")
     if not bond_option.expiry_date:
         reasons.append("bond_option.expiry_date must be explicit and non-blank")
     if bond_option.strike_price is None:
@@ -158,27 +173,25 @@ def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGua
     if bond_option.notional is None or not bond_option.notional > 0:
         reasons.append("bond_option.notional must be explicit and positive")
 
-    # --- Bond reference data present (defensive: BLIMVPInputBundle.
-    # __post_init__ already type-checks and re-verifies eligibility for
-    # this field -- see tests/test_bli_mvp_input_bundle.py) --------------
-    if not isinstance(bundle.resolved_bond_reference_data, BondReferenceData):
-        reasons.append("bundle.resolved_bond_reference_data must be a BondReferenceData")
+    # --- Bond reference data present (defensive: both containers already
+    # type-check and re-verify eligibility for this field) ---------------
+    if not isinstance(resolved_bond_reference_data, BondReferenceData):
+        reasons.append("resolved_bond_reference_data must be a BondReferenceData")
 
     # --- Bond clean price present (reachable: BLIBondQuote only requires
     # *one* of clean_price_per_100 / yield_value) -------------------------
-    if bundle.market_data_snapshot.bond_quote.clean_price_per_100 is None:
+    if market_data_snapshot.bond_quote.clean_price_per_100 is None:
         reasons.append(
             "market_data_snapshot.bond_quote.clean_price_per_100 must be present "
             "(a yield-only bond quote is not usable by this MVP slice)"
         )
 
-    # --- Required curves present (defensive: BLIMVPInputBundle.
-    # __post_init__ already requires both in the product's currency --
-    # see tests/test_bli_mvp_input_bundle.py) -----------------------------
+    # --- Required curves present (defensive: both containers already
+    # require both option-leg purposes in the product's currency) --------
     product_currency = bond_option.currency
     present_purposes = {
         point.curve_purpose.value
-        for point in bundle.market_data_snapshot.curve_points
+        for point in market_data_snapshot.curve_points
         if point.currency is product_currency
     }
     missing_curve_purposes = _REQUIRED_BOND_OPTION_CURVE_PURPOSES - present_purposes
@@ -192,7 +205,7 @@ def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGua
     # --- Explicit price volatility present (reachable: BLIVolatilityInput
     # permits YIELD_VOL, which this slice cannot use without a conversion
     # that does not exist yet -- docs/26 §2.1) ----------------------------
-    volatility_basis = bundle.market_data_snapshot.volatility_input.volatility_basis
+    volatility_basis = market_data_snapshot.volatility_input.volatility_basis
     if volatility_basis not in _SUPPORTED_VOLATILITY_BASES:
         reasons.append(
             "market_data_snapshot.volatility_input.volatility_basis must be one of "
@@ -201,3 +214,56 @@ def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGua
         )
 
     return RequiredInputGuardResult(supported=not reasons, reasons=tuple(reasons))
+
+
+def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGuardResult:
+    """Return whether ``bundle`` is the narrow MVP-supported bond option case.
+
+    Thin public wrapper (unchanged signature and observable behavior) that
+    unpacks ``bundle`` and delegates to the shared
+    :func:`_check_bli_mvp_required_inputs_from_fields` checklist. Pure:
+    never mutates ``bundle`` (it is already frozen), never looks at market
+    data or reference data beyond what ``bundle`` already carries, never
+    calls ``resolve_bond_reference_data`` or ``build_bli_mvp_input_bundle``,
+    and computes no pricing output. Raises ``TypeError`` for a
+    non-``BLIMVPInputBundle`` argument -- a contract violation, not a domain
+    "unsupported case" outcome.
+    """
+
+    if not isinstance(bundle, BLIMVPInputBundle):
+        raise TypeError(f"bundle must be a BLIMVPInputBundle, got {type(bundle).__name__}")
+
+    return _check_bli_mvp_required_inputs_from_fields(
+        bond_option=bundle.product.bond_option,
+        valuation_date=bundle.valuation_date,
+        resolved_bond_reference_data=bundle.resolved_bond_reference_data,
+        market_data_snapshot=bundle.market_data_snapshot,
+    )
+
+
+def check_bli_mvp_standalone_option_required_inputs(
+    request: BLIStandaloneBondOptionRequest,
+) -> RequiredInputGuardResult:
+    """Return whether ``request`` is the narrow MVP-supported bond option case.
+
+    Standalone-request sibling of :func:`check_bli_mvp_required_inputs`
+    (Issue #95): unpacks ``request`` and delegates to the same shared
+    :func:`_check_bli_mvp_required_inputs_from_fields` checklist, so the
+    supported/unsupported boundary is byte-for-byte identical to the bundle
+    path -- American, yield payoff, PHYSICAL settlement, ``YIELD_VOL``, a
+    missing clean price, and a missing option-leg curve purpose all produce
+    the same reasons. Pure; raises ``TypeError`` for a
+    non-``BLIStandaloneBondOptionRequest`` argument.
+    """
+
+    if not isinstance(request, BLIStandaloneBondOptionRequest):
+        raise TypeError(
+            f"request must be a BLIStandaloneBondOptionRequest, got {type(request).__name__}"
+        )
+
+    return _check_bli_mvp_required_inputs_from_fields(
+        bond_option=request.bond_option,
+        valuation_date=request.valuation_date,
+        resolved_bond_reference_data=request.resolved_bond_reference_data,
+        market_data_snapshot=request.market_data_snapshot,
+    )
