@@ -318,6 +318,36 @@ def solve_implied_price_vol(
             option_type=option_type,
         )
 
+    def _price_at_configured_bound(sigma: float, bound_field_name: str) -> float:
+        """Price ``sigma`` at a configured vol bound, or raise a field-specific error.
+
+        A finite, correctly-ordered ``lower_price_vol``/``upper_price_vol``
+        can still sit outside the numeric domain
+        ``black76_price_option_pv_per_100`` can evaluate (e.g. ``sigma**2``
+        overflowing for an extreme ``upper_price_vol``). That is a
+        configuration problem with the named bound, not a domain outcome,
+        so it is raised as a field-specific ``ValueError`` here rather than
+        leaking whatever raw exception the primitive happened to raise, and
+        rather than being silently caught into a structured failure result.
+        No new cap, clamping, or bound narrowing/expansion is introduced --
+        the caller-supplied bound is only ever evaluated as given.
+        """
+
+        try:
+            price = _price_at(sigma)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError(
+                f"{bound_field_name} ({sigma!r}) is outside the numeric domain "
+                "black76_price_option_pv_per_100 can evaluate: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if not math.isfinite(price):
+            raise ValueError(
+                f"{bound_field_name} ({sigma!r}) produced a non-finite model premium "
+                f"({price!r}) from black76_price_option_pv_per_100"
+            )
+        return price
+
     # --- 1-4. Theoretical arbitrage bounds (before any configured-vol work) --
     if target_premium_per_100 < arbitrage_lower_bound_per_100:
         return _build(
@@ -363,8 +393,12 @@ def solve_implied_price_vol(
         )
 
     # --- 5-6. Configured-bound boundary evaluation -----------------------------
-    lower_bound_model_premium_per_100 = _price_at(lower_price_vol)
-    upper_bound_model_premium_per_100 = _price_at(upper_price_vol)
+    lower_bound_model_premium_per_100 = _price_at_configured_bound(
+        lower_price_vol, "lower_price_vol"
+    )
+    upper_bound_model_premium_per_100 = _price_at_configured_bound(
+        upper_price_vol, "upper_price_vol"
+    )
 
     lower_residual = lower_bound_model_premium_per_100 - target_premium_per_100
     if abs(lower_residual) <= premium_tolerance_per_100:

@@ -264,6 +264,58 @@ def test_root_not_bracketed_within_theoretical_but_outside_configured_bracket():
     assert result.final_bracket_upper_price_vol == 0.05
 
 
+# --- Numeric-domain regression: finite, correctly-ordered bounds outside what --
+# --- black76_price_option_pv_per_100 can evaluate must never leak a raw error --
+
+
+def test_extreme_upper_price_vol_raises_value_error_not_overflow_error():
+    with pytest.raises(ValueError, match="upper_price_vol") as excinfo:
+        solve_implied_price_vol(
+            forward_clean_price=_F,
+            strike_clean_price=_K,
+            time_to_expiry=_T,
+            discount_factor=_DF,
+            option_type=OptionType.CALL,
+            target_premium_per_100=6.0,
+            upper_price_vol=1e308,
+        )
+    assert not isinstance(excinfo.value, OverflowError)
+
+
+def test_extreme_lower_price_vol_raises_value_error_not_overflow_error():
+    with pytest.raises(ValueError, match="lower_price_vol") as excinfo:
+        solve_implied_price_vol(
+            forward_clean_price=_F,
+            strike_clean_price=_K,
+            time_to_expiry=_T,
+            discount_factor=_DF,
+            option_type=OptionType.CALL,
+            target_premium_per_100=6.0,
+            lower_price_vol=1e308,
+            upper_price_vol=1.5e308,
+        )
+    assert not isinstance(excinfo.value, OverflowError)
+
+
+def test_ordinary_configured_bounds_still_converge_normally():
+    # Same fixture as test_known_synthetic_call_recovery -- proves the
+    # numeric-domain guard does not change any existing outcome for
+    # well-behaved, default-range configured bounds.
+    sigma_true = 0.20
+    target = _price(sigma_true, option_type=OptionType.CALL)
+    result = solve_implied_price_vol(
+        forward_clean_price=_F,
+        strike_clean_price=_K,
+        time_to_expiry=_T,
+        discount_factor=_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=target,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.SUCCESS
+    assert result.reason is BLIImpliedPriceVolSolverReason.CONVERGED
+    assert result.implied_price_vol == pytest.approx(sigma_true, abs=1e-6)
+
+
 # --- Dyadic dual-tolerance-boundary fixture (shared by tests 12-14) -------------
 
 _BRACKET_F = 100.0
