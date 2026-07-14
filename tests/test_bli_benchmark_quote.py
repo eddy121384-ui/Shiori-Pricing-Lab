@@ -28,7 +28,7 @@ def _valid_kwargs(**overrides: object) -> dict:
     kwargs = dict(
         benchmark_id="BM-0001",
         source_type=BLIBenchmarkSourceType.BLOOMBERG,
-        source_system="Bloomberg OVME",
+        source_system="BLOOMBERG",
         source_as_of="2026-07-10T16:00:00Z",
         retrieved_at="2026-07-14T09:30:00Z",
         quote_side=BLIBenchmarkQuoteSide.MID,
@@ -37,8 +37,8 @@ def _valid_kwargs(**overrides: object) -> dict:
         currency=Currency.USD,
         product_id="BONDOPT-0001",
         snapshot_id="SNAP-0001",
-        underlying_id="US0000000001",
-        source_reference="Bloomberg export 2026-07-10.pdf",
+        underlying_id="ANON-BOND-001",
+        source_reference="SANITIZED-BENCHMARK-REFERENCE-001",
     )
     kwargs.update(overrides)
     return kwargs
@@ -86,7 +86,7 @@ def test_asdict_is_deterministic_and_complete():
     assert first == {
         "benchmark_id": "BM-0001",
         "source_type": BLIBenchmarkSourceType.BLOOMBERG,
-        "source_system": "Bloomberg OVME",
+        "source_system": "BLOOMBERG",
         "source_as_of": "2026-07-10T16:00:00Z",
         "retrieved_at": "2026-07-14T09:30:00Z",
         "quote_side": BLIBenchmarkQuoteSide.MID,
@@ -95,8 +95,8 @@ def test_asdict_is_deterministic_and_complete():
         "currency": Currency.USD,
         "product_id": "BONDOPT-0001",
         "snapshot_id": "SNAP-0001",
-        "underlying_id": "US0000000001",
-        "source_reference": "Bloomberg export 2026-07-10.pdf",
+        "underlying_id": "ANON-BOND-001",
+        "source_reference": "SANITIZED-BENCHMARK-REFERENCE-001",
         "notes": None,
     }
 
