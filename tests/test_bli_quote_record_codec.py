@@ -521,3 +521,100 @@ def test_exact_pricing_message_detail_still_rejects_arbitrary_enum():
     rec = record(pricing_result=pricing)
     with pytest.raises(ValueError, match="Enum"):
         quote_record_to_dict(rec)
+
+
+# --- Raw Python tuples in a decode payload are non-canonical --------------------
+#
+# quote_record_from_dict accepts only JSON-ready canonical typed dicts. A raw
+# Python tuple anywhere in the supplied payload is non-canonical and must be
+# rejected before any native object is constructed; the only legal tuple wire
+# form is the explicit {"__tuple__": [...]} tag. These tests feed raw dict
+# input directly to quote_record_from_dict (not via an explicit tuple tag).
+
+
+def test_raw_finite_tuple_in_assumptions_rejected():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["raw"] = (1, 2, 3)
+    with pytest.raises(ValueError, match="raw Python tuple"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_tuple_with_nan_in_assumptions_rejected():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["raw"] = (float("nan"),)
+    with pytest.raises(ValueError, match="raw Python tuple"):
+        quote_record_from_dict(payload)
+
+
+@pytest.mark.parametrize("infinity", [float("inf"), float("-inf")])
+def test_raw_tuple_with_infinity_in_assumptions_rejected(infinity):
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["raw"] = (infinity,)
+    with pytest.raises(ValueError, match="raw Python tuple"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_tuple_in_exact_pricing_message_detail_rejected():
+    pricing = pricing_result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        warnings=(_message(detail={}),),
+    )
+    payload = quote_record_to_dict(record(pricing_result=pricing))
+    payload["pricing_result"]["warnings"]["__tuple__"][0]["detail"]["raw"] = ("a", "b")
+    with pytest.raises(ValueError, match="raw Python tuple"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_tuple_in_diagnostics_rejected():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["diagnostics"]["raw"] = ("x",)
+    with pytest.raises(ValueError, match="raw Python tuple"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_tuple_rejection_reports_precise_keyed_and_indexed_path():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["nested"] = [{"deep": (1, 2)}]
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_from_dict(payload)
+    message = str(excinfo.value)
+    assert "pricing_result.assumptions.nested" in message
+    assert "[0]" in message
+    assert "deep" in message
+
+
+def test_raw_tuple_rejected_even_when_contents_are_all_json_safe_and_finite():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["raw"] = ("ok", 1, 2.5, True, None)
+    with pytest.raises(ValueError, match="raw Python tuple"):
+        quote_record_from_dict(payload)
+
+
+def test_explicit_tuple_tags_still_decode_and_round_trip_exactly():
+    pricing = pricing_result(
+        assumptions={
+            "black76_pv_per_100": 4.5,
+            "genuine_tuple": ("left", "right"),
+            "nested": {"inner": (1, (2, 3))},
+        },
+    )
+    rec = record(pricing_result=pricing)
+    payload = quote_record_to_dict(rec)
+    # The encoder produced explicit tuple tags, not raw tuples.
+    assert payload["pricing_result"]["assumptions"]["genuine_tuple"] == {
+        "__tuple__": ["left", "right"]
+    }
+    restored = quote_record_from_dict(payload)
+    assert restored == rec
+    assert restored.pricing_result.assumptions["genuine_tuple"] == ("left", "right")
+    assert restored.pricing_result.assumptions["nested"]["inner"] == (1, (2, 3))
+
+
+def test_legitimate_lists_remain_lists_and_are_not_rejected():
+    pricing = pricing_result(
+        assumptions={"black76_pv_per_100": 4.5, "genuine_list": ["a", "b"]},
+    )
+    rec = record(pricing_result=pricing)
+    restored = quote_record_from_dict(quote_record_to_dict(rec))
+    assert restored.pricing_result.assumptions["genuine_list"] == ["a", "b"]
+    assert isinstance(restored.pricing_result.assumptions["genuine_list"], list)

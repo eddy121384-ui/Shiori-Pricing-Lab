@@ -265,7 +265,7 @@ def _tagged(cls: type, obj: Any) -> dict[str, object]:
 def _object(payload: object, name: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"{name} must be an object")
-    _reject_non_finite(payload, name)
+    _reject_non_canonical_payload(payload, name)
     return payload
 
 
@@ -283,15 +283,36 @@ def _require_fields(payload: dict[str, Any], cls: type, name: str, *, tagged: bo
         )
 
 
-def _reject_non_finite(value: object, path: str) -> None:
+def _reject_non_canonical_payload(value: object, path: str) -> None:
+    """Reject non-canonical wire values anywhere in a decode/encode payload.
+
+    A JSON-ready canonical payload contains only JSON primitives, lists, and
+    dicts; the *only* legal tuple representation on the wire is the explicit
+    tuple tag ``{"__tuple__": [...]}`` (itself a dict). A raw Python
+    ``tuple`` supplied to ``quote_record_from_dict`` is therefore
+    non-canonical and is rejected here -- deterministically, with the exact
+    payload path, and before any native object is constructed -- rather than
+    being silently normalized into a tuple tag or traversed and accepted. A
+    raw tuple is rejected outright regardless of its contents, so a raw
+    tuple containing ``NaN``/``Infinity`` is rejected as a raw tuple (it
+    never reaches the non-finite-number check). Codec-generated explicit
+    tuple tags are plain dicts and are unaffected. Non-finite floats
+    (``NaN``/``Infinity``/``-Infinity``) remain rejected as before.
+    """
+
+    if isinstance(value, tuple):
+        raise ValueError(
+            f"{path} contains a raw Python tuple; the only canonical tuple wire "
+            "form is {'__tuple__': [...]}"
+        )
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{path} contains non-finite number {value!r}")
     if isinstance(value, dict):
         for key, item in value.items():
-            _reject_non_finite(item, f"{path}.{key}")
+            _reject_non_canonical_payload(item, f"{path}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            _reject_non_finite(item, f"{path}[{index}]")
+            _reject_non_canonical_payload(item, f"{path}[{index}]")
 
 
 def _tuple(payload: object, name: str, decode_item=lambda item: item) -> tuple[Any, ...]:
@@ -643,7 +664,7 @@ def quote_record_to_dict(record: BLIQuoteRecord) -> dict[str, object]:
         "override_reason": record.override_reason,
         "exclusions": _encode_value(record.exclusions),
     }
-    _reject_non_finite(payload, "BLIQuoteRecord")
+    _reject_non_canonical_payload(payload, "BLIQuoteRecord")
     return payload
 
 
