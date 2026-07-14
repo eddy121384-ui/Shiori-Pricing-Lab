@@ -55,11 +55,11 @@ of the workflow only via identifiers that already exist elsewhere:
 ``underlying_id`` (an ISIN or other already-existing stable underlying
 identifier). No quote/version/persistent request id is introduced.
 
-**No tolerance logic here (decision #8).** The Annex A §A.13.4 tolerance
-bands are pinned at the *methodology* level (``< 2%`` = pass, ``2%-5%`` =
-warning inclusive of both boundaries, ``> 5%`` = fail) but this module
-contains no comparison, threshold, or status computation of any kind --
-that belongs entirely to the later comparison slice.
+**No tolerance logic here (decision #8).** All residual, tolerance,
+threshold, and comparison-status methodology is deferred to the later
+comparison slice ("PR B") and the applicable Issue #94 decisions -- this
+module contains no comparison, threshold, or status computation of any
+kind.
 
 **Hard non-goals (Issue #98 PR A scope cap):** no residual math, no
 near-zero denominator rule, no timestamp comparability policy, no
@@ -164,6 +164,8 @@ class BLIBenchmarkQuote:
         # as-of/date-time format only (same parser as
         # BLIMarketDataSnapshot's coherence checks) -- neither is compared
         # against the other or against any other object's date here.
+        _require_non_blank(self.source_as_of, "source_as_of")
+        _require_non_blank(self.retrieved_at, "retrieved_at")
         _parse_as_of_calendar_date(self.source_as_of, "source_as_of")
         _parse_as_of_calendar_date(self.retrieved_at, "retrieved_at")
 

@@ -215,6 +215,26 @@ def test_source_as_of_and_retrieved_at_are_not_defaulted_from_each_other():
     assert quote.source_as_of != quote.retrieved_at
 
 
+def test_none_source_as_of_rejected():
+    with pytest.raises(ValueError, match="source_as_of"):
+        BLIBenchmarkQuote(**_valid_kwargs(source_as_of=None))
+
+
+def test_none_retrieved_at_rejected():
+    with pytest.raises(ValueError, match="retrieved_at"):
+        BLIBenchmarkQuote(**_valid_kwargs(retrieved_at=None))
+
+
+def test_none_source_as_of_and_none_retrieved_at_fail_independently():
+    # A None source_as_of with a valid retrieved_at still fails on
+    # source_as_of, and vice versa -- neither field's None-check depends on
+    # or is inferred from the other.
+    with pytest.raises(ValueError, match="source_as_of"):
+        BLIBenchmarkQuote(**_valid_kwargs(source_as_of=None, retrieved_at="2026-07-14"))
+    with pytest.raises(ValueError, match="retrieved_at"):
+        BLIBenchmarkQuote(**_valid_kwargs(source_as_of="2026-07-10", retrieved_at=None))
+
+
 # --- 7. Premium validation ----------------------------------------------------
 
 
