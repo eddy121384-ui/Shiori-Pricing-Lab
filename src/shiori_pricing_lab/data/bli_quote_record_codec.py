@@ -77,6 +77,21 @@ from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 
 _CLASS_KEY = "__class__"
 _TUPLE_KEY = "__tuple__"
+_RESERVED_KEYS = (_TUPLE_KEY, _CLASS_KEY)
+
+# Free-form (business/user) fields: their values may hold arbitrary
+# JSON-safe primitives, dicts, lists, and tuples supplied by the pricing
+# engine or a caller -- never a reserved codec key, an arbitrary Enum, or an
+# arbitrary dataclass/custom object. Every other field on these dataclasses
+# is a typed schema field and keeps its existing explicit field-specific
+# encoding via ``_encode_value``.
+_FREE_FORM_FIELDS = {
+    ("PricingMessage", "detail"),
+    ("PricingResult", "assumptions"),
+    ("PricingResult", "diagnostics"),
+    ("PricingResult", "scenario_results"),
+    ("PricingResult", "cashflows"),
+}
 _KNOWN_TAGGED_CLASSES = {
     "BLIStandaloneBondOptionRequest",
     "BondOption",
@@ -122,6 +137,60 @@ def _encode_value(value: Any) -> Any:
     return value
 
 
+def _encode_free_form_value(value: Any, path: str) -> Any:
+    """Encode one free-form (business/user) value, rejecting unsafe content.
+
+    Rejects, deterministically and with the precise value path, before any
+    encoded payload is returned:
+
+    - a reserved codec key (``__tuple__``/``__class__``) appearing as a key
+      in any nested dict -- these keys are never escaped, renamed, or
+      normalized, only rejected;
+    - an arbitrary ``Enum`` instance -- typed schema fields keep their own
+      explicit field-specific enum encoding via :func:`_encode_value` and
+      never reach this function;
+    - an arbitrary dataclass or other unsupported custom object -- this
+      function only round-trips JSON-safe primitives, dicts, lists, and
+      tuples, matching what the pricing engine actually places in these
+      fields today; it does not add a generic "serialize anything" path.
+
+    Actual tuples are still tagged with the existing internal ``__tuple__``
+    marker so they round-trip -- only a *user-supplied* dict key equal to a
+    reserved name is rejected, never the codec's own tagging mechanism.
+    """
+
+    if isinstance(value, Enum):
+        raise ValueError(f"{path}: Enum values are not supported in free-form data")
+    if is_dataclass(value):
+        raise ValueError(f"{path}: dataclass values are not supported in free-form data")
+    if isinstance(value, dict):
+        for key in value:
+            if not isinstance(key, str):
+                raise ValueError(f"{path}: free-form dict keys must be strings")
+            if key in _RESERVED_KEYS:
+                raise ValueError(
+                    f"{path}.{key}: reserved key {key!r} is not allowed in free-form data"
+                )
+        return {
+            key: _encode_free_form_value(item, f"{path}.{key}") for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return {
+            _TUPLE_KEY: [
+                _encode_free_form_value(item, f"{path}[{index}]")
+                for index, item in enumerate(value)
+            ]
+        }
+    if isinstance(value, list):
+        return [
+            _encode_free_form_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise ValueError(f"{path}: unsupported free-form value type {type(value).__name__}")
+
+
 def _decode_value(value: Any) -> Any:
     if isinstance(value, dict):
         if _TUPLE_KEY in value:
@@ -142,7 +211,13 @@ def _decode_value(value: Any) -> Any:
 def _tagged(cls: type, obj: Any) -> dict[str, object]:
     payload = {_CLASS_KEY: cls.__name__}
     for field in fields(cls):
-        payload[field.name] = _encode_value(getattr(obj, field.name))
+        value = getattr(obj, field.name)
+        if (cls.__name__, field.name) in _FREE_FORM_FIELDS:
+            payload[field.name] = _encode_free_form_value(
+                value, f"{cls.__name__}.{field.name}"
+            )
+        else:
+            payload[field.name] = _encode_value(value)
     return payload
 
 
@@ -503,8 +578,8 @@ def _calibration(payload: object) -> BLIImpliedPriceVolCalibrationResult | None:
 def quote_record_to_dict(record: BLIQuoteRecord) -> dict[str, object]:
     """Encode ``record`` to a strict JSON-ready typed dict."""
 
-    if not isinstance(record, BLIQuoteRecord):
-        raise TypeError("record must be a BLIQuoteRecord")
+    if type(record) is not BLIQuoteRecord:
+        raise TypeError("record must be exactly a BLIQuoteRecord")
     payload: dict[str, object] = {
         "schema_version": record.schema_version,
         "quote_id": record.quote_id,

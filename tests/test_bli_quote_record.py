@@ -34,8 +34,10 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
     BLIImpliedPriceVolSolverStatus,
 )
 from shiori_pricing_lab.pricing.result import (
+    PricingMessage,
     PricingResult,
     PricingStatus,
+    PricingWarningCode,
 )
 from shiori_pricing_lab.products.enums import OptionType
 
@@ -396,3 +398,96 @@ def test_no_forbidden_boundary_imports_or_calls():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert forbidden_names.isdisjoint(called)
+
+
+# --- Exact native object types (subclasses rejected) --------------------------
+
+
+def _subclass_instance(obj):
+    base_cls = type(obj)
+    subclass = type(f"_{base_cls.__name__}Subclass", (base_cls,), {})
+    kwargs = {f.name: getattr(obj, f.name) for f in fields(base_cls) if f.init}
+    return subclass(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field_name,build_base",
+    [
+        ("request", request),
+        ("pricing_result", pricing_result),
+        ("benchmark_quote", benchmark_quote),
+        ("benchmark_comparison", benchmark_comparison),
+        ("calibration_result", calibration_result),
+    ],
+)
+def test_subclass_of_native_object_rejected(field_name, build_base):
+    subclassed = _subclass_instance(build_base())
+    with pytest.raises(TypeError):
+        record(**{field_name: subclassed})
+
+
+def test_calibration_result_none_still_accepted_alongside_exact_type_check():
+    rec = record(calibration_result=None)
+    assert rec.calibration_result is None
+
+
+# --- Required model premium anchors -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pv": None},
+        {"pv": float("nan")},
+        {"pv": float("inf")},
+        {"pv": float("-inf")},
+        {"pv": True},
+        {"assumptions": {}},
+        {"assumptions": {"black76_pv_per_100": float("nan")}},
+        {"assumptions": {"black76_pv_per_100": float("inf")}},
+        {"assumptions": {"black76_pv_per_100": True}},
+    ],
+)
+def test_missing_or_invalid_model_anchor_rejected(overrides):
+    with pytest.raises(ValueError):
+        record(pricing_result=pricing_result(**overrides))
+
+
+def test_missing_pv_anchor_fails_before_override_evaluation_even_with_client_quote():
+    # A present client quote would otherwise trigger the override-invariant
+    # equality check; the missing pv anchor must fail first and explicitly,
+    # never silently comparing the client value against a missing anchor.
+    bad_pricing = pricing_result(pv=None)
+    with pytest.raises(ValueError, match="pricing_result.pv"):
+        record(pricing_result=bad_pricing, client_quote_premium_per_100=4.5)
+
+
+def test_missing_per_100_anchor_fails_before_override_evaluation_even_with_client_quote():
+    bad_pricing = pricing_result(assumptions={})
+    with pytest.raises(ValueError, match="black76_pv_per_100"):
+        record(pricing_result=bad_pricing, client_quote_premium_per_100=4.5)
+
+
+def test_bool_per_100_anchor_rejected_even_with_matching_client_total():
+    bad_pricing = pricing_result(assumptions={"black76_pv_per_100": True})
+    with pytest.raises(ValueError, match="black76_pv_per_100"):
+        record(pricing_result=bad_pricing, client_quote_total_premium=2250.0)
+
+
+# --- Successful-status policy ---------------------------------------------------
+
+
+def test_success_with_warnings_pricing_result_accepted():
+    warning_pricing = pricing_result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        warnings=(
+            PricingMessage(
+                code=PricingWarningCode.DATA_QUALITY,
+                message="synthetic data-quality warning",
+                detail={"note": "synthetic"},
+            ),
+        ),
+    )
+    rec = record(pricing_result=warning_pricing)
+    assert rec.pricing_result.status is PricingStatus.SUCCESS_WITH_WARNINGS
+    assert rec.pricing_result.warnings[0].message == "synthetic data-quality warning"

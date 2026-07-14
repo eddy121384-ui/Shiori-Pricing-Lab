@@ -88,8 +88,37 @@ def _require_exclusions(value: object) -> tuple[str, ...]:
     return value
 
 
-def _model_per_100(pricing_result: PricingResult) -> object:
-    return pricing_result.assumptions.get("black76_pv_per_100")
+def _require_model_number(value: object, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
+
+
+def _require_model_anchors(pricing_result: PricingResult) -> None:
+    """Require ``pv`` and ``assumptions['black76_pv_per_100']`` to be usable anchors.
+
+    Called before any comparison-alignment or override evaluation reads
+    either value, so a missing/non-finite/bool anchor fails explicitly
+    instead of silently comparing against ``None`` (which would make a
+    missing anchor look like "always different," accidentally satisfying an
+    override/mismatch check rather than failing it outright). Neither value
+    is derived, reconciled, coerced, or mutated here -- only validated.
+    """
+
+    _require_model_number(pricing_result.pv, "pricing_result.pv")
+    if "black76_pv_per_100" not in pricing_result.assumptions:
+        raise ValueError(
+            "pricing_result.assumptions must contain 'black76_pv_per_100'"
+        )
+    _require_model_number(
+        pricing_result.assumptions["black76_pv_per_100"],
+        "pricing_result.assumptions['black76_pv_per_100']",
+    )
+
+
+def _model_per_100(pricing_result: PricingResult) -> float:
+    return pricing_result.assumptions["black76_pv_per_100"]
 
 
 @dataclass(frozen=True)
@@ -132,23 +161,26 @@ class BLIQuoteRecord:
         _require_saved_at(self.saved_at)
         _require_non_blank_stripped(self.operator_id, "operator_id")
 
-        if not isinstance(self.request, BLIStandaloneBondOptionRequest):
-            raise TypeError("request must be a BLIStandaloneBondOptionRequest")
-        if not isinstance(self.pricing_result, PricingResult):
-            raise TypeError("pricing_result must be a PricingResult")
-        if not isinstance(self.benchmark_quote, BLIBenchmarkQuote):
-            raise TypeError("benchmark_quote must be a BLIBenchmarkQuote")
-        if not isinstance(self.benchmark_comparison, BLIBenchmarkComparisonResult):
-            raise TypeError("benchmark_comparison must be a BLIBenchmarkComparisonResult")
-        if self.calibration_result is not None and not isinstance(
-            self.calibration_result, BLIImpliedPriceVolCalibrationResult
+        if type(self.request) is not BLIStandaloneBondOptionRequest:
+            raise TypeError("request must be exactly a BLIStandaloneBondOptionRequest")
+        if type(self.pricing_result) is not PricingResult:
+            raise TypeError("pricing_result must be exactly a PricingResult")
+        if type(self.benchmark_quote) is not BLIBenchmarkQuote:
+            raise TypeError("benchmark_quote must be exactly a BLIBenchmarkQuote")
+        if type(self.benchmark_comparison) is not BLIBenchmarkComparisonResult:
+            raise TypeError("benchmark_comparison must be exactly a BLIBenchmarkComparisonResult")
+        if self.calibration_result is not None and (
+            type(self.calibration_result) is not BLIImpliedPriceVolCalibrationResult
         ):
             raise TypeError(
-                "calibration_result must be None or a BLIImpliedPriceVolCalibrationResult"
+                "calibration_result must be None or exactly a "
+                "BLIImpliedPriceVolCalibrationResult"
             )
 
         if not self.pricing_result.is_success:
             raise ValueError("pricing_result must be SUCCESS or SUCCESS_WITH_WARNINGS")
+
+        _require_model_anchors(self.pricing_result)
 
         object.__setattr__(
             self,

@@ -4,6 +4,8 @@ import importlib.machinery
 import importlib.util
 import inspect
 import json
+import re
+from dataclasses import fields
 
 import pytest
 
@@ -14,7 +16,12 @@ from shiori_pricing_lab.data.bli_quote_record_codec import (
     quote_record_to_dict,
     quote_record_to_json,
 )
-from shiori_pricing_lab.pricing.result import PricingMessage, PricingWarningCode
+from shiori_pricing_lab.pricing.result import (
+    PricingMessage,
+    PricingStatus,
+    PricingWarningCode,
+)
+from shiori_pricing_lab.products.enums import PayReceive
 
 _loader = importlib.machinery.SourceFileLoader(
     "quote_record_helpers", "tests/test_bli_quote_record.py"
@@ -24,6 +31,7 @@ _helpers = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_helpers)
 record = _helpers.record
 calibration_result = _helpers.calibration_result
+pricing_result = _helpers.pricing_result
 
 
 def test_exact_dict_round_trip_with_non_none_calibration_solver_and_no_mutation():
@@ -227,3 +235,181 @@ def test_codec_boundary_has_no_filesystem_clock_provider_migration_or_prbc_behav
     assert forbidden_calls.isdisjoint(called)
     assert "migration" not in source.lower()
     assert "alias" not in source.lower()
+
+
+# --- Reserved codec keys rejected in free-form containers ------------------------
+
+_RESERVED_KEYS = ["__tuple__", "__class__"]
+
+
+def _reserved_key_in_assumptions(reserved_key):
+    return pricing_result(assumptions={"black76_pv_per_100": 4.5, reserved_key: "x"})
+
+
+def _reserved_key_nested_deep_in_assumptions(reserved_key):
+    return pricing_result(
+        assumptions={
+            "black76_pv_per_100": 4.5,
+            "nested": {"deeper": [{"deepest": {reserved_key: "x"}}]},
+        }
+    )
+
+
+def _reserved_key_in_diagnostics(reserved_key):
+    return pricing_result(diagnostics={reserved_key: "x"})
+
+
+def _reserved_key_in_scenario_results(reserved_key):
+    return pricing_result(scenario_results={reserved_key: "x"})
+
+
+def _reserved_key_in_cashflows(reserved_key):
+    return pricing_result(cashflows=({"amount": 1.0, reserved_key: "x"},))
+
+
+def _reserved_key_in_message_detail(reserved_key):
+    return pricing_result(
+        warnings=(
+            PricingMessage(
+                code=PricingWarningCode.DATA_QUALITY,
+                message="synthetic",
+                detail={reserved_key: "x"},
+            ),
+        )
+    )
+
+
+_RESERVED_KEY_BUILDERS = [
+    _reserved_key_in_assumptions,
+    _reserved_key_nested_deep_in_assumptions,
+    _reserved_key_in_diagnostics,
+    _reserved_key_in_scenario_results,
+    _reserved_key_in_cashflows,
+    _reserved_key_in_message_detail,
+]
+
+
+@pytest.mark.parametrize("reserved_key", _RESERVED_KEYS)
+@pytest.mark.parametrize("build_pricing_result", _RESERVED_KEY_BUILDERS)
+def test_reserved_codec_keys_rejected_before_encoding(reserved_key, build_pricing_result):
+    pricing = build_pricing_result(reserved_key)
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape(reserved_key)):
+        quote_record_to_dict(rec)
+
+
+def test_reserved_key_rejection_does_not_escape_rename_or_normalize():
+    # The error must name the exact offending key/path; the codec must not
+    # silently rewrite it into something else and continue encoding.
+    pricing = pricing_result(assumptions={"black76_pv_per_100": 4.5, "__class__": "x"})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_to_dict(rec)
+    assert "assumptions" in str(excinfo.value)
+    assert "__class__" in str(excinfo.value)
+
+
+def test_actual_tuples_still_use_the_internal_tuple_tag():
+    # The reserved-key rejection must not disable the codec's own legitimate
+    # tuple tagging for real tuple values in free-form data.
+    pricing = pricing_result(assumptions={"black76_pv_per_100": 4.5, "real_tuple": (1, 2)})
+    rec = record(pricing_result=pricing)
+    payload = quote_record_to_dict(rec)
+    assert payload["pricing_result"]["assumptions"]["real_tuple"] == {"__tuple__": [1, 2]}
+    restored = quote_record_from_dict(payload)
+    assert restored.pricing_result.assumptions["real_tuple"] == (1, 2)
+
+
+# --- Arbitrary Enum values rejected in free-form containers ----------------------
+
+
+def test_arbitrary_enum_rejected_in_assumptions():
+    pricing = pricing_result(assumptions={"black76_pv_per_100": 4.5, "bad": PayReceive.PAY})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="Enum"):
+        quote_record_to_dict(rec)
+
+
+def test_arbitrary_enum_rejected_in_message_detail():
+    pricing = pricing_result(
+        warnings=(
+            PricingMessage(
+                code=PricingWarningCode.DATA_QUALITY,
+                message="synthetic",
+                detail={"bad": PayReceive.PAY},
+            ),
+        )
+    )
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="Enum"):
+        quote_record_to_dict(rec)
+
+
+def test_arbitrary_enum_rejected_nested_in_diagnostics_list():
+    pricing = pricing_result(diagnostics={"items": [{"nested": PayReceive.PAY}]})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="Enum"):
+        quote_record_to_dict(rec)
+
+
+def test_arbitrary_enum_rejected_nested_in_scenario_results():
+    pricing = pricing_result(scenario_results={"path": [{"leg": PayReceive.RECEIVE}]})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="Enum"):
+        quote_record_to_dict(rec)
+
+
+def test_arbitrary_enum_rejection_does_not_silently_convert_to_value():
+    # Confirms the rejection message is not just a passthrough of .value --
+    # the encoder must refuse the payload outright, not stringify it.
+    pricing = pricing_result(assumptions={"black76_pv_per_100": 4.5, "bad": PayReceive.PAY})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError):
+        quote_record_to_dict(rec)
+
+
+def test_typed_schema_enums_still_round_trip_normally():
+    rec = record(calibration_result=calibration_result())
+    restored = quote_record_from_dict(quote_record_to_dict(rec))
+    assert restored.request.bond_option.currency is rec.request.bond_option.currency
+    assert restored.benchmark_quote.quote_side is rec.benchmark_quote.quote_side
+    assert restored.benchmark_comparison.status is rec.benchmark_comparison.status
+    assert restored.calibration_result.reason is rec.calibration_result.reason
+    assert restored.calibration_result.solver_result.reason == (
+        rec.calibration_result.solver_result.reason
+    )
+
+
+# --- Exact native object types (subclasses rejected) ------------------------------
+
+
+def test_codec_rejects_quote_record_subclass():
+    base = record()
+    record_cls = type(base)
+    subclass = type(f"_{record_cls.__name__}Subclass", (record_cls,), {})
+    kwargs = {f.name: getattr(base, f.name) for f in fields(record_cls) if f.init}
+    subclassed = subclass(**kwargs)
+    with pytest.raises(TypeError):
+        quote_record_to_dict(subclassed)
+
+
+# --- Successful-status policy: SUCCESS_WITH_WARNINGS round-trips exactly ---------
+
+
+def test_success_with_warnings_round_trips_exactly():
+    warning_pricing = pricing_result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        warnings=(
+            PricingMessage(
+                code=PricingWarningCode.DATA_QUALITY,
+                message="synthetic data-quality warning",
+                detail={"note": "synthetic"},
+            ),
+        ),
+    )
+    rec = record(pricing_result=warning_pricing)
+    restored = quote_record_from_json(quote_record_to_json(rec))
+    assert restored == rec
+    assert restored.pricing_result.status is PricingStatus.SUCCESS_WITH_WARNINGS
+    assert restored.pricing_result.warnings[0].code is PricingWarningCode.DATA_QUALITY
+    assert restored.pricing_result.warnings[0].message == "synthetic data-quality warning"
