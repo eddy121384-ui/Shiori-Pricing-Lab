@@ -1,16 +1,18 @@
+import ast
 import copy
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 
 import pytest
 
-from shiori_pricing_lab.data.bli_quote_record import BLIQuoteRecordOverrideReason
+from shiori_pricing_lab.data import bli_quote_record_codec as codec_module
 from shiori_pricing_lab.data.bli_quote_record_codec import (
-    bli_quote_record_from_canonical_json,
-    bli_quote_record_from_typed_dict,
-    bli_quote_record_to_canonical_json,
-    bli_quote_record_to_typed_dict,
+    quote_record_from_dict,
+    quote_record_from_json,
+    quote_record_to_dict,
+    quote_record_to_json,
 )
 
 _loader = importlib.machinery.SourceFileLoader(
@@ -20,93 +22,157 @@ _spec = importlib.util.spec_from_loader("quote_record_helpers", _loader)
 _helpers = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_helpers)
 record = _helpers.record
+calibration_result = _helpers.calibration_result
 
 
-def test_typed_dict_round_trip_is_exact_and_non_mutating():
-    rec = record()
-    before = rec
-    payload = bli_quote_record_to_typed_dict(rec)
+def test_exact_dict_round_trip_with_non_none_calibration_solver_and_no_mutation():
+    rec = record(calibration_result=calibration_result())
+    before = copy.deepcopy(rec)
+    payload = quote_record_to_dict(rec)
     payload_before = copy.deepcopy(payload)
-    restored = bli_quote_record_from_typed_dict(payload)
+    restored = quote_record_from_dict(payload)
     assert restored == rec
     assert rec == before
     assert payload == payload_before
-    assert payload["model_fair_value_per_100"] == 1.25
-    assert payload["benchmark_quote"]["premium_per_100"] == 1.2
-    assert payload["client_quote_per_100"] == 1.3
+    curve_point_payload = payload["request"]["market_data_snapshot"]["curve_points"][0]
+    assert curve_point_payload["__class__"] == "BLICurvePoint"
+    solver_payload = payload["calibration_result"]["solver_result"]
+    assert solver_payload["__class__"] == "BLIImpliedPriceVolSolverResult"
 
 
-def test_canonical_json_round_trip_is_deterministic_with_trailing_newline():
-    rec = record()
-    first = bli_quote_record_to_canonical_json(rec)
-    second = bli_quote_record_to_canonical_json(rec)
+def test_exact_canonical_json_round_trip_after_sorted_keys():
+    rec = record(calibration_result=calibration_result())
+    first = quote_record_to_json(rec)
+    second = quote_record_to_json(rec)
     assert first == second
     assert first.endswith("\n")
-    assert json.loads(first)["schema_version"] == 1
-    assert bli_quote_record_from_canonical_json(first) == rec
+    assert first == json.dumps(
+        quote_record_to_dict(rec),
+        sort_keys=True,
+        indent=2,
+        ensure_ascii=False,
+        allow_nan=False,
+    ) + "\n"
+    assert quote_record_from_json(first) == rec
 
 
-@pytest.mark.parametrize("field", ["schema_version", "pricing_result", "benchmark_quote"])
-def test_missing_top_level_field_rejected(field):
-    payload = bli_quote_record_to_typed_dict(record())
+@pytest.mark.parametrize("field", ["schema_version", "request", "benchmark_comparison"])
+def test_missing_required_top_level_fields_rejected(field):
+    payload = quote_record_to_dict(record())
     payload.pop(field)
     with pytest.raises(ValueError):
-        bli_quote_record_from_typed_dict(payload)
+        quote_record_from_dict(payload)
 
 
 def test_unknown_top_level_field_rejected():
-    payload = bli_quote_record_to_typed_dict(record())
-    payload["extra"] = "nope"
+    payload = quote_record_to_dict(record())
+    payload["migration_alias"] = "not authorized"
     with pytest.raises(ValueError):
-        bli_quote_record_from_typed_dict(payload)
+        quote_record_from_dict(payload)
 
 
-@pytest.mark.parametrize("path", [
-    ("pricing_result", "status", "NOT_A_STATUS"),
-    ("benchmark_quote", "quote_side", "SIDEWAYS"),
-    ("comparison_result", "reason", "NOPE"),
-])
-def test_nested_invalid_enum_rejected(path):
-    section, key, value = path
-    payload = bli_quote_record_to_typed_dict(record())
-    payload[section][key] = value
+@pytest.mark.parametrize(
+    "section,field,value",
+    [
+        ("request", "valuation_date", "not-a-date"),
+        ("pricing_result", "status", "NOPE"),
+        ("benchmark_quote", "quote_side", "NOPE"),
+        ("benchmark_comparison", "reason", "NOPE"),
+        ("calibration_result", "reason", "NOPE"),
+    ],
+)
+def test_malformed_nested_payloads_and_invalid_enums_rejected(section, field, value):
+    payload = quote_record_to_dict(record())
+    payload[section][field] = value
+    with pytest.raises((TypeError, ValueError)):
+        quote_record_from_dict(payload)
+
+
+def test_missing_and_unknown_nested_fields_rejected():
+    payload = quote_record_to_dict(record())
+    payload["request"]["market_data_snapshot"]["curve_points"][0].pop("rate")
     with pytest.raises(ValueError):
-        bli_quote_record_from_typed_dict(payload)
+        quote_record_from_dict(payload)
 
-
-def test_nested_unknown_field_rejected():
-    payload = bli_quote_record_to_typed_dict(record())
-    payload["benchmark_quote"]["unknown"] = "nope"
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["extra"] = "nope"
     with pytest.raises(ValueError):
-        bli_quote_record_from_typed_dict(payload)
+        quote_record_from_dict(payload)
 
 
 def test_unsupported_schema_version_rejected():
-    payload = bli_quote_record_to_typed_dict(record())
+    payload = quote_record_to_dict(record())
     payload["schema_version"] = 2
     with pytest.raises(ValueError):
-        bli_quote_record_from_typed_dict(payload)
+        quote_record_from_dict(payload)
 
 
-@pytest.mark.parametrize("text", ["{", "[]", "null", "1"])
-def test_malformed_or_non_object_json_rejected(text):
+@pytest.mark.parametrize("text", ["{", "[]", "null", "1", "true"])
+def test_malformed_and_non_object_json_rejected(text):
     with pytest.raises(ValueError):
-        bli_quote_record_from_canonical_json(text)
+        quote_record_from_json(text)
 
 
-def test_non_finite_numbers_rejected_before_json_output():
-    payload = bli_quote_record_to_typed_dict(record())
-    payload["model_total_value"] = float("inf")
+@pytest.mark.parametrize("field,value", [
+    ("client_quote_premium_per_100", float("nan")),
+    ("trader_adjustment_total", float("inf")),
+])
+def test_non_finite_numbers_rejected(field, value):
+    payload = quote_record_to_dict(record())
+    payload[field] = value
     with pytest.raises(ValueError):
-        bli_quote_record_from_typed_dict(payload)
+        quote_record_from_dict(payload)
 
 
-def test_override_codec_round_trip():
+def test_lists_where_tuples_are_required_after_reconstruction_are_rejected():
+    rec = record()
+    with pytest.raises(TypeError):
+        type(rec)(**{**rec.__dict__, "exclusions": ["not-a-tuple"]})
+
+
+def test_no_economic_derivation_or_buy_sell_sign_application():
     rec = record(
-        override_applied=True,
-        override_reason=BLIQuoteRecordOverrideReason.OTHER,
-        override_note="synthetic override note",
+        client_quote_premium_per_100=4.6,
+        client_quote_total_premium=999.0,
+        trader_adjustment_per_100=-0.2,
+        trader_adjustment_total=123.0,
+        override_reason="manual separated economics",
     )
-    restored = bli_quote_record_from_canonical_json(bli_quote_record_to_canonical_json(rec))
-    assert restored.override_applied is True
-    assert restored.override_reason is BLIQuoteRecordOverrideReason.OTHER
+    restored = quote_record_from_json(quote_record_to_json(rec))
+    assert restored.client_quote_premium_per_100 == 4.6
+    assert restored.client_quote_total_premium == 999.0
+    assert restored.trader_adjustment_per_100 == -0.2
+    assert restored.trader_adjustment_total == 123.0
+
+
+def test_public_api_names_are_authorized_only():
+    assert not hasattr(codec_module, "bli_quote_record_to_typed_dict")
+    assert not hasattr(codec_module, "bli_quote_record_from_typed_dict")
+    assert not hasattr(codec_module, "bli_quote_record_to_canonical_json")
+    assert not hasattr(codec_module, "bli_quote_record_from_canonical_json")
+
+
+def test_codec_boundary_has_no_filesystem_clock_provider_migration_or_prbc_behavior():
+    source = inspect.getsource(codec_module)
+    tree = ast.parse(source)
+    forbidden_import_roots = {
+        "os", "pathlib", "tempfile", "uuid", "getpass", "sqlite3", "requests", "urllib"
+    }
+    imported = {
+        alias.name.split(".")[0]
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert forbidden_import_roots.isdisjoint(imported)
+    forbidden_calls = {
+        "open", "uuid4", "now", "today", "price_bli_mvp", "calibrate_bli_implied_price_vol"
+    }
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert forbidden_calls.isdisjoint(called)
+    assert "migration" not in source.lower()
+    assert "alias" not in source.lower()
