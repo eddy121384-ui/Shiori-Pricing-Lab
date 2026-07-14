@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
 from unittest import mock
 
@@ -257,18 +258,37 @@ def test_known_synthetic_put_recovery():
     assert result.solver_result.implied_price_vol == pytest.approx(sigma_true, abs=1e-6)
 
 
-# --- 4-6. Provenance neutrality (real composition, only the solve differs) ------
+# --- 4-6. Provenance neutrality (mocked F/T/DF, real solver) -------------------
+#
+# F/T/DF resolution is patched to return the exact same constants the target
+# premium below was computed from, so the real solve_implied_price_vol still
+# runs against genuine, consistent inputs -- these tests are portable
+# without QuantLib, unlike the two real-composition recovery tests above.
+
+_NEUTRALITY_F = 101.0
+_NEUTRALITY_T = 0.5
+_NEUTRALITY_DF = 0.98
 
 
-@_requires_quantlib
+@contextmanager
+def _patched_resolution():
+    with mock.patch(
+        f"{_MODULE}.forward_clean_price_per_100", return_value=_NEUTRALITY_F
+    ), mock.patch(
+        f"{_MODULE}.year_fraction_to_expiry", return_value=_NEUTRALITY_T
+    ), mock.patch(
+        f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=_NEUTRALITY_DF
+    ):
+        yield
+
+
 def test_original_request_volatility_does_not_change_implied_vol():
-    F, T, DF = 101.22605288103159, 0.2465753424657534, 0.9929452501091504
     target = black76_price_option_pv_per_100(
-        forward_clean_price=F,
+        forward_clean_price=_NEUTRALITY_F,
         strike_clean_price=_REQUEST.bond_option.strike_price,
         price_volatility=0.18,
-        time_to_expiry=T,
-        discount_factor=DF,
+        time_to_expiry=_NEUTRALITY_T,
+        discount_factor=_NEUTRALITY_DF,
         option_type=OptionType.CALL,
     )
     benchmark = _make_benchmark(premium_per_100=target)
@@ -292,23 +312,22 @@ def test_original_request_volatility_does_not_change_implied_vol():
         ),
     )
 
-    result_a = _calibrate(request_a, benchmark, active_quote_side=_MID)
-    result_b = _calibrate(request_b, benchmark, active_quote_side=_MID)
+    with _patched_resolution():
+        result_a = _calibrate(request_a, benchmark, active_quote_side=_MID)
+        result_b = _calibrate(request_b, benchmark, active_quote_side=_MID)
 
     assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
     assert result_a.original_volatility == 0.05
     assert result_b.original_volatility == 0.90
 
 
-@_requires_quantlib
 def test_request_notional_does_not_change_implied_vol():
-    F, T, DF = 101.22605288103159, 0.2465753424657534, 0.9929452501091504
     target = black76_price_option_pv_per_100(
-        forward_clean_price=F,
+        forward_clean_price=_NEUTRALITY_F,
         strike_clean_price=_REQUEST.bond_option.strike_price,
         price_volatility=0.18,
-        time_to_expiry=T,
-        discount_factor=DF,
+        time_to_expiry=_NEUTRALITY_T,
+        discount_factor=_NEUTRALITY_DF,
         option_type=OptionType.CALL,
     )
     benchmark = _make_benchmark(premium_per_100=target)
@@ -316,30 +335,30 @@ def test_request_notional_does_not_change_implied_vol():
     request_a = replace(_REQUEST, bond_option=replace(_REQUEST.bond_option, notional=10.0))
     request_b = replace(_REQUEST, bond_option=replace(_REQUEST.bond_option, notional=10_000_000.0))
 
-    result_a = _calibrate(request_a, benchmark, active_quote_side=_MID)
-    result_b = _calibrate(request_b, benchmark, active_quote_side=_MID)
+    with _patched_resolution():
+        result_a = _calibrate(request_a, benchmark, active_quote_side=_MID)
+        result_b = _calibrate(request_b, benchmark, active_quote_side=_MID)
 
     assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
     assert result_a.request_notional == 10.0
     assert result_b.request_notional == 10_000_000.0
 
 
-@_requires_quantlib
 def test_benchmark_total_premium_does_not_change_implied_vol():
-    F, T, DF = 101.22605288103159, 0.2465753424657534, 0.9929452501091504
     target = black76_price_option_pv_per_100(
-        forward_clean_price=F,
+        forward_clean_price=_NEUTRALITY_F,
         strike_clean_price=_REQUEST.bond_option.strike_price,
         price_volatility=0.18,
-        time_to_expiry=T,
-        discount_factor=DF,
+        time_to_expiry=_NEUTRALITY_T,
+        discount_factor=_NEUTRALITY_DF,
         option_type=OptionType.CALL,
     )
     benchmark_a = _make_benchmark(premium_per_100=target, total_premium=1.0)
     benchmark_b = _make_benchmark(premium_per_100=target, total_premium=999_999_999.0)
 
-    result_a = _calibrate(_REQUEST, benchmark_a, active_quote_side=_MID)
-    result_b = _calibrate(_REQUEST, benchmark_b, active_quote_side=_MID)
+    with _patched_resolution():
+        result_a = _calibrate(_REQUEST, benchmark_a, active_quote_side=_MID)
+        result_b = _calibrate(_REQUEST, benchmark_b, active_quote_side=_MID)
 
     assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
     assert result_a.benchmark_total_premium == 1.0
@@ -537,10 +556,18 @@ def test_retrieved_at_difference_does_not_change_calibration():
 
 
 def test_support_guard_called_exactly_once():
+    # F/T/DF resolution and the solver are mocked so this test proves only
+    # that the real support-guard wrapper is invoked exactly once -- it
+    # does not depend on QuantLib or the real pricing composition.
+    fake_solver_result = _fake_solver_result()
     with mock.patch(
         f"{_MODULE}.check_bli_mvp_standalone_option_required_inputs",
         wraps=calibration_module.check_bli_mvp_standalone_option_required_inputs,
-    ) as mock_guard:
+    ) as mock_guard, mock.patch(
+        f"{_MODULE}.forward_clean_price_per_100", return_value=101.0
+    ), mock.patch(f"{_MODULE}.year_fraction_to_expiry", return_value=0.5), mock.patch(
+        f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98
+    ), mock.patch(f"{_MODULE}.solve_implied_price_vol", return_value=fake_solver_result):
         _calibrate(_REQUEST, _make_benchmark(), active_quote_side=_MID)
     assert mock_guard.call_count == 1
 
