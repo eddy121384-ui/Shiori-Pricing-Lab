@@ -618,3 +618,69 @@ def test_legitimate_lists_remain_lists_and_are_not_rejected():
     restored = quote_record_from_dict(quote_record_to_dict(rec))
     assert restored.pricing_result.assumptions["genuine_list"] == ["a", "b"]
     assert isinstance(restored.pricing_result.assumptions["genuine_list"], list)
+
+
+def test_raw_tuple_key_in_assumptions_rejected():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"][("raw", "key")] = "x"
+    with pytest.raises(ValueError, match="non-string dict key"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_tuple_key_in_nested_free_form_dict_rejected():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["nested"] = {"inner": {}}
+    payload["pricing_result"]["assumptions"]["nested"]["inner"][("deep", "key")] = 1
+    with pytest.raises(ValueError, match="non-string dict key"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_tuple_key_rejection_reports_precise_path_and_key():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"][("raw", "key")] = "x"
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_from_dict(payload)
+    message = str(excinfo.value)
+    assert "pricing_result.assumptions" in message
+    assert "('raw', 'key')" in message
+
+
+def test_raw_tuple_key_rejected_even_with_finite_json_safe_contents():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"][(1, 2)] = "safe-value"
+    with pytest.raises(ValueError, match="non-string dict key"):
+        quote_record_from_dict(payload)
+
+
+@pytest.mark.parametrize("bad_key", [1, 1.5, None, True, frozenset({"x"})])
+def test_non_tuple_non_string_key_rejected(bad_key):
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"][bad_key] = "x"
+    with pytest.raises(ValueError, match="non-string dict key"):
+        quote_record_from_dict(payload)
+
+
+def test_legitimate_string_key_dicts_still_round_trip():
+    pricing = pricing_result(
+        assumptions={"black76_pv_per_100": 4.5, "a_string_key": "value"},
+    )
+    rec = record(pricing_result=pricing)
+    restored = quote_record_from_dict(quote_record_to_dict(rec))
+    assert restored.pricing_result.assumptions["a_string_key"] == "value"
+
+
+def test_explicit_tuple_tag_values_still_round_trip_with_key_validation_active():
+    pricing = pricing_result(
+        assumptions={
+            "black76_pv_per_100": 4.5,
+            "genuine_tuple": ("left", "right"),
+        },
+    )
+    rec = record(pricing_result=pricing)
+    payload = quote_record_to_dict(rec)
+    assert payload["pricing_result"]["assumptions"]["genuine_tuple"] == {
+        "__tuple__": ["left", "right"]
+    }
+    restored = quote_record_from_dict(payload)
+    assert restored == rec
+    assert restored.pricing_result.assumptions["genuine_tuple"] == ("left", "right")

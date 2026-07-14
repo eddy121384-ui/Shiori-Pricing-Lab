@@ -298,6 +298,16 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
     never reaches the non-finite-number check). Codec-generated explicit
     tuple tags are plain dicts and are unaffected. Non-finite floats
     (``NaN``/``Infinity``/``-Infinity``) remain rejected as before.
+
+    A JSON-ready canonical payload also only ever has ``str`` dict keys
+    (JSON object keys are always strings); a raw Python ``dict`` supplied to
+    ``quote_record_from_dict`` may carry any hashable key, so every key is
+    checked here too, at every nesting depth, before any native object is
+    constructed. This is a single uniform ``isinstance(key, str)`` check --
+    it does not special-case tuples, ints, floats, ``None``, ``bool``, enums,
+    or custom objects, and it never stringifies, normalizes, or
+    tuple-tags a non-string key; it only reports the key's ``repr()`` in the
+    error message.
     """
 
     if isinstance(value, tuple):
@@ -309,6 +319,11 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
         raise ValueError(f"{path} contains non-finite number {value!r}")
     if isinstance(value, dict):
         for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"{path} contains a non-string dict key {key!r} "
+                    f"({type(key).__name__}); only string keys are canonical"
+                )
             _reject_non_canonical_payload(item, f"{path}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
