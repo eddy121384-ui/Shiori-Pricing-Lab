@@ -73,7 +73,7 @@ engine, or any request/builder/snapshot schema. This module imports from
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum, StrEnum
 
 from shiori_pricing_lab.data._validation import (
     _parse_as_of_calendar_date,
@@ -81,6 +81,26 @@ from shiori_pricing_lab.data._validation import (
     _require_non_blank,
 )
 from shiori_pricing_lab.products.enums import Currency, coerce_enum
+
+
+def _reject_foreign_enum_quote_side(value: object) -> None:
+    """Reject any ``Enum`` instance that is not already a ``BLIBenchmarkQuoteSide``.
+
+    ``products.enums.coerce_enum`` coerces by *value*, so a foreign
+    ``StrEnum`` member sharing a string value (e.g.
+    ``TreasuryFTPQuoteSide.BID == "BID"``) would otherwise pass through it
+    silently and defeat the local, benchmark-scoped quote-side enum (Issue
+    #94 decision #2). This guard runs before ``coerce_enum`` and only
+    rejects *other* ``Enum`` instances -- native ``BLIBenchmarkQuoteSide``
+    members and raw strings (``"BID"``/``"MID"``/``"OFFER"``) are left for
+    ``coerce_enum`` to accept as before.
+    """
+
+    if isinstance(value, Enum) and not isinstance(value, BLIBenchmarkQuoteSide):
+        raise ValueError(
+            "quote_side must be a BLIBenchmarkQuoteSide member or one of "
+            f"{{BID, MID, OFFER}}, got foreign enum {value!r}"
+        )
 
 
 class BLIBenchmarkQuoteSide(StrEnum):
@@ -148,6 +168,7 @@ class BLIBenchmarkQuote:
             "source_type",
             coerce_enum(self.source_type, BLIBenchmarkSourceType, "source_type"),
         )
+        _reject_foreign_enum_quote_side(self.quote_side)
         object.__setattr__(
             self, "quote_side", coerce_enum(self.quote_side, BLIBenchmarkQuoteSide, "quote_side")
         )

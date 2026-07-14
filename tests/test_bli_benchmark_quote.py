@@ -21,7 +21,7 @@ from shiori_pricing_lab.data.bli_benchmark_quote import (
     BLIBenchmarkQuoteSide,
     BLIBenchmarkSourceType,
 )
-from shiori_pricing_lab.products.enums import Currency
+from shiori_pricing_lab.products.enums import Currency, PayReceive, TreasuryFTPQuoteSide
 
 
 def _valid_kwargs(**overrides: object) -> dict:
@@ -152,6 +152,36 @@ def test_invalid_quote_side_rejected():
 def test_invalid_currency_rejected():
     with pytest.raises(ValueError, match="currency"):
         BLIBenchmarkQuote(**_valid_kwargs(currency="XXX"))
+
+
+def test_native_quote_side_members_accepted():
+    for side in BLIBenchmarkQuoteSide:
+        quote = BLIBenchmarkQuote(**_valid_kwargs(quote_side=side))
+        assert quote.quote_side is side
+
+
+def test_raw_string_quote_sides_accepted():
+    for raw in ("BID", "MID", "OFFER"):
+        quote = BLIBenchmarkQuote(**_valid_kwargs(quote_side=raw))
+        assert quote.quote_side is BLIBenchmarkQuoteSide(raw)
+
+
+@pytest.mark.parametrize("foreign_side", list(TreasuryFTPQuoteSide))
+def test_foreign_treasury_ftp_quote_side_rejected(foreign_side):
+    # products.enums.coerce_enum coerces by value, so a foreign StrEnum
+    # member sharing a string value (e.g. TreasuryFTPQuoteSide.BID ==
+    # "BID") would otherwise pass through it silently. Every
+    # TreasuryFTPQuoteSide member must be rejected before coerce_enum runs.
+    with pytest.raises(ValueError, match="quote_side"):
+        BLIBenchmarkQuote(**_valid_kwargs(quote_side=foreign_side))
+
+
+def test_unrelated_foreign_enum_quote_side_rejected():
+    # No production vocabulary is added for this test -- PayReceive is an
+    # existing, unrelated StrEnum used only to prove the guard is not
+    # narrowly scoped to TreasuryFTPQuoteSide.
+    with pytest.raises(ValueError, match="quote_side"):
+        BLIBenchmarkQuote(**_valid_kwargs(quote_side=PayReceive.PAY))
 
 
 # --- 5. Blank mandatory strings -----------------------------------------------
