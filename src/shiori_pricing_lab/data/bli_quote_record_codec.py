@@ -76,6 +76,24 @@ from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceD
 from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 
 _CLASS_KEY = "__class__"
+_TUPLE_KEY = "__tuple__"
+_KNOWN_TAGGED_CLASSES = {
+    "BLIStandaloneBondOptionRequest",
+    "BondOption",
+    "BondReferenceData",
+    "BLIMarketDataSnapshot",
+    "BLIBondQuote",
+    "BLICurvePoint",
+    "BLIDepositRateObservation",
+    "BLIVolatilityInput",
+    "BLICreditSpreadInput",
+    "PricingMessage",
+    "PricingResult",
+    "BLIBenchmarkQuote",
+    "BLIBenchmarkComparisonResult",
+    "BLIImpliedPriceVolCalibrationResult",
+    "BLIImpliedPriceVolSolverResult",
+}
 
 
 def _enum_value(value: Any) -> Any:
@@ -96,11 +114,28 @@ def _encode_value(value: Any) -> Any:
     if is_dataclass(value):
         return _tagged(type(value), value)
     if isinstance(value, tuple):
-        return [_encode_value(item) for item in value]
+        return {_TUPLE_KEY: [_encode_value(item) for item in value]}
     if isinstance(value, list):
         return [_encode_value(item) for item in value]
     if isinstance(value, dict):
         return {key: _encode_value(item) for key, item in value.items()}
+    return value
+
+
+def _decode_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if _TUPLE_KEY in value:
+            if set(value) != {_TUPLE_KEY} or not isinstance(value[_TUPLE_KEY], list):
+                raise ValueError("malformed tuple tag payload")
+            return tuple(_decode_value(item) for item in value[_TUPLE_KEY])
+        if _CLASS_KEY in value:
+            class_name = value[_CLASS_KEY]
+            if class_name in _KNOWN_TAGGED_CLASSES:
+                raise ValueError(f"unexpected tagged dataclass payload {class_name!r}")
+            raise ValueError(f"unknown tagged class {class_name!r}")
+        return {key: _decode_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode_value(item) for item in value]
     return value
 
 
@@ -144,9 +179,12 @@ def _reject_non_finite(value: object, path: str) -> None:
 
 
 def _tuple(payload: object, name: str, decode_item=lambda item: item) -> tuple[Any, ...]:
-    if not isinstance(payload, list):
-        raise ValueError(f"{name} must be an array")
-    return tuple(decode_item(item) for item in payload)
+    if not isinstance(payload, dict) or set(payload) != {_TUPLE_KEY}:
+        raise ValueError(f"{name} must be an explicit tuple tag")
+    items = payload[_TUPLE_KEY]
+    if not isinstance(items, list):
+        raise ValueError(f"{name} tuple tag must contain an array")
+    return tuple(decode_item(item) for item in items)
 
 
 def _message(payload: object) -> PricingMessage:
@@ -157,7 +195,7 @@ def _message(payload: object) -> PricingMessage:
         code = PricingErrorCode(code_value)
     except ValueError:
         code = PricingWarningCode(code_value)
-    return PricingMessage(code=code, message=data["message"], detail=data["detail"])
+    return PricingMessage(code=code, message=data["message"], detail=_decode_value(data["detail"]))
 
 
 def _bond_option(payload: object) -> BondOption:
@@ -324,12 +362,12 @@ def _pricing_result(payload: object) -> PricingResult:
         market_data_as_of=data["market_data_as_of"],
         warnings=_tuple(data["warnings"], "warnings", _message),
         errors=_tuple(data["errors"], "errors", _message),
-        assumptions=data["assumptions"],
+        assumptions=_decode_value(data["assumptions"]),
         pv=data["pv"],
         dv01=data["dv01"],
-        cashflows=None if data["cashflows"] is None else tuple(data["cashflows"]),
-        scenario_results=data["scenario_results"],
-        diagnostics=data["diagnostics"],
+        cashflows=None if data["cashflows"] is None else _decode_value(data["cashflows"]),
+        scenario_results=_decode_value(data["scenario_results"]),
+        diagnostics=_decode_value(data["diagnostics"]),
     )
 
 
@@ -487,7 +525,7 @@ def quote_record_to_dict(record: BLIQuoteRecord) -> dict[str, object]:
         "trader_adjustment_per_100": record.trader_adjustment_per_100,
         "trader_adjustment_total": record.trader_adjustment_total,
         "override_reason": record.override_reason,
-        "exclusions": list(record.exclusions),
+        "exclusions": _encode_value(record.exclusions),
     }
     _reject_non_finite(payload, "BLIQuoteRecord")
     return payload

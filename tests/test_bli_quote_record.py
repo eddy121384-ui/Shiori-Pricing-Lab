@@ -33,7 +33,10 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
     BLIImpliedPriceVolSolverResult,
     BLIImpliedPriceVolSolverStatus,
 )
-from shiori_pricing_lab.pricing.result import PricingResult, PricingStatus
+from shiori_pricing_lab.pricing.result import (
+    PricingResult,
+    PricingStatus,
+)
 from shiori_pricing_lab.products.enums import OptionType
 
 QUOTE_ID = "123e4567-e89b-42d3-a456-426614174000"
@@ -67,8 +70,10 @@ def pricing_result(**overrides):
         engine_version="1.0",
         method="BLACK76_PRICE_VOL",
         market_data_as_of=req.market_data_snapshot.as_of_timestamp,
+        warnings=(),
         assumptions={"black76_pv_per_100": 4.5},
         pv=2250.0,
+        diagnostics={},
     )
     params.update(overrides)
     return PricingResult(**params)
@@ -271,10 +276,27 @@ def test_quote_version_validation(value):
         record(quote_version=value)
 
 
-@pytest.mark.parametrize("value", ["2026-07-01", "2026-07-01T16:02Z", "2026-07-01T16:02:00+00:00"])
-def test_saved_at_exact_utc_seconds(value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-07-01",
+        "2026-07-01T16:02Z",
+        "2026-07-01T16:02:00+00:00",
+        "2026-07-01T16:02:00.000Z",
+        "2026-07-01T16:02:00z",
+        "2026-07-01 16:02:00Z",
+        "2026-02-30T16:02:00Z",
+        "2026-07-01T25:61:61Z",
+    ],
+)
+def test_saved_at_exact_real_utc_seconds(value):
     with pytest.raises(ValueError):
         record(saved_at=value)
+
+
+def test_saved_at_stores_original_text_unchanged():
+    rec = record(saved_at="2026-07-01T00:00:00Z")
+    assert rec.saved_at == "2026-07-01T00:00:00Z"
 
 
 @pytest.mark.parametrize("value", ["", " operator", "operator ", "   "])

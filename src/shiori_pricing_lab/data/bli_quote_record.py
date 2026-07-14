@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote
 from shiori_pricing_lab.data.bli_standalone_option_request import (
@@ -68,6 +69,17 @@ def _require_optional_finite_number(
     return number
 
 
+def _require_saved_at(value: object) -> str:
+    saved_at = _require_non_blank_stripped(value, "saved_at")
+    if not _SAVED_AT_UTC_SECONDS_RE.fullmatch(saved_at):
+        raise ValueError("saved_at must match YYYY-MM-DDTHH:MM:SSZ")
+    try:
+        datetime.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError("saved_at must be a real UTC RFC3339 seconds timestamp") from exc
+    return saved_at
+
+
 def _require_exclusions(value: object) -> tuple[str, ...]:
     if not isinstance(value, tuple):
         raise TypeError("exclusions must be a tuple[str, ...]")
@@ -117,9 +129,7 @@ class BLIQuoteRecord:
         if quote_version <= 0:
             raise ValueError(f"quote_version must be positive, got {quote_version!r}")
 
-        saved_at = _require_non_blank_stripped(self.saved_at, "saved_at")
-        if not _SAVED_AT_UTC_SECONDS_RE.fullmatch(saved_at):
-            raise ValueError("saved_at must match YYYY-MM-DDTHH:MM:SSZ")
+        _require_saved_at(self.saved_at)
         _require_non_blank_stripped(self.operator_id, "operator_id")
 
         if not isinstance(self.request, BLIStandaloneBondOptionRequest):

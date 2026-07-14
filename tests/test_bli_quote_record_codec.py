@@ -14,6 +14,7 @@ from shiori_pricing_lab.data.bli_quote_record_codec import (
     quote_record_to_dict,
     quote_record_to_json,
 )
+from shiori_pricing_lab.pricing.result import PricingMessage, PricingWarningCode
 
 _loader = importlib.machinery.SourceFileLoader(
     "quote_record_helpers", "tests/test_bli_quote_record.py"
@@ -34,10 +35,40 @@ def test_exact_dict_round_trip_with_non_none_calibration_solver_and_no_mutation(
     assert restored == rec
     assert rec == before
     assert payload == payload_before
-    curve_point_payload = payload["request"]["market_data_snapshot"]["curve_points"][0]
+    curve_points_payload = payload["request"]["market_data_snapshot"]["curve_points"]
+    curve_point_payload = curve_points_payload["__tuple__"][0]
     assert curve_point_payload["__class__"] == "BLICurvePoint"
     solver_payload = payload["calibration_result"]["solver_result"]
     assert solver_payload["__class__"] == "BLIImpliedPriceVolSolverResult"
+
+
+def test_tuple_tag_preserves_free_form_tuples_and_lists_after_round_trip():
+    pricing = _helpers.pricing_result(
+        warnings=(
+            PricingMessage(
+                code=PricingWarningCode.DATA_QUALITY,
+                message="synthetic warning",
+                detail={"nested": ("curve", ("node", 1)), "real_list": ["a", "b"]},
+            ),
+        ),
+        assumptions={
+            "black76_pv_per_100": 4.5,
+            "genuine_list": ["left", "right"],
+            "genuine_tuple": ("left", "right"),
+        },
+        diagnostics={"nested_tuple": (("outer", "inner"),)},
+        scenario_results={"path": ("base", ["list-stays-list"])},
+    )
+    comparison = _helpers.benchmark_comparison()
+    rec = record(pricing_result=pricing, benchmark_comparison=comparison)
+    restored = quote_record_from_json(quote_record_to_json(rec))
+
+    assert restored.pricing_result.warnings[0].detail["nested"] == ("curve", ("node", 1))
+    assert restored.pricing_result.warnings[0].detail["real_list"] == ["a", "b"]
+    assert restored.pricing_result.assumptions["genuine_list"] == ["left", "right"]
+    assert restored.pricing_result.assumptions["genuine_tuple"] == ("left", "right")
+    assert restored.pricing_result.diagnostics["nested_tuple"] == (("outer", "inner"),)
+    assert restored.pricing_result.scenario_results["path"] == ("base", ["list-stays-list"])
 
 
 def test_exact_canonical_json_round_trip_after_sorted_keys():
@@ -90,12 +121,32 @@ def test_malformed_nested_payloads_and_invalid_enums_rejected(section, field, va
 
 def test_missing_and_unknown_nested_fields_rejected():
     payload = quote_record_to_dict(record())
-    payload["request"]["market_data_snapshot"]["curve_points"][0].pop("rate")
+    payload["request"]["market_data_snapshot"]["curve_points"]["__tuple__"][0].pop("rate")
     with pytest.raises(ValueError):
         quote_record_from_dict(payload)
 
     payload = quote_record_to_dict(record())
     payload["pricing_result"]["extra"] = "nope"
+    with pytest.raises(ValueError):
+        quote_record_from_dict(payload)
+
+
+def test_malformed_tuple_tag_and_unknown_tagged_class_rejected():
+    payload = quote_record_to_dict(record())
+    payload["exclusions"] = {"__tuple__": "not-list"}
+    with pytest.raises(ValueError):
+        quote_record_from_dict(payload)
+
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["bad_tag"] = {"__class__": "FutureThing"}
+    with pytest.raises(ValueError):
+        quote_record_from_dict(payload)
+
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["bad_tuple"] = {
+        "__tuple__": [],
+        "extra": "nope",
+    }
     with pytest.raises(ValueError):
         quote_record_from_dict(payload)
 
