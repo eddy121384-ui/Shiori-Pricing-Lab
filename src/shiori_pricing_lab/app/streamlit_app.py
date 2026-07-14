@@ -6,6 +6,9 @@ import plotly.express as px
 import streamlit as st
 
 from shiori_pricing_lab.app.bli_mvp_ui import render_bli_mvp_page
+from shiori_pricing_lab.app.standalone_option_ui import (
+    render_standalone_option_workbench_page,
+)
 from shiori_pricing_lab.charts.series import curve_to_chart_series, scenario_to_chart_series
 from shiori_pricing_lab.data.providers import CSVMarketDataProvider
 from shiori_pricing_lab.data.snapshot import MarketDataSnapshot
@@ -57,12 +60,19 @@ def render_rates_curve_demo_page() -> None:
 def main() -> None:
     st.set_page_config(page_title="Shiori Pricing Lab", layout="wide")
     page = st.sidebar.radio(
-        "Page", ["Rates Curve Demo", "Bond Option (BLI MVP)"]
+        "Page",
+        [
+            "Rates Curve Demo",
+            "Bond Option (BLI MVP)",
+            "Standalone Bond Option Workbench",
+        ],
     )
     if page == "Rates Curve Demo":
         render_rates_curve_demo_page()
-    else:
+    elif page == "Bond Option (BLI MVP)":
         render_bli_mvp_page()
+    else:
+        render_standalone_option_workbench_page()
 
 
 if __name__ == "__main__":
