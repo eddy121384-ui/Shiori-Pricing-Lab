@@ -413,3 +413,111 @@ def test_success_with_warnings_round_trips_exactly():
     assert restored.pricing_result.status is PricingStatus.SUCCESS_WITH_WARNINGS
     assert restored.pricing_result.warnings[0].code is PricingWarningCode.DATA_QUALITY
     assert restored.pricing_result.warnings[0].message == "synthetic data-quality warning"
+
+
+# --- Exact PricingMessage items in warnings/errors (subclasses rejected) ---------
+
+
+class _PricingMessageSubclass(PricingMessage):
+    """A synthetic PricingMessage subclass used only to prove exact-type rejection."""
+
+
+def _message(detail=None):
+    return PricingMessage(
+        code=PricingWarningCode.DATA_QUALITY,
+        message="synthetic",
+        detail={} if detail is None else detail,
+    )
+
+
+def _message_subclass(detail=None):
+    return _PricingMessageSubclass(
+        code=PricingWarningCode.DATA_QUALITY,
+        message="synthetic subclass",
+        detail={} if detail is None else detail,
+    )
+
+
+def test_pricing_message_subclass_in_warnings_rejected_with_indexed_path():
+    pricing = pricing_result(warnings=(_message_subclass(),))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingResult.warnings[0]")):
+        quote_record_to_dict(rec)
+
+
+def test_pricing_message_subclass_in_errors_rejected_with_indexed_path():
+    # errors must be tuples-of-PricingMessage; a FAILED status is not needed to
+    # carry an errors entry on a SUCCESS_WITH_WARNINGS result for this encode test.
+    pricing = pricing_result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        errors=(_message_subclass(),),
+    )
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingResult.errors[0]")):
+        quote_record_to_dict(rec)
+
+
+def test_subclass_in_warnings_rejected_even_at_nonzero_index():
+    pricing = pricing_result(warnings=(_message(), _message_subclass()))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingResult.warnings[1]")):
+        quote_record_to_dict(rec)
+
+
+def test_subclass_with_reserved_key_in_detail_cannot_bypass_validation():
+    # The subclass is rejected outright at encode time; the reserved-key
+    # payload it carries can never reach the wire.
+    pricing = pricing_result(warnings=(_message_subclass(detail={"__class__": "x"}),))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingResult.warnings[0]")):
+        quote_record_to_dict(rec)
+
+
+def test_subclass_with_arbitrary_enum_in_detail_cannot_bypass_validation():
+    pricing = pricing_result(warnings=(_message_subclass(detail={"bad": PayReceive.PAY}),))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingResult.warnings[0]")):
+        quote_record_to_dict(rec)
+
+
+def test_subclass_rejected_before_any_encoded_payload_via_json_entrypoint():
+    pricing = pricing_result(errors=(_message_subclass(),))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingResult.errors[0]")):
+        quote_record_to_json(rec)
+
+
+def test_exact_pricing_message_warnings_and_errors_round_trip():
+    pricing = pricing_result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        warnings=(
+            _message(detail={"note": "w0", "nested": ("a", ("b", 1)), "lst": ["x"]}),
+            _message(detail={}),
+        ),
+        errors=(_message(detail={"note": "e0"}),),
+    )
+    rec = record(pricing_result=pricing)
+    restored = quote_record_from_json(quote_record_to_json(rec))
+    assert restored == rec
+    assert [type(m) for m in restored.pricing_result.warnings] == [
+        PricingMessage,
+        PricingMessage,
+    ]
+    assert [type(m) for m in restored.pricing_result.errors] == [PricingMessage]
+    assert restored.pricing_result.warnings[0].detail["nested"] == ("a", ("b", 1))
+    assert restored.pricing_result.warnings[0].detail["lst"] == ["x"]
+
+
+@pytest.mark.parametrize("bad_detail", [{"__tuple__": []}, {"__class__": "x"}])
+def test_exact_pricing_message_detail_still_rejects_reserved_keys(bad_detail):
+    pricing = pricing_result(warnings=(_message(detail=bad_detail),))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=re.escape("PricingMessage.detail")):
+        quote_record_to_dict(rec)
+
+
+def test_exact_pricing_message_detail_still_rejects_arbitrary_enum():
+    pricing = pricing_result(warnings=(_message(detail={"bad": PayReceive.PAY}),))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="Enum"):
+        quote_record_to_dict(rec)

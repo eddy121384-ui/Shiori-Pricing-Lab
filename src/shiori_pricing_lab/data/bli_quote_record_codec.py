@@ -92,6 +92,16 @@ _FREE_FORM_FIELDS = {
     ("PricingResult", "scenario_results"),
     ("PricingResult", "cashflows"),
 }
+
+# ``PricingResult.warnings`` / ``PricingResult.errors`` are tuples whose every
+# element must be an *exact* ``PricingMessage`` (not a subclass), so each item
+# is encoded through the canonical base-class path and its ``detail`` always
+# passes through the free-form reserved-key / arbitrary-Enum validation --
+# regardless of any runtime dispatch a subclass might otherwise trigger.
+_MESSAGE_TUPLE_FIELDS = {
+    ("PricingResult", "warnings"),
+    ("PricingResult", "errors"),
+}
 _KNOWN_TAGGED_CLASSES = {
     "BLIStandaloneBondOptionRequest",
     "BondOption",
@@ -191,6 +201,32 @@ def _encode_free_form_value(value: Any, path: str) -> Any:
     raise ValueError(f"{path}: unsupported free-form value type {type(value).__name__}")
 
 
+def _encode_message_tuple(value: Any, path: str) -> dict[str, object]:
+    """Encode a ``PricingResult.warnings``/``errors`` tuple, exact items only.
+
+    Every element must be an *exact* ``PricingMessage`` -- a subclass is
+    rejected deterministically, before any encoded payload is returned, with
+    the exact indexed path (e.g. ``PricingResult.warnings[0]``). A subclass
+    is never normalized to the base type, and its identity/extra state is
+    never silently discarded. Each exact item is encoded through the
+    canonical ``_tagged(PricingMessage, message)`` path, so its ``detail``
+    always flows through the free-form reserved-key / arbitrary-Enum
+    validation.
+    """
+
+    if not isinstance(value, tuple):
+        raise ValueError(f"{path} must be a tuple of PricingMessage")
+    encoded: list[object] = []
+    for index, message in enumerate(value):
+        if type(message) is not PricingMessage:
+            raise ValueError(
+                f"{path}[{index}]: must be exactly a PricingMessage, "
+                f"got {type(message).__name__}"
+            )
+        encoded.append(_tagged(PricingMessage, message))
+    return {_TUPLE_KEY: encoded}
+
+
 def _decode_value(value: Any) -> Any:
     if isinstance(value, dict):
         if _TUPLE_KEY in value:
@@ -212,7 +248,12 @@ def _tagged(cls: type, obj: Any) -> dict[str, object]:
     payload = {_CLASS_KEY: cls.__name__}
     for field in fields(cls):
         value = getattr(obj, field.name)
-        if (cls.__name__, field.name) in _FREE_FORM_FIELDS:
+        field_key = (cls.__name__, field.name)
+        if field_key in _MESSAGE_TUPLE_FIELDS:
+            payload[field.name] = _encode_message_tuple(
+                value, f"{cls.__name__}.{field.name}"
+            )
+        elif field_key in _FREE_FORM_FIELDS:
             payload[field.name] = _encode_free_form_value(
                 value, f"{cls.__name__}.{field.name}"
             )
