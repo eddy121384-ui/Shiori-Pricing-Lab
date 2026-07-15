@@ -326,6 +326,15 @@ def test_alignment_mismatches_rejected(field, bad_value):
         record(**{field: bad_value})
 
 
+def test_pricing_result_product_type_must_match_request_bond_option_product_type():
+    # PricingResult.product_type is an always-populated identity field that
+    # _validate_alignment previously omitted, so a PricingResult carrying a
+    # foreign product discriminator (e.g. "IRS") could be stored alongside a
+    # request whose fixed product_type is "BOND_OPTION".
+    with pytest.raises(ValueError, match="product_type"):
+        record(pricing_result=pricing_result(product_type="IRS"))
+
+
 # --- Calibration direct-source provenance alignment (Issue #100 comment 4975917315) --
 
 

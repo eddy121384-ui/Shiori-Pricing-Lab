@@ -270,6 +270,10 @@ class BLIQuoteRecord:
 
         if pricing.product_id != product_id:
             raise ValueError("pricing_result.product_id must match request.bond_option.product_id")
+        if pricing.product_type != request.bond_option.product_type:
+            raise ValueError(
+                "pricing_result.product_type must match request.bond_option.product_type"
+            )
         if pricing.result_currency != currency.value:
             raise ValueError("pricing_result.result_currency must match request currency")
         if pricing.valuation_date != valuation_date:
