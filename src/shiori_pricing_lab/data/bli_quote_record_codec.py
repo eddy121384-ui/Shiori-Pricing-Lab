@@ -159,9 +159,14 @@ def _encode_value(value: Any, path: str) -> Any:
     the decoder cannot accept.
 
     Containers are matched by *exact* type (``type(value) is dict`` /
-    ``type(value) is list``), not ``isinstance``, so a ``dict``/``list``
-    subclass is never silently traversed and normalized into a plain builtin
-    container -- it is rejected as a non-canonical Python-only object instead.
+    ``type(value) is list`` / ``type(value) is tuple``), not ``isinstance``,
+    so a ``dict``/``list``/``tuple`` subclass is never silently traversed and
+    normalized into a plain builtin container (a tuple subclass would
+    otherwise be accepted as a normal tuple and encoded via the ordinary
+    explicit tuple tag, discarding its actual type on the way in and
+    decoding back out as a plain builtin ``tuple`` -- the same silent
+    normalization already closed for ``dict``/``list``). It is rejected as a
+    non-canonical Python-only object instead.
     """
 
     if isinstance(value, Enum):
@@ -173,7 +178,7 @@ def _encode_value(value: Any, path: str) -> Any:
                 "dataclass type; nested dataclass subclasses are not supported"
             )
         return _tagged(type(value), value)
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return {
             _TUPLE_KEY: [
                 _encode_value(item, f"{path}[{index}]") for index, item in enumerate(value)
@@ -183,10 +188,10 @@ def _encode_value(value: Any, path: str) -> Any:
         return [_encode_value(item, f"{path}[{index}]") for index, item in enumerate(value)]
     if type(value) is dict:
         return {key: _encode_value(item, f"{path}.{key}") for key, item in value.items()}
-    if isinstance(value, (dict, list)):
+    if isinstance(value, (dict, list, tuple)):
         raise ValueError(
-            f"{path}: {type(value).__name__} is a dict/list subclass, not a plain "
-            "dict/list; container subclasses are not supported"
+            f"{path}: {type(value).__name__} is a dict/list/tuple subclass, not a "
+            "plain dict/list/tuple; container subclasses are not supported"
         )
     return value
 
@@ -213,9 +218,10 @@ def _encode_free_form_value(value: Any, path: str) -> Any:
     reserved name is rejected, never the codec's own tagging mechanism.
 
     Containers are matched by *exact* type (``type(value) is dict`` /
-    ``type(value) is list``), not ``isinstance``, so a ``dict``/``list``
-    subclass is rejected as an unsupported free-form value type rather than
-    silently traversed and normalized into a plain builtin container.
+    ``type(value) is list`` / ``type(value) is tuple``), not ``isinstance``,
+    so a ``dict``/``list``/``tuple`` subclass is rejected as an unsupported
+    free-form value type rather than silently traversed and normalized into
+    a plain builtin container.
     """
 
     if isinstance(value, Enum):
@@ -233,7 +239,7 @@ def _encode_free_form_value(value: Any, path: str) -> Any:
         return {
             key: _encode_free_form_value(item, f"{path}.{key}") for key, item in value.items()
         }
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return {
             _TUPLE_KEY: [
                 _encode_free_form_value(item, f"{path}[{index}]")

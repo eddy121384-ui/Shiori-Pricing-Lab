@@ -862,3 +862,59 @@ def test_container_subclass_rejection_reports_precise_path():
     with pytest.raises(ValueError) as excinfo:
         quote_record_from_dict(payload)
     assert "pricing_result.assumptions" in str(excinfo.value)
+
+
+# --- Tuple subclasses rejected, never silently normalized ------------------------
+#
+# A tuple subclass is the same defect class as the dict/list subclass
+# normalization fixed above: isinstance(value, tuple) accepted it as an
+# ordinary tuple, encoded it via the normal explicit tuple tag, and it would
+# decode back out as a plain builtin tuple -- silently discarding its actual
+# type. Fixed by matching tuples by exact type (type(value) is tuple), like
+# dict/list.
+
+
+class _TupleSubclass(tuple):
+    pass
+
+
+def test_tuple_subclass_in_free_form_nested_value_rejected_at_encode():
+    pricing = pricing_result(
+        assumptions={"black76_pv_per_100": 4.5, "nested": {"bad": _TupleSubclass((1, 2))}}
+    )
+    rec = record(pricing_result=pricing)
+    with pytest.raises(
+        ValueError, match="unsupported free-form value type _TupleSubclass"
+    ) as excinfo:
+        quote_record_to_dict(rec)
+    assert "PricingResult.assumptions.nested.bad" in str(excinfo.value)
+
+
+def test_tuple_subclass_in_typed_schema_tuple_field_rejected_at_encode():
+    # exclusions is a typed-schema tuple[str, ...] field whose own validator
+    # (_require_exclusions) accepts any tuple subclass unchanged rather than
+    # normalizing it -- so the codec boundary is the only place left to
+    # reject it.
+    rec = record(exclusions=_TupleSubclass(("desk_override",)))
+    assert type(rec.exclusions) is _TupleSubclass
+    with pytest.raises(
+        ValueError, match="dict/list/tuple subclass"
+    ) as excinfo:
+        quote_record_to_dict(rec)
+    assert "BLIQuoteRecord.exclusions" in str(excinfo.value)
+
+
+def test_exact_builtin_tuples_still_round_trip_unchanged_after_tuple_subclass_fix():
+    pricing = pricing_result(
+        assumptions={"black76_pv_per_100": 4.5, "genuine_tuple": ("left", "right")}
+    )
+    rec = record(pricing_result=pricing, exclusions=("desk_override", "manual_review"))
+    payload = quote_record_to_dict(rec)
+    assert payload["pricing_result"]["assumptions"]["genuine_tuple"] == {
+        "__tuple__": ["left", "right"]
+    }
+    assert payload["exclusions"] == {"__tuple__": ["desk_override", "manual_review"]}
+    restored = quote_record_from_dict(payload)
+    assert restored == rec
+    assert type(restored.exclusions) is tuple
+    assert restored.pricing_result.assumptions["genuine_tuple"] == ("left", "right")
