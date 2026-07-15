@@ -2,8 +2,13 @@
 title: Annex A v1.3 - Pricing Methodology Specification
 version: 1.3
 source: GPT direct markdown output（非 PDF 反向解析）
-authoritative: true
+status: methodology reference; binding only for sections explicitly invoked by the current approved slice
 ---
+
+> **Implementation authority notice:** This document is a methodology
+> reference. Only sections explicitly invoked by the current Eddy-approved
+> issue or PR slice are binding for that slice. See `AGENTS.md` for the
+> current implementation authority order.
 
 # Annex A：Pricing Methodology Specification（自幹版 v1.3）
 

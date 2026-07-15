@@ -15,8 +15,8 @@ implementation slice must add. **It implements none of them.**
 
 Required reading before the implementation slice: `AGENTS.md`,
 `docs/02_data_and_market_snapshots.md`, `docs/03_valuation_context.md`,
-`docs/05_backtesting_engine.md`, `docs/09_mvp_core_runbook.md` (sections 1, 3, 8),
-and the existing pricing-contract modules
+`docs/05_backtesting_engine.md`, and the MVP runbook (sections 1, 3, 8 --
+removed, see git history), and the existing pricing-contract modules
 (`src/shiori_pricing_lab/pricing/engine.py`, `result.py`) plus
 `ValuationContext` / `MarketDataSnapshot`.
 
@@ -308,7 +308,7 @@ comes only from the request and, for priced rows, the returned `PricingResult`.
 
 ## 10. No system date / no future data / no external data rules
 
-Load-bearing invariants for the loop (extending `docs/09` §3):
+Load-bearing invariants for the loop (extending `docs/09 (removed, see git history)` §3):
 
 1. **No system date.** The loop contains no `date.today()` / `datetime.now()`.
    Every valuation date is explicit and caller-supplied. (A test mirrors the
@@ -419,9 +419,9 @@ Restating the load-bearing boundaries the implementation must not break:
 
 ## 14. Relationship to existing docs
 
-- `docs/09_mvp_core_runbook.md` §1/§8 documents the single-date `price(...)`
-  contract and the registered USD IRS engine; this loop sits **on top of** that
-  contract and changes none of it.
+- the MVP runbook §1/§8 (removed, see git history) documented the single-date
+  `price(...)` contract and the registered USD IRS engine; this loop sits
+  **on top of** that contract and changes none of it.
 - `docs/10_irs_reference_engine_preflight.md` is the design step for the engine
   the loop will exercise; this document is the analogous design step for the
   historical loop.

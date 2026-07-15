@@ -531,8 +531,7 @@ tests/test_bli_curve_rate_basis.py)
   -- coercion/validation tests for the new enum and field, mirroring
      BLICurvePurpose's existing test pattern.
 
-docs/00_development_log.md
-docs/09_mvp_core_runbook.md
+(development log and runbook entries -- removed, see git history)
 ```
 
 **Migration/fixture considerations:** every existing `BLICurvePoint`

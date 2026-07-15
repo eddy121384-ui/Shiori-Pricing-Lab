@@ -493,7 +493,7 @@ required dates/timestamps (business_date/valuation_date, as_of_timestamp)
   must be non-blank, explicit strings -- reuse the existing
   _parse_iso_date pattern where a calendar date is expected.
 no system date fallback -- never date.today()/datetime.now() anywhere
-  in this module, per the existing repo-wide invariant (docs/09 §3).
+  in this module, per the existing repo-wide invariant (docs/09 (removed, see git history) §3).
 curve records are tenor/rate rows, not one row per curve (Codex P2
   review of PR #62 -- corrected from an earlier, too-broad version of
   this rule): Annex B §B.2 models a curve as multiple tenor nodes (e.g.

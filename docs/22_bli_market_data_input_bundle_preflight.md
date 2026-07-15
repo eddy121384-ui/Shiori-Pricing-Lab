@@ -197,7 +197,7 @@ explicit assumptions and validation results      (§8/§9)
 
 **This is what a future pricing engine consumes** — not the product, not
 the reference data, and not the market snapshot individually. This
-mirrors the existing spine contract (`docs/09` §1: `Product Definition +
+mirrors the existing spine contract (`docs/09 (removed, see git history)` §1: `Product Definition +
 ValuationContext + MarketDataSnapshot → price(...) → PricingResult`) —
 the BLI input bundle is the BLI-specific instantiation of "everything
 `price(...)` needs to actually price this product," not a second,
@@ -545,7 +545,7 @@ source status invalid
 Several of these already have a natural home in the existing pricing
 contract: `PricingErrorCode.MISSING_REFERENCE_DATA` (PR #45) fits
 "reference data not found/ineligible"; `PricingErrorCode.
-MISSING_MARKET_DATA` (existing, `docs/09` §8) fits "missing bond market
+MISSING_MARKET_DATA` (existing, `docs/09 (removed, see git history)` §8) fits "missing bond market
 quote / missing curve mapping / missing FTP rate / missing volatility
 input / missing credit spread." **"unauthorized silent fallback /
 default" is added specifically for the vol/spread gap this section

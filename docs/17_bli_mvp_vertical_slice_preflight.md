@@ -86,8 +86,8 @@ rather than treating as automatic:
   settlement is chosen here as the narrower path, not because physical
   settlement is unsupported by the schema.
 
-No conflict was found between this proposed scope and `docs/13`, `docs/14`,
-or `docs/15` — the BLI product-priority pivot (`docs/13`) and the teardown
+No conflict was found between this proposed scope and `docs/13 (removed, see git history)`, `docs/14`,
+or `docs/15` — the BLI product-priority pivot (`docs/13 (removed, see git history)`) and the teardown
 (`docs/14`) describe the full v1.3 product universe, and this doc is
 choosing the single narrowest slice of that universe, which those docs
 anticipate ("MVP slice" language already appears in `docs/14` §6).
@@ -103,7 +103,7 @@ anticipate ("MVP slice" language already appears in `docs/14` §6).
 | **Wrapper relationship** | Nothing (`docs/15` explicitly rejected a placeholder-only wrapper as insufficient) | A schema linking deposit leg + `BondOption`, with `participation_ratio` derived/validated (§6) | Multi-option or multi-deposit-leg wrappers |
 | **Market / reference data** | Nothing BLI-specific; existing `MarketDataSnapshot` concept (`docs/02`) | Minimal bond reference fixture (§7) + minimal market inputs (§8) | Bloomberg/BQL connector, generic file import, screenshot capture |
 | **Pricing method** | Nothing | A deterministic MVP pricing path definition (§10) — not the engine itself | Actual engine implementation, American tree, vol-surface handling beyond a flat input |
-| **Audit trail** | Existing `PricingResult` / `PricingMessage` conventions (`docs/09` §8) | MVP-scoped audit fields (§11) | Full provenance/versioning system beyond the MVP field list |
+| **Audit trail** | Existing `PricingResult` / `PricingMessage` conventions (`docs/09 (removed, see git history)` §8) | MVP-scoped audit fields (§11) | Full provenance/versioning system beyond the MVP field list |
 
 ---
 
@@ -290,8 +290,8 @@ BondLinkedStructuredProduct definition
 
 This mirrors the existing spine contract
 (`Product Definition + ValuationContext + MarketDataSnapshot → price(...) →
-PricingResult`, `docs/09` §1) — the BLI MVP is a new product type routed
-through the same `price(...)` front door (`docs/09`'s "Product-priority
+PricingResult`, `docs/09 (removed, see git history)` §1) — the BLI MVP is a new product type routed
+through the same `price(...)` front door (`docs/09 (removed, see git history)`'s "Product-priority
 pivot" note: BLI registers behind the same front door, it does not create a
 second pricing path). **The pricing engine itself is future work.** No
 engine, no registration, and no payoff/cashflow logic is written in this PR.
@@ -315,7 +315,7 @@ user / run id if available
 ```
 
 These extend, rather than replace, the existing `PricingResult` /
-`PricingMessage` conventions referenced in `docs/09` §8. Exact field names
+`PricingMessage` conventions referenced in `docs/09 (removed, see git history)` §8. Exact field names
 and where they live (on `PricingResult` vs. a separate audit record) are an
 implementation decision for a later slice, not this doc.
 

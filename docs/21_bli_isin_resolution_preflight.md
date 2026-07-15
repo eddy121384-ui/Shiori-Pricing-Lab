@@ -110,7 +110,7 @@ signature is binding yet (§8 proposes one, non-bindingly).
 | **Exact ISIN match, one record, eligible** | Resolution succeeds: the caller gets the matched `BondReferenceData` record and an eligible/true signal. |
 | **Exact ISIN match, one record, ineligible** (see rows below for *why* a record is ineligible) | Resolution finds the record (it is not "missing") but reports it as **found-but-ineligible**, with the specific `is_mvp_pricing_eligible(bond).reasons` attached. This is a different outcome than "not found" — a future caller must be able to tell "no such bond" apart from "that bond exists but cannot be MVP-priced." |
 | **Missing ISIN** (no record in the fixture has a matching `isin`) | Resolution fails explicitly with a **not-found** result. Never returns a default/placeholder bond. |
-| **Duplicate ISIN in fixture** (more than one record shares an `isin`) | Resolution must **not** silently pick the first match. This is a **fixture data-integrity error**, not a normal lookup outcome — a future resolver must detect it and fail explicitly (e.g. a raised contract violation, mirroring how `pricing/errors.py` already distinguishes domain failures from contract violations, `docs/09` §8). It must never be resolved by "return the first one" or "return the last one." |
+| **Duplicate ISIN in fixture** (more than one record shares an `isin`) | Resolution must **not** silently pick the first match. This is a **fixture data-integrity error**, not a normal lookup outcome — a future resolver must detect it and fail explicitly (e.g. a raised contract violation, mirroring how `pricing/errors.py` already distinguishes domain failures from contract violations, `docs/09 (removed, see git history)` §8). It must never be resolved by "return the first one" or "return the last one." |
 | **Inactive bond** (`BondReferenceData.status is BondStatus.INACTIVE`) | Found, not ineligible-by-absence — reported **found-but-ineligible**, using the existing `is_mvp_pricing_eligible` reason (`"status INACTIVE is not MVP-pricing-eligible"`, landed in PR #58's Codex fix). No separate "inactive" resolution status is needed; eligibility already carries this. |
 | **Bond valid as reference data but not MVP-pricing-eligible** (the general case — callable, sinkable, zero-coupon, `OTHER` yield convention, non-`FIXED_COUPON_BULLET` `bond_type`, or inactive status, alone or combined) | Found-but-ineligible, with **all** applicable reasons from `is_mvp_pricing_eligible(bond).reasons` attached — not just the first one. `is_mvp_pricing_eligible` already returns every failing reason (PR #58); a resolver must not discard any of them. |
 | **Unsupported `bond_type`** (`FLOATING_RATE_NOTE`, `AMORTIZING`, `CONVERTIBLE`, `INFLATION_LINKED`, `PERPETUAL`, `STRUCTURED_NOTE`) | Same as the general ineligible case above — `is_mvp_pricing_eligible` already encodes this via `bond_type`; the resolver adds no new bond-type logic of its own. |
@@ -189,7 +189,7 @@ a yield
 scenario results
 ```
 
-This mirrors the exact boundary `docs/09` §3 already enforces for the
+This mirrors the exact boundary `docs/09 (removed, see git history)` §3 already enforces for the
 existing pricing contract ("pricing engines must not fetch market data
 directly," restated here as "a resolver must not price"): a resolver is
 a **lookup step upstream of pricing**, callable by a future pricing

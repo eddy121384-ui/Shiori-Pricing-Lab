@@ -364,7 +364,7 @@ requires market data or a pricing engine to produce.
 payoff, deposit accrual, option value, PV, margin, a scenario table, or
 customer return. Those are exclusively future pricing-engine
 responsibilities, consumed through the existing `price(...)` front door
-(`docs/09` §1, `docs/17` §9) — the wrapper is a `Product Definition`, the
+(`docs/09 (removed, see git history)` §1, `docs/17` §9) — the wrapper is a `Product Definition`, the
 left-hand side of that contract, never the pricing logic itself.
 
 ---

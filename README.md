@@ -34,6 +34,29 @@ Agents must follow [`AGENTS.md`](AGENTS.md), including the lean implementation g
 3. Prefer the standard library, platform-native features, and installed dependencies.
 4. Write only the smallest complete implementation that remains financially correct and testable.
 
+## Quickstart
+
+```bash
+pip install -e ".[dev,quant]"
+
+# focused standalone bond-option workflow test
+pytest -q tests/test_standalone_option_workbench.py
+
+# full suite
+pytest -q
+
+# launch the trader-facing app
+streamlit run src/shiori_pricing_lab/app/streamlit_app.py
+```
+
+The current trader-facing entry point is the **Standalone Bond Option
+Workbench** page in the launched app.
+
+Current supported slice: a standalone European, price-based, cash-settled
+bond option (bond-option leg only). Current product objective: enter one
+anonymized real-market case and compare it with Bloomberg, tracked in
+issue #94.
+
 ## Repository layout
 
 ```text

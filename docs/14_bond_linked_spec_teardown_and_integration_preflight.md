@@ -6,7 +6,7 @@ registered, and no edit to the four BLI source spec files.**
 This document tears down the authoritative Bond Linked Structured Pricer (BLI)
 v1.3 specifications (landed by PR #33) and maps them onto the existing
 deterministic pricing spine, *before* any BLI pricing code is written. It is the
-docs-only preflight the pivot checkpoint (`docs/13`, §4) named as the next step
+docs-only preflight the pivot checkpoint (`docs/13 (removed, see git history)`, §4) named as the next step
 after the product-priority pivot.
 
 It does four things and nothing else:
@@ -41,13 +41,14 @@ implementation, Bloomberg / FTP adapters, QuantLib dependency, UI. No edit to th
 four BLI source spec files. No implementation issue is opened or modified.
 
 **Required reading before the first BLI implementation slice:** `AGENTS.md`,
-`docs/12_pr_review_rubric.md`, `docs/13_bond_linked_pivot_checkpoint.md`, the four
+`docs/12_pr_review_rubric.md`, the pivot checkpoint (`docs/13_bond_linked_pivot_checkpoint.md`,
+removed, see git history), the four
 files under `docs/bond_linked_structured_pricer/`, and the existing spine modules
 (`src/shiori_pricing_lab/pricing/engine.py`, `result.py`, `errors.py`,
 `valuation/context.py`, `data/snapshot.py`, `products/`), plus `docs/02` (market
 snapshots) and `docs/04` (product schema).
 
-**Reuse invariant (from `docs/13` §1):** BLI registers behind the **same**
+**Reuse invariant (from `docs/13 (removed, see git history)` §1):** BLI registers behind the **same**
 `price(product, valuation_context, market_snapshot) -> PricingResult` front door
 as a per-product engine (exactly as the IRS reference engine does today via
 `register_engine("IRS", IRSReferenceEngine())` in
@@ -66,7 +67,7 @@ ambiguity**, it is recorded as a finding `F-nn` and rolled into the risk list
 
 PR #33 already fixed three Annex A items during review (clean-price tree coupon
 handling §A.4.2, price-based parity notional scaling §A.13.2, and parity
-tolerance basis §A.13.2 — see `docs/13` §3). Those are treated as closed here and
+tolerance basis §A.13.2 — see `docs/13 (removed, see git history)` §3). Those are treated as closed here and
 not re-litigated; the findings below are **new**.
 
 ### 2.1 Clean vs dirty price, accrued interest, coupon timing
@@ -478,7 +479,7 @@ market-snapshot-identity guard, `UNSUPPORTED_PRODUCT` routing, and the
 
 ### 4.6 What must stay **outside** pricing engines
 
-Per AGENTS.md engineering rules and `docs/13` §6, the engine consumes a resolved
+Per AGENTS.md engineering rules and `docs/13 (removed, see git history)` §6, the engine consumes a resolved
 product + context + snapshot and returns a `PricingResult`. It must **not** own:
 
 - FTP / Bloomberg / file ingestion (lives in `data/` only; AGENTS.md rule 2);
@@ -641,7 +642,7 @@ available switches but not MVP defaults.
 ### 6.4 Existing issues — defer / reframe / leave alone
 
 - **Issue #13 (historical valuation loop):** stays **deferred / reframed** for
-  later EOD-revaluation use (`docs/13` §5); its preflight `docs/11` remains valid.
+  later EOD-revaluation use (`docs/13 (removed, see git history)` §5); its preflight `docs/11` remains valid.
   Do not implement now.
 - **Issue #14 (AI inquiry contract):** stays **deferred** and untouched. AI must
   still not bypass the deterministic `price(...)` API when it does land.

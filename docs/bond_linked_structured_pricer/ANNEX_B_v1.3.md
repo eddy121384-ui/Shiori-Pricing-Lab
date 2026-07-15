@@ -2,8 +2,12 @@
 title: Annex B v1.3 - FTP File Specification
 version: 1.3
 source: GPT direct markdown output（非 PDF 反向解析）
-authoritative: true
+status: future-state reference only; does not authorize implementation
 ---
+
+> **Implementation authority notice:** This document is future-state
+> reference material. It does not authorize implementation on its own. See
+> `AGENTS.md` for the current implementation authority order.
 
 # Annex B：FTP File Specification
 

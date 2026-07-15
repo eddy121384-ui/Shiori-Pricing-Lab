@@ -24,8 +24,8 @@ snapshot, or a pricing engine.
   `BondYieldConvention`, `PricingErrorCode.MISSING_REFERENCE_DATA`, and their
   tests (`tests/test_bli_enums.py`). No schema, no snapshot, no pricing engine
   was added.
-- **Issue #37 remains open.** `docs/00_development_log.md` and
-  `docs/09_mvp_core_runbook.md` (checkpoint after PR #46) both record that the
+- **Issue #37 remains open.** The development log and runbook
+  (checkpoint after PR #46; both removed, see git history) both recorded that the
   `DayCount` vocabulary (`ACT/365`, `ACT/365F`, market `ACT/ACT` variants) and
   the broader market/jurisdiction vocabulary are **still deferred**, pending a
   reviewed Annex-driven decision (`docs/14` §5, amendment A-14). `DayCount`
@@ -386,8 +386,8 @@ strict `YYYY-MM-DD`, positive-notional checks):
 ## 7. Files updated by this PR
 
 - Added `docs/15_bli_product_schema_preflight_issue_38.md` (this file).
-- Added a short checkpoint entry to `docs/00_development_log.md`.
-- Added a short pointer under `docs/09_mvp_core_runbook.md` §9.
+- Added a short checkpoint entry to the development log (removed, see git history).
+- Added a short pointer under the runbook §9 (removed, see git history).
 - The four frozen BLI source spec files under
   `docs/bond_linked_structured_pricer/` are **not** edited.
 - No source code or tests are added or modified in this PR.
