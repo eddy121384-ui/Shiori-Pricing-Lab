@@ -66,13 +66,20 @@ def _require_optional_finite_number(
     ``float`` (or vice versa), so the four optional top-level quote numeric
     fields (client premiums, trader adjustments) preserve exactly the
     builtin type the caller supplied.
+
+    ``math.isfinite`` is called only for an exact ``float``. An exact
+    builtin ``int`` is mathematically finite by construction and needs no
+    finiteness check -- calling ``math.isfinite`` on one anyway would
+    implicitly convert it to ``float`` first, and a huge int outside
+    float range (e.g. ``10**1000``) would raise ``OverflowError`` instead
+    of being accepted, contradicting the exact-int-accepted-unchanged rule.
     """
 
     if value is None:
         return None
     if type(value) not in (int, float):
         raise TypeError(f"{field_name} must be a finite number or None, got {value!r}")
-    if not math.isfinite(value):
+    if type(value) is float and not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite, got {value!r}")
     if non_negative and value < 0:
         raise ValueError(f"{field_name} must be non-negative, got {value!r}")
@@ -99,9 +106,20 @@ def _require_exclusions(value: object) -> tuple[str, ...]:
 
 
 def _require_model_number(value: object, field_name: str) -> None:
+    """Require a finite, non-bool number; accepted-type policy unchanged.
+
+    ``math.isfinite`` is called only for a ``float`` -- an ``int`` (already
+    accepted by the type check above, with ``bool`` excluded) is
+    mathematically finite by construction and needs no finiteness check.
+    Calling ``math.isfinite`` on a huge ``int`` (e.g. ``10**1000``) would
+    implicitly convert it to ``float`` first and raise ``OverflowError``
+    instead of accepting it, contradicting the already-approved rule that
+    an exact builtin int is accepted unchanged.
+    """
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field_name} must be a finite number, got {value!r}")
-    if not math.isfinite(value):
+    if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite, got {value!r}")
 
 

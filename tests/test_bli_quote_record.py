@@ -423,6 +423,51 @@ def test_optional_numeric_fields_reject_numeric_subclasses(field, bad_value):
         record(**{field: bad_value, "override_reason": "manual override"})
 
 
+_HUGE_INT = 10**1000
+
+
+@pytest.mark.parametrize("field", _OPTIONAL_NUMERIC_FIELDS)
+def test_optional_numeric_fields_accept_huge_exact_int_without_overflow(field):
+    # A builtin int outside float range must be accepted unchanged, not
+    # raise OverflowError via an implicit float() conversion inside
+    # math.isfinite -- an exact int is mathematically finite by
+    # construction and needs no finiteness check at all.
+    rec = record(**{field: _HUGE_INT, "override_reason": "manual override"})
+    value = getattr(rec, field)
+    assert value == _HUGE_INT
+    assert type(value) is int
+
+
+@pytest.mark.parametrize(
+    "field", ["trader_adjustment_per_100", "trader_adjustment_total"]
+)
+def test_signed_trader_adjustment_fields_accept_huge_negative_int(field):
+    rec = record(**{field: -_HUGE_INT, "override_reason": "manual override"})
+    assert getattr(rec, field) == -_HUGE_INT
+
+
+@pytest.mark.parametrize(
+    "field", ["client_quote_premium_per_100", "client_quote_total_premium"]
+)
+def test_non_negative_client_premium_fields_reject_huge_negative_int(field):
+    with pytest.raises(ValueError, match="must be non-negative"):
+        record(**{field: -_HUGE_INT, "override_reason": "manual override"})
+
+
+def test_huge_exact_int_model_anchors_accepted_without_overflow():
+    # PricingResult.pv and assumptions['black76_pv_per_100'] are the two
+    # reachable _require_model_number paths; a huge exact int must be
+    # accepted for both, with the dependent benchmark_comparison fields
+    # kept aligned to satisfy the existing alignment contract.
+    pricing = pricing_result(pv=_HUGE_INT, assumptions={"black76_pv_per_100": _HUGE_INT})
+    comparison = benchmark_comparison(
+        model_fair_premium_per_100=_HUGE_INT, model_total_premium=_HUGE_INT
+    )
+    rec = record(pricing_result=pricing, benchmark_comparison=comparison)
+    assert rec.pricing_result.pv == _HUGE_INT
+    assert rec.pricing_result.assumptions["black76_pv_per_100"] == _HUGE_INT
+
+
 def test_exclusions_are_ordered_stripped_strings_not_enums():
     rec = record(exclusions=("first", "second"))
     assert rec.exclusions == ("first", "second")

@@ -1166,3 +1166,23 @@ def test_top_level_quote_numeric_exact_int_round_trips_without_coercion():
         "trader_adjustment_total",
     ):
         assert type(getattr(restored, field)) is int
+
+
+def test_huge_exact_int_quote_numeric_round_trips_through_json_without_overflow():
+    # A builtin int outside float range (e.g. 10**1000) must survive the
+    # full object -> dict -> JSON -> object round trip without raising
+    # OverflowError anywhere in the encode/decode path, and without losing
+    # its exact int type or value.
+    huge = 10**1000
+    rec = record(
+        client_quote_premium_per_100=huge,
+        trader_adjustment_per_100=-huge,
+        override_reason="manual override",
+    )
+    text = quote_record_to_json(rec)
+    restored = quote_record_from_json(text)
+    assert restored == rec
+    assert restored.client_quote_premium_per_100 == huge
+    assert type(restored.client_quote_premium_per_100) is int
+    assert restored.trader_adjustment_per_100 == -huge
+    assert type(restored.trader_adjustment_per_100) is int
