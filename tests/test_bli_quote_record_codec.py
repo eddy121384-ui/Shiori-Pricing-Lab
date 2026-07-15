@@ -1127,3 +1127,42 @@ def test_field_shapes_cover_every_non_special_field_across_the_full_schema():
             if key in codec_module._FREE_FORM_FIELDS or key in codec_module._MESSAGE_TUPLE_FIELDS:
                 continue
             assert key in codec_module._FIELD_SHAPES, f"{key} has no resolved field shape"
+
+
+def test_top_level_quote_numeric_exact_int_round_trips_without_coercion():
+    # The four optional top-level quote numeric fields (client premiums,
+    # trader adjustments) must preserve an exact builtin int through the
+    # full object -> dict -> object round trip -- never coerced to float.
+    rec = record(
+        client_quote_premium_per_100=5,
+        client_quote_total_premium=2251,
+        trader_adjustment_per_100=1,
+        trader_adjustment_total=-1,
+        override_reason="manual override",
+    )
+    for field in (
+        "client_quote_premium_per_100",
+        "client_quote_total_premium",
+        "trader_adjustment_per_100",
+        "trader_adjustment_total",
+    ):
+        assert type(getattr(rec, field)) is int
+
+    payload = quote_record_to_dict(rec)
+    for field in (
+        "client_quote_premium_per_100",
+        "client_quote_total_premium",
+        "trader_adjustment_per_100",
+        "trader_adjustment_total",
+    ):
+        assert type(payload[field]) is int
+
+    restored = quote_record_from_dict(payload)
+    assert restored == rec
+    for field in (
+        "client_quote_premium_per_100",
+        "client_quote_total_premium",
+        "trader_adjustment_per_100",
+        "trader_adjustment_total",
+    ):
+        assert type(getattr(restored, field)) is int

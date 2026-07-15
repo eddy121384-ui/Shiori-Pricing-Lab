@@ -56,17 +56,27 @@ def _require_non_blank_stripped(value: object, field_name: str) -> str:
 
 def _require_optional_finite_number(
     value: object, field_name: str, *, non_negative: bool
-) -> float | None:
+) -> int | float | None:
+    """Require ``None`` or an exact, finite ``int``/``float``, unchanged.
+
+    Membership is by exact type (``type(value) in (int, float)``), not
+    ``isinstance`` -- a ``bool`` (an ``int`` subclass) and any other numeric
+    subclass or custom numeric type are rejected, never silently accepted.
+    The original value is returned as-is: an ``int`` is never coerced to
+    ``float`` (or vice versa), so the four optional top-level quote numeric
+    fields (client premiums, trader adjustments) preserve exactly the
+    builtin type the caller supplied.
+    """
+
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise TypeError(f"{field_name} must be a finite number or None, got {value!r}")
     if not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite, got {value!r}")
-    number = float(value)
-    if non_negative and number < 0.0:
+    if non_negative and value < 0:
         raise ValueError(f"{field_name} must be non-negative, got {value!r}")
-    return number
+    return value
 
 
 def _require_saved_at(value: object) -> str:

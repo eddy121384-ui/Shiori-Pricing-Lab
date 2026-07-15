@@ -387,6 +387,42 @@ def test_optional_numeric_validation(field, value):
         record(**{field: value})
 
 
+_OPTIONAL_NUMERIC_FIELDS = [
+    "client_quote_premium_per_100",
+    "client_quote_total_premium",
+    "trader_adjustment_per_100",
+    "trader_adjustment_total",
+]
+
+
+@pytest.mark.parametrize("field", _OPTIONAL_NUMERIC_FIELDS)
+def test_optional_numeric_fields_accept_exact_int_and_store_it_unchanged(field):
+    # An exact builtin int must be accepted and returned unchanged -- never
+    # coerced to float() -- for each of the four optional top-level quote
+    # numeric fields.
+    rec = record(**{field: 5, "override_reason": "manual override"})
+    value = getattr(rec, field)
+    assert value == 5
+    assert type(value) is int
+
+
+class _IntSubclass(int):
+    pass
+
+
+class _FloatSubclass(float):
+    pass
+
+
+@pytest.mark.parametrize("field", _OPTIONAL_NUMERIC_FIELDS)
+@pytest.mark.parametrize(
+    "bad_value", [_IntSubclass(5), _FloatSubclass(5.0)], ids=["int-subclass", "float-subclass"]
+)
+def test_optional_numeric_fields_reject_numeric_subclasses(field, bad_value):
+    with pytest.raises(TypeError):
+        record(**{field: bad_value, "override_reason": "manual override"})
+
+
 def test_exclusions_are_ordered_stripped_strings_not_enums():
     rec = record(exclusions=("first", "second"))
     assert rec.exclusions == ("first", "second")
