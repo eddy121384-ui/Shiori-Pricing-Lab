@@ -24,7 +24,7 @@ src/shiori_pricing_lab/data/bli_mvp_input_bundle.py
   -- BLIMVPInputBundle: frozen dataclass binding one
      BondLinkedStructuredProduct + one resolved BondReferenceData + one
      BLIMarketDataSnapshot by reference, enforcing every input-readiness
-     gate at construction time (see docs/09's "BLI bundle construction:
+     gate at construction time (see docs/09 (removed, see git history)'s "BLI bundle construction:
      the canonical path" checkpoint for the full gate list).
 
 src/shiori_pricing_lab/data/bli_mvp_input_bundle_builder.py
@@ -69,10 +69,10 @@ front door") states plainly: *"All of it. A BLI engine is a
 identical to the IRS pattern. ... No front-door change is required."*
 `docs/24` §2 restates the same intent one layer down, at the bundle
 level: the future input bundle "mirror[s] the existing spine contract
-already documented in `docs/09` §1... the BLI bundle is the
+already documented in `docs/09 (removed, see git history)` §1... the BLI bundle is the
 BLI-specific instantiation of 'everything `price(...)` needs to
 actually price this product,' **not a second, parallel contract**."
-`docs/09`'s own "Product-priority pivot" checkpoint says the same:
+`docs/09 (removed, see git history)`'s own "Product-priority pivot" checkpoint says the same:
 "BLI will register behind the same `price(...)` front door." **Reuse of
 the shared spine is therefore the standing architectural assumption,
 not an open-ended choice** — see §4 for how the next slice must confirm
@@ -301,7 +301,7 @@ For a valid `BLIMVPInputBundle`, the skeleton should **either**:
 **Choose one in the next implementation, based on repo conventions** —
 do not implement both, and do not leave the choice ambiguous. Relevant
 precedent to weigh: the existing vanilla-rates-core spine uses a hybrid
-(`docs/09` §3's "Failure handling is hybrid" model) — domain failures
+(`docs/09 (removed, see git history)` §3's "Failure handling is hybrid" model) — domain failures
 return a `FAILED` `PricingResult`, while contract/programming
 violations raise. "Not implemented yet" for a *valid* bundle is neither
 a domain failure (nothing about the bundle is wrong) nor a programming
@@ -407,11 +407,11 @@ engine skeleton implementation) should read, in this order:
 
 ```text
 1. This doc (docs/25_bli_pricing_engine_skeleton_preflight.md).
-2. docs/09_mvp_core_runbook.md -- specifically the "BLI bundle
+2. The MVP runbook (removed, see git history) -- specifically the "BLI bundle
    construction: the canonical path (post-PR #66)" checkpoint and the
    BLIMVPInputBundle / build_bli_mvp_input_bundle checkpoints above it.
-3. docs/00_development_log.md -- the PR #65/#66/this-doc entries, for
-   the "why" behind each design decision already made.
+3. The development log (removed, see git history) -- the PR #65/#66/this-doc
+   entries, for the "why" behind each design decision already made.
 4. src/shiori_pricing_lab/data/bli_mvp_input_bundle.py -- the exact
    validation gates already enforced (nothing here needs re-checking
    by the pricing skeleton).
@@ -450,8 +450,8 @@ adds no code itself. That implementation PR should:
   disproven**;
 - pick exactly one of §6's two not-implemented behaviors, stating why;
 - add the tests scoped in §8;
-- update `docs/00_development_log.md` and `docs/09_mvp_core_runbook.md`
-  with what actually landed, the same way every prior BLI slice has.
+- update the current README quickstart or a successor doc with what actually
+  landed, the same way every prior BLI slice has recorded its outcome.
 
 ---
 

@@ -12,8 +12,8 @@ pricing-engine slice). Consumers filter or search ``SYNTHETIC_BOND_FIXTURES``
 directly.
 
 Every bond below is invented and clearly synthetic (``issuer`` and
-``isin`` are placeholder values, not real securities), matching
-`AGENTS.md` rule 6 and `docs/09`'s "synthetic data only" invariant.
+``isin`` are placeholder values, not real securities), consistent with
+the repository's synthetic-data safety rule.
 
 **Irregular-stub handling by construction (docs/20 §5/§10):** none of
 these fixture bonds has an irregular first/last coupon period --

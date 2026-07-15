@@ -451,7 +451,7 @@ per this repo's standing PR-description convention.
 [ ] Is expiry_date <= valuation_date rejected (raise), never silently
     clamped to 0 or allowed to go negative?
 [ ] Is date.today()/datetime.now() absent from the new module and its
-    tests (no system-date use in pricing, docs/09 §3, AGENTS.md rule 11)?
+    tests (no system-date use in pricing, docs/09 (removed, see git history) §3, AGENTS.md rule 11)?
 [ ] Is price_bli_mvp's return value byte-for-byte unchanged before/after
     this PR for the existing SYNTHETIC_BLI_MVP_INPUT_BUNDLE fixture?
 [ ] Does pricing/result.py / pricing/errors.py / pricing/engine.py /
@@ -503,8 +503,8 @@ A new Claude Code session picking up the actual next implementation PR
 ```text
 1. This doc (docs/26_bli_first_valuation_slice_preflight.md).
 2. docs/25_bli_pricing_engine_skeleton_preflight.md and the "BLI pricing
-   engine skeleton landed" checkpoint in docs/09_mvp_core_runbook.md --
-   what price_bli_mvp already does and does not do.
+   engine skeleton landed" checkpoint in the MVP runbook (removed, see git
+   history) -- what price_bli_mvp already does and does not do.
 3. src/shiori_pricing_lab/pricing/bli_pricing_engine.py -- confirm it is
    not touched by the time-to-expiry slice.
 4. src/shiori_pricing_lab/pricing/irs_engine.py's _year_fraction helper

@@ -11,7 +11,7 @@ between ``products/bond_option.py``, ``products/deposit_leg.py``, and
 
 Nothing here touches market data content or the system clock:
 ``date.fromisoformat`` is used purely to validate the format and calendar
-validity of an explicit date string, never to read "today" (docs/09 §3).
+validity of an explicit date string, never to read "today".
 """
 
 from __future__ import annotations

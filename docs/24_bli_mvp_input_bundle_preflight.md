@@ -92,7 +92,7 @@ not itself part of the pricing calculation, has no `pv`/`dv01`/
 `cashflows` field, and performs no interpolation, conversion, or
 numerical methodology of any kind. Its only job is *assembly with
 validation*, mirroring the existing spine contract already documented
-in `docs/09` §1 (`Product Definition + ValuationContext +
+in `docs/09 (removed, see git history)` §1 (`Product Definition + ValuationContext +
 MarketDataSnapshot → price(...) → PricingResult`) — the BLI bundle is
 the BLI-specific instantiation of "everything `price(...)` needs to
 actually price this product," not a second, parallel contract.
@@ -456,7 +456,7 @@ valuation date / as-of timestamp handling must be explicit, and
 
     the bundle's own valuation_date must be a required, explicit,
       non-defaulted field (same "no date.today()" invariant already
-      enforced everywhere else in this repo, docs/09 §3).
+      enforced everywhere else in this repo, docs/09 (removed, see git history) §3).
     market_data_snapshot.valuation_date must equal the bundle's
       valuation_date (unchanged from the earlier version of this doc).
     market_data_snapshot.as_of_timestamp must ALSO be validated under
@@ -901,7 +901,7 @@ None of steps 3-7 is started by this doc.
 - `docs/20` §8, `docs/21` §5/§6/§7.1: the "missing/ineligible bond must
   block, never guess" rule and the point-in-time boundary are restated
   in §6/§9/§11 above, not changed or re-opened.
-- `docs/09` §1: the existing spine contract
+- `docs/09 (removed, see git history)` §1: the existing spine contract
   (`Product Definition + ValuationContext + MarketDataSnapshot →
   price(...) → PricingResult`) is the pattern this doc's bundle mirrors
   for BLI, restated in §2, not replaced.

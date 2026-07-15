@@ -16,8 +16,8 @@ that introduces this document.
 
 Required reading before the implementation slice: `AGENTS.md`, `docs/00_vision.md`,
 `docs/01_system_architecture.md`, `docs/04_product_definition_schema.md`,
-`docs/08_performance_engine_backend_strategy.md`, `docs/09_mvp_core_runbook.md`
-(sections 3, 8, 9), and the existing pricing-contract modules
+`docs/08_performance_engine_backend_strategy.md`, and the MVP runbook
+(sections 3, 8, 9 -- removed, see git history), and the existing pricing-contract modules
 (`src/shiori_pricing_lab/pricing/result.py`, `engine.py`, `errors.py`).
 
 ---
@@ -451,12 +451,13 @@ schemas in this preflight.
 
 ## 10. Relationship to existing docs
 
-This preflight extends — and does not replace — the runbook and development log:
+This preflight extends — and does not replace — the runbook and development log
+(both removed, see git history):
 
-- `docs/09_mvp_core_runbook.md` §8–§9 already names "design preflight for the
+- the MVP runbook §8–§9 already named "design preflight for the
   first per-product reference engine" as the recommended next step; this document
   is that preflight, narrowed to **IRS first**.
-- `docs/00_development_log.md` records the PR #23 contract checkpoint; this
+- the development log recorded the PR #23 contract checkpoint; this
   preflight is the design step before the first engine implementation.
 
 Issue #10 remains **open** — its first slice (the contract) is done; the

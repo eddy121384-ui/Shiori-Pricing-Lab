@@ -11,8 +11,8 @@ eligible" (``resolve_bond_reference_data`` / ``is_mvp_pricing_eligible``),
 or "what is the PV" (a future ``PricingResult``).
 
 **Naming and location (docs/23 §3):** this module lives inside the existing
-``data/`` package (``AGENTS.md`` rule 2 already designates it as the one
-place market-data code may live), and the class is named
+``data/`` package (the repository keeps market-data code in this package),
+and the class is named
 ``BLIMarketDataSnapshot`` -- deliberately distinct from the existing
 vanilla-rates-core ``MarketDataSnapshot`` (``data/snapshot.py``), which is a
 structurally unrelated DataFrame-of-rates-points object. Neither class is
@@ -553,7 +553,7 @@ class BLIMarketDataSnapshot:
         _require_active_status(self.status, "snapshot")
 
         # valuation_date is explicit and parsed only for format validation --
-        # never date.today()/datetime.now() anywhere in this module (docs/09 §3).
+        # never date.today()/datetime.now() anywhere in this module.
         _parse_iso_date(self.valuation_date, "valuation_date")
         _require_non_blank(self.as_of_timestamp, "as_of_timestamp")
         _require_non_blank(self.source_system, "source_system")
