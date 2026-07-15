@@ -1,5 +1,6 @@
 import ast
 import copy
+import dataclasses
 import importlib.machinery
 import importlib.util
 import inspect
@@ -752,3 +753,112 @@ def test_strenum_dict_key_in_free_form_data_rejected_at_encode():
     rec = record(pricing_result=pricing)
     with pytest.raises(ValueError, match="free-form dict keys must be strings"):
         quote_record_to_dict(rec)
+
+
+# --- Nested dataclass subclasses rejected before a payload is returned -----------
+#
+# _encode_value tags a nested dataclass value with type(value); if the actual
+# runtime type is a subclass (e.g. a BondOption subclass reachable through
+# BLIStandaloneBondOptionRequest.bond_option, which the request constructor
+# does not itself reject), the encoder must not tag it with the subclass's own
+# name -- that would produce a payload the decoder can never legitimately
+# reconstruct, breaking object -> dict -> object symmetry. This must hold at
+# every reachable nesting depth, through the single generic _encode_value path.
+
+
+def _record_with_subclass_bond_option():
+    rec = record()
+    subclass_bond_option = _helpers._subclass_instance(rec.request.bond_option)
+    new_request = dataclasses.replace(rec.request, bond_option=subclass_bond_option)
+    return dataclasses.replace(rec, request=new_request)
+
+
+def _record_with_subclass_curve_point():
+    rec = record()
+    snapshot = rec.request.market_data_snapshot
+    subclass_curve_point = _helpers._subclass_instance(snapshot.curve_points[0])
+    new_curve_points = (subclass_curve_point,) + snapshot.curve_points[1:]
+    new_snapshot = dataclasses.replace(snapshot, curve_points=new_curve_points)
+    new_request = dataclasses.replace(rec.request, market_data_snapshot=new_snapshot)
+    return dataclasses.replace(rec, request=new_request)
+
+
+def _record_with_subclass_solver_result():
+    rec = record(calibration_result=calibration_result())
+    calib = rec.calibration_result
+    subclass_solver = _helpers._subclass_instance(calib.solver_result)
+    new_calib = dataclasses.replace(calib, solver_result=subclass_solver)
+    return dataclasses.replace(rec, calibration_result=new_calib)
+
+
+@pytest.mark.parametrize(
+    "build_record,expected_path_fragment",
+    [
+        (_record_with_subclass_bond_option, "BLIStandaloneBondOptionRequest.bond_option"),
+        (_record_with_subclass_curve_point, "curve_points[0]"),
+        (_record_with_subclass_solver_result, "solver_result"),
+    ],
+    ids=["top-level-nested", "tuple-item-nested", "two-levels-deep"],
+)
+def test_nested_dataclass_subclass_rejected_at_encode(build_record, expected_path_fragment):
+    rec = build_record()
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_to_dict(rec)
+    message = str(excinfo.value)
+    assert expected_path_fragment in message
+    assert "not an exact known tagged dataclass type" in message
+
+
+# --- Custom dict/list subclasses rejected, never silently normalized -------------
+#
+# A dict/list subclass is a Python-only object json.loads can never produce.
+# It must be rejected outright at both encode and decode, not traversed and
+# normalized into a plain builtin dict/list.
+
+
+class _SneakyDict(dict):
+    pass
+
+
+class _SneakyList(list):
+    pass
+
+
+def test_custom_dict_subclass_in_free_form_rejected_at_encode():
+    pricing = pricing_result(assumptions=_SneakyDict({"black76_pv_per_100": 4.5}))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="unsupported free-form value type _SneakyDict"):
+        quote_record_to_dict(rec)
+
+
+def test_custom_list_subclass_in_free_form_rejected_at_encode():
+    pricing = pricing_result(diagnostics={"items": _SneakyList(["a", "b"])})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="unsupported free-form value type _SneakyList"):
+        quote_record_to_dict(rec)
+
+
+def test_custom_dict_subclass_rejected_at_decode():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"] = _SneakyDict(
+        payload["pricing_result"]["assumptions"]
+    )
+    with pytest.raises(ValueError, match="dict/list subclass"):
+        quote_record_from_dict(payload)
+
+
+def test_custom_list_subclass_rejected_at_decode_nested():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["diagnostics"] = {"items": _SneakyList(["a", "b"])}
+    with pytest.raises(ValueError, match="dict/list subclass"):
+        quote_record_from_dict(payload)
+
+
+def test_container_subclass_rejection_reports_precise_path():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"] = _SneakyDict(
+        payload["pricing_result"]["assumptions"]
+    )
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_from_dict(payload)
+    assert "pricing_result.assumptions" in str(excinfo.value)

@@ -102,23 +102,33 @@ _MESSAGE_TUPLE_FIELDS = {
     ("PricingResult", "warnings"),
     ("PricingResult", "errors"),
 }
-_KNOWN_TAGGED_CLASSES = {
-    "BLIStandaloneBondOptionRequest",
-    "BondOption",
-    "BondReferenceData",
-    "BLIMarketDataSnapshot",
-    "BLIBondQuote",
-    "BLICurvePoint",
-    "BLIDepositRateObservation",
-    "BLIVolatilityInput",
-    "BLICreditSpreadInput",
-    "PricingMessage",
-    "PricingResult",
-    "BLIBenchmarkQuote",
-    "BLIBenchmarkComparisonResult",
-    "BLIImpliedPriceVolCalibrationResult",
-    "BLIImpliedPriceVolSolverResult",
-}
+# The single source of truth for "an exact, supported native tagged dataclass
+# type" -- both the encode side (deciding whether a runtime dataclass value is
+# legitimate to tag) and the decode side (deciding whether a wire class tag is
+# known) key off this same set of class *objects*, so the two can never drift.
+# Membership is by exact type identity (``type(value) in ...``), never
+# ``isinstance``, so a subclass of any of these -- which would otherwise carry
+# the same fields and superficially "work" -- is never treated as legitimate.
+_KNOWN_TAGGED_CLASS_OBJECTS = frozenset(
+    {
+        BLIStandaloneBondOptionRequest,
+        BondOption,
+        BondReferenceData,
+        BLIMarketDataSnapshot,
+        BLIBondQuote,
+        BLICurvePoint,
+        BLIDepositRateObservation,
+        BLIVolatilityInput,
+        BLICreditSpreadInput,
+        PricingMessage,
+        PricingResult,
+        BLIBenchmarkQuote,
+        BLIBenchmarkComparisonResult,
+        BLIImpliedPriceVolCalibrationResult,
+        BLIImpliedPriceVolSolverResult,
+    }
+)
+_KNOWN_TAGGED_CLASSES = {cls.__name__ for cls in _KNOWN_TAGGED_CLASS_OBJECTS}
 
 
 def _enum_value(value: Any) -> Any:
@@ -133,17 +143,51 @@ def _enum_value(value: Any) -> Any:
     return value
 
 
-def _encode_value(value: Any) -> Any:
+def _encode_value(value: Any, path: str) -> Any:
+    """Encode one typed-schema value, tagging only exact known dataclass types.
+
+    A nested dataclass value is tagged with ``type(value)`` so its fields are
+    encoded correctly, but ``type(value)`` is only trusted as a tag if it is
+    itself an *exact* member of :data:`_KNOWN_TAGGED_CLASS_OBJECTS` -- never a
+    subclass. A subclass instance (e.g. a ``BondOption`` subclass reachable
+    through ``BLIStandaloneBondOptionRequest.bond_option``, which the request
+    constructor does not itself reject) would otherwise be tagged with the
+    subclass's own name, producing a payload the decoder can never
+    legitimately reconstruct (the decoder always expects the exact base class
+    name). Rejecting it here, before any payload is returned, preserves
+    object -> dict -> object symmetry: the encoder never emits a class tag
+    the decoder cannot accept.
+
+    Containers are matched by *exact* type (``type(value) is dict`` /
+    ``type(value) is list``), not ``isinstance``, so a ``dict``/``list``
+    subclass is never silently traversed and normalized into a plain builtin
+    container -- it is rejected as a non-canonical Python-only object instead.
+    """
+
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value):
+        if type(value) not in _KNOWN_TAGGED_CLASS_OBJECTS:
+            raise ValueError(
+                f"{path}: {type(value).__name__} is not an exact known tagged "
+                "dataclass type; nested dataclass subclasses are not supported"
+            )
         return _tagged(type(value), value)
     if isinstance(value, tuple):
-        return {_TUPLE_KEY: [_encode_value(item) for item in value]}
-    if isinstance(value, list):
-        return [_encode_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _encode_value(item) for key, item in value.items()}
+        return {
+            _TUPLE_KEY: [
+                _encode_value(item, f"{path}[{index}]") for index, item in enumerate(value)
+            ]
+        }
+    if type(value) is list:
+        return [_encode_value(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if type(value) is dict:
+        return {key: _encode_value(item, f"{path}.{key}") for key, item in value.items()}
+    if isinstance(value, (dict, list)):
+        raise ValueError(
+            f"{path}: {type(value).__name__} is a dict/list subclass, not a plain "
+            "dict/list; container subclasses are not supported"
+        )
     return value
 
 
@@ -167,13 +211,18 @@ def _encode_free_form_value(value: Any, path: str) -> Any:
     Actual tuples are still tagged with the existing internal ``__tuple__``
     marker so they round-trip -- only a *user-supplied* dict key equal to a
     reserved name is rejected, never the codec's own tagging mechanism.
+
+    Containers are matched by *exact* type (``type(value) is dict`` /
+    ``type(value) is list``), not ``isinstance``, so a ``dict``/``list``
+    subclass is rejected as an unsupported free-form value type rather than
+    silently traversed and normalized into a plain builtin container.
     """
 
     if isinstance(value, Enum):
         raise ValueError(f"{path}: Enum values are not supported in free-form data")
     if is_dataclass(value):
         raise ValueError(f"{path}: dataclass values are not supported in free-form data")
-    if isinstance(value, dict):
+    if type(value) is dict:
         for key in value:
             if type(key) is not str:
                 raise ValueError(f"{path}: free-form dict keys must be strings")
@@ -191,12 +240,12 @@ def _encode_free_form_value(value: Any, path: str) -> Any:
                 for index, item in enumerate(value)
             ]
         }
-    if isinstance(value, list):
+    if type(value) is list:
         return [
             _encode_free_form_value(item, f"{path}[{index}]")
             for index, item in enumerate(value)
         ]
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or type(value) in (bool, int, float, str):
         return value
     raise ValueError(f"{path}: unsupported free-form value type {type(value).__name__}")
 
@@ -258,7 +307,7 @@ def _tagged(cls: type, obj: Any) -> dict[str, object]:
                 value, f"{cls.__name__}.{field.name}"
             )
         else:
-            payload[field.name] = _encode_value(value)
+            payload[field.name] = _encode_value(value, f"{cls.__name__}.{field.name}")
     return payload
 
 
@@ -324,6 +373,14 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
     ``isinstance`` of ``str``/``int`` while still being a live Enum object,
     not a plain JSON-ready primitive; the same exact-type check applies to
     dict keys.
+
+    Containers are matched by *exact* type too (``type(value) is dict`` /
+    ``type(value) is list``), not ``isinstance``. A ``dict`` or ``list``
+    subclass is a Python-only object ``json.loads`` can never produce; an
+    ``isinstance`` check would traverse and accept it, and the plain-dict/
+    plain-list comprehensions used throughout the codec would then silently
+    normalize it into a builtin container, discarding its actual type. It is
+    rejected outright instead, with the exact path and its `repr()`.
     """
 
     if isinstance(value, tuple):
@@ -331,7 +388,7 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
             f"{path} contains a raw Python tuple; the only canonical tuple wire "
             "form is {'__tuple__': [...]}"
         )
-    if isinstance(value, dict):
+    if type(value) is dict:
         for key, item in value.items():
             if type(key) is not str:
                 raise ValueError(
@@ -340,10 +397,15 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
                 )
             _reject_non_canonical_payload(item, f"{path}.{key}")
         return
-    if isinstance(value, list):
+    if type(value) is list:
         for index, item in enumerate(value):
             _reject_non_canonical_payload(item, f"{path}[{index}]")
         return
+    if isinstance(value, (dict, list)):
+        raise ValueError(
+            f"{path} contains a {type(value).__name__!r} dict/list subclass "
+            f"{value!r}; only plain dict/list containers are canonical"
+        )
     if type(value) is float:
         if not math.isfinite(value):
             raise ValueError(f"{path} contains non-finite number {value!r}")
@@ -704,7 +766,7 @@ def quote_record_to_dict(record: BLIQuoteRecord) -> dict[str, object]:
         "trader_adjustment_per_100": record.trader_adjustment_per_100,
         "trader_adjustment_total": record.trader_adjustment_total,
         "override_reason": record.override_reason,
-        "exclusions": _encode_value(record.exclusions),
+        "exclusions": _encode_value(record.exclusions, "BLIQuoteRecord.exclusions"),
     }
     _reject_non_canonical_payload(payload, "BLIQuoteRecord")
     return payload
