@@ -11,8 +11,8 @@ eligible" (``resolve_bond_reference_data`` / ``is_mvp_pricing_eligible``),
 or "what is the PV" (a future ``PricingResult``).
 
 **Naming and location (docs/23 §3):** this module lives inside the existing
-``data/`` package (``AGENTS.md`` rule 2 already designates it as the one
-place market-data code may live), and the class is named
+``data/`` package (the repository keeps market-data code in this package),
+and the class is named
 ``BLIMarketDataSnapshot`` -- deliberately distinct from the existing
 vanilla-rates-core ``MarketDataSnapshot`` (``data/snapshot.py``), which is a
 structurally unrelated DataFrame-of-rates-points object. Neither class is
