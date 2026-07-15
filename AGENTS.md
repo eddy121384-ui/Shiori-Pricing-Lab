@@ -1,139 +1,116 @@
 # AGENTS.md
 
-This repository is designed to be maintained with AI coding agents such as Codex, Claude Code, or other assistants. Follow these rules when editing the project.
+This repository is maintained with AI coding agents. Build the current trader-facing workflow with the least code, documentation, infrastructure, and process that safely works.
 
-## Project identity
+## Implementation authority
 
-Project name: Shiori Pricing Lab
+Only these authorize implementation, in order:
 
-Purpose: build a private, AI-readable Rates Desk Workbench for trader-owned pricing, valuation, historical valuation, backtesting, charting, and AI-assisted inquiry.
+1. Eddy’s latest explicit decision.
+2. The current Eddy-approved GitHub issue or PR slice.
+3. Pricing methodology explicitly invoked by that slice.
+4. Existing runtime contracts required by that slice.
 
-The project starts with vanilla rates workflows, but the long-term scope includes IRS, CCS, FX Swap, Swaptions, Bond Options, Callable Swaps, and IR Daily Range Accrual structured products.
+Vision, roadmap, architecture, SPEC, annexes, archives, future phases, TODOs, and reviewer suggestions are reference only. They may clarify the approved slice but may not expand it.
 
-Do not turn the early project into a full Bloomberg clone, TradingView clone, or generic quant platform. Build the shared pricing spine first.
+## Lean implementation gate
 
-## Source of truth
+Understand the real execution path, then stop at the first applicable step:
 
-GitHub is the source of truth for executable specs, code, issues, tests, and architecture decisions that affect implementation.
+1. Does this need to exist for the current user-visible slice? If not, do not build it.
+2. Does it already exist? Reuse it.
+3. Can the standard library or platform-native behavior do it? Use that.
+4. Can an installed dependency do it safely? Use it.
+5. Only then write the smallest complete implementation.
 
-Notion may be used as a discussion hub, draft space, and cross-AI handoff layer, but Notion drafts must be converted into GitHub docs or issues before implementation.
+Prefer deletion, reuse, native behavior, mature plumbing, few files, and one vertical slice.
 
-## Required reading map
+Do not create speculative frameworks, one-implementation interfaces, factories for one product, unused configuration, compatibility or migration layers, schema registries, persistence abstractions, delegating wrappers, or future-phase scaffolding.
 
-Before coding, read the smallest relevant set of files.
+“No code change needed” is valid.
 
-Always start with:
+## Before editing
 
-1. `README.md`
-2. `docs/00_vision.md`
-3. `docs/01_system_architecture.md`
+- Read the approved issue or PR slice.
+- Read the code and tests directly involved.
+- Trace callers and the real execution flow.
+- Read only methodology or docs needed by that flow.
+- Confirm the change is necessary.
 
-Then read the relevant domain document:
+Do not load the whole vision, roadmap, or docs tree by default. Fix the smallest shared root cause, not one symptom per caller.
 
-- Market data or historical data: `docs/02_data_and_market_snapshots.md`
-- Valuation date, context, or scenario assumptions: `docs/03_valuation_context.md`
-- Product representation: `docs/04_product_definition_schema.md`
-- Backtesting: `docs/05_backtesting_engine.md`
-- AI inquiry or script generation: `docs/06_ai_native_layer.md`
-- UI or charting: `docs/07_ui_workbench.md`
-- Performance or pricing backend design: `docs/08_performance_engine_backend_strategy.md`
+## Risk classification
 
-Legacy docs still exist:
+Classify by actual effect, not by filename or object name.
 
-- `docs/spec_v0.1.md`
-- `docs/architecture.md`
-- `docs/roadmap.md`
-- `docs/runbook.md`
+### RED
 
-Prefer the numbered architecture documents for new design decisions.
+RED includes changes that can alter pricing or risk output, curve construction/interpolation/discounting, forward clean price, accrued interest or coupon PV, yield-price or volatility conversion, Black-76/tree/payoff behavior, pricing-engine wiring, pricing fallback/unsupported behavior, externally consumed interfaces, or persisted-data compatibility.
 
-## Current priority
+For RED work:
 
-The current priority is not exotic-product pricing.
+- do not invent missing methodology;
+- preserve the approved contract;
+- add deterministic tests;
+- state scope and exclusions;
+- require independent Codex review and Eddy’s merge approval;
+- stop when a required RED decision is not authorized.
 
-The first durable milestone is Vanilla Rates Core:
+### Non-RED
 
-- explicit valuation date;
-- market data snapshot concept;
-- valuation context;
-- curve framework;
-- IRS / OIS / CCS / FX Swap foundations;
-- deterministic PV / DV01 / scenario output;
-- tests;
-- simple local UI.
+Internal replaceable plumbing, UI, tools, formatting, and non-pricing validation are classified by their real impact. A schema, dataclass, validator, or serializer is not automatically RED.
 
-## Engineering rules
+If work unexpectedly affects RED behavior, stop and reclassify it.
 
-1. Keep pricing logic independent from data sources.
-2. Bloomberg/API calls must only live in `src/shiori_pricing_lab/data/`.
-3. Pricing modules must accept explicit inputs and return explicit outputs.
-4. Do not hide pricing, model, or convention assumptions inside UI code.
-5. Do not add external services, credentials, or cloud calls unless explicitly requested.
-6. Do not commit real Bloomberg data, internal bank data, client information, real positions, or secrets.
-7. Prefer simple readable code over clever abstractions.
-8. Add or update tests when adding calculation logic.
-9. Keep examples synthetic unless the user explicitly provides public data.
-10. Write comments to explain financial assumptions, not obvious Python syntax.
-11. Do not use system date inside pricing engines. Valuation date must be explicit.
-12. Do not let AI inquiry code bypass deterministic pricing APIs.
-13. Keep Python as the orchestration layer and allow optimized or compiled pricing backends behind stable interfaces.
-14. Do not write large pure Python Monte Carlo or portfolio repricing loops without profiling and an explicit performance plan.
-15. Do not claim performance improvement without a benchmark and reference-result comparison.
+## Financial correctness
 
-## Financial correctness rules
+Pricing results must come from deterministic code, never LLM reasoning.
 
-Pricing results must come from deterministic pricing engines, not LLM reasoning.
+Do not fabricate market data, prices, risk, Bloomberg/vendor output, benchmark evidence, or model-validation evidence.
 
-LLMs may assist with:
+Keep pricing logic independent from UI rendering, external data fetching, LLM calls, and persistence side effects. Pricing inputs and valuation dates must be explicit.
 
-- parsing natural language into structured requests;
-- writing backtest scripts;
-- explaining outputs;
-- drafting specs;
-- proposing tests;
-- reviewing architecture.
+Do not silently add coercion, fallback, unsupported behavior, conventions, or methodology changes.
 
-LLMs must not fabricate market data, PV, risk, backtest results, Bloomberg output, or model validation evidence.
+## Tests and reviews
 
-## Suggested workflow for agents
+Tests prove current approved behavior, not hypothetical future behavior.
 
-Before coding:
+- RED: deterministic boundary/numerical tests, focused tests, full suite, and lint when practical.
+- Non-RED: the smallest runnable check that catches the changed behavior.
+- Do not build broad fixture frameworks or exhaustive type matrices without a current need.
+- Do not lock in implementation trivia or test unreachable future behavior.
 
-1. Restate the target issue or spec section.
-2. Identify the relevant architecture document.
-3. Identify which module owns the change.
-4. State financial assumptions that may affect pricing or risk.
+A reviewer finding does not authorize scope. Fix only reachable defects, approved-invariant violations, necessary proof gaps, or real security/data-loss/accessibility issues. Defer speculative hardening, future compatibility, generalized frameworks, unrelated cleanup, new methodology, and redesign beyond the slice.
 
-When implementing:
+Review the actual diff and path. Say nothing rather than invent findings.
 
-1. Start with the smallest useful version.
-2. Keep data adapters, valuation context, pricing engines, UI, and AI layers separate.
-3. Add tests for deterministic calculations.
-4. Keep imports lightweight.
-5. Avoid broad refactors unless requested.
+## Pull requests and documentation
 
-When proposing larger changes:
+Default to one smallest complete, reviewable PR. Split only for materially different risk, genuine reviewability, or an unresolved RED boundary.
 
-1. Create or update an issue first.
-2. State the financial assumption affected.
-3. State expected user-visible behavior.
-4. State test coverage.
-5. State remaining risks.
+Every PR states concisely:
 
-When opening or updating a pull request:
+- changed user-visible or runtime behavior;
+- tests/checks proving it;
+- what remains out of scope.
 
-Leave a self-contained GitHub PR conversation comment that is understandable without reading the agent private chat session. Include the target issue / scope, changed files, implementation summary, tests and lint commands run with results, known limitations, explicitly deferred work, and any assumptions or financial-model choices that affect pricing or risk behavior.
+Maintain one current source of truth per topic. Update or merge existing docs; archive or delete obsolete guidance. Do not add a document when an issue, PR body, test name, docstring, or existing doc is enough. Git history is the default archive.
 
-## Reviewing a pull request
+Docs-only PRs are allowed only when they unlock the next concrete implementation or remove a conflicting source of truth.
 
-When reviewing (Codex, Claude, or any AI reviewer), read `docs/12_pr_review_rubric.md` and apply it. In short:
+Progress means tested usable behavior or verified removal of unnecessary complexity—not more files, abstractions, tests, documents, or PRs.
 
-- Ground every finding in the actual diff. Do not comment on code the PR does not change, and do not invent problems.
-- Apply only the review lenses that are relevant to the diff (quant/financial correctness, IT/engineering, trader/workflow, design/readability). These are **lenses, not roleplay personas** — do not narrate a persona and do not force every lens to speak on every PR.
-- Prefer concrete blockers, edge cases, missing tests, broken contracts, and misleading outputs over generic advice. Say nothing rather than pad the review.
-- Use the severity scale in the rubric (P0/P1 for wrong PV/risk, data leakage, determinism/contract breaks, future-data use, fake results, or safety; P2 for missing edge cases, unclear failures, missing tests, likely perf/maintenance risk; P3 for naming, docs, and small cleanups).
-- Keep reviews short by default. A clean PR can be approved briefly.
+## Security and merge control
 
-## Style preference
+Do not commit credentials, client information, internal positions, restricted Bloomberg data, confidential bank files, or unapproved production market data.
 
-The codebase should be boring, explicit, and easy for another AI to edit. This is a feature, not a weakness.
+Do not remove trust-boundary validation, data-loss protection, security, or accessibility in the name of simplification.
+
+One issue/branch/PR has one primary implementation owner. Do not run overlapping agents against the same files or core invariant.
+
+Codex reviews; it does not expand scope. No agent may approve, merge, resolve review threads, or close methodology decisions for Eddy.
+
+Final gate:
+
+> READY TO MERGE — awaiting Eddy’s explicit approval.

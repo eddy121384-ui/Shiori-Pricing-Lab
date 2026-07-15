@@ -1,169 +1,57 @@
 # Shiori Pricing Lab
 
-Shiori Pricing Lab is a private, AI-native Rates Desk Workbench for building trader-owned pricing, valuation, historical valuation, backtesting, charting, and AI-assisted inquiry tools.
+Shiori Pricing Lab is a private, AI-native workspace for trader-owned pricing and market-data workflows.
 
-The project starts with vanilla rates and fixed-income workflows, but the architecture is intentionally modular so that future data sources, pricing engines, charting components, trade journals, options products, callable products, and structured products can be added without rewriting the whole system.
+It is a research and prototyping tool. It is not an official booking, risk, valuation, accounting, compliance, or regulatory system.
 
-## Core idea
+## Core rule
 
-This is not meant to replace Bloomberg, internal systems, or official risk infrastructure. It is a personal research and workflow lab that helps a trader make pricing logic explicit, testable, explainable, historically reproducible, and easier for AI coding assistants to maintain.
+Pricing and risk results must come from deterministic code with explicit inputs. AI may help build, test, review, and explain the system, but it must not invent market data or numeric results.
 
-The long-term goal is to support:
-
-- IRS, OIS, CCS, and FX Swap;
-- Swaptions;
-- Bond Options;
-- Callable Swaps, fixed or floating;
-- IR Daily Range Accrual structured products;
-- valuation at arbitrary valuation dates;
-- historical valuation and backtesting;
-- clean visual dashboards and TradingView-like charting over time;
-- trading journal and position notes;
-- AI-readable project structure, specs, tests, and documentation;
-- AI-assisted inquiry, script generation, and explanation around deterministic pricing engines.
-
-## Product thesis
-
-The platform should be built around one reusable flow:
+The basic flow is:
 
 ```text
-Product Definition
-+ Valuation Context
-+ Market Data Snapshot
-+ Model Settings
-+ Pricing Engine
-= Valuation Result
+Product terms
++ valuation date
++ market data
++ model inputs
+→ deterministic pricing engine
+→ result and diagnostics
 ```
 
-Backtesting should reuse the same flow through time:
+Data access, pricing logic, UI rendering, AI assistance, and persistence should remain separate where the current workflow actually needs those boundaries.
 
-```text
-for each historical valuation date:
-    load market data snapshot
-    build valuation context
-    value product or strategy
-    store valuation / risk / PnL / diagnostics
-```
+## Development model
 
-AI should sit around the deterministic pricing core, not replace it.
+Implementation scope is defined one approved GitHub issue or PR slice at a time.
 
-```text
-Natural language request
-→ structured pricing or backtest request
-→ validation
-→ deterministic engine
-→ numeric result
-→ AI-assisted explanation
-```
+Long-term vision, roadmaps, architecture documents, product specifications, annexes, and future phases are reference material. They do not authorize implementation by themselves.
 
-## Current milestone
+Agents must follow [`AGENTS.md`](AGENTS.md), including the lean implementation gate:
 
-The first durable milestone is Vanilla Rates Core. It should answer:
-
-> Can I load rates data, build a valuation context, represent a curve, price vanilla rates products, calculate risk, run scenarios, and visualize results without relying on a fragile spreadsheet?
-
-Initial MVP scope:
-
-- local Python project structure;
-- CSV/manual market data provider;
-- market data snapshot concept;
-- explicit valuation date and valuation context;
-- basic curve representation;
-- deterministic scenario shock helper;
-- chart-ready outputs;
-- local web app prototype;
-- simple trade journal schema;
-- tests and benchmark hooks.
-
-## Project principles
-
-1. Keep data access separate from pricing logic.
-2. Keep pricing functions deterministic and testable.
-3. Do not call Bloomberg, APIs, or external AI services directly from model code.
-4. Prefer clear modules over magical notebooks.
-5. Document every assumption that affects pricing, risk, scenario output, or backtesting.
-6. Treat external data, Bloomberg data, internal positions, and trade records as sensitive.
-7. Build small, verify, then expand.
-8. Do not implement exotic products before the shared rates spine is stable.
-9. Do not let AI generate final pricing numbers without deterministic engine calls.
-10. Keep Python as the orchestration layer while allowing high-performance pricing backends behind stable interfaces.
-
-## Suggested stack
-
-The exact stack can evolve, but the current direction is:
-
-- Python 3.11+
-- pandas / polars for data handling
-- numpy / scipy for numerical work
-- QuantLib-Python later for serious fixed-income analytics
-- Streamlit for fast local UI prototypes
-- FastAPI later if the app becomes a more formal service
-- Plotly or TradingView Lightweight Charts for visualization
-- SQLite / DuckDB / Parquet for local storage and cache
-- Numba / compiled backends later for proven numerical hot spots
-- pytest for tests
-
-## Architecture documents
-
-Start here for new work:
-
-```text
-docs/00_vision.md
-docs/01_system_architecture.md
-docs/02_data_and_market_snapshots.md
-docs/03_valuation_context.md
-docs/04_product_definition_schema.md
-docs/05_backtesting_engine.md
-docs/06_ai_native_layer.md
-docs/07_ui_workbench.md
-docs/08_performance_engine_backend_strategy.md
-```
-
-Legacy / supporting docs:
-
-```text
-docs/spec_v0.1.md
-docs/architecture.md
-docs/roadmap.md
-docs/runbook.md
-docs/30_bli_mvp_demo_runbook.md  # European bond option (BLI) MVP demo + expected values
-```
+1. Do not build what the current slice does not need.
+2. Reuse existing behavior.
+3. Prefer the standard library, platform-native features, and installed dependencies.
+4. Write only the smallest complete implementation that remains financially correct and testable.
 
 ## Repository layout
 
 ```text
-.
-├── AGENTS.md                    # Shared instructions for Codex / AI coding agents
-├── CLAUDE.md                    # Claude Code specific entrypoint
-├── README.md                    # Project overview
-├── docs/
-│   ├── 00_vision.md
-│   ├── 01_system_architecture.md
-│   ├── 02_data_and_market_snapshots.md
-│   ├── 03_valuation_context.md
-│   ├── 04_product_definition_schema.md
-│   ├── 05_backtesting_engine.md
-│   ├── 06_ai_native_layer.md
-│   ├── 07_ui_workbench.md
-│   ├── 08_performance_engine_backend_strategy.md
-│   ├── architecture.md
-│   ├── roadmap.md
-│   ├── runbook.md
-│   └── spec_v0.1.md
-├── examples/
-│   └── sample_market_data.csv   # Synthetic toy data for development
-├── src/
-│   └── shiori_pricing_lab/
-│       ├── data/                # Data providers and schemas
-│       ├── pricing/             # Pricing and risk engines
-│       ├── charts/              # Chart preparation helpers
-│       ├── journal/             # Trade journal models
-│       └── app/                 # Local app entry points
-└── tests/                       # Unit tests
+src/shiori_pricing_lab/
+├── data/       # data adapters and input contracts
+├── pricing/    # deterministic pricing and risk logic
+├── app/        # local user interfaces and orchestration
+├── charts/     # chart-ready transformations
+└── journal/    # research and workflow notes
+
+tests/          # deterministic and behavioral tests
+docs/           # methodology, architecture, runbooks, and reference material
 ```
 
-## Safety and compliance note
+Read only the documents required by the current approved slice. Historical or future-state documents must not expand the task.
 
-This repository is for research, education, prototyping, and trader workflow support. It should not be used as an official booking, risk, valuation, or compliance system unless reviewed and approved under the relevant internal governance process.
+## Safety
 
-Do not commit credentials, Bloomberg entitlements, raw client data, internal position files, confidential reports, production market data, or production secrets.
+Do not commit credentials, client information, internal positions, restricted Bloomberg data, confidential reports, production market data, or other bank-sensitive material.
+
+Use synthetic examples unless explicitly approved otherwise.
