@@ -345,6 +345,52 @@ class BLIQuoteRecord:
             if calibration.benchmark_notes != benchmark.notes:
                 raise ValueError("calibration_result notes must match benchmark_quote")
 
+            # Direct-source calibration provenance anchors (Issue #100 comment
+            # 4975917315): each of these calibration fields is a verbatim copy
+            # of a value that already has one authoritative source elsewhere in
+            # the record (the stored request or the stored model PricingResult).
+            # Reject on mismatch; never derive, reconcile, coerce, or mutate
+            # either side. This is deliberately limited to direct-source
+            # anchors -- it does not add speculative solver-internal equality
+            # rules for calibration_result.solver_result.
+            if calibration.pricing_engine_name != pricing.engine_name:
+                raise ValueError(
+                    "calibration_result.pricing_engine_name must match pricing_result.engine_name"
+                )
+            if calibration.pricing_engine_version != pricing.engine_version:
+                raise ValueError(
+                    "calibration_result.pricing_engine_version must match "
+                    "pricing_result.engine_version"
+                )
+            if calibration.option_type is not request.bond_option.option_type:
+                raise ValueError(
+                    "calibration_result.option_type must match request.bond_option.option_type"
+                )
+            if calibration.expiry_date != request.bond_option.expiry_date:
+                raise ValueError(
+                    "calibration_result.expiry_date must match request.bond_option.expiry_date"
+                )
+            if calibration.request_notional != request.bond_option.notional:
+                raise ValueError(
+                    "calibration_result.request_notional must match request.bond_option.notional"
+                )
+            if (
+                calibration.original_volatility
+                != request.market_data_snapshot.volatility_input.volatility
+            ):
+                raise ValueError(
+                    "calibration_result.original_volatility must match "
+                    "request.market_data_snapshot.volatility_input.volatility"
+                )
+            if (
+                calibration.original_volatility_basis
+                is not request.market_data_snapshot.volatility_input.volatility_basis
+            ):
+                raise ValueError(
+                    "calibration_result.original_volatility_basis must match "
+                    "request.market_data_snapshot.volatility_input.volatility_basis"
+                )
+
     def _validate_override_invariant(self) -> None:
         requires_override = False
         model_per_100 = _model_per_100(self.pricing_result)

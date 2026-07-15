@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import types
+import typing
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from typing import Any
@@ -131,6 +133,56 @@ _KNOWN_TAGGED_CLASS_OBJECTS = frozenset(
 _KNOWN_TAGGED_CLASSES = {cls.__name__ for cls in _KNOWN_TAGGED_CLASS_OBJECTS}
 
 
+def _enum_types_in_annotation(annotation: Any) -> frozenset[type]:
+    """Return every ``Enum`` subclass reachable in a resolved field annotation.
+
+    Handles a plain ``Enum`` class, and a ``Union``/``X | None`` wrapping one
+    or more ``Enum`` classes (e.g. ``PricingErrorCode | PricingWarningCode``
+    on ``PricingMessage.code``) -- non-Enum members of a union, such as
+    ``None`` from an optional field, are ignored. An annotation containing no
+    ``Enum`` class returns an empty ``frozenset``, meaning the field is not
+    enum-typed.
+    """
+
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        found: set[type] = set()
+        for arg in typing.get_args(annotation):
+            found |= _enum_types_in_annotation(arg)
+        return frozenset(found)
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return frozenset({annotation})
+    return frozenset()
+
+
+def _build_enum_field_types() -> dict[tuple[str, str], frozenset[type]]:
+    """Single source of truth: which ``(class, field)`` pairs are enum-typed.
+
+    Derived directly from each known tagged dataclass's own resolved type
+    hints via :func:`typing.get_type_hints` -- not a hand-maintained parallel
+    list that could silently drift when a field is added or its declared
+    type changes. A ``(class, field)`` pair present here must, at encode
+    time, hold exactly one of its resolved ``Enum`` type(s)
+    (:func:`_encode_enum_field`); a pair absent here must never hold any
+    ``Enum`` instance at all (:func:`_encode_value` rejects one
+    unconditionally). This covers the complete reachable tagged dataclass
+    graph in :data:`_KNOWN_TAGGED_CLASS_OBJECTS` by construction, not by
+    per-field enumeration.
+    """
+
+    result: dict[tuple[str, str], frozenset[type]] = {}
+    for cls in _KNOWN_TAGGED_CLASS_OBJECTS:
+        hints = typing.get_type_hints(cls)
+        for field in fields(cls):
+            enum_types = _enum_types_in_annotation(hints[field.name])
+            if enum_types:
+                result[(cls.__name__, field.name)] = enum_types
+    return result
+
+
+_ENUM_FIELD_TYPES = _build_enum_field_types()
+
+
 def _enum_value(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
@@ -167,10 +219,22 @@ def _encode_value(value: Any, path: str) -> Any:
     decoding back out as a plain builtin ``tuple`` -- the same silent
     normalization already closed for ``dict``/``list``). It is rejected as a
     non-canonical Python-only object instead.
+
+    An ``Enum`` instance reaching this function is always rejected. Every
+    field explicitly declared as enum-typed (see :data:`_ENUM_FIELD_TYPES`)
+    is intercepted earlier, in :func:`_tagged`, by :func:`_encode_enum_field`
+    -- so an ``Enum`` that still reaches the generic value encoder can only
+    be a foreign object placed in a *non*-enum-typed field (a plain string,
+    numeric, boolean, or other typed-schema field, or an element of a tuple
+    on such a field), which must never be silently normalized through
+    ``.value``.
     """
 
     if isinstance(value, Enum):
-        return value.value
+        raise ValueError(
+            f"{path}: Enum values are not supported outside an explicitly "
+            "enum-typed field"
+        )
     if is_dataclass(value):
         if type(value) not in _KNOWN_TAGGED_CLASS_OBJECTS:
             raise ValueError(
@@ -299,21 +363,39 @@ def _decode_value(value: Any) -> Any:
     return value
 
 
+def _encode_enum_field(value: Any, path: str, expected_types: frozenset[type]) -> Any:
+    """Encode one explicitly enum-typed field, exact expected Enum class only.
+
+    The runtime value must be exactly one of the field's resolved Enum
+    type(s) (``type(value) in expected_types``, checked by exact type
+    identity, never ``isinstance``). A foreign Enum (the wrong enum class for
+    this field) and a non-Enum value (e.g. a raw string) are both rejected
+    here, deterministically, before any payload is returned -- neither is
+    coerced by matching ``.value``.
+    """
+
+    if type(value) not in expected_types:
+        allowed = ", ".join(sorted(t.__name__ for t in expected_types))
+        raise ValueError(
+            f"{path}: must be exactly one of ({allowed}), got {type(value).__name__}"
+        )
+    return value.value
+
+
 def _tagged(cls: type, obj: Any) -> dict[str, object]:
     payload = {_CLASS_KEY: cls.__name__}
     for field in fields(cls):
         value = getattr(obj, field.name)
         field_key = (cls.__name__, field.name)
+        path = f"{cls.__name__}.{field.name}"
         if field_key in _MESSAGE_TUPLE_FIELDS:
-            payload[field.name] = _encode_message_tuple(
-                value, f"{cls.__name__}.{field.name}"
-            )
+            payload[field.name] = _encode_message_tuple(value, path)
         elif field_key in _FREE_FORM_FIELDS:
-            payload[field.name] = _encode_free_form_value(
-                value, f"{cls.__name__}.{field.name}"
-            )
+            payload[field.name] = _encode_free_form_value(value, path)
+        elif field_key in _ENUM_FIELD_TYPES:
+            payload[field.name] = _encode_enum_field(value, path, _ENUM_FIELD_TYPES[field_key])
         else:
-            payload[field.name] = _encode_value(value, f"{cls.__name__}.{field.name}")
+            payload[field.name] = _encode_value(value, path)
     return payload
 
 

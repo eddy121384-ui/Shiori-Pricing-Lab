@@ -326,6 +326,56 @@ def test_alignment_mismatches_rejected(field, bad_value):
         record(**{field: bad_value})
 
 
+# --- Calibration direct-source provenance alignment (Issue #100 comment 4975917315) --
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"pricing_engine_name": "OTHER_ENGINE"},
+        {"pricing_engine_version": "9.9"},
+        {"option_type": OptionType.PUT},
+        {"expiry_date": "2099-01-01"},
+        {"request_notional": 999999.0},
+        {"original_volatility": 0.99},
+        {"original_volatility_basis": BLIVolatilityBasis.YIELD_VOL},
+    ],
+    ids=[
+        "pricing_engine_name",
+        "pricing_engine_version",
+        "option_type",
+        "expiry_date",
+        "request_notional",
+        "original_volatility",
+        "original_volatility_basis",
+    ],
+)
+def test_calibration_direct_source_provenance_mismatch_rejected(override):
+    # Each of these calibration fields is a verbatim copy of a value that
+    # already has one authoritative source elsewhere in the record (the
+    # stored request or the stored model PricingResult); a mismatch on any
+    # one of the seven must be rejected on its own, deterministically.
+    with pytest.raises(ValueError):
+        record(calibration_result=calibration_result(**override))
+
+
+def test_calibration_direct_source_provenance_aligned_record_round_trips():
+    rec = record(calibration_result=calibration_result())
+    assert rec.calibration_result.pricing_engine_name == rec.pricing_result.engine_name
+    assert rec.calibration_result.pricing_engine_version == rec.pricing_result.engine_version
+    assert rec.calibration_result.option_type is rec.request.bond_option.option_type
+    assert rec.calibration_result.expiry_date == rec.request.bond_option.expiry_date
+    assert rec.calibration_result.request_notional == rec.request.bond_option.notional
+    assert (
+        rec.calibration_result.original_volatility
+        == rec.request.market_data_snapshot.volatility_input.volatility
+    )
+    assert (
+        rec.calibration_result.original_volatility_basis
+        is rec.request.market_data_snapshot.volatility_input.volatility_basis
+    )
+
+
 @pytest.mark.parametrize("field,value", [
     ("client_quote_premium_per_100", -0.01),
     ("client_quote_total_premium", float("nan")),

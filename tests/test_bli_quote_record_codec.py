@@ -918,3 +918,90 @@ def test_exact_builtin_tuples_still_round_trip_unchanged_after_tuple_subclass_fi
     assert restored == rec
     assert type(restored.exclusions) is tuple
     assert restored.pricing_result.assumptions["genuine_tuple"] == ("left", "right")
+
+
+# --- Typed-schema Enum boundary: field-aware, no generic Enum -> .value ----------
+#
+# An Enum may serialize only in a field explicitly declared enum-typed, and
+# only when it is exactly the field's expected Enum class. A foreign Enum in
+# a non-enum typed field, or the wrong Enum class in an enum-typed field, is
+# rejected before payload return -- never silently normalized through
+# .value.
+
+_ENUM_REJECT_MATCH = "Enum values are not supported outside an explicitly enum-typed field"
+
+
+def test_foreign_strenum_in_exclusions_rejected():
+    # exclusions' own validator (_require_exclusions in bli_quote_record.py)
+    # accepts a StrEnum member unchanged, since isinstance(member, str) is
+    # True -- the codec boundary is the only place left to reject it.
+    rec = record(exclusions=(PayReceive.PAY,))
+    assert type(rec.exclusions[0]) is PayReceive
+    with pytest.raises(ValueError, match=_ENUM_REJECT_MATCH) as excinfo:
+        quote_record_to_dict(rec)
+    assert "BLIQuoteRecord.exclusions[0]" in str(excinfo.value)
+
+
+def test_foreign_enum_in_pricing_message_message_field_rejected():
+    # PricingMessage.message is a plain str field with no __post_init__
+    # validation of its own type.
+    code = next(iter(PricingWarningCode))
+    bad_message = PricingMessage(code=code, message=PayReceive.PAY)
+    pricing = pricing_result(status=PricingStatus.SUCCESS_WITH_WARNINGS, warnings=(bad_message,))
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match=_ENUM_REJECT_MATCH) as excinfo:
+        quote_record_to_dict(rec)
+    assert "PricingMessage.message" in str(excinfo.value)
+
+
+def test_foreign_enum_in_non_enum_numeric_calibration_field_rejected():
+    # BLIImpliedPriceVolCalibrationResult has no __post_init__ of its own, so
+    # a foreign Enum can reach a plain Optional[float] field unvalidated.
+    calib = dataclasses.replace(calibration_result(), forward_clean_price=PayReceive.PAY)
+    rec = record(calibration_result=calib)
+    with pytest.raises(ValueError, match=_ENUM_REJECT_MATCH) as excinfo:
+        quote_record_to_dict(rec)
+    assert "BLIImpliedPriceVolCalibrationResult.forward_clean_price" in str(excinfo.value)
+
+
+def test_foreign_enum_in_enum_typed_field_rejected_not_coerced_by_value():
+    # status is enum-typed (BLIImpliedPriceVolCalibrationStatus) but has no
+    # alignment check and no __post_init__ validation of its own -- a wrong
+    # enum class must be rejected outright, never coerced via .value.
+    calib = dataclasses.replace(calibration_result(), status=PayReceive.PAY)
+    rec = record(calibration_result=calib)
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_to_dict(rec)
+    message = str(excinfo.value)
+    assert "BLIImpliedPriceVolCalibrationResult.status" in message
+    assert "BLIImpliedPriceVolCalibrationStatus" in message
+    assert "PayReceive" in message
+
+
+@pytest.mark.parametrize(
+    "build_record",
+    [lambda: record(), lambda: record(calibration_result=calibration_result())],
+    ids=["without-calibration", "with-calibration"],
+)
+def test_legitimate_exact_typed_enums_round_trip_across_the_object_graph(build_record):
+    rec = build_record()
+    restored = quote_record_from_dict(quote_record_to_dict(rec))
+    assert restored == rec
+    # Representative enum-typed fields across request/snapshot/benchmark/
+    # comparison/calibration/solver all reconstruct to the exact same enum
+    # member identity, not merely an equal string value.
+    assert restored.request.bond_option.currency is rec.request.bond_option.currency
+    assert restored.request.bond_option.option_type is rec.request.bond_option.option_type
+    assert (
+        restored.request.market_data_snapshot.volatility_input.volatility_basis
+        is rec.request.market_data_snapshot.volatility_input.volatility_basis
+    )
+    assert restored.benchmark_quote.source_type is rec.benchmark_quote.source_type
+    assert restored.benchmark_comparison.status is rec.benchmark_comparison.status
+    if rec.calibration_result is not None:
+        assert restored.calibration_result.status is rec.calibration_result.status
+        assert restored.calibration_result.option_type is rec.calibration_result.option_type
+        assert (
+            restored.calibration_result.solver_result.status
+            is rec.calibration_result.solver_result.status
+        )
