@@ -175,7 +175,7 @@ def _encode_free_form_value(value: Any, path: str) -> Any:
         raise ValueError(f"{path}: dataclass values are not supported in free-form data")
     if isinstance(value, dict):
         for key in value:
-            if not isinstance(key, str):
+            if type(key) is not str:
                 raise ValueError(f"{path}: free-form dict keys must be strings")
             if key in _RESERVED_KEYS:
                 raise ValueError(
@@ -308,6 +308,22 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
     or custom objects, and it never stringifies, normalizes, or
     tuple-tags a non-string key; it only reports the key's ``repr()`` in the
     error message.
+
+    Finally, every *value* is also restricted to the JSON-ready leaf types
+    (``str``, ``int``, ``float``, ``bool``, ``None``) plus ``dict``/``list``
+    containers -- the only shapes ``json.loads`` or the encoder's own
+    ``_encode_value``/``_encode_free_form_value`` can ever legitimately
+    produce. A raw Python ``Enum`` member, dataclass instance, ``set``, or
+    any other custom object supplied directly to ``quote_record_from_dict``
+    is therefore rejected here too, deterministically, with the exact path
+    and the value's ``repr()`` -- mirroring the encoder's own rejection of
+    ``Enum``/dataclass values in free-form data, so a value the encoder
+    could never produce cannot silently pass through decode either. Leaf
+    types are checked by *exact* type (``type(x) is str``, not
+    ``isinstance``), because a ``StrEnum``/``IntEnum`` member is also an
+    ``isinstance`` of ``str``/``int`` while still being a live Enum object,
+    not a plain JSON-ready primitive; the same exact-type check applies to
+    dict keys.
     """
 
     if isinstance(value, tuple):
@@ -315,19 +331,30 @@ def _reject_non_canonical_payload(value: object, path: str) -> None:
             f"{path} contains a raw Python tuple; the only canonical tuple wire "
             "form is {'__tuple__': [...]}"
         )
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{path} contains non-finite number {value!r}")
     if isinstance(value, dict):
         for key, item in value.items():
-            if not isinstance(key, str):
+            if type(key) is not str:
                 raise ValueError(
                     f"{path} contains a non-string dict key {key!r} "
                     f"({type(key).__name__}); only string keys are canonical"
                 )
             _reject_non_canonical_payload(item, f"{path}.{key}")
-    elif isinstance(value, list):
+        return
+    if isinstance(value, list):
         for index, item in enumerate(value):
             _reject_non_canonical_payload(item, f"{path}[{index}]")
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains non-finite number {value!r}")
+        return
+    if value is None or type(value) in (bool, int, str):
+        return
+    raise ValueError(
+        f"{path} contains a non-canonical value {value!r} ({type(value).__name__}); "
+        "only JSON-ready primitives (str, int, float, bool, None), lists, and dicts "
+        "are allowed"
+    )
 
 
 def _tuple(payload: object, name: str, decode_item=lambda item: item) -> tuple[Any, ...]:

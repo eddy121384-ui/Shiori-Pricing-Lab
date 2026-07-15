@@ -684,3 +684,71 @@ def test_explicit_tuple_tag_values_still_round_trip_with_key_validation_active()
     restored = quote_record_from_dict(payload)
     assert restored == rec
     assert restored.pricing_result.assumptions["genuine_tuple"] == ("left", "right")
+
+
+# --- Decode/encode symmetry: raw non-JSON-ready Python objects rejected ----------
+#
+# ``quote_record_from_dict`` accepts only a JSON-ready canonical typed dict --
+# the same contract already enforced for raw tuple values/keys. A raw
+# ``Enum`` member, dataclass instance, or other custom object is a payload
+# shape the encoder could never legitimately produce (``_encode_free_form_value``
+# already rejects Enum/dataclass values before encoding), so decode must
+# reject it too rather than silently embedding the live Python object.
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        PayReceive.PAY,
+        PricingMessage(code=next(iter(PricingWarningCode)), message="x"),
+        frozenset({"x"}),
+    ],
+    ids=["enum", "dataclass", "frozenset"],
+)
+def test_raw_non_json_ready_value_in_assumptions_rejected(bad_value):
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["sneaky"] = bad_value
+    with pytest.raises(ValueError, match="non-canonical value"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_enum_value_nested_in_diagnostics_list_rejected():
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["diagnostics"] = {"items": [{"leg": PayReceive.PAY}]}
+    with pytest.raises(ValueError, match="non-canonical value"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_enum_value_in_message_detail_rejected():
+    pricing = pricing_result(
+        status=PricingStatus.SUCCESS_WITH_WARNINGS,
+        warnings=(_message(detail={}),),
+    )
+    payload = quote_record_to_dict(record(pricing_result=pricing))
+    payload["pricing_result"]["warnings"]["__tuple__"][0]["detail"]["sneaky"] = PayReceive.PAY
+    with pytest.raises(ValueError, match="non-canonical value"):
+        quote_record_from_dict(payload)
+
+
+def test_raw_enum_value_rejection_reports_precise_path():
+    # The encoder converts Enum -> .value for typed-schema fields, but a
+    # decode-side raw Enum in free-form data must never be silently
+    # normalized to its .value string -- it is rejected outright, with the
+    # exact offending path.
+    payload = quote_record_to_dict(record())
+    payload["pricing_result"]["assumptions"]["sneaky"] = PayReceive.PAY
+    with pytest.raises(ValueError) as excinfo:
+        quote_record_from_dict(payload)
+    assert "pricing_result.assumptions.sneaky" in str(excinfo.value)
+
+
+def test_strenum_dict_key_in_free_form_data_rejected_at_encode():
+    # PayReceive is a StrEnum, so isinstance(key, str) is True for its
+    # members even though it is a live Enum object, not a plain string;
+    # the free-form dict-key check must use an exact-type comparison so a
+    # StrEnum key is rejected at encode time, not silently accepted because
+    # it happens to also be a str.
+    pricing = pricing_result(assumptions={"black76_pv_per_100": 4.5, PayReceive.PAY: "x"})
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="free-form dict keys must be strings"):
+        quote_record_to_dict(rec)
