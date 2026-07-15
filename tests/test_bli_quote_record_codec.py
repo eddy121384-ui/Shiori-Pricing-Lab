@@ -806,7 +806,7 @@ def test_nested_dataclass_subclass_rejected_at_encode(build_record, expected_pat
         quote_record_to_dict(rec)
     message = str(excinfo.value)
     assert expected_path_fragment in message
-    assert "not an exact known tagged dataclass type" in message
+    assert "must be exactly" in message
 
 
 # --- Custom dict/list subclasses rejected, never silently normalized -------------
@@ -898,7 +898,7 @@ def test_tuple_subclass_in_typed_schema_tuple_field_rejected_at_encode():
     rec = record(exclusions=_TupleSubclass(("desk_override",)))
     assert type(rec.exclusions) is _TupleSubclass
     with pytest.raises(
-        ValueError, match="dict/list/tuple subclass"
+        ValueError, match="must be exactly tuple, got _TupleSubclass"
     ) as excinfo:
         quote_record_to_dict(rec)
     assert "BLIQuoteRecord.exclusions" in str(excinfo.value)
@@ -926,9 +926,11 @@ def test_exact_builtin_tuples_still_round_trip_unchanged_after_tuple_subclass_fi
 # only when it is exactly the field's expected Enum class. A foreign Enum in
 # a non-enum typed field, or the wrong Enum class in an enum-typed field, is
 # rejected before payload return -- never silently normalized through
-# .value.
-
-_ENUM_REJECT_MATCH = "Enum values are not supported outside an explicitly enum-typed field"
+# .value. A foreign Enum in a non-enum-typed field is rejected by the same
+# exact-shape check as any other wrong-typed value for that field (str/
+# int/float/bool), since PayReceive is never among the field's own expected
+# types -- there is no separate "Enum" carve-out left in the unified
+# _FIELD_SHAPES mechanism.
 
 
 def test_foreign_strenum_in_exclusions_rejected():
@@ -937,7 +939,7 @@ def test_foreign_strenum_in_exclusions_rejected():
     # True -- the codec boundary is the only place left to reject it.
     rec = record(exclusions=(PayReceive.PAY,))
     assert type(rec.exclusions[0]) is PayReceive
-    with pytest.raises(ValueError, match=_ENUM_REJECT_MATCH) as excinfo:
+    with pytest.raises(ValueError, match="must be exactly str, got PayReceive") as excinfo:
         quote_record_to_dict(rec)
     assert "BLIQuoteRecord.exclusions[0]" in str(excinfo.value)
 
@@ -949,7 +951,7 @@ def test_foreign_enum_in_pricing_message_message_field_rejected():
     bad_message = PricingMessage(code=code, message=PayReceive.PAY)
     pricing = pricing_result(status=PricingStatus.SUCCESS_WITH_WARNINGS, warnings=(bad_message,))
     rec = record(pricing_result=pricing)
-    with pytest.raises(ValueError, match=_ENUM_REJECT_MATCH) as excinfo:
+    with pytest.raises(ValueError, match="must be exactly str, got PayReceive") as excinfo:
         quote_record_to_dict(rec)
     assert "PricingMessage.message" in str(excinfo.value)
 
@@ -959,7 +961,9 @@ def test_foreign_enum_in_non_enum_numeric_calibration_field_rejected():
     # a foreign Enum can reach a plain Optional[float] field unvalidated.
     calib = dataclasses.replace(calibration_result(), forward_clean_price=PayReceive.PAY)
     rec = record(calibration_result=calib)
-    with pytest.raises(ValueError, match=_ENUM_REJECT_MATCH) as excinfo:
+    with pytest.raises(
+        ValueError, match="must be exactly int or float, got PayReceive"
+    ) as excinfo:
         quote_record_to_dict(rec)
     assert "BLIImpliedPriceVolCalibrationResult.forward_clean_price" in str(excinfo.value)
 
@@ -1005,3 +1009,121 @@ def test_legitimate_exact_typed_enums_round_trip_across_the_object_graph(build_r
             restored.calibration_result.solver_result.status
             is rec.calibration_result.solver_result.status
         )
+
+
+# --- Complete typed-schema shape validation (_FIELD_SHAPES) ----------------------
+#
+# Every typed-schema field (every field on every class in _SHAPE_CLASSES,
+# except the free-form and warnings/errors fields, which keep their own
+# already-approved dedicated validators) is now validated against its
+# resolved annotation, on both encode and decode -- there is no remaining
+# shape-blind generic fallback for a typed field.
+
+
+def test_list_rejected_for_typed_schema_tuple_field_with_precise_path():
+    calib = dataclasses.replace(calibration_result(), request_support_reasons=[])
+    rec = record(calibration_result=calib)
+    with pytest.raises(ValueError, match="must be exactly tuple, got list") as excinfo:
+        quote_record_to_dict(rec)
+    assert "BLIImpliedPriceVolCalibrationResult.request_support_reasons" in str(excinfo.value)
+
+
+def test_bool_rejected_for_str_typed_field_with_precise_path():
+    pricing = pricing_result(method=True)
+    rec = record(pricing_result=pricing)
+    with pytest.raises(ValueError, match="must be exactly str, got bool") as excinfo:
+        quote_record_to_dict(rec)
+    assert "PricingResult.method" in str(excinfo.value)
+
+
+def _record_with_solver_field_override(**overrides):
+    calib = calibration_result()
+    new_solver = dataclasses.replace(calib.solver_result, **overrides)
+    return record(calibration_result=dataclasses.replace(calib, solver_result=new_solver))
+
+
+@pytest.mark.parametrize(
+    "overrides,expected_match,expected_path",
+    [
+        ({"diagnostic_note": True}, "must be exactly str, got bool", "diagnostic_note"),
+        ({"max_iterations": True}, "must be exactly int, got bool", "max_iterations"),
+        ({"max_iterations": 100.0}, "must be exactly int, got float", "max_iterations"),
+        (
+            {"forward_clean_price": "101.0"},
+            "must be exactly int or float, got str",
+            "forward_clean_price",
+        ),
+        (
+            {"forward_clean_price": True},
+            "must be exactly int or float, got bool",
+            "forward_clean_price",
+        ),
+        ({"status": PayReceive.PAY}, "must be exactly one of", "status"),
+    ],
+    ids=[
+        "str-field-gets-bool",
+        "int-field-gets-bool",
+        "int-field-gets-float",
+        "float-field-gets-str",
+        "float-field-gets-bool",
+        "enum-field-gets-foreign-enum",
+    ],
+)
+def test_representative_primitive_shape_matrix_rejected_at_encode(
+    overrides, expected_match, expected_path
+):
+    rec = _record_with_solver_field_override(**overrides)
+    with pytest.raises(ValueError, match=expected_match) as excinfo:
+        quote_record_to_dict(rec)
+    assert expected_path in str(excinfo.value)
+
+
+def test_tuple_wrong_item_type_rejected_at_encode():
+    calib = dataclasses.replace(calibration_result(), request_support_reasons=("ok", 5))
+    rec = record(calibration_result=calib)
+    with pytest.raises(ValueError, match="must be exactly str, got int") as excinfo:
+        quote_record_to_dict(rec)
+    assert "request_support_reasons[1]" in str(excinfo.value)
+
+
+def test_int_accepted_for_float_typed_field_and_round_trips_exactly():
+    # The approved numeric wire rule: a float-annotated field accepts an
+    # exact builtin int too (bool excluded); no coercion to float() is
+    # performed -- the int identity is preserved through the round trip.
+    pricing = pricing_result(pv=2250)
+    assert type(pricing.pv) is int
+    rec = record(pricing_result=pricing)
+    payload = quote_record_to_dict(rec)
+    assert payload["pricing_result"]["pv"] == 2250
+    assert type(payload["pricing_result"]["pv"]) is int
+    restored = quote_record_from_dict(payload)
+    assert type(restored.pricing_result.pv) is int
+    assert restored.pricing_result.pv == 2250
+
+
+def test_malformed_wire_primitive_rejected_directly_on_decode():
+    payload = quote_record_to_dict(record(calibration_result=calibration_result()))
+    payload["pricing_result"]["method"] = True
+    with pytest.raises(ValueError, match="must be exactly str, got bool"):
+        quote_record_from_dict(payload)
+
+
+def test_malformed_wire_tuple_shape_rejected_directly_on_decode():
+    payload = quote_record_to_dict(record(calibration_result=calibration_result()))
+    payload["calibration_result"]["request_support_reasons"] = ["a", "b"]
+    with pytest.raises(ValueError, match="must be an explicit tuple tag"):
+        quote_record_from_dict(payload)
+
+
+def test_field_shapes_cover_every_non_special_field_across_the_full_schema():
+    # Module-load-time completeness: every non-free-form/non-message-tuple
+    # field on every class in _SHAPE_CLASSES (the 15 tagged dataclasses plus
+    # BLIQuoteRecord itself) must resolve to a shape -- proving there is no
+    # remaining shape-unvalidated typed field anywhere in the reachable
+    # schema, not only in the two original Codex reproductions.
+    for cls in codec_module._SHAPE_CLASSES:
+        for field in fields(cls):
+            key = (cls.__name__, field.name)
+            if key in codec_module._FREE_FORM_FIELDS or key in codec_module._MESSAGE_TUPLE_FIELDS:
+                continue
+            assert key in codec_module._FIELD_SHAPES, f"{key} has no resolved field shape"

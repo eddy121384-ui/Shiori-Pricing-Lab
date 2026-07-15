@@ -132,55 +132,127 @@ _KNOWN_TAGGED_CLASS_OBJECTS = frozenset(
 )
 _KNOWN_TAGGED_CLASSES = {cls.__name__ for cls in _KNOWN_TAGGED_CLASS_OBJECTS}
 
+# BLIQuoteRecord itself is untagged at the wire's top level (no __class__ key)
+# but its own fields (schema_version, quote_id, ..., exclusions) are typed
+# schema fields exactly like every field on the 15 tagged dataclasses above,
+# so it shares the same shape source of truth rather than being encoded
+# through a separate, ad hoc path.
+_SHAPE_CLASSES = _KNOWN_TAGGED_CLASS_OBJECTS | {BLIQuoteRecord}
 
-def _enum_types_in_annotation(annotation: Any) -> frozenset[type]:
-    """Return every ``Enum`` subclass reachable in a resolved field annotation.
 
-    Handles a plain ``Enum`` class, and a ``Union``/``X | None`` wrapping one
-    or more ``Enum`` classes (e.g. ``PricingErrorCode | PricingWarningCode``
-    on ``PricingMessage.code``) -- non-Enum members of a union, such as
-    ``None`` from an optional field, are ignored. An annotation containing no
-    ``Enum`` class returns an empty ``frozenset``, meaning the field is not
-    enum-typed.
+class _ShapeKind(Enum):
+    """The closed set of typed-schema field shapes reachable in PR A.
+
+    Deliberately closed, not extensible: this is not a general-purpose
+    serialization framework, only a classification of the exact shapes that
+    already occur in :data:`_SHAPE_CLASSES`' resolved type hints.
+    """
+
+    STR = "str"
+    BOOL = "bool"
+    INT = "int"
+    FLOAT = "float"
+    ENUM = "enum"
+    DATACLASS = "dataclass"
+    TUPLE = "tuple"
+
+
+class _FieldShape(typing.NamedTuple):
+    """One field's resolved wire/runtime shape, used by both encode and decode."""
+
+    kind: _ShapeKind
+    optional: bool = False
+    enum_types: frozenset[type] = frozenset()
+    dataclass_type: type | None = None
+    item_shape: _FieldShape | None = None
+
+
+def _resolve_field_shape(annotation: Any) -> _FieldShape:
+    """Resolve one field's real type hint into a closed :class:`_FieldShape`.
+
+    Handles exactly the shapes present in this schema's resolved type hints:
+    ``str``/``bool``/``int``/``float`` leaves; a plain ``Enum`` class or a
+    ``Union`` of ``Enum`` classes (e.g. ``PricingErrorCode |
+    PricingWarningCode`` on ``PricingMessage.code``); an exact member of
+    :data:`_KNOWN_TAGGED_CLASS_OBJECTS`; ``tuple[X, ...]`` with a
+    recursively-resolved item shape; and ``X | None`` wrapping any of the
+    above, which sets ``optional=True`` and otherwise resolves ``X``
+    normally. Anything else raises ``TypeError`` -- this function is called
+    once, at module import time, for every non-free-form/non-message-tuple
+    field in :data:`_SHAPE_CLASSES`, so an annotation this resolver cannot
+    classify fails the whole module import (fail closed) rather than
+    silently leaving a field shape-unvalidated.
     """
 
     origin = typing.get_origin(annotation)
     if origin in (typing.Union, types.UnionType):
-        found: set[type] = set()
-        for arg in typing.get_args(annotation):
-            found |= _enum_types_in_annotation(arg)
-        return frozenset(found)
+        args = typing.get_args(annotation)
+        non_none = [arg for arg in args if arg is not type(None)]
+        optional = len(non_none) < len(args)
+        if non_none and all(
+            isinstance(arg, type) and issubclass(arg, Enum) for arg in non_none
+        ):
+            return _FieldShape(
+                kind=_ShapeKind.ENUM, optional=optional, enum_types=frozenset(non_none)
+            )
+        if len(non_none) == 1:
+            base = _resolve_field_shape(non_none[0])
+            return _FieldShape(
+                kind=base.kind,
+                optional=True,
+                enum_types=base.enum_types,
+                dataclass_type=base.dataclass_type,
+                item_shape=base.item_shape,
+            )
+        raise TypeError(f"unresolvable union field annotation: {annotation!r}")
+    if annotation is str:
+        return _FieldShape(kind=_ShapeKind.STR)
+    if annotation is bool:
+        return _FieldShape(kind=_ShapeKind.BOOL)
+    if annotation is int:
+        return _FieldShape(kind=_ShapeKind.INT)
+    if annotation is float:
+        return _FieldShape(kind=_ShapeKind.FLOAT)
     if isinstance(annotation, type) and issubclass(annotation, Enum):
-        return frozenset({annotation})
-    return frozenset()
+        return _FieldShape(kind=_ShapeKind.ENUM, enum_types=frozenset({annotation}))
+    if isinstance(annotation, type) and annotation in _KNOWN_TAGGED_CLASS_OBJECTS:
+        return _FieldShape(kind=_ShapeKind.DATACLASS, dataclass_type=annotation)
+    if origin is tuple:
+        args = typing.get_args(annotation)
+        if len(args) == 2 and args[1] is Ellipsis:
+            return _FieldShape(kind=_ShapeKind.TUPLE, item_shape=_resolve_field_shape(args[0]))
+        raise TypeError(f"unresolvable tuple field annotation: {annotation!r}")
+    raise TypeError(f"unresolvable field annotation: {annotation!r}")
 
 
-def _build_enum_field_types() -> dict[tuple[str, str], frozenset[type]]:
-    """Single source of truth: which ``(class, field)`` pairs are enum-typed.
+def _build_field_shapes() -> dict[tuple[str, str], _FieldShape]:
+    """Single source of truth: the resolved shape of every typed-schema field.
 
-    Derived directly from each known tagged dataclass's own resolved type
-    hints via :func:`typing.get_type_hints` -- not a hand-maintained parallel
-    list that could silently drift when a field is added or its declared
-    type changes. A ``(class, field)`` pair present here must, at encode
-    time, hold exactly one of its resolved ``Enum`` type(s)
-    (:func:`_encode_enum_field`); a pair absent here must never hold any
-    ``Enum`` instance at all (:func:`_encode_value` rejects one
-    unconditionally). This covers the complete reachable tagged dataclass
-    graph in :data:`_KNOWN_TAGGED_CLASS_OBJECTS` by construction, not by
-    per-field enumeration.
+    Derived directly from each class's own resolved type hints via
+    :func:`typing.get_type_hints`, across the complete reachable graph in
+    :data:`_SHAPE_CLASSES` (the 15 tagged dataclasses plus ``BLIQuoteRecord``
+    itself) -- not a hand-maintained parallel list that could silently drift
+    when a field is added or its declared type changes. Free-form fields
+    (:data:`_FREE_FORM_FIELDS`) and the message-tuple fields
+    (:data:`_MESSAGE_TUPLE_FIELDS`) are excluded here; they keep their own
+    already-approved dedicated validators. Every other field must resolve to
+    exactly one shape -- this fails at import time otherwise (see
+    :func:`_resolve_field_shape`), so there is no generic, shape-blind
+    fallback left for any typed-schema field.
     """
 
-    result: dict[tuple[str, str], frozenset[type]] = {}
-    for cls in _KNOWN_TAGGED_CLASS_OBJECTS:
+    result: dict[tuple[str, str], _FieldShape] = {}
+    for cls in _SHAPE_CLASSES:
         hints = typing.get_type_hints(cls)
         for field in fields(cls):
-            enum_types = _enum_types_in_annotation(hints[field.name])
-            if enum_types:
-                result[(cls.__name__, field.name)] = enum_types
+            key = (cls.__name__, field.name)
+            if key in _FREE_FORM_FIELDS or key in _MESSAGE_TUPLE_FIELDS:
+                continue
+            result[key] = _resolve_field_shape(hints[field.name])
     return result
 
 
-_ENUM_FIELD_TYPES = _build_enum_field_types()
+_FIELD_SHAPES = _build_field_shapes()
 
 
 def _enum_value(value: Any) -> Any:
@@ -195,69 +267,81 @@ def _enum_value(value: Any) -> Any:
     return value
 
 
-def _encode_value(value: Any, path: str) -> Any:
-    """Encode one typed-schema value, tagging only exact known dataclass types.
+def _encode_typed_field(value: Any, path: str, shape: _FieldShape) -> Any:
+    """Encode one typed-schema value against its resolved :class:`_FieldShape`.
 
-    A nested dataclass value is tagged with ``type(value)`` so its fields are
-    encoded correctly, but ``type(value)`` is only trusted as a tag if it is
-    itself an *exact* member of :data:`_KNOWN_TAGGED_CLASS_OBJECTS` -- never a
-    subclass. A subclass instance (e.g. a ``BondOption`` subclass reachable
-    through ``BLIStandaloneBondOptionRequest.bond_option``, which the request
-    constructor does not itself reject) would otherwise be tagged with the
-    subclass's own name, producing a payload the decoder can never
-    legitimately reconstruct (the decoder always expects the exact base class
-    name). Rejecting it here, before any payload is returned, preserves
-    object -> dict -> object symmetry: the encoder never emits a class tag
-    the decoder cannot accept.
+    This is the single mechanism for every non-free-form, non-message-tuple
+    field across the complete reachable schema (:data:`_SHAPE_CLASSES`) --
+    there is no remaining shape-blind generic fallback. Each closed shape
+    kind is checked by *exact* type, never ``isinstance``:
 
-    Containers are matched by *exact* type (``type(value) is dict`` /
-    ``type(value) is list`` / ``type(value) is tuple``), not ``isinstance``,
-    so a ``dict``/``list``/``tuple`` subclass is never silently traversed and
-    normalized into a plain builtin container (a tuple subclass would
-    otherwise be accepted as a normal tuple and encoded via the ordinary
-    explicit tuple tag, discarding its actual type on the way in and
-    decoding back out as a plain builtin ``tuple`` -- the same silent
-    normalization already closed for ``dict``/``list``). It is rejected as a
-    non-canonical Python-only object instead.
+    - ``STR``/``BOOL``/``INT``: exact ``str``/``bool``/``int`` only.
+    - ``FLOAT``: exact ``int`` or exact ``float`` (the approved numeric
+      compatibility rule -- ``bool``, numeric subclasses, and other
+      alternate numeric types are rejected); an exact ``float`` must be
+      finite.
+    - ``ENUM``: exact expected Enum class only, encoded via ``.value``; a
+      foreign Enum class is rejected, never coerced by value.
+    - ``DATACLASS``: exact expected dataclass type only (not merely *some*
+      member of :data:`_KNOWN_TAGGED_CLASS_OBJECTS` -- the exact type
+      declared for *this* field), encoded via :func:`_tagged` so the class
+      tag the decoder will see always matches what it expects.
+    - ``TUPLE``: exact builtin ``tuple`` only (never a ``list`` or a tuple
+      subclass), every item recursively encoded against the tuple's item
+      shape, emitted only as the explicit ``{"__tuple__": [...]}`` tag.
 
-    An ``Enum`` instance reaching this function is always rejected. Every
-    field explicitly declared as enum-typed (see :data:`_ENUM_FIELD_TYPES`)
-    is intercepted earlier, in :func:`_tagged`, by :func:`_encode_enum_field`
-    -- so an ``Enum`` that still reaches the generic value encoder can only
-    be a foreign object placed in a *non*-enum-typed field (a plain string,
-    numeric, boolean, or other typed-schema field, or an element of a tuple
-    on such a field), which must never be silently normalized through
-    ``.value``.
+    ``None`` is accepted only when ``shape.optional`` is set. No coercion,
+    normalization, or fallback is performed at any point.
     """
 
-    if isinstance(value, Enum):
-        raise ValueError(
-            f"{path}: Enum values are not supported outside an explicitly "
-            "enum-typed field"
-        )
-    if is_dataclass(value):
-        if type(value) not in _KNOWN_TAGGED_CLASS_OBJECTS:
+    if value is None:
+        if shape.optional:
+            return None
+        raise ValueError(f"{path} must not be None")
+    if shape.kind is _ShapeKind.STR:
+        if type(value) is not str:
+            raise ValueError(f"{path} must be exactly str, got {type(value).__name__}")
+        return value
+    if shape.kind is _ShapeKind.BOOL:
+        if type(value) is not bool:
+            raise ValueError(f"{path} must be exactly bool, got {type(value).__name__}")
+        return value
+    if shape.kind is _ShapeKind.INT:
+        if type(value) is not int:
+            raise ValueError(f"{path} must be exactly int, got {type(value).__name__}")
+        return value
+    if shape.kind is _ShapeKind.FLOAT:
+        if type(value) not in (int, float):
             raise ValueError(
-                f"{path}: {type(value).__name__} is not an exact known tagged "
-                "dataclass type; nested dataclass subclasses are not supported"
+                f"{path} must be exactly int or float, got {type(value).__name__}"
             )
-        return _tagged(type(value), value)
-    if type(value) is tuple:
+        if type(value) is float and not math.isfinite(value):
+            raise ValueError(f"{path} must be finite, got {value!r}")
+        return value
+    if shape.kind is _ShapeKind.ENUM:
+        if type(value) not in shape.enum_types:
+            allowed = ", ".join(sorted(t.__name__ for t in shape.enum_types))
+            raise ValueError(
+                f"{path}: must be exactly one of ({allowed}), got {type(value).__name__}"
+            )
+        return value.value
+    if shape.kind is _ShapeKind.DATACLASS:
+        if type(value) is not shape.dataclass_type:
+            raise ValueError(
+                f"{path}: must be exactly {shape.dataclass_type.__name__}, "
+                f"got {type(value).__name__}"
+            )
+        return _tagged(shape.dataclass_type, value)
+    if shape.kind is _ShapeKind.TUPLE:
+        if type(value) is not tuple:
+            raise ValueError(f"{path} must be exactly tuple, got {type(value).__name__}")
         return {
             _TUPLE_KEY: [
-                _encode_value(item, f"{path}[{index}]") for index, item in enumerate(value)
+                _encode_typed_field(item, f"{path}[{index}]", shape.item_shape)
+                for index, item in enumerate(value)
             ]
         }
-    if type(value) is list:
-        return [_encode_value(item, f"{path}[{index}]") for index, item in enumerate(value)]
-    if type(value) is dict:
-        return {key: _encode_value(item, f"{path}.{key}") for key, item in value.items()}
-    if isinstance(value, (dict, list, tuple)):
-        raise ValueError(
-            f"{path}: {type(value).__name__} is a dict/list/tuple subclass, not a "
-            "plain dict/list/tuple; container subclasses are not supported"
-        )
-    return value
+    raise AssertionError(f"unhandled shape kind {shape.kind!r}")  # pragma: no cover
 
 
 def _encode_free_form_value(value: Any, path: str) -> Any:
@@ -363,25 +447,6 @@ def _decode_value(value: Any) -> Any:
     return value
 
 
-def _encode_enum_field(value: Any, path: str, expected_types: frozenset[type]) -> Any:
-    """Encode one explicitly enum-typed field, exact expected Enum class only.
-
-    The runtime value must be exactly one of the field's resolved Enum
-    type(s) (``type(value) in expected_types``, checked by exact type
-    identity, never ``isinstance``). A foreign Enum (the wrong enum class for
-    this field) and a non-Enum value (e.g. a raw string) are both rejected
-    here, deterministically, before any payload is returned -- neither is
-    coerced by matching ``.value``.
-    """
-
-    if type(value) not in expected_types:
-        allowed = ", ".join(sorted(t.__name__ for t in expected_types))
-        raise ValueError(
-            f"{path}: must be exactly one of ({allowed}), got {type(value).__name__}"
-        )
-    return value.value
-
-
 def _tagged(cls: type, obj: Any) -> dict[str, object]:
     payload = {_CLASS_KEY: cls.__name__}
     for field in fields(cls):
@@ -392,10 +457,8 @@ def _tagged(cls: type, obj: Any) -> dict[str, object]:
             payload[field.name] = _encode_message_tuple(value, path)
         elif field_key in _FREE_FORM_FIELDS:
             payload[field.name] = _encode_free_form_value(value, path)
-        elif field_key in _ENUM_FIELD_TYPES:
-            payload[field.name] = _encode_enum_field(value, path, _ENUM_FIELD_TYPES[field_key])
         else:
-            payload[field.name] = _encode_value(value, path)
+            payload[field.name] = _encode_typed_field(value, path, _FIELD_SHAPES[field_key])
     return payload
 
 
@@ -514,6 +577,104 @@ def _tuple(payload: object, name: str, decode_item=lambda item: item) -> tuple[A
     if not isinstance(items, list):
         raise ValueError(f"{name} tuple tag must contain an array")
     return tuple(decode_item(item) for item in items)
+
+
+def _is_valid_enum_wire_value(value: Any, enum_cls: type[Enum]) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        enum_cls(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_wire_value(value: Any, shape: _FieldShape, path: str) -> None:
+    """Validate one already-canonical decode value against its field shape."""
+
+    if value is None:
+        if shape.optional:
+            return
+        raise ValueError(f"{path} must not be null")
+    if shape.kind is _ShapeKind.STR:
+        if type(value) is not str:
+            raise ValueError(f"{path} must be exactly str, got {type(value).__name__}")
+    elif shape.kind is _ShapeKind.BOOL:
+        if type(value) is not bool:
+            raise ValueError(f"{path} must be exactly bool, got {type(value).__name__}")
+    elif shape.kind is _ShapeKind.INT:
+        if type(value) is not int:
+            raise ValueError(f"{path} must be exactly int, got {type(value).__name__}")
+    elif shape.kind is _ShapeKind.FLOAT:
+        if type(value) not in (int, float):
+            raise ValueError(
+                f"{path} must be exactly int or float, got {type(value).__name__}"
+            )
+    elif shape.kind is _ShapeKind.ENUM:
+        if not any(_is_valid_enum_wire_value(value, enum_cls) for enum_cls in shape.enum_types):
+            allowed = ", ".join(sorted(t.__name__ for t in shape.enum_types))
+            raise ValueError(
+                f"{path} must be a valid value of one of ({allowed}), got {value!r}"
+            )
+    elif shape.kind is _ShapeKind.DATACLASS:
+        _validate_wire_shape(value, shape.dataclass_type, path, tagged=True)
+    elif shape.kind is _ShapeKind.TUPLE:
+        if not (
+            isinstance(value, dict)
+            and set(value) == {_TUPLE_KEY}
+            and isinstance(value[_TUPLE_KEY], list)
+        ):
+            raise ValueError(f"{path} must be an explicit tuple tag")
+        for index, item in enumerate(value[_TUPLE_KEY]):
+            _validate_wire_value(item, shape.item_shape, f"{path}[{index}]")
+    else:
+        raise AssertionError(f"unhandled shape kind {shape.kind!r}")  # pragma: no cover
+
+
+def _validate_wire_shape(payload: Any, cls: type, path: str, *, tagged: bool) -> None:
+    """Recursively validate a decode payload's field shapes against :data:`_FIELD_SHAPES`.
+
+    Called once, from the very top of :func:`quote_record_from_dict`, before
+    any of the existing per-class reconstruction helpers (:func:`_request`,
+    :func:`_pricing_result`, etc.) run -- not scattered as separate manual
+    calls inside each of them. ``payload`` at this point has already passed
+    :func:`_reject_non_canonical_payload` (via :func:`_object`), so it is
+    guaranteed to be JSON-ready-shaped already; this pass adds the
+    field-*specific* check that shape alone does not give, e.g. that
+    ``PricingResult.method`` -- a JSON-ready ``bool`` -- is actually the
+    ``str`` its field declares, not merely some canonical JSON value.
+
+    ``PricingResult.warnings``/``errors`` (:data:`_MESSAGE_TUPLE_FIELDS`) are
+    walked specially: the tuple-tag shape and the exact-``PricingMessage``
+    class tag are still enforced, and each item's own non-free-form fields
+    (``code``, ``message``) are recursively shape-checked the same way as
+    everywhere else -- only ``detail`` (free-form) is skipped, exactly as it
+    already is on every other class.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must be an object")
+    if tagged and payload.get(_CLASS_KEY) != cls.__name__:
+        raise ValueError(f"{path} must carry {_CLASS_KEY}={cls.__name__!r}")
+    for field in fields(cls):
+        if field.name not in payload:
+            continue
+        value = payload[field.name]
+        field_key = (cls.__name__, field.name)
+        field_path = f"{path}.{field.name}"
+        if field_key in _FREE_FORM_FIELDS:
+            continue
+        if field_key in _MESSAGE_TUPLE_FIELDS:
+            if not (
+                isinstance(value, dict)
+                and set(value) == {_TUPLE_KEY}
+                and isinstance(value[_TUPLE_KEY], list)
+            ):
+                raise ValueError(f"{field_path} must be an explicit tuple tag")
+            for index, item in enumerate(value[_TUPLE_KEY]):
+                _validate_wire_shape(item, PricingMessage, f"{field_path}[{index}]", tagged=True)
+            continue
+        _validate_wire_value(value, _FIELD_SHAPES[field_key], field_path)
 
 
 def _message(payload: object) -> PricingMessage:
@@ -830,32 +991,22 @@ def _calibration(payload: object) -> BLIImpliedPriceVolCalibrationResult | None:
 
 
 def quote_record_to_dict(record: BLIQuoteRecord) -> dict[str, object]:
-    """Encode ``record`` to a strict JSON-ready typed dict."""
+    """Encode ``record`` to a strict JSON-ready typed dict.
+
+    Every field is encoded through the same :data:`_FIELD_SHAPES` mechanism
+    used for the 15 nested tagged dataclasses -- ``BLIQuoteRecord`` is not a
+    special case with its own ad hoc field-by-field encoding.
+    """
 
     if type(record) is not BLIQuoteRecord:
         raise TypeError("record must be exactly a BLIQuoteRecord")
-    payload: dict[str, object] = {
-        "schema_version": record.schema_version,
-        "quote_id": record.quote_id,
-        "quote_version": record.quote_version,
-        "saved_at": record.saved_at,
-        "operator_id": record.operator_id,
-        "request": _tagged(BLIStandaloneBondOptionRequest, record.request),
-        "pricing_result": _tagged(PricingResult, record.pricing_result),
-        "benchmark_quote": _tagged(BLIBenchmarkQuote, record.benchmark_quote),
-        "benchmark_comparison": _tagged(
-            BLIBenchmarkComparisonResult, record.benchmark_comparison
-        ),
-        "calibration_result": None
-        if record.calibration_result is None
-        else _tagged(BLIImpliedPriceVolCalibrationResult, record.calibration_result),
-        "client_quote_premium_per_100": record.client_quote_premium_per_100,
-        "client_quote_total_premium": record.client_quote_total_premium,
-        "trader_adjustment_per_100": record.trader_adjustment_per_100,
-        "trader_adjustment_total": record.trader_adjustment_total,
-        "override_reason": record.override_reason,
-        "exclusions": _encode_value(record.exclusions, "BLIQuoteRecord.exclusions"),
-    }
+    payload: dict[str, object] = {}
+    for field in fields(BLIQuoteRecord):
+        value = getattr(record, field.name)
+        path = f"BLIQuoteRecord.{field.name}"
+        payload[field.name] = _encode_typed_field(
+            value, path, _FIELD_SHAPES[("BLIQuoteRecord", field.name)]
+        )
     _reject_non_canonical_payload(payload, "BLIQuoteRecord")
     return payload
 
@@ -865,6 +1016,7 @@ def quote_record_from_dict(payload: object) -> BLIQuoteRecord:
 
     data = _object(payload, "BLIQuoteRecord")
     _require_fields(data, BLIQuoteRecord, "BLIQuoteRecord", tagged=False)
+    _validate_wire_shape(data, BLIQuoteRecord, "BLIQuoteRecord", tagged=False)
     if data["schema_version"] != BLI_QUOTE_RECORD_SCHEMA_VERSION:
         raise ValueError(f"unsupported schema_version {data['schema_version']!r}")
     return BLIQuoteRecord(
