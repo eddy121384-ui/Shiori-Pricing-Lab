@@ -186,7 +186,7 @@ class BLIMVPInputBundle:
         _require_non_blank(self.bundle_id, "bundle_id")
 
         # valuation_date is explicit and parsed only for format validation --
-        # never date.today()/datetime.now() anywhere in this module (docs/09 §3).
+        # never date.today()/datetime.now() anywhere in this module.
         valuation_date = _parse_iso_date(self.valuation_date, "valuation_date")
 
         if not isinstance(self.product, BondLinkedStructuredProduct):

@@ -30,7 +30,7 @@ computation is delegated to an already-reviewed helper from #41/#42/#83;
 this module's only job is composition, in the fixed order above, and
 translating outcomes into a `PricingResult`.
 
-**Result mapping (docs/09's hybrid failure model, unchanged):**
+**Result mapping:**
 
 - Wrong ``bundle`` type: raises ``TypeError`` -- a contract violation,
   not a domain outcome (unchanged from the prior skeleton).

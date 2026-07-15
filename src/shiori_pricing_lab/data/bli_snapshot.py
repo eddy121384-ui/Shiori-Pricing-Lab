@@ -553,7 +553,7 @@ class BLIMarketDataSnapshot:
         _require_active_status(self.status, "snapshot")
 
         # valuation_date is explicit and parsed only for format validation --
-        # never date.today()/datetime.now() anywhere in this module (docs/09 §3).
+        # never date.today()/datetime.now() anywhere in this module.
         _parse_iso_date(self.valuation_date, "valuation_date")
         _require_non_blank(self.as_of_timestamp, "as_of_timestamp")
         _require_non_blank(self.source_system, "source_system")
