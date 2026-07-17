@@ -221,6 +221,50 @@ _EOM_EXPECTED_COUPON_DATES = (
 )
 
 
+def _day30_non_eom_semiannual_bond() -> BondReferenceData:
+    # Codex P1 regression case: issue_date and maturity_date are BOTH
+    # calendar month-end (2026-06-30, 2031-06-30) -- the exact same
+    # endpoints as _eom_semiannual_bond() above -- but this bond's
+    # declared coupon dates are the ordinary day-of-month-preserving
+    # (non-EOM) grid, not the end-of-month grid. Month-end endpoints
+    # alone must never force EOM mode: this bond must still validate,
+    # and generate cashflows, via the non-EOM candidate.
+    return BondReferenceData(
+        isin="XS0TEST-DAY30-NON-EOM",
+        issuer="Synthetic Day-30 Non-EOM Test Issuer",
+        currency=Currency.USD,
+        coupon=0.05,
+        coupon_frequency=Frequency.SEMI_ANNUAL,
+        maturity_date="2031-06-30",
+        issue_date="2026-06-30",
+        day_count=DayCount.ACT_ACT_ISDA,
+        business_day_convention=BusinessDayConvention.MODIFIED_FOLLOWING,
+        redemption_amount=100.0,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        yield_convention=BondYieldConvention.SEMI_ANNUAL_COMPOUND,
+        ex_dividend_days=0,
+        first_coupon_date="2026-12-30",
+        last_coupon_date="2030-12-30",
+        status=BondStatus.ACTIVE,
+    )
+
+
+_DAY30_EXPECTED_AMOUNT_PER_100 = 2.5  # 0.05 * 100 / 2
+_DAY30_EXPECTED_COUPON_DATES = (
+    "2026-12-30",
+    "2027-06-30",
+    "2027-12-30",
+    "2028-06-30",
+    "2028-12-30",
+    "2029-06-30",
+    "2029-12-30",
+    "2030-06-30",
+    "2030-12-30",
+)
+
+
 # --- 1. QuantLib availability behavior -------------------------------------
 
 
@@ -608,6 +652,64 @@ def test_non_eom_bond_behavior_is_unaffected_by_eom_support():
     )
     assert [flow.payment_date for flow in flows] == list(_EXPECTED_COUPON_DATES)
     assert all(flow.amount_per_100 == pytest.approx(_EXPECTED_AMOUNT_PER_100) for flow in flows)
+
+
+# --- 7c. Schedule-mode resolution (Codex P1 regression) ----------------------
+
+
+def test_day30_bond_with_month_end_endpoints_is_still_accepted():
+    # Month-end issue_date/maturity_date must not, by themselves, force EOM
+    # mode -- this bond's declared coupon dates match only the non-EOM
+    # candidate and must be accepted, not rejected as "irregular."
+    flows = coupon_flows_before(
+        _day30_non_eom_semiannual_bond(),
+        after_date="2026-06-30",
+        on_or_before_date="2030-12-30",
+    )
+    assert [flow.payment_date for flow in flows] == list(_DAY30_EXPECTED_COUPON_DATES)
+
+
+def test_day30_bond_produces_the_original_day30_coupon_grid():
+    # Every generated coupon date must land on day 30, never day 31 -- proof
+    # the EOM candidate (day 31 in December) was not silently substituted.
+    flows = coupon_flows_before(
+        _day30_non_eom_semiannual_bond(),
+        after_date="2026-06-30",
+        on_or_before_date="2030-12-30",
+    )
+    for flow in flows:
+        assert flow.payment_date.endswith("-30")
+        assert flow.amount_per_100 == pytest.approx(_DAY30_EXPECTED_AMOUNT_PER_100)
+
+
+def test_day30_bond_accrued_interest_computable_without_entering_eom_mode():
+    # 2026-06-30 -> 2026-12-30 (the day-30 period), not 2026-12-31 (the
+    # EOM period this bond does NOT use) -- proves the resolved mode
+    # actually reaches the day-30 bracketing period, not the EOM one.
+    bond = _day30_non_eom_semiannual_bond()
+    period_start = date(2026, 6, 30)
+    period_end = date(2026, 12, 30)
+    as_of = date(2026, 10, 20)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    expected = _DAY30_EXPECTED_AMOUNT_PER_100 * elapsed_days / full_period_days
+
+    actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+    assert actual > 0.0
+
+
+def test_neither_candidate_matching_still_raises_schedule_error():
+    # Declared first/last coupon dates that match neither the non-EOM
+    # (2026-12-30 / 2030-12-30) nor the EOM (2026-12-31 / 2030-12-31)
+    # candidate -- genuinely irregular, must still raise.
+    bond = _eom_semiannual_bond(
+        first_coupon_date="2026-11-30", last_coupon_date="2030-11-30"
+    )
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        coupon_flows_before(bond, after_date="2026-06-30", on_or_before_date="2030-12-31")
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        accrued_interest_per_100(bond, as_of_date="2026-10-20")
 
 
 # --- 8. Clean/dirty arithmetic identity --------------------------------------

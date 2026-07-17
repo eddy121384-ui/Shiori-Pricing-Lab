@@ -14,21 +14,31 @@ generation uses `ql.NullCalendar()` regardless of
 dates are out of scope until a separate, reviewed calendar-source
 contract exists.
 
-**Calendar-end-of-month schedule anchoring (Issue #94 fix):** when both
-`issue_date` and `maturity_date` fall on the last calendar day of their
-respective months, the regular coupon grid is generated with QuantLib's
-own `Schedule(..., endOfMonth=True)` instead of this module's
-day-of-month-preserving `_add_months` arithmetic, so a bond issued
-2026-06-30 correctly generates coupons on 2026-12-31, 2027-06-30, ...
-rather than 2026-12-30 (`_add_months` cannot represent end-of-month
-rolling -- it has no notion of "last day of the month," only "same day
-number"). This is calendar end-of-month schedule *anchoring* only: it
-adds no business-day payment adjustment, no holiday calendar, no
-irregular-stub support, no new day-count convention, no
+**Calendar-end-of-month schedule anchoring (Issue #94 fix, corrected per
+Codex P1):** the selected schedule mode is **never inferred from
+`issue_date`/`maturity_date` alone**. Two candidate grids are always
+considered: the existing day-of-month-preserving `_add_months`
+arithmetic (non-EOM), and -- only when both `issue_date` and
+`maturity_date` are themselves calendar month-end -- QuantLib's own
+`Schedule(..., endOfMonth=True)` (EOM). The bond's own declared
+`first_coupon_date`/`last_coupon_date` resolve which candidate is
+actually in effect: if only the non-EOM candidate's expected first/last
+coupon dates match, non-EOM is selected; if only the EOM candidate
+matches, EOM is selected; if both candidates match, non-EOM is preferred
+(preserves prior behavior); if neither matches, `BLIBondScheduleError`
+is raised. This matters because a bond can have month-end
+`issue_date`/`maturity_date` and still use the ordinary day-of-month
+schedule (e.g. `issue_date=2026-06-30` with
+`first_coupon_date=2026-12-30`, not `2026-12-31`) -- treating month-end
+endpoints as sufficient on their own to force EOM mode would silently
+break that previously-valid bond. This is calendar end-of-month schedule
+*anchoring* only: it adds no business-day payment adjustment, no holiday
+calendar, no irregular-stub support, no new day-count convention, no
 principal/redemption handling, and is not wired into any curve,
 discount-factor, forward-price, or Black-76 logic. A bond where only one
-of `issue_date`/`maturity_date` is a month-end (or neither) is validated
-exactly as before, with no behavior change.
+of `issue_date`/`maturity_date` is a month-end (or neither) only has the
+non-EOM candidate to match against, so it is validated exactly as
+before, with no behavior change.
 
 **Coupon amount (docs/29 §5):** a fixed per-100-face amount,
 `coupon * 100 / periods_per_year` -- never scaled by
@@ -240,8 +250,24 @@ def _check_regular_schedule(
     first_coupon: date,
     last_coupon: date,
     months: int,
-    end_of_month: bool,
-) -> None:
+) -> bool:
+    """Validate the regular coupon grid and return the resolved `end_of_month` flag.
+
+    Two candidate grids are considered, never inferred from
+    `issue`/`maturity` alone: the existing day-of-month-preserving
+    `_add_months` arithmetic (non-EOM), and -- only when both `issue`
+    and `maturity` are themselves calendar month-end -- QuantLib's own
+    `Schedule(..., endOfMonth=True)` (EOM). The declared
+    `first_coupon`/`last_coupon` resolve which candidate is actually in
+    effect (Codex P1 regression: a bond may have month-end
+    `issue`/`maturity` yet still use the ordinary non-EOM schedule, e.g.
+    `issue=2026-06-30` with `first_coupon=2026-12-30`). If only one
+    candidate's expected first/last coupon dates match the declared
+    ones, that candidate is selected; if both match, non-EOM is
+    preferred (preserves prior behavior); if neither matches, raises
+    `BLIBondScheduleError`.
+    """
+
     # Checking only the two endpoints in isolation (first_coupon_date vs.
     # issue_date + one period, last_coupon_date vs. maturity_date - one
     # period) is not sufficient (Codex P2 review of PR #81): both checks
@@ -250,6 +276,9 @@ def _check_regular_schedule(
     # arithmetic is computed independently and can "look regular" in
     # isolation while silently disagreeing with the other end's grid.
     # This checks the whole grid, anchored at issue_date, in one pass.
+    # This part is candidate-agnostic: if the period count itself does
+    # not divide evenly, neither the non-EOM nor the EOM candidate can
+    # possibly work.
     total_months = (maturity.year - issue.year) * 12 + (maturity.month - issue.month)
     if total_months <= 0 or total_months % months != 0:
         raise BLIBondScheduleError(
@@ -261,48 +290,39 @@ def _check_regular_schedule(
 
     periods = total_months // months
 
-    if end_of_month:
-        # Calendar-end-of-month anchoring (Issue #94 fix): `_add_months`
-        # preserves the day-of-month literally and has no notion of
-        # "last day of the month," so it cannot represent this grid (it
-        # would compute 2026-12-30 from a 2026-06-30 issue_date, not the
-        # correct end-of-month 2026-12-31). QuantLib's own
-        # `Schedule(..., endOfMonth=True)` is the single source of truth
-        # for both validation and generation in this mode, so schedule
-        # validation and schedule generation can never disagree with each
-        # other.
-        eom_schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=True)
-        if eom_schedule_dates[-1] != maturity:
-            raise BLIBondScheduleError(
-                f"bond {bond.isin!r} has an irregular coupon grid: the end-of-month "
-                f"schedule from issue_date ({bond.issue_date!r}) does not land exactly on "
-                f"maturity_date ({bond.maturity_date!r}) -- no consistent regular schedule "
-                "exists (no stub approximation is computed)"
-            )
-        expected_first = eom_schedule_dates[1]
-        expected_last = eom_schedule_dates[-2]
-    else:
-        grid_maturity = _add_months(issue, periods * months)
-        if grid_maturity != maturity:
-            raise BLIBondScheduleError(
-                f"bond {bond.isin!r} has an irregular coupon grid: stepping {periods} regular "
-                f"{months}-month period(s) from issue_date ({bond.issue_date!r}) lands on "
-                f"{grid_maturity.isoformat()!r}, not maturity_date ({bond.maturity_date!r}) -- "
-                "no consistent regular schedule exists (no stub approximation is computed)"
-            )
-
-        expected_first = _add_months(issue, months)
-        expected_last = _add_months(issue, (periods - 1) * months)
-
-    if first_coupon != expected_first or last_coupon != expected_last:
-        raise BLIBondScheduleError(
-            f"bond {bond.isin!r} has an irregular first/last coupon period, which this "
-            "adapter slice does not support (no stub approximation is computed): expected "
-            f"first_coupon_date {expected_first.isoformat()!r} (got "
-            f"{bond.first_coupon_date!r}), expected last_coupon_date "
-            f"{expected_last.isoformat()!r} (got {bond.last_coupon_date!r}), both on the "
-            "regular grid anchored at issue_date"
+    # Non-EOM candidate: the existing, unchanged `_add_months` arithmetic.
+    expected_first_non_eom = _add_months(issue, months)
+    expected_last_non_eom = _add_months(issue, (periods - 1) * months)
+    non_eom_valid = _add_months(issue, periods * months) == maturity
+    if non_eom_valid:
+        non_eom_valid = (
+            first_coupon == expected_first_non_eom and last_coupon == expected_last_non_eom
         )
+
+    # EOM candidate: considered only when both endpoints are themselves
+    # calendar month-end -- never as a consequence of the declared
+    # first/last coupon dates alone.
+    eom_valid = False
+    if _is_last_day_of_month(issue) and _is_last_day_of_month(maturity):
+        eom_schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=True)
+        if eom_schedule_dates[-1] == maturity:
+            eom_valid = (
+                first_coupon == eom_schedule_dates[1] and last_coupon == eom_schedule_dates[-2]
+            )
+
+    if non_eom_valid:
+        return False
+    if eom_valid:
+        return True
+
+    raise BLIBondScheduleError(
+        f"bond {bond.isin!r} has an irregular first/last coupon period, which this "
+        "adapter slice does not support (no stub approximation is computed): expected "
+        f"first_coupon_date {expected_first_non_eom.isoformat()!r} (got "
+        f"{bond.first_coupon_date!r}), expected last_coupon_date "
+        f"{expected_last_non_eom.isoformat()!r} (got {bond.last_coupon_date!r}), both on the "
+        "regular grid anchored at issue_date"
+    )
 
 
 def _to_ql_date(value: date) -> ql.Date:
@@ -373,15 +393,13 @@ def coupon_flows_before(
     first_coupon = _parse_iso_date(bond.first_coupon_date, "first_coupon_date")
     last_coupon = _parse_iso_date(bond.last_coupon_date, "last_coupon_date")
     months = _coupon_period_months(bond.coupon_frequency)
-    end_of_month = _is_last_day_of_month(issue) and _is_last_day_of_month(maturity)
-    _check_regular_schedule(
+    end_of_month = _check_regular_schedule(
         bond,
         issue=issue,
         maturity=maturity,
         first_coupon=first_coupon,
         last_coupon=last_coupon,
         months=months,
-        end_of_month=end_of_month,
     )
 
     after = _parse_iso_date(after_date, "after_date")
@@ -439,15 +457,13 @@ def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> flo
     first_coupon = _parse_iso_date(bond.first_coupon_date, "first_coupon_date")
     last_coupon = _parse_iso_date(bond.last_coupon_date, "last_coupon_date")
     months = _coupon_period_months(bond.coupon_frequency)
-    end_of_month = _is_last_day_of_month(issue) and _is_last_day_of_month(maturity)
-    _check_regular_schedule(
+    end_of_month = _check_regular_schedule(
         bond,
         issue=issue,
         maturity=maturity,
         first_coupon=first_coupon,
         last_coupon=last_coupon,
         months=months,
-        end_of_month=end_of_month,
     )
 
     as_of = _parse_iso_date(as_of_date, "as_of_date")
