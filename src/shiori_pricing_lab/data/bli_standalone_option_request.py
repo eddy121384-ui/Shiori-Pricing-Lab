@@ -130,10 +130,24 @@ def _parse_offset_aware_datetime(value: object, field_name: str) -> datetime:
     accepts a bare date or naive datetime for a different, more permissive
     no-look-ahead check -- the two must not be conflated or reused for each
     other's purpose. Never reads the system clock or timezone.
+
+    **Codex P1 fix:** ``datetime.fromisoformat`` accepts an arbitrary single
+    Unicode character (any ASCII separator, a space, or even an emoji) in
+    the date/time separator position -- so ``"2026-07-01x16:00:00Z"`` or
+    ``"2026-09-29\U0001F40D16:00:00+08:00"`` would otherwise parse
+    successfully. The canonical shape is checked explicitly -- position 10
+    must be exactly the uppercase ``"T"`` -- *before* delegating the actual
+    date/time/offset parsing to ``datetime.fromisoformat``; a lowercase
+    ``"t"``, a space, or any other separator is rejected outright.
     """
 
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-blank ISO-8601 datetime string")
+    if len(value) < 11 or value[10] != "T":
+        raise ValueError(
+            f"{field_name} must use an uppercase 'T' separator immediately after the "
+            f"YYYY-MM-DD date (e.g. '2026-07-01T16:00:00Z'), got {value!r}"
+        )
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:

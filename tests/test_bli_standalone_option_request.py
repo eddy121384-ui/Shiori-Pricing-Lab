@@ -343,6 +343,29 @@ def test_offset_variants_all_accepted():
         assert request.pricing_timestamp == pricing_ts
 
 
+def test_arbitrary_ascii_separator_rejected():
+    # Codex P1: datetime.fromisoformat accepts an arbitrary single Unicode
+    # character between the date and time portions -- position 10 must be
+    # exactly an uppercase "T", checked before delegating to fromisoformat.
+    with pytest.raises(ValueError, match="pricing_timestamp"):
+        _make_request(pricing_timestamp="2026-07-01x16:00:00Z")
+
+
+def test_emoji_separator_rejected():
+    with pytest.raises(ValueError, match="expiry_timestamp"):
+        _make_request(expiry_timestamp="2026-09-29\U0001F40D16:00:00+08:00")
+
+
+def test_space_separator_rejected():
+    with pytest.raises(ValueError, match="pricing_timestamp"):
+        _make_request(pricing_timestamp="2026-07-01 16:00:00Z")
+
+
+def test_lowercase_t_separator_rejected():
+    with pytest.raises(ValueError, match="pricing_timestamp"):
+        _make_request(pricing_timestamp="2026-07-01t16:00:00Z")
+
+
 def test_bare_date_pricing_timestamp_rejected():
     with pytest.raises(ValueError, match="pricing_timestamp"):
         _make_request(pricing_timestamp="2026-07-01")
