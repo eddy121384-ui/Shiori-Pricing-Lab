@@ -712,6 +712,77 @@ def test_neither_candidate_matching_still_raises_schedule_error():
         accrued_interest_per_100(bond, as_of_date="2026-10-20")
 
 
+def _monthly_eom_bond() -> BondReferenceData:
+    # Codex P1 follow-up regression: issue_date=2026-01-31 stepping
+    # MONTHLY has no "February 31st" -- `_add_months` cannot construct
+    # the non-EOM candidate at all (raises ValueError), so this bond is
+    # only representable as an EOM schedule. Non-EOM construction
+    # failing must not block evaluating the EOM candidate.
+    return BondReferenceData(
+        isin="XS0TEST-MONTHLY-EOM",
+        issuer="Synthetic Monthly End-of-Month Test Issuer",
+        currency=Currency.USD,
+        coupon=0.06,
+        coupon_frequency=Frequency.MONTHLY,
+        maturity_date="2026-06-30",
+        issue_date="2026-01-31",
+        day_count=DayCount.ACT_ACT_ISDA,
+        business_day_convention=BusinessDayConvention.MODIFIED_FOLLOWING,
+        redemption_amount=100.0,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        yield_convention=BondYieldConvention.SEMI_ANNUAL_COMPOUND,
+        ex_dividend_days=0,
+        first_coupon_date="2026-02-28",
+        last_coupon_date="2026-05-31",
+        status=BondStatus.ACTIVE,
+    )
+
+
+_MONTHLY_EOM_EXPECTED_AMOUNT_PER_100 = 0.5  # 0.06 * 100 / 12
+_MONTHLY_EOM_EXPECTED_COUPON_DATES = (
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31",
+)
+
+
+def test_monthly_eom_bond_is_accepted_when_non_eom_candidate_cannot_construct():
+    # _add_months(2026-01-31, 1) would raise (no "February 31st") if it
+    # were ever evaluated as a hard failure -- this bond must still be
+    # accepted via the EOM candidate, not rejected.
+    flows = coupon_flows_before(
+        _monthly_eom_bond(), after_date="2026-01-31", on_or_before_date="2026-05-31"
+    )
+    assert [flow.payment_date for flow in flows] == list(_MONTHLY_EOM_EXPECTED_COUPON_DATES)
+
+
+def test_monthly_eom_bond_generates_the_expected_coupon_dates():
+    flows = coupon_flows_before(
+        _monthly_eom_bond(), after_date="2026-01-31", on_or_before_date="2026-05-31"
+    )
+    assert [flow.payment_date for flow in flows] == [
+        "2026-02-28",
+        "2026-03-31",
+        "2026-04-30",
+        "2026-05-31",
+    ]
+    assert all(
+        flow.amount_per_100 == pytest.approx(_MONTHLY_EOM_EXPECTED_AMOUNT_PER_100)
+        for flow in flows
+    )
+
+
+def test_monthly_eom_bond_accrued_interest_computable_inside_first_period():
+    # 2026-02-15 falls inside the first bracketing period
+    # [2026-01-31, 2026-02-28].
+    result = accrued_interest_per_100(_monthly_eom_bond(), as_of_date="2026-02-15")
+    assert result > 0.0
+    assert result < _MONTHLY_EOM_EXPECTED_AMOUNT_PER_100
+
+
 # --- 8. Clean/dirty arithmetic identity --------------------------------------
 
 

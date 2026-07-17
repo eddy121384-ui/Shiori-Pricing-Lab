@@ -266,6 +266,14 @@ def _check_regular_schedule(
     ones, that candidate is selected; if both match, non-EOM is
     preferred (preserves prior behavior); if neither matches, raises
     `BLIBondScheduleError`.
+
+    A valid EOM schedule can have an intermediate month where the
+    `issue` day-of-month simply does not exist (Codex P1 follow-up
+    regression: `issue=2026-01-31` stepping monthly has no "February
+    31st"), which makes `_add_months` raise. That is not by itself a
+    reason to reject the bond -- it only means the non-EOM candidate is
+    inapplicable, so the EOM candidate is still evaluated. No other
+    exception from `_add_months` is caught or suppressed.
     """
 
     # Checking only the two endpoints in isolation (first_coupon_date vs.
@@ -291,37 +299,67 @@ def _check_regular_schedule(
     periods = total_months // months
 
     # Non-EOM candidate: the existing, unchanged `_add_months` arithmetic.
-    expected_first_non_eom = _add_months(issue, months)
-    expected_last_non_eom = _add_months(issue, (periods - 1) * months)
-    non_eom_valid = _add_months(issue, periods * months) == maturity
-    if non_eom_valid:
-        non_eom_valid = (
-            first_coupon == expected_first_non_eom and last_coupon == expected_last_non_eom
-        )
+    # `_add_months` raises `ValueError` when the issue day-of-month does
+    # not exist in a stepped-to month (e.g. no "February 31st") -- a
+    # legitimate EOM-only bond, not an irregular one, so this only marks
+    # the non-EOM candidate inapplicable rather than propagating.
+    non_eom_valid = False
+    expected_first_non_eom: date | None = None
+    expected_last_non_eom: date | None = None
+    try:
+        expected_first_non_eom = _add_months(issue, months)
+        expected_last_non_eom = _add_months(issue, (periods - 1) * months)
+        non_eom_valid = _add_months(issue, periods * months) == maturity
+    except ValueError:
+        non_eom_valid = False
+    else:
+        if non_eom_valid:
+            non_eom_valid = (
+                first_coupon == expected_first_non_eom and last_coupon == expected_last_non_eom
+            )
 
     # EOM candidate: considered only when both endpoints are themselves
     # calendar month-end -- never as a consequence of the declared
-    # first/last coupon dates alone.
+    # first/last coupon dates alone, and never as a consequence of the
+    # non-EOM candidate failing to construct.
     eom_valid = False
+    expected_first_eom: date | None = None
+    expected_last_eom: date | None = None
     if _is_last_day_of_month(issue) and _is_last_day_of_month(maturity):
         eom_schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=True)
         if eom_schedule_dates[-1] == maturity:
-            eom_valid = (
-                first_coupon == eom_schedule_dates[1] and last_coupon == eom_schedule_dates[-2]
-            )
+            expected_first_eom = eom_schedule_dates[1]
+            expected_last_eom = eom_schedule_dates[-2]
+            eom_valid = first_coupon == expected_first_eom and last_coupon == expected_last_eom
 
     if non_eom_valid:
         return False
     if eom_valid:
         return True
 
+    candidate_details = []
+    if expected_first_non_eom is not None and expected_last_non_eom is not None:
+        candidate_details.append(
+            "non-EOM candidate expects first_coupon_date "
+            f"{expected_first_non_eom.isoformat()!r} and last_coupon_date "
+            f"{expected_last_non_eom.isoformat()!r}"
+        )
+    if expected_first_eom is not None and expected_last_eom is not None:
+        candidate_details.append(
+            f"EOM candidate expects first_coupon_date {expected_first_eom.isoformat()!r} "
+            f"and last_coupon_date {expected_last_eom.isoformat()!r}"
+        )
+    candidate_detail_text = (
+        "; ".join(candidate_details)
+        if candidate_details
+        else "no candidate regular schedule could be constructed from issue_date/maturity_date"
+    )
+
     raise BLIBondScheduleError(
         f"bond {bond.isin!r} has an irregular first/last coupon period, which this "
-        "adapter slice does not support (no stub approximation is computed): expected "
-        f"first_coupon_date {expected_first_non_eom.isoformat()!r} (got "
-        f"{bond.first_coupon_date!r}), expected last_coupon_date "
-        f"{expected_last_non_eom.isoformat()!r} (got {bond.last_coupon_date!r}), both on the "
-        "regular grid anchored at issue_date"
+        "adapter slice does not support (no stub approximation is computed): got "
+        f"first_coupon_date {bond.first_coupon_date!r} and last_coupon_date "
+        f"{bond.last_coupon_date!r}; {candidate_detail_text}"
     )
 
 
