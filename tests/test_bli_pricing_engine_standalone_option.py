@@ -68,6 +68,15 @@ _EXPECTED_OPTION_DISCOUNT_FACTOR = 0.9929452501091504
 _EXPECTED_BLACK76_PV_PER_100 = 4.474769848529296
 _EXPECTED_PV = 2.237384924264648
 
+# Synthetic timing/date contract values (Issue #94 human methodology
+# approval, comment 5001749998). SYNTHETIC_BLI_MVP_INPUT_BUNDLE's
+# bond_option.expiry_date is "2026-09-29"; its valuation_date is "2026-07-01".
+_PRICING_TIMESTAMP = "2026-07-01T16:00:00Z"
+_EXPIRY_TIMESTAMP = "2026-09-29T16:00:00Z"
+_REPORTING_DATE = "2026-07-01"
+_FORWARD_SETTLEMENT_DATE = "2026-10-01"
+_OPTION_SETTLEMENT_DATE = "2026-10-02"
+
 # The one intentional success-``assumptions`` difference between the two
 # entrypoints (Sophira Red-zone review of PR #105). The bundle path
 # preserves its exact legacy string (naming the _for_bundle wrapper) as an
@@ -147,6 +156,11 @@ def _standalone_request_from_bundle(bundle: BLIMVPInputBundle) -> BLIStandaloneB
         resolved_bond_reference_data=bundle.resolved_bond_reference_data,
         valuation_date=bundle.valuation_date,
         market_data_snapshot=bundle.market_data_snapshot,
+        pricing_timestamp=_PRICING_TIMESTAMP,
+        expiry_timestamp=_EXPIRY_TIMESTAMP,
+        reporting_date=_REPORTING_DATE,
+        forward_settlement_date=_FORWARD_SETTLEMENT_DATE,
+        option_settlement_date=_OPTION_SETTLEMENT_DATE,
     )
 
 
@@ -156,6 +170,11 @@ def _supported_request() -> BLIStandaloneBondOptionRequest:
         resolved_bond_reference_data=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.resolved_bond_reference_data,
         valuation_date=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.valuation_date,
         market_data_snapshot=_local_supported_snapshot(),
+        pricing_timestamp=_PRICING_TIMESTAMP,
+        expiry_timestamp=_EXPIRY_TIMESTAMP,
+        reporting_date=_REPORTING_DATE,
+        forward_settlement_date=_FORWARD_SETTLEMENT_DATE,
+        option_settlement_date=_OPTION_SETTLEMENT_DATE,
     )
 
 
@@ -267,6 +286,11 @@ def test_standalone_out_of_range_curve_maps_to_engine_error():
         resolved_bond_reference_data=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.resolved_bond_reference_data,
         valuation_date=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.valuation_date,
         market_data_snapshot=SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT,
+        pricing_timestamp=_PRICING_TIMESTAMP,
+        expiry_timestamp=_EXPIRY_TIMESTAMP,
+        reporting_date=_REPORTING_DATE,
+        forward_settlement_date=_FORWARD_SETTLEMENT_DATE,
+        option_settlement_date=_OPTION_SETTLEMENT_DATE,
     )
 
     result = price_bli_mvp_standalone_option(request)

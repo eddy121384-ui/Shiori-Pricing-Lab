@@ -118,6 +118,11 @@ def _direct_reference_request() -> BLIStandaloneBondOptionRequest:
         curve_points=curve_points,
         volatility_input=SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.volatility_input,
         credit_spread_input=SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.credit_spread_input,
+        pricing_timestamp="2026-07-01T16:00:00Z",
+        expiry_timestamp="2026-09-29T16:00:00Z",
+        reporting_date="2026-07-01",
+        forward_settlement_date="2026-10-01",
+        option_settlement_date="2026-10-01",
         deposit_rate_observation=None,
         bond_reference_source_name="SANITIZED_SYNTHETIC_REFERENCE_UNIVERSE",
     )

@@ -22,7 +22,12 @@ JSON object with exactly these top-level keys:
 - required: ``bond_option``, ``bond_reference_data_universe``,
   ``valuation_date``, ``as_of_timestamp``, ``source_system``,
   ``snapshot_id``, ``snapshot_status``, ``bond_quote``, ``curve_points``,
-  ``volatility_input``, ``credit_spread_input``;
+  ``volatility_input``, ``credit_spread_input``, ``pricing_timestamp``,
+  ``expiry_timestamp``, ``reporting_date``, ``forward_settlement_date``,
+  ``option_settlement_date`` (Issue #94 human methodology approval,
+  comment 5001749998 -- forwarded verbatim to
+  ``BLIStandaloneBondOptionRequest``, computed/derived/defaulted by
+  neither this envelope parser nor the builder);
 - optional: ``deposit_rate_observation`` (may be omitted or ``null``; no
   Deposit Curve is required), ``bond_reference_source_name``.
 
@@ -88,6 +93,11 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
         "curve_points",
         "volatility_input",
         "credit_spread_input",
+        "pricing_timestamp",
+        "expiry_timestamp",
+        "reporting_date",
+        "forward_settlement_date",
+        "option_settlement_date",
     }
 )
 _OPTIONAL_TOP_LEVEL_KEYS = frozenset(
@@ -182,6 +192,11 @@ def build_request_from_standalone_option_case(
         curve_points=curve_points,
         volatility_input=volatility_input,
         credit_spread_input=credit_spread_input,
+        pricing_timestamp=envelope["pricing_timestamp"],
+        expiry_timestamp=envelope["expiry_timestamp"],
+        reporting_date=envelope["reporting_date"],
+        forward_settlement_date=envelope["forward_settlement_date"],
+        option_settlement_date=envelope["option_settlement_date"],
         deposit_rate_observation=deposit_rate_observation,
         bond_reference_source_name=envelope.get("bond_reference_source_name"),
     )
