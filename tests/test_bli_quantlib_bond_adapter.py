@@ -175,6 +175,52 @@ def _odd_last_stub_bond() -> BondReferenceData:
     )
 
 
+def _eom_semiannual_bond(
+    *, first_coupon_date: str = "2026-12-31", last_coupon_date: str = "2030-12-31"
+) -> BondReferenceData:
+    # Issue #94 fix: issue_date and maturity_date are both the last calendar
+    # day of their month (2026-06-30, 2031-06-30) -- QuantLib's own
+    # Schedule(..., endOfMonth=True) generates the regular semi-annual grid
+    # 2026-06-30, 2026-12-31, 2027-06-30, ..., 2031-06-30, alternating
+    # month-end June 30 / December 31 dates. `first_coupon_date` and
+    # `last_coupon_date` default to that grid's actual first/second-to-last
+    # dates; callers may override either to construct a deliberate mismatch.
+    return BondReferenceData(
+        isin="XS0TEST-EOM-SEMIANNUAL",
+        issuer="Synthetic End-of-Month Test Issuer",
+        currency=Currency.USD,
+        coupon=0.05,
+        coupon_frequency=Frequency.SEMI_ANNUAL,
+        maturity_date="2031-06-30",
+        issue_date="2026-06-30",
+        day_count=DayCount.ACT_ACT_ISDA,
+        business_day_convention=BusinessDayConvention.MODIFIED_FOLLOWING,
+        redemption_amount=100.0,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        yield_convention=BondYieldConvention.SEMI_ANNUAL_COMPOUND,
+        ex_dividend_days=0,
+        first_coupon_date=first_coupon_date,
+        last_coupon_date=last_coupon_date,
+        status=BondStatus.ACTIVE,
+    )
+
+
+_EOM_EXPECTED_AMOUNT_PER_100 = 2.5  # 0.05 * 100 / 2
+_EOM_EXPECTED_COUPON_DATES = (
+    "2026-12-31",
+    "2027-06-30",
+    "2027-12-31",
+    "2028-06-30",
+    "2028-12-31",
+    "2029-06-30",
+    "2029-12-31",
+    "2030-06-30",
+    "2030-12-31",
+)
+
+
 # --- 1. QuantLib availability behavior -------------------------------------
 
 
@@ -466,6 +512,102 @@ def test_inconsistent_grid_bond_raises_on_coupon_flows_before():
 def test_inconsistent_grid_bond_raises_on_accrued_interest():
     with pytest.raises(BLIBondScheduleError, match="irregular"):
         accrued_interest_per_100(_inconsistent_grid_bond(), as_of_date="2026-01-01")
+
+
+# --- 7b. Calendar-end-of-month schedule anchoring (Issue #94 fix) ------------
+
+
+def test_is_last_day_of_month_boundary_cases():
+    # Direct unit coverage of the new pure helper's boundary behavior --
+    # 30-day month, 31-day month, non-leap Feb, leap Feb.
+    assert adapter_module._is_last_day_of_month(date(2026, 6, 30)) is True
+    assert adapter_module._is_last_day_of_month(date(2026, 6, 29)) is False
+    assert adapter_module._is_last_day_of_month(date(2031, 6, 30)) is True
+    assert adapter_module._is_last_day_of_month(date(2026, 12, 31)) is True
+    assert adapter_module._is_last_day_of_month(date(2026, 12, 30)) is False
+    assert adapter_module._is_last_day_of_month(date(2026, 2, 28)) is True  # 2026: non-leap
+    assert adapter_module._is_last_day_of_month(date(2028, 2, 29)) is True  # 2028: leap
+    assert adapter_module._is_last_day_of_month(date(2028, 2, 28)) is False
+
+
+def test_eom_bond_coupon_dates_alternate_june_30_and_december_31():
+    # Full regular window: every coupon date the end-of-month schedule
+    # generates, first_coupon_date through last_coupon_date inclusive --
+    # the final coupon-at-maturity event (2031-06-30) is excluded, same
+    # boundary rule as the existing mid-month fixture bond.
+    flows = coupon_flows_before(
+        _eom_semiannual_bond(), after_date="2026-06-30", on_or_before_date="2030-12-31"
+    )
+    assert [flow.payment_date for flow in flows] == list(_EOM_EXPECTED_COUPON_DATES)
+    assert all(flow.amount_per_100 == pytest.approx(_EOM_EXPECTED_AMOUNT_PER_100) for flow in flows)
+    for payment_date in _EOM_EXPECTED_COUPON_DATES:
+        month = int(payment_date[5:7])
+        day = int(payment_date[8:10])
+        assert (month, day) in {(6, 30), (12, 31)}
+
+
+def test_eom_bond_window_through_october_has_no_coupon():
+    flows = coupon_flows_before(
+        _eom_semiannual_bond(), after_date="2026-07-20", on_or_before_date="2026-10-31"
+    )
+    assert flows == ()
+
+
+@pytest.mark.parametrize(
+    "as_of_date", ["2026-07-20", "2026-10-19", "2026-10-20", "2026-10-21"]
+)
+def test_eom_bond_accrued_interest_is_computable_at_diagnostic_dates(as_of_date):
+    result = accrued_interest_per_100(_eom_semiannual_bond(), as_of_date=as_of_date)
+    assert result >= 0.0
+    assert result < _EOM_EXPECTED_AMOUNT_PER_100
+
+
+def test_eom_bond_accrued_interest_matches_hand_computed_proration():
+    # 2026-06-30 -> 2026-12-31 is entirely inside the single non-leap
+    # calendar year 2026, so ACT/ACT ISDA's yearFraction reduces exactly to
+    # actual_days / 365 for both the elapsed and full-period spans (same
+    # reasoning already proven for the existing mid-month fixture bond) --
+    # the elapsed/full ratio reduces to elapsed_days / full_period_days.
+    period_start = date(2026, 6, 30)
+    period_end = date(2026, 12, 31)
+    as_of = date(2026, 10, 20)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    expected = _EOM_EXPECTED_AMOUNT_PER_100 * elapsed_days / full_period_days
+
+    actual = accrued_interest_per_100(_eom_semiannual_bond(), as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+    assert actual > 0.0
+
+
+def test_eom_bond_mismatched_first_coupon_date_raises_schedule_error():
+    # 2026-12-30 (the non-EOM `_add_months` answer) does not match the
+    # actual end-of-month schedule's first coupon (2026-12-31) -- still
+    # rejected, not silently coerced.
+    bond = _eom_semiannual_bond(first_coupon_date="2026-12-30")
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        coupon_flows_before(bond, after_date="2026-06-30", on_or_before_date="2030-12-31")
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        accrued_interest_per_100(bond, as_of_date="2026-10-20")
+
+
+def test_eom_bond_mismatched_last_coupon_date_raises_schedule_error():
+    bond = _eom_semiannual_bond(last_coupon_date="2030-12-30")
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        coupon_flows_before(bond, after_date="2026-06-30", on_or_before_date="2030-12-31")
+    with pytest.raises(BLIBondScheduleError, match="irregular"):
+        accrued_interest_per_100(bond, as_of_date="2026-10-20")
+
+
+def test_non_eom_bond_behavior_is_unaffected_by_eom_support():
+    # Regression pin: the existing mid-month fixture bond (day=15, not a
+    # month-end) must keep taking the pre-existing `_add_months` path --
+    # same literal expected coupon dates and amounts as before this fix.
+    flows = coupon_flows_before(
+        _ELIGIBLE_BOND, after_date="2025-06-15", on_or_before_date="2029-12-15"
+    )
+    assert [flow.payment_date for flow in flows] == list(_EXPECTED_COUPON_DATES)
+    assert all(flow.amount_per_100 == pytest.approx(_EXPECTED_AMOUNT_PER_100) for flow in flows)
 
 
 # --- 8. Clean/dirty arithmetic identity --------------------------------------

@@ -14,6 +14,22 @@ generation uses `ql.NullCalendar()` regardless of
 dates are out of scope until a separate, reviewed calendar-source
 contract exists.
 
+**Calendar-end-of-month schedule anchoring (Issue #94 fix):** when both
+`issue_date` and `maturity_date` fall on the last calendar day of their
+respective months, the regular coupon grid is generated with QuantLib's
+own `Schedule(..., endOfMonth=True)` instead of this module's
+day-of-month-preserving `_add_months` arithmetic, so a bond issued
+2026-06-30 correctly generates coupons on 2026-12-31, 2027-06-30, ...
+rather than 2026-12-30 (`_add_months` cannot represent end-of-month
+rolling -- it has no notion of "last day of the month," only "same day
+number"). This is calendar end-of-month schedule *anchoring* only: it
+adds no business-day payment adjustment, no holiday calendar, no
+irregular-stub support, no new day-count convention, no
+principal/redemption handling, and is not wired into any curve,
+discount-factor, forward-price, or Black-76 logic. A bond where only one
+of `issue_date`/`maturity_date` is a month-end (or neither) is validated
+exactly as before, with no behavior change.
+
 **Coupon amount (docs/29 §5):** a fixed per-100-face amount,
 `coupon * 100 / periods_per_year` -- never scaled by
 `redemption_amount`, which this module never reads for coupon-flow
@@ -88,7 +104,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from shiori_pricing_lab.products.enums import DayCount, Frequency
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
@@ -204,6 +220,18 @@ def _coupon_period_months(frequency: Frequency) -> int:
         ) from exc
 
 
+def _is_last_day_of_month(value: date) -> bool:
+    """Return whether `value` is the last calendar day of its month.
+
+    Pure stdlib arithmetic: `value` is the month's last day exactly when
+    the very next calendar day rolls into day 1 of a new month -- true
+    regardless of month length or leap years, so no month-length table is
+    needed.
+    """
+
+    return (value + timedelta(days=1)).day == 1
+
+
 def _check_regular_schedule(
     bond: BondReferenceData,
     *,
@@ -212,6 +240,7 @@ def _check_regular_schedule(
     first_coupon: date,
     last_coupon: date,
     months: int,
+    end_of_month: bool,
 ) -> None:
     # Checking only the two endpoints in isolation (first_coupon_date vs.
     # issue_date + one period, last_coupon_date vs. maturity_date - one
@@ -231,17 +260,40 @@ def _check_regular_schedule(
         )
 
     periods = total_months // months
-    grid_maturity = _add_months(issue, periods * months)
-    if grid_maturity != maturity:
-        raise BLIBondScheduleError(
-            f"bond {bond.isin!r} has an irregular coupon grid: stepping {periods} regular "
-            f"{months}-month period(s) from issue_date ({bond.issue_date!r}) lands on "
-            f"{grid_maturity.isoformat()!r}, not maturity_date ({bond.maturity_date!r}) -- "
-            "no consistent regular schedule exists (no stub approximation is computed)"
-        )
 
-    expected_first = _add_months(issue, months)
-    expected_last = _add_months(issue, (periods - 1) * months)
+    if end_of_month:
+        # Calendar-end-of-month anchoring (Issue #94 fix): `_add_months`
+        # preserves the day-of-month literally and has no notion of
+        # "last day of the month," so it cannot represent this grid (it
+        # would compute 2026-12-30 from a 2026-06-30 issue_date, not the
+        # correct end-of-month 2026-12-31). QuantLib's own
+        # `Schedule(..., endOfMonth=True)` is the single source of truth
+        # for both validation and generation in this mode, so schedule
+        # validation and schedule generation can never disagree with each
+        # other.
+        eom_schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=True)
+        if eom_schedule_dates[-1] != maturity:
+            raise BLIBondScheduleError(
+                f"bond {bond.isin!r} has an irregular coupon grid: the end-of-month "
+                f"schedule from issue_date ({bond.issue_date!r}) does not land exactly on "
+                f"maturity_date ({bond.maturity_date!r}) -- no consistent regular schedule "
+                "exists (no stub approximation is computed)"
+            )
+        expected_first = eom_schedule_dates[1]
+        expected_last = eom_schedule_dates[-2]
+    else:
+        grid_maturity = _add_months(issue, periods * months)
+        if grid_maturity != maturity:
+            raise BLIBondScheduleError(
+                f"bond {bond.isin!r} has an irregular coupon grid: stepping {periods} regular "
+                f"{months}-month period(s) from issue_date ({bond.issue_date!r}) lands on "
+                f"{grid_maturity.isoformat()!r}, not maturity_date ({bond.maturity_date!r}) -- "
+                "no consistent regular schedule exists (no stub approximation is computed)"
+            )
+
+        expected_first = _add_months(issue, months)
+        expected_last = _add_months(issue, (periods - 1) * months)
+
     if first_coupon != expected_first or last_coupon != expected_last:
         raise BLIBondScheduleError(
             f"bond {bond.isin!r} has an irregular first/last coupon period, which this "
@@ -261,7 +313,9 @@ def _from_ql_date(value: ql.Date) -> date:
     return date(value.year(), value.month(), value.dayOfMonth())
 
 
-def _schedule_dates(issue: date, maturity: date, months: int) -> tuple[date, ...]:
+def _schedule_dates(
+    issue: date, maturity: date, months: int, *, end_of_month: bool = False
+) -> tuple[date, ...]:
     tenor = ql.Period(months, ql.Months)
     calendar = ql.NullCalendar()
     schedule = ql.Schedule(
@@ -272,7 +326,7 @@ def _schedule_dates(issue: date, maturity: date, months: int) -> tuple[date, ...
         ql.Unadjusted,
         ql.Unadjusted,
         ql.DateGeneration.Backward,
-        False,
+        end_of_month,
     )
     return tuple(_from_ql_date(d) for d in schedule)
 
@@ -319,6 +373,7 @@ def coupon_flows_before(
     first_coupon = _parse_iso_date(bond.first_coupon_date, "first_coupon_date")
     last_coupon = _parse_iso_date(bond.last_coupon_date, "last_coupon_date")
     months = _coupon_period_months(bond.coupon_frequency)
+    end_of_month = _is_last_day_of_month(issue) and _is_last_day_of_month(maturity)
     _check_regular_schedule(
         bond,
         issue=issue,
@@ -326,6 +381,7 @@ def coupon_flows_before(
         first_coupon=first_coupon,
         last_coupon=last_coupon,
         months=months,
+        end_of_month=end_of_month,
     )
 
     after = _parse_iso_date(after_date, "after_date")
@@ -345,7 +401,7 @@ def coupon_flows_before(
             "not implement; narrow on_or_before_date to end before maturity_date"
         )
 
-    schedule_dates = _schedule_dates(issue, maturity, months)
+    schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=end_of_month)
     coupon_dates = [d for d in schedule_dates[1:] if first_coupon <= d <= last_coupon]
 
     periods_per_year = 12 // months
@@ -383,6 +439,7 @@ def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> flo
     first_coupon = _parse_iso_date(bond.first_coupon_date, "first_coupon_date")
     last_coupon = _parse_iso_date(bond.last_coupon_date, "last_coupon_date")
     months = _coupon_period_months(bond.coupon_frequency)
+    end_of_month = _is_last_day_of_month(issue) and _is_last_day_of_month(maturity)
     _check_regular_schedule(
         bond,
         issue=issue,
@@ -390,6 +447,7 @@ def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> flo
         first_coupon=first_coupon,
         last_coupon=last_coupon,
         months=months,
+        end_of_month=end_of_month,
     )
 
     as_of = _parse_iso_date(as_of_date, "as_of_date")
@@ -403,7 +461,7 @@ def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> flo
         # The final coupon/redemption date -- accrual has just reset to zero.
         return 0.0
 
-    schedule_dates = _schedule_dates(issue, maturity, months)
+    schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=end_of_month)
     period_start: date | None = None
     period_end: date | None = None
     for start, end in zip(schedule_dates, schedule_dates[1:], strict=False):
