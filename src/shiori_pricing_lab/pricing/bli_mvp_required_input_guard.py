@@ -241,18 +241,37 @@ def check_bli_mvp_required_inputs(bundle: BLIMVPInputBundle) -> RequiredInputGua
     )
 
 
+# Curve purpose the OVME-aligned standalone path needs (Issue #94): only
+# the Option Discount Curve. Unlike the bundle path it does NOT require a
+# BOND_REFERENCE_CURVE, because the forward clean price is supplied
+# explicitly (BLIForwardCleanPriceInput) rather than constructed from a
+# spot price and the Bond Reference Curve.
+_REQUIRED_STANDALONE_CURVE_PURPOSES = frozenset({"OPTION_DISCOUNT_CURVE"})
+
+
 def check_bli_mvp_standalone_option_required_inputs(
     request: BLIStandaloneBondOptionRequest,
 ) -> RequiredInputGuardResult:
-    """Return whether ``request`` is the narrow MVP-supported bond option case.
+    """Return whether ``request`` is the OVME-aligned standalone bond option case.
 
-    Standalone-request sibling of :func:`check_bli_mvp_required_inputs`
-    (Issue #95): unpacks ``request`` and delegates to the same shared
-    :func:`_check_bli_mvp_required_inputs_from_fields` checklist, so the
-    supported/unsupported boundary is byte-for-byte identical to the bundle
-    path -- American, yield payoff, PHYSICAL settlement, ``YIELD_VOL``, a
-    missing clean price, and a missing option-leg curve purpose all produce
-    the same reasons. Pure; raises ``TypeError`` for a
+    Standalone-request checklist for the OVME-aligned fair-premium path
+    (Issue #94). It shares the product-shape and volatility-basis checks
+    with the bundle guard (European / PRICE / CASH; ``PRICE_VOL`` /
+    ``EQUIVALENT_PRICE_VOL`` only) but differs where the standalone
+    methodology differs, so it deliberately does **not** reuse
+    :func:`_check_bli_mvp_required_inputs_from_fields` (that shared body
+    stays exactly as-is for the bundle path):
+
+    - an explicit ``forward_clean_price_input`` is **required** (its own
+      presence + spot-side coherence are already enforced at request
+      construction; re-verified here as a defense-in-depth checklist item);
+    - only ``OPTION_DISCOUNT_CURVE`` is required (no
+      ``BOND_REFERENCE_CURVE``);
+    - a **yield-only** spot ``bond_quote`` is allowed -- the forward no
+      longer depends on the spot clean price, so a missing
+      ``clean_price_per_100`` is not a rejection reason here.
+
+    Pure; never mutates ``request``; raises ``TypeError`` for a
     non-``BLIStandaloneBondOptionRequest`` argument.
     """
 
@@ -261,9 +280,71 @@ def check_bli_mvp_standalone_option_required_inputs(
             f"request must be a BLIStandaloneBondOptionRequest, got {type(request).__name__}"
         )
 
-    return _check_bli_mvp_required_inputs_from_fields(
-        bond_option=request.bond_option,
-        valuation_date=request.valuation_date,
-        resolved_bond_reference_data=request.resolved_bond_reference_data,
-        market_data_snapshot=request.market_data_snapshot,
-    )
+    bond_option = request.bond_option
+    snapshot = request.market_data_snapshot
+    reasons: list[str] = []
+
+    # --- Supported product shape only (same as the bundle path) ----------
+    if bond_option.exercise_style is not ExerciseStyle.EUROPEAN:
+        reasons.append(
+            "bond_option.exercise_style must be EUROPEAN, got "
+            f"{bond_option.exercise_style.value}"
+        )
+    if bond_option.payoff_basis is not PayoffBasis.PRICE:
+        reasons.append(
+            f"bond_option.payoff_basis must be PRICE, got {bond_option.payoff_basis.value}"
+        )
+    if bond_option.settlement_type is not SettlementType.CASH:
+        reasons.append(
+            f"bond_option.settlement_type must be CASH, got {bond_option.settlement_type.value}"
+        )
+
+    # --- Explicit deal terms (defensive; all validated at construction) --
+    if not request.valuation_date:
+        reasons.append("valuation_date must be explicit and non-blank")
+    if not bond_option.expiry_date:
+        reasons.append("bond_option.expiry_date must be explicit and non-blank")
+    if bond_option.strike_price is None:
+        reasons.append("bond_option.strike_price must be explicit (non-None)")
+    if bond_option.notional is None or not bond_option.notional > 0:
+        reasons.append("bond_option.notional must be explicit and positive")
+
+    # --- Bond reference data present (for accrued interest at forward
+    # settlement -- defensive, re-verified at construction) ---------------
+    if not isinstance(request.resolved_bond_reference_data, BondReferenceData):
+        reasons.append("resolved_bond_reference_data must be a BondReferenceData")
+
+    # --- Explicit forward clean price input required (Issue #94) ---------
+    # No spot-clean-price requirement: the forward is supplied explicitly,
+    # so a yield-only spot bond_quote is allowed on this path.
+    if snapshot.forward_clean_price_input is None:
+        reasons.append(
+            "market_data_snapshot.forward_clean_price_input must be present "
+            "(the OVME-aligned standalone path prices from an explicit forward clean price)"
+        )
+
+    # --- Only the Option Discount Curve required (no Bond Reference Curve) -
+    product_currency = bond_option.currency
+    present_purposes = {
+        point.curve_purpose.value
+        for point in snapshot.curve_points
+        if point.currency is product_currency
+    }
+    missing_curve_purposes = _REQUIRED_STANDALONE_CURVE_PURPOSES - present_purposes
+    if missing_curve_purposes:
+        reasons.append(
+            "market_data_snapshot.curve_points is missing required curve "
+            f"purpose(s) in currency {product_currency.value}: "
+            f"{sorted(missing_curve_purposes)}"
+        )
+
+    # --- Explicit price volatility present (same as the bundle path) -----
+    volatility_basis = snapshot.volatility_input.volatility_basis
+    if volatility_basis not in _SUPPORTED_VOLATILITY_BASES:
+        reasons.append(
+            "market_data_snapshot.volatility_input.volatility_basis must be one of "
+            f"{{PRICE_VOL, EQUIVALENT_PRICE_VOL}}, got {volatility_basis.value} "
+            "(YIELD_VOL requires a yield-to-price-vol conversion not implemented yet)"
+        )
+
+    return RequiredInputGuardResult(supported=not reasons, reasons=tuple(reasons))

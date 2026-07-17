@@ -1,5 +1,23 @@
 """``calibrate_bli_implied_price_vol``: standalone calibration wiring (Issue #99 PR B).
 
+**Issue #94 methodology-alignment block (comment 5003670704).** The
+standalone fair-premium path is now OVME-aligned (dirty forward/strike,
+fractional ACT/ACT option time, Option-Discount-Curve reporting-date
+discount -- see ``price_bli_mvp_standalone_option``), but the
+implied-``PRICE_VOL`` solver's public contract is still clean-price/ACT-365F.
+This module therefore no longer runs the legacy clean-price/ACT-365
+composition: after its methodology-neutral coherence gates (request
+support, identity, source-date) it returns an explicit
+``METHODOLOGY_NOT_ALIGNED`` outcome **before** any forward/strike/T/DF
+resolution or solver call, so no plausible-but-inconsistent implied vol is
+ever emitted. Safely aligning it would require either pushing dirty prices
+through the solver's ``forward_clean_price`` / ``strike_clean_price``
+arguments (whose contracts label them clean) or a broad public solver/result
+migration -- both out of bounds for this slice; a dedicated dirty-price
+solver contract is a separate future slice. The historical description of
+the F/T/DF composition below is retained for context but is not currently
+reached.
+
 Scope, per the methodology approved in Issue #99 comments 4966208056,
 4966209368, 4966210598, 4966211726, and the implementation authorization in
 comment 4966213294: one isolated function that wires a
@@ -95,24 +113,17 @@ from shiori_pricing_lab.data.bli_benchmark_quote import (
     BLIBenchmarkQuoteSide,
     BLIBenchmarkSourceType,
 )
-from shiori_pricing_lab.data.bli_snapshot import BLICurvePurpose, BLIVolatilityBasis
+from shiori_pricing_lab.data.bli_snapshot import BLIVolatilityBasis
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
-from shiori_pricing_lab.pricing.bli_curve_discount_factor import (
-    discount_factor_from_continuous_zero_curve,
-)
-from shiori_pricing_lab.pricing.bli_forward_clean_price import forward_clean_price_per_100
 from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
     BLIImpliedPriceVolSolverResult,
-    BLIImpliedPriceVolSolverStatus,
-    solve_implied_price_vol,
 )
 from shiori_pricing_lab.pricing.bli_mvp_required_input_guard import (
     check_bli_mvp_standalone_option_required_inputs,
 )
 from shiori_pricing_lab.pricing.bli_pricing_engine import ENGINE_NAME, ENGINE_VERSION
-from shiori_pricing_lab.pricing.bli_valuation_time import year_fraction_to_expiry
 from shiori_pricing_lab.products.enums import Currency, OptionType, coerce_enum
 
 
@@ -144,6 +155,16 @@ class BLIImpliedPriceVolCalibrationReason(StrEnum):
     SOURCE_DATE_MISMATCH = "SOURCE_DATE_MISMATCH"
     INPUT_RESOLUTION_FAILED = "INPUT_RESOLUTION_FAILED"
     SOLVER_FAILED = "SOLVER_FAILED"
+    # Issue #94: the standalone fair-premium path is now OVME-aligned (dirty
+    # forward/strike, ACT/ACT option time, Option-Discount-Curve reporting-date
+    # discount), but the implied-PRICE_VOL solver's public contract is still
+    # clean-price/ACT-365. Rather than silently keep calibrating on the stale
+    # composition (or fake alignment by pushing dirty prices through the
+    # solver's clean-labelled arguments), calibration returns this explicit
+    # outcome before any legacy F/T/DF resolution -- no plausible-but-
+    # inconsistent implied vol is ever emitted. A dedicated dirty-price solver
+    # contract is a separate future slice.
+    METHODOLOGY_NOT_ALIGNED = "METHODOLOGY_NOT_ALIGNED"
 
 
 def _reject_foreign_enum_active_quote_side(value: object) -> None:
@@ -400,106 +421,35 @@ def calibrate_bli_implied_price_vol(
             ),
         )
 
-    # --- 8. Resolve F/K/T/DF exactly once ---------------------------------------
-    # strike_clean_price is a plain field read (guaranteed non-None by the
-    # request-support gate above) -- no helper call, cannot fail.
-    strike_clean_price = bond_option.strike_price
-
-    try:
-        forward_clean_price = forward_clean_price_per_100(
-            bond=request.resolved_bond_reference_data,
-            spot_clean_price=snapshot.bond_quote.clean_price_per_100,
-            valuation_date=request.valuation_date,
-            expiry_date=bond_option.expiry_date,
-            curve_points=snapshot.curve_points,
-        )
-    except ValueError as exc:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-            reason=BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED,
-            diagnostic_note=(
-                f"forward_clean_price_per_100 raised {type(exc).__name__}: {exc}"
-            ),
-            strike_clean_price=strike_clean_price,
-            resolution_error_type=type(exc).__name__,
-            resolution_error_message=str(exc),
-        )
-
-    try:
-        time_to_expiry = year_fraction_to_expiry(request.valuation_date, bond_option.expiry_date)
-    except ValueError as exc:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-            reason=BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED,
-            diagnostic_note=f"year_fraction_to_expiry raised {type(exc).__name__}: {exc}",
-            forward_clean_price=forward_clean_price,
-            strike_clean_price=strike_clean_price,
-            resolution_error_type=type(exc).__name__,
-            resolution_error_message=str(exc),
-        )
-
-    try:
-        option_discount_factor = discount_factor_from_continuous_zero_curve(
-            snapshot.curve_points,
-            currency=bond_option.currency,
-            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
-            target_year_fraction=time_to_expiry,
-        )
-    except ValueError as exc:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-            reason=BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED,
-            diagnostic_note=(
-                f"discount_factor_from_continuous_zero_curve raised {type(exc).__name__}: {exc}"
-            ),
-            forward_clean_price=forward_clean_price,
-            strike_clean_price=strike_clean_price,
-            time_to_expiry=time_to_expiry,
-            resolution_error_type=type(exc).__name__,
-            resolution_error_message=str(exc),
-        )
-
-    # --- 9. Solve exactly once; a solver ValueError (bad solver config) --------
-    # propagates unchanged -- never caught or relabeled here.
-    solver_result = solve_implied_price_vol(
-        forward_clean_price=forward_clean_price,
-        strike_clean_price=strike_clean_price,
-        time_to_expiry=time_to_expiry,
-        discount_factor=option_discount_factor,
-        option_type=bond_option.option_type,
-        target_premium_per_100=benchmark.premium_per_100,
-        lower_price_vol=lower_price_vol,
-        upper_price_vol=upper_price_vol,
-        premium_tolerance_per_100=premium_tolerance_per_100,
-        price_vol_tolerance=price_vol_tolerance,
-        max_iterations=max_iterations,
-    )
-
-    if solver_result.status is BLIImpliedPriceVolSolverStatus.SUCCESS:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.SUCCESS,
-            reason=BLIImpliedPriceVolCalibrationReason.CALIBRATED,
-            diagnostic_note=(
-                f"solve_implied_price_vol converged: implied_price_vol="
-                f"{solver_result.implied_price_vol!r} in {solver_result.iterations} "
-                "iteration(s)"
-            ),
-            forward_clean_price=forward_clean_price,
-            strike_clean_price=strike_clean_price,
-            time_to_expiry=time_to_expiry,
-            option_discount_factor=option_discount_factor,
-            solver_result=solver_result,
-        )
-
+    # --- 8. Methodology-alignment gate (Issue #94) ------------------------------
+    # The identity/date/support gates above are methodology-neutral coherence
+    # checks and still run. But the actual calibration composition -- the
+    # legacy clean-price forward from spot/Bond Reference Curve, ACT/365F
+    # option time, clean-F/K Black, and expiry discount factor -- is now
+    # inconsistent with the OVME-aligned standalone fair-premium path
+    # (price_bli_mvp_standalone_option: dirty forward/strike, fractional
+    # ACT/ACT time, Option-Discount-Curve reporting-date discount).
+    #
+    # Per Issue #94 comment 5003670704, this must not silently continue on the
+    # stale composition, and must not emit a plausible-but-inconsistent
+    # implied vol. Safely aligning it would require passing dirty prices
+    # through solve_implied_price_vol's public forward_clean_price /
+    # strike_clean_price arguments (whose contracts label them clean) or a
+    # broad public solver/result migration -- both out of bounds for this
+    # slice. So calibration returns an explicit METHODOLOGY_NOT_ALIGNED
+    # outcome here, before any legacy F/T/DF resolution or solver call. No
+    # forward/strike/T/DF is resolved and no solver runs, so solver_result and
+    # all resolved-input fields stay None and no implied vol is produced.
     return _build(
         status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-        reason=BLIImpliedPriceVolCalibrationReason.SOLVER_FAILED,
+        reason=BLIImpliedPriceVolCalibrationReason.METHODOLOGY_NOT_ALIGNED,
         diagnostic_note=(
-            f"solve_implied_price_vol did not converge: reason={solver_result.reason.value}"
+            "implied PRICE_VOL calibration is blocked: the standalone fair-premium path "
+            "is now OVME-aligned (dirty forward/strike, fractional ACT/ACT option time, "
+            "Option-Discount-Curve reporting-date discount), but the implied-vol solver's "
+            "public contract is still clean-price/ACT-365F. No implied vol is emitted -- "
+            "a dedicated dirty-price solver contract is required before calibration can "
+            "resume. Request/benchmark identity and source-date coherence were checked "
+            "first and passed; only the pricing-methodology alignment blocks this call."
         ),
-        forward_clean_price=forward_clean_price,
-        strike_clean_price=strike_clean_price,
-        time_to_expiry=time_to_expiry,
-        option_discount_factor=option_discount_factor,
-        solver_result=solver_result,
     )

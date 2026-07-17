@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 import inspect
 import math
-from dataclasses import FrozenInstanceError, asdict
+from dataclasses import FrozenInstanceError, asdict, replace
 
 import pytest
 
@@ -23,6 +23,10 @@ from shiori_pricing_lab.data.bli_benchmark_quote import (
 )
 from shiori_pricing_lab.data.bli_mvp_input_bundle_fixtures import (
     SYNTHETIC_BLI_MVP_INPUT_BUNDLE,
+)
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLIForwardCleanPriceInput,
+    BLIMarketDataStatus,
 )
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 from shiori_pricing_lab.data.bli_standalone_option_request import (
@@ -44,7 +48,17 @@ from shiori_pricing_lab.products.enums import Currency, PayReceive, TreasuryFTPQ
 _BOND_OPTION = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option
 _REFERENCE_DATA = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.resolved_bond_reference_data
 _VALUATION_DATE = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.valuation_date
-_SNAPSHOT = SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
+# Issue #94: standalone requests now require an explicit forward clean price
+# input whose quote side matches the MID spot bond quote.
+_SNAPSHOT = replace(
+    SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT,
+    forward_clean_price_input=BLIForwardCleanPriceInput(
+        forward_clean_price_per_100=101.30,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_system="SYNTHETIC_FORWARD_FEED",
+        status=BLIMarketDataStatus.ACTIVE,
+    ),
+)
 
 # product_id="BONDOPT-SYNTHETIC-0001", underlying_isin="XS0000000001",
 # currency=USD, valuation_date="2026-07-01",

@@ -137,7 +137,10 @@ def _render_pricing_result(display: dict) -> None:
             "Forward clean price per 100",
             f"{display['forward_clean_price_per_100']:.6f}",
         )
-        st.metric("Option discount factor", f"{display['option_discount_factor']:.6f}")
+        st.metric(
+            "Effective reporting-date discount factor",
+            f"{display['effective_reporting_date_discount_factor']:.6f}",
+        )
     with detail_right:
         st.metric("Black-76 PV per 100", f"{display['black76_pv_per_100']:.6f}")
         st.metric("Time to expiry (years)", f"{display['time_to_expiry_year_fraction']:.6f}")

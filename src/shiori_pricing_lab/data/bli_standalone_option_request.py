@@ -23,7 +23,15 @@ composition as the bundle path.
   ``"STANDALONE_BOND_OPTION"`` discriminator is introduced).
 - ``resolved_bond_reference_data`` -- the resolved Bond Master record.
 - ``valuation_date`` -- explicit ISO date; never ``date.today()``.
-- ``market_data_snapshot`` -- one ``BLIMarketDataSnapshot``.
+- ``market_data_snapshot`` -- one ``BLIMarketDataSnapshot``. For the
+  OVME-aligned standalone path (Issue #94) its
+  ``forward_clean_price_input`` must be present, and that input's
+  ``quote_side`` must equal the spot ``bond_quote.quote_side``: the
+  forward clean price is supplied explicitly with provenance and is never
+  reconstructed from a spot price and a Bond Reference Curve. Consequently
+  only ``OPTION_DISCOUNT_CURVE`` is required here (not
+  ``BOND_REFERENCE_CURVE``), and a yield-only spot ``bond_quote`` is
+  allowed since the forward no longer depends on the spot clean price.
 
 **Timing/date contract (Issue #94 human methodology approval, comment
 5001749998): the explicit inputs the approved Phase 1 Bloomberg
@@ -107,14 +115,16 @@ from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 from shiori_pricing_lab.reference_data.eligibility import is_mvp_pricing_eligible
 
-# Curve purposes required to price the standalone option leg (docs/26 §3,
-# §5): presence only, never tenor-node selection or interpolation.
-# Deliberately narrower than BLIMVPInputBundle's own
-# _REQUIRED_MVP_CURVE_PURPOSES -- no DEPOSIT_CURVE, because this request
-# prices only the bond option leg, never a deposit leg (Issue #95).
+# Curve purposes required to price the standalone option leg. Presence
+# only, never tenor-node selection or interpolation. Narrowed for the
+# OVME-aligned standalone path (Issue #94): the forward clean price is now
+# supplied explicitly as market data (BLIForwardCleanPriceInput), so this
+# path no longer constructs the forward from a spot price and a Bond
+# Reference Curve and no longer requires BOND_REFERENCE_CURVE. Only the
+# Option Discount Curve (used for the option-payoff discount factor to the
+# option settlement date and the reporting-date factor) is required.
 _REQUIRED_STANDALONE_CURVE_PURPOSES: frozenset[BLICurvePurpose] = frozenset(
     {
-        BLICurvePurpose.BOND_REFERENCE_CURVE,
         BLICurvePurpose.OPTION_DISCOUNT_CURVE,
     }
 )
@@ -266,7 +276,36 @@ class BLIStandaloneBondOptionRequest:
             )
 
         self._require_standalone_curve_purposes()
+        self._require_forward_clean_price_input()
         self._validate_timing_contract(valuation_date)
+
+    def _require_forward_clean_price_input(self) -> None:
+        """Require an explicit forward clean price input, coherent with the spot side.
+
+        OVME-aligned standalone path (Issue #94): the forward clean price is
+        supplied explicitly as market data with provenance -- this request
+        cannot price without it, and never reconstructs it from a spot price
+        and a Bond Reference Curve. Its ``quote_side`` must equal the spot
+        ``bond_quote.quote_side`` (one coherent observation side; no silent
+        side substitution or blending). The numeric forward is read only from
+        the snapshot's ``forward_clean_price_input`` -- it is deliberately not
+        duplicated as a separate request field.
+        """
+
+        forward_input = self.market_data_snapshot.forward_clean_price_input
+        if forward_input is None:
+            raise ValueError(
+                "market_data_snapshot.forward_clean_price_input must be present -- the "
+                "standalone OVME-aligned path prices from an explicit forward clean price "
+                "and never reconstructs it from a spot price and a Bond Reference Curve"
+            )
+        spot_side = self.market_data_snapshot.bond_quote.quote_side
+        if forward_input.quote_side is not spot_side:
+            raise ValueError(
+                "market_data_snapshot.forward_clean_price_input.quote_side "
+                f"({forward_input.quote_side.value}) must equal bond_quote.quote_side "
+                f"({spot_side.value}) -- one coherent observation side, no substitution"
+            )
 
     def _validate_timing_contract(self, valuation_date: date) -> None:
         """Validate the Phase 1 Bloomberg methodology timing/date contract.

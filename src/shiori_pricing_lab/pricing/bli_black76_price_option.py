@@ -18,6 +18,16 @@ added. Only Phi (CDF) is implemented; the standard normal PDF (phi) is
 used solely by Annex A §A.2.5's closed-form Greeks, which are explicitly
 out of scope for this slice, so it is not added.
 
+**Two public wrappers, one formula (Issue #94):** the clean-basis
+``black76_price_option_pv_per_100`` (unchanged signature/behavior, used
+by the legacy bundle path) and the dirty-basis
+``black76_dirty_price_option_pv_per_100`` (the OVME-aligned standalone
+path prices Black-76 on dirty forward/strike) both delegate to the
+single private, price-basis-neutral ``_black76_option_pv_per_100_core``.
+The d1/d2/Phi formula and its input validation exist in exactly one
+place; no dirty value is ever passed through an argument whose name
+claims it is clean.
+
 **Zero composition, by design (unlike `bli_forward_clean_price.py`):**
 this module does not import `bli_forward_clean_price`,
 `bli_curve_discount_factor`, `bli_curve_selector`, `bli_valuation_time`,
@@ -84,6 +94,68 @@ def _standard_normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 
 
+def _black76_option_pv_per_100_core(
+    *,
+    forward_price: float,
+    strike_price: float,
+    forward_field_name: str,
+    strike_field_name: str,
+    price_volatility: float,
+    time_to_expiry: float,
+    discount_factor: float,
+    option_type: OptionType | str,
+) -> float:
+    """Price-basis-neutral Black-76 European option PV per 100.
+
+    The single numerical core shared by both public wrappers
+    (:func:`black76_price_option_pv_per_100`, clean; and
+    :func:`black76_dirty_price_option_pv_per_100`, dirty). It carries **no
+    price-basis assumption of its own** -- ``forward_price``/``strike_price``
+    are whatever basis (clean or dirty) the caller has already resolved,
+    and ``forward_field_name``/``strike_field_name`` are used only to build
+    the validation error messages so each public wrapper reports its own
+    argument names. The d1/d2/Phi formula exists in exactly this one place;
+    neither wrapper duplicates it.
+
+    Per Annex A §A.2.4, F > 0, K > 0, sigma > 0, and T > 0 are all
+    required; ``discount_factor`` is validated the same way (finite,
+    strictly positive) as a defensive fail-fast measure. Any violation
+    raises :class:`ValueError` rather than returning a fabricated number.
+    """
+
+    option_type = coerce_enum(option_type, OptionType, "option_type")
+
+    forward_price = _require_positive(
+        _require_finite_number(forward_price, forward_field_name), forward_field_name
+    )
+    strike_price = _require_positive(
+        _require_finite_number(strike_price, strike_field_name), strike_field_name
+    )
+    price_volatility = _require_positive(
+        _require_finite_number(price_volatility, "price_volatility"), "price_volatility"
+    )
+    time_to_expiry = _require_positive(
+        _require_finite_number(time_to_expiry, "time_to_expiry"), "time_to_expiry"
+    )
+    discount_factor = _require_positive(
+        _require_finite_number(discount_factor, "discount_factor"), "discount_factor"
+    )
+
+    sqrt_t = sqrt(time_to_expiry)
+    d1 = (
+        log(forward_price / strike_price) + 0.5 * price_volatility**2 * time_to_expiry
+    ) / (price_volatility * sqrt_t)
+    d2 = d1 - price_volatility * sqrt_t
+
+    if option_type is OptionType.CALL:
+        return discount_factor * (
+            forward_price * _standard_normal_cdf(d1) - strike_price * _standard_normal_cdf(d2)
+        )
+    return discount_factor * (
+        strike_price * _standard_normal_cdf(-d2) - forward_price * _standard_normal_cdf(-d1)
+    )
+
+
 def black76_price_option_pv_per_100(
     *,
     forward_clean_price: float,
@@ -93,7 +165,7 @@ def black76_price_option_pv_per_100(
     discount_factor: float,
     option_type: OptionType | str,
 ) -> float:
-    """Return the Black-76 European price-based bond option PV per 100.
+    """Return the Black-76 European price-based bond option PV per 100 (clean basis).
 
     ``forward_clean_price`` (F), ``strike_clean_price`` (K),
     ``price_volatility`` (sigma), ``time_to_expiry`` (T, a year fraction),
@@ -112,43 +184,60 @@ def black76_price_option_pv_per_100(
     `bli_forward_clean_price.py` (#42) -- a zero, negative, NaN, or
     infinite discount factor never silently produces an option value.
 
-    Returns PV **per 100** only -- no Bond Option Notional scaling is
-    accepted or applied (Annex A's separate ``PV per 100 * N / 100`` step
-    is left to a future engine-wiring slice).
+    Unchanged public signature and behavior (Issue #94): this wrapper
+    delegates to the shared :func:`_black76_option_pv_per_100_core`, which
+    carries the one copy of the d1/d2/Phi formula. Returns PV **per 100**
+    only -- no Bond Option Notional scaling is accepted or applied.
     """
 
-    option_type = coerce_enum(option_type, OptionType, "option_type")
-
-    forward_clean_price = _require_positive(
-        _require_finite_number(forward_clean_price, "forward_clean_price"),
-        "forward_clean_price",
-    )
-    strike_clean_price = _require_positive(
-        _require_finite_number(strike_clean_price, "strike_clean_price"), "strike_clean_price"
-    )
-    price_volatility = _require_positive(
-        _require_finite_number(price_volatility, "price_volatility"), "price_volatility"
-    )
-    time_to_expiry = _require_positive(
-        _require_finite_number(time_to_expiry, "time_to_expiry"), "time_to_expiry"
-    )
-    discount_factor = _require_positive(
-        _require_finite_number(discount_factor, "discount_factor"), "discount_factor"
+    return _black76_option_pv_per_100_core(
+        forward_price=forward_clean_price,
+        strike_price=strike_clean_price,
+        forward_field_name="forward_clean_price",
+        strike_field_name="strike_clean_price",
+        price_volatility=price_volatility,
+        time_to_expiry=time_to_expiry,
+        discount_factor=discount_factor,
+        option_type=option_type,
     )
 
-    sqrt_t = sqrt(time_to_expiry)
-    d1 = (
-        log(forward_clean_price / strike_clean_price)
-        + 0.5 * price_volatility**2 * time_to_expiry
-    ) / (price_volatility * sqrt_t)
-    d2 = d1 - price_volatility * sqrt_t
 
-    if option_type is OptionType.CALL:
-        return discount_factor * (
-            forward_clean_price * _standard_normal_cdf(d1)
-            - strike_clean_price * _standard_normal_cdf(d2)
-        )
-    return discount_factor * (
-        strike_clean_price * _standard_normal_cdf(-d2)
-        - forward_clean_price * _standard_normal_cdf(-d1)
+def black76_dirty_price_option_pv_per_100(
+    *,
+    forward_dirty_price: float,
+    strike_dirty_price: float,
+    price_volatility: float,
+    time_to_expiry: float,
+    discount_factor: float,
+    option_type: OptionType | str,
+) -> float:
+    """Return the Black-76 European bond option PV per 100 on a dirty-price basis.
+
+    The OVME-aligned standalone path (Issue #94 human methodology approval,
+    comment 5001749998) prices Black-76 on **dirty** forward and strike
+    (clean values plus accrued interest at the bond forward settlement
+    date), not clean. This wrapper takes ``forward_dirty_price`` (F) and
+    ``strike_dirty_price`` (K) already on the dirty basis and delegates to
+    the same shared :func:`_black76_option_pv_per_100_core` the clean
+    wrapper uses -- the d1/d2/Phi formula is never duplicated, and the
+    dirty basis is carried honestly in this function's own argument names
+    rather than passed through a ``*_clean_price`` argument whose contract
+    claims it is clean.
+
+    ``price_volatility`` (sigma), ``time_to_expiry`` (T), and
+    ``discount_factor`` (DF, the effective Option-Discount-Curve reporting
+    factor) are plain floats; the same F > 0, K > 0, sigma > 0, T > 0, and
+    finite/positive DF boundaries apply, each violation raising
+    :class:`ValueError`. Returns PV **per 100** only.
+    """
+
+    return _black76_option_pv_per_100_core(
+        forward_price=forward_dirty_price,
+        strike_price=strike_dirty_price,
+        forward_field_name="forward_dirty_price",
+        strike_field_name="strike_dirty_price",
+        price_volatility=price_volatility,
+        time_to_expiry=time_to_expiry,
+        discount_factor=discount_factor,
+        option_type=option_type,
     )

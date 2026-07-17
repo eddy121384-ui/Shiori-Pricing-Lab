@@ -58,29 +58,13 @@
     "yield_value": null,
     "accrued_interest_per_100": 0.42
   },
+  "forward_clean_price_input": {
+    "forward_clean_price_per_100": 101.3,
+    "quote_side": "MID",
+    "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
+    "status": "ACTIVE"
+  },
   "curve_points": [
-    {
-      "curve_id": "SANITIZED_BOND_REFERENCE_CURVE",
-      "curve_name": "SANITIZED_BOND_REFERENCE_CURVE",
-      "currency": "USD",
-      "curve_purpose": "BOND_REFERENCE_CURVE",
-      "tenor": "1M",
-      "rate": 0.03,
-      "rate_basis": "CONTINUOUS_ZERO_RATE",
-      "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
-      "status": "ACTIVE"
-    },
-    {
-      "curve_id": "SANITIZED_BOND_REFERENCE_CURVE",
-      "curve_name": "SANITIZED_BOND_REFERENCE_CURVE",
-      "currency": "USD",
-      "curve_purpose": "BOND_REFERENCE_CURVE",
-      "tenor": "1Y",
-      "rate": 0.035,
-      "rate_basis": "CONTINUOUS_ZERO_RATE",
-      "source_system": "SANITIZED_SYNTHETIC_MARKET_SOURCE",
-      "status": "ACTIVE"
-    },
     {
       "curve_id": "SANITIZED_OPTION_DISCOUNT_CURVE",
       "curve_name": "SANITIZED_OPTION_DISCOUNT_CURVE",

@@ -36,6 +36,41 @@ def test_valid_tenor_labels(tenor, expected):
     assert tenor_to_year_fraction(tenor) == pytest.approx(expected)
 
 
+# --- 1b. Day tenors (Issue #94): nD -> n / 365.0 ------------------------
+
+
+@pytest.mark.parametrize(
+    "tenor,expected",
+    [
+        ("1D", 1 / 365.0),
+        ("3D", 3 / 365.0),
+        ("94D", 94 / 365.0),
+        ("365D", 1.0),
+    ],
+)
+def test_valid_day_tenor_labels(tenor, expected):
+    # The day unit shares the continuous-zero-curve coordinate convention
+    # (n / 365.0); month/year behavior is unchanged.
+    assert tenor_to_year_fraction(tenor) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "tenor",
+    [
+        "0D",  # zero rejected
+        "-1D",  # negative rejected
+        "1d",  # lowercase rejected
+        " 3D",  # leading whitespace rejected
+        "3D ",  # trailing whitespace rejected
+        "1.5D",  # fractional label rejected
+        "1W",  # weeks still rejected (day support does not add week support)
+    ],
+)
+def test_malformed_day_tenor_raises(tenor):
+    with pytest.raises(ValueError):
+        tenor_to_year_fraction(tenor)
+
+
 # --- 2. Existing BLI fixture coverage -----------------------------------
 
 

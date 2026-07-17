@@ -20,6 +20,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICurvePurpose,
     BLICurveRateBasis,
     BLIDepositRateObservation,
+    BLIForwardCleanPriceInput,
     BLIMarketDataSnapshot,
     BLIMarketDataStatus,
     BLIQuoteBasis,
@@ -658,3 +659,80 @@ def test_bli_market_data_snapshot_has_no_product_or_pricing_fields():
     field_names = {f.name for f in fields(BLIMarketDataSnapshot)}
     forbidden = {"pv", "dv01", "cashflows", "product_type", "underlying_isin", "notional"}
     assert field_names.isdisjoint(forbidden)
+
+
+# --- BLIForwardCleanPriceInput (Issue #94) -----------------------------------
+
+
+def _forward_clean_price_input(**overrides) -> BLIForwardCleanPriceInput:
+    params = dict(
+        forward_clean_price_per_100=101.30,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_system="TEST_FORWARD_FEED",
+        status=BLIMarketDataStatus.ACTIVE,
+    )
+    params.update(overrides)
+    return BLIForwardCleanPriceInput(**params)
+
+
+def test_forward_clean_price_input_valid_construction():
+    forward = _forward_clean_price_input()
+    assert forward.forward_clean_price_per_100 == 101.30
+    assert forward.quote_side is TreasuryFTPQuoteSide.MID
+    assert forward.status is BLIMarketDataStatus.ACTIVE
+
+
+def test_forward_clean_price_input_coerces_raw_quote_side_and_status():
+    forward = _forward_clean_price_input(quote_side="MID", status="ACTIVE")
+    assert forward.quote_side is TreasuryFTPQuoteSide.MID
+    assert forward.status is BLIMarketDataStatus.ACTIVE
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, -0.01])
+def test_forward_clean_price_input_rejects_non_positive(value):
+    with pytest.raises(ValueError, match="forward_clean_price_per_100 must be positive"):
+        _forward_clean_price_input(forward_clean_price_per_100=value)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), True, "101.3"])
+def test_forward_clean_price_input_rejects_non_finite_number(value):
+    with pytest.raises(ValueError, match="forward_clean_price_per_100"):
+        _forward_clean_price_input(forward_clean_price_per_100=value)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_forward_clean_price_input_rejects_blank_source_system(value):
+    with pytest.raises(ValueError, match="source_system"):
+        _forward_clean_price_input(source_system=value)
+
+
+@pytest.mark.parametrize("status", _NON_ACTIVE_STATUSES)
+def test_forward_clean_price_input_rejects_non_active_status(status):
+    with pytest.raises(ValueError, match="forward_clean_price_input status must be ACTIVE"):
+        _forward_clean_price_input(status=status)
+
+
+def test_forward_clean_price_input_rejects_manual_verified_status():
+    with pytest.raises(ValueError, match="MANUAL_VERIFIED is not accepted yet"):
+        _forward_clean_price_input(status=BLIMarketDataStatus.MANUAL_VERIFIED)
+
+
+def test_snapshot_forward_clean_price_input_defaults_to_none():
+    # Optional at the general snapshot level: the legacy bundle path neither
+    # supplies nor reads it, so existing fixtures stay backward compatible.
+    assert SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.forward_clean_price_input is None
+
+
+def test_snapshot_rejects_wrong_forward_clean_price_input_type():
+    from dataclasses import replace
+
+    with pytest.raises(TypeError, match="forward_clean_price_input"):
+        replace(SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, forward_clean_price_input=object())
+
+
+def test_snapshot_accepts_valid_forward_clean_price_input():
+    from dataclasses import replace
+
+    forward = _forward_clean_price_input()
+    snapshot = replace(SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, forward_clean_price_input=forward)
+    assert snapshot.forward_clean_price_input is forward

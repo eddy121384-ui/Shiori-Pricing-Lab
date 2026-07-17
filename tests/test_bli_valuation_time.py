@@ -9,13 +9,14 @@ yield-conversion/volatility/QuantLib-shaped logic.
 from __future__ import annotations
 
 import inspect
-from datetime import date
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle_fixtures import SYNTHETIC_BLI_MVP_INPUT_BUNDLE
 from shiori_pricing_lab.pricing import bli_valuation_time as bli_valuation_time_module
 from shiori_pricing_lab.pricing.bli_valuation_time import (
+    actual_actual_isda_year_fraction_between_datetimes,
     year_fraction_to_bond_option_expiry,
     year_fraction_to_expiry,
 )
@@ -135,3 +136,71 @@ def test_year_fraction_to_bond_option_expiry_does_not_mutate_bundle():
     year_fraction_to_bond_option_expiry(bundle)
     assert bundle.valuation_date == valuation_date_before
     assert bundle.product.bond_option.expiry_date == expiry_date_before
+
+
+# --- 5. Fractional-timestamp ACT/ACT (ISDA) option time (Issue #94) ----------
+
+_PLUS_8 = timezone(timedelta(hours=8))
+
+
+def test_act_act_approved_same_year_benchmark():
+    # Issue #94 human methodology approval, comment 5001749998: the exact
+    # approved benchmark pair (a single, non-leap calendar year 2026).
+    start = datetime(2026, 7, 17, 13, 58, 0, tzinfo=_PLUS_8)
+    end = datetime(2026, 10, 16, 5, 20, 0, tzinfo=_PLUS_8)
+    # Exact elapsed days match the approved 90.64027777777778.
+    assert (end - start).total_seconds() / 86400.0 == pytest.approx(90.64027777777778)
+    assert actual_actual_isda_year_fraction_between_datetimes(start, end) == pytest.approx(
+        0.2483295281582953
+    )
+
+
+def test_act_act_same_instant_different_offsets_is_equal():
+    # Same aware instant expressed with two explicit offsets, same expiry
+    # instant: the year fraction is identical (an interval inside one calendar
+    # year depends only on elapsed seconds).
+    start_plus8 = datetime(2026, 7, 17, 13, 58, 0, tzinfo=_PLUS_8)
+    start_utc = datetime(2026, 7, 17, 5, 58, 0, tzinfo=UTC)
+    assert start_plus8 == start_utc  # same instant
+    end = datetime(2026, 10, 16, 5, 20, 0, tzinfo=_PLUS_8)
+    assert actual_actual_isda_year_fraction_between_datetimes(
+        start_plus8, end
+    ) == pytest.approx(
+        actual_actual_isda_year_fraction_between_datetimes(start_utc, end)
+    )
+
+
+def test_act_act_spanning_normal_year_boundary():
+    # 2025 and 2026 are both non-leap: one day in each -> 1/365 + 1/365.
+    start = datetime(2025, 12, 31, 0, 0, 0, tzinfo=UTC)
+    end = datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC)
+    assert actual_actual_isda_year_fraction_between_datetimes(start, end) == pytest.approx(
+        1 / 365.0 + 1 / 365.0
+    )
+
+
+def test_act_act_spanning_leap_year_boundary_uses_366_and_365():
+    # 2024 is a leap year (366), 2025 is not (365): one day in each segment.
+    start = datetime(2024, 12, 31, 0, 0, 0, tzinfo=UTC)
+    end = datetime(2025, 1, 2, 0, 0, 0, tzinfo=UTC)
+    assert actual_actual_isda_year_fraction_between_datetimes(start, end) == pytest.approx(
+        1 / 366.0 + 1 / 365.0
+    )
+
+
+def test_act_act_rejects_naive_start_or_end():
+    aware = datetime(2026, 7, 17, 13, 58, 0, tzinfo=UTC)
+    naive = datetime(2026, 10, 16, 5, 20, 0)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        actual_actual_isda_year_fraction_between_datetimes(naive, aware)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        actual_actual_isda_year_fraction_between_datetimes(aware, naive)
+
+
+def test_act_act_rejects_non_positive_interval():
+    start = datetime(2026, 7, 17, 13, 58, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="strictly after"):
+        actual_actual_isda_year_fraction_between_datetimes(start, start)
+    earlier_end = datetime(2026, 7, 16, 13, 58, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="strictly after"):
+        actual_actual_isda_year_fraction_between_datetimes(start, earlier_end)
