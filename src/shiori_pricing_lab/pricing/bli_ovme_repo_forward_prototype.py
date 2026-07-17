@@ -104,9 +104,12 @@ def ovme_flat_repo_forward_clean_price_no_coupon_per_100(
 ) -> float:
     """Return the flat-repo forward clean price per 100 for a no-coupon horizon.
 
-    Diagnostic-only prototype: reproduces one observed Bloomberg OVME case's
-    forward clean price using an explicit flat repo rate (ACT/365,
-    semi-annual compounding) in place of the Bond Reference Curve. Raises
+    Diagnostic-only prototype: calculates a candidate flat-repo forward
+    clean price so it can be compared with an observed Bloomberg OVME case,
+    using an explicit flat repo rate (ACT/365, semi-annual compounding) in
+    place of the Bond Reference Curve. This is an experiment, not a claim of
+    Bloomberg reproduction, Bloomberg validation, or approved production
+    methodology. Raises
     ``TypeError`` for a non-``BondReferenceData`` ``bond``. Raises
     ``ValueError`` for: a non-finite or non-positive ``spot_clean_price``; a
     malformed or reversed settlement-date pair (``forward_settlement_date``
