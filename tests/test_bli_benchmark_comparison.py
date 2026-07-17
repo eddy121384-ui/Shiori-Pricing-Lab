@@ -50,6 +50,14 @@ _SNAPSHOT = SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 # currency=USD, valuation_date="2026-07-01",
 # snapshot_id="SYNTHETIC_BLI_SNAPSHOT_0001", as_of_timestamp="2026-07-01T16:00:00Z"
 
+# Synthetic timing/date contract values (Issue #94 human methodology
+# approval, comment 5001749998). _BOND_OPTION.expiry_date is "2026-09-29".
+_PRICING_TIMESTAMP = "2026-07-01T16:00:00Z"
+_EXPIRY_TIMESTAMP = "2026-09-29T16:00:00Z"
+_REPORTING_DATE = "2026-07-01"
+_FORWARD_SETTLEMENT_DATE = "2026-10-01"
+_OPTION_SETTLEMENT_DATE = "2026-10-02"
+
 
 def _make_request(**overrides: object) -> BLIStandaloneBondOptionRequest:
     params = dict(
@@ -57,6 +65,11 @@ def _make_request(**overrides: object) -> BLIStandaloneBondOptionRequest:
         resolved_bond_reference_data=_REFERENCE_DATA,
         valuation_date=_VALUATION_DATE,
         market_data_snapshot=_SNAPSHOT,
+        pricing_timestamp=_PRICING_TIMESTAMP,
+        expiry_timestamp=_EXPIRY_TIMESTAMP,
+        reporting_date=_REPORTING_DATE,
+        forward_settlement_date=_FORWARD_SETTLEMENT_DATE,
+        option_settlement_date=_OPTION_SETTLEMENT_DATE,
     )
     params.update(overrides)
     return BLIStandaloneBondOptionRequest(**params)

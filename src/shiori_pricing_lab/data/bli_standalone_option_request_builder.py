@@ -100,6 +100,11 @@ def build_bli_standalone_option_request(
     curve_points: Iterable[BLICurvePoint],
     volatility_input: BLIVolatilityInput,
     credit_spread_input: BLICreditSpreadInput,
+    pricing_timestamp: str,
+    expiry_timestamp: str,
+    reporting_date: str,
+    forward_settlement_date: str,
+    option_settlement_date: str,
     deposit_rate_observation: BLIDepositRateObservation | None = None,
     bond_reference_source_name: str | None = None,
 ) -> BLIStandaloneBondOptionRequest:
@@ -112,6 +117,13 @@ def build_bli_standalone_option_request(
     ``bond_reference_source_name`` is forwarded only as the resolver's
     audit/source label (its ``source_fixture_name``); it never affects
     matching.
+
+    ``pricing_timestamp``, ``expiry_timestamp``, ``reporting_date``,
+    ``forward_settlement_date``, and ``option_settlement_date`` (Issue #94
+    human methodology approval, comment 5001749998) are forwarded verbatim
+    to ``BLIStandaloneBondOptionRequest`` -- this builder computes, derives,
+    or defaults none of them; its own coherence/format validation raises
+    directly from that constructor.
 
     Raises :class:`TypeError` if ``bond_option`` is not a ``BondOption`` --
     checked before its ``underlying_isin`` is read, so the failure is clear
@@ -167,4 +179,9 @@ def build_bli_standalone_option_request(
         resolved_bond_reference_data=resolution.bond_reference_data,
         valuation_date=valuation_date,
         market_data_snapshot=market_data_snapshot,
+        pricing_timestamp=pricing_timestamp,
+        expiry_timestamp=expiry_timestamp,
+        reporting_date=reporting_date,
+        forward_settlement_date=forward_settlement_date,
+        option_settlement_date=option_settlement_date,
     )

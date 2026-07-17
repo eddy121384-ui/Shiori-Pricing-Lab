@@ -66,6 +66,14 @@ _AS_OF_TIMESTAMP = "2026-07-01T16:00:00Z"
 _SOURCE_SYSTEM = "SANITIZED_SYNTHETIC_MARKET_SOURCE"
 _SNAPSHOT_ID = "SANITIZED_SYNTHETIC_STANDALONE_SNAPSHOT_0001"
 
+# Synthetic timing/date contract values (Issue #94 human methodology
+# approval, comment 5001749998). _BOND_OPTION.expiry_date is "2026-09-29".
+_PRICING_TIMESTAMP = "2026-07-01T16:00:00Z"
+_EXPIRY_TIMESTAMP = "2026-09-29T16:00:00Z"
+_REPORTING_DATE = "2026-07-01"
+_FORWARD_SETTLEMENT_DATE = "2026-10-01"
+_OPTION_SETTLEMENT_DATE = "2026-10-02"
+
 # Pinned expected values -- identical to the standalone engine tests, whose
 # by-hand Annex A derivation is the source of truth. Re-pinned here so a
 # builder-path regression is caught directly.
@@ -128,6 +136,11 @@ def _supported_kwargs(**overrides) -> dict:
         curve_points=_short_tenor_curve_points(),
         volatility_input=_VOLATILITY_INPUT,
         credit_spread_input=_CREDIT_SPREAD_INPUT,
+        pricing_timestamp=_PRICING_TIMESTAMP,
+        expiry_timestamp=_EXPIRY_TIMESTAMP,
+        reporting_date=_REPORTING_DATE,
+        forward_settlement_date=_FORWARD_SETTLEMENT_DATE,
+        option_settlement_date=_OPTION_SETTLEMENT_DATE,
     )
     params.update(overrides)
     return params

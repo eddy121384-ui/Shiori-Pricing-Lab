@@ -77,6 +77,16 @@ _requires_quantlib = pytest.mark.skipif(
 _calibrate = calibrate_bli_implied_price_vol
 _MID = BLIBenchmarkQuoteSide.MID
 
+# Synthetic timing/date contract values (Issue #94 human methodology
+# approval, comment 5001749998).
+# SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.expiry_date is
+# "2026-09-29"; its valuation_date is "2026-07-01".
+_PRICING_TIMESTAMP = "2026-07-01T16:00:00Z"
+_EXPIRY_TIMESTAMP = "2026-09-29T16:00:00Z"
+_REPORTING_DATE = "2026-07-01"
+_FORWARD_SETTLEMENT_DATE = "2026-10-01"
+_OPTION_SETTLEMENT_DATE = "2026-10-02"
+
 # --- Shared synthetic fixtures (mirrors tests/test_bli_pricing_engine_standalone_option.py) --
 
 
@@ -135,6 +145,11 @@ def _supported_request(**overrides) -> BLIStandaloneBondOptionRequest:
         resolved_bond_reference_data=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.resolved_bond_reference_data,
         valuation_date=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.valuation_date,
         market_data_snapshot=_supported_snapshot(),
+        pricing_timestamp=_PRICING_TIMESTAMP,
+        expiry_timestamp=_EXPIRY_TIMESTAMP,
+        reporting_date=_REPORTING_DATE,
+        forward_settlement_date=_FORWARD_SETTLEMENT_DATE,
+        option_settlement_date=_OPTION_SETTLEMENT_DATE,
     )
     params.update(overrides)
     return BLIStandaloneBondOptionRequest(**params)
