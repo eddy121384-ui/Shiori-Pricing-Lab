@@ -41,8 +41,11 @@ _ELIGIBLE_BOND = SYNTHETIC_BOND_FIXTURES[0]
 # (next coupon for this bond is 2026-12-15).
 _SPOT_SETTLEMENT_DATE = "2026-07-01"
 _FORWARD_SETTLEMENT_DATE = "2026-09-29"
-_SPOT_CLEAN_PRICE = 99.46484375
-_REPO_RATE = 0.04725
+# Clearly synthetic values, unrelated to any observed Bloomberg case --
+# matching the same spot_clean_price already reused across
+# test_bli_forward_clean_price.py's own integration tests.
+_SPOT_CLEAN_PRICE = 101.25
+_REPO_RATE = 0.035
 
 
 # --- 1. Matches an independently computed ACT/365 semi-annual repo formula ---
