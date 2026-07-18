@@ -22,8 +22,15 @@ continuous-zero nodes (Issue #94 day-tenor support): 3D to the reporting date
 
 from __future__ import annotations
 
+from dataclasses import asdict, replace
+
 import pytest
 
+from shiori_pricing_lab.data.bli_benchmark_quote import (
+    BLIBenchmarkQuote,
+    BLIBenchmarkQuoteSide,
+    BLIBenchmarkSourceType,
+)
 from shiori_pricing_lab.data.bli_snapshot import (
     BLIBondQuote,
     BLICreditSpreadInput,
@@ -43,6 +50,11 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
 )
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
     black76_price_option_pv_per_100,
+)
+from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
+    BLIImpliedPriceVolCalibrationReason,
+    BLIImpliedPriceVolCalibrationStatus,
+    calibrate_bli_implied_price_vol,
 )
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp_standalone_option
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
@@ -279,3 +291,74 @@ def test_ovme_golden_case_rejects_legacy_clean_act365_expiry_methodology():
     )
     assert not (_DISPLAY_BUCKET_LOW <= legacy_premium <= _DISPLAY_BUCKET_HIGH)
     assert abs(legacy_premium - _EXPECTED_PREMIUM_PER_100) > 1e-3
+
+
+# --- Implied PRICE_VOL calibration round trip (Issue #P1-06) -----------------
+
+
+def _golden_benchmark() -> BLIBenchmarkQuote:
+    request = _golden_request()
+    return BLIBenchmarkQuote(
+        benchmark_id="SANITIZED_OVME_GOLDEN_BENCHMARK",
+        source_type=BLIBenchmarkSourceType.BLOOMBERG,
+        source_system=_SOURCE,
+        source_as_of=request.market_data_snapshot.as_of_timestamp,
+        retrieved_at="2026-07-17T14:00:00Z",
+        quote_side=BLIBenchmarkQuoteSide.MID,
+        premium_per_100=_EXPECTED_PREMIUM_PER_100,
+        total_premium=_EXPECTED_TOTAL_PREMIUM,
+        currency=request.bond_option.currency,
+        product_id=request.bond_option.product_id,
+        snapshot_id=request.market_data_snapshot.snapshot_id,
+        underlying_id=request.bond_option.underlying_isin,
+        source_reference="SANITIZED-OVME-GOLDEN-BENCHMARK-REFERENCE",
+    )
+
+
+@_requires_quantlib
+def test_ovme_golden_case_implied_price_vol_calibration_recovers_and_reprices():
+    # Proves calibration and the formal standalone pricing path are
+    # consistent end to end: calibrating against the golden benchmark
+    # premium recovers ~0.03314, and repricing a request that differs from
+    # the original only by that implied volatility -- through the same
+    # price_bli_mvp_standalone_option formal path, not a self-referential
+    # dirty-solver repricing -- reproduces the golden premium.
+    request = _golden_request()
+    benchmark = _golden_benchmark()
+    request_before = asdict(request)
+    benchmark_before = asdict(benchmark)
+    snapshot_before = asdict(request.market_data_snapshot)
+
+    calibration = calibrate_bli_implied_price_vol(
+        request, benchmark, active_quote_side=BLIBenchmarkQuoteSide.MID
+    )
+
+    assert calibration.status is BLIImpliedPriceVolCalibrationStatus.SUCCESS
+    assert calibration.reason is BLIImpliedPriceVolCalibrationReason.CALIBRATED
+    implied_vol = calibration.solver_result.implied_price_vol
+    assert implied_vol == pytest.approx(_PRICE_VOL, abs=1e-4)
+
+    # request/benchmark/snapshot were never mutated by calibration.
+    assert asdict(request) == request_before
+    assert asdict(benchmark) == benchmark_before
+    assert asdict(request.market_data_snapshot) == snapshot_before
+
+    # New immutable request copy: only the volatility input differs.
+    repriced_request = replace(
+        request,
+        market_data_snapshot=replace(
+            request.market_data_snapshot,
+            volatility_input=replace(
+                request.market_data_snapshot.volatility_input, volatility=implied_vol
+            ),
+        ),
+    )
+    assert repriced_request.market_data_snapshot.volatility_input.volatility != _PRICE_VOL
+    # The original request/snapshot/volatility are still untouched.
+    assert asdict(request) == request_before
+    assert request.market_data_snapshot.volatility_input.volatility == _PRICE_VOL
+
+    pricing_result = price_bli_mvp_standalone_option(repriced_request)
+    assert pricing_result.status is PricingStatus.SUCCESS
+    repriced_premium_per_100 = pricing_result.assumptions["black76_pv_per_100"]
+    assert repriced_premium_per_100 == pytest.approx(_EXPECTED_PREMIUM_PER_100, abs=1e-6)

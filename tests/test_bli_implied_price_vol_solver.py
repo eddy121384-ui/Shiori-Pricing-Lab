@@ -1,4 +1,5 @@
-"""Tests for ``solve_implied_price_vol`` (Issue #99 PR A bounded solver).
+"""Tests for ``solve_implied_price_vol`` / ``solve_implied_dirty_price_vol``
+(Issue #99 PR A bounded solver; Issue #P1-06 dirty-price extension).
 
 All fixtures are explicitly synthetic float inputs chosen only to exercise
 the solver's arbitrage-bound, bracketing, tolerance, and iteration logic in
@@ -6,6 +7,14 @@ isolation. None represents Bloomberg output, a golden case, market
 calibration evidence, or UAT -- Issue #94's sanitized Bloomberg golden case
 remains open and gates only licensed-environment UAT evidence, not this
 synthetic, deterministic solver.
+
+The clean-price ``solve_implied_price_vol`` tests below are the pre-existing
+Issue #99 regression suite and are unchanged. The dirty-price
+``solve_implied_dirty_price_vol`` tests near the end of this file reuse the
+same fixture style but do not duplicate the full clean-solver matrix (Issue
+#P1-06 scope): they prove the shared bisection core still produces the
+required outcomes on a dirty basis, and that the dirty wrapper's trial
+pricing goes through ``black76_dirty_price_option_pv_per_100`` only.
 """
 
 from __future__ import annotations
@@ -19,12 +28,15 @@ import pytest
 
 from shiori_pricing_lab.pricing import bli_implied_price_vol_solver as solver_module
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
+    black76_dirty_price_option_pv_per_100,
     black76_price_option_pv_per_100,
 )
 from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
+    BLIImpliedDirtyPriceVolSolverResult,
     BLIImpliedPriceVolSolverReason,
     BLIImpliedPriceVolSolverResult,
     BLIImpliedPriceVolSolverStatus,
+    solve_implied_dirty_price_vol,
     solve_implied_price_vol,
 )
 from shiori_pricing_lab.products.enums import OptionType
@@ -664,3 +676,280 @@ def test_module_calls_but_does_not_reimplement_black76():
     forbidden_tokens = ("erf(", "d1 =", "d2 =", "_standard_normal_cdf", "norm.cdf", "NormalDist")
     for token in forbidden_tokens:
         assert token not in source, f"unexpected token {token!r} found in module source"
+
+
+# ==================================================================================
+# Dirty-price solver (Issue #P1-06): ``solve_implied_dirty_price_vol``.
+#
+# Shares the same private bisection core as the clean solver above, so this
+# section does not re-run the full clean-solver matrix -- only the coverage
+# needed to prove the dirty basis and the shared-core wiring are both honest
+# (Issue #P1-06 required tests: synthetic recovery, boundary convergence,
+# theoretical bounds, ROOT_NOT_BRACKETED, MAX_ITERATIONS_REACHED, malformed
+# inputs, repeatability, frozen result, dirty-only trial pricing).
+# ==================================================================================
+
+_DIRTY_F = 100.6
+_DIRTY_K = 100.7
+_DIRTY_T = 0.25
+_DIRTY_DF = 0.987
+
+
+def _dirty_price(sigma: float, *, option_type: OptionType = OptionType.CALL, **overrides) -> float:
+    params = dict(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        price_volatility=sigma,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=option_type,
+    )
+    params.update(overrides)
+    return black76_dirty_price_option_pv_per_100(**params)
+
+
+def test_dirty_known_synthetic_call_recovery():
+    sigma_true = 0.03314
+    target = _dirty_price(sigma_true, option_type=OptionType.CALL)
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=target,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.SUCCESS
+    assert result.reason is BLIImpliedPriceVolSolverReason.CONVERGED
+    assert result.implied_price_vol == pytest.approx(sigma_true, abs=1e-6)
+    assert result.forward_dirty_price == _DIRTY_F
+    assert result.strike_dirty_price == _DIRTY_K
+
+
+def test_dirty_known_synthetic_put_recovery():
+    sigma_true = 0.20
+    target = _dirty_price(sigma_true, option_type=OptionType.PUT)
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.PUT,
+        target_premium_per_100=target,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.SUCCESS
+    assert result.reason is BLIImpliedPriceVolSolverReason.CONVERGED
+    assert result.implied_price_vol == pytest.approx(sigma_true, abs=1e-6)
+
+
+def test_dirty_configured_lower_vol_root_converges_with_zero_iterations():
+    lower_vol = 0.000001
+    target = _dirty_price(lower_vol, forward_dirty_price=_DIRTY_F, strike_dirty_price=_DIRTY_F)
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_F,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=target,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.SUCCESS
+    assert result.reason is BLIImpliedPriceVolSolverReason.CONVERGED
+    assert result.implied_price_vol == lower_vol
+    assert result.iterations == 0
+
+
+def test_dirty_configured_upper_vol_root_converges_with_zero_iterations():
+    upper_vol = 5.0
+    target = _dirty_price(upper_vol, forward_dirty_price=_DIRTY_F, strike_dirty_price=_DIRTY_F)
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_F,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=target,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.SUCCESS
+    assert result.reason is BLIImpliedPriceVolSolverReason.CONVERGED
+    assert result.implied_price_vol == upper_vol
+    assert result.iterations == 0
+
+
+_DIRTY_ITM_F = 110.0
+_DIRTY_ITM_K = 100.0
+_DIRTY_THEORETICAL_LOWER = _DIRTY_DF * max(_DIRTY_ITM_F - _DIRTY_ITM_K, 0.0)
+_DIRTY_THEORETICAL_UPPER = _DIRTY_DF * _DIRTY_ITM_F
+
+
+def _solve_dirty_itm(target: float, **overrides) -> BLIImpliedDirtyPriceVolSolverResult:
+    params = dict(
+        forward_dirty_price=_DIRTY_ITM_F,
+        strike_dirty_price=_DIRTY_ITM_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=target,
+    )
+    params.update(overrides)
+    return solve_implied_dirty_price_vol(**params)
+
+
+@pytest.mark.parametrize(
+    "target,expected_reason",
+    [
+        (0.0, BLIImpliedPriceVolSolverReason.BELOW_ARBITRAGE_LOWER_BOUND),
+        (_DIRTY_THEORETICAL_LOWER, BLIImpliedPriceVolSolverReason.AT_ARBITRAGE_LOWER_BOUND),
+        (_DIRTY_THEORETICAL_UPPER, BLIImpliedPriceVolSolverReason.AT_ARBITRAGE_UPPER_BOUND),
+        (
+            _DIRTY_THEORETICAL_UPPER + 1.0,
+            BLIImpliedPriceVolSolverReason.ABOVE_ARBITRAGE_UPPER_BOUND,
+        ),
+    ],
+)
+def test_dirty_theoretical_arbitrage_bound_outcomes(target, expected_reason):
+    result = _solve_dirty_itm(target)
+    assert result.status is BLIImpliedPriceVolSolverStatus.FAILED
+    assert result.reason is expected_reason
+    assert result.implied_price_vol is None
+    assert result.iterations == 0
+    assert result.arbitrage_lower_bound_per_100 == _DIRTY_THEORETICAL_LOWER
+    assert result.arbitrage_upper_bound_per_100 == _DIRTY_THEORETICAL_UPPER
+
+
+def test_dirty_root_not_bracketed():
+    target = 50.0
+    theoretical_upper = _DIRTY_DF * _DIRTY_F
+    assert 0.0 < target < theoretical_upper
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_F,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=target,
+        lower_price_vol=0.01,
+        upper_price_vol=0.05,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.FAILED
+    assert result.reason is BLIImpliedPriceVolSolverReason.ROOT_NOT_BRACKETED
+    assert result.implied_price_vol is None
+    assert result.iterations == 0
+    assert result.final_bracket_lower_price_vol == 0.01
+    assert result.final_bracket_upper_price_vol == 0.05
+
+
+def test_dirty_max_iterations_reached_preserves_diagnostics():
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=0.6,
+        premium_tolerance_per_100=1e-15,
+        price_vol_tolerance=1e-15,
+        max_iterations=5,
+    )
+    assert result.status is BLIImpliedPriceVolSolverStatus.FAILED
+    assert result.reason is BLIImpliedPriceVolSolverReason.MAX_ITERATIONS_REACHED
+    assert result.iterations == 5
+    assert result.implied_price_vol is not None
+    assert result.model_premium_per_100 is not None
+    assert result.premium_residual_per_100 is not None
+    assert result.final_bracket_lower_price_vol is not None
+    assert result.final_bracket_upper_price_vol is not None
+    assert result.diagnostic_note
+
+
+def test_dirty_repeat_calls_are_deterministic():
+    kwargs = dict(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=0.6,
+    )
+    first = solve_implied_dirty_price_vol(**kwargs)
+    second = solve_implied_dirty_price_vol(**kwargs)
+    assert asdict(first) == asdict(second)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"forward_dirty_price": True},
+        {"strike_dirty_price": math.nan},
+        {"time_to_expiry": math.inf},
+        {"discount_factor": -math.inf},
+        {"forward_dirty_price": 0.0},
+        {"strike_dirty_price": -1.0},
+        {"time_to_expiry": 0.0},
+        {"discount_factor": 0.0},
+        {"target_premium_per_100": -1.0},
+        {"lower_price_vol": 0.0},
+        {"lower_price_vol": -0.1},
+        {"lower_price_vol": 5.0, "upper_price_vol": 5.0},
+        {"lower_price_vol": 6.0, "upper_price_vol": 5.0},
+        {"lower_price_vol": math.nan},
+        {"upper_price_vol": math.inf},
+        {"premium_tolerance_per_100": 0.0},
+        {"premium_tolerance_per_100": -1e-8},
+        {"price_vol_tolerance": 0.0},
+        {"price_vol_tolerance": -1e-8},
+        {"max_iterations": 0},
+        {"max_iterations": -5},
+        {"max_iterations": 100.0},
+        {"max_iterations": True},
+    ],
+)
+def test_dirty_invalid_configuration_rejected(overrides):
+    kwargs = dict(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=0.6,
+    )
+    kwargs.update(overrides)
+    with pytest.raises((TypeError, ValueError)):
+        solve_implied_dirty_price_vol(**kwargs)
+
+
+def test_dirty_result_is_frozen():
+    result = solve_implied_dirty_price_vol(
+        forward_dirty_price=_DIRTY_F,
+        strike_dirty_price=_DIRTY_K,
+        time_to_expiry=_DIRTY_T,
+        discount_factor=_DIRTY_DF,
+        option_type=OptionType.CALL,
+        target_premium_per_100=0.6,
+    )
+    with pytest.raises(FrozenInstanceError):
+        result.status = BLIImpliedPriceVolSolverStatus.FAILED  # type: ignore[misc]
+
+
+def test_dirty_solver_only_calls_dirty_black76_wrapper():
+    # The dirty wrapper's own source must reach
+    # black76_dirty_price_option_pv_per_100 and never the clean wrapper --
+    # proving trial pricing never silently reuses the clean Black-76 call.
+    source = inspect.getsource(solve_implied_dirty_price_vol)
+    assert "black76_dirty_price_option_pv_per_100(" in source
+    assert "black76_price_option_pv_per_100(" not in source
+
+
+def test_clean_solver_only_calls_clean_black76_wrapper():
+    source = inspect.getsource(solve_implied_price_vol)
+    assert "black76_price_option_pv_per_100(" in source
+    assert "black76_dirty_price_option_pv_per_100(" not in source
+
+
+def test_dirty_and_clean_solvers_share_the_private_bisection_core():
+    # Both public wrappers delegate to the same private core -- the
+    # bisection/arbitrage-bound logic is not duplicated per wrapper.
+    clean_source = inspect.getsource(solve_implied_price_vol)
+    dirty_source = inspect.getsource(solve_implied_dirty_price_vol)
+    assert "_solve_bounded_implied_price_vol_core(" in clean_source
+    assert "_solve_bounded_implied_price_vol_core(" in dirty_source
