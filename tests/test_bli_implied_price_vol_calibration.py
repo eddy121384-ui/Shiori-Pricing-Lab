@@ -651,6 +651,7 @@ def test_retrieved_at_difference_does_not_affect_calibration():
 # --- 7. No mutation of request / benchmark / snapshot ------------------------------
 
 
+@_requires_quantlib
 def test_request_benchmark_and_snapshot_are_not_mutated():
     request = _REQUEST
     benchmark = _make_benchmark()
