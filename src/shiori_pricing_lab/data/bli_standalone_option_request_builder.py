@@ -72,6 +72,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICreditSpreadInput,
     BLICurvePoint,
     BLIDepositRateObservation,
+    BLIForwardCleanPriceInput,
     BLIMarketDataSnapshot,
     BLIMarketDataStatus,
     BLIVolatilityInput,
@@ -100,6 +101,7 @@ def build_bli_standalone_option_request(
     curve_points: Iterable[BLICurvePoint],
     volatility_input: BLIVolatilityInput,
     credit_spread_input: BLICreditSpreadInput,
+    forward_clean_price_input: BLIForwardCleanPriceInput,
     pricing_timestamp: str,
     expiry_timestamp: str,
     reporting_date: str,
@@ -124,6 +126,12 @@ def build_bli_standalone_option_request(
     to ``BLIStandaloneBondOptionRequest`` -- this builder computes, derives,
     or defaults none of them; its own coherence/format validation raises
     directly from that constructor.
+
+    ``forward_clean_price_input`` (Issue #94) is the explicit
+    ``BLIForwardCleanPriceInput`` market observation the OVME-aligned
+    standalone path prices from; it is stored on the assembled snapshot
+    verbatim -- this builder never constructs or derives a forward from a
+    spot price and a Bond Reference Curve.
 
     Raises :class:`TypeError` if ``bond_option`` is not a ``BondOption`` --
     checked before its ``underlying_isin`` is read, so the failure is clear
@@ -172,6 +180,7 @@ def build_bli_standalone_option_request(
         volatility_input=volatility_input,
         credit_spread_input=credit_spread_input,
         deposit_rate_observation=deposit_rate_observation,
+        forward_clean_price_input=forward_clean_price_input,
     )
 
     return BLIStandaloneBondOptionRequest(

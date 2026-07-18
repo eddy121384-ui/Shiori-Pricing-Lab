@@ -265,6 +265,56 @@ class BLIBondQuote:
 
 
 @dataclass(frozen=True)
+class BLIForwardCleanPriceInput:
+    """One explicit forward clean price observation (Issue #94).
+
+    The OVME-aligned standalone path (Issue #94 human methodology approval,
+    comment 5001749998; implementation authorization 5003670704) prices from
+    an **explicitly supplied** forward clean price with provenance -- it does
+    **not** construct the forward from a spot price and a Bond Reference
+    Curve, and performs no repo/financing derivation of any kind. This typed
+    input carries exactly that observation and its provenance; the numeric
+    forward is never inferred, defaulted, or reconstructed.
+
+    ``forward_clean_price_per_100`` must be a finite, strictly positive
+    number (a zero/negative/NaN forward is rejected outright, never silently
+    accepted). ``quote_side`` uses the existing ``TreasuryFTPQuoteSide``
+    enum/coercion pattern already used by ``BLIBondQuote`` for the spot
+    quote. ``status`` follows the same ACTIVE-only construction policy as
+    every other nested observation.
+
+    This is deliberately optional at the general ``BLIMarketDataSnapshot``
+    level (see that class): the legacy bundle path neither supplies nor reads
+    it, so its snapshots and fixtures stay backward compatible. The standalone
+    request requires it (see ``BLIStandaloneBondOptionRequest``).
+    """
+
+    forward_clean_price_per_100: float
+    quote_side: TreasuryFTPQuoteSide
+    source_system: str
+    status: BLIMarketDataStatus
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "quote_side", coerce_enum(self.quote_side, TreasuryFTPQuoteSide, "quote_side")
+        )
+        object.__setattr__(
+            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
+        )
+        _require_active_status(self.status, "forward_clean_price_input")
+
+        _require_non_blank(self.source_system, "source_system")
+        _require_finite_number(
+            self.forward_clean_price_per_100, "forward_clean_price_per_100"
+        )
+        if not self.forward_clean_price_per_100 > 0:
+            raise ValueError(
+                "forward_clean_price_per_100 must be positive, got "
+                f"{self.forward_clean_price_per_100}"
+            )
+
+
+@dataclass(frozen=True)
 class BLICurvePoint:
     """One tenor/rate row of a named curve (docs/23 §4.3, Annex B §B.2).
 
@@ -545,6 +595,7 @@ class BLIMarketDataSnapshot:
     volatility_input: BLIVolatilityInput
     credit_spread_input: BLICreditSpreadInput
     deposit_rate_observation: BLIDepositRateObservation | None = None
+    forward_clean_price_input: BLIForwardCleanPriceInput | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -570,6 +621,15 @@ class BLIMarketDataSnapshot:
         ):
             raise TypeError(
                 "deposit_rate_observation must be None or a BLIDepositRateObservation"
+            )
+        # Optional at the general snapshot level (Issue #94): the legacy
+        # bundle path neither supplies nor reads it, so its snapshots/fixtures
+        # stay backward compatible. The standalone request requires it.
+        if self.forward_clean_price_input is not None and not isinstance(
+            self.forward_clean_price_input, BLIForwardCleanPriceInput
+        ):
+            raise TypeError(
+                "forward_clean_price_input must be None or a BLIForwardCleanPriceInput"
             )
 
         curve_points = tuple(self.curve_points)

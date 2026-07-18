@@ -22,7 +22,11 @@ JSON object with exactly these top-level keys:
 - required: ``bond_option``, ``bond_reference_data_universe``,
   ``valuation_date``, ``as_of_timestamp``, ``source_system``,
   ``snapshot_id``, ``snapshot_status``, ``bond_quote``, ``curve_points``,
-  ``volatility_input``, ``credit_spread_input``, ``pricing_timestamp``,
+  ``volatility_input``, ``credit_spread_input``,
+  ``forward_clean_price_input`` (Issue #94 -- a nested object mirroring
+  ``BLIForwardCleanPriceInput``: the explicit forward clean price the
+  OVME-aligned standalone path prices from, never reconstructed from a
+  spot price and a Bond Reference Curve), ``pricing_timestamp``,
   ``expiry_timestamp``, ``reporting_date``, ``forward_settlement_date``,
   ``option_settlement_date`` (Issue #94 human methodology approval,
   comment 5001749998 -- forwarded verbatim to
@@ -67,6 +71,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICreditSpreadInput,
     BLICurvePoint,
     BLIDepositRateObservation,
+    BLIForwardCleanPriceInput,
     BLIVolatilityInput,
 )
 from shiori_pricing_lab.data.bli_standalone_option_request import (
@@ -93,6 +98,7 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
         "curve_points",
         "volatility_input",
         "credit_spread_input",
+        "forward_clean_price_input",
         "pricing_timestamp",
         "expiry_timestamp",
         "reporting_date",
@@ -174,6 +180,9 @@ def build_request_from_standalone_option_case(
     bond_quote = BLIBondQuote(**envelope["bond_quote"])
     volatility_input = BLIVolatilityInput(**envelope["volatility_input"])
     credit_spread_input = BLICreditSpreadInput(**envelope["credit_spread_input"])
+    forward_clean_price_input = BLIForwardCleanPriceInput(
+        **envelope["forward_clean_price_input"]
+    )
 
     deposit_raw = envelope.get("deposit_rate_observation")
     deposit_rate_observation = (
@@ -192,6 +201,7 @@ def build_request_from_standalone_option_case(
         curve_points=curve_points,
         volatility_input=volatility_input,
         credit_spread_input=credit_spread_input,
+        forward_clean_price_input=forward_clean_price_input,
         pricing_timestamp=envelope["pricing_timestamp"],
         expiry_timestamp=envelope["expiry_timestamp"],
         reporting_date=envelope["reporting_date"],
@@ -238,7 +248,9 @@ def prepare_standalone_display(
         "total_notional_model_fair_premium": result.pv,
         "forward_clean_price_per_100": assumptions.get("forward_clean_price_per_100"),
         "black76_pv_per_100": assumptions.get("black76_pv_per_100"),
-        "option_discount_factor": assumptions.get("option_discount_factor"),
+        "effective_reporting_date_discount_factor": assumptions.get(
+            "effective_reporting_date_discount_factor"
+        ),
         "time_to_expiry_year_fraction": assumptions.get("time_to_expiry_year_fraction"),
         "pv_scaling_formula": assumptions.get("pv_scaling_formula"),
         "priced_component": assumptions.get("priced_component"),

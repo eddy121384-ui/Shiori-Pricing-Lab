@@ -54,8 +54,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _APP_PATH = _REPO_ROOT / "src" / "shiori_pricing_lab" / "app" / "streamlit_app.py"
 _EXAMPLE_PATH = _REPO_ROOT / "examples" / "standalone_option_case.json"
 
-_EXPECTED_PV = 2.237384924264648
-_EXPECTED_BLACK76_PV_PER_100 = 4.474769848529296
+_EXPECTED_PV = 2.2755055634196273
+_EXPECTED_BLACK76_PV_PER_100 = 4.551011126839255
 _RETRIEVED_AT = "2026-07-11T09:00:00Z"
 _SOURCE_AS_OF = "2026-07-01T16:00:00Z"
 
@@ -179,7 +179,7 @@ def test_success_render_shows_separate_premium_metrics():
     for label in (
         "Forward clean price per 100",
         "Black-76 PV per 100",
-        "Option discount factor",
+        "Effective reporting-date discount factor",
         "Time to expiry (years)",
     ):
         assert label in metrics

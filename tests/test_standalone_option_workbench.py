@@ -33,6 +33,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICurvePoint,
     BLICurvePurpose,
     BLICurveRateBasis,
+    BLIForwardCleanPriceInput,
     BLIMarketDataStatus,
 )
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
@@ -45,6 +46,7 @@ from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp_standalone_option
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.pricing.result import PricingErrorCode, PricingStatus
+from shiori_pricing_lab.products.enums import TreasuryFTPQuoteSide
 from shiori_pricing_lab.products.fixtures import SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT
 from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 
@@ -55,13 +57,14 @@ _requires_quantlib = pytest.mark.skipif(
 
 _EXAMPLE_PATH = Path(__file__).resolve().parents[1] / "examples" / "standalone_option_case.json"
 
-# Pinned expected values -- identical to the standalone engine/builder tests,
-# whose by-hand Annex A derivation is the source of truth.
-_EXPECTED_FORWARD_CLEAN_PRICE_PER_100 = 101.22605288103159
+# Pinned expected OVME values for the example envelope (explicit MID forward
+# of 101.30; reporting_date == valuation_date so DF-to-reporting is 1.0 and the
+# effective DF equals the pricing-to-option-settlement DF at 2026-10-01).
+_EXPECTED_FORWARD_CLEAN_PRICE_PER_100 = 101.30
 _EXPECTED_TIME_TO_EXPIRY = 0.2465753424657534
-_EXPECTED_OPTION_DISCOUNT_FACTOR = 0.9929452501091504
-_EXPECTED_BLACK76_PV_PER_100 = 4.474769848529296
-_EXPECTED_PV = 2.237384924264648
+_EXPECTED_EFFECTIVE_DF = 0.9927830612383566
+_EXPECTED_BLACK76_PV_PER_100 = 4.551011126839255
+_EXPECTED_PV = 2.2755055634196273
 
 
 def _example_text() -> str:
@@ -87,16 +90,6 @@ def _direct_reference_request() -> BLIStandaloneBondOptionRequest:
     }
     curve_points = tuple(
         BLICurvePoint(
-            curve_id="SANITIZED_BOND_REFERENCE_CURVE",
-            curve_name="SANITIZED_BOND_REFERENCE_CURVE",
-            curve_purpose=BLICurvePurpose.BOND_REFERENCE_CURVE,
-            tenor=tenor,
-            rate=rate,
-            **common,
-        )
-        for tenor, rate in (("1M", 0.030), ("1Y", 0.035))
-    ) + tuple(
-        BLICurvePoint(
             curve_id="SANITIZED_OPTION_DISCOUNT_CURVE",
             curve_name="SANITIZED_OPTION_DISCOUNT_CURVE",
             curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
@@ -105,6 +98,12 @@ def _direct_reference_request() -> BLIStandaloneBondOptionRequest:
             **common,
         )
         for tenor, rate in (("1M", 0.028), ("1Y", 0.032))
+    )
+    forward_clean_price_input = BLIForwardCleanPriceInput(
+        forward_clean_price_per_100=101.30,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_system="SANITIZED_SYNTHETIC_MARKET_SOURCE",
+        status=BLIMarketDataStatus.ACTIVE,
     )
     return build_bli_standalone_option_request(
         bond_option=SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT.bond_option,
@@ -118,6 +117,7 @@ def _direct_reference_request() -> BLIStandaloneBondOptionRequest:
         curve_points=curve_points,
         volatility_input=SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.volatility_input,
         credit_spread_input=SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.credit_spread_input,
+        forward_clean_price_input=forward_clean_price_input,
         pricing_timestamp="2026-07-01T16:00:00Z",
         expiry_timestamp="2026-09-29T16:00:00Z",
         reporting_date="2026-07-01",
@@ -161,7 +161,9 @@ def test_example_reaches_engine_and_reproduces_pinned_premium():
         _EXPECTED_FORWARD_CLEAN_PRICE_PER_100
     )
     assert display["time_to_expiry_year_fraction"] == pytest.approx(_EXPECTED_TIME_TO_EXPIRY)
-    assert display["option_discount_factor"] == pytest.approx(_EXPECTED_OPTION_DISCOUNT_FACTOR)
+    assert display["effective_reporting_date_discount_factor"] == pytest.approx(
+        _EXPECTED_EFFECTIVE_DF
+    )
     assert display["black76_pv_per_100"] == pytest.approx(_EXPECTED_BLACK76_PV_PER_100)
 
 
@@ -192,7 +194,10 @@ def test_display_copies_result_values_verbatim():
     assert display["model_fair_premium_per_100"] == assumptions["black76_pv_per_100"]
     assert display["black76_pv_per_100"] == assumptions["black76_pv_per_100"]
     assert display["forward_clean_price_per_100"] == assumptions["forward_clean_price_per_100"]
-    assert display["option_discount_factor"] == assumptions["option_discount_factor"]
+    assert (
+        display["effective_reporting_date_discount_factor"]
+        == assumptions["effective_reporting_date_discount_factor"]
+    )
     assert display["engine_name"] == result.engine_name
     assert display["engine_version"] == result.engine_version
     assert display["result_currency"] == result.result_currency
@@ -223,9 +228,15 @@ def test_workflow_preserves_provenance_quote_side_and_curve_identity():
     expected_quote_side = SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.bond_quote.quote_side
     assert snapshot.bond_quote.quote_side == expected_quote_side
 
+    # OVME alignment (Issue #94): the explicit forward input replaces the
+    # Bond Reference Curve; the example carries only the Option Discount Curve.
     by_id = {(p.curve_id, p.curve_purpose) for p in snapshot.curve_points}
-    assert ("SANITIZED_BOND_REFERENCE_CURVE", BLICurvePurpose.BOND_REFERENCE_CURVE) in by_id
     assert ("SANITIZED_OPTION_DISCOUNT_CURVE", BLICurvePurpose.OPTION_DISCOUNT_CURVE) in by_id
+    assert all(
+        p.curve_purpose is BLICurvePurpose.OPTION_DISCOUNT_CURVE for p in snapshot.curve_points
+    )
+    # Forward input provenance + side coherence preserved.
+    assert snapshot.forward_clean_price_input.quote_side == snapshot.bond_quote.quote_side
 
 
 # --- 4. retrieved_at stays separate, caller-supplied, defaults to None -------

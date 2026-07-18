@@ -88,28 +88,26 @@ structured-product payoff. ``assumptions["priced_component"]``,
 this explicit and machine-readable on every success result, so a caller
 cannot mistake the returned ``pv`` for a whole-structured-product value.
 
-**Standalone bond-option sibling (Issue #95):** the same reviewed guard +
-forward-clean-price + curve + Black-76 + result composition is exposed a
-second time as ``price_bli_mvp_standalone_option(request)``, accepting a
-``BLIStandaloneBondOptionRequest`` (one bare ``BondOption`` + reference
-data + market snapshot, no ``DepositLeg`` / ``BondLinkedStructuredProduct``
-wrapper and no Deposit Curve). Both public entrypoints unpack their
-container and delegate to the private, container-agnostic
-``_price_bli_mvp_from_fields`` helper (which runs the same
-``_classify_guard_rejection_from_fields`` and the same
-``forward_clean_price_per_100`` / Black-76 chain), so no pricing formula is
-duplicated. For economically identical inputs the two paths produce an
-identical ``PricingResult`` -- every numeric output and every other
-assumption key matches -- except for three intentional, non-numeric
-differences: ``product_id`` / ``product_type`` (the standalone result uses
-the bare ``BondOption``'s own ``"BOND_OPTION"`` discriminator, never a new
-one); the single explanatory ``assumptions["bond_reference_curve_purpose"]``
-label (the bundle path preserves its exact legacy string naming
-``forward_clean_price_per_100_for_bundle`` as an observable-result
-contract, while the standalone path names the ``forward_clean_price_per_100``
-primitive it actually reaches -- Sophira Red-zone review of PR #105); and
-the context-specific error ``detail`` identifiers (the bundle path keeps
-``bundle_id``; the standalone path carries only ``product_id``).
+**Standalone bond-option OVME-aligned path (Issue #94):**
+``price_bli_mvp_standalone_option(request)`` is now a **separate numeric
+composition** from the bundle path, implementing the Eddy-approved
+Bloomberg (OVME) methodology for the standalone European price-based
+cash-settled option (comments 5001749998 / 5003670704). It accepts a
+``BLIStandaloneBondOptionRequest`` and, unlike the legacy bundle path,
+does **not** share ``_price_bli_mvp_from_fields`` and does **not**
+construct a forward from a spot price and the Bond Reference Curve:
+instead it reads an explicit ``forward_clean_price_input`` and composes
+dirty forward / dirty strike (clean + accrued interest at the bond forward
+settlement date), fractional-timestamp ACT/ACT option time, and an Option
+Discount Curve discount factor to option settlement divided by the factor
+to the reporting date -- all via the focused
+``resolve_standalone_option_pricing_inputs`` resolver and the dirty-price
+Black wrapper ``black76_dirty_price_option_pv_per_100``. It uses its own
+``STANDALONE_ENGINE_NAME`` / ``STANDALONE_ENGINE_VERSION`` provenance and
+its own ``product_id`` / ``product_type`` (the bare ``BondOption``'s
+``"BOND_OPTION"`` discriminator). The legacy bundle path
+(:func:`price_bli_mvp`) is numerically and contractually unchanged by this
+slice.
 
 **Unchanged from the prior skeleton:** ``price_bli_mvp`` still accepts
 only a ``BLIMVPInputBundle`` (never calls ``resolve_bond_reference_data``
@@ -139,6 +137,7 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
+    black76_dirty_price_option_pv_per_100,
     black76_price_option_pv_per_100,
 )
 from shiori_pricing_lab.pricing.bli_curve_discount_factor import (
@@ -151,6 +150,9 @@ from shiori_pricing_lab.pricing.bli_mvp_required_input_guard import (
     RequiredInputGuardResult,
     check_bli_mvp_required_inputs,
     check_bli_mvp_standalone_option_required_inputs,
+)
+from shiori_pricing_lab.pricing.bli_standalone_option_pricing_inputs import (
+    resolve_standalone_option_pricing_inputs,
 )
 from shiori_pricing_lab.pricing.bli_valuation_time import year_fraction_to_expiry
 from shiori_pricing_lab.pricing.result import (
@@ -165,6 +167,12 @@ from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceD
 
 ENGINE_NAME = "bli_mvp_black76_forward_clean_price_engine"
 ENGINE_VERSION = "1.0.0"
+
+# Separate provenance for the OVME-aligned standalone engine (Issue #94), so
+# the legacy bundle engine name/version and its pinned results never change.
+STANDALONE_ENGINE_NAME = "bli_standalone_bond_option_ovme_black76_engine"
+STANDALONE_ENGINE_VERSION = "1.0.0"
+_METHOD_STANDALONE_OVME_BLACK76 = "black76_forward_dirty_price_ovme_v1"
 
 # Method identifiers distinguish "never attempted real pricing" (the
 # guard rejected the bundle) from "pricing was attempted" (success or a
@@ -186,10 +194,6 @@ _METHOD_BLACK76_FORWARD_CLEAN_PRICE = "black76_forward_clean_price_v1"
 _BUNDLE_BOND_REFERENCE_CURVE_PURPOSE_NOTE = (
     "BOND_REFERENCE_CURVE (used only for forward clean price, via "
     "forward_clean_price_per_100_for_bundle)"
-)
-_STANDALONE_BOND_REFERENCE_CURVE_PURPOSE_NOTE = (
-    "BOND_REFERENCE_CURVE (used only for forward clean price, via "
-    "forward_clean_price_per_100)"
 )
 
 # Volatility bases this engine can use as sigma without any conversion --
@@ -425,26 +429,70 @@ def price_bli_mvp(bundle: BLIMVPInputBundle) -> PricingResult:
     )
 
 
+def _classify_standalone_guard_rejection_from_fields(
+    bond_option: BondOption,
+    market_data_snapshot: BLIMarketDataSnapshot,
+) -> PricingErrorCode:
+    """Return the ``PricingErrorCode`` for a guard-rejected standalone request.
+
+    Reads typed fields directly (never the guard's plain-text reasons). An
+    unsupported product shape (exercise style, payoff basis, settlement
+    type, or a volatility basis with no conversion available) always wins
+    over merely-missing market data; a supported shape whose explicit
+    ``forward_clean_price_input`` is absent maps to
+    ``MISSING_MARKET_DATA`` (the standalone path prices from that explicit
+    forward, so its absence is missing market data, not an unsupported
+    shape).
+    """
+
+    volatility_basis = market_data_snapshot.volatility_input.volatility_basis
+    shape_supported = (
+        bond_option.exercise_style is ExerciseStyle.EUROPEAN
+        and bond_option.payoff_basis is PayoffBasis.PRICE
+        and bond_option.settlement_type is SettlementType.CASH
+        and volatility_basis in _SUPPORTED_VOLATILITY_BASES
+    )
+    if not shape_supported:
+        return PricingErrorCode.UNSUPPORTED_PRODUCT
+    if market_data_snapshot.forward_clean_price_input is None:
+        return PricingErrorCode.MISSING_MARKET_DATA
+    return PricingErrorCode.UNSUPPORTED_PRODUCT
+
+
 def price_bli_mvp_standalone_option(
     request: BLIStandaloneBondOptionRequest,
 ) -> PricingResult:
-    """Return a deterministic ``PricingResult`` for a standalone bond option.
+    """Return a deterministic ``PricingResult`` for a standalone bond option (OVME-aligned).
 
-    Standalone-request sibling of :func:`price_bli_mvp` (Issue #95): accepts
-    only a ``BLIStandaloneBondOptionRequest`` -- raises :class:`TypeError`
-    for anything else -- and reaches the identical reviewed guard +
-    forward-clean-price + curve + Black-76 + result composition via the same
-    shared :func:`_price_bli_mvp_from_fields`. For economically identical
-    inputs it reproduces the bundle path's premium and every intermediate
-    numeric output exactly; the only intentional differences are
-    ``product_id`` / ``product_type`` (taken from the bare ``BondOption`` --
-    ``"BOND_OPTION"``, never a new discriminator), the single explanatory
-    ``assumptions["bond_reference_curve_purpose"]`` label (which truthfully
-    names ``forward_clean_price_per_100`` here, vs the bundle path's exact
-    preserved legacy string), and the context-specific error ``detail``
-    identifiers (``product_id`` only, no ``bundle_id`` and no request id).
-    Never mutates ``request``; reads no deposit leg and requires no Deposit
-    Curve.
+    Standalone European price-based cash-settled path implementing the
+    Eddy-approved Bloomberg (OVME) methodology (Issue #94, comments
+    5001749998 / 5003670704). It is a **separate numeric composition** from
+    the legacy bundle path :func:`price_bli_mvp` -- it does not share
+    :func:`_price_bli_mvp_from_fields` and does not construct a forward from
+    a spot price and the Bond Reference Curve. In order:
+
+    1. run the OVME-aligned standalone guard
+       (:func:`check_bli_mvp_standalone_option_required_inputs`);
+    2. resolve the approved inputs exactly once through the focused
+       :func:`resolve_standalone_option_pricing_inputs` (explicit forward
+       clean price; accrued interest at the forward settlement date; dirty
+       forward / dirty strike; ACT/ACT option time; Option Discount Curve DF
+       to option settlement divided by DF to reporting date);
+    3. read ``PRICE_VOL`` / ``EQUIVALENT_PRICE_VOL`` directly as sigma;
+    4. call the dirty-price Black wrapper
+       (:func:`black76_dirty_price_option_pv_per_100`);
+    5. scale total PV = premium_per_100 * notional / 100.
+
+    Uses separate ``STANDALONE_ENGINE_NAME`` / ``STANDALONE_ENGINE_VERSION``
+    provenance so the legacy bundle constants and pinned results never
+    change. Failure/error mapping mirrors the bundle path: a guard rejection
+    is a ``FAILED`` result classified from typed fields; a downstream
+    ``ValueError`` (curve out of range, invalid accrued-interest date, a
+    non-positive resolved DF, ...) becomes ``FAILED / ENGINE_ERROR``; a
+    ``BLIQuantLibNotAvailableError`` (``RuntimeError``) propagates unchanged,
+    exactly as the bundle path lets it propagate. ``position`` (BUY/SELL) is
+    never applied to the sign of ``pv``. Raises :class:`TypeError` for a
+    non-``BLIStandaloneBondOptionRequest``; never mutates ``request``.
     """
 
     if not isinstance(request, BLIStandaloneBondOptionRequest):
@@ -453,27 +501,116 @@ def price_bli_mvp_standalone_option(
         )
 
     bond_option = request.bond_option
+    snapshot = request.market_data_snapshot
 
     common_fields = dict(
         product_id=bond_option.product_id,
         product_type=bond_option.product_type,
         valuation_date=request.valuation_date,
         result_currency=bond_option.currency.value,
-        engine_name=ENGINE_NAME,
-        engine_version=ENGINE_VERSION,
-        market_data_as_of=request.market_data_snapshot.as_of_timestamp,
+        engine_name=STANDALONE_ENGINE_NAME,
+        engine_version=STANDALONE_ENGINE_VERSION,
+        market_data_as_of=snapshot.as_of_timestamp,
     )
+    error_detail_base = {"product_id": bond_option.product_id}
 
     guard_result = check_bli_mvp_standalone_option_required_inputs(request)
+    if not guard_result.supported:
+        error_code = _classify_standalone_guard_rejection_from_fields(bond_option, snapshot)
+        return PricingResult(
+            **common_fields,
+            status=PricingStatus.FAILED,
+            method=_METHOD_NOT_SUPPORTED,
+            errors=(
+                PricingMessage(
+                    code=error_code,
+                    message=(
+                        "BLI standalone required-input guard rejected this request: "
+                        f"{'; '.join(guard_result.reasons)}"
+                    ),
+                    detail={**error_detail_base, "reasons": list(guard_result.reasons)},
+                ),
+            ),
+        )
 
-    return _price_bli_mvp_from_fields(
-        bond_option=bond_option,
-        valuation_date=request.valuation_date,
-        resolved_bond_reference_data=request.resolved_bond_reference_data,
-        market_data_snapshot=request.market_data_snapshot,
-        guard_result=guard_result,
-        common_fields=common_fields,
-        error_detail_base={"product_id": bond_option.product_id},
-        subject_label="request",
-        bond_reference_curve_purpose_note=_STANDALONE_BOND_REFERENCE_CURVE_PURPOSE_NOTE,
+    try:
+        inputs = resolve_standalone_option_pricing_inputs(request)
+        price_volatility = snapshot.volatility_input.volatility
+        pv_per_100 = black76_dirty_price_option_pv_per_100(
+            forward_dirty_price=inputs.forward_dirty_price_per_100,
+            strike_dirty_price=inputs.strike_dirty_price_per_100,
+            price_volatility=price_volatility,
+            time_to_expiry=inputs.time_to_expiry_year_fraction,
+            discount_factor=inputs.effective_reporting_date_discount_factor,
+            option_type=bond_option.option_type,
+        )
+    except ValueError as exc:
+        return PricingResult(
+            **common_fields,
+            status=PricingStatus.FAILED,
+            method=_METHOD_STANDALONE_OVME_BLACK76,
+            errors=(
+                PricingMessage(
+                    code=PricingErrorCode.ENGINE_ERROR,
+                    message=str(exc),
+                    detail={**error_detail_base, "exception_type": type(exc).__name__},
+                ),
+            ),
+        )
+
+    pv = pv_per_100 * bond_option.notional / 100.0
+    forward_input = snapshot.forward_clean_price_input
+
+    return PricingResult(
+        **common_fields,
+        status=PricingStatus.SUCCESS,
+        method=_METHOD_STANDALONE_OVME_BLACK76,
+        pv=pv,
+        assumptions={
+            "methodology": "ovme_dirty_price_black76_act_act_option_discount_curve",
+            "forward_clean_price_per_100": inputs.forward_clean_price_per_100,
+            "forward_clean_price_source_system": forward_input.source_system,
+            "forward_clean_price_quote_side": forward_input.quote_side.value,
+            "strike_clean_price_per_100": inputs.strike_clean_price_per_100,
+            "accrued_interest_at_forward_settlement_per_100": (
+                inputs.accrued_interest_at_forward_settlement_per_100
+            ),
+            "forward_dirty_price_per_100": inputs.forward_dirty_price_per_100,
+            "strike_dirty_price_per_100": inputs.strike_dirty_price_per_100,
+            "pricing_timestamp": request.pricing_timestamp,
+            "expiry_timestamp": request.expiry_timestamp,
+            "reporting_date": request.reporting_date,
+            "forward_settlement_date": request.forward_settlement_date,
+            "option_settlement_date": request.option_settlement_date,
+            "time_to_expiry_year_fraction": inputs.time_to_expiry_year_fraction,
+            "time_to_expiry_convention": "ACT_ACT_ISDA_fractional_timestamp",
+            "pricing_to_reporting_discount_factor": (
+                inputs.pricing_to_reporting_discount_factor
+            ),
+            "pricing_to_option_settlement_discount_factor": (
+                inputs.pricing_to_option_settlement_discount_factor
+            ),
+            "effective_reporting_date_discount_factor": (
+                inputs.effective_reporting_date_discount_factor
+            ),
+            "option_discount_curve_purpose": "OPTION_DISCOUNT_CURVE (used for the option "
+            "payoff discount factor to option settlement and the reporting-date factor)",
+            "price_volatility": price_volatility,
+            "volatility_basis": snapshot.volatility_input.volatility_basis.value,
+            "black76_pv_per_100": pv_per_100,
+            "notional": bond_option.notional,
+            "pv_scaling_formula": "pv = black76_pv_per_100 * notional / 100",
+            "option_type": bond_option.option_type.value,
+            "position_sign_applied": False,
+            "priced_component": "bond_option_leg",
+            "priced_component_scope": "option_leg_only_not_full_structured_product",
+            "excluded_components": [
+                "deposit_leg",
+                "principal_redemption",
+                "physical_delivery",
+            ],
+            "forward_construction": (
+                "explicit_forward_clean_price_input_no_repo_forward_construction"
+            ),
+        },
     )

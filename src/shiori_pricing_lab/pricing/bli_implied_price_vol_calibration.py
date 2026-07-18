@@ -1,5 +1,23 @@
 """``calibrate_bli_implied_price_vol``: standalone calibration wiring (Issue #99 PR B).
 
+**Issue #94 methodology-alignment block (comment 5003670704).** The
+standalone fair-premium path is now OVME-aligned (dirty forward/strike,
+fractional ACT/ACT option time, Option-Discount-Curve reporting-date
+discount -- see ``price_bli_mvp_standalone_option``), but the
+implied-``PRICE_VOL`` solver's public contract is still clean-price/ACT-365F.
+This module therefore no longer runs the legacy clean-price/ACT-365
+composition: after its methodology-neutral coherence gates (request
+support, identity, source-date) it returns an explicit
+``METHODOLOGY_NOT_ALIGNED`` outcome **before** any forward/strike/T/DF
+resolution or solver call, so no plausible-but-inconsistent implied vol is
+ever emitted. Safely aligning it would require either pushing dirty prices
+through the solver's ``forward_clean_price`` / ``strike_clean_price``
+arguments (whose contracts label them clean) or a broad public solver/result
+migration -- both out of bounds for this slice; a dedicated dirty-price
+solver contract is a separate future slice. The historical description of
+the F/T/DF composition below is retained for context but is not currently
+reached.
+
 Scope, per the methodology approved in Issue #99 comments 4966208056,
 4966209368, 4966210598, 4966211726, and the implementation authorization in
 comment 4966213294: one isolated function that wires a
@@ -25,10 +43,13 @@ A / #109) to the bounded implied-``PRICE_VOL`` solver (Issue #99 PR A /
 Calibration occurs *before* a repricing ``PricingResult`` exists for the
 calibrated volatility (Issue #99 methodology comment 4965749214 §8) --
 ``price_bli_mvp`` / ``price_bli_mvp_standalone_option`` are never invoked
-here. ``ENGINE_NAME`` / ``ENGINE_VERSION`` are imported from
-``pricing/bli_pricing_engine.py`` only as the two existing provenance
+here. ``STANDALONE_ENGINE_NAME`` / ``STANDALONE_ENGINE_VERSION`` are imported
+from ``pricing/bli_pricing_engine.py`` only as the two existing provenance
 string constants stamped on the result -- no new model name or version is
-introduced.
+introduced. They identify the standalone OVME pricing methodology against
+which calibration compatibility is being assessed (Issue #94 Codex P2): the
+result is stamped with the standalone engine's provenance, not the legacy
+bundle engine's, even though no solver or pricing calculation runs.
 
 **This module does not call ``compare_bli_benchmark``** (Issue #98 PR B /
 #110) and does not require an existing ``PricingResult`` as a prerequisite.
@@ -86,6 +107,7 @@ market calibration evidence, or UAT.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 
@@ -95,24 +117,20 @@ from shiori_pricing_lab.data.bli_benchmark_quote import (
     BLIBenchmarkQuoteSide,
     BLIBenchmarkSourceType,
 )
-from shiori_pricing_lab.data.bli_snapshot import BLICurvePurpose, BLIVolatilityBasis
+from shiori_pricing_lab.data.bli_snapshot import BLIVolatilityBasis
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
-from shiori_pricing_lab.pricing.bli_curve_discount_factor import (
-    discount_factor_from_continuous_zero_curve,
-)
-from shiori_pricing_lab.pricing.bli_forward_clean_price import forward_clean_price_per_100
 from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
     BLIImpliedPriceVolSolverResult,
-    BLIImpliedPriceVolSolverStatus,
-    solve_implied_price_vol,
 )
 from shiori_pricing_lab.pricing.bli_mvp_required_input_guard import (
     check_bli_mvp_standalone_option_required_inputs,
 )
-from shiori_pricing_lab.pricing.bli_pricing_engine import ENGINE_NAME, ENGINE_VERSION
-from shiori_pricing_lab.pricing.bli_valuation_time import year_fraction_to_expiry
+from shiori_pricing_lab.pricing.bli_pricing_engine import (
+    STANDALONE_ENGINE_NAME,
+    STANDALONE_ENGINE_VERSION,
+)
 from shiori_pricing_lab.products.enums import Currency, OptionType, coerce_enum
 
 
@@ -144,6 +162,16 @@ class BLIImpliedPriceVolCalibrationReason(StrEnum):
     SOURCE_DATE_MISMATCH = "SOURCE_DATE_MISMATCH"
     INPUT_RESOLUTION_FAILED = "INPUT_RESOLUTION_FAILED"
     SOLVER_FAILED = "SOLVER_FAILED"
+    # Issue #94: the standalone fair-premium path is now OVME-aligned (dirty
+    # forward/strike, ACT/ACT option time, Option-Discount-Curve reporting-date
+    # discount), but the implied-PRICE_VOL solver's public contract is still
+    # clean-price/ACT-365. Rather than silently keep calibrating on the stale
+    # composition (or fake alignment by pushing dirty prices through the
+    # solver's clean-labelled arguments), calibration returns this explicit
+    # outcome before any legacy F/T/DF resolution -- no plausible-but-
+    # inconsistent implied vol is ever emitted. A dedicated dirty-price solver
+    # contract is a separate future slice.
+    METHODOLOGY_NOT_ALIGNED = "METHODOLOGY_NOT_ALIGNED"
 
 
 def _reject_foreign_enum_active_quote_side(value: object) -> None:
@@ -165,6 +193,62 @@ def _reject_foreign_enum_active_quote_side(value: object) -> None:
             "active_quote_side must be a BLIBenchmarkQuoteSide member or one of "
             f"{{BID, MID, OFFER}}, got foreign enum {value!r}"
         )
+
+
+def _require_finite_non_bool_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def _validate_solver_configuration(
+    *,
+    lower_price_vol: float,
+    upper_price_vol: float,
+    premium_tolerance_per_100: float,
+    price_vol_tolerance: float,
+    max_iterations: int,
+) -> None:
+    """Validate the five public solver-configuration arguments (Issue #94).
+
+    The implied-``PRICE_VOL`` solver is no longer reached on the OVME-aligned
+    standalone path (calibration returns ``METHODOLOGY_NOT_ALIGNED`` before
+    any solver call), but these arguments remain part of this function's
+    public contract. Validating them here -- in the same accepted/rejected
+    domain and order ``solve_implied_price_vol`` itself uses -- keeps a
+    malformed caller configuration (e.g. ``lower_price_vol=-1.0``) a
+    ``ValueError`` rather than a silently-successful methodology block. No
+    normalization, clamping, fallback, widening, or default repair is applied;
+    no solver runs and no F/K/T/DF is resolved.
+    """
+
+    lower_price_vol = _require_finite_non_bool_number(lower_price_vol, "lower_price_vol")
+    if not lower_price_vol > 0:
+        raise ValueError(f"lower_price_vol must be positive, got {lower_price_vol!r}")
+    upper_price_vol = _require_finite_non_bool_number(upper_price_vol, "upper_price_vol")
+    if not lower_price_vol < upper_price_vol:
+        raise ValueError(
+            "lower_price_vol must be strictly less than upper_price_vol, got "
+            f"lower_price_vol={lower_price_vol!r} upper_price_vol={upper_price_vol!r}"
+        )
+    premium_tolerance_per_100 = _require_finite_non_bool_number(
+        premium_tolerance_per_100, "premium_tolerance_per_100"
+    )
+    if not premium_tolerance_per_100 > 0:
+        raise ValueError(
+            f"premium_tolerance_per_100 must be positive, got {premium_tolerance_per_100!r}"
+        )
+    price_vol_tolerance = _require_finite_non_bool_number(
+        price_vol_tolerance, "price_vol_tolerance"
+    )
+    if not price_vol_tolerance > 0:
+        raise ValueError(f"price_vol_tolerance must be positive, got {price_vol_tolerance!r}")
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int):
+        raise ValueError(f"max_iterations must be a non-bool int, got {max_iterations!r}")
+    if not max_iterations > 0:
+        raise ValueError(f"max_iterations must be positive, got {max_iterations!r}")
 
 
 @dataclass(frozen=True)
@@ -270,8 +354,8 @@ def calibrate_bli_implied_price_vol(
             status=status,
             reason=reason,
             active_quote_side=resolved_active_quote_side,
-            pricing_engine_name=ENGINE_NAME,
-            pricing_engine_version=ENGINE_VERSION,
+            pricing_engine_name=STANDALONE_ENGINE_NAME,
+            pricing_engine_version=STANDALONE_ENGINE_VERSION,
             product_id=benchmark.product_id,
             snapshot_id=benchmark.snapshot_id,
             underlying_id=benchmark.underlying_id,
@@ -400,74 +484,13 @@ def calibrate_bli_implied_price_vol(
             ),
         )
 
-    # --- 8. Resolve F/K/T/DF exactly once ---------------------------------------
-    # strike_clean_price is a plain field read (guaranteed non-None by the
-    # request-support gate above) -- no helper call, cannot fail.
-    strike_clean_price = bond_option.strike_price
-
-    try:
-        forward_clean_price = forward_clean_price_per_100(
-            bond=request.resolved_bond_reference_data,
-            spot_clean_price=snapshot.bond_quote.clean_price_per_100,
-            valuation_date=request.valuation_date,
-            expiry_date=bond_option.expiry_date,
-            curve_points=snapshot.curve_points,
-        )
-    except ValueError as exc:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-            reason=BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED,
-            diagnostic_note=(
-                f"forward_clean_price_per_100 raised {type(exc).__name__}: {exc}"
-            ),
-            strike_clean_price=strike_clean_price,
-            resolution_error_type=type(exc).__name__,
-            resolution_error_message=str(exc),
-        )
-
-    try:
-        time_to_expiry = year_fraction_to_expiry(request.valuation_date, bond_option.expiry_date)
-    except ValueError as exc:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-            reason=BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED,
-            diagnostic_note=f"year_fraction_to_expiry raised {type(exc).__name__}: {exc}",
-            forward_clean_price=forward_clean_price,
-            strike_clean_price=strike_clean_price,
-            resolution_error_type=type(exc).__name__,
-            resolution_error_message=str(exc),
-        )
-
-    try:
-        option_discount_factor = discount_factor_from_continuous_zero_curve(
-            snapshot.curve_points,
-            currency=bond_option.currency,
-            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
-            target_year_fraction=time_to_expiry,
-        )
-    except ValueError as exc:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-            reason=BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED,
-            diagnostic_note=(
-                f"discount_factor_from_continuous_zero_curve raised {type(exc).__name__}: {exc}"
-            ),
-            forward_clean_price=forward_clean_price,
-            strike_clean_price=strike_clean_price,
-            time_to_expiry=time_to_expiry,
-            resolution_error_type=type(exc).__name__,
-            resolution_error_message=str(exc),
-        )
-
-    # --- 9. Solve exactly once; a solver ValueError (bad solver config) --------
-    # propagates unchanged -- never caught or relabeled here.
-    solver_result = solve_implied_price_vol(
-        forward_clean_price=forward_clean_price,
-        strike_clean_price=strike_clean_price,
-        time_to_expiry=time_to_expiry,
-        discount_factor=option_discount_factor,
-        option_type=bond_option.option_type,
-        target_premium_per_100=benchmark.premium_per_100,
+    # --- 7b. Solver-configuration validation (Issue #94 Codex P2) ---------------
+    # The five public solver-configuration arguments used to be validated by
+    # solve_implied_price_vol (now unreachable on this path). Validate them here
+    # -- after every coherence gate above, before the methodology block -- so a
+    # malformed configuration stays a ValueError rather than silently returning
+    # a structured methodology block. No solver runs and no F/K/T/DF is resolved.
+    _validate_solver_configuration(
         lower_price_vol=lower_price_vol,
         upper_price_vol=upper_price_vol,
         premium_tolerance_per_100=premium_tolerance_per_100,
@@ -475,31 +498,35 @@ def calibrate_bli_implied_price_vol(
         max_iterations=max_iterations,
     )
 
-    if solver_result.status is BLIImpliedPriceVolSolverStatus.SUCCESS:
-        return _build(
-            status=BLIImpliedPriceVolCalibrationStatus.SUCCESS,
-            reason=BLIImpliedPriceVolCalibrationReason.CALIBRATED,
-            diagnostic_note=(
-                f"solve_implied_price_vol converged: implied_price_vol="
-                f"{solver_result.implied_price_vol!r} in {solver_result.iterations} "
-                "iteration(s)"
-            ),
-            forward_clean_price=forward_clean_price,
-            strike_clean_price=strike_clean_price,
-            time_to_expiry=time_to_expiry,
-            option_discount_factor=option_discount_factor,
-            solver_result=solver_result,
-        )
-
+    # --- 8. Methodology-alignment gate (Issue #94) ------------------------------
+    # The identity/date/support gates above are methodology-neutral coherence
+    # checks and still run. But the actual calibration composition -- the
+    # legacy clean-price forward from spot/Bond Reference Curve, ACT/365F
+    # option time, clean-F/K Black, and expiry discount factor -- is now
+    # inconsistent with the OVME-aligned standalone fair-premium path
+    # (price_bli_mvp_standalone_option: dirty forward/strike, fractional
+    # ACT/ACT time, Option-Discount-Curve reporting-date discount).
+    #
+    # Per Issue #94 comment 5003670704, this must not silently continue on the
+    # stale composition, and must not emit a plausible-but-inconsistent
+    # implied vol. Safely aligning it would require passing dirty prices
+    # through solve_implied_price_vol's public forward_clean_price /
+    # strike_clean_price arguments (whose contracts label them clean) or a
+    # broad public solver/result migration -- both out of bounds for this
+    # slice. So calibration returns an explicit METHODOLOGY_NOT_ALIGNED
+    # outcome here, before any legacy F/T/DF resolution or solver call. No
+    # forward/strike/T/DF is resolved and no solver runs, so solver_result and
+    # all resolved-input fields stay None and no implied vol is produced.
     return _build(
         status=BLIImpliedPriceVolCalibrationStatus.FAILED,
-        reason=BLIImpliedPriceVolCalibrationReason.SOLVER_FAILED,
+        reason=BLIImpliedPriceVolCalibrationReason.METHODOLOGY_NOT_ALIGNED,
         diagnostic_note=(
-            f"solve_implied_price_vol did not converge: reason={solver_result.reason.value}"
+            "implied PRICE_VOL calibration is blocked: the standalone fair-premium path "
+            "is now OVME-aligned (dirty forward/strike, fractional ACT/ACT option time, "
+            "Option-Discount-Curve reporting-date discount), but the implied-vol solver's "
+            "public contract is still clean-price/ACT-365F. No implied vol is emitted -- "
+            "a dedicated dirty-price solver contract is required before calibration can "
+            "resume. Request/benchmark identity and source-date coherence were checked "
+            "first and passed; only the pricing-methodology alignment blocks this call."
         ),
-        forward_clean_price=forward_clean_price,
-        strike_clean_price=strike_clean_price,
-        time_to_expiry=time_to_expiry,
-        option_discount_factor=option_discount_factor,
-        solver_result=solver_result,
     )

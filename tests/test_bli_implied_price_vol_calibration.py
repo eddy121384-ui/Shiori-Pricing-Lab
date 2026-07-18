@@ -3,25 +3,28 @@
 All fixtures are explicitly synthetic. None represents Bloomberg output,
 market calibration evidence, a golden case, or UAT.
 
-Two tests (``test_known_synthetic_call_recovery`` /
-``test_known_synthetic_put_recovery``) exercise the real, unmocked
-production F/T/DF composition (mirroring the reviewed pinned fixture in
-``tests/test_bli_pricing_engine_standalone_option.py``) and require
-QuantLib. Every other test mocks the three resolution helpers and/or the
-solver (via ``unittest.mock.patch`` on the names as imported into the
-calibration module) so the wiring logic -- gate order, call counts, error
-mapping, provenance neutrality -- is proven independently of whether
-QuantLib is installed, matching this repo's existing test-portability
-convention.
+**Issue #94 methodology-alignment block (comment 5003670704).** The
+standalone fair-premium path is now OVME-aligned (dirty forward/strike,
+fractional ACT/ACT option time, Option-Discount-Curve reporting-date
+discount -- see ``price_bli_mvp_standalone_option``), but the
+implied-``PRICE_VOL`` solver's public contract is still clean-price/ACT-365F.
+Calibration therefore no longer runs the legacy F/T/DF + solver composition:
+after its methodology-neutral coherence gates (request support, identity,
+source-date) it returns an explicit ``METHODOLOGY_NOT_ALIGNED`` FAILED
+outcome **before** any forward/strike/T/DF resolution or solver call, so no
+plausible-but-inconsistent implied vol is ever emitted. These tests prove
+exactly that: the coherence gates still short-circuit first (identity/date/
+support mismatches keep their existing reasons), and any request that clears
+every gate lands on ``METHODOLOGY_NOT_ALIGNED`` with no ``solver_result`` and
+no resolved F/T/DF. The legacy solver-recovery / resolution-error / solver-
+failure tests are intentionally gone -- that composition is no longer reached.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
-from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
-from unittest import mock
 
 import pytest
 
@@ -37,6 +40,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICurvePoint,
     BLICurvePurpose,
     BLICurveRateBasis,
+    BLIForwardCleanPriceInput,
     BLIMarketDataStatus,
     BLIVolatilityBasis,
 )
@@ -45,35 +49,24 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
 from shiori_pricing_lab.pricing import bli_implied_price_vol_calibration as calibration_module
-from shiori_pricing_lab.pricing.bli_black76_price_option import (
-    black76_price_option_pv_per_100,
-)
 from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
     BLIImpliedPriceVolCalibrationReason,
     BLIImpliedPriceVolCalibrationStatus,
     calibrate_bli_implied_price_vol,
 )
-from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
-    BLIImpliedPriceVolSolverReason,
-    BLIImpliedPriceVolSolverResult,
-    BLIImpliedPriceVolSolverStatus,
+from shiori_pricing_lab.pricing.bli_pricing_engine import (
+    STANDALONE_ENGINE_NAME,
+    STANDALONE_ENGINE_VERSION,
 )
-from shiori_pricing_lab.pricing.bli_pricing_engine import ENGINE_NAME, ENGINE_VERSION
-from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.products.enums import (
     Currency,
     ExerciseStyle,
-    OptionType,
     PayoffBasis,
     PayReceive,
     SettlementType,
     TreasuryFTPQuoteSide,
 )
 
-_MODULE = "shiori_pricing_lab.pricing.bli_implied_price_vol_calibration"
-_requires_quantlib = pytest.mark.skipif(
-    not is_quantlib_available(), reason="QuantLib is not installed in this environment"
-)
 _calibrate = calibrate_bli_implied_price_vol
 _MID = BLIBenchmarkQuoteSide.MID
 
@@ -97,17 +90,6 @@ def _short_tenor_curve_points(currency) -> tuple[BLICurvePoint, ...]:
         "source_system": "TEST_LOCAL_CURVE",
         "status": BLIMarketDataStatus.ACTIVE,
     }
-    bond_reference_nodes = tuple(
-        BLICurvePoint(
-            curve_id="TEST_LOCAL_BOND_REFERENCE_CURVE",
-            curve_name="TEST_LOCAL_BOND_REFERENCE_CURVE",
-            curve_purpose=BLICurvePurpose.BOND_REFERENCE_CURVE,
-            tenor=tenor,
-            rate=rate,
-            **common,
-        )
-        for tenor, rate in (("1M", 0.030), ("1Y", 0.035))
-    )
     option_discount_nodes = tuple(
         BLICurvePoint(
             curve_id="TEST_LOCAL_OPTION_DISCOUNT_CURVE",
@@ -124,7 +106,7 @@ def _short_tenor_curve_points(currency) -> tuple[BLICurvePoint, ...]:
         for point in SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.curve_points
         if point.curve_purpose is BLICurvePurpose.DEPOSIT_CURVE
     )
-    return bond_reference_nodes + option_discount_nodes + deposit_nodes
+    return option_discount_nodes + deposit_nodes
 
 
 def _supported_snapshot(**overrides):
@@ -133,6 +115,14 @@ def _supported_snapshot(**overrides):
         source_system="TEST_LOCAL_CURVE",
         curve_points=_short_tenor_curve_points(
             SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.currency
+        ),
+        # Issue #94: standalone requests require an explicit forward clean
+        # price input whose quote side matches the MID spot bond quote.
+        forward_clean_price_input=BLIForwardCleanPriceInput(
+            forward_clean_price_per_100=101.30,
+            quote_side=TreasuryFTPQuoteSide.MID,
+            source_system="TEST_LOCAL_FORWARD_FEED",
+            status=BLIMarketDataStatus.ACTIVE,
         ),
     )
     params.update(overrides)
@@ -179,208 +169,77 @@ def _make_benchmark(**overrides) -> BLIBenchmarkQuote:
     return BLIBenchmarkQuote(**params)
 
 
-def _fake_solver_result(**overrides) -> BLIImpliedPriceVolSolverResult:
-    params = dict(
-        status=BLIImpliedPriceVolSolverStatus.SUCCESS,
-        reason=BLIImpliedPriceVolSolverReason.CONVERGED,
-        option_type=OptionType.CALL,
-        forward_clean_price=101.0,
-        strike_clean_price=99.5,
-        time_to_expiry=0.5,
-        discount_factor=0.98,
-        target_premium_per_100=4.5,
-        lower_price_vol=0.000001,
-        upper_price_vol=5.0,
-        premium_tolerance_per_100=1e-8,
-        price_vol_tolerance=1e-8,
-        max_iterations=100,
-        arbitrage_lower_bound_per_100=0.98 * (101.0 - 99.5),
-        arbitrage_upper_bound_per_100=0.98 * 101.0,
-        lower_bound_model_premium_per_100=0.001,
-        upper_bound_model_premium_per_100=90.0,
-        implied_price_vol=0.15,
-        model_premium_per_100=4.5,
-        premium_residual_per_100=0.0,
-        iterations=20,
-        final_bracket_lower_price_vol=0.15,
-        final_bracket_upper_price_vol=0.15,
-        diagnostic_note="synthetic fake solver result for calibration wiring tests",
-    )
-    params.update(overrides)
-    return BLIImpliedPriceVolSolverResult(**params)
+# --- 1. Fully-coherent request lands on METHODOLOGY_NOT_ALIGNED, no implied vol ---
 
 
-# --- 1-3. Known synthetic recovery + repricing match (real composition) --------
+def _assert_methodology_not_aligned(result):
+    assert result.status is BLIImpliedPriceVolCalibrationStatus.FAILED
+    assert result.reason is BLIImpliedPriceVolCalibrationReason.METHODOLOGY_NOT_ALIGNED
+    # No implied vol is emitted, and no legacy F/T/DF was resolved: the
+    # methodology gate returns before any resolution or solver call.
+    assert result.solver_result is None
+    assert result.forward_clean_price is None
+    assert result.strike_clean_price is None
+    assert result.time_to_expiry is None
+    assert result.option_discount_factor is None
+    assert result.resolution_error_type is None
+    assert result.resolution_error_message is None
+    # Issue #94 Codex P2: blocked results carry the standalone OVME engine's
+    # provenance (the methodology being assessed), not the legacy bundle engine.
+    assert result.pricing_engine_name == STANDALONE_ENGINE_NAME
+    assert result.pricing_engine_version == STANDALONE_ENGINE_VERSION
 
 
-@_requires_quantlib
-def test_known_synthetic_call_recovery():
-    request = _REQUEST
-    bond_option = request.bond_option
-    F = 101.22605288103159
-    T = 0.2465753424657534
-    DF = 0.9929452501091504
-    sigma_true = 0.18
-    target = black76_price_option_pv_per_100(
-        forward_clean_price=F,
-        strike_clean_price=bond_option.strike_price,
-        price_volatility=sigma_true,
-        time_to_expiry=T,
-        discount_factor=DF,
-        option_type=OptionType.CALL,
-    )
-    total_premium = target * bond_option.notional / 100.0
-    benchmark = _make_benchmark(premium_per_100=target, total_premium=total_premium)
-
-    result = _calibrate(request, benchmark, active_quote_side=_MID)
-
-    assert result.status is BLIImpliedPriceVolCalibrationStatus.SUCCESS
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.CALIBRATED
-    assert result.solver_result.status is BLIImpliedPriceVolSolverStatus.SUCCESS
-    assert result.solver_result.implied_price_vol == pytest.approx(sigma_true, abs=1e-6)
-    residual = abs(result.solver_result.model_premium_per_100 - target)
-    assert residual <= result.solver_result.premium_tolerance_per_100
-    assert result.forward_clean_price == F
-    assert result.time_to_expiry == T
-    assert result.option_discount_factor == DF
-    assert result.pricing_engine_name == ENGINE_NAME
-    assert result.pricing_engine_version == ENGINE_VERSION
+def test_fully_coherent_request_is_methodology_not_aligned():
+    result = _calibrate(_REQUEST, _make_benchmark(), active_quote_side=_MID)
+    _assert_methodology_not_aligned(result)
+    assert "OVME-aligned" in result.diagnostic_note
 
 
-@_requires_quantlib
-def test_known_synthetic_put_recovery():
-    put_option = replace(_REQUEST.bond_option, option_type=OptionType.PUT)
-    request = replace(_REQUEST, bond_option=put_option)
-    F = 101.22605288103159
-    T = 0.2465753424657534
-    DF = 0.9929452501091504
-    sigma_true = 0.18
-    target = black76_price_option_pv_per_100(
-        forward_clean_price=F,
-        strike_clean_price=put_option.strike_price,
-        price_volatility=sigma_true,
-        time_to_expiry=T,
-        discount_factor=DF,
-        option_type=OptionType.PUT,
-    )
-    total_premium = target * put_option.notional / 100.0
-    benchmark = _make_benchmark(premium_per_100=target, total_premium=total_premium)
-
-    result = _calibrate(request, benchmark, active_quote_side=_MID)
-
-    assert result.status is BLIImpliedPriceVolCalibrationStatus.SUCCESS
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.CALIBRATED
-    assert result.solver_result.implied_price_vol == pytest.approx(sigma_true, abs=1e-6)
-
-
-# --- 4-6. Provenance neutrality (mocked F/T/DF, real solver) -------------------
-#
-# F/T/DF resolution is patched to return the exact same constants the target
-# premium below was computed from, so the real solve_implied_price_vol still
-# runs against genuine, consistent inputs -- these tests are portable
-# without QuantLib, unlike the two real-composition recovery tests above.
-
-_NEUTRALITY_F = 101.0
-_NEUTRALITY_T = 0.5
-_NEUTRALITY_DF = 0.98
-
-
-@contextmanager
-def _patched_resolution():
-    with mock.patch(
-        f"{_MODULE}.forward_clean_price_per_100", return_value=_NEUTRALITY_F
-    ), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=_NEUTRALITY_T
-    ), mock.patch(
-        f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=_NEUTRALITY_DF
-    ):
-        yield
-
-
-def test_original_request_volatility_does_not_change_implied_vol():
-    target = black76_price_option_pv_per_100(
-        forward_clean_price=_NEUTRALITY_F,
-        strike_clean_price=_REQUEST.bond_option.strike_price,
-        price_volatility=0.18,
-        time_to_expiry=_NEUTRALITY_T,
-        discount_factor=_NEUTRALITY_DF,
-        option_type=OptionType.CALL,
-    )
-    benchmark = _make_benchmark(premium_per_100=target)
-
-    request_a = replace(
-        _REQUEST,
-        market_data_snapshot=replace(
-            _REQUEST.market_data_snapshot,
-            volatility_input=replace(
-                _REQUEST.market_data_snapshot.volatility_input, volatility=0.05
+def test_no_plausible_implied_vol_across_varying_provenance():
+    # Original request volatility, notional, and benchmark total premium are
+    # provenance only -- none can turn the methodology block into an emitted
+    # implied vol. Every variation still lands on METHODOLOGY_NOT_ALIGNED with
+    # solver_result None.
+    for volatility in (0.05, 0.90):
+        request = replace(
+            _REQUEST,
+            market_data_snapshot=replace(
+                _REQUEST.market_data_snapshot,
+                volatility_input=replace(
+                    _REQUEST.market_data_snapshot.volatility_input, volatility=volatility
+                ),
             ),
-        ),
-    )
-    request_b = replace(
-        _REQUEST,
-        market_data_snapshot=replace(
-            _REQUEST.market_data_snapshot,
-            volatility_input=replace(
-                _REQUEST.market_data_snapshot.volatility_input, volatility=0.90
-            ),
-        ),
-    )
-
-    with _patched_resolution():
-        result_a = _calibrate(request_a, benchmark, active_quote_side=_MID)
-        result_b = _calibrate(request_b, benchmark, active_quote_side=_MID)
-
-    assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
-    assert result_a.original_volatility == 0.05
-    assert result_b.original_volatility == 0.90
+        )
+        _assert_methodology_not_aligned(
+            _calibrate(request, _make_benchmark(), active_quote_side=_MID)
+        )
+    for notional in (10.0, 10_000_000.0):
+        request = replace(_REQUEST, bond_option=replace(_REQUEST.bond_option, notional=notional))
+        _assert_methodology_not_aligned(
+            _calibrate(request, _make_benchmark(), active_quote_side=_MID)
+        )
+    for total_premium in (1.0, 999_999_999.0):
+        _assert_methodology_not_aligned(
+            _calibrate(
+                _REQUEST,
+                _make_benchmark(premium_per_100=4.5, total_premium=total_premium),
+                active_quote_side=_MID,
+            )
+        )
 
 
-def test_request_notional_does_not_change_implied_vol():
-    target = black76_price_option_pv_per_100(
-        forward_clean_price=_NEUTRALITY_F,
-        strike_clean_price=_REQUEST.bond_option.strike_price,
-        price_volatility=0.18,
-        time_to_expiry=_NEUTRALITY_T,
-        discount_factor=_NEUTRALITY_DF,
-        option_type=OptionType.CALL,
-    )
-    benchmark = _make_benchmark(premium_per_100=target)
-
-    request_a = replace(_REQUEST, bond_option=replace(_REQUEST.bond_option, notional=10.0))
-    request_b = replace(_REQUEST, bond_option=replace(_REQUEST.bond_option, notional=10_000_000.0))
-
-    with _patched_resolution():
-        result_a = _calibrate(request_a, benchmark, active_quote_side=_MID)
-        result_b = _calibrate(request_b, benchmark, active_quote_side=_MID)
-
-    assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
-    assert result_a.request_notional == 10.0
-    assert result_b.request_notional == 10_000_000.0
+def test_retrieved_at_difference_still_methodology_not_aligned():
+    benchmark_a = _make_benchmark(premium_per_100=4.5, retrieved_at="2020-01-01T00:00:00Z")
+    benchmark_b = _make_benchmark(premium_per_100=4.5, retrieved_at="2030-06-15T23:59:00Z")
+    result_a = _calibrate(_REQUEST, benchmark_a, active_quote_side=_MID)
+    result_b = _calibrate(_REQUEST, benchmark_b, active_quote_side=_MID)
+    _assert_methodology_not_aligned(result_a)
+    _assert_methodology_not_aligned(result_b)
+    assert result_a.benchmark_retrieved_at != result_b.benchmark_retrieved_at
 
 
-def test_benchmark_total_premium_does_not_change_implied_vol():
-    target = black76_price_option_pv_per_100(
-        forward_clean_price=_NEUTRALITY_F,
-        strike_clean_price=_REQUEST.bond_option.strike_price,
-        price_volatility=0.18,
-        time_to_expiry=_NEUTRALITY_T,
-        discount_factor=_NEUTRALITY_DF,
-        option_type=OptionType.CALL,
-    )
-    benchmark_a = _make_benchmark(premium_per_100=target, total_premium=1.0)
-    benchmark_b = _make_benchmark(premium_per_100=target, total_premium=999_999_999.0)
-
-    with _patched_resolution():
-        result_a = _calibrate(_REQUEST, benchmark_a, active_quote_side=_MID)
-        result_b = _calibrate(_REQUEST, benchmark_b, active_quote_side=_MID)
-
-    assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
-    assert result_a.benchmark_total_premium == 1.0
-    assert result_b.benchmark_total_premium == 999_999_999.0
-
-
-# --- 7-12. Alignment mismatches (gate short-circuits before resolution) ---------
+# --- 2. Identity/date coherence gates still short-circuit BEFORE the methodology gate --
 
 
 def test_product_id_mismatch():
@@ -422,9 +281,6 @@ def test_source_date_mismatch():
     assert result.reason is BLIImpliedPriceVolCalibrationReason.SOURCE_DATE_MISMATCH
 
 
-# --- 13. Mismatch priority --------------------------------------------------------
-
-
 def test_mismatch_priority_product_id_beats_snapshot_and_underlying():
     benchmark = _make_benchmark(
         product_id="OTHER-PRODUCT-ID", snapshot_id="OTHER-SNAPSHOT-ID", underlying_id="XS9999999999"
@@ -443,6 +299,17 @@ def test_mismatch_priority_currency_beats_quote_side_and_date():
     assert result.reason is BLIImpliedPriceVolCalibrationReason.CURRENCY_MISMATCH
 
 
+def test_source_date_mismatch_beats_methodology_gate():
+    # SOURCE_DATE_MISMATCH is gate 7; the methodology block is gate 8 -- a
+    # date mismatch still wins, proving the methodology gate runs last.
+    benchmark = _make_benchmark(source_as_of="2026-08-01T09:00:00Z")
+    result = _calibrate(_REQUEST, benchmark, active_quote_side=_MID)
+    assert result.reason is BLIImpliedPriceVolCalibrationReason.SOURCE_DATE_MISMATCH
+
+
+# --- 3. Unsupported request stops at REQUEST_NOT_SUPPORTED (gate 1, before methodology) --
+
+
 def test_mismatch_priority_request_not_supported_beats_everything():
     american_option = replace(
         _REQUEST.bond_option,
@@ -455,55 +322,40 @@ def test_mismatch_priority_request_not_supported_beats_everything():
     assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
 
 
-# --- 14-17. Unsupported request stops before resolution --------------------------
-
-
-def test_unsupported_american_exercise_stops_before_resolution():
+def test_unsupported_american_exercise_stops_at_request_not_supported():
     american_option = replace(
         _REQUEST.bond_option,
         exercise_style=ExerciseStyle.AMERICAN,
         exercise_start_date="2026-06-01",
     )
     request = replace(_REQUEST, bond_option=american_option)
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100") as mock_forward:
-        result = _calibrate(
-            request, _make_benchmark(), active_quote_side=_MID
-        )
+    result = _calibrate(request, _make_benchmark(), active_quote_side=_MID)
     assert result.status is BLIImpliedPriceVolCalibrationStatus.FAILED
     assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
     assert any("exercise_style" in reason for reason in result.request_support_reasons)
     assert result.forward_clean_price is None
     assert result.solver_result is None
-    mock_forward.assert_not_called()
 
 
-def test_unsupported_yield_payoff_stops_before_resolution():
+def test_unsupported_yield_payoff_stops_at_request_not_supported():
     yield_option = replace(
         _REQUEST.bond_option, payoff_basis=PayoffBasis.YIELD, strike_price=None, strike_yield=0.035
     )
     request = replace(_REQUEST, bond_option=yield_option)
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100") as mock_forward:
-        result = _calibrate(
-            request, _make_benchmark(), active_quote_side=_MID
-        )
+    result = _calibrate(request, _make_benchmark(), active_quote_side=_MID)
     assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
     assert any("payoff_basis" in reason for reason in result.request_support_reasons)
-    mock_forward.assert_not_called()
 
 
-def test_unsupported_physical_settlement_stops_before_resolution():
+def test_unsupported_physical_settlement_stops_at_request_not_supported():
     physical_option = replace(_REQUEST.bond_option, settlement_type=SettlementType.PHYSICAL)
     request = replace(_REQUEST, bond_option=physical_option)
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100") as mock_forward:
-        result = _calibrate(
-            request, _make_benchmark(), active_quote_side=_MID
-        )
+    result = _calibrate(request, _make_benchmark(), active_quote_side=_MID)
     assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
     assert any("settlement_type" in reason for reason in result.request_support_reasons)
-    mock_forward.assert_not_called()
 
 
-def test_unsupported_yield_vol_stops_before_resolution():
+def test_unsupported_yield_vol_stops_at_request_not_supported():
     yield_vol_snapshot = replace(
         _REQUEST.market_data_snapshot,
         volatility_input=replace(
@@ -512,23 +364,19 @@ def test_unsupported_yield_vol_stops_before_resolution():
         ),
     )
     request = replace(_REQUEST, market_data_snapshot=yield_vol_snapshot)
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100") as mock_forward:
-        result = _calibrate(
-            request, _make_benchmark(), active_quote_side=_MID
-        )
+    result = _calibrate(request, _make_benchmark(), active_quote_side=_MID)
     assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
     assert any("volatility_basis" in reason for reason in result.request_support_reasons)
-    mock_forward.assert_not_called()
 
 
-# --- 18-19. Quote-side boundary ---------------------------------------------------
+# --- 4. Quote-side boundary ---------------------------------------------------------
 
 
 @pytest.mark.parametrize("side", [BLIBenchmarkQuoteSide.BID, "BID"])
 def test_native_and_raw_quote_side_accepted(side):
     # Deliberately mismatch source_as_of so the run stops at the *next* gate
     # (SOURCE_DATE_MISMATCH) rather than QUOTE_SIDE_MISMATCH -- proving the
-    # quote-side gate was passed, without needing QuantLib.
+    # quote-side gate was passed.
     benchmark = _make_benchmark(
         quote_side=BLIBenchmarkQuoteSide.BID, source_as_of="2026-08-01T09:00:00Z"
     )
@@ -548,198 +396,78 @@ def test_unrelated_foreign_enum_quote_side_rejected():
         _calibrate(_REQUEST, _make_benchmark(), active_quote_side=PayReceive.PAY)
 
 
-# --- 20. retrieved_at neutrality (mocked resolution, real solver) ---------------
-
-
-def test_retrieved_at_difference_does_not_change_calibration():
-    benchmark_a = _make_benchmark(premium_per_100=4.5, retrieved_at="2020-01-01T00:00:00Z")
-    benchmark_b = _make_benchmark(premium_per_100=4.5, retrieved_at="2030-06-15T23:59:00Z")
-
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100", return_value=101.0), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=0.5
-    ), mock.patch(f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98):
-        result_a = _calibrate(_REQUEST, benchmark_a, active_quote_side=_MID)
-        result_b = _calibrate(_REQUEST, benchmark_b, active_quote_side=_MID)
-
-    assert result_a.status == result_b.status
-    assert result_a.reason == result_b.reason
-    assert result_a.solver_result.implied_price_vol == result_b.solver_result.implied_price_vol
-    assert result_a.benchmark_retrieved_at != result_b.benchmark_retrieved_at
-
-
-# --- 21. Support guard called exactly once ---------------------------------------
-
-
-def test_support_guard_called_exactly_once():
-    # F/T/DF resolution and the solver are mocked so this test proves only
-    # that the real support-guard wrapper is invoked exactly once -- it
-    # does not depend on QuantLib or the real pricing composition.
-    fake_solver_result = _fake_solver_result()
-    with mock.patch(
-        f"{_MODULE}.check_bli_mvp_standalone_option_required_inputs",
-        wraps=calibration_module.check_bli_mvp_standalone_option_required_inputs,
-    ) as mock_guard, mock.patch(
-        f"{_MODULE}.forward_clean_price_per_100", return_value=101.0
-    ), mock.patch(f"{_MODULE}.year_fraction_to_expiry", return_value=0.5), mock.patch(
-        f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98
-    ), mock.patch(f"{_MODULE}.solve_implied_price_vol", return_value=fake_solver_result):
-        _calibrate(_REQUEST, _make_benchmark(), active_quote_side=_MID)
-    assert mock_guard.call_count == 1
-
-
-# --- 22-25. F/T/DF/solver call counts ---------------------------------------------
-
-
-def test_forward_time_discount_and_solver_each_called_exactly_once():
-    fake_solver_result = _fake_solver_result()
-    with mock.patch(
-        f"{_MODULE}.forward_clean_price_per_100", return_value=101.0
-    ) as mock_forward, mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=0.5
-    ) as mock_time, mock.patch(
-        f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98
-    ) as mock_df, mock.patch(
-        f"{_MODULE}.solve_implied_price_vol", return_value=fake_solver_result
-    ) as mock_solver:
-        result = _calibrate(
-            _REQUEST, _make_benchmark(), active_quote_side=_MID
-        )
-    assert mock_forward.call_count == 1
-    assert mock_time.call_count == 1
-    assert mock_df.call_count == 1
-    assert mock_solver.call_count == 1
-    assert result.status is BLIImpliedPriceVolCalibrationStatus.SUCCESS
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.CALIBRATED
-    assert result.solver_result is fake_solver_result
-
-
-# --- 26-29. Individual F/T/DF resolution ValueError mapping ----------------------
-
-
-def test_forward_clean_price_resolution_value_error_maps_to_input_resolution_failed():
-    with mock.patch(
-        f"{_MODULE}.forward_clean_price_per_100", side_effect=ValueError("forward boom")
-    ):
-        result = _calibrate(
-            _REQUEST, _make_benchmark(), active_quote_side=_MID
-        )
-    assert result.status is BLIImpliedPriceVolCalibrationStatus.FAILED
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED
-    assert result.resolution_error_type == "ValueError"
-    assert result.resolution_error_message == "forward boom"
-    # Only strike_clean_price (a plain field read) is available before F fails.
-    assert result.strike_clean_price == _REQUEST.bond_option.strike_price
-    assert result.forward_clean_price is None
-    assert result.time_to_expiry is None
-    assert result.option_discount_factor is None
-    assert result.solver_result is None
-
-
-def test_time_to_expiry_resolution_value_error_maps_to_input_resolution_failed():
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100", return_value=101.0), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", side_effect=ValueError("time boom")
-    ):
-        result = _calibrate(
-            _REQUEST, _make_benchmark(), active_quote_side=_MID
-        )
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED
-    assert result.resolution_error_type == "ValueError"
-    assert result.resolution_error_message == "time boom"
-    assert result.forward_clean_price == 101.0
-    assert result.strike_clean_price == _REQUEST.bond_option.strike_price
-    assert result.time_to_expiry is None
-    assert result.option_discount_factor is None
-    assert result.solver_result is None
-
-
-def test_discount_factor_resolution_value_error_maps_to_input_resolution_failed():
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100", return_value=101.0), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=0.5
-    ), mock.patch(
-        f"{_MODULE}.discount_factor_from_continuous_zero_curve", side_effect=ValueError("df boom")
-    ):
-        result = _calibrate(
-            _REQUEST, _make_benchmark(), active_quote_side=_MID
-        )
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.INPUT_RESOLUTION_FAILED
-    assert result.resolution_error_type == "ValueError"
-    assert result.resolution_error_message == "df boom"
-    assert result.forward_clean_price == 101.0
-    assert result.time_to_expiry == 0.5
-    assert result.strike_clean_price == _REQUEST.bond_option.strike_price
-    assert result.option_discount_factor is None
-    assert result.solver_result is None
-
-
-# --- 30. RuntimeError propagates (never caught, never relabeled) -----------------
-
-
-def test_runtime_error_from_forward_resolution_propagates():
-    with mock.patch(
-        f"{_MODULE}.forward_clean_price_per_100", side_effect=RuntimeError("QuantLib not available")
-    ):
-        with pytest.raises(RuntimeError, match="QuantLib not available"):
-            _calibrate(
-                _REQUEST, _make_benchmark(), active_quote_side=_MID
-            )
-
-
-# --- 31. Solver configuration ValueError propagates unchanged --------------------
-
-
-def test_solver_configuration_value_error_propagates_unchanged():
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100", return_value=101.0), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=0.5
-    ), mock.patch(f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98):
-        with pytest.raises(ValueError, match="lower_price_vol"):
-            _calibrate(
-                _REQUEST,
-                _make_benchmark(),
-                active_quote_side=_MID,
-                lower_price_vol=-1.0,
-            )
-
-
-# --- 32. Every solver economic failure maps to SOLVER_FAILED unchanged -----------
+# --- 4b. Solver-configuration validation (Issue #94 Codex P2) ----------------------
+#
+# The five public solver-configuration arguments are validated after every
+# coherence gate and before the methodology block, in the solver's own
+# accepted/rejected domain -- a malformed configuration stays a ValueError
+# rather than silently returning a structured methodology block. No solver
+# runs and no F/K/T/DF is resolved.
 
 
 @pytest.mark.parametrize(
-    "solver_reason",
+    "config",
     [
-        BLIImpliedPriceVolSolverReason.BELOW_ARBITRAGE_LOWER_BOUND,
-        BLIImpliedPriceVolSolverReason.AT_ARBITRAGE_LOWER_BOUND,
-        BLIImpliedPriceVolSolverReason.AT_ARBITRAGE_UPPER_BOUND,
-        BLIImpliedPriceVolSolverReason.ABOVE_ARBITRAGE_UPPER_BOUND,
-        BLIImpliedPriceVolSolverReason.ROOT_NOT_BRACKETED,
-        BLIImpliedPriceVolSolverReason.MAX_ITERATIONS_REACHED,
+        {"lower_price_vol": -1.0},
+        {"lower_price_vol": 0.0},
+        {"lower_price_vol": float("nan")},
+        {"lower_price_vol": float("inf")},
+        {"upper_price_vol": float("nan")},
+        {"upper_price_vol": float("-inf")},
+        {"lower_price_vol": 0.5, "upper_price_vol": 0.5},  # upper <= lower
+        {"lower_price_vol": 0.5, "upper_price_vol": 0.4},
+        {"premium_tolerance_per_100": 0.0},
+        {"premium_tolerance_per_100": -1e-8},
+        {"premium_tolerance_per_100": float("nan")},
+        {"price_vol_tolerance": 0.0},
+        {"price_vol_tolerance": -1e-8},
+        {"price_vol_tolerance": float("inf")},
+        {"max_iterations": 0},
+        {"max_iterations": -5},
+        {"max_iterations": True},  # bool rejected as a non-int
+        {"max_iterations": 1.5},  # non-int rejected
     ],
 )
-def test_every_solver_failure_reason_maps_to_solver_failed_unchanged(solver_reason):
-    fake_solver_result = _fake_solver_result(
-        status=BLIImpliedPriceVolSolverStatus.FAILED,
-        reason=solver_reason,
-        implied_price_vol=None,
-        model_premium_per_100=None,
-        premium_residual_per_100=None,
-        iterations=0,
-        final_bracket_lower_price_vol=None,
-        final_bracket_upper_price_vol=None,
+def test_coherent_request_with_malformed_solver_config_raises_value_error(config):
+    with pytest.raises(ValueError):
+        _calibrate(_REQUEST, _make_benchmark(), active_quote_side=_MID, **config)
+
+
+def test_valid_custom_solver_config_still_methodology_not_aligned():
+    result = _calibrate(
+        _REQUEST,
+        _make_benchmark(),
+        active_quote_side=_MID,
+        lower_price_vol=0.001,
+        upper_price_vol=3.0,
+        premium_tolerance_per_100=1e-6,
+        price_vol_tolerance=1e-6,
+        max_iterations=50,
     )
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100", return_value=101.0), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=0.5
-    ), mock.patch(
-        f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98
-    ), mock.patch(f"{_MODULE}.solve_implied_price_vol", return_value=fake_solver_result):
-        result = _calibrate(
-            _REQUEST, _make_benchmark(), active_quote_side=_MID
-        )
-    assert result.status is BLIImpliedPriceVolCalibrationStatus.FAILED
-    assert result.reason is BLIImpliedPriceVolCalibrationReason.SOLVER_FAILED
-    assert result.solver_result is fake_solver_result
-    assert result.solver_result.reason is solver_reason
+    _assert_methodology_not_aligned(result)
 
 
-# --- 33. No mutation of request / benchmark / snapshot ---------------------------
+def test_coherence_mismatch_wins_before_solver_config_validation():
+    # An earlier identity mismatch must short-circuit before configuration
+    # validation: a bad config paired with a product_id mismatch yields the
+    # mismatch reason, not a ValueError.
+    benchmark = _make_benchmark(product_id="OTHER-PRODUCT-ID")
+    result = _calibrate(_REQUEST, benchmark, active_quote_side=_MID, lower_price_vol=-1.0)
+    assert result.reason is BLIImpliedPriceVolCalibrationReason.PRODUCT_ID_MISMATCH
+
+
+def test_unsupported_request_wins_before_solver_config_validation():
+    american_option = replace(
+        _REQUEST.bond_option,
+        exercise_style=ExerciseStyle.AMERICAN,
+        exercise_start_date="2026-06-01",
+    )
+    request = replace(_REQUEST, bond_option=american_option)
+    result = _calibrate(request, _make_benchmark(), active_quote_side=_MID, max_iterations=0)
+    assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
+
+
+# --- 5. No mutation of request / benchmark / snapshot ------------------------------
 
 
 def test_request_benchmark_and_snapshot_are_not_mutated():
@@ -749,17 +477,14 @@ def test_request_benchmark_and_snapshot_are_not_mutated():
     benchmark_before = asdict(benchmark)
     snapshot_before = asdict(request.market_data_snapshot)
 
-    with mock.patch(f"{_MODULE}.forward_clean_price_per_100", return_value=101.0), mock.patch(
-        f"{_MODULE}.year_fraction_to_expiry", return_value=0.5
-    ), mock.patch(f"{_MODULE}.discount_factor_from_continuous_zero_curve", return_value=0.98):
-        _calibrate(request, benchmark, active_quote_side=_MID)
+    _calibrate(request, benchmark, active_quote_side=_MID)
 
     assert asdict(request) == request_before
     assert asdict(benchmark) == benchmark_before
     assert asdict(request.market_data_snapshot) == snapshot_before
 
 
-# --- 34-35. Frozen result / deterministic asdict ----------------------------------
+# --- 6. Frozen result / deterministic asdict ---------------------------------------
 
 
 def test_result_is_frozen():
@@ -777,7 +502,7 @@ def test_asdict_is_deterministic():
     assert asdict(first) == asdict(second)
 
 
-# --- 36. Public signature has no forbidden parameters -----------------------------
+# --- 7. Public signature has no forbidden parameters -------------------------------
 
 
 def test_signature_has_no_pricing_result_comparison_or_forbidden_parameters():
@@ -796,7 +521,7 @@ def test_signature_has_no_pricing_result_comparison_or_forbidden_parameters():
     assert forbidden_names.isdisjoint(signature.parameters.keys())
 
 
-# --- 37. Module-boundary proof -----------------------------------------------------
+# --- 8. Module-boundary proof ------------------------------------------------------
 
 
 def test_module_imports_only_the_expected_dependencies():
@@ -807,20 +532,21 @@ def test_module_imports_only_the_expected_dependencies():
             imported_names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported_names.add(node.module)
+    # Issue #94: the legacy F/T/DF resolution helpers (bli_forward_clean_price,
+    # bli_valuation_time, bli_curve_discount_factor) are no longer imported --
+    # the methodology gate returns before any of them would run.
     assert imported_names == {
         "__future__",
         "dataclasses",
         "enum",
+        "math",
         "shiori_pricing_lab.data._validation",
         "shiori_pricing_lab.data.bli_benchmark_quote",
         "shiori_pricing_lab.data.bli_snapshot",
         "shiori_pricing_lab.data.bli_standalone_option_request",
-        "shiori_pricing_lab.pricing.bli_curve_discount_factor",
-        "shiori_pricing_lab.pricing.bli_forward_clean_price",
         "shiori_pricing_lab.pricing.bli_implied_price_vol_solver",
         "shiori_pricing_lab.pricing.bli_mvp_required_input_guard",
         "shiori_pricing_lab.pricing.bli_pricing_engine",
-        "shiori_pricing_lab.pricing.bli_valuation_time",
         "shiori_pricing_lab.products.enums",
     }
 
@@ -851,9 +577,6 @@ def test_module_source_does_not_use_system_clock():
 
 
 def test_module_defines_no_yield_vol_surface_sabr_or_scipy_names():
-    # dir()-based: inspects the module's actual defined/imported names, not
-    # prose in the docstring's non-goals list (which legitimately names
-    # YIELD_VOL/SABR/American-exercise as things this module does NOT do).
     module_names = set(dir(calibration_module))
     forbidden_names = {
         "YIELD_VOL",

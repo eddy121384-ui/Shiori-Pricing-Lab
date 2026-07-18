@@ -31,6 +31,7 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLICurvePoint,
     BLICurvePurpose,
     BLICurveRateBasis,
+    BLIForwardCleanPriceInput,
     BLIMarketDataStatus,
     BLIVolatilityBasis,
 )
@@ -43,6 +44,7 @@ from shiori_pricing_lab.products.enums import (
     ExerciseStyle,
     PayoffBasis,
     SettlementType,
+    TreasuryFTPQuoteSide,
 )
 from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 
@@ -50,7 +52,19 @@ from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 _BOND_OPTION = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option
 _REFERENCE_DATA = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.resolved_bond_reference_data
 _VALUATION_DATE = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.valuation_date
-_SNAPSHOT = SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
+
+# Explicit forward clean price input (Issue #94), quote side matching the
+# shared fixture's MID spot bond quote. Attached to the shared snapshot so
+# the OVME-aligned standalone request is constructible.
+_FORWARD_INPUT = BLIForwardCleanPriceInput(
+    forward_clean_price_per_100=101.30,
+    quote_side=TreasuryFTPQuoteSide.MID,
+    source_system="SYNTHETIC_FORWARD_FEED",
+    status=BLIMarketDataStatus.ACTIVE,
+)
+_SNAPSHOT = replace(
+    SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, forward_clean_price_input=_FORWARD_INPUT
+)
 
 # Synthetic timing/date contract values (Issue #94 human methodology
 # approval, comment 5001749998). _BOND_OPTION.expiry_date is "2026-09-29".
@@ -154,6 +168,7 @@ def test_request_needs_no_deposit_curve():
         snapshot_id="TEST_DEPOSIT_FREE_SNAPSHOT",
         source_system="TEST_LOCAL_CURVE",
         curve_points=_short_tenor_curve_points(_BOND_OPTION.currency, include_deposit=False),
+        forward_clean_price_input=_FORWARD_INPUT,
     )
     present_purposes = {
         point.curve_purpose for point in deposit_free_snapshot.curve_points
@@ -294,6 +309,54 @@ def test_missing_option_leg_curve_purpose_rejected():
     )
     with pytest.raises(ValueError, match="missing required curve purpose"):
         _make_request(market_data_snapshot=without_option_discount)
+
+
+def test_missing_bond_reference_curve_is_now_allowed():
+    # Issue #94: the OVME-aligned standalone path prices from an explicit
+    # forward clean price and no longer constructs the forward from a spot
+    # price and the Bond Reference Curve. A snapshot with only
+    # OPTION_DISCOUNT_CURVE (no BOND_REFERENCE_CURVE) must still construct.
+    option_discount_only = replace(
+        _SNAPSHOT,
+        curve_points=tuple(
+            point
+            for point in _SNAPSHOT.curve_points
+            if point.curve_purpose is BLICurvePurpose.OPTION_DISCOUNT_CURVE
+        ),
+    )
+    present = {p.curve_purpose for p in option_discount_only.curve_points}
+    assert BLICurvePurpose.BOND_REFERENCE_CURVE not in present
+    request = _make_request(market_data_snapshot=option_discount_only)
+    assert isinstance(request, BLIStandaloneBondOptionRequest)
+
+
+# --- 3b. Explicit forward clean price input (Issue #94) ----------------------
+
+
+def test_missing_forward_clean_price_input_rejected():
+    without_forward = replace(_SNAPSHOT, forward_clean_price_input=None)
+    with pytest.raises(ValueError, match="forward_clean_price_input must be present"):
+        _make_request(market_data_snapshot=without_forward)
+
+
+def test_forward_input_quote_side_must_match_spot_side():
+    # Spot bond_quote.quote_side is MID; an OFFER forward input is incoherent.
+    mismatched_forward = replace(_FORWARD_INPUT, quote_side=TreasuryFTPQuoteSide.OFFER)
+    incoherent_snapshot = replace(_SNAPSHOT, forward_clean_price_input=mismatched_forward)
+    with pytest.raises(ValueError, match="must equal bond_quote.quote_side"):
+        _make_request(market_data_snapshot=incoherent_snapshot)
+
+
+def test_yield_only_spot_quote_is_now_constructible():
+    # Issue #94: the forward is explicit, so a yield-only spot bond_quote
+    # (no clean_price_per_100) no longer blocks request construction.
+    yield_only_quote = replace(
+        _SNAPSHOT.bond_quote, clean_price_per_100=None, yield_value=0.041
+    )
+    yield_only_snapshot = replace(_SNAPSHOT, bond_quote=yield_only_quote)
+    request = _make_request(market_data_snapshot=yield_only_snapshot)
+    assert request.market_data_snapshot.bond_quote.clean_price_per_100 is None
+    assert request.market_data_snapshot.forward_clean_price_input is _FORWARD_INPUT
 
 
 # --- 4. Immutability ---------------------------------------------------------

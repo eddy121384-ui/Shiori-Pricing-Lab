@@ -12,17 +12,77 @@ option expiry date; §A.2.4 requires `T > 0`, i.e. pricing is blocked for
 a same-day or already-expired option. This mirrors the existing
 `pricing/irs_engine.py::_year_fraction`'s `ACT_365_FIXED` behavior
 (`days / 365.0`), the reviewed precedent this slice mechanically adapts
-for BLI.
+for BLI. ``year_fraction_to_expiry`` and its bundle wrapper are left
+exactly as-is: they continue to serve the legacy bundle pricing path
+unchanged.
+
+The OVME-aligned standalone path (Issue #94) needs a *different* option
+time: fractional-timestamp ACT/ACT (ISDA) from an explicit pricing
+timestamp to an explicit expiry timestamp. That is a separate pure
+helper, :func:`actual_actual_isda_year_fraction_between_datetimes`,
+added below -- it does not change, and is not called by, the date-only
+``year_fraction_to_expiry`` the bundle path uses.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
 
 _ISO_DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _is_leap_year(year: int) -> int:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def actual_actual_isda_year_fraction_between_datetimes(
+    start: datetime, end: datetime
+) -> float:
+    """Return the ACT/ACT (ISDA) year fraction between two aware datetimes.
+
+    Fractional-timestamp option time for the OVME-aligned standalone path
+    (Issue #94 human methodology approval, comment 5001749998): unlike the
+    date-only :func:`year_fraction_to_expiry` (which stays exactly as-is for
+    the legacy bundle path), this uses the exact elapsed seconds between two
+    timezone-aware instants and splits the interval at calendar-year
+    boundaries per ACT/ACT ISDA.
+
+    Both ``start`` and ``end`` must be timezone-aware ``datetime`` values
+    (a naive value raises); ``end`` must be strictly after ``start``.
+    ``end`` is first converted into ``start``'s timezone, and the interval
+    is then split at each ``1 January 00:00`` boundary *in that timezone*.
+    Each segment contributes ``segment_seconds / 86400 / days_in_that_year``,
+    where ``days_in_that_year`` is 366 for a leap year and 365 otherwise.
+    Never reads the system clock; adds no third-party dependency.
+    """
+
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        raise ValueError("start and end must both be datetime instances")
+    if start.tzinfo is None or start.utcoffset() is None:
+        raise ValueError("start must be timezone-aware (an explicit UTC offset)")
+    if end.tzinfo is None or end.utcoffset() is None:
+        raise ValueError("end must be timezone-aware (an explicit UTC offset)")
+
+    # Compare and segment in start's timezone so calendar-year boundaries
+    # are evaluated consistently in one frame (an aware comparison itself is
+    # instant-based, but the year-boundary split must use one local frame).
+    end_in_start_tz = end.astimezone(start.tzinfo)
+    if end_in_start_tz <= start:
+        raise ValueError("end must be strictly after start")
+
+    total = 0.0
+    cursor = start
+    while cursor < end_in_start_tz:
+        next_year_boundary = datetime(cursor.year + 1, 1, 1, tzinfo=cursor.tzinfo)
+        segment_end = min(end_in_start_tz, next_year_boundary)
+        segment_seconds = (segment_end - cursor).total_seconds()
+        days_in_year = 366.0 if _is_leap_year(cursor.year) else 365.0
+        total += segment_seconds / 86400.0 / days_in_year
+        cursor = segment_end
+    return total
 
 
 def _parse_iso_date(value: str, field_name: str) -> date:
