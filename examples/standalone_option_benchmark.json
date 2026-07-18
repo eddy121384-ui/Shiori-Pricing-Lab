@@ -1,0 +1,16 @@
+{
+  "benchmark_id": "SANITIZED_SYNTHETIC_BENCHMARK_0001",
+  "source_type": "BLOOMBERG",
+  "source_system": "SANITIZED_SYNTHETIC_BENCHMARK_SOURCE",
+  "source_as_of": "2026-07-01T16:00:00Z",
+  "retrieved_at": "2026-07-01T16:05:00Z",
+  "quote_side": "MID",
+  "premium_per_100": 4.551011126839255,
+  "total_premium": 2.2755055634196273,
+  "currency": "USD",
+  "product_id": "BONDOPT-SYNTHETIC-0001",
+  "snapshot_id": "SANITIZED_SYNTHETIC_STANDALONE_SNAPSHOT_0001",
+  "underlying_id": "XS0000000001",
+  "source_reference": "SANITIZED_SYNTHETIC_BENCHMARK_REFERENCE_0001",
+  "notes": "Synthetic benchmark quote for deterministic testing only. Not a Bloomberg or real-market observation."
+}

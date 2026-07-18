@@ -1,4 +1,5 @@
-"""Tests for the standalone bond-option trader workbench UI (Issue #97, PR B).
+"""Tests for the standalone bond-option trader workbench UI (Issue #97, PR B;
+Issue #125 benchmark comparison / implied PRICE_VOL extension).
 
 Isolation strategy (see the full-suite interference note below):
 
@@ -37,12 +38,18 @@ from streamlit.testing.v1 import AppTest
 
 from shiori_pricing_lab.app import standalone_option_ui as ui_module
 from shiori_pricing_lab.app.standalone_option_ui import (
+    _MODE_PRICE_AND_BENCHMARK,
+    _MODE_PRICE_ONLY,
     _decode_uploaded_json_text,
+    _load_example_benchmark_text,
     _load_example_case_text,
     _retrieved_at_or_none,
     render_standalone_option_workbench_page,
 )
-from shiori_pricing_lab.app.standalone_option_workbench import price_standalone_option_case
+from shiori_pricing_lab.app.standalone_option_workbench import (
+    price_standalone_option_case,
+    price_standalone_option_case_with_benchmark,
+)
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 
 _QUANTLIB_AVAILABLE = is_quantlib_available()
@@ -83,6 +90,45 @@ _SUCCESS_DISPLAY = (
 )
 
 
+# --- Issue #125: benchmark-mode display fixtures, built at import time -------------
+# Same isolation rationale as _SUCCESS_DISPLAY above -- built once, before any test
+# body runs, using the real bounded workflow (price_standalone_option_case_with_
+# benchmark). Rendering these does no further BLI construction.
+
+
+def _benchmark_envelope(**overrides) -> dict:
+    envelope = json.loads(_load_example_benchmark_text())
+    envelope.update(overrides)
+    return envelope
+
+
+_BENCHMARK_PASS_DISPLAY = (
+    price_standalone_option_case_with_benchmark(
+        _load_example_case_text(), json.dumps(_benchmark_envelope()), active_quote_side="MID"
+    )[5]
+    if _QUANTLIB_AVAILABLE
+    else None
+)
+_BENCHMARK_NON_COMPARABLE_DISPLAY = (
+    price_standalone_option_case_with_benchmark(
+        _load_example_case_text(),
+        json.dumps(_benchmark_envelope(product_id="OTHER-PRODUCT-ID")),
+        active_quote_side="MID",
+    )[5]
+    if _QUANTLIB_AVAILABLE
+    else None
+)
+_BENCHMARK_SOLVER_FAILED_DISPLAY = (
+    price_standalone_option_case_with_benchmark(
+        _load_example_case_text(),
+        json.dumps(_benchmark_envelope(premium_per_100=0.0, total_premium=0.0)),
+        active_quote_side="MID",
+    )[5]
+    if _QUANTLIB_AVAILABLE
+    else None
+)
+
+
 def _render_display_script(display: dict) -> None:
     # Self-contained AppTest.from_function entry point: renders a prepared
     # display dict via the real page render helper. No BLI construction.
@@ -100,9 +146,30 @@ def _render_page_script() -> None:
     render_standalone_option_workbench_page()
 
 
+def _render_benchmark_display_script(display: dict) -> None:
+    # Self-contained AppTest.from_function entry point mirroring
+    # _render_display_script, but also rendering the benchmark/comparison/
+    # calibration sections. No BLI construction.
+    from shiori_pricing_lab.app.standalone_option_ui import (
+        _render_benchmark_result,
+        _render_pricing_result,
+    )
+
+    _render_pricing_result(display)
+    _render_benchmark_result(display)
+
+
 def _run_render(display: dict) -> AppTest:
     at = AppTest.from_function(
         _render_display_script, kwargs={"display": display}, default_timeout=60
+    )
+    at.run()
+    return at
+
+
+def _run_benchmark_render(display: dict) -> AppTest:
+    at = AppTest.from_function(
+        _render_benchmark_display_script, kwargs={"display": display}, default_timeout=60
     )
     at.run()
     return at
@@ -117,6 +184,11 @@ def _run_page() -> AppTest:
 def _set_case_json(at: AppTest, text: str) -> None:
     text_area = next(t for t in at.text_area if t.label == "Standalone option case JSON")
     text_area.set_value(text).run()
+
+
+def _set_mode(at: AppTest, mode: str) -> None:
+    radio = next(r for r in at.radio if r.label == "Mode")
+    radio.set_value(mode).run()
 
 
 def _press_price(at: AppTest) -> None:
@@ -259,10 +331,12 @@ def test_streamlit_app_wires_new_page_and_keeps_existing():
 def test_ui_calls_only_headless_workflow_for_execution():
     source = inspect.getsource(ui_module)
     assert "price_standalone_option_case(" in source
+    assert "price_standalone_option_case_with_benchmark(" in source
     # No shortcut around the builder / direct request construction.
     assert "BLIStandaloneBondOptionRequest(" not in source
     assert "build_bli_standalone_option_request" not in source
-    # No direct pricing/guard/curve/vol/provider/QuantLib imports or calls.
+    # No direct pricing/comparison/calibration/resolver/solver/Black-76/
+    # curve/vol/provider/QuantLib imports or calls (Issue #125).
     for forbidden in (
         "price_bli_mvp_standalone_option",
         "bli_pricing_engine",
@@ -272,6 +346,12 @@ def test_ui_calls_only_headless_workflow_for_execution():
         "bli_forward_clean_price",
         "quantlib",
         "providers",
+        "compare_bli_benchmark(",
+        "calibrate_bli_implied_price_vol(",
+        "bli_benchmark_comparison",
+        "bli_implied_price_vol_calibration",
+        "bli_implied_price_vol_solver",
+        "bli_standalone_option_pricing_inputs",
     ):
         assert forbidden not in source, f"unexpected reference to {forbidden!r}"
 
@@ -317,3 +397,143 @@ def test_ui_has_no_broad_except_and_no_client_quote_label():
     # Only the four expected local-input exceptions are caught.
     assert "json.JSONDecodeError" in body
     assert "UnicodeDecodeError" in body
+
+
+def test_quote_side_selectbox_has_no_default_selection():
+    # Issue #125: st.selectbox(..., index=None) is the only way to genuinely
+    # start with no selection -- never a silently-chosen MID or first member.
+    source = inspect.getsource(ui_module)
+    assert "index=None" in source
+
+
+# ==================================================================================
+# Issue #125: benchmark comparison / implied PRICE_VOL orchestration UI.
+# ==================================================================================
+
+# --- 8. Mode selector: two explicit modes, default preserves existing behavior ----
+
+
+def test_mode_selector_offers_price_only_and_benchmark_modes_with_price_only_default():
+    at = _run_page()
+    mode_radio = next(r for r in at.radio if r.label == "Mode")
+    assert list(mode_radio.options) == [_MODE_PRICE_ONLY, _MODE_PRICE_AND_BENCHMARK]
+    assert mode_radio.value == _MODE_PRICE_ONLY
+
+
+def test_price_only_mode_never_renders_benchmark_sections():
+    at = _run_page()
+    _press_price(at)  # default mode is Price only; malformed JSON triggers no pricing
+    assert not at.exception
+    # No "Benchmark input" controls are ever shown in Price-only mode.
+    assert not any(t.label == "Standalone option benchmark JSON" for t in at.text_area)
+    assert not any(s.label == "Active quote side" for s in at.selectbox)
+
+
+# --- 9. Benchmark mode: quote side is mandatory, no hidden default ----------------
+
+
+def test_benchmark_mode_without_quote_side_selected_shows_warning_and_does_not_run():
+    at = _run_page()
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    _press_price(at)
+
+    assert not at.exception
+    assert any("quote side" in w.value.lower() for w in at.warning)
+    assert len(at.metric) == 0
+
+
+# --- 10. Full-page benchmark mode wiring: routes to the button before construction -
+#
+# A genuine full end-to-end SUCCESS render through a fresh full-page button click
+# is deliberately NOT tested here (unlike the warning-path test above, which exits
+# before any BLI construction): this module's own docstring documents a pre-existing,
+# out-of-scope full-suite module-reload hazard that makes a *fresh* successful BLI
+# construction unreliable once other suites have run. Full success rendering is
+# instead proven by test_benchmark_pass_render_shows_distinct_pricing_benchmark_and_
+# calibration_metrics below, which re-renders a display built once at import time
+# (immune to that hazard, same isolation strategy as _SUCCESS_DISPLAY above).
+
+
+# --- 11. Editable/upload input surface mirrors the pricing-case pattern ----------
+
+
+@_requires_quantlib
+def test_benchmark_editable_textarea_is_prefilled_from_bundled_example():
+    at = _run_page()
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    text_area = next(t for t in at.text_area if t.label == "Standalone option benchmark JSON")
+    assert text_area.value == _load_example_benchmark_text()
+
+
+@_requires_quantlib
+def test_benchmark_upload_no_file_does_not_fall_back_to_editable_example():
+    source = inspect.getsource(ui_module)
+    assert "No benchmark file uploaded" in source
+    assert "benchmark_text = _decode_uploaded_json_text(" in source
+    assert "benchmark_text = benchmark_textarea_text" in source
+
+
+# --- 12. Render helper: PASS + CALIBRATED shows clearly separated metrics --------
+
+
+@_requires_quantlib
+def test_benchmark_pass_render_shows_distinct_pricing_benchmark_and_calibration_metrics():
+    at = _run_benchmark_render(_BENCHMARK_PASS_DISPLAY)
+    assert not at.exception
+    assert any("Comparison PASS" in s.value for s in at.success)
+    assert any("Calibration SUCCESS" in s.value for s in at.success)
+
+    metrics = {m.label: m.value for m in at.metric}
+    # Model, benchmark, and calibrated values are distinct, separately labeled.
+    assert "Model fair premium per 100" in metrics  # pricing section
+    assert "Benchmark premium per 100" in metrics  # benchmark section
+    assert "Model fair premium per 100 (comparison)" in metrics
+    assert "Implied PRICE_VOL" in metrics
+    assert float(metrics["Implied PRICE_VOL"]) == pytest.approx(0.18, abs=1e-4)
+    assert float(metrics["Model fair premium per 100"]) == pytest.approx(
+        _EXPECTED_BLACK76_PV_PER_100
+    )
+    assert float(metrics["Benchmark premium per 100"]) == pytest.approx(
+        _EXPECTED_BLACK76_PV_PER_100
+    )
+
+
+# --- 13. NON_COMPARABLE renders without fabricated residual metrics -------------
+
+
+@_requires_quantlib
+def test_non_comparable_render_shows_no_fabricated_residual_metrics():
+    at = _run_benchmark_render(_BENCHMARK_NON_COMPARABLE_DISPLAY)
+    assert not at.exception
+    assert any("Comparison NON_COMPARABLE" in e.value for e in at.error)
+
+    metrics = {m.label: m.value for m in at.metric}
+    # Residual fields are None for a mismatch outcome (reasons 1-8 of the
+    # existing compare_bli_benchmark priority) -- never rendered as a
+    # fabricated 0/placeholder metric, only as an honest caption.
+    assert "Relative residual" not in metrics
+    assert "Signed residual per 100" not in metrics
+    assert any("not available" in c.value for c in at.caption)
+
+
+# --- 14. Calibration solver failure renders without fabricated implied vol ------
+
+
+@_requires_quantlib
+def test_calibration_solver_failed_render_shows_no_fabricated_implied_vol():
+    at = _run_benchmark_render(_BENCHMARK_SOLVER_FAILED_DISPLAY)
+    assert not at.exception
+    assert any("Calibration FAILED" in e.value for e in at.error)
+
+    metrics = {m.label: m.value for m in at.metric}
+    assert "Implied PRICE_VOL" not in metrics
+    assert any("not available" in c.value for c in at.caption)
+
+    # Solver diagnostics (bounds/tolerances/config) are still shown -- the
+    # theoretical-bound outcome only drops implied/model/residual, never the
+    # whole diagnostic picture.
+    json_blocks = [json.loads(j.value) for j in at.json]
+    solver_diagnostics = json_blocks[-1]
+    assert solver_diagnostics["lower_price_vol"] is not None
+    assert solver_diagnostics["upper_price_vol"] is not None
+    assert solver_diagnostics["max_iterations"] is not None
