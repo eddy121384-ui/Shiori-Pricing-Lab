@@ -41,7 +41,6 @@ from shiori_pricing_lab.app.standalone_option_ui import (
     _MODE_PRICE_AND_BENCHMARK,
     _MODE_PRICE_ONLY,
     _decode_uploaded_json_text,
-    _load_example_benchmark_text,
     _load_example_case_text,
     _retrieved_at_or_none,
     render_standalone_option_workbench_page,
@@ -94,10 +93,37 @@ _SUCCESS_DISPLAY = (
 # Same isolation rationale as _SUCCESS_DISPLAY above -- built once, before any test
 # body runs, using the real bounded workflow (price_standalone_option_case_with_
 # benchmark). Rendering these does no further BLI construction.
+#
+# Codex P1 review of PR #126: there is no bundled benchmark example under
+# examples/ (BLIBenchmarkQuote.source_type only accepts BLOOMBERG/VENDOR, and
+# a bundled file claiming BLOOMBERG for an engineered synthetic premium would
+# misrepresent the workbench as Bloomberg-validated). This dict is test-local
+# only, never read by production/UI code, and is explicitly not a claim of
+# Bloomberg validation or market evidence -- its premium_per_100 is set to
+# the pricing example's own model fair premium purely so the render tests
+# below get deterministic, pinned PASS/CALIBRATED output.
 
 
 def _benchmark_envelope(**overrides) -> dict:
-    envelope = json.loads(_load_example_benchmark_text())
+    envelope = {
+        "benchmark_id": "TEST_LOCAL_SYNTHETIC_BENCHMARK_0001",
+        "source_type": "BLOOMBERG",
+        "source_system": "TEST_LOCAL_SYNTHETIC_BENCHMARK_SOURCE",
+        "source_as_of": _SOURCE_AS_OF,
+        "retrieved_at": "2026-07-01T16:05:00Z",
+        "quote_side": "MID",
+        "premium_per_100": _EXPECTED_BLACK76_PV_PER_100,
+        "total_premium": _EXPECTED_PV,
+        "currency": "USD",
+        "product_id": "BONDOPT-SYNTHETIC-0001",
+        "snapshot_id": "SANITIZED_SYNTHETIC_STANDALONE_SNAPSHOT_0001",
+        "underlying_id": "XS0000000001",
+        "source_reference": "TEST_LOCAL_SYNTHETIC_BENCHMARK_REFERENCE_0001",
+        "notes": (
+            "Test-local synthetic fixture for deterministic testing only. Not a "
+            "Bloomberg or real-market observation, and never exposed to a user."
+        ),
+    }
     envelope.update(overrides)
     return envelope
 
@@ -421,9 +447,16 @@ def test_mode_selector_offers_price_only_and_benchmark_modes_with_price_only_def
 
 
 def test_price_only_mode_never_renders_benchmark_sections():
+    # Malformed pricing JSON exits before pricing is ever reached, so this
+    # test needs no QuantLib (Codex P2 review of PR #126) -- it proves only
+    # that Price-only mode never exposes benchmark controls/sections, not
+    # anything about a successful price.
     at = _run_page()
-    _press_price(at)  # default mode is Price only; malformed JSON triggers no pricing
+    _set_case_json(at, "{ this is not valid json ")
+    _press_price(at)  # default mode is Price only
+
     assert not at.exception
+    assert len(at.error) >= 1  # the malformed-JSON error is still rendered
     # No "Benchmark input" controls are ever shown in Price-only mode.
     assert not any(t.label == "Standalone option benchmark JSON" for t in at.text_area)
     assert not any(s.label == "Active quote side" for s in at.selectbox)
@@ -454,19 +487,33 @@ def test_benchmark_mode_without_quote_side_selected_shows_warning_and_does_not_r
 # (immune to that hazard, same isolation strategy as _SUCCESS_DISPLAY above).
 
 
-# --- 11. Editable/upload input surface mirrors the pricing-case pattern ----------
+# --- 11. No bundled benchmark example (Codex P1 review of PR #126) ---------------
 
 
-@_requires_quantlib
-def test_benchmark_editable_textarea_is_prefilled_from_bundled_example():
+def test_benchmark_textarea_starts_empty_with_no_bundled_example():
+    # The pricing-case textarea is prefilled from a bundled sanitized example
+    # (unchanged); the benchmark textarea deliberately is not -- there is no
+    # examples/standalone_option_benchmark.json, so this field always starts
+    # empty and instructs the trader to paste an actually-observed quote.
     at = _run_page()
     _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
     text_area = next(t for t in at.text_area if t.label == "Standalone option benchmark JSON")
-    assert text_area.value == _load_example_benchmark_text()
+    assert text_area.value == ""
+    assert any(
+        "no bundled benchmark example" in c.value.lower()
+        or "paste" in c.value.lower()
+        for c in at.caption
+    )
 
 
-@_requires_quantlib
-def test_benchmark_upload_no_file_does_not_fall_back_to_editable_example():
+def test_no_example_benchmark_loader_or_bundled_file_reference_exists():
+    assert not hasattr(ui_module, "_load_example_benchmark_text")
+    source = inspect.getsource(ui_module)
+    assert "standalone_option_benchmark.json" not in source
+    assert "_EXAMPLE_BENCHMARK_PATH" not in source
+
+
+def test_benchmark_upload_no_file_does_not_fall_back_to_paste_source():
     source = inspect.getsource(ui_module)
     assert "No benchmark file uploaded" in source
     assert "benchmark_text = _decode_uploaded_json_text(" in source

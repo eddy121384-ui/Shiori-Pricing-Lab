@@ -44,6 +44,18 @@ benchmark evaluation until a side is explicitly chosen; and the same single
 "Price standalone option" execution button drives both the pricing call and,
 in benchmark mode, the comparison + calibration call.
 
+**No bundled benchmark example (Codex P1 review of PR #126).** Unlike the
+pricing case, this page ships **no** bundled benchmark JSON. The existing
+``BLIBenchmarkQuote`` contract only accepts ``source_type`` ``BLOOMBERG`` or
+``VENDOR`` -- there is no ``SYNTHETIC``/``MANUAL``/``TEST`` member, and this
+page does not add one. A bundled example claiming ``BLOOMBERG`` while
+carrying an engineered synthetic premium would misrepresent the workbench as
+Bloomberg-validated when it is not. The "paste benchmark JSON" textarea
+therefore always starts **empty**, with placeholder text instructing the
+trader to paste one actually-observed benchmark quote or use the upload
+path instead; there is no ``_load_example_benchmark_text`` and no benchmark
+counterpart to ``examples/standalone_option_case.json``.
+
 **Failure display.** Only the expected local-input exceptions
 (``json.JSONDecodeError``, ``UnicodeDecodeError``, ``TypeError``,
 ``ValueError``) are caught at the button boundary and rendered verbatim via
@@ -74,12 +86,21 @@ from shiori_pricing_lab.app.standalone_option_workbench import (
 _EXAMPLE_PATH = (
     Path(__file__).resolve().parents[3] / "examples" / "standalone_option_case.json"
 )
-_EXAMPLE_BENCHMARK_PATH = (
-    Path(__file__).resolve().parents[3] / "examples" / "standalone_option_benchmark.json"
-)
 
 _EDITABLE_SOURCE = "Editable example JSON"
 _UPLOAD_SOURCE = "Upload local JSON"
+
+# No bundled benchmark example exists (Codex P1 review of PR #126): the
+# benchmark textarea always starts empty, never prefilled from a file.
+_BENCHMARK_PASTE_SOURCE = "Paste benchmark JSON"
+_BENCHMARK_JSON_PLACEHOLDER = (
+    "Paste one actually-observed benchmark quote JSON here "
+    '(e.g. {"benchmark_id": "...", "source_type": "BLOOMBERG", "source_system": "...", '
+    '"source_as_of": "...", "retrieved_at": "...", "quote_side": "...", '
+    '"premium_per_100": ..., "total_premium": ..., "currency": "...", "product_id": "...", '
+    '"snapshot_id": "...", "underlying_id": "...", "source_reference": "...", "notes": null}) '
+    "-- or upload a benchmark JSON file instead. This field is never prefilled."
+)
 
 _MODE_PRICE_ONLY = "Price only"
 _MODE_PRICE_AND_BENCHMARK = "Price + benchmark comparison / implied PRICE_VOL"
@@ -102,12 +123,6 @@ def _load_example_case_text() -> str:
     """Return the bundled sanitized-synthetic example JSON text, verbatim."""
 
     return _EXAMPLE_PATH.read_text(encoding="utf-8")
-
-
-def _load_example_benchmark_text() -> str:
-    """Return the bundled sanitized-synthetic example benchmark JSON text, verbatim."""
-
-    return _EXAMPLE_BENCHMARK_PATH.read_text(encoding="utf-8")
 
 
 def _retrieved_at_or_none(text: str | None) -> str | None:
@@ -383,14 +398,20 @@ def render_standalone_option_workbench_page() -> None:
     active_quote_side: str | None = None
     if benchmark_mode:
         st.subheader("Benchmark input")
-        benchmark_input_source = st.radio(
-            "Benchmark input source", [_EDITABLE_SOURCE, _UPLOAD_SOURCE]
+        st.caption(
+            "No bundled benchmark example is provided. Paste one actually-observed "
+            "benchmark quote JSON (BLOOMBERG or VENDOR source) or upload a benchmark "
+            "JSON file -- this page never prefills or fabricates a benchmark quote."
         )
-        if benchmark_input_source == _EDITABLE_SOURCE:
+        benchmark_input_source = st.radio(
+            "Benchmark input source", [_BENCHMARK_PASTE_SOURCE, _UPLOAD_SOURCE]
+        )
+        if benchmark_input_source == _BENCHMARK_PASTE_SOURCE:
             benchmark_textarea_text = st.text_area(
                 "Standalone option benchmark JSON",
-                value=_load_example_benchmark_text(),
+                value="",
                 height=250,
+                placeholder=_BENCHMARK_JSON_PLACEHOLDER,
             )
         else:
             benchmark_uploaded_file = st.file_uploader(

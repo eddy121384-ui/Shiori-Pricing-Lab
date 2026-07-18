@@ -19,12 +19,19 @@ The Issue #125 section below tests the separate benchmark JSON parser and
 the bounded ``price_standalone_option_case_with_benchmark`` orchestration
 (prices via the unchanged ``price_standalone_option_case``, then calls the
 existing, unmodified ``compare_bli_benchmark`` and
-``calibrate_bli_implied_price_vol`` exactly once each). The bundled
-``examples/standalone_option_benchmark.json`` is likewise sanitized
-synthetic data -- its ``premium_per_100`` is deliberately set to the exact
-model fair premium the pricing example produces, so the comparison and
-calibration outcomes are pinned and deterministic, not a claim of Bloomberg
-validation.
+``calibrate_bli_implied_price_vol`` exactly once each).
+
+**No bundled benchmark example (Codex P1 review of PR #126).** Unlike the
+pricing case, there is no ``examples/standalone_option_benchmark.json`` --
+``BLIBenchmarkQuote.source_type`` only accepts ``BLOOMBERG``/``VENDOR``, and
+a bundled user-facing file claiming ``BLOOMBERG`` while carrying an
+engineered synthetic premium would misrepresent the workbench as
+Bloomberg-validated. The synthetic benchmark data these tests need
+(``_synthetic_benchmark_envelope`` below) is test-local only, never read by
+production/UI code, and is explicitly **not** a claim of Bloomberg
+validation or market evidence -- only a deterministic fixture whose
+``premium_per_100`` is set to the exact model fair premium the pricing
+example produces, so the comparison and calibration outcomes are pinned.
 """
 
 from __future__ import annotations
@@ -442,43 +449,79 @@ def test_module_does_not_shortcut_the_builder():
 
 # ==================================================================================
 # Issue #125: benchmark comparison / implied PRICE_VOL orchestration.
+#
+# Codex P1 review of PR #126: no bundled benchmark example exists under
+# examples/ -- BLIBenchmarkQuote's source_type only accepts BLOOMBERG/VENDOR,
+# and a bundled file claiming BLOOMBERG while carrying an engineered
+# synthetic premium would misrepresent the workbench as Bloomberg-validated.
+# The deterministic synthetic benchmark data these tests need lives here,
+# test-local only -- it is never read by production/UI code, never written
+# to examples/, and this test file makes no Bloomberg-validation claim about
+# it (see the docstring below).
 # ==================================================================================
 
-_EXAMPLE_BENCHMARK_PATH = (
-    Path(__file__).resolve().parents[1] / "examples" / "standalone_option_benchmark.json"
-)
-_EXPECTED_IMPLIED_PRICE_VOL = 0.18  # the example's own PRICE_VOL input
+_EXPECTED_IMPLIED_PRICE_VOL = 0.18  # the pricing example's own PRICE_VOL input
 
 
-def _example_benchmark_text() -> str:
-    return _EXAMPLE_BENCHMARK_PATH.read_text(encoding="utf-8")
+def _synthetic_benchmark_envelope() -> dict:
+    """Return one deterministic, test-local synthetic benchmark envelope.
+
+    ``premium_per_100`` is deliberately set to the bundled pricing example's
+    own model fair premium at its own ``PRICE_VOL`` (0.18), so the
+    comparison/calibration outcomes below are pinned and deterministic.
+    ``source_type`` is ``BLOOMBERG`` only because ``BLIBenchmarkQuote``
+    accepts no other value (no ``SYNTHETIC``/``MANUAL``/``TEST`` member
+    exists, and none is added here) -- this is test-only fixture data, never
+    exposed to a user, and is explicitly **not** a claim of Bloomberg
+    validation or market evidence.
+    """
+
+    return {
+        "benchmark_id": "TEST_LOCAL_SYNTHETIC_BENCHMARK_0001",
+        "source_type": "BLOOMBERG",
+        "source_system": "TEST_LOCAL_SYNTHETIC_BENCHMARK_SOURCE",
+        "source_as_of": "2026-07-01T16:00:00Z",
+        "retrieved_at": "2026-07-01T16:05:00Z",
+        "quote_side": "MID",
+        "premium_per_100": _EXPECTED_BLACK76_PV_PER_100,
+        "total_premium": _EXPECTED_PV,
+        "currency": "USD",
+        "product_id": "BONDOPT-SYNTHETIC-0001",
+        "snapshot_id": "SANITIZED_SYNTHETIC_STANDALONE_SNAPSHOT_0001",
+        "underlying_id": "XS0000000001",
+        "source_reference": "TEST_LOCAL_SYNTHETIC_BENCHMARK_REFERENCE_0001",
+        "notes": (
+            "Test-local synthetic fixture for deterministic testing only. Not a "
+            "Bloomberg or real-market observation, and never exposed to a user."
+        ),
+    }
 
 
-def _example_benchmark_envelope() -> dict:
-    return json.loads(_example_benchmark_text())
+def _synthetic_benchmark_text() -> str:
+    return json.dumps(_synthetic_benchmark_envelope())
 
 
 # --- 9. Benchmark JSON parser: valid case reconstructs the frozen dataclass -------
 
 
 def test_valid_benchmark_json_reconstructs_expected_benchmark_quote():
-    benchmark = build_benchmark_from_standalone_option_benchmark_case(_example_benchmark_text())
+    benchmark = build_benchmark_from_standalone_option_benchmark_case(_synthetic_benchmark_text())
     assert isinstance(benchmark, BLIBenchmarkQuote)
-    envelope = _example_benchmark_envelope()
+    envelope = _synthetic_benchmark_envelope()
     assert benchmark == BLIBenchmarkQuote(**envelope)
 
 
 def test_benchmark_json_accepts_string_or_already_parsed_mapping():
-    from_text = build_benchmark_from_standalone_option_benchmark_case(_example_benchmark_text())
+    from_text = build_benchmark_from_standalone_option_benchmark_case(_synthetic_benchmark_text())
     from_dict = build_benchmark_from_standalone_option_benchmark_case(
-        _example_benchmark_envelope()
+        _synthetic_benchmark_envelope()
     )
     assert from_text == from_dict
 
 
 def test_benchmark_json_loads_twice_to_equal_quotes():
-    first = build_benchmark_from_standalone_option_benchmark_case(_example_benchmark_text())
-    second = build_benchmark_from_standalone_option_benchmark_case(_example_benchmark_text())
+    first = build_benchmark_from_standalone_option_benchmark_case(_synthetic_benchmark_text())
+    second = build_benchmark_from_standalone_option_benchmark_case(_synthetic_benchmark_text())
     assert first == second
 
 
@@ -486,7 +529,7 @@ def test_benchmark_json_loads_twice_to_equal_quotes():
 
 
 def test_benchmark_missing_top_level_key_fails_explicitly():
-    envelope = _example_benchmark_envelope()
+    envelope = _synthetic_benchmark_envelope()
     del envelope["premium_per_100"]
     with pytest.raises(ValueError, match="missing required top-level key"):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
@@ -495,20 +538,20 @@ def test_benchmark_missing_top_level_key_fails_explicitly():
 def test_benchmark_missing_notes_key_fails_explicitly():
     # notes is optional ON THE DATACLASS but required PRESENT (nullable) on
     # this strict envelope -- omitting the key entirely must still fail.
-    envelope = _example_benchmark_envelope()
+    envelope = _synthetic_benchmark_envelope()
     del envelope["notes"]
     with pytest.raises(ValueError, match="missing required top-level key"):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
 
 
 def test_benchmark_null_notes_is_accepted():
-    envelope = {**_example_benchmark_envelope(), "notes": None}
+    envelope = {**_synthetic_benchmark_envelope(), "notes": None}
     benchmark = build_benchmark_from_standalone_option_benchmark_case(envelope)
     assert benchmark.notes is None
 
 
 def test_benchmark_unknown_top_level_key_fails_explicitly():
-    envelope = {**_example_benchmark_envelope(), "retrieved_at_alias": "2026-07-01T16:05:00Z"}
+    envelope = {**_synthetic_benchmark_envelope(), "retrieved_at_alias": "2026-07-01T16:05:00Z"}
     with pytest.raises(ValueError, match="unknown top-level key"):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
 
@@ -527,25 +570,25 @@ def test_benchmark_malformed_json_raises_json_decode_error():
 
 
 def test_benchmark_bad_quote_side_propagates_from_constructor():
-    envelope = {**_example_benchmark_envelope(), "quote_side": "NOT_A_SIDE"}
+    envelope = {**_synthetic_benchmark_envelope(), "quote_side": "NOT_A_SIDE"}
     with pytest.raises(ValueError, match="quote_side"):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
 
 
 def test_benchmark_negative_premium_propagates_from_constructor():
-    envelope = {**_example_benchmark_envelope(), "premium_per_100": -1.0}
+    envelope = {**_synthetic_benchmark_envelope(), "premium_per_100": -1.0}
     with pytest.raises(ValueError, match="premium_per_100"):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
 
 
 def test_benchmark_blank_benchmark_id_propagates_from_constructor():
-    envelope = {**_example_benchmark_envelope(), "benchmark_id": ""}
+    envelope = {**_synthetic_benchmark_envelope(), "benchmark_id": ""}
     with pytest.raises(ValueError, match="benchmark_id"):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
 
 
 def test_benchmark_unknown_nested_type_propagates_as_type_error():
-    envelope = {**_example_benchmark_envelope(), "premium_per_100": "not-a-number"}
+    envelope = {**_synthetic_benchmark_envelope(), "premium_per_100": "not-a-number"}
     with pytest.raises((TypeError, ValueError)):
         build_benchmark_from_standalone_option_benchmark_case(envelope)
 
@@ -556,7 +599,7 @@ def test_benchmark_unknown_nested_type_propagates_as_type_error():
 def test_active_quote_side_has_no_default_and_is_keyword_only():
     with pytest.raises(TypeError):
         price_standalone_option_case_with_benchmark(  # type: ignore[call-arg]
-            _example_text(), _example_benchmark_text()
+            _example_text(), _synthetic_benchmark_text()
         )
 
 
@@ -573,12 +616,12 @@ def test_bounded_workflow_equals_direct_pricing_comparison_and_calibration_calls
         calibration,
         display,
     ) = price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
+        _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
 
     direct_request, direct_result, _direct_display = price_standalone_option_case(_example_text())
     direct_benchmark = build_benchmark_from_standalone_option_benchmark_case(
-        _example_benchmark_text()
+        _synthetic_benchmark_text()
     )
     direct_comparison = compare_bli_benchmark(
         direct_result, direct_request, direct_benchmark, active_quote_side=BLIBenchmarkQuoteSide.MID
@@ -597,10 +640,10 @@ def test_bounded_workflow_equals_direct_pricing_comparison_and_calibration_calls
 @_requires_quantlib
 def test_bounded_workflow_accepts_raw_string_quote_side():
     result_via_string = price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side="MID"
+        _example_text(), _synthetic_benchmark_text(), active_quote_side="MID"
     )
     result_via_enum = price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
+        _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
     assert result_via_string[3] == result_via_enum[3]  # comparison
     assert result_via_string[4] == result_via_enum[4]  # calibration
@@ -627,7 +670,7 @@ def test_comparison_and_calibration_are_each_called_exactly_once(monkeypatch):
     monkeypatch.setattr(workbench_module, "calibrate_bli_implied_price_vol", _counting_calibrate)
 
     price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
+        _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
 
     assert call_counts["compare"] == 1
@@ -638,9 +681,9 @@ def test_comparison_and_calibration_are_each_called_exactly_once(monkeypatch):
 
 
 @_requires_quantlib
-def test_example_benchmark_produces_pinned_pass_comparison():
+def test_synthetic_benchmark_produces_pinned_pass_comparison():
     _r, _res, _b, comparison, _c, _d = price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
+        _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
     assert comparison.status is BLIBenchmarkComparisonStatus.PASS
     assert comparison.reason is BLIBenchmarkComparisonReason.COMPARABLE
@@ -650,9 +693,9 @@ def test_example_benchmark_produces_pinned_pass_comparison():
 
 
 @_requires_quantlib
-def test_example_benchmark_recovers_expected_implied_price_vol_deterministically():
+def test_synthetic_benchmark_recovers_expected_implied_price_vol_deterministically():
     _r, _res, _b, _comp, calibration, _d = price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
+        _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
     assert calibration.status is BLIImpliedPriceVolCalibrationStatus.SUCCESS
     assert calibration.reason is BLIImpliedPriceVolCalibrationReason.CALIBRATED
@@ -662,7 +705,7 @@ def test_example_benchmark_recovers_expected_implied_price_vol_deterministically
 
     # Repeat run is deterministic.
     _r2, _res2, _b2, _comp2, calibration2, _d2 = price_standalone_option_case_with_benchmark(
-        _example_text(), _example_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
+        _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
     assert calibration.solver_result.implied_price_vol == pytest.approx(
         calibration2.solver_result.implied_price_vol, abs=1e-12
@@ -674,7 +717,7 @@ def test_example_benchmark_recovers_expected_implied_price_vol_deterministically
 
 @_requires_quantlib
 def test_mismatched_product_id_yields_non_comparable_and_calibration_failed_no_fabrication():
-    mismatched_envelope = {**_example_benchmark_envelope(), "product_id": "OTHER-PRODUCT-ID"}
+    mismatched_envelope = {**_synthetic_benchmark_envelope(), "product_id": "OTHER-PRODUCT-ID"}
     _r, _res, benchmark, comparison, calibration, display = (
         price_standalone_option_case_with_benchmark(
             _example_text(), mismatched_envelope, active_quote_side=BLIBenchmarkQuoteSide.MID
@@ -702,7 +745,7 @@ def test_mismatched_product_id_yields_non_comparable_and_calibration_failed_no_f
 @_requires_quantlib
 def test_solver_economic_failure_displays_without_fabricated_implied_vol():
     infeasible_envelope = {
-        **_example_benchmark_envelope(),
+        **_synthetic_benchmark_envelope(),
         "premium_per_100": 0.0,
         "total_premium": 0.0,
     }
@@ -731,7 +774,7 @@ def test_solver_economic_failure_displays_without_fabricated_implied_vol():
 @_requires_quantlib
 def test_model_benchmark_and_calibrated_values_are_visibly_distinct_fields():
     # A deliberately mismatched premium so model != benchmark != calibrated vol.
-    warning_envelope = {**_example_benchmark_envelope(), "premium_per_100": 5.0}
+    warning_envelope = {**_synthetic_benchmark_envelope(), "premium_per_100": 5.0}
     _r, result, benchmark, comparison, calibration, display = (
         price_standalone_option_case_with_benchmark(
             _example_text(), warning_envelope, active_quote_side=BLIBenchmarkQuoteSide.MID
@@ -757,7 +800,7 @@ def test_model_benchmark_and_calibrated_values_are_visibly_distinct_fields():
 @_requires_quantlib
 def test_no_mutation_of_any_result_object():
     case_text = _example_text()
-    benchmark_text = _example_benchmark_text()
+    benchmark_text = _synthetic_benchmark_text()
 
     request, result, benchmark, comparison, calibration, _display = (
         price_standalone_option_case_with_benchmark(
