@@ -54,7 +54,10 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
     BLIImpliedPriceVolCalibrationStatus,
     calibrate_bli_implied_price_vol,
 )
-from shiori_pricing_lab.pricing.bli_pricing_engine import ENGINE_NAME, ENGINE_VERSION
+from shiori_pricing_lab.pricing.bli_pricing_engine import (
+    STANDALONE_ENGINE_NAME,
+    STANDALONE_ENGINE_VERSION,
+)
 from shiori_pricing_lab.products.enums import (
     Currency,
     ExerciseStyle,
@@ -181,8 +184,10 @@ def _assert_methodology_not_aligned(result):
     assert result.option_discount_factor is None
     assert result.resolution_error_type is None
     assert result.resolution_error_message is None
-    assert result.pricing_engine_name == ENGINE_NAME
-    assert result.pricing_engine_version == ENGINE_VERSION
+    # Issue #94 Codex P2: blocked results carry the standalone OVME engine's
+    # provenance (the methodology being assessed), not the legacy bundle engine.
+    assert result.pricing_engine_name == STANDALONE_ENGINE_NAME
+    assert result.pricing_engine_version == STANDALONE_ENGINE_VERSION
 
 
 def test_fully_coherent_request_is_methodology_not_aligned():
@@ -391,6 +396,77 @@ def test_unrelated_foreign_enum_quote_side_rejected():
         _calibrate(_REQUEST, _make_benchmark(), active_quote_side=PayReceive.PAY)
 
 
+# --- 4b. Solver-configuration validation (Issue #94 Codex P2) ----------------------
+#
+# The five public solver-configuration arguments are validated after every
+# coherence gate and before the methodology block, in the solver's own
+# accepted/rejected domain -- a malformed configuration stays a ValueError
+# rather than silently returning a structured methodology block. No solver
+# runs and no F/K/T/DF is resolved.
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"lower_price_vol": -1.0},
+        {"lower_price_vol": 0.0},
+        {"lower_price_vol": float("nan")},
+        {"lower_price_vol": float("inf")},
+        {"upper_price_vol": float("nan")},
+        {"upper_price_vol": float("-inf")},
+        {"lower_price_vol": 0.5, "upper_price_vol": 0.5},  # upper <= lower
+        {"lower_price_vol": 0.5, "upper_price_vol": 0.4},
+        {"premium_tolerance_per_100": 0.0},
+        {"premium_tolerance_per_100": -1e-8},
+        {"premium_tolerance_per_100": float("nan")},
+        {"price_vol_tolerance": 0.0},
+        {"price_vol_tolerance": -1e-8},
+        {"price_vol_tolerance": float("inf")},
+        {"max_iterations": 0},
+        {"max_iterations": -5},
+        {"max_iterations": True},  # bool rejected as a non-int
+        {"max_iterations": 1.5},  # non-int rejected
+    ],
+)
+def test_coherent_request_with_malformed_solver_config_raises_value_error(config):
+    with pytest.raises(ValueError):
+        _calibrate(_REQUEST, _make_benchmark(), active_quote_side=_MID, **config)
+
+
+def test_valid_custom_solver_config_still_methodology_not_aligned():
+    result = _calibrate(
+        _REQUEST,
+        _make_benchmark(),
+        active_quote_side=_MID,
+        lower_price_vol=0.001,
+        upper_price_vol=3.0,
+        premium_tolerance_per_100=1e-6,
+        price_vol_tolerance=1e-6,
+        max_iterations=50,
+    )
+    _assert_methodology_not_aligned(result)
+
+
+def test_coherence_mismatch_wins_before_solver_config_validation():
+    # An earlier identity mismatch must short-circuit before configuration
+    # validation: a bad config paired with a product_id mismatch yields the
+    # mismatch reason, not a ValueError.
+    benchmark = _make_benchmark(product_id="OTHER-PRODUCT-ID")
+    result = _calibrate(_REQUEST, benchmark, active_quote_side=_MID, lower_price_vol=-1.0)
+    assert result.reason is BLIImpliedPriceVolCalibrationReason.PRODUCT_ID_MISMATCH
+
+
+def test_unsupported_request_wins_before_solver_config_validation():
+    american_option = replace(
+        _REQUEST.bond_option,
+        exercise_style=ExerciseStyle.AMERICAN,
+        exercise_start_date="2026-06-01",
+    )
+    request = replace(_REQUEST, bond_option=american_option)
+    result = _calibrate(request, _make_benchmark(), active_quote_side=_MID, max_iterations=0)
+    assert result.reason is BLIImpliedPriceVolCalibrationReason.REQUEST_NOT_SUPPORTED
+
+
 # --- 5. No mutation of request / benchmark / snapshot ------------------------------
 
 
@@ -463,6 +539,7 @@ def test_module_imports_only_the_expected_dependencies():
         "__future__",
         "dataclasses",
         "enum",
+        "math",
         "shiori_pricing_lab.data._validation",
         "shiori_pricing_lab.data.bli_benchmark_quote",
         "shiori_pricing_lab.data.bli_snapshot",

@@ -43,10 +43,13 @@ A / #109) to the bounded implied-``PRICE_VOL`` solver (Issue #99 PR A /
 Calibration occurs *before* a repricing ``PricingResult`` exists for the
 calibrated volatility (Issue #99 methodology comment 4965749214 §8) --
 ``price_bli_mvp`` / ``price_bli_mvp_standalone_option`` are never invoked
-here. ``ENGINE_NAME`` / ``ENGINE_VERSION`` are imported from
-``pricing/bli_pricing_engine.py`` only as the two existing provenance
+here. ``STANDALONE_ENGINE_NAME`` / ``STANDALONE_ENGINE_VERSION`` are imported
+from ``pricing/bli_pricing_engine.py`` only as the two existing provenance
 string constants stamped on the result -- no new model name or version is
-introduced.
+introduced. They identify the standalone OVME pricing methodology against
+which calibration compatibility is being assessed (Issue #94 Codex P2): the
+result is stamped with the standalone engine's provenance, not the legacy
+bundle engine's, even though no solver or pricing calculation runs.
 
 **This module does not call ``compare_bli_benchmark``** (Issue #98 PR B /
 #110) and does not require an existing ``PricingResult`` as a prerequisite.
@@ -104,6 +107,7 @@ market calibration evidence, or UAT.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 
@@ -123,7 +127,10 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_solver import (
 from shiori_pricing_lab.pricing.bli_mvp_required_input_guard import (
     check_bli_mvp_standalone_option_required_inputs,
 )
-from shiori_pricing_lab.pricing.bli_pricing_engine import ENGINE_NAME, ENGINE_VERSION
+from shiori_pricing_lab.pricing.bli_pricing_engine import (
+    STANDALONE_ENGINE_NAME,
+    STANDALONE_ENGINE_VERSION,
+)
 from shiori_pricing_lab.products.enums import Currency, OptionType, coerce_enum
 
 
@@ -186,6 +193,62 @@ def _reject_foreign_enum_active_quote_side(value: object) -> None:
             "active_quote_side must be a BLIBenchmarkQuoteSide member or one of "
             f"{{BID, MID, OFFER}}, got foreign enum {value!r}"
         )
+
+
+def _require_finite_non_bool_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def _validate_solver_configuration(
+    *,
+    lower_price_vol: float,
+    upper_price_vol: float,
+    premium_tolerance_per_100: float,
+    price_vol_tolerance: float,
+    max_iterations: int,
+) -> None:
+    """Validate the five public solver-configuration arguments (Issue #94).
+
+    The implied-``PRICE_VOL`` solver is no longer reached on the OVME-aligned
+    standalone path (calibration returns ``METHODOLOGY_NOT_ALIGNED`` before
+    any solver call), but these arguments remain part of this function's
+    public contract. Validating them here -- in the same accepted/rejected
+    domain and order ``solve_implied_price_vol`` itself uses -- keeps a
+    malformed caller configuration (e.g. ``lower_price_vol=-1.0``) a
+    ``ValueError`` rather than a silently-successful methodology block. No
+    normalization, clamping, fallback, widening, or default repair is applied;
+    no solver runs and no F/K/T/DF is resolved.
+    """
+
+    lower_price_vol = _require_finite_non_bool_number(lower_price_vol, "lower_price_vol")
+    if not lower_price_vol > 0:
+        raise ValueError(f"lower_price_vol must be positive, got {lower_price_vol!r}")
+    upper_price_vol = _require_finite_non_bool_number(upper_price_vol, "upper_price_vol")
+    if not lower_price_vol < upper_price_vol:
+        raise ValueError(
+            "lower_price_vol must be strictly less than upper_price_vol, got "
+            f"lower_price_vol={lower_price_vol!r} upper_price_vol={upper_price_vol!r}"
+        )
+    premium_tolerance_per_100 = _require_finite_non_bool_number(
+        premium_tolerance_per_100, "premium_tolerance_per_100"
+    )
+    if not premium_tolerance_per_100 > 0:
+        raise ValueError(
+            f"premium_tolerance_per_100 must be positive, got {premium_tolerance_per_100!r}"
+        )
+    price_vol_tolerance = _require_finite_non_bool_number(
+        price_vol_tolerance, "price_vol_tolerance"
+    )
+    if not price_vol_tolerance > 0:
+        raise ValueError(f"price_vol_tolerance must be positive, got {price_vol_tolerance!r}")
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int):
+        raise ValueError(f"max_iterations must be a non-bool int, got {max_iterations!r}")
+    if not max_iterations > 0:
+        raise ValueError(f"max_iterations must be positive, got {max_iterations!r}")
 
 
 @dataclass(frozen=True)
@@ -291,8 +354,8 @@ def calibrate_bli_implied_price_vol(
             status=status,
             reason=reason,
             active_quote_side=resolved_active_quote_side,
-            pricing_engine_name=ENGINE_NAME,
-            pricing_engine_version=ENGINE_VERSION,
+            pricing_engine_name=STANDALONE_ENGINE_NAME,
+            pricing_engine_version=STANDALONE_ENGINE_VERSION,
             product_id=benchmark.product_id,
             snapshot_id=benchmark.snapshot_id,
             underlying_id=benchmark.underlying_id,
@@ -420,6 +483,20 @@ def calibrate_bli_implied_price_vol(
                 "is provenance only and never participates in this check"
             ),
         )
+
+    # --- 7b. Solver-configuration validation (Issue #94 Codex P2) ---------------
+    # The five public solver-configuration arguments used to be validated by
+    # solve_implied_price_vol (now unreachable on this path). Validate them here
+    # -- after every coherence gate above, before the methodology block -- so a
+    # malformed configuration stays a ValueError rather than silently returning
+    # a structured methodology block. No solver runs and no F/K/T/DF is resolved.
+    _validate_solver_configuration(
+        lower_price_vol=lower_price_vol,
+        upper_price_vol=upper_price_vol,
+        premium_tolerance_per_100=premium_tolerance_per_100,
+        price_vol_tolerance=price_vol_tolerance,
+        max_iterations=max_iterations,
+    )
 
     # --- 8. Methodology-alignment gate (Issue #94) ------------------------------
     # The identity/date/support gates above are methodology-neutral coherence
