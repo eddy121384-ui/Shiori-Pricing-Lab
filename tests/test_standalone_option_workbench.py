@@ -972,6 +972,7 @@ def test_only_bond_quote_is_replaced_everything_else_equal(monkeypatch):
     assert actual == expected
 
 
+@_requires_quantlib
 def test_input_mapping_and_nested_values_not_mutated(monkeypatch):
     _install_fake_bloomberg_loader(monkeypatch)
     envelope = _example_envelope()
