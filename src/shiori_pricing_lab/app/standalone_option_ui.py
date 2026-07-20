@@ -1,5 +1,6 @@
 """Streamlit page: standalone bond-option trader workbench (Issue #97, PR B;
-Issue #125 benchmark comparison / implied PRICE_VOL extension).
+Issue #125 benchmark comparison / implied PRICE_VOL extension; Issue #101
+current-run export).
 
 A thin trader UI over the merged headless workflow
 (``standalone_option_workbench.price_standalone_option_case`` /
@@ -8,7 +9,8 @@ bond-option leg** from a local JSON case -- an editable copy of the bundled
 sanitized-synthetic example, or an uploaded ``.json`` file -- and displays the
 result verbatim. Optionally, in benchmark mode, it also evaluates that same
 priced case against one explicit benchmark JSON case (comparison + implied
-``PRICE_VOL`` calibration).
+``PRICE_VOL`` calibration). After a real result exists, it offers two
+current-run export downloads (JSON / Markdown) of that same display context.
 
 **This page performs no pricing, comparison, calibration, resolver, solver,
 Black-76, curve, discounting, accrual, volatility, error-mapping, or fallback
@@ -18,6 +20,19 @@ the builder, request constructor, pricing engine, comparison function,
 calibration function, resolver, solver, guard, curve/volatility helpers,
 provider, or QuantLib adapter directly. Every displayed value is a verbatim
 read of the headless workflow's display context. It reads no system clock.
+
+**Current-run export (Issue #101).** Once a real workflow result exists (in
+either mode), an "Export current run" section offers two
+``st.download_button`` controls -- "Download current run JSON" and
+"Download current run Markdown" -- with fixed file names
+(``shiori_standalone_run.json`` / ``shiori_standalone_run.md``) and explicit
+MIME types. Both call only the bounded, pure
+``standalone_option_run_export.render_standalone_run_as_json`` /
+``render_standalone_run_as_markdown`` helpers on the **already-computed**
+``display`` dict -- pricing, comparison, and calibration are never called
+again for export, no server-side file is written, and no session/report
+history is added. ``on_click="ignore"`` (this installed Streamlit version's
+supported mechanism) avoids an unnecessary app rerun on download.
 
 **Input surface (Issue #97 PR B binding decision).** An explicit input-source
 selector avoids any hidden precedence/fallback:
@@ -78,10 +93,19 @@ from pathlib import Path
 
 import streamlit as st
 
+from shiori_pricing_lab.app.standalone_option_run_export import (
+    render_standalone_run_as_json,
+    render_standalone_run_as_markdown,
+)
 from shiori_pricing_lab.app.standalone_option_workbench import (
     price_standalone_option_case,
     price_standalone_option_case_with_benchmark,
 )
+
+_EXPORT_JSON_FILE_NAME = "shiori_standalone_run.json"
+_EXPORT_MARKDOWN_FILE_NAME = "shiori_standalone_run.md"
+_EXPORT_JSON_MIME = "application/json"
+_EXPORT_MARKDOWN_MIME = "text/markdown; charset=utf-8"
 
 _EXAMPLE_PATH = (
     Path(__file__).resolve().parents[3] / "examples" / "standalone_option_case.json"
@@ -357,6 +381,37 @@ def _render_benchmark_result(display: dict) -> None:
             )
 
 
+def _render_export_section(display: dict) -> None:
+    """Render the "Export current run" downloads for the already-computed ``display``.
+
+    Only called after a real workflow result exists. Both downloads are
+    produced by the pure, bounded export helper reading ``display`` alone --
+    pricing, comparison, and calibration are not invoked again, no
+    server-side file is written, and nothing is persisted to session state.
+    ``on_click="ignore"`` avoids an unnecessary rerun of the whole page when
+    the trader clicks a download button.
+    """
+
+    st.subheader("Export current run")
+    export_left, export_right = st.columns(2)
+    with export_left:
+        st.download_button(
+            "Download current run JSON",
+            data=render_standalone_run_as_json(display),
+            file_name=_EXPORT_JSON_FILE_NAME,
+            mime=_EXPORT_JSON_MIME,
+            on_click="ignore",
+        )
+    with export_right:
+        st.download_button(
+            "Download current run Markdown",
+            data=render_standalone_run_as_markdown(display),
+            file_name=_EXPORT_MARKDOWN_FILE_NAME,
+            mime=_EXPORT_MARKDOWN_MIME,
+            on_click="ignore",
+        )
+
+
 def render_standalone_option_workbench_page() -> None:
     st.header("Standalone Bond Option Workbench")
     st.caption(
@@ -486,3 +541,4 @@ def render_standalone_option_workbench_page() -> None:
     _render_pricing_result(display)
     if benchmark_mode:
         _render_benchmark_result(display)
+    _render_export_section(display)
