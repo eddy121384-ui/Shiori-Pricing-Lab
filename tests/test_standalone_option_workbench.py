@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -47,17 +47,22 @@ from shiori_pricing_lab.app import standalone_option_workbench as workbench_modu
 from shiori_pricing_lab.app.standalone_option_workbench import (
     build_benchmark_from_standalone_option_benchmark_case,
     build_request_from_standalone_option_case,
+    prepare_live_bloomberg_quote_display,
     prepare_standalone_display,
     price_standalone_option_case,
     price_standalone_option_case_with_benchmark,
+    price_standalone_option_case_with_bloomberg_quote,
+    price_standalone_option_case_with_bloomberg_quote_and_benchmark,
 )
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote, BLIBenchmarkQuoteSide
 from shiori_pricing_lab.data.bli_snapshot import (
+    BLIBondQuote,
     BLICurvePoint,
     BLICurvePurpose,
     BLICurveRateBasis,
     BLIForwardCleanPriceInput,
     BLIMarketDataStatus,
+    BLIQuoteBasis,
 )
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
 from shiori_pricing_lab.data.bli_standalone_option_request import (
@@ -66,6 +71,7 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
 from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
     build_bli_standalone_option_request,
 )
+from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError
 from shiori_pricing_lab.pricing.bli_benchmark_comparison import (
     BLIBenchmarkComparisonReason,
     BLIBenchmarkComparisonStatus,
@@ -79,7 +85,7 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp_standalone_option
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.pricing.result import PricingErrorCode, PricingStatus
-from shiori_pricing_lab.products.enums import TreasuryFTPQuoteSide
+from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 from shiori_pricing_lab.products.fixtures import SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT
 from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 
@@ -842,3 +848,269 @@ def test_workbench_module_calls_compare_and_calibrate_but_no_lower_layer_math():
         "black76_price_option_pv_per_100",
     ):
         assert forbidden not in source, f"unexpected reference to {forbidden!r}"
+
+
+# --- 20. Issue #6 Phase 3: live Bloomberg bond-quote wiring ------------------
+#
+# No real blpapi/network/system clock: `load_bloomberg_bond_quote` itself is
+# already fully covered by tests/test_bloomberg_bond_quote.py, so here it is
+# monkeypatched directly on the workbench module (the smallest seam that
+# exercises this module's own orchestration/validation logic in isolation).
+
+_BLOOMBERG_SECURITY = "91282CQX Govt"
+
+
+def _live_quote(**overrides) -> BLIBondQuote:
+    params = dict(
+        isin=_example_envelope()["bond_option"]["underlying_isin"],
+        currency=Currency.USD,
+        price_type=BLIQuoteBasis.PRICE,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_system="BLOOMBERG_DAPI",
+        status=BLIMarketDataStatus.ACTIVE,
+        clean_price_per_100=99.5,
+        accrued_interest_per_100=0.31,
+    )
+    params.update(overrides)
+    return BLIBondQuote(**params)
+
+
+def _install_fake_bloomberg_loader(monkeypatch, *, quote=None, error=None):
+    calls: list[dict] = []
+
+    def fake_loader(*, security, isin, quote_side):
+        calls.append({"security": security, "isin": isin, "quote_side": quote_side})
+        if error is not None:
+            raise error
+        return quote if quote is not None else _live_quote()
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", fake_loader)
+    return calls
+
+
+def test_bloomberg_security_and_quote_side_have_no_default():
+    sig = inspect.signature(price_standalone_option_case_with_bloomberg_quote)
+    assert sig.parameters["bloomberg_security"].default is inspect.Parameter.empty
+    assert sig.parameters["quote_side"].default is inspect.Parameter.empty
+    assert sig.parameters["source_as_of"].default is inspect.Parameter.empty
+
+
+def test_source_as_of_mismatch_fails_before_bloomberg_call(monkeypatch):
+    calls = _install_fake_bloomberg_loader(monkeypatch)
+    envelope = _example_envelope()
+
+    with pytest.raises(ValueError, match="as_of_timestamp"):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope,
+            bloomberg_security=_BLOOMBERG_SECURITY,
+            quote_side=TreasuryFTPQuoteSide.MID,
+            source_as_of="2099-01-01T00:00:00Z",
+        )
+
+    assert calls == []
+
+
+def test_blank_bloomberg_security_raises_value_error(monkeypatch):
+    calls = _install_fake_bloomberg_loader(monkeypatch)
+    envelope = _example_envelope()
+
+    with pytest.raises(ValueError, match="bloomberg_security"):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope,
+            bloomberg_security="  ",
+            quote_side=TreasuryFTPQuoteSide.MID,
+            source_as_of=envelope["as_of_timestamp"],
+        )
+
+    assert calls == []
+
+
+@_requires_quantlib
+def test_exactly_one_bloomberg_call_with_expected_isin_and_explicit_side(monkeypatch):
+    calls = _install_fake_bloomberg_loader(monkeypatch)
+    envelope = _example_envelope()
+
+    price_standalone_option_case_with_bloomberg_quote(
+        envelope,
+        bloomberg_security=_BLOOMBERG_SECURITY,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_as_of=envelope["as_of_timestamp"],
+    )
+
+    assert calls == [
+        {
+            "security": _BLOOMBERG_SECURITY,
+            "isin": envelope["bond_option"]["underlying_isin"],
+            "quote_side": TreasuryFTPQuoteSide.MID,
+        }
+    ]
+
+
+@_requires_quantlib
+def test_only_bond_quote_is_replaced_everything_else_equal(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    envelope = _example_envelope()
+    reference_request = build_request_from_standalone_option_case(envelope)
+
+    request, _result, live_quote, _display = price_standalone_option_case_with_bloomberg_quote(
+        envelope,
+        bloomberg_security=_BLOOMBERG_SECURITY,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_as_of=envelope["as_of_timestamp"],
+    )
+
+    actual = asdict(request)
+    expected = asdict(reference_request)
+    actual_bond_quote = actual["market_data_snapshot"]["bond_quote"]
+    expected_bond_quote = expected["market_data_snapshot"]["bond_quote"]
+    assert actual_bond_quote != expected_bond_quote
+    assert request.market_data_snapshot.bond_quote.isin == live_quote.isin
+    assert request.market_data_snapshot.bond_quote.clean_price_per_100 == (
+        live_quote.clean_price_per_100
+    )
+    actual["market_data_snapshot"]["bond_quote"] = expected_bond_quote
+    assert actual == expected
+
+
+def test_input_mapping_and_nested_values_not_mutated(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    envelope = _example_envelope()
+    snapshot_before = json.loads(json.dumps(envelope))
+
+    price_standalone_option_case_with_bloomberg_quote(
+        envelope,
+        bloomberg_security=_BLOOMBERG_SECURITY,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_as_of=envelope["as_of_timestamp"],
+    )
+
+    assert envelope == snapshot_before
+
+
+def test_bloomberg_failure_propagates_and_never_falls_back(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch, error=BLIBloombergDapiError("boom"))
+    envelope = _example_envelope()
+
+    with pytest.raises(BLIBloombergDapiError, match="boom"):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope,
+            bloomberg_security=_BLOOMBERG_SECURITY,
+            quote_side=TreasuryFTPQuoteSide.MID,
+            source_as_of=envelope["as_of_timestamp"],
+        )
+
+
+def test_mismatched_live_quote_isin_is_rejected_by_existing_constructor(monkeypatch):
+    mismatched_quote = replace(_live_quote(), isin="XS9999999999")
+    _install_fake_bloomberg_loader(monkeypatch, quote=mismatched_quote)
+    envelope = _example_envelope()
+
+    # The existing BLIStandaloneBondOptionRequest ISIN-coherence gate (not
+    # anything reimplemented in the workbench) catches this -- proving live
+    # quote/ISIN coherence still reaches the existing constructors unchanged.
+    with pytest.raises(ValueError):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope,
+            bloomberg_security=_BLOOMBERG_SECURITY,
+            quote_side=TreasuryFTPQuoteSide.MID,
+            source_as_of=envelope["as_of_timestamp"],
+        )
+
+
+@_requires_quantlib
+def test_price_only_mode_result_matches_manually_swapped_reference(monkeypatch):
+    live_quote = _live_quote()
+    _install_fake_bloomberg_loader(monkeypatch, quote=live_quote)
+    envelope = _example_envelope()
+
+    request, result, returned_quote, display = price_standalone_option_case_with_bloomberg_quote(
+        envelope,
+        bloomberg_security=_BLOOMBERG_SECURITY,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_as_of=envelope["as_of_timestamp"],
+    )
+
+    # No financial calculation duplicated in the orchestration: pricing the
+    # same envelope directly, with only bond_quote swapped for the live
+    # quote (via the existing builder path, not a hand-built object), must
+    # reach the exact same PricingResult.
+    bloomberg_envelope = {**envelope, "bond_quote": asdict(live_quote)}
+    reference_result = price_bli_mvp_standalone_option(
+        build_request_from_standalone_option_case(bloomberg_envelope)
+    )
+
+    assert returned_quote == live_quote
+    assert result.status == reference_result.status
+    assert result.pv == reference_result.pv
+    assert display["live_bloomberg_quote"] == prepare_live_bloomberg_quote_display(
+        _BLOOMBERG_SECURITY, live_quote, envelope["as_of_timestamp"], None
+    )
+
+
+def test_prepare_live_bloomberg_quote_display_is_bounded_and_verbatim():
+    live_quote = _live_quote()
+    display = prepare_live_bloomberg_quote_display(
+        _BLOOMBERG_SECURITY, live_quote, "2026-07-01T16:00:00Z", "2026-07-01T16:05:00Z"
+    )
+    assert display == {
+        "security": _BLOOMBERG_SECURITY,
+        "verified_isin": live_quote.isin,
+        "source_system": live_quote.source_system,
+        "source_as_of": "2026-07-01T16:00:00Z",
+        "retrieved_at": "2026-07-01T16:05:00Z",
+        "quote_side": "MID",
+        "currency": "USD",
+        "clean_price_per_100": live_quote.clean_price_per_100,
+        "accrued_interest_per_100": live_quote.accrued_interest_per_100,
+    }
+
+
+@_requires_quantlib
+def test_benchmark_mode_calls_pricing_comparison_calibration_exactly_once_each(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    envelope = _example_envelope()
+    benchmark_text = _synthetic_benchmark_text()
+
+    compare_calls = []
+    calibrate_calls = []
+    real_compare = workbench_module.compare_bli_benchmark
+    real_calibrate = workbench_module.calibrate_bli_implied_price_vol
+
+    def spy_compare(*args, **kwargs):
+        compare_calls.append(kwargs.get("active_quote_side"))
+        return real_compare(*args, **kwargs)
+
+    def spy_calibrate(*args, **kwargs):
+        calibrate_calls.append(kwargs.get("active_quote_side"))
+        return real_calibrate(*args, **kwargs)
+
+    monkeypatch.setattr(workbench_module, "compare_bli_benchmark", spy_compare)
+    monkeypatch.setattr(workbench_module, "calibrate_bli_implied_price_vol", spy_calibrate)
+
+    (
+        request,
+        result,
+        live_quote,
+        benchmark,
+        comparison,
+        calibration,
+        display,
+    ) = price_standalone_option_case_with_bloomberg_quote_and_benchmark(
+        envelope,
+        benchmark_text,
+        bloomberg_security=_BLOOMBERG_SECURITY,
+        quote_side=TreasuryFTPQuoteSide.MID,
+        source_as_of=envelope["as_of_timestamp"],
+    )
+
+    assert len(compare_calls) == 1
+    assert len(calibrate_calls) == 1
+    # The same explicit side reaches Bloomberg, comparison, and calibration.
+    assert live_quote.quote_side is TreasuryFTPQuoteSide.MID
+    assert compare_calls[0] == "MID"
+    assert calibrate_calls[0] == "MID"
+    assert comparison.active_quote_side.value == "MID"
+    assert display["live_bloomberg_quote"]["quote_side"] == "MID"
+    assert "benchmark" in display
+    assert "comparison" in display
+    assert "calibration" in display

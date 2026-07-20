@@ -84,6 +84,26 @@ actually ran) full solver diagnostics -- any field the existing result leaves
 ``None`` is never replaced by a fabricated ``0``/placeholder value; it is
 simply not rendered as a metric. The model fair premium is never labeled a
 client quote.
+
+**Issue #6 Phase 4: Bloomberg DAPI bond-quote source.** An explicit
+"Bond quote source" selector -- *Case JSON* (unchanged default) or
+*Bloomberg DAPI* -- with no hidden precedence. *Case JSON* preserves the
+existing behavior exactly, including the existing benchmark active-side
+selector, and never imports or calls anything Bloomberg-related.
+*Bloomberg DAPI* requires an explicit security, an explicit quote side
+(``index=None``, no preselected value), and an explicit ``source_as_of``,
+then calls only the new headless
+``price_standalone_option_case_with_bloomberg_quote`` /
+``_and_benchmark`` workflows; in benchmark mode the same quote side drives
+both the Bloomberg price field and the comparison/calibration
+``active_quote_side`` -- the page shows no separate active-side selector in
+this mode. The page states plainly that the case JSON's ``bond_quote`` is
+replaced and never used as a fallback. A Bloomberg failure
+(``BLIBloombergDapiError``, caught alongside the existing local-input
+exceptions -- never a broad ``except Exception``) renders the exact error
+and prices nothing; there is no stale previous result and no fabricated
+zero. This page adds no background refresh, polling, caching, auto-run,
+session history, credentials UI, or Bloomberg connection settings.
 """
 
 from __future__ import annotations
@@ -100,7 +120,10 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
 from shiori_pricing_lab.app.standalone_option_workbench import (
     price_standalone_option_case,
     price_standalone_option_case_with_benchmark,
+    price_standalone_option_case_with_bloomberg_quote,
+    price_standalone_option_case_with_bloomberg_quote_and_benchmark,
 )
+from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError
 
 _EXPORT_JSON_FILE_NAME = "shiori_standalone_run.json"
 _EXPORT_MARKDOWN_FILE_NAME = "shiori_standalone_run.md"
@@ -130,6 +153,9 @@ _MODE_PRICE_ONLY = "Price only"
 _MODE_PRICE_AND_BENCHMARK = "Price + benchmark comparison / implied PRICE_VOL"
 
 _QUOTE_SIDE_OPTIONS = ("BID", "MID", "OFFER")
+
+_BOND_QUOTE_SOURCE_CASE_JSON = "Case JSON"
+_BOND_QUOTE_SOURCE_BLOOMBERG = "Bloomberg DAPI"
 
 _COMPARISON_STATUS_RENDERERS = {
     "PASS": st.success,
@@ -381,6 +407,21 @@ def _render_benchmark_result(display: dict) -> None:
             )
 
 
+def _render_live_bloomberg_quote(display: dict) -> None:
+    """Render the live Bloomberg quote provenance section, verbatim.
+
+    Only called in Bloomberg-DAPI bond-quote-source mode. Shown as its own
+    section, distinct from the model fair premium, the benchmark premium,
+    and the implied ``PRICE_VOL`` -- every value is a direct read of
+    ``display["live_bloomberg_quote"]``
+    (:func:`standalone_option_workbench.prepare_live_bloomberg_quote_display`),
+    never recomputed or reinterpreted here.
+    """
+
+    st.subheader("Live Bloomberg Quote")
+    st.write(display["live_bloomberg_quote"])
+
+
 def _render_export_section(display: dict) -> None:
     """Render the "Export current run" downloads for the already-computed ``display``.
 
@@ -424,6 +465,11 @@ def render_standalone_option_workbench_page() -> None:
     mode = st.radio("Mode", [_MODE_PRICE_ONLY, _MODE_PRICE_AND_BENCHMARK])
     benchmark_mode = mode == _MODE_PRICE_AND_BENCHMARK
 
+    bond_quote_source = st.radio(
+        "Bond quote source", [_BOND_QUOTE_SOURCE_CASE_JSON, _BOND_QUOTE_SOURCE_BLOOMBERG]
+    )
+    bloomberg_mode = bond_quote_source == _BOND_QUOTE_SOURCE_BLOOMBERG
+
     input_source = st.radio("Input source", [_EDITABLE_SOURCE, _UPLOAD_SOURCE])
 
     textarea_text: str | None = None
@@ -446,6 +492,28 @@ def render_standalone_option_workbench_page() -> None:
         "retrieved_at (optional workbench provenance; kept separate from source-as-of)",
         value="",
     )
+
+    bloomberg_security_text: str | None = None
+    bloomberg_quote_side: str | None = None
+    bloomberg_source_as_of_text: str | None = None
+    if bloomberg_mode:
+        st.subheader("Bloomberg DAPI bond quote")
+        st.caption(
+            "The case JSON's bond_quote will be replaced by one live Bloomberg DAPI "
+            "quote and is never used as a fallback -- not on failure, not merged "
+            "field-by-field."
+        )
+        bloomberg_security_text = st.text_input("Bloomberg security", value="")
+        bloomberg_quote_side = st.selectbox(
+            "Quote side",
+            _QUOTE_SIDE_OPTIONS,
+            index=None,
+            placeholder="Select a quote side (required — no default)",
+        )
+        bloomberg_source_as_of_text = st.text_input(
+            "source_as_of (must equal the case JSON's as_of_timestamp exactly)",
+            value="",
+        )
 
     benchmark_input_source: str | None = None
     benchmark_textarea_text: str | None = None
@@ -476,12 +544,18 @@ def render_standalone_option_workbench_page() -> None:
             if benchmark_uploaded_file is None:
                 st.info("Upload a benchmark .json file to compare. No file is loaded yet.")
 
-        active_quote_side = st.selectbox(
-            "Active quote side",
-            _QUOTE_SIDE_OPTIONS,
-            index=None,
-            placeholder="Select a quote side (required — no default)",
-        )
+        if bloomberg_mode:
+            st.caption(
+                "Active quote side: driven by the Bloomberg quote side above -- "
+                "no separate selector in Bloomberg DAPI mode."
+            )
+        else:
+            active_quote_side = st.selectbox(
+                "Active quote side",
+                _QUOTE_SIDE_OPTIONS,
+                index=None,
+                placeholder="Select a quote side (required — no default)",
+            )
 
     if not st.button("Price standalone option"):
         return
@@ -499,8 +573,28 @@ def render_standalone_option_workbench_page() -> None:
         else:
             case_text = textarea_text
 
+        if bloomberg_mode:
+            if not bloomberg_security_text or not bloomberg_security_text.strip():
+                st.warning(
+                    "No Bloomberg security entered — nothing to price. Enter a "
+                    "security first."
+                )
+                return
+            if bloomberg_quote_side is None:
+                st.warning(
+                    "No quote side selected — nothing to price. Select BID, MID, "
+                    "or OFFER first."
+                )
+                return
+            if not bloomberg_source_as_of_text or not bloomberg_source_as_of_text.strip():
+                st.warning(
+                    "No source_as_of entered — nothing to price. Enter the case "
+                    "JSON's as_of_timestamp first."
+                )
+                return
+
         if benchmark_mode:
-            if active_quote_side is None:
+            if not bloomberg_mode and active_quote_side is None:
                 st.warning(
                     "No active quote side selected — nothing to compare. Select "
                     "BID, MID, or OFFER first."
@@ -517,6 +611,37 @@ def render_standalone_option_workbench_page() -> None:
             else:
                 benchmark_text = benchmark_textarea_text
 
+        if bloomberg_mode and benchmark_mode:
+            (
+                _request,
+                _result,
+                _live_quote,
+                _benchmark,
+                _comparison,
+                _calibration,
+                display,
+            ) = price_standalone_option_case_with_bloomberg_quote_and_benchmark(
+                case_text,
+                benchmark_text,
+                bloomberg_security=bloomberg_security_text,
+                quote_side=bloomberg_quote_side,
+                source_as_of=bloomberg_source_as_of_text,
+                retrieved_at=retrieved_at,
+            )
+        elif bloomberg_mode:
+            (
+                _request,
+                _result,
+                _live_quote,
+                display,
+            ) = price_standalone_option_case_with_bloomberg_quote(
+                case_text,
+                bloomberg_security=bloomberg_security_text,
+                quote_side=bloomberg_quote_side,
+                source_as_of=bloomberg_source_as_of_text,
+                retrieved_at=retrieved_at,
+            )
+        elif benchmark_mode:
             (
                 _request,
                 _result,
@@ -534,11 +659,19 @@ def render_standalone_option_workbench_page() -> None:
             _request, _result, display = price_standalone_option_case(
                 case_text, retrieved_at=retrieved_at
             )
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        TypeError,
+        ValueError,
+        BLIBloombergDapiError,
+    ) as exc:
         st.error(str(exc))
         return
 
     _render_pricing_result(display)
+    if bloomberg_mode:
+        _render_live_bloomberg_quote(display)
     if benchmark_mode:
         _render_benchmark_result(display)
     _render_export_section(display)

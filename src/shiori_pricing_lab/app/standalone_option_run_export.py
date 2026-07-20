@@ -33,13 +33,15 @@ already carried by the existing display contract (Issue #97 §"never
 fabricating a replacement value").
 
 **Markdown.** ``render_standalone_run_as_markdown`` renders the sections
-Context / Pricing / Benchmark / Comparison / Calibration / Assumptions /
-Excluded Components / Errors / Solver Diagnostics -- the last four are
+Context / Pricing / Live Bloomberg Quote / Benchmark / Comparison /
+Calibration / Assumptions / Excluded Components / Errors / Solver
+Diagnostics -- all but Context/Pricing/Assumptions/Excluded Components are
 included only when the corresponding data is actually present in
-``display`` (mirrors the existing UI's own conditional rendering:
-Benchmark/Comparison/Calibration only exist in the merged benchmark-mode
-display; Solver Diagnostics only when ``calibration["solver_status"]`` is
-not ``None``; Errors only when the errors list is non-empty). Every existing
+``display`` (mirrors the existing UI's own conditional rendering: Live
+Bloomberg Quote only in Bloomberg-DAPI mode; Benchmark/Comparison/
+Calibration only exist in the merged benchmark-mode display; Solver
+Diagnostics only when ``calibration["solver_status"]`` is not ``None``;
+Errors only when the errors list is non-empty). Every existing
 ``None`` value renders as the literal text ``not available`` -- never a
 fabricated ``0`` or other numeric replacement. Every other scalar value is
 ``str(value)`` verbatim -- no rounding, no reformatting, no recomputation
@@ -62,6 +64,16 @@ than falling back to Python ``repr``.
 **No system clock, no quote ID, no version, no hidden metadata.** Neither
 function reads the clock or generates an identifier; the only content is
 what ``display`` already carries.
+
+**Issue #6 Phase 5: live Bloomberg quote provenance.** JSON export needs no
+change -- ``json.dumps(display, ...)`` already serializes a
+``"live_bloomberg_quote"`` key verbatim if the display dict carries one
+(Bloomberg-DAPI bond-quote-source mode). Markdown export adds one
+conditional ``## Live Bloomberg Quote`` section, included only when that key
+is present, rendered through the same verbatim ``_section`` helper as every
+other section -- no rounding, no recomputation, no omitted field, and
+``None`` still renders as ``not available``. Manual (Case JSON) mode never
+produces this key, so its Markdown export is unchanged.
 """
 
 from __future__ import annotations
@@ -156,6 +168,18 @@ _CALIBRATION_FIELDS = (
     ("Implied PRICE_VOL", "implied_price_vol"),
     ("Model premium per 100 (solver)", "model_premium_per_100"),
     ("Premium residual per 100 (solver)", "premium_residual_per_100"),
+)
+
+_LIVE_BLOOMBERG_QUOTE_FIELDS = (
+    ("Security", "security"),
+    ("Verified ISIN", "verified_isin"),
+    ("Source system", "source_system"),
+    ("Source as-of", "source_as_of"),
+    ("Retrieved at", "retrieved_at"),
+    ("Quote side", "quote_side"),
+    ("Currency", "currency"),
+    ("Clean price per 100", "clean_price_per_100"),
+    ("Accrued interest per 100", "accrued_interest_per_100"),
 )
 
 _SOLVER_DIAGNOSTICS_FIELDS = (
@@ -377,6 +401,15 @@ def render_standalone_run_as_markdown(display: dict) -> str:
 
     lines.extend(_section("Context", display, _CONTEXT_FIELDS))
     lines.extend(_section("Pricing", display, _PRICING_FIELDS))
+
+    if "live_bloomberg_quote" in display:
+        lines.extend(
+            _section(
+                "Live Bloomberg Quote",
+                display["live_bloomberg_quote"],
+                _LIVE_BLOOMBERG_QUOTE_FIELDS,
+            )
+        )
 
     if "benchmark" in display:
         lines.extend(_section("Benchmark", display["benchmark"], _BENCHMARK_FIELDS))

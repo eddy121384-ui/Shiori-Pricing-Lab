@@ -43,6 +43,8 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
 from shiori_pricing_lab.app.standalone_option_ui import (
+    _BOND_QUOTE_SOURCE_BLOOMBERG,
+    _BOND_QUOTE_SOURCE_CASE_JSON,
     _MODE_PRICE_AND_BENCHMARK,
     _MODE_PRICE_ONLY,
     _decode_uploaded_json_text,
@@ -230,8 +232,71 @@ def _set_mode(at: AppTest, mode: str) -> None:
     radio.set_value(mode).run()
 
 
+def _set_bond_quote_source(at: AppTest, source: str) -> None:
+    radio = next(r for r in at.radio if r.label == "Bond quote source")
+    radio.set_value(source).run()
+
+
 def _press_price(at: AppTest) -> None:
     next(b for b in at.button if b.label == "Price standalone option").click().run()
+
+
+# --- Issue #6 Phase 4: live Bloomberg bond-quote source fixtures -------------
+#
+# Same isolation strategy as _SUCCESS_DISPLAY/_BENCHMARK_PASS_DISPLAY above:
+# render-only tests use a plain dict (no BLI construction at all); the one
+# benchmark-mode wiring test that needs a fully render-complete display
+# reuses the real _BENCHMARK_PASS_DISPLAY built at import time, only adding
+# the live_bloomberg_quote section a real Bloomberg call would have produced.
+
+_FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY = {
+    "security": "91282CQX Govt",
+    "verified_isin": "XS0000000001",
+    "source_system": "BLOOMBERG_DAPI",
+    "source_as_of": _SOURCE_AS_OF,
+    "retrieved_at": None,
+    "quote_side": "MID",
+    "currency": "USD",
+    "clean_price_per_100": 99.5,
+    "accrued_interest_per_100": 0.31,
+}
+_FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY = {
+    **_FAILED_DISPLAY,
+    "live_bloomberg_quote": _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY,
+}
+_FAKE_BLOOMBERG_BENCHMARK_DISPLAY = (
+    {**_BENCHMARK_PASS_DISPLAY, "live_bloomberg_quote": _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY}
+    if _QUANTLIB_AVAILABLE
+    else None
+)
+
+
+def _render_bloomberg_display_script(display: dict) -> None:
+    from shiori_pricing_lab.app.standalone_option_ui import (
+        _render_export_section,
+        _render_live_bloomberg_quote,
+        _render_pricing_result,
+    )
+
+    _render_pricing_result(display)
+    _render_live_bloomberg_quote(display)
+    _render_export_section(display)
+
+
+def _run_bloomberg_render(display: dict) -> AppTest:
+    at = AppTest.from_function(
+        _render_bloomberg_display_script, kwargs={"display": display}, default_timeout=60
+    )
+    at.run()
+    return at
+
+
+def _fill_bloomberg_inputs(at: AppTest, *, security: str, side: str, source_as_of: str) -> None:
+    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(security).run()
+    next(s for s in at.selectbox if s.label == "Quote side").set_value(side).run()
+    next(t for t in at.text_input if t.label.startswith("source_as_of")).set_value(
+        source_as_of
+    ).run()
 
 
 # --- 1. Module + helpers ------------------------------------------------------
@@ -796,3 +861,276 @@ def test_export_helper_module_defines_no_streamlit_names():
     module_names = set(dir(export_module))
     forbidden_names = {"streamlit", "st"}
     assert forbidden_names.isdisjoint(module_names)
+
+
+# ==================================================================================
+# Issue #6 Phase 4: live Bloomberg bond-quote source UI.
+# ==================================================================================
+
+# --- 22. Bond quote source selector: default preserves existing manual mode -------
+
+
+def test_bond_quote_source_selector_defaults_to_case_json_with_no_bloomberg_controls():
+    at = _run_page()
+    radio = next(r for r in at.radio if r.label == "Bond quote source")
+    assert list(radio.options) == [_BOND_QUOTE_SOURCE_CASE_JSON, _BOND_QUOTE_SOURCE_BLOOMBERG]
+    assert radio.value == _BOND_QUOTE_SOURCE_CASE_JSON
+    assert not any(t.label == "Bloomberg security" for t in at.text_input)
+
+
+def test_manual_mode_never_calls_bloomberg_workflow(monkeypatch):
+    def _fail(*args, **kwargs):
+        raise AssertionError("Bloomberg workflow must not be called in Case JSON mode")
+
+    monkeypatch.setattr(ui_module, "price_standalone_option_case_with_bloomberg_quote", _fail)
+    monkeypatch.setattr(
+        ui_module, "price_standalone_option_case_with_bloomberg_quote_and_benchmark", _fail
+    )
+
+    at = _run_page()
+    _set_case_json(at, "{ this is not valid json ")
+    _press_price(at)  # default Bond quote source is Case JSON
+
+    assert not at.exception
+    assert len(at.error) >= 1
+
+
+# --- 23. Bloomberg mode: explicit security/side/source_as_of, no preselected side --
+
+
+def test_bloomberg_mode_shows_explicit_inputs_with_no_preselected_side():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+
+    assert any(t.label == "Bloomberg security" for t in at.text_input)
+    quote_side_box = next(s for s in at.selectbox if s.label == "Quote side")
+    assert list(quote_side_box.options) == ["BID", "MID", "OFFER"]
+    assert quote_side_box.value is None
+    assert any(t.label.startswith("source_as_of") for t in at.text_input)
+    # No separate "Active quote side" selector in Bloomberg mode, even in
+    # benchmark mode (the Bloomberg quote side drives comparison/calibration).
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    assert not any(s.label == "Active quote side" for s in at.selectbox)
+
+
+def test_bloomberg_mode_missing_security_shows_warning_and_does_not_run():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    next(s for s in at.selectbox if s.label == "Quote side").set_value("MID").run()
+    next(t for t in at.text_input if t.label.startswith("source_as_of")).set_value(
+        _SOURCE_AS_OF
+    ).run()
+    _press_price(at)
+
+    assert not at.exception
+    assert any("security" in w.value.lower() for w in at.warning)
+    assert len(at.metric) == 0
+
+
+def test_bloomberg_mode_missing_quote_side_shows_warning_and_does_not_run():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(
+        "91282CQX Govt"
+    ).run()
+    next(t for t in at.text_input if t.label.startswith("source_as_of")).set_value(
+        _SOURCE_AS_OF
+    ).run()
+    _press_price(at)
+
+    assert not at.exception
+    assert any("quote side" in w.value.lower() for w in at.warning)
+    assert len(at.metric) == 0
+
+
+def test_bloomberg_mode_missing_source_as_of_shows_warning_and_does_not_run():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(
+        "91282CQX Govt"
+    ).run()
+    next(s for s in at.selectbox if s.label == "Quote side").set_value("MID").run()
+    _press_price(at)
+
+    assert not at.exception
+    assert any("source_as_of" in w.value.lower() for w in at.warning)
+    assert len(at.metric) == 0
+
+
+# --- 24. Bloomberg failure: exact error shown, no fallback, no stale results -------
+#
+# The stub is installed *inside* the AppTest script function itself (a fresh
+# `from ... import ...` there, exactly like the file's other script
+# functions) rather than via `monkeypatch.setattr(ui_module, ...)` from the
+# test body: under the full suite, earlier suites' `sys.modules` deletion
+# games (see the module docstring's "Full-suite interference" note) can
+# leave the test file's own `ui_module` reference stale relative to what
+# AppTest's fresh import resolves, so an externally-applied patch can miss.
+# Patching inside the script -- which reruns on every widget interaction --
+# uses whatever module object is current at each execution, sidestepping
+# that pre-existing, out-of-scope hazard entirely.
+
+
+def _bloomberg_failure_script() -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+    from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError as _Error
+
+    def _raise(*args, **kwargs):
+        raise _Error("Bloomberg DAPI session failed to start")
+
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _raise
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+def test_bloomberg_failure_shows_exact_error_and_never_falls_back():
+    at = AppTest.from_function(_bloomberg_failure_script, default_timeout=60)
+    at.run()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID", source_as_of=_SOURCE_AS_OF)
+    _press_price(at)
+
+    assert not at.exception
+    assert any("Bloomberg DAPI session failed to start" in e.value for e in at.error)
+    assert len(at.metric) == 0
+    assert len(at.download_button) == 0
+
+
+# --- 25. Correct headless workflow is called for each mode combination ------------
+
+
+def _bloomberg_price_only_stub_script(calls: list, display: dict) -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _fake_price_only(case, *, bloomberg_security, quote_side, source_as_of, retrieved_at=None):
+        calls.append(
+            {
+                "bloomberg_security": bloomberg_security,
+                "quote_side": quote_side,
+                "source_as_of": source_as_of,
+            }
+        )
+        return None, None, None, display
+
+    def _fail_benchmark(*args, **kwargs):
+        raise AssertionError("benchmark workflow must not be called in price-only mode")
+
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _fake_price_only
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote_and_benchmark = (
+        _fail_benchmark
+    )
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+def test_bloomberg_price_only_mode_calls_correct_workflow_and_renders_live_quote():
+    calls: list[dict] = []
+    at = AppTest.from_function(
+        _bloomberg_price_only_stub_script,
+        kwargs={"calls": calls, "display": _FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY},
+        default_timeout=60,
+    )
+    at.run()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID", source_as_of=_SOURCE_AS_OF)
+    _press_price(at)
+
+    assert not at.exception
+    assert calls == [
+        {"bloomberg_security": "91282CQX Govt", "quote_side": "MID", "source_as_of": _SOURCE_AS_OF}
+    ]
+    subheadings = [s.value for s in at.subheader]
+    assert "Live Bloomberg Quote" in subheadings
+
+
+def _bloomberg_benchmark_stub_script(calls: list, display: dict) -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _fake_benchmark(
+        case, benchmark_case, *, bloomberg_security, quote_side, source_as_of, retrieved_at=None
+    ):
+        calls.append(
+            {
+                "bloomberg_security": bloomberg_security,
+                "quote_side": quote_side,
+                "source_as_of": source_as_of,
+            }
+        )
+        return None, None, None, None, None, None, display
+
+    def _fail_price_only(*args, **kwargs):
+        raise AssertionError("price-only workflow must not be called in benchmark mode")
+
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote_and_benchmark = (
+        _fake_benchmark
+    )
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _fail_price_only
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+@_requires_quantlib
+def test_bloomberg_benchmark_mode_calls_correct_workflow_with_same_side():
+    calls: list[dict] = []
+    at = AppTest.from_function(
+        _bloomberg_benchmark_stub_script,
+        kwargs={"calls": calls, "display": _FAKE_BLOOMBERG_BENCHMARK_DISPLAY},
+        default_timeout=60,
+    )
+    at.run()
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
+        json.dumps(_benchmark_envelope())
+    ).run()
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID", source_as_of=_SOURCE_AS_OF)
+    _press_price(at)
+
+    assert not at.exception
+    assert calls == [
+        {"bloomberg_security": "91282CQX Govt", "quote_side": "MID", "source_as_of": _SOURCE_AS_OF}
+    ]
+    # The same explicit side reached Bloomberg (asserted above) and there is
+    # no separate active-side selector for comparison/calibration to diverge.
+    assert not any(s.label == "Active quote side" for s in at.selectbox)
+    subheadings = [s.value for s in at.subheader]
+    assert "Live Bloomberg Quote" in subheadings
+    assert "Benchmark" in subheadings
+    assert "Comparison" in subheadings
+    assert "Calibration" in subheadings
+
+
+# --- 26. Live provenance renders as its own distinct section ----------------------
+
+
+def test_live_bloomberg_quote_renders_as_distinct_section_verbatim():
+    at = _run_bloomberg_render(_FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY)
+    assert not at.exception
+
+    subheadings = [s.value for s in at.subheader]
+    assert "Context" in subheadings
+    assert "Live Bloomberg Quote" in subheadings
+    assert subheadings.index("Live Bloomberg Quote") > subheadings.index("Context")
+
+    json_blocks = [json.loads(j.value) for j in at.json]
+    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY in json_blocks
+
+
+# --- 27. Only expected local-input exceptions plus BLIBloombergDapiError caught ----
+
+
+def test_ui_catches_bloomberg_dapi_error_alongside_existing_local_input_exceptions():
+    source = inspect.getsource(ui_module)
+    body = source.replace(ui_module.__doc__ or "", "")
+    assert "except Exception" not in body
+    assert "BLIBloombergDapiError" in body
+    assert "json.JSONDecodeError" in body
+    assert "UnicodeDecodeError" in body
+
+
+def test_ui_source_has_no_broad_bloomberg_side_defaults():
+    # Every st.selectbox for a quote side (existing active-side and the new
+    # Bloomberg quote-side selector) starts unselected -- there are exactly
+    # two `index=None` selectboxes in the code body, never a hidden default
+    # like "MID". Scan the body only: the docstring legitimately mentions
+    # `index=None` in prose, which must not count as a widget occurrence.
+    source = inspect.getsource(ui_module)
+    body = source.replace(ui_module.__doc__ or "", "")
+    assert body.count("index=None") == 2

@@ -76,11 +76,33 @@ original ``errors`` and never invents a replacement value. No new
 result/status dataclass or error envelope is introduced.
 
 The workbench never labels the model fair premium a client quote.
+
+**Issue #6 Phase 3: live Bloomberg bond-quote wiring.** Two bounded headless
+workflows -- :func:`price_standalone_option_case_with_bloomberg_quote` and
+:func:`price_standalone_option_case_with_bloomberg_quote_and_benchmark` --
+replace only a case's ``bond_quote`` with one live quote from the existing,
+unmodified ``load_bloomberg_bond_quote`` (``data/bloomberg_bond_quote.py``)
+before pricing through the same approved path as the manual-JSON workflow.
+``source_as_of`` must equal the case envelope's ``as_of_timestamp`` exactly
+before any Bloomberg call is made -- no normalization, no timezone
+conversion, no system clock, no "close enough" rule. The expected ISIN
+comes from the case's own ``bond_option.underlying_isin``; Bloomberg's
+``ID_ISIN`` is verified against it by the loader itself (Issue #6 Phase 2).
+The original case JSON's ``bond_quote`` is never read, never used as a
+fallback, and never merged field-by-field with the live quote -- it is
+unconditionally replaced on success and never touched on failure, since a
+Bloomberg failure raises before the case's ``bond_quote`` is ever
+referenced. In benchmark mode, the one live-quote ``quote_side`` is reused
+verbatim as ``active_quote_side`` for both ``compare_bli_benchmark`` and
+``calibrate_bli_implied_price_vol`` -- no second side, override, or
+fallback. This slice adds no forward, repo, ``PRICE_VOL``, OVME, curve, or
+pricing-methodology logic of its own.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote, BLIBenchmarkQuoteSide
 from shiori_pricing_lab.data.bli_snapshot import (
@@ -97,6 +119,7 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
 from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
     build_bli_standalone_option_request,
 )
+from shiori_pricing_lab.data.bloomberg_bond_quote import load_bloomberg_bond_quote
 from shiori_pricing_lab.pricing.bli_benchmark_comparison import (
     BLIBenchmarkComparisonResult,
     compare_bli_benchmark,
@@ -108,6 +131,7 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp_standalone_option
 from shiori_pricing_lab.pricing.result import PricingResult
 from shiori_pricing_lab.products.bond_option import BondOption
+from shiori_pricing_lab.products.enums import TreasuryFTPQuoteSide
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
 _REQUIRED_TOP_LEVEL_KEYS = frozenset(
@@ -539,3 +563,149 @@ def price_standalone_option_case_with_benchmark(
     benchmark_display = prepare_standalone_benchmark_display(benchmark, comparison, calibration)
     merged_display = {**display, **benchmark_display}
     return request, result, benchmark, comparison, calibration, merged_display
+
+
+# --- Issue #6 Phase 3: live Bloomberg bond-quote wiring ---------------------
+
+
+def prepare_live_bloomberg_quote_display(
+    bloomberg_security: str,
+    live_quote: BLIBondQuote,
+    source_as_of: str,
+    retrieved_at: str | None,
+) -> dict:
+    """Return a bounded display context read **verbatim** from ``live_quote``.
+
+    No calculated values, no clock-sourced timestamp, no quote ID, no
+    inferred metadata -- every field is a direct read of ``live_quote`` or a
+    caller-supplied provenance value (``bloomberg_security``, ``source_as_of``,
+    ``retrieved_at``).
+    """
+
+    return {
+        "security": bloomberg_security,
+        "verified_isin": live_quote.isin,
+        "source_system": live_quote.source_system,
+        "source_as_of": source_as_of,
+        "retrieved_at": retrieved_at,
+        "quote_side": live_quote.quote_side.value,
+        "currency": live_quote.currency.value,
+        "clean_price_per_100": live_quote.clean_price_per_100,
+        "accrued_interest_per_100": live_quote.accrued_interest_per_100,
+    }
+
+
+def price_standalone_option_case_with_bloomberg_quote(
+    case: str | dict,
+    *,
+    bloomberg_security: str,
+    quote_side: TreasuryFTPQuoteSide,
+    source_as_of: str,
+    retrieved_at: str | None = None,
+) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, BLIBondQuote, dict]:
+    """Price ``case`` with its ``bond_quote`` replaced by one live Bloomberg quote.
+
+    Parses ``case`` through the existing envelope rules first (no Bloomberg
+    call yet), requires ``bloomberg_security``/``source_as_of`` non-blank,
+    and requires ``source_as_of`` to equal the envelope's ``as_of_timestamp``
+    exactly -- only then is ``load_bloomberg_bond_quote`` called, exactly
+    once, with the expected ISIN read from the case's own
+    ``bond_option.underlying_isin`` (via the existing ``BondOption``
+    constructor, not raw dict indexing) and the caller's explicit
+    ``quote_side`` (required, no default). A new copied envelope is built
+    with only ``bond_quote`` replaced (a shallow top-level dict copy, exactly
+    like this module's existing display-merge pattern) -- the input ``case``
+    mapping and every other envelope value are never mutated. The copied
+    envelope is then priced through the unmodified
+    :func:`price_standalone_option_case`, reusing the same request builder
+    and pricing engine as the manual-JSON workflow.
+
+    Returns the existing ``request``/``PricingResult``, the live
+    ``BLIBondQuote``, and the price-only display dict with one added
+    ``"live_bloomberg_quote"`` section (see
+    :func:`prepare_live_bloomberg_quote_display`). Raises ``ValueError`` for
+    envelope/input problems, propagates ``BLIBloombergDapiError`` unchanged
+    on any Bloomberg failure (the original ``bond_quote`` is never used as a
+    fallback), and propagates every nested schema/builder error unremapped,
+    exactly as :func:`price_standalone_option_case` already does.
+    """
+
+    envelope = _parse_standalone_option_case(case)
+
+    if not isinstance(bloomberg_security, str) or not bloomberg_security.strip():
+        raise ValueError("bloomberg_security must be a non-blank string")
+    if not isinstance(source_as_of, str) or not source_as_of.strip():
+        raise ValueError("source_as_of must be a non-blank string")
+    if source_as_of != envelope["as_of_timestamp"]:
+        raise ValueError(
+            "source_as_of must equal the case envelope's as_of_timestamp exactly: "
+            f"{source_as_of!r} != {envelope['as_of_timestamp']!r}"
+        )
+
+    expected_isin = BondOption(**envelope["bond_option"]).underlying_isin
+
+    live_quote = load_bloomberg_bond_quote(
+        security=bloomberg_security, isin=expected_isin, quote_side=quote_side
+    )
+
+    bloomberg_case = {**envelope, "bond_quote": asdict(live_quote)}
+    request, result, display = price_standalone_option_case(
+        bloomberg_case, retrieved_at=retrieved_at
+    )
+
+    live_quote_display = prepare_live_bloomberg_quote_display(
+        bloomberg_security, live_quote, source_as_of, retrieved_at
+    )
+    merged_display = {**display, "live_bloomberg_quote": live_quote_display}
+    return request, result, live_quote, merged_display
+
+
+def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
+    case: str | dict,
+    benchmark_case: str | dict,
+    *,
+    bloomberg_security: str,
+    quote_side: TreasuryFTPQuoteSide,
+    source_as_of: str,
+    retrieved_at: str | None = None,
+) -> tuple[
+    BLIStandaloneBondOptionRequest,
+    PricingResult,
+    BLIBondQuote,
+    BLIBenchmarkQuote,
+    BLIBenchmarkComparisonResult,
+    BLIImpliedPriceVolCalibrationResult,
+    dict,
+]:
+    """Price ``case`` with a live Bloomberg quote, then compare/calibrate once each.
+
+    Reuses :func:`price_standalone_option_case_with_bloomberg_quote`
+    unchanged for pricing (one Bloomberg call, one copied envelope). The
+    live quote's own ``quote_side`` -- the same explicit side the Bloomberg
+    price field was requested with -- is reused verbatim as
+    ``active_quote_side`` for both ``compare_bli_benchmark`` and
+    ``calibrate_bli_implied_price_vol``, each called exactly once: no
+    second side, hidden override, or fallback. Mirrors
+    :func:`price_standalone_option_case_with_benchmark`'s existing
+    orchestration shape exactly, with the live quote inserted as an
+    additional returned value.
+    """
+
+    request, result, live_quote, display = price_standalone_option_case_with_bloomberg_quote(
+        case,
+        bloomberg_security=bloomberg_security,
+        quote_side=quote_side,
+        source_as_of=source_as_of,
+        retrieved_at=retrieved_at,
+    )
+    benchmark = build_benchmark_from_standalone_option_benchmark_case(benchmark_case)
+    active_quote_side = live_quote.quote_side.value
+    comparison = compare_bli_benchmark(
+        result, request, benchmark, active_quote_side=active_quote_side
+    )
+    calibration = calibrate_bli_implied_price_vol(
+        request, benchmark, active_quote_side=active_quote_side
+    )
+    benchmark_display = prepare_standalone_benchmark_display(benchmark, comparison, calibration)
+    merged_display = {**display, **benchmark_display}
+    return request, result, live_quote, benchmark, comparison, calibration, merged_display
