@@ -59,6 +59,10 @@ def main() -> int:
         while not done:
             event = session.nextEvent(REQUEST_TIMEOUT_MS)
 
+            if event.eventType() == blpapi.Event.TIMEOUT:
+                print("REQUEST_FAILED: timed out waiting for Bloomberg response")
+                return 1
+
             if event.eventType() not in (
                 blpapi.Event.PARTIAL_RESPONSE,
                 blpapi.Event.RESPONSE,
