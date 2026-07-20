@@ -41,9 +41,23 @@ Benchmark/Comparison/Calibration only exist in the merged benchmark-mode
 display; Solver Diagnostics only when ``calibration["solver_status"]`` is
 not ``None``; Errors only when the errors list is non-empty). Every existing
 ``None`` value renders as the literal text ``not available`` -- never a
-fabricated ``0`` or other numeric replacement. Every other value is
+fabricated ``0`` or other numeric replacement. Every other scalar value is
 ``str(value)`` verbatim -- no rounding, no reformatting, no recomputation
 (deliberately more precise than the UI's ``.6f`` display formatting).
+
+**Nested structured values (Codex P2 review of PR #127).** The known,
+fixed-shape section fields (Context/Pricing/Benchmark/Comparison/
+Calibration/Solver Diagnostics) are always scalar per the existing display
+contract and stay on ``_fmt``'s simple one-line path. Two places can
+legitimately carry a nested ``dict``/``list``/``tuple`` -- ``errors[*].detail``
+(e.g. ``detail["reasons"]``, a list of strings) and an ``assumptions`` value
+-- and are rendered through the small recursive ``_render_container_lines`` /
+``_render_field_lines`` helpers instead of ``str(value)``: a bounded,
+deterministic bullet-list renderer, not a generic serializer. ``None``
+renders as ``not available`` at every nesting depth; a genuine ``0``,
+``0.0``, ``False``, or ``""`` renders verbatim and is never confused with a
+missing value; any other object type raises ``TypeError`` explicitly rather
+than falling back to Python ``repr``.
 
 **No system clock, no quote ID, no version, no hidden metadata.** Neither
 function reads the clock or generates an identifier; the only content is
@@ -222,6 +236,91 @@ def _section(title: str, source: dict, fields: tuple[tuple[str, str], ...]) -> l
     return lines
 
 
+_INDENT_UNIT = "    "  # 4 spaces per nesting level
+
+
+def _is_scalar_or_none(value: object) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _scalar_text(value: object) -> str:
+    """Return ``value`` verbatim, or ``not available`` for ``None``.
+
+    A genuine ``0``, ``0.0``, ``False``, or ``""`` is a real value and
+    renders as itself -- only ``None`` (an existing, meaningful "unset"
+    outcome) maps to the literal ``not available``.
+    """
+
+    return "not available" if value is None else str(value)
+
+
+def _render_container_lines(value: object, level: int) -> list[str]:
+    """Render a ``dict``/``list``/``tuple`` as deterministic nested bullets.
+
+    ``level`` (>= 1) is the nesting depth, each level indented by one
+    ``_INDENT_UNIT``. Dict keys preserve insertion order; list/tuple items
+    preserve their original order. A nested ``None`` renders as
+    ``not available``; a nested container recurses one level deeper; any
+    other object type raises ``TypeError`` explicitly -- this function never
+    falls back to Python ``repr`` for a type it does not recognize, and
+    never mutates ``value``.
+    """
+
+    prefix = _INDENT_UNIT * level
+
+    if isinstance(value, dict):
+        if not value:
+            return [f"{prefix}- (empty)"]
+        lines: list[str] = []
+        for key, item in value.items():
+            if _is_scalar_or_none(item):
+                lines.append(f"{prefix}- **{key}:** {_scalar_text(item)}")
+            elif isinstance(item, (dict, list, tuple)):
+                lines.append(f"{prefix}- **{key}:**")
+                lines.extend(_render_container_lines(item, level + 1))
+            else:
+                raise TypeError(
+                    f"object of type {type(item).__name__!r} is not renderable by "
+                    "the standalone run export markdown helper"
+                )
+        return lines
+
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return [f"{prefix}- (empty)"]
+        lines = []
+        for item in value:
+            if _is_scalar_or_none(item):
+                lines.append(f"{prefix}- {_scalar_text(item)}")
+            elif isinstance(item, (dict, list, tuple)):
+                lines.append(f"{prefix}-")
+                lines.extend(_render_container_lines(item, level + 1))
+            else:
+                raise TypeError(
+                    f"object of type {type(item).__name__!r} is not renderable by "
+                    "the standalone run export markdown helper"
+                )
+        return lines
+
+    raise TypeError(
+        f"object of type {type(value).__name__!r} is not renderable by the "
+        "standalone run export markdown helper"
+    )
+
+
+def _render_field_lines(label: str, value: object) -> list[str]:
+    """Render one top-level ``- **label:** value`` bullet, recursing for containers."""
+
+    if _is_scalar_or_none(value):
+        return [f"- **{label}:** {_scalar_text(value)}"]
+    if isinstance(value, (dict, list, tuple)):
+        return [f"- **{label}:**", *_render_container_lines(value, 1)]
+    raise TypeError(
+        f"object of type {type(value).__name__!r} is not renderable by the "
+        "standalone run export markdown helper"
+    )
+
+
 def _excluded_components_section(components: object) -> list[str]:
     lines = ["## Excluded Components", ""]
     if not components:
@@ -238,11 +337,7 @@ def _assumptions_section(assumptions: object) -> list[str]:
         lines.append("- not available")
     else:
         for key, value in assumptions.items():
-            if isinstance(value, (list, tuple)):
-                rendered = ", ".join(str(item) for item in value)
-            else:
-                rendered = _fmt(value)
-            lines.append(f"- **{key}:** {rendered}")
+            lines.extend(_render_field_lines(key, value))
     lines.append("")
     return lines
 
@@ -253,8 +348,7 @@ def _errors_section(errors: object) -> list[str]:
         lines.append(f"- **{error['code']}**: {error['message']}")
         detail = error.get("detail")
         if detail:
-            for detail_key, detail_value in detail.items():
-                lines.append(f"    - {detail_key}: {_fmt(detail_value)}")
+            lines.extend(_render_container_lines(detail, 1))
     lines.append("")
     return lines
 

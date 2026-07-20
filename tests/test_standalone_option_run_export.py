@@ -445,3 +445,177 @@ def test_solver_failed_export_preserves_solver_reason_config_and_no_implied_vol(
     assert "## Solver Diagnostics" in md
     assert "**Lower price vol:** 1e-06" in md
     assert "**Max iterations:** 100" in md
+
+
+# ==================================================================================
+# Codex P2 review of PR #127: nested structured Markdown rendering (errors[*].detail,
+# nested assumptions values) must use deterministic bullets, never Python repr, and
+# must not conflate a genuine falsy value (0, 0.0, False, "") with a missing one.
+# ==================================================================================
+
+
+def _display_with_errors(detail: dict) -> dict:
+    display = _synthetic_price_only_display(status="FAILED")
+    display["errors"] = [
+        {"code": "UNSUPPORTED_PRODUCT", "message": "synthetic rejection", "detail": detail}
+    ]
+    return display
+
+
+# --- 11. reasons list renders as nested bullets, not Python repr -------------------
+
+
+def test_error_detail_reasons_list_renders_as_nested_bullets_not_repr():
+    display = _display_with_errors({"product_id": "TEST-PRODUCT-ID", "reasons": ["A", "B"]})
+    md = render_standalone_run_as_markdown(display)
+
+    assert "['A', 'B']" not in md
+    assert "reasons: ['A', 'B']" not in md
+    assert "- **reasons:**" in md
+    lines = md.splitlines()
+    reasons_index = lines.index(next(line for line in lines if "**reasons:**" in line))
+    assert lines[reasons_index + 1].strip() == "- A"
+    assert lines[reasons_index + 2].strip() == "- B"
+
+
+# --- 12. Nested dict/list/tuple structure preserved deterministically --------------
+
+
+def test_nested_dict_and_list_structure_preserved_deterministically():
+    display = _display_with_errors(
+        {
+            "outer_list": ["first", "second"],
+            "outer_dict": {"inner_key": "inner_value", "inner_list": [1, 2, 3]},
+            "outer_tuple": ("x", "y"),
+        }
+    )
+    md = render_standalone_run_as_markdown(display)
+
+    assert "- **outer_list:**" in md
+    assert "        - first" in md
+    assert "        - second" in md
+    assert "- **outer_dict:**" in md
+    assert "        - **inner_key:** inner_value" in md
+    assert "        - **inner_list:**" in md
+    assert "            - 1" in md
+    assert "            - 2" in md
+    assert "            - 3" in md
+    assert "- **outer_tuple:**" in md
+    assert "        - x" in md
+    assert "        - y" in md
+
+
+# --- 13. Nested None renders as "not available" ------------------------------------
+
+
+def test_nested_none_renders_as_not_available():
+    display = _display_with_errors({"maybe_reason": None, "reasons": ["A", None, "C"]})
+    md = render_standalone_run_as_markdown(display)
+
+    assert "- **maybe_reason:** not available" in md
+    lines = md.splitlines()
+    reasons_index = lines.index(next(line for line in lines if "**reasons:**" in line))
+    assert lines[reasons_index + 1].strip() == "- A"
+    assert lines[reasons_index + 2].strip() == "- not available"
+    assert lines[reasons_index + 3].strip() == "- C"
+
+
+# --- 14. Genuine falsy values stay distinct from "not available" -------------------
+
+
+def test_genuine_falsy_nested_values_are_not_replaced():
+    display = _display_with_errors(
+        {
+            "zero_int": 0,
+            "zero_float": 0.0,
+            "false_flag": False,
+            "empty_string": "",
+            "none_value": None,
+        }
+    )
+    md = render_standalone_run_as_markdown(display)
+
+    assert "- **zero_int:** 0" in md
+    assert "- **zero_float:** 0.0" in md
+    assert "- **false_flag:** False" in md
+    assert "- **empty_string:** " in md
+    assert "- **none_value:** not available" in md
+    # None must never be rendered as any of the genuine falsy values above.
+    assert "- **none_value:** 0" not in md
+    assert "- **none_value:** False" not in md
+
+
+def test_genuine_falsy_values_in_nested_list_are_not_replaced():
+    display = _display_with_errors({"flags": [0, 0.0, False, "", None]})
+    md = render_standalone_run_as_markdown(display)
+    lines = md.splitlines()
+    flags_index = lines.index(next(line for line in lines if "**flags:**" in line))
+    assert lines[flags_index + 1].strip() == "- 0"
+    assert lines[flags_index + 2].strip() == "- 0.0"
+    assert lines[flags_index + 3].strip() == "- False"
+    assert lines[flags_index + 4].strip() == "-"  # empty string bullet
+    assert lines[flags_index + 5].strip() == "- not available"
+
+
+# --- 15. Unsupported nested object types raise TypeError explicitly ----------------
+
+
+def test_unsupported_nested_object_in_error_detail_raises_type_error():
+    display = _display_with_errors({"bad_field": _UnsupportedType()})
+    with pytest.raises(TypeError):
+        render_standalone_run_as_markdown(display)
+
+
+def test_unsupported_nested_object_inside_list_raises_type_error():
+    display = _display_with_errors({"reasons": ["A", _UnsupportedType()]})
+    with pytest.raises(TypeError):
+        render_standalone_run_as_markdown(display)
+
+
+def test_unsupported_nested_object_inside_dict_value_raises_type_error():
+    display = _display_with_errors({"nested": {"bad_field": {1, 2, 3}}})
+    with pytest.raises(TypeError):
+        render_standalone_run_as_markdown(display)
+
+
+# --- 16. Determinism and no-mutation hold for nested structured values -------------
+
+
+def test_nested_structured_markdown_is_deterministic():
+    display = _display_with_errors({"product_id": "TEST-PRODUCT-ID", "reasons": ["A", "B"]})
+    assert render_standalone_run_as_markdown(display) == render_standalone_run_as_markdown(
+        display
+    )
+
+
+def test_nested_structured_export_does_not_mutate_input():
+    display = _display_with_errors({"product_id": "TEST-PRODUCT-ID", "reasons": ["A", "B"]})
+    before = copy.deepcopy(display)
+    render_standalone_run_as_markdown(display)
+    assert display == before
+
+
+# --- 17. A genuine reachable pricing FAILED workflow exports cleanly ---------------
+
+
+def test_real_pricing_failed_workflow_with_reasons_list_exports_cleanly():
+    envelope = json.loads(_example_text())
+    envelope["volatility_input"] = {
+        **envelope["volatility_input"],
+        "volatility_basis": "YIELD_VOL",
+    }
+    _request, _result, display = price_standalone_option_case(envelope)
+    assert display["status"] == "FAILED"
+    assert isinstance(display["errors"][0]["detail"]["reasons"], list)
+
+    md = render_standalone_run_as_markdown(display)
+    assert "['" not in md  # no Python list repr anywhere in the document
+    assert "- **reasons:**" in md
+    lines = md.splitlines()
+    reasons_index = lines.index(next(line for line in lines if "**reasons:**" in line))
+    assert lines[reasons_index + 1].strip().startswith("- ")
+    assert "not available" not in lines[reasons_index + 1]
+
+    # JSON export is unaffected by this Markdown-only fix.
+    json_text = render_standalone_run_as_json(display)
+    assert json.loads(json_text) == display
