@@ -1,0 +1,251 @@
+"""``load_bloomberg_bond_quote``: production Bloomberg DAPI bond-quote loader (Issue #6).
+
+Scope, per Eddy's first production Bloomberg implementation slice
+authorization: one small function that connects to a local, logged-in
+Bloomberg Terminal's Desktop API (DAPI) at ``localhost:8194``, requests
+exactly one explicitly-selected clean price side plus currency and accrued
+interest for one security, and returns exactly one validated
+``BLIBondQuote`` (``data/bli_snapshot.py``) built from the live response.
+
+**Approved live field mapping (Issue #6):**
+
+- ``CRNCY``           -> ``BLIBondQuote.currency``
+- BID  -> ``PX_BID``  -> ``BLIBondQuote.clean_price_per_100``
+- MID  -> ``PX_MID``  -> ``BLIBondQuote.clean_price_per_100``
+- OFFER -> ``PX_ASK`` -> ``BLIBondQuote.clean_price_per_100``
+- ``INT_ACC``         -> ``BLIBondQuote.accrued_interest_per_100``
+
+Only the one price field matching the caller's explicit ``quote_side`` is
+ever requested -- this loader never requests all three sides and picks one
+afterward, never infers BID/MID/OFFER from anything else, and never
+requests or falls back to ``PX_LAST``.
+
+**Caller-remediation contract:** a successful call returns a validated
+``BLIBondQuote`` directly. Every failure raises ``BLIBloombergDapiError``
+(a ``RuntimeError``) with a message identifying which stage failed: blpapi
+not installed, session-start (connection) failure, ``//blp/refdata``
+service-open failure, request timeout, a DAPI ``responseError``, a
+security-level error, any field exception, or a missing/non-numeric/
+non-finite value for a requested field. This loader never silently returns
+partial data -- every field that is missing, exceptional, or malformed
+aborts the whole call. ``security``/``isin`` blank checks and an invalid
+``quote_side`` raise ``ValueError`` directly (a caller-input problem, not a
+Bloomberg-response problem). Domain rules already enforced by
+``BLIBondQuote`` itself (positive clean price, non-negative accrued
+interest, valid ``Currency`` member) are not duplicated here and propagate
+as whatever ``ValueError`` ``BLIBondQuote.__post_init__`` raises.
+
+**Session lifecycle:** ``blpapi`` is imported lazily, inside this function,
+so importing this module (or any module that imports it) never requires
+``blpapi`` to be installed -- only calling this function does.
+``session.stop()`` is called on every path once a ``Session`` object
+exists, whether the call succeeds or fails.
+
+**Hard non-goals (Issue #6 scope cap):** no ISIN retrieval or inference (the
+caller supplies it explicitly and it is stored verbatim, never looked up or
+validated against Bloomberg), no ``BondReferenceData``, no wiring into
+``BLIMarketDataSnapshot``, the request builder, the pricing engine, the
+workbench, or the UI, no forward price, no ``PRICE_VOL``, no OVME premium,
+no curve/repo/yield-conversion/option calculation of any kind, no provider
+interface, base class, factory, registry, cache, configuration framework,
+persistence, or compatibility wrapper. ``BLIBondQuote`` and its sibling
+schemas are unmodified.
+"""
+
+from __future__ import annotations
+
+import math
+
+from shiori_pricing_lab.data._validation import _require_non_blank
+from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLIMarketDataStatus, BLIQuoteBasis
+from shiori_pricing_lab.products.enums import TreasuryFTPQuoteSide, coerce_enum
+
+_DAPI_HOST = "localhost"
+_DAPI_PORT = 8194
+_REFDATA_SERVICE = "//blp/refdata"
+_REQUEST_TIMEOUT_MS = 10_000
+
+_CURRENCY_FIELD = "CRNCY"
+_ACCRUED_INTEREST_FIELD = "INT_ACC"
+
+# Approved live field mapping (Issue #6) -- the only three
+# TreasuryFTPQuoteSide members that exist, so this mapping is exhaustive
+# and needs no fallback/default branch.
+_PRICE_FIELD_BY_QUOTE_SIDE = {
+    TreasuryFTPQuoteSide.BID: "PX_BID",
+    TreasuryFTPQuoteSide.MID: "PX_MID",
+    TreasuryFTPQuoteSide.OFFER: "PX_ASK",
+}
+
+_SOURCE_SYSTEM = "BLOOMBERG_DAPI"
+
+
+class BLIBloombergDapiError(RuntimeError):
+    """Raised for any Bloomberg DAPI connectivity, session, or response failure.
+
+    Covers: ``blpapi`` not installed, session-start (connection) failure,
+    ``//blp/refdata`` service-open failure, request timeout, a DAPI
+    ``responseError``, a security-level error, a field exception, a
+    missing required field, or a non-numeric/non-finite returned value.
+    Deliberately one exception type -- these are all the same
+    caller-remediation outcome ("Bloomberg DAPI did not return one usable
+    quote"), not distinct conditions a caller would remediate differently.
+    """
+
+
+def load_bloomberg_bond_quote(
+    *,
+    security: str,
+    isin: str,
+    quote_side: TreasuryFTPQuoteSide,
+) -> BLIBondQuote:
+    """Load one live Bloomberg DAPI bond quote into a validated ``BLIBondQuote``.
+
+    ``security`` is the Bloomberg security identifier requested from DAPI
+    (e.g. ``"91282CQX Govt"``). ``isin`` is stored on the returned quote
+    verbatim -- this function does not retrieve, infer, or cross-check an
+    ISIN against Bloomberg. ``quote_side`` selects exactly one price field
+    (see the module docstring's field mapping); it is required and has no
+    default.
+
+    Raises ``ValueError`` if ``security``/``isin`` is blank or ``quote_side``
+    is not a valid ``TreasuryFTPQuoteSide``. Raises ``BLIBloombergDapiError``
+    for every Bloomberg-side failure (see the module docstring's
+    caller-remediation contract). Propagates unchanged whatever
+    ``ValueError`` ``BLIBondQuote.__post_init__`` itself raises for a
+    domain rule (e.g. a non-positive returned clean price) -- this function
+    duplicates none of those checks.
+    """
+
+    _require_non_blank(security, "security")
+    _require_non_blank(isin, "isin")
+    quote_side = coerce_enum(quote_side, TreasuryFTPQuoteSide, "quote_side")
+    price_field = _PRICE_FIELD_BY_QUOTE_SIDE[quote_side]
+
+    try:
+        import blpapi
+    except ImportError as exc:
+        raise BLIBloombergDapiError(
+            "blpapi is not installed -- Bloomberg's official blpapi package is "
+            "required in this environment to load a live Bloomberg DAPI bond quote"
+        ) from exc
+
+    session_options = blpapi.SessionOptions()
+    session_options.setServerHost(_DAPI_HOST)
+    session_options.setServerPort(_DAPI_PORT)
+    session = blpapi.Session(session_options)
+
+    try:
+        if not session.start():
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
+                "-- confirm a Bloomberg Terminal is running and logged in locally"
+            )
+
+        if not session.openService(_REFDATA_SERVICE):
+            raise BLIBloombergDapiError(f"Bloomberg DAPI failed to open service {_REFDATA_SERVICE}")
+
+        service = session.getService(_REFDATA_SERVICE)
+        request = service.createRequest("ReferenceDataRequest")
+        request.append("securities", security)
+        request.append("fields", _CURRENCY_FIELD)
+        request.append("fields", price_field)
+        request.append("fields", _ACCRUED_INTEREST_FIELD)
+
+        session.sendRequest(request)
+
+        raw_currency: str | None = None
+        raw_price: str | None = None
+        raw_accrued: str | None = None
+
+        done = False
+        while not done:
+            event = session.nextEvent(_REQUEST_TIMEOUT_MS)
+
+            if event.eventType() == blpapi.Event.TIMEOUT:
+                raise BLIBloombergDapiError(
+                    "Bloomberg DAPI request timed out waiting for a response for "
+                    f"{security!r}"
+                )
+
+            if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
+                continue
+
+            for msg in event:
+                if msg.hasElement("responseError"):
+                    raise BLIBloombergDapiError(
+                        f"Bloomberg DAPI responseError for {security!r}: "
+                        f"{msg.getElement('responseError')}"
+                    )
+
+                security_data_array = msg.getElement("securityData")
+                for i in range(security_data_array.numValues()):
+                    security_data = security_data_array.getValueAsElement(i)
+
+                    if security_data.hasElement("securityError"):
+                        raise BLIBloombergDapiError(
+                            f"Bloomberg DAPI securityError for {security!r}: "
+                            f"{security_data.getElement('securityError')}"
+                        )
+
+                    if security_data.hasElement("fieldExceptions"):
+                        field_exceptions = security_data.getElement("fieldExceptions")
+                        if field_exceptions.numValues() > 0:
+                            raise BLIBloombergDapiError(
+                                f"Bloomberg DAPI field exception for {security!r}: "
+                                f"{field_exceptions.getValueAsElement(0)}"
+                            )
+
+                    field_data = security_data.getElement("fieldData")
+                    if field_data.hasElement(_CURRENCY_FIELD):
+                        raw_currency = field_data.getElementAsString(_CURRENCY_FIELD)
+                    if field_data.hasElement(price_field):
+                        raw_price = field_data.getElementAsString(price_field)
+                    if field_data.hasElement(_ACCRUED_INTEREST_FIELD):
+                        raw_accrued = field_data.getElementAsString(_ACCRUED_INTEREST_FIELD)
+
+            if event.eventType() == blpapi.Event.RESPONSE:
+                done = True
+    finally:
+        session.stop()
+
+    if not raw_currency:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {_CURRENCY_FIELD}"
+        )
+    if not raw_price:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {price_field}"
+        )
+    if not raw_accrued:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {_ACCRUED_INTEREST_FIELD}"
+        )
+
+    clean_price_per_100 = _parse_finite_float(raw_price, price_field)
+    accrued_interest_per_100 = _parse_finite_float(raw_accrued, _ACCRUED_INTEREST_FIELD)
+
+    return BLIBondQuote(
+        isin=isin,
+        currency=raw_currency,
+        price_type=BLIQuoteBasis.PRICE,
+        quote_side=quote_side,
+        source_system=_SOURCE_SYSTEM,
+        status=BLIMarketDataStatus.ACTIVE,
+        clean_price_per_100=clean_price_per_100,
+        accrued_interest_per_100=accrued_interest_per_100,
+    )
+
+
+def _parse_finite_float(raw_value: str, field_name: str) -> float:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI field {field_name} returned a non-numeric value: {raw_value!r}"
+        ) from exc
+    if not math.isfinite(value):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI field {field_name} returned a non-finite value: {raw_value!r}"
+        )
+    return value
