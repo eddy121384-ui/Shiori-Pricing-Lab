@@ -1,5 +1,6 @@
 """Tests for the standalone bond-option trader workbench UI (Issue #97, PR B;
-Issue #125 benchmark comparison / implied PRICE_VOL extension).
+Issue #125 benchmark comparison / implied PRICE_VOL extension; Issue #101
+current-run export).
 
 Isolation strategy (see the full-suite interference note below):
 
@@ -37,6 +38,10 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from shiori_pricing_lab.app import standalone_option_ui as ui_module
+from shiori_pricing_lab.app.standalone_option_run_export import (
+    render_standalone_run_as_json,
+    render_standalone_run_as_markdown,
+)
 from shiori_pricing_lab.app.standalone_option_ui import (
     _MODE_PRICE_AND_BENCHMARK,
     _MODE_PRICE_ONLY,
@@ -157,10 +162,15 @@ _BENCHMARK_SOLVER_FAILED_DISPLAY = (
 
 def _render_display_script(display: dict) -> None:
     # Self-contained AppTest.from_function entry point: renders a prepared
-    # display dict via the real page render helper. No BLI construction.
-    from shiori_pricing_lab.app.standalone_option_ui import _render_pricing_result
+    # display dict via the real page render helpers, matching the real
+    # page's own order (pricing, then export). No BLI construction.
+    from shiori_pricing_lab.app.standalone_option_ui import (
+        _render_export_section,
+        _render_pricing_result,
+    )
 
     _render_pricing_result(display)
+    _render_export_section(display)
 
 
 def _render_page_script() -> None:
@@ -175,14 +185,17 @@ def _render_page_script() -> None:
 def _render_benchmark_display_script(display: dict) -> None:
     # Self-contained AppTest.from_function entry point mirroring
     # _render_display_script, but also rendering the benchmark/comparison/
-    # calibration sections. No BLI construction.
+    # calibration sections, then export -- the real page's exact order.
+    # No BLI construction.
     from shiori_pricing_lab.app.standalone_option_ui import (
         _render_benchmark_result,
+        _render_export_section,
         _render_pricing_result,
     )
 
     _render_pricing_result(display)
     _render_benchmark_result(display)
+    _render_export_section(display)
 
 
 def _run_render(display: dict) -> AppTest:
@@ -584,3 +597,202 @@ def test_calibration_solver_failed_render_shows_no_fabricated_implied_vol():
     assert solver_diagnostics["lower_price_vol"] is not None
     assert solver_diagnostics["upper_price_vol"] is not None
     assert solver_diagnostics["max_iterations"] is not None
+
+
+# ==================================================================================
+# Issue #101: current-run JSON/Markdown export downloads.
+# ==================================================================================
+
+_EXPORT_JSON_LABEL = "Download current run JSON"
+_EXPORT_MARKDOWN_LABEL = "Download current run Markdown"
+
+# --- 15. No download controls before a real workflow result exists ----------------
+
+
+def test_no_download_controls_before_execution():
+    # Full page, no button press: nothing has been priced yet.
+    at = _run_page()
+    assert len(at.download_button) == 0
+
+
+def test_no_download_controls_when_malformed_json_blocks_execution():
+    at = _run_page()
+    _set_case_json(at, "{ this is not valid json ")
+    _press_price(at)
+
+    assert not at.exception
+    assert len(at.error) >= 1
+    assert len(at.download_button) == 0
+
+
+def test_no_download_controls_when_benchmark_mode_quote_side_unselected():
+    at = _run_page()
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    _press_price(at)
+
+    assert not at.exception
+    assert len(at.download_button) == 0
+
+
+# --- 16. Both download controls appear after a real result (price-only) -----------
+
+
+def test_both_download_controls_appear_after_failed_price_only_result():
+    # FAILED is still a real workflow result -- export must remain available
+    # to capture the failure diagnostics as UAT evidence.
+    at = _run_render(_FAILED_DISPLAY)
+    assert not at.exception
+    labels = {b.label for b in at.download_button}
+    assert _EXPORT_JSON_LABEL in labels
+    assert _EXPORT_MARKDOWN_LABEL in labels
+    assert len(at.download_button) == 2
+
+
+@_requires_quantlib
+def test_both_download_controls_appear_after_price_only_success():
+    at = _run_render(_SUCCESS_DISPLAY)
+    assert not at.exception
+    labels = {b.label for b in at.download_button}
+    assert _EXPORT_JSON_LABEL in labels
+    assert _EXPORT_MARKDOWN_LABEL in labels
+    assert len(at.download_button) == 2
+
+
+# --- 17. Both download controls appear after benchmark-mode execution -------------
+
+
+@_requires_quantlib
+def test_both_download_controls_appear_after_benchmark_pass_calibrated():
+    at = _run_benchmark_render(_BENCHMARK_PASS_DISPLAY)
+    assert not at.exception
+    labels = {b.label for b in at.download_button}
+    assert _EXPORT_JSON_LABEL in labels
+    assert _EXPORT_MARKDOWN_LABEL in labels
+    assert len(at.download_button) == 2
+
+
+@_requires_quantlib
+def test_both_download_controls_appear_after_non_comparable_and_solver_failed():
+    for display in (_BENCHMARK_NON_COMPARABLE_DISPLAY, _BENCHMARK_SOLVER_FAILED_DISPLAY):
+        at = _run_benchmark_render(display)
+        assert not at.exception
+        labels = {b.label for b in at.download_button}
+        assert _EXPORT_JSON_LABEL in labels
+        assert _EXPORT_MARKDOWN_LABEL in labels
+
+
+# --- 18. Button payloads equal the pure helper output, fixed names/MIME -----------
+
+
+def test_export_button_payloads_equal_pure_helper_output_and_use_fixed_names_mime(
+    monkeypatch,
+):
+    from shiori_pricing_lab.app import standalone_option_ui as ui_module_local
+
+    calls = []
+
+    def _fake_download_button(label, *, data, file_name, mime, on_click):
+        calls.append(
+            {
+                "label": label,
+                "data": data,
+                "file_name": file_name,
+                "mime": mime,
+                "on_click": on_click,
+            }
+        )
+        return False
+
+    monkeypatch.setattr(ui_module_local.st, "download_button", _fake_download_button)
+    ui_module_local._render_export_section(_FAILED_DISPLAY)
+
+    assert len(calls) == 2
+    json_call = next(c for c in calls if c["label"] == _EXPORT_JSON_LABEL)
+    md_call = next(c for c in calls if c["label"] == _EXPORT_MARKDOWN_LABEL)
+
+    assert json_call["data"] == render_standalone_run_as_json(_FAILED_DISPLAY)
+    assert json_call["file_name"] == "shiori_standalone_run.json"
+    assert json_call["mime"] == "application/json"
+    assert json_call["on_click"] == "ignore"
+
+    assert md_call["data"] == render_standalone_run_as_markdown(_FAILED_DISPLAY)
+    assert md_call["file_name"] == "shiori_standalone_run.md"
+    assert md_call["mime"] == "text/markdown; charset=utf-8"
+    assert md_call["on_click"] == "ignore"
+
+
+# --- 19. Export never repeats a pricing/comparison/calibration call ---------------
+
+
+def test_export_section_never_calls_pricing_or_benchmark_workflow_again(monkeypatch):
+    from shiori_pricing_lab.app import standalone_option_ui as ui_module_local
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("export must not call the pricing/benchmark workflow again")
+
+    monkeypatch.setattr(ui_module_local, "price_standalone_option_case", _fail)
+    monkeypatch.setattr(ui_module_local, "price_standalone_option_case_with_benchmark", _fail)
+
+    # Must not raise: _render_export_section only reads the already-computed display.
+    ui_module_local._render_export_section(_FAILED_DISPLAY)
+
+
+def test_export_module_source_has_no_pricing_comparison_or_calibration_calls():
+    from shiori_pricing_lab.app import standalone_option_run_export as export_module
+
+    # Scan the code body only: the module docstring legitimately explains
+    # which upstream functions produce the display dict this module
+    # consumes -- that prose must not count as a functional reference.
+    source = inspect.getsource(export_module)
+    body = source.replace(export_module.__doc__ or "", "")
+    for forbidden in (
+        "price_bli_mvp_standalone_option",
+        "price_standalone_option_case(",
+        "price_standalone_option_case_with_benchmark(",
+        "compare_bli_benchmark",
+        "calibrate_bli_implied_price_vol",
+        "resolve_standalone_option_pricing_inputs",
+        "solve_implied_dirty_price_vol",
+        "black76_dirty_price_option_pv_per_100",
+        "black76_price_option_pv_per_100",
+        "BLIStandaloneBondOptionRequest",
+        "BLIBenchmarkQuote",
+        "PricingResult",
+        "QuantLib",
+        "quantlib",
+    ):
+        assert forbidden not in body, f"unexpected reference to {forbidden!r}"
+
+
+# --- 20. Pricing / benchmark / comparison / calibration / export stay distinct ----
+
+
+@_requires_quantlib
+def test_export_section_is_its_own_distinct_subheading():
+    at = _run_benchmark_render(_BENCHMARK_PASS_DISPLAY)
+    assert not at.exception
+    subheadings = [s.value for s in at.subheader]
+    for expected in ("Context", "Benchmark", "Comparison", "Calibration", "Export current run"):
+        assert expected in subheadings
+    # Export is listed after every result section, never interleaved with them.
+    assert subheadings.index("Export current run") > subheadings.index("Calibration")
+
+
+# --- 21. Module-boundary: UI imports only the bounded export helper ---------------
+
+
+def test_ui_calls_only_the_bounded_export_helper():
+    source = inspect.getsource(ui_module)
+    assert "render_standalone_run_as_json(" in source
+    assert "render_standalone_run_as_markdown(" in source
+    # The UI never assembles JSON/Markdown text itself.
+    assert "json.dumps(" not in source
+    assert "## " not in source
+
+
+def test_export_helper_module_defines_no_streamlit_names():
+    from shiori_pricing_lab.app import standalone_option_run_export as export_module
+
+    module_names = set(dir(export_module))
+    forbidden_names = {"streamlit", "st"}
+    assert forbidden_names.isdisjoint(module_names)
