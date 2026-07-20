@@ -20,16 +20,41 @@ ever requested -- this loader never requests all three sides and picks one
 afterward, never infers BID/MID/OFFER from anything else, and never
 requests or falls back to ``PX_LAST``.
 
+**Exactly one matching record (PR #128 Codex finding #1):** every
+``securityData`` record received across *all* ``PARTIAL_RESPONSE`` and
+``RESPONSE`` events for the request is collected before any of it is used.
+Zero records, more than one record, a record missing its own security
+identifier, or a record whose identifier does not equal the requested
+``security`` are all rejected. Fields are read from that single validated
+record only -- never combined across records.
+
+**Whole-request deadline (PR #128 Codex finding #2):** ``_REQUEST_TIMEOUT_MS``
+is one deadline for the entire request, computed once via a monotonic clock
+before the event loop starts. Each ``session.nextEvent`` call receives only
+the time remaining until that deadline, not a fresh full timeout every call;
+once the deadline has passed -- whether from one slow response or many
+non-terminal events -- the loop raises without waiting further.
+
+**Malformed element access (PR #128 Codex finding #3):** reading a
+requested field's or the security identifier's string value from a
+``blpapi`` element can itself raise a native ``blpapi`` exception (e.g. a
+field present but of an unexpected underlying type). That native exception
+is caught narrowly (only ``blpapi.exception.Exception``, never a bare
+``except Exception``) and converted to ``BLIBloombergDapiError`` naming the
+affected field/security -- it never propagates as a raw ``blpapi``
+exception and never gets silently treated as "missing".
+
 **Caller-remediation contract:** a successful call returns a validated
 ``BLIBondQuote`` directly. Every failure raises ``BLIBloombergDapiError``
 (a ``RuntimeError``) with a message identifying which stage failed: blpapi
 not installed, session-start (connection) failure, ``//blp/refdata``
 service-open failure, request timeout, a DAPI ``responseError``, a
-security-level error, any field exception, or a missing/non-numeric/
-non-finite value for a requested field. This loader never silently returns
-partial data -- every field that is missing, exceptional, or malformed
-aborts the whole call. ``security``/``isin`` blank checks and an invalid
-``quote_side`` raise ``ValueError`` directly (a caller-input problem, not a
+record-count/identity mismatch, a security-level error, any field
+exception, a malformed element, or a missing/non-numeric/non-finite value
+for a requested field. This loader never silently returns partial data --
+every field that is missing, exceptional, or malformed aborts the whole
+call. ``security``/``isin`` blank checks and an invalid ``quote_side``
+raise ``ValueError`` directly (a caller-input problem, not a
 Bloomberg-response problem). Domain rules already enforced by
 ``BLIBondQuote`` itself (positive clean price, non-negative accrued
 interest, valid ``Currency`` member) are not duplicated here and propagate
@@ -55,6 +80,7 @@ schemas are unmodified.
 from __future__ import annotations
 
 import math
+import time
 
 from shiori_pricing_lab.data._validation import _require_non_blank
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLIMarketDataStatus, BLIQuoteBasis
@@ -67,6 +93,7 @@ _REQUEST_TIMEOUT_MS = 10_000
 
 _CURRENCY_FIELD = "CRNCY"
 _ACCRUED_INTEREST_FIELD = "INT_ACC"
+_SECURITY_IDENTIFIER_FIELD = "security"
 
 # Approved live field mapping (Issue #6) -- the only three
 # TreasuryFTPQuoteSide members that exist, so this mapping is exhaustive
@@ -79,13 +106,19 @@ _PRICE_FIELD_BY_QUOTE_SIDE = {
 
 _SOURCE_SYSTEM = "BLOOMBERG_DAPI"
 
+# Testable seam for the whole-request deadline (PR #128 Codex finding #2):
+# a plain module-level alias, monkeypatchable in tests without touching the
+# real `time` module.
+_monotonic = time.monotonic
+
 
 class BLIBloombergDapiError(RuntimeError):
     """Raised for any Bloomberg DAPI connectivity, session, or response failure.
 
     Covers: ``blpapi`` not installed, session-start (connection) failure,
     ``//blp/refdata`` service-open failure, request timeout, a DAPI
-    ``responseError``, a security-level error, a field exception, a
+    ``responseError``, a record-count or security-identity mismatch, a
+    security-level error, a field exception, a malformed element, a
     missing required field, or a non-numeric/non-finite returned value.
     Deliberately one exception type -- these are all the same
     caller-remediation outcome ("Bloomberg DAPI did not return one usable
@@ -154,18 +187,26 @@ def load_bloomberg_bond_quote(
 
         session.sendRequest(request)
 
-        raw_currency: str | None = None
-        raw_price: str | None = None
-        raw_accrued: str | None = None
+        # Collected across every PARTIAL_RESPONSE/RESPONSE event for the
+        # whole request -- validated as a single group only after the loop
+        # ends, so "exactly one record" can never be checked prematurely
+        # against only the first event received (finding #1).
+        security_data_records = []
 
+        deadline = _monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
         done = False
         while not done:
-            event = session.nextEvent(_REQUEST_TIMEOUT_MS)
+            remaining_seconds = deadline - _monotonic()
+            if remaining_seconds <= 0:
+                raise BLIBloombergDapiError(
+                    f"Bloomberg DAPI request timed out waiting for a response for {security!r}"
+                )
+            remaining_ms = max(1, int(remaining_seconds * 1000))
+            event = session.nextEvent(remaining_ms)
 
             if event.eventType() == blpapi.Event.TIMEOUT:
                 raise BLIBloombergDapiError(
-                    "Bloomberg DAPI request timed out waiting for a response for "
-                    f"{security!r}"
+                    f"Bloomberg DAPI request timed out waiting for a response for {security!r}"
                 )
 
             if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
@@ -180,34 +221,73 @@ def load_bloomberg_bond_quote(
 
                 security_data_array = msg.getElement("securityData")
                 for i in range(security_data_array.numValues()):
-                    security_data = security_data_array.getValueAsElement(i)
-
-                    if security_data.hasElement("securityError"):
-                        raise BLIBloombergDapiError(
-                            f"Bloomberg DAPI securityError for {security!r}: "
-                            f"{security_data.getElement('securityError')}"
-                        )
-
-                    if security_data.hasElement("fieldExceptions"):
-                        field_exceptions = security_data.getElement("fieldExceptions")
-                        if field_exceptions.numValues() > 0:
-                            raise BLIBloombergDapiError(
-                                f"Bloomberg DAPI field exception for {security!r}: "
-                                f"{field_exceptions.getValueAsElement(0)}"
-                            )
-
-                    field_data = security_data.getElement("fieldData")
-                    if field_data.hasElement(_CURRENCY_FIELD):
-                        raw_currency = field_data.getElementAsString(_CURRENCY_FIELD)
-                    if field_data.hasElement(price_field):
-                        raw_price = field_data.getElementAsString(price_field)
-                    if field_data.hasElement(_ACCRUED_INTEREST_FIELD):
-                        raw_accrued = field_data.getElementAsString(_ACCRUED_INTEREST_FIELD)
+                    security_data_records.append(security_data_array.getValueAsElement(i))
 
             if event.eventType() == blpapi.Event.RESPONSE:
                 done = True
     finally:
         session.stop()
+
+    if len(security_data_records) == 0:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI returned zero securityData records for {security!r}, "
+            "expected exactly one"
+        )
+    if len(security_data_records) > 1:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI returned {len(security_data_records)} securityData records for "
+            f"{security!r}, expected exactly one"
+        )
+
+    security_data = security_data_records[0]
+
+    if not security_data.hasElement(_SECURITY_IDENTIFIER_FIELD):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI securityData record for {security!r} is missing its own "
+            "security identifier"
+        )
+    returned_security = _get_element_as_string(
+        blpapi, security_data, _SECURITY_IDENTIFIER_FIELD, security
+    )
+    if returned_security != security:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI securityData record identifier {returned_security!r} does not "
+            f"match requested security {security!r}"
+        )
+
+    if security_data.hasElement("securityError"):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI securityError for {security!r}: "
+            f"{security_data.getElement('securityError')}"
+        )
+
+    if security_data.hasElement("fieldExceptions"):
+        field_exceptions = security_data.getElement("fieldExceptions")
+        if field_exceptions.numValues() > 0:
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI field exception for {security!r}: "
+                f"{field_exceptions.getValueAsElement(0)}"
+            )
+
+    field_data = security_data.getElement("fieldData")
+
+    if not field_data.hasElement(_CURRENCY_FIELD):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {_CURRENCY_FIELD}"
+        )
+    raw_currency = _get_element_as_string(blpapi, field_data, _CURRENCY_FIELD, security)
+
+    if not field_data.hasElement(price_field):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {price_field}"
+        )
+    raw_price = _get_element_as_string(blpapi, field_data, price_field, security)
+
+    if not field_data.hasElement(_ACCRUED_INTEREST_FIELD):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {_ACCRUED_INTEREST_FIELD}"
+        )
+    raw_accrued = _get_element_as_string(blpapi, field_data, _ACCRUED_INTEREST_FIELD, security)
 
     if not raw_currency:
         raise BLIBloombergDapiError(
@@ -235,6 +315,25 @@ def load_bloomberg_bond_quote(
         clean_price_per_100=clean_price_per_100,
         accrued_interest_per_100=accrued_interest_per_100,
     )
+
+
+def _get_element_as_string(blpapi, element, field_name: str, security: str) -> str:
+    """Read ``field_name`` as a string, converting a native ``blpapi`` failure.
+
+    Catches only ``blpapi.exception.Exception`` -- the base of every native
+    ``blpapi`` element-access error (e.g. reading a field whose actual
+    underlying type cannot convert to a string) -- never a bare
+    ``except Exception``, so an unrelated programming error in this module
+    still propagates as itself rather than being mislabeled as a Bloomberg
+    response problem.
+    """
+
+    try:
+        return element.getElementAsString(field_name)
+    except blpapi.exception.Exception as exc:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI returned a malformed value for {field_name} on {security!r}: {exc}"
+        ) from exc
 
 
 def _parse_finite_float(raw_value: str, field_name: str) -> float:
