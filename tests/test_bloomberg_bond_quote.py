@@ -1,12 +1,14 @@
 """Tests for `data/bloomberg_bond_quote.py` (Issue #6 production slice).
 
 Covers the approved live field mapping (BID/MID/OFFER -> exactly one of
-PX_BID/PX_MID/PX_ASK, plus CRNCY and INT_ACC), the caller-remediation
-contract (blpapi-unavailable, connection, service-open, timeout, response,
-security, field-exception, and missing/malformed-field failures all raise
-`BLIBloombergDapiError`), the session lifecycle guarantee (`stop()` on
-every post-session-start path), the "no PX_LAST fallback" hard constraint,
-and that a successful call returns an actual validated `BLIBondQuote`.
+PX_BID/PX_MID/PX_ASK, plus CRNCY, ID_ISIN, and INT_ACC), the
+caller-remediation contract (blpapi-unavailable, connection, service-open,
+timeout, response, security, field-exception, and missing/malformed-field
+failures all raise `BLIBloombergDapiError`), the session lifecycle
+guarantee (`stop()` on every post-session-start path), the "no PX_LAST
+fallback" hard constraint, the canonical ISIN verification (ID_ISIN must
+equal the caller-supplied isin exactly), and that a successful call
+returns an actual validated `BLIBondQuote`.
 
 No network access, no real `blpapi`, no system clock: Bloomberg is faked
 with minimal stand-in objects that mirror only the small slice of the real
@@ -289,9 +291,14 @@ def _install_fake_blpapi(
 
 
 def _success_events(
-    *, currency="USD", price_value="99.320312", accrued="0.235394", price_field="PX_MID"
+    *,
+    currency="USD",
+    price_value="99.320312",
+    accrued="0.235394",
+    price_field="PX_MID",
+    isin=_ISIN,
 ):
-    fields = {"CRNCY": currency, price_field: price_value, "INT_ACC": accrued}
+    fields = {"CRNCY": currency, "ID_ISIN": isin, price_field: price_value, "INT_ACC": accrued}
     return [_response_event(_security_data(fields=fields))]
 
 
@@ -314,7 +321,7 @@ def test_quote_side_requests_exactly_one_price_field(monkeypatch, quote_side, ex
     quote = load_bloomberg_bond_quote(security=_SECURITY, isin=_ISIN, quote_side=quote_side)
 
     sent_fields = holder["session"].last_request.fields
-    assert sent_fields == ["CRNCY", expected_price_field, "INT_ACC"]
+    assert sent_fields == ["CRNCY", "ID_ISIN", expected_price_field, "INT_ACC"]
     assert "PX_LAST" not in sent_fields
     assert quote.clean_price_per_100 == 101.5
     assert quote.quote_side is quote_side
@@ -468,10 +475,10 @@ def test_field_exception_raises_clear_error_and_stops_session(monkeypatch):
 
 @pytest.mark.parametrize(
     "missing_field",
-    ["CRNCY", "PX_MID", "INT_ACC"],
+    ["CRNCY", "ID_ISIN", "PX_MID", "INT_ACC"],
 )
 def test_missing_required_field_raises_clear_error_and_stops_session(monkeypatch, missing_field):
-    all_fields = {"CRNCY": "USD", "PX_MID": "99.32", "INT_ACC": "0.23"}
+    all_fields = {"CRNCY": "USD", "ID_ISIN": _ISIN, "PX_MID": "99.32", "INT_ACC": "0.23"}
     del all_fields[missing_field]
     security_data = _security_data(fields=all_fields)
     events = [_response_event(security_data)]
@@ -498,7 +505,9 @@ def test_non_finite_price_raises_clear_error(monkeypatch):
 
 
 def test_partial_response_then_response_events_are_both_consumed(monkeypatch):
-    security_data = _security_data(fields={"CRNCY": "USD", "PX_MID": "99.32", "INT_ACC": "0.23"})
+    security_data = _security_data(
+        fields={"CRNCY": "USD", "ID_ISIN": _ISIN, "PX_MID": "99.32", "INT_ACC": "0.23"}
+    )
     events = [
         _FakeEvent(_EventType.PARTIAL_RESPONSE, []),
         _FakeEvent(_EventType.RESPONSE, [_response_message(security_data_list=[security_data])]),
@@ -513,7 +522,7 @@ def test_partial_response_then_response_events_are_both_consumed(monkeypatch):
 
 # --- 5. Exactly one matching securityData record (PR #128 Codex finding #1) -
 
-_FIELDS = {"CRNCY": "USD", "PX_MID": "99.32", "INT_ACC": "0.23"}
+_FIELDS = {"CRNCY": "USD", "ID_ISIN": _ISIN, "PX_MID": "99.32", "INT_ACC": "0.23"}
 
 
 def test_two_records_in_one_response_raises_clear_error(monkeypatch):
@@ -615,7 +624,12 @@ def test_malformed_currency_raises_clear_error(monkeypatch):
 
 
 def test_malformed_selected_price_field_raises_clear_error(monkeypatch):
-    fields = {"CRNCY": "USD", "PX_MID": _FakeBlpapiException("bad conversion"), "INT_ACC": "0.23"}
+    fields = {
+        "CRNCY": "USD",
+        "ID_ISIN": _ISIN,
+        "PX_MID": _FakeBlpapiException("bad conversion"),
+        "INT_ACC": "0.23",
+    }
     events = [_response_event(_security_data(fields=fields))]
     holder = _install_fake_blpapi(monkeypatch, events=events)
 
@@ -626,7 +640,12 @@ def test_malformed_selected_price_field_raises_clear_error(monkeypatch):
 
 
 def test_malformed_accrued_interest_raises_clear_error(monkeypatch):
-    fields = {"CRNCY": "USD", "PX_MID": "99.32", "INT_ACC": _FakeBlpapiException("bad conversion")}
+    fields = {
+        "CRNCY": "USD",
+        "ID_ISIN": _ISIN,
+        "PX_MID": "99.32",
+        "INT_ACC": _FakeBlpapiException("bad conversion"),
+    }
     events = [_response_event(_security_data(fields=fields))]
     holder = _install_fake_blpapi(monkeypatch, events=events)
 
@@ -651,9 +670,75 @@ def test_unrelated_programming_error_is_not_swallowed(monkeypatch):
     # A KeyError is not a blpapi-native error -- the narrow
     # `except blpapi.exception.Exception` must not catch it, so it
     # propagates as itself rather than being mislabeled BLIBloombergDapiError.
-    fields = {"CRNCY": "USD", "PX_MID": KeyError("boom"), "INT_ACC": "0.23"}
+    fields = {"CRNCY": "USD", "ID_ISIN": _ISIN, "PX_MID": KeyError("boom"), "INT_ACC": "0.23"}
     events = [_response_event(_security_data(fields=fields))]
     _install_fake_blpapi(monkeypatch, events=events)
 
     with pytest.raises(KeyError, match="boom"):
         _load_mid()
+
+
+# --- 8. Canonical ISIN verification (Issue #6) -------------------------------
+#
+# ID_ISIN was identified as the canonical field via a live //blp/apiflds
+# field-metadata search and confirmed against 91282CQX Govt / US91282CQX29
+# before this slice was implemented (see the module docstring).
+
+
+def test_exact_isin_match_succeeds(monkeypatch):
+    _install_fake_blpapi(monkeypatch, events=_success_events(isin=_ISIN))
+
+    quote = _load_mid(isin=_ISIN)
+
+    assert quote.isin == _ISIN
+
+
+def test_blank_isin_field_value_raises_clear_error(monkeypatch):
+    fields = {"CRNCY": "USD", "ID_ISIN": "", "PX_MID": "99.32", "INT_ACC": "0.23"}
+    events = [_response_event(_security_data(fields=fields))]
+    holder = _install_fake_blpapi(monkeypatch, events=events)
+
+    with pytest.raises(BLIBloombergDapiError, match="missing ID_ISIN"):
+        _load_mid()
+
+    assert holder["session"].stopped is True
+
+
+def test_malformed_isin_field_raises_clear_error(monkeypatch):
+    fields = {
+        "CRNCY": "USD",
+        "ID_ISIN": _FakeBlpapiException("bad conversion"),
+        "PX_MID": "99.32",
+        "INT_ACC": "0.23",
+    }
+    events = [_response_event(_security_data(fields=fields))]
+    holder = _install_fake_blpapi(monkeypatch, events=events)
+
+    with pytest.raises(BLIBloombergDapiError, match="malformed value for ID_ISIN"):
+        _load_mid()
+
+    assert holder["session"].stopped is True
+
+
+def test_mismatched_isin_raises_clear_error(monkeypatch):
+    fields = {"CRNCY": "USD", "ID_ISIN": "US00000000AA", "PX_MID": "99.32", "INT_ACC": "0.23"}
+    events = [_response_event(_security_data(fields=fields))]
+    holder = _install_fake_blpapi(monkeypatch, events=events)
+
+    with pytest.raises(BLIBloombergDapiError, match="does not match requested isin"):
+        _load_mid(isin=_ISIN)
+
+    assert holder["session"].stopped is True
+
+
+def test_isin_field_exception_raises_clear_error(monkeypatch):
+    security_data = _security_data(
+        fields={"CRNCY": "USD"}, field_exceptions=["[BAD_FLD] ID_ISIN not applicable to security"]
+    )
+    events = [_response_event(security_data)]
+    holder = _install_fake_blpapi(monkeypatch, events=events)
+
+    with pytest.raises(BLIBloombergDapiError, match="field exception"):
+        _load_mid()
+
+    assert holder["session"].stopped is True

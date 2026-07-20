@@ -10,6 +10,7 @@ interest for one security, and returns exactly one validated
 **Approved live field mapping (Issue #6):**
 
 - ``CRNCY``           -> ``BLIBondQuote.currency``
+- ``ID_ISIN``         -> verified equal to the caller-supplied ``isin`` (Issue #6)
 - BID  -> ``PX_BID``  -> ``BLIBondQuote.clean_price_per_100``
 - MID  -> ``PX_MID``  -> ``BLIBondQuote.clean_price_per_100``
 - OFFER -> ``PX_ASK`` -> ``BLIBondQuote.clean_price_per_100``
@@ -19,6 +20,17 @@ Only the one price field matching the caller's explicit ``quote_side`` is
 ever requested -- this loader never requests all three sides and picks one
 afterward, never infers BID/MID/OFFER from anything else, and never
 requests or falls back to ``PX_LAST``.
+
+**Canonical ISIN verification (Issue #6 ISIN verification slice):**
+``ID_ISIN`` was identified as the canonical Bloomberg ISIN field via a live
+``//blp/apiflds`` field-metadata search (not a guessed mnemonic) and
+confirmed against ``91282CQX Govt`` / ``US91282CQX29`` before this slice was
+implemented. The caller still supplies ``isin`` explicitly and it is still
+what gets stored on the returned quote -- this loader now also requests
+``ID_ISIN`` and requires it to equal the caller-supplied ``isin`` exactly
+(no normalization, no partial match), rejecting a missing, blank,
+malformed, field-exceptioned, or mismatched value. This is verification
+only, never a source of the ISIN.
 
 **Exactly one matching record (PR #128 Codex finding #1):** every
 ``securityData`` record received across *all* ``PARTIAL_RESPONSE`` and
@@ -50,8 +62,9 @@ exception and never gets silently treated as "missing".
 not installed, session-start (connection) failure, ``//blp/refdata``
 service-open failure, request timeout, a DAPI ``responseError``, a
 record-count/identity mismatch, a security-level error, any field
-exception, a malformed element, or a missing/non-numeric/non-finite value
-for a requested field. This loader never silently returns partial data --
+exception, a malformed element, an ``ID_ISIN`` mismatch, or a
+missing/non-numeric/non-finite value for a requested field. This loader
+never silently returns partial data --
 every field that is missing, exceptional, or malformed aborts the whole
 call. ``security``/``isin`` blank checks and an invalid ``quote_side``
 raise ``ValueError`` directly (a caller-input problem, not a
@@ -66,15 +79,17 @@ so importing this module (or any module that imports it) never requires
 ``session.stop()`` is called on every path once a ``Session`` object
 exists, whether the call succeeds or fails.
 
-**Hard non-goals (Issue #6 scope cap):** no ISIN retrieval or inference (the
-caller supplies it explicitly and it is stored verbatim, never looked up or
-validated against Bloomberg), no ``BondReferenceData``, no wiring into
-``BLIMarketDataSnapshot``, the request builder, the pricing engine, the
-workbench, or the UI, no forward price, no ``PRICE_VOL``, no OVME premium,
-no curve/repo/yield-conversion/option calculation of any kind, no provider
-interface, base class, factory, registry, cache, configuration framework,
-persistence, or compatibility wrapper. ``BLIBondQuote`` and its sibling
-schemas are unmodified.
+**Hard non-goals (Issue #6 scope cap):** no ISIN retrieval or inference --
+the caller still supplies ``isin`` explicitly and it is what gets stored on
+the returned quote; Bloomberg's ``ID_ISIN`` is used only to verify that
+supplied value, never to source, replace, or normalize it. No
+``BondReferenceData``, no wiring into ``BLIMarketDataSnapshot``, the
+request builder, the pricing engine, the workbench, or the UI (this loader
+is not currently called by any of them), no forward price, no
+``PRICE_VOL``, no OVME premium, no curve/repo/yield-conversion/option
+calculation of any kind, no provider interface, base class, factory,
+registry, cache, configuration framework, persistence, or compatibility
+wrapper. ``BLIBondQuote`` and its sibling schemas are unmodified.
 """
 
 from __future__ import annotations
@@ -94,6 +109,7 @@ _REQUEST_TIMEOUT_MS = 10_000
 _CURRENCY_FIELD = "CRNCY"
 _ACCRUED_INTEREST_FIELD = "INT_ACC"
 _SECURITY_IDENTIFIER_FIELD = "security"
+_ISIN_FIELD = "ID_ISIN"
 
 # Approved live field mapping (Issue #6) -- the only three
 # TreasuryFTPQuoteSide members that exist, so this mapping is exhaustive
@@ -136,10 +152,11 @@ def load_bloomberg_bond_quote(
 
     ``security`` is the Bloomberg security identifier requested from DAPI
     (e.g. ``"91282CQX Govt"``). ``isin`` is stored on the returned quote
-    verbatim -- this function does not retrieve, infer, or cross-check an
-    ISIN against Bloomberg. ``quote_side`` selects exactly one price field
-    (see the module docstring's field mapping); it is required and has no
-    default.
+    verbatim and is also verified against Bloomberg's ``ID_ISIN`` field for
+    ``security`` -- this function never retrieves or infers an ISIN, only
+    confirms the caller-supplied one matches exactly. ``quote_side`` selects
+    exactly one price field (see the module docstring's field mapping); it
+    is required and has no default.
 
     Raises ``ValueError`` if ``security``/``isin`` is blank or ``quote_side``
     is not a valid ``TreasuryFTPQuoteSide``. Raises ``BLIBloombergDapiError``
@@ -182,6 +199,7 @@ def load_bloomberg_bond_quote(
         request = service.createRequest("ReferenceDataRequest")
         request.append("securities", security)
         request.append("fields", _CURRENCY_FIELD)
+        request.append("fields", _ISIN_FIELD)
         request.append("fields", price_field)
         request.append("fields", _ACCRUED_INTEREST_FIELD)
 
@@ -277,6 +295,12 @@ def load_bloomberg_bond_quote(
         )
     raw_currency = _get_element_as_string(blpapi, field_data, _CURRENCY_FIELD, security)
 
+    if not field_data.hasElement(_ISIN_FIELD):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {_ISIN_FIELD}"
+        )
+    raw_isin = _get_element_as_string(blpapi, field_data, _ISIN_FIELD, security)
+
     if not field_data.hasElement(price_field):
         raise BLIBloombergDapiError(
             f"Bloomberg DAPI response for {security!r} is missing {price_field}"
@@ -292,6 +316,14 @@ def load_bloomberg_bond_quote(
     if not raw_currency:
         raise BLIBloombergDapiError(
             f"Bloomberg DAPI response for {security!r} is missing {_CURRENCY_FIELD}"
+        )
+    if not raw_isin:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI response for {security!r} is missing {_ISIN_FIELD}"
+        )
+    if raw_isin != isin:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI {_ISIN_FIELD} {raw_isin!r} does not match requested isin {isin!r}"
         )
     if not raw_price:
         raise BLIBloombergDapiError(
