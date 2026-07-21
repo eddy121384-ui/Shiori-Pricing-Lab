@@ -85,25 +85,42 @@ actually ran) full solver diagnostics -- any field the existing result leaves
 simply not rendered as a metric. The model fair premium is never labeled a
 client quote.
 
-**Issue #6 Phase 4: Bloomberg DAPI bond-quote source.** An explicit
-"Bond quote source" selector -- *Case JSON* (unchanged default) or
+**Issue #6: Bloomberg DAPI bond-quote source, Eddy-approved acquisition-time
+contract (issue #6 comment 5028876767, PR #129 comment 5028878866).** An
+explicit "Bond quote source" selector -- *Case JSON* (unchanged default) or
 *Bloomberg DAPI* -- with no hidden precedence. *Case JSON* preserves the
 existing behavior exactly, including the existing benchmark active-side
-selector, and never imports or calls anything Bloomberg-related.
-*Bloomberg DAPI* requires an explicit security, an explicit quote side
-(``index=None``, no preselected value), and an explicit ``source_as_of``,
-then calls only the new headless
-``price_standalone_option_case_with_bloomberg_quote`` /
-``_and_benchmark`` workflows; in benchmark mode the same quote side drives
-both the Bloomberg price field and the comparison/calibration
-``active_quote_side`` -- the page shows no separate active-side selector in
-this mode. The page states plainly that the case JSON's ``bond_quote`` is
-replaced and never used as a fallback. A Bloomberg failure
+selector and the ``retrieved_at`` workbench-provenance input, and never
+imports or calls anything Bloomberg-related.
+
+*Bloomberg DAPI* requires an explicit security and an explicit quote side
+(``index=None``, no preselected value) -- there is no ``source_as_of``
+input and no caller-entered live ``retrieved_at`` input in this mode. The
+execution button reads **"Refresh Bloomberg quote and price"** in this mode
+(vs. "Price standalone option" in Case JSON mode) because it is one
+explicit action: refresh the live quote and immediately price the current
+run -- no cache, polling, background refresh, or stale reuse. It calls only
+the headless ``price_standalone_option_case_with_bloomberg_quote`` /
+``_and_benchmark`` workflows, which capture the Shiori acquisition
+timestamp internally (no clock read in this page) and reject a case whose
+``valuation_date`` does not match the acquisition date -- before any
+pricing. In benchmark mode the same quote side drives both the Bloomberg
+price field and the comparison/calibration ``active_quote_side`` -- the
+page shows no separate active-side selector in this mode.
+
+The page states plainly, in the Live Bloomberg Quote section, that:
+Bloomberg quote-observation time is not provided by this DAPI path;
+``acquired_at`` is when Shiori received the quote; only the bond quote was
+refreshed; curve, forward, volatility, credit-spread, and other case inputs
+are unchanged; and the result is a current-run mixed-provenance
+calculation, not a historical replay. A Bloomberg failure
 (``BLIBloombergDapiError``, caught alongside the existing local-input
-exceptions -- never a broad ``except Exception``) renders the exact error
-and prices nothing; there is no stale previous result and no fabricated
-zero. This page adds no background refresh, polling, caching, auto-run,
-session history, credentials UI, or Bloomberg connection settings.
+exceptions -- never a broad ``except Exception``), a valuation-date
+mismatch, or a pricing failure renders the exact error and prices nothing;
+none of these ever falls back to the case's original ``bond_quote`` or a
+stale previous result. This page adds no background refresh, polling,
+caching, auto-run, session history, credentials UI, or Bloomberg connection
+settings.
 """
 
 from __future__ import annotations
@@ -415,10 +432,18 @@ def _render_live_bloomberg_quote(display: dict) -> None:
     and the implied ``PRICE_VOL`` -- every value is a direct read of
     ``display["live_bloomberg_quote"]``
     (:func:`standalone_option_workbench.prepare_live_bloomberg_quote_display`),
-    never recomputed or reinterpreted here.
+    never recomputed or reinterpreted here. The disclaimer text below states
+    the acquisition-time contract plainly; it adds no new data field.
     """
 
     st.subheader("Live Bloomberg Quote")
+    st.caption(
+        "Bloomberg quote-observation time is not provided by this DAPI path. "
+        "acquired_at is when Shiori received this quote. Only the bond quote "
+        "was refreshed -- curve, forward, volatility, credit-spread, and "
+        "other market inputs remain from the case JSON. This is a current-run "
+        "mixed-provenance calculation, not a historical replay."
+    )
     st.write(display["live_bloomberg_quote"])
 
 
@@ -488,20 +513,25 @@ def render_standalone_option_workbench_page() -> None:
         if uploaded_file is None:
             st.info("Upload a .json file to price. No file is loaded yet.")
 
-    retrieved_at_text = st.text_input(
-        "retrieved_at (optional workbench provenance; kept separate from source-as-of)",
-        value="",
-    )
+    retrieved_at_text: str | None = None
+    if not bloomberg_mode:
+        retrieved_at_text = st.text_input(
+            "retrieved_at (optional workbench provenance; kept separate from source-as-of)",
+            value="",
+        )
 
     bloomberg_security_text: str | None = None
     bloomberg_quote_side: str | None = None
-    bloomberg_source_as_of_text: str | None = None
     if bloomberg_mode:
         st.subheader("Bloomberg DAPI bond quote")
         st.caption(
-            "The case JSON's bond_quote will be replaced by one live Bloomberg DAPI "
-            "quote and is never used as a fallback -- not on failure, not merged "
-            "field-by-field."
+            "The case JSON's bond_quote and pricing_timestamp will be replaced by one "
+            "live Bloomberg quote and the Shiori acquisition time -- never used as a "
+            "fallback, never merged field-by-field. Bloomberg's quote-observation time "
+            "is not provided by this DAPI path; acquired_at is when Shiori received the "
+            "quote. Only the bond quote is refreshed -- curve, forward, volatility, "
+            "credit-spread, and other case inputs stay unchanged. A valuation-date "
+            "mismatch against the acquisition date is rejected before any pricing."
         )
         bloomberg_security_text = st.text_input("Bloomberg security", value="")
         bloomberg_quote_side = st.selectbox(
@@ -509,10 +539,6 @@ def render_standalone_option_workbench_page() -> None:
             _QUOTE_SIDE_OPTIONS,
             index=None,
             placeholder="Select a quote side (required — no default)",
-        )
-        bloomberg_source_as_of_text = st.text_input(
-            "source_as_of (must equal the case JSON's as_of_timestamp exactly)",
-            value="",
         )
 
     benchmark_input_source: str | None = None
@@ -557,7 +583,10 @@ def render_standalone_option_workbench_page() -> None:
                 placeholder="Select a quote side (required — no default)",
             )
 
-    if not st.button("Price standalone option"):
+    button_label = (
+        "Refresh Bloomberg quote and price" if bloomberg_mode else "Price standalone option"
+    )
+    if not st.button(button_label):
         return
 
     retrieved_at = _retrieved_at_or_none(retrieved_at_text)
@@ -584,12 +613,6 @@ def render_standalone_option_workbench_page() -> None:
                 st.warning(
                     "No quote side selected — nothing to price. Select BID, MID, "
                     "or OFFER first."
-                )
-                return
-            if not bloomberg_source_as_of_text or not bloomberg_source_as_of_text.strip():
-                st.warning(
-                    "No source_as_of entered — nothing to price. Enter the case "
-                    "JSON's as_of_timestamp first."
                 )
                 return
 
@@ -625,8 +648,6 @@ def render_standalone_option_workbench_page() -> None:
                 benchmark_text,
                 bloomberg_security=bloomberg_security_text,
                 quote_side=bloomberg_quote_side,
-                source_as_of=bloomberg_source_as_of_text,
-                retrieved_at=retrieved_at,
             )
         elif bloomberg_mode:
             (
@@ -638,8 +659,6 @@ def render_standalone_option_workbench_page() -> None:
                 case_text,
                 bloomberg_security=bloomberg_security_text,
                 quote_side=bloomberg_quote_side,
-                source_as_of=bloomberg_source_as_of_text,
-                retrieved_at=retrieved_at,
             )
         elif benchmark_mode:
             (

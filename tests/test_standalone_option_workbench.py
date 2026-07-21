@@ -39,6 +39,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -423,10 +424,9 @@ def test_failed_display_preserves_structured_error_detail_verbatim():
 # --- 8. No provider / network / clock / pricing math in the app layer --------
 
 
-def test_module_has_no_pricing_math_provider_or_system_clock():
+def test_module_has_no_pricing_math_or_provider_dependency():
     source = inspect.getsource(workbench_module)
     for forbidden in (
-        "datetime.now(",
         "date.today(",
         "utcnow(",
         "requests",
@@ -442,6 +442,45 @@ def test_module_has_no_pricing_math_provider_or_system_clock():
         "QuantLib",
     ):
         assert forbidden not in source, f"unexpected reference to {forbidden!r}"
+
+
+def test_only_the_acquisition_clock_seam_reads_the_system_clock():
+    # Eddy-approved acquisition-time contract (issue #6 comment 5028876767):
+    # exactly one function in this module reads the real clock.
+    module_source = inspect.getsource(workbench_module)
+    assert module_source.count("datetime.now(") == 1
+    seam_source = inspect.getsource(workbench_module._shiori_acquisition_now)
+    assert "datetime.now().astimezone()" in seam_source
+
+
+def test_manual_workflow_functions_never_read_the_clock():
+    manual_functions = (
+        workbench_module._parse_standalone_option_case,
+        workbench_module.build_request_from_standalone_option_case,
+        workbench_module.prepare_standalone_display,
+        workbench_module.price_standalone_option_case,
+        workbench_module._parse_standalone_option_benchmark_case,
+        workbench_module.build_benchmark_from_standalone_option_benchmark_case,
+        workbench_module.prepare_standalone_benchmark_display,
+        workbench_module.price_standalone_option_case_with_benchmark,
+    )
+    for func in manual_functions:
+        assert "datetime.now(" not in inspect.getsource(func)
+
+
+def test_live_bloomberg_orchestration_only_calls_the_clock_seam():
+    # The price-only workflow calls the seam directly; the benchmark variant
+    # delegates to it unchanged (no clock call of its own -- see the module
+    # docstring), so neither ever calls the real clock directly.
+    source = inspect.getsource(price_standalone_option_case_with_bloomberg_quote)
+    assert "datetime.now(" not in source
+    assert "_shiori_acquisition_now()" in source
+
+    benchmark_source = inspect.getsource(
+        price_standalone_option_case_with_bloomberg_quote_and_benchmark
+    )
+    assert "datetime.now(" not in benchmark_source
+    assert "_shiori_acquisition_now(" not in benchmark_source
 
 
 def test_module_does_not_shortcut_the_builder():
@@ -850,14 +889,26 @@ def test_workbench_module_calls_compare_and_calibrate_but_no_lower_layer_math():
         assert forbidden not in source, f"unexpected reference to {forbidden!r}"
 
 
-# --- 20. Issue #6 Phase 3: live Bloomberg bond-quote wiring ------------------
+# --- 20. Issue #6: live Bloomberg bond-quote wiring, Eddy-approved
+#     acquisition-time contract (issue #6 comment 5028876767, PR #129
+#     comment 5028878866) --------------------------------------------------
 #
 # No real blpapi/network/system clock: `load_bloomberg_bond_quote` itself is
 # already fully covered by tests/test_bloomberg_bond_quote.py, so here it is
 # monkeypatched directly on the workbench module (the smallest seam that
 # exercises this module's own orchestration/validation logic in isolation).
+# `_shiori_acquisition_now` -- the one clock seam this module adds -- is
+# monkeypatched the same way, so no real clock is read in CI either.
 
 _BLOOMBERG_SECURITY = "91282CQX Govt"
+
+# The example envelope's valuation_date is "2026-07-01" -- a fixed clock
+# reading a time on that same calendar date lets the acquisition-date guard
+# pass deterministically.
+_FIXED_ACQUIRED_AT = datetime(2026, 7, 1, 16, 5, 0, tzinfo=UTC)
+_FIXED_ACQUIRED_AT_TEXT = _FIXED_ACQUIRED_AT.isoformat(timespec="seconds")
+# A different calendar date, for the date-mismatch guard tests.
+_MISMATCHED_ACQUIRED_AT = datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC)
 
 
 def _live_quote(**overrides) -> BLIBondQuote:
@@ -888,30 +939,45 @@ def _install_fake_bloomberg_loader(monkeypatch, *, quote=None, error=None):
     return calls
 
 
-def test_bloomberg_security_and_quote_side_have_no_default():
+def _install_fixed_clock(monkeypatch, acquired_at: datetime = _FIXED_ACQUIRED_AT):
+    clock_calls: list[datetime] = []
+
+    def fake_clock() -> datetime:
+        clock_calls.append(acquired_at)
+        return acquired_at
+
+    monkeypatch.setattr(workbench_module, "_shiori_acquisition_now", fake_clock)
+    return clock_calls
+
+
+def test_bloomberg_functions_have_no_source_as_of_or_retrieved_at_parameter():
+    for func in (
+        price_standalone_option_case_with_bloomberg_quote,
+        price_standalone_option_case_with_bloomberg_quote_and_benchmark,
+    ):
+        sig = inspect.signature(func)
+        assert "source_as_of" not in sig.parameters
+        assert "retrieved_at" not in sig.parameters
+
     sig = inspect.signature(price_standalone_option_case_with_bloomberg_quote)
     assert sig.parameters["bloomberg_security"].default is inspect.Parameter.empty
     assert sig.parameters["quote_side"].default is inspect.Parameter.empty
-    assert sig.parameters["source_as_of"].default is inspect.Parameter.empty
 
 
-def test_source_as_of_mismatch_fails_before_bloomberg_call(monkeypatch):
-    calls = _install_fake_bloomberg_loader(monkeypatch)
+def test_bloomberg_functions_reject_a_source_as_of_kwarg():
     envelope = _example_envelope()
-
-    with pytest.raises(ValueError, match="as_of_timestamp"):
+    with pytest.raises(TypeError):
         price_standalone_option_case_with_bloomberg_quote(
             envelope,
             bloomberg_security=_BLOOMBERG_SECURITY,
             quote_side=TreasuryFTPQuoteSide.MID,
-            source_as_of="2099-01-01T00:00:00Z",
+            source_as_of=envelope["as_of_timestamp"],
         )
-
-    assert calls == []
 
 
 def test_blank_bloomberg_security_raises_value_error(monkeypatch):
     calls = _install_fake_bloomberg_loader(monkeypatch)
+    clock_calls = _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
     with pytest.raises(ValueError, match="bloomberg_security"):
@@ -919,22 +985,22 @@ def test_blank_bloomberg_security_raises_value_error(monkeypatch):
             envelope,
             bloomberg_security="  ",
             quote_side=TreasuryFTPQuoteSide.MID,
-            source_as_of=envelope["as_of_timestamp"],
         )
 
     assert calls == []
+    assert clock_calls == []
 
 
 @_requires_quantlib
 def test_exactly_one_bloomberg_call_with_expected_isin_and_explicit_side(monkeypatch):
     calls = _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
     price_standalone_option_case_with_bloomberg_quote(
         envelope,
         bloomberg_security=_BLOOMBERG_SECURITY,
         quote_side=TreasuryFTPQuoteSide.MID,
-        source_as_of=envelope["as_of_timestamp"],
     )
 
     assert calls == [
@@ -947,8 +1013,45 @@ def test_exactly_one_bloomberg_call_with_expected_isin_and_explicit_side(monkeyp
 
 
 @_requires_quantlib
-def test_only_bond_quote_is_replaced_everything_else_equal(monkeypatch):
+def test_clock_captured_only_after_successful_loader_return(monkeypatch):
+    order: list[str] = []
+
+    def fake_loader(*, security, isin, quote_side):
+        order.append("loader")
+        return _live_quote()
+
+    def fake_clock() -> datetime:
+        order.append("clock")
+        return _FIXED_ACQUIRED_AT
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", fake_loader)
+    monkeypatch.setattr(workbench_module, "_shiori_acquisition_now", fake_clock)
+    envelope = _example_envelope()
+
+    price_standalone_option_case_with_bloomberg_quote(
+        envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert order == ["loader", "clock"]
+
+
+def test_clock_never_called_when_loader_raises(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch, error=BLIBloombergDapiError("boom"))
+    clock_calls = _install_fixed_clock(monkeypatch)
+    envelope = _example_envelope()
+
+    with pytest.raises(BLIBloombergDapiError, match="boom"):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+    assert clock_calls == []
+
+
+@_requires_quantlib
+def test_only_bond_quote_and_pricing_timestamp_are_replaced_everything_else_equal(monkeypatch):
     _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
     reference_request = build_request_from_standalone_option_case(envelope)
 
@@ -956,33 +1059,67 @@ def test_only_bond_quote_is_replaced_everything_else_equal(monkeypatch):
         envelope,
         bloomberg_security=_BLOOMBERG_SECURITY,
         quote_side=TreasuryFTPQuoteSide.MID,
-        source_as_of=envelope["as_of_timestamp"],
     )
 
     actual = asdict(request)
     expected = asdict(reference_request)
-    actual_bond_quote = actual["market_data_snapshot"]["bond_quote"]
-    expected_bond_quote = expected["market_data_snapshot"]["bond_quote"]
-    assert actual_bond_quote != expected_bond_quote
+    actual_snapshot = actual["market_data_snapshot"]
+    expected_snapshot = expected["market_data_snapshot"]
+    assert actual_snapshot["bond_quote"] != expected_snapshot["bond_quote"]
     assert request.market_data_snapshot.bond_quote.isin == live_quote.isin
     assert request.market_data_snapshot.bond_quote.clean_price_per_100 == (
         live_quote.clean_price_per_100
     )
-    actual["market_data_snapshot"]["bond_quote"] = expected_bond_quote
+    # pricing_timestamp is replaced with the acquisition timestamp -- not
+    # the case's original pricing_timestamp.
+    assert actual["pricing_timestamp"] == _FIXED_ACQUIRED_AT_TEXT
+    assert actual["pricing_timestamp"] != expected["pricing_timestamp"]
+    # as_of_timestamp (case market-data provenance) is untouched.
+    assert actual_snapshot["as_of_timestamp"] == expected_snapshot["as_of_timestamp"]
+
+    actual_snapshot["bond_quote"] = expected_snapshot["bond_quote"]
+    actual["pricing_timestamp"] = expected["pricing_timestamp"]
     assert actual == expected
+
+
+@_requires_quantlib
+def test_live_pricing_timestamp_equals_acquired_at(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
+    envelope = _example_envelope()
+
+    request, _result, _live_quote, display = price_standalone_option_case_with_bloomberg_quote(
+        envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert request.pricing_timestamp == _FIXED_ACQUIRED_AT_TEXT
+    assert display["live_bloomberg_quote"]["acquired_at"] == _FIXED_ACQUIRED_AT_TEXT
+    assert display["retrieved_at"] == _FIXED_ACQUIRED_AT_TEXT
+
+
+@_requires_quantlib
+def test_case_as_of_timestamp_stays_unchanged(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
+    envelope = _example_envelope()
+
+    request, _result, _live_quote, display = price_standalone_option_case_with_bloomberg_quote(
+        envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert request.market_data_snapshot.as_of_timestamp == envelope["as_of_timestamp"]
+    assert display["live_bloomberg_quote"]["case_as_of_timestamp"] == envelope["as_of_timestamp"]
 
 
 @_requires_quantlib
 def test_input_mapping_and_nested_values_not_mutated(monkeypatch):
     _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
     snapshot_before = json.loads(json.dumps(envelope))
 
     price_standalone_option_case_with_bloomberg_quote(
-        envelope,
-        bloomberg_security=_BLOOMBERG_SECURITY,
-        quote_side=TreasuryFTPQuoteSide.MID,
-        source_as_of=envelope["as_of_timestamp"],
+        envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
     )
 
     assert envelope == snapshot_before
@@ -990,20 +1127,19 @@ def test_input_mapping_and_nested_values_not_mutated(monkeypatch):
 
 def test_bloomberg_failure_propagates_and_never_falls_back(monkeypatch):
     _install_fake_bloomberg_loader(monkeypatch, error=BLIBloombergDapiError("boom"))
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
     with pytest.raises(BLIBloombergDapiError, match="boom"):
         price_standalone_option_case_with_bloomberg_quote(
-            envelope,
-            bloomberg_security=_BLOOMBERG_SECURITY,
-            quote_side=TreasuryFTPQuoteSide.MID,
-            source_as_of=envelope["as_of_timestamp"],
+            envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
         )
 
 
 def test_mismatched_live_quote_isin_is_rejected_by_existing_constructor(monkeypatch):
     mismatched_quote = replace(_live_quote(), isin="XS9999999999")
     _install_fake_bloomberg_loader(monkeypatch, quote=mismatched_quote)
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
     # The existing BLIStandaloneBondOptionRequest ISIN-coherence gate (not
@@ -1011,31 +1147,89 @@ def test_mismatched_live_quote_isin_is_rejected_by_existing_constructor(monkeypa
     # quote/ISIN coherence still reaches the existing constructors unchanged.
     with pytest.raises(ValueError):
         price_standalone_option_case_with_bloomberg_quote(
+            envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+
+# --- 20a. Acquisition-date-mismatch guard: retrieval happens, pricing does not ----
+
+
+def test_acquisition_date_mismatch_raises_after_retrieval_before_pricing(monkeypatch):
+    calls = _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch, acquired_at=_MISMATCHED_ACQUIRED_AT)
+    envelope = _example_envelope()
+    assert envelope["valuation_date"] == "2026-07-01"
+
+    with pytest.raises(ValueError, match="valuation_date"):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+    # Retrieval already happened (the loader was called exactly once) --
+    # only pricing was blocked.
+    assert len(calls) == 1
+
+
+def test_acquisition_date_mismatch_never_calls_the_pricing_engine(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch, acquired_at=_MISMATCHED_ACQUIRED_AT)
+    envelope = _example_envelope()
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("pricing engine must not run on an acquisition-date mismatch")
+
+    monkeypatch.setattr(workbench_module, "price_bli_mvp_standalone_option", _fail)
+
+    with pytest.raises(ValueError, match="valuation_date"):
+        price_standalone_option_case_with_bloomberg_quote(
+            envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+
+def test_acquisition_date_mismatch_blocks_comparison_and_calibration(monkeypatch):
+    _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch, acquired_at=_MISMATCHED_ACQUIRED_AT)
+    envelope = _example_envelope()
+    benchmark_text = _synthetic_benchmark_text()
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("comparison/calibration must not run on a date mismatch")
+
+    monkeypatch.setattr(workbench_module, "compare_bli_benchmark", _fail)
+    monkeypatch.setattr(workbench_module, "calibrate_bli_implied_price_vol", _fail)
+
+    with pytest.raises(ValueError, match="valuation_date"):
+        price_standalone_option_case_with_bloomberg_quote_and_benchmark(
             envelope,
+            benchmark_text,
             bloomberg_security=_BLOOMBERG_SECURITY,
             quote_side=TreasuryFTPQuoteSide.MID,
-            source_as_of=envelope["as_of_timestamp"],
         )
+
+
+# --- 20b. Price-only result equals a manually swapped reference; provenance -------
 
 
 @_requires_quantlib
 def test_price_only_mode_result_matches_manually_swapped_reference(monkeypatch):
     live_quote = _live_quote()
     _install_fake_bloomberg_loader(monkeypatch, quote=live_quote)
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
     request, result, returned_quote, display = price_standalone_option_case_with_bloomberg_quote(
-        envelope,
-        bloomberg_security=_BLOOMBERG_SECURITY,
-        quote_side=TreasuryFTPQuoteSide.MID,
-        source_as_of=envelope["as_of_timestamp"],
+        envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
     )
 
     # No financial calculation duplicated in the orchestration: pricing the
-    # same envelope directly, with only bond_quote swapped for the live
-    # quote (via the existing builder path, not a hand-built object), must
-    # reach the exact same PricingResult.
-    bloomberg_envelope = {**envelope, "bond_quote": asdict(live_quote)}
+    # same envelope directly, with bond_quote and pricing_timestamp swapped
+    # for the live quote/acquisition time (via the existing builder path,
+    # not a hand-built object), must reach the exact same PricingResult.
+    bloomberg_envelope = {
+        **envelope,
+        "bond_quote": asdict(live_quote),
+        "pricing_timestamp": _FIXED_ACQUIRED_AT_TEXT,
+    }
     reference_result = price_bli_mvp_standalone_option(
         build_request_from_standalone_option_case(bloomberg_envelope)
     )
@@ -1044,31 +1238,37 @@ def test_price_only_mode_result_matches_manually_swapped_reference(monkeypatch):
     assert result.status == reference_result.status
     assert result.pv == reference_result.pv
     assert display["live_bloomberg_quote"] == prepare_live_bloomberg_quote_display(
-        _BLOOMBERG_SECURITY, live_quote, envelope["as_of_timestamp"], None
+        _BLOOMBERG_SECURITY, live_quote, _FIXED_ACQUIRED_AT_TEXT, envelope["as_of_timestamp"]
     )
 
 
 def test_prepare_live_bloomberg_quote_display_is_bounded_and_verbatim():
     live_quote = _live_quote()
     display = prepare_live_bloomberg_quote_display(
-        _BLOOMBERG_SECURITY, live_quote, "2026-07-01T16:00:00Z", "2026-07-01T16:05:00Z"
+        _BLOOMBERG_SECURITY, live_quote, _FIXED_ACQUIRED_AT_TEXT, "2026-07-01T16:00:00Z"
     )
     assert display == {
         "security": _BLOOMBERG_SECURITY,
         "verified_isin": live_quote.isin,
         "source_system": live_quote.source_system,
-        "source_as_of": "2026-07-01T16:00:00Z",
-        "retrieved_at": "2026-07-01T16:05:00Z",
         "quote_side": "MID",
         "currency": "USD",
         "clean_price_per_100": live_quote.clean_price_per_100,
         "accrued_interest_per_100": live_quote.accrued_interest_per_100,
+        "acquired_at": _FIXED_ACQUIRED_AT_TEXT,
+        "timestamp_basis": "SHIORI_ACQUISITION_TIME",
+        "bloomberg_quote_observation_time": None,
+        "case_as_of_timestamp": "2026-07-01T16:00:00Z",
+        "refreshed_scope": "BOND_QUOTE_ONLY",
+        "other_market_inputs": "CASE_JSON_UNCHANGED",
     }
+    assert "source_as_of" not in display
 
 
 @_requires_quantlib
 def test_benchmark_mode_calls_pricing_comparison_calibration_exactly_once_each(monkeypatch):
     _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
     benchmark_text = _synthetic_benchmark_text()
 
@@ -1101,7 +1301,6 @@ def test_benchmark_mode_calls_pricing_comparison_calibration_exactly_once_each(m
         benchmark_text,
         bloomberg_security=_BLOOMBERG_SECURITY,
         quote_side=TreasuryFTPQuoteSide.MID,
-        source_as_of=envelope["as_of_timestamp"],
     )
 
     assert len(compare_calls) == 1
@@ -1115,3 +1314,24 @@ def test_benchmark_mode_calls_pricing_comparison_calibration_exactly_once_each(m
     assert "benchmark" in display
     assert "comparison" in display
     assert "calibration" in display
+
+
+# --- 20c. Manual mode is fully isolated from Bloomberg and the live clock ---------
+
+
+@_requires_quantlib
+def test_manual_mode_never_calls_bloomberg_or_the_live_clock(monkeypatch):
+    def _fail_loader(*args, **kwargs):
+        raise AssertionError("manual mode must never call the Bloomberg loader")
+
+    def _fail_clock():
+        raise AssertionError("manual mode must never read the live acquisition clock")
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _fail_loader)
+    monkeypatch.setattr(workbench_module, "_shiori_acquisition_now", _fail_clock)
+
+    envelope = _example_envelope()
+    price_standalone_option_case(envelope)
+    price_standalone_option_case_with_benchmark(
+        envelope, _synthetic_benchmark_text(), active_quote_side="MID"
+    )

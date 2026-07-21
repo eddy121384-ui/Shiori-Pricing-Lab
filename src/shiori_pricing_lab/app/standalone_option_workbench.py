@@ -77,32 +77,50 @@ result/status dataclass or error envelope is introduced.
 
 The workbench never labels the model fair premium a client quote.
 
-**Issue #6 Phase 3: live Bloomberg bond-quote wiring.** Two bounded headless
-workflows -- :func:`price_standalone_option_case_with_bloomberg_quote` and
-:func:`price_standalone_option_case_with_bloomberg_quote_and_benchmark` --
-replace only a case's ``bond_quote`` with one live quote from the existing,
-unmodified ``load_bloomberg_bond_quote`` (``data/bloomberg_bond_quote.py``)
-before pricing through the same approved path as the manual-JSON workflow.
-``source_as_of`` must equal the case envelope's ``as_of_timestamp`` exactly
-before any Bloomberg call is made -- no normalization, no timezone
-conversion, no system clock, no "close enough" rule. The expected ISIN
-comes from the case's own ``bond_option.underlying_isin``; Bloomberg's
-``ID_ISIN`` is verified against it by the loader itself (Issue #6 Phase 2).
-The original case JSON's ``bond_quote`` is never read, never used as a
-fallback, and never merged field-by-field with the live quote -- it is
-unconditionally replaced on success and never touched on failure, since a
-Bloomberg failure raises before the case's ``bond_quote`` is ever
-referenced. In benchmark mode, the one live-quote ``quote_side`` is reused
-verbatim as ``active_quote_side`` for both ``compare_bli_benchmark`` and
-``calibrate_bli_implied_price_vol`` -- no second side, override, or
-fallback. This slice adds no forward, repo, ``PRICE_VOL``, OVME, curve, or
-pricing-methodology logic of its own.
+**Issue #6: live Bloomberg bond-quote wiring, Eddy-approved acquisition-time
+contract (issue #6 comment 5028876767, PR #129 comment 5028878866).** Two
+bounded headless workflows -- :func:`price_standalone_option_case_with_bloomberg_quote`
+and :func:`price_standalone_option_case_with_bloomberg_quote_and_benchmark`
+-- replace a case's ``bond_quote`` and ``pricing_timestamp`` with one live
+quote and one acquisition timestamp, then price through the same approved
+path as the manual-JSON workflow. Bloomberg mode is one explicit action:
+refresh the live quote and immediately price the current run -- there is no
+quote cache, polling, background refresh, or stale reuse.
+
+No Bloomberg quote-observation timestamp is required or requested; the live
+workflow accepts no caller-supplied ``source_as_of`` or live ``retrieved_at``.
+The expected ISIN comes from the case's own ``bond_option.underlying_isin``;
+Bloomberg's ``ID_ISIN`` is verified against it by the loader itself
+(``data/bloomberg_bond_quote.py``, PR #130). Immediately after a successful
+loader return, :func:`_shiori_acquisition_now` -- the only clock read
+anywhere in this module -- captures one offset-aware system-local **Shiori
+acquisition timestamp**. This is never labeled a Bloomberg update time,
+exchange time, or quote-observation time. Its local calendar date must
+equal the case's ``valuation_date`` exactly; a mismatch is caught by the
+existing, unmodified ``pricing_timestamp.date() != valuation_date`` builder
+invariant (``data/bli_standalone_option_request.py``) once the acquisition
+timestamp is placed on the copied envelope as ``pricing_timestamp`` --
+raising ``ValueError`` after retrieval and strictly before any pricing,
+comparison, or calibration call, with no fallback to the case's original
+``bond_quote`` or a stale prior result.
+
+On a matching date, a new copied envelope replaces only ``bond_quote`` and
+``pricing_timestamp`` -- ``as_of_timestamp``, curve points, forward clean
+price, volatility, credit spread, reference data, and every other case
+field are carried unchanged and never relabeled as current. The original
+case JSON's ``bond_quote`` is never read, never used as a fallback, and
+never merged field-by-field with the live quote. In benchmark mode, the one
+live-quote ``quote_side`` is reused verbatim as ``active_quote_side`` for
+both ``compare_bli_benchmark`` and ``calibrate_bli_implied_price_vol`` -- no
+second side, override, or fallback. This slice adds no forward, repo,
+``PRICE_VOL``, OVME, curve, or pricing-methodology logic of its own.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import datetime
 
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote, BLIBenchmarkQuoteSide
 from shiori_pricing_lab.data.bli_snapshot import (
@@ -565,33 +583,65 @@ def price_standalone_option_case_with_benchmark(
     return request, result, benchmark, comparison, calibration, merged_display
 
 
-# --- Issue #6 Phase 3: live Bloomberg bond-quote wiring ---------------------
+# --- Issue #6: live Bloomberg bond-quote wiring, acquisition-time contract ---
+
+
+def _shiori_acquisition_now() -> datetime:
+    """Return one offset-aware Shiori acquisition timestamp via the platform clock.
+
+    The only clock read anywhere in this module -- called exactly once, by
+    :func:`price_standalone_option_case_with_bloomberg_quote`, immediately
+    after a successful ``load_bloomberg_bond_quote`` return. Uses the
+    platform-native local-clock-then-attach-offset call below (never a
+    fixed or naive time, never a UTC-now/today-only reading). This is the
+    Shiori acquisition time only -- never a Bloomberg quote-observation
+    time, ``source_as_of``, or exchange time. Tests monkeypatch this exact
+    function directly so no real clock is read in CI.
+    """
+
+    return datetime.now().astimezone()
+
+
+def _format_acquisition_timestamp(acquired_at: datetime) -> str:
+    """Serialize ``acquired_at`` with an uppercase ``T``, explicit offset, second precision."""
+
+    return acquired_at.isoformat(timespec="seconds")
 
 
 def prepare_live_bloomberg_quote_display(
     bloomberg_security: str,
     live_quote: BLIBondQuote,
-    source_as_of: str,
-    retrieved_at: str | None,
+    acquired_at: str,
+    case_as_of_timestamp: str,
 ) -> dict:
     """Return a bounded display context read **verbatim** from ``live_quote``.
 
-    No calculated values, no clock-sourced timestamp, no quote ID, no
-    inferred metadata -- every field is a direct read of ``live_quote`` or a
-    caller-supplied provenance value (``bloomberg_security``, ``source_as_of``,
-    ``retrieved_at``).
+    No calculated values, no quote ID, no inferred metadata -- every field
+    is a direct read of ``live_quote`` or a caller-supplied provenance value
+    (``bloomberg_security``, ``acquired_at``, ``case_as_of_timestamp``).
+    ``timestamp_basis`` is always ``"SHIORI_ACQUISITION_TIME"``;
+    ``bloomberg_quote_observation_time`` is always ``None`` (this DAPI path
+    does not provide one); ``refreshed_scope`` is always
+    ``"BOND_QUOTE_ONLY"``; ``other_market_inputs`` is always
+    ``"CASE_JSON_UNCHANGED"`` -- curve, forward, volatility, credit-spread,
+    and reference-data inputs all remain from the case, untouched here.
+    There is no ``source_as_of`` field in this section.
     """
 
     return {
         "security": bloomberg_security,
         "verified_isin": live_quote.isin,
         "source_system": live_quote.source_system,
-        "source_as_of": source_as_of,
-        "retrieved_at": retrieved_at,
         "quote_side": live_quote.quote_side.value,
         "currency": live_quote.currency.value,
         "clean_price_per_100": live_quote.clean_price_per_100,
         "accrued_interest_per_100": live_quote.accrued_interest_per_100,
+        "acquired_at": acquired_at,
+        "timestamp_basis": "SHIORI_ACQUISITION_TIME",
+        "bloomberg_quote_observation_time": None,
+        "case_as_of_timestamp": case_as_of_timestamp,
+        "refreshed_scope": "BOND_QUOTE_ONLY",
+        "other_market_inputs": "CASE_JSON_UNCHANGED",
     }
 
 
@@ -600,47 +650,51 @@ def price_standalone_option_case_with_bloomberg_quote(
     *,
     bloomberg_security: str,
     quote_side: TreasuryFTPQuoteSide,
-    source_as_of: str,
-    retrieved_at: str | None = None,
 ) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, BLIBondQuote, dict]:
     """Price ``case`` with its ``bond_quote`` replaced by one live Bloomberg quote.
 
-    Parses ``case`` through the existing envelope rules first (no Bloomberg
-    call yet), requires ``bloomberg_security``/``source_as_of`` non-blank,
-    and requires ``source_as_of`` to equal the envelope's ``as_of_timestamp``
-    exactly -- only then is ``load_bloomberg_bond_quote`` called, exactly
-    once, with the expected ISIN read from the case's own
-    ``bond_option.underlying_isin`` (via the existing ``BondOption``
-    constructor, not raw dict indexing) and the caller's explicit
-    ``quote_side`` (required, no default). A new copied envelope is built
-    with only ``bond_quote`` replaced (a shallow top-level dict copy, exactly
-    like this module's existing display-merge pattern) -- the input ``case``
-    mapping and every other envelope value are never mutated. The copied
-    envelope is then priced through the unmodified
-    :func:`price_standalone_option_case`, reusing the same request builder
-    and pricing engine as the manual-JSON workflow.
+    Bloomberg mode is one explicit action: refresh the live quote and
+    immediately price the current run -- no cache, no polling, no stale
+    reuse. Parses ``case`` through the existing envelope rules first (no
+    Bloomberg call yet) and requires ``bloomberg_security`` non-blank; only
+    then is ``load_bloomberg_bond_quote`` called, exactly once, with the
+    expected ISIN read from the case's own ``bond_option.underlying_isin``
+    (via the existing ``BondOption`` constructor, not raw dict indexing)
+    and the caller's explicit ``quote_side`` (required, no default). This
+    function accepts no caller-supplied ``source_as_of`` or live
+    ``retrieved_at``.
+
+    Immediately after a successful loader return, :func:`_shiori_acquisition_now`
+    captures one offset-aware Shiori acquisition timestamp. A new copied
+    envelope is built with only ``bond_quote`` and ``pricing_timestamp``
+    replaced (a shallow top-level dict copy) -- the input ``case`` mapping
+    and every other envelope value, including ``as_of_timestamp``, are
+    never mutated or relabeled. The copied envelope is then priced through
+    the unmodified :func:`price_standalone_option_case`, reusing the same
+    request builder and pricing engine as the manual-JSON workflow, with
+    the acquisition timestamp passed as its ``retrieved_at`` display value.
+    If the acquisition timestamp's local calendar date does not equal
+    ``valuation_date``, the existing, unmodified
+    ``pricing_timestamp.date() != valuation_date`` builder invariant
+    (``data/bli_standalone_option_request.py``) raises ``ValueError`` from
+    inside that build step -- after retrieval, strictly before pricing, and
+    with no fallback to the case's original ``bond_quote``.
 
     Returns the existing ``request``/``PricingResult``, the live
     ``BLIBondQuote``, and the price-only display dict with one added
     ``"live_bloomberg_quote"`` section (see
     :func:`prepare_live_bloomberg_quote_display`). Raises ``ValueError`` for
-    envelope/input problems, propagates ``BLIBloombergDapiError`` unchanged
-    on any Bloomberg failure (the original ``bond_quote`` is never used as a
-    fallback), and propagates every nested schema/builder error unremapped,
-    exactly as :func:`price_standalone_option_case` already does.
+    envelope/input/date problems, propagates ``BLIBloombergDapiError``
+    unchanged on any Bloomberg failure (the original ``bond_quote`` is
+    never used as a fallback), and propagates every nested schema/builder
+    error unremapped, exactly as :func:`price_standalone_option_case`
+    already does.
     """
 
     envelope = _parse_standalone_option_case(case)
 
     if not isinstance(bloomberg_security, str) or not bloomberg_security.strip():
         raise ValueError("bloomberg_security must be a non-blank string")
-    if not isinstance(source_as_of, str) or not source_as_of.strip():
-        raise ValueError("source_as_of must be a non-blank string")
-    if source_as_of != envelope["as_of_timestamp"]:
-        raise ValueError(
-            "source_as_of must equal the case envelope's as_of_timestamp exactly: "
-            f"{source_as_of!r} != {envelope['as_of_timestamp']!r}"
-        )
 
     expected_isin = BondOption(**envelope["bond_option"]).underlying_isin
 
@@ -648,13 +702,19 @@ def price_standalone_option_case_with_bloomberg_quote(
         security=bloomberg_security, isin=expected_isin, quote_side=quote_side
     )
 
-    bloomberg_case = {**envelope, "bond_quote": asdict(live_quote)}
+    acquired_at = _format_acquisition_timestamp(_shiori_acquisition_now())
+
+    bloomberg_case = {
+        **envelope,
+        "bond_quote": asdict(live_quote),
+        "pricing_timestamp": acquired_at,
+    }
     request, result, display = price_standalone_option_case(
-        bloomberg_case, retrieved_at=retrieved_at
+        bloomberg_case, retrieved_at=acquired_at
     )
 
     live_quote_display = prepare_live_bloomberg_quote_display(
-        bloomberg_security, live_quote, source_as_of, retrieved_at
+        bloomberg_security, live_quote, acquired_at, envelope["as_of_timestamp"]
     )
     merged_display = {**display, "live_bloomberg_quote": live_quote_display}
     return request, result, live_quote, merged_display
@@ -666,8 +726,6 @@ def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
     *,
     bloomberg_security: str,
     quote_side: TreasuryFTPQuoteSide,
-    source_as_of: str,
-    retrieved_at: str | None = None,
 ) -> tuple[
     BLIStandaloneBondOptionRequest,
     PricingResult,
@@ -680,7 +738,9 @@ def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
     """Price ``case`` with a live Bloomberg quote, then compare/calibrate once each.
 
     Reuses :func:`price_standalone_option_case_with_bloomberg_quote`
-    unchanged for pricing (one Bloomberg call, one copied envelope). The
+    unchanged for pricing/acquisition/date-guard (one Bloomberg call, one
+    clock read, one copied envelope) -- a date mismatch or Bloomberg
+    failure raises there, before any comparison or calibration call. The
     live quote's own ``quote_side`` -- the same explicit side the Bloomberg
     price field was requested with -- is reused verbatim as
     ``active_quote_side`` for both ``compare_bli_benchmark`` and
@@ -695,8 +755,6 @@ def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
         case,
         bloomberg_security=bloomberg_security,
         quote_side=quote_side,
-        source_as_of=source_as_of,
-        retrieved_at=retrieved_at,
     )
     benchmark = build_benchmark_from_standalone_option_benchmark_case(benchmark_case)
     active_quote_side = live_quote.quote_side.value

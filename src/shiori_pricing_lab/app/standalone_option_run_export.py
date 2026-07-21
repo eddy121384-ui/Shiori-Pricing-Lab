@@ -65,13 +65,19 @@ than falling back to Python ``repr``.
 function reads the clock or generates an identifier; the only content is
 what ``display`` already carries.
 
-**Issue #6 Phase 5: live Bloomberg quote provenance.** JSON export needs no
-change -- ``json.dumps(display, ...)`` already serializes a
+**Issue #6: live Bloomberg quote provenance, acquisition-time contract
+(issue #6 comment 5028876767, PR #129 comment 5028878866).** JSON export
+needs no change -- ``json.dumps(display, ...)`` already serializes a
 ``"live_bloomberg_quote"`` key verbatim if the display dict carries one
-(Bloomberg-DAPI bond-quote-source mode). Markdown export adds one
+(Bloomberg-DAPI bond-quote-source mode), including its
+``acquired_at``/``timestamp_basis``/``bloomberg_quote_observation_time``/
+``case_as_of_timestamp``/``refreshed_scope``/``other_market_inputs`` fields
+and the absence of any live ``source_as_of`` field. Markdown export adds one
 conditional ``## Live Bloomberg Quote`` section, included only when that key
-is present, rendered through the same verbatim ``_section`` helper as every
-other section -- no rounding, no recomputation, no omitted field, and
+is present, with a one-line disclaimer stating that Bloomberg's
+quote-observation time is unavailable, ``acquired_at`` is Shiori's own
+acquisition time, only the bond quote was refreshed, and other case inputs
+are unchanged -- no rounding, no recomputation, no omitted field, and
 ``None`` still renders as ``not available``. Manual (Case JSON) mode never
 produces this key, so its Markdown export is unchanged.
 """
@@ -174,12 +180,24 @@ _LIVE_BLOOMBERG_QUOTE_FIELDS = (
     ("Security", "security"),
     ("Verified ISIN", "verified_isin"),
     ("Source system", "source_system"),
-    ("Source as-of", "source_as_of"),
-    ("Retrieved at", "retrieved_at"),
     ("Quote side", "quote_side"),
     ("Currency", "currency"),
     ("Clean price per 100", "clean_price_per_100"),
     ("Accrued interest per 100", "accrued_interest_per_100"),
+    ("Acquired at", "acquired_at"),
+    ("Timestamp basis", "timestamp_basis"),
+    ("Bloomberg quote observation time", "bloomberg_quote_observation_time"),
+    ("Case as-of timestamp", "case_as_of_timestamp"),
+    ("Refreshed scope", "refreshed_scope"),
+    ("Other market inputs", "other_market_inputs"),
+)
+
+_LIVE_BLOOMBERG_QUOTE_DISCLAIMER = (
+    "Bloomberg quote-observation time is not provided by this DAPI path. "
+    "Acquired at is when Shiori received this quote. Only the bond quote was "
+    "refreshed -- curve, forward, volatility, credit-spread, and other market "
+    "inputs remain from the case JSON. This is a current-run mixed-provenance "
+    "calculation, not a historical replay."
 )
 
 _SOLVER_DIAGNOSTICS_FIELDS = (
@@ -403,13 +421,13 @@ def render_standalone_run_as_markdown(display: dict) -> str:
     lines.extend(_section("Pricing", display, _PRICING_FIELDS))
 
     if "live_bloomberg_quote" in display:
-        lines.extend(
-            _section(
-                "Live Bloomberg Quote",
-                display["live_bloomberg_quote"],
-                _LIVE_BLOOMBERG_QUOTE_FIELDS,
-            )
-        )
+        lines.append("## Live Bloomberg Quote")
+        lines.append("")
+        lines.append(f"> {_LIVE_BLOOMBERG_QUOTE_DISCLAIMER}")
+        lines.append("")
+        for label, key in _LIVE_BLOOMBERG_QUOTE_FIELDS:
+            lines.append(f"- **{label}:** {_fmt(display['live_bloomberg_quote'].get(key))}")
+        lines.append("")
 
     if "benchmark" in display:
         lines.extend(_section("Benchmark", display["benchmark"], _BENCHMARK_FIELDS))

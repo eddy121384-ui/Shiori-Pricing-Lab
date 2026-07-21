@@ -241,7 +241,8 @@ def _press_price(at: AppTest) -> None:
     next(b for b in at.button if b.label == "Price standalone option").click().run()
 
 
-# --- Issue #6 Phase 4: live Bloomberg bond-quote source fixtures -------------
+# --- Issue #6: live Bloomberg bond-quote source fixtures, acquisition-time
+# contract (issue #6 comment 5028876767, PR #129 comment 5028878866) --------
 #
 # Same isolation strategy as _SUCCESS_DISPLAY/_BENCHMARK_PASS_DISPLAY above:
 # render-only tests use a plain dict (no BLI construction at all); the one
@@ -249,16 +250,21 @@ def _press_price(at: AppTest) -> None:
 # reuses the real _BENCHMARK_PASS_DISPLAY built at import time, only adding
 # the live_bloomberg_quote section a real Bloomberg call would have produced.
 
+_ACQUIRED_AT = "2026-07-01T16:05:00+00:00"
 _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY = {
     "security": "91282CQX Govt",
     "verified_isin": "XS0000000001",
     "source_system": "BLOOMBERG_DAPI",
-    "source_as_of": _SOURCE_AS_OF,
-    "retrieved_at": None,
     "quote_side": "MID",
     "currency": "USD",
     "clean_price_per_100": 99.5,
     "accrued_interest_per_100": 0.31,
+    "acquired_at": _ACQUIRED_AT,
+    "timestamp_basis": "SHIORI_ACQUISITION_TIME",
+    "bloomberg_quote_observation_time": None,
+    "case_as_of_timestamp": _SOURCE_AS_OF,
+    "refreshed_scope": "BOND_QUOTE_ONLY",
+    "other_market_inputs": "CASE_JSON_UNCHANGED",
 }
 _FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY = {
     **_FAILED_DISPLAY,
@@ -291,12 +297,15 @@ def _run_bloomberg_render(display: dict) -> AppTest:
     return at
 
 
-def _fill_bloomberg_inputs(at: AppTest, *, security: str, side: str, source_as_of: str) -> None:
+def _fill_bloomberg_inputs(at: AppTest, *, security: str, side: str) -> None:
     next(t for t in at.text_input if t.label == "Bloomberg security").set_value(security).run()
     next(s for s in at.selectbox if s.label == "Quote side").set_value(side).run()
-    next(t for t in at.text_input if t.label.startswith("source_as_of")).set_value(
-        source_as_of
-    ).run()
+
+
+def _press_bloomberg_refresh(at: AppTest) -> None:
+    next(
+        b for b in at.button if b.label == "Refresh Bloomberg quote and price"
+    ).click().run()
 
 
 # --- 1. Module + helpers ------------------------------------------------------
@@ -864,7 +873,8 @@ def test_export_helper_module_defines_no_streamlit_names():
 
 
 # ==================================================================================
-# Issue #6 Phase 4: live Bloomberg bond-quote source UI.
+# Issue #6: live Bloomberg bond-quote source UI, Eddy-approved acquisition-time
+# contract (issue #6 comment 5028876767, PR #129 comment 5028878866).
 # ==================================================================================
 
 # --- 22. Bond quote source selector: default preserves existing manual mode -------
@@ -876,6 +886,8 @@ def test_bond_quote_source_selector_defaults_to_case_json_with_no_bloomberg_cont
     assert list(radio.options) == [_BOND_QUOTE_SOURCE_CASE_JSON, _BOND_QUOTE_SOURCE_BLOOMBERG]
     assert radio.value == _BOND_QUOTE_SOURCE_CASE_JSON
     assert not any(t.label == "Bloomberg security" for t in at.text_input)
+    assert any(b.label == "Price standalone option" for b in at.button)
+    assert not any(b.label == "Refresh Bloomberg quote and price" for b in at.button)
 
 
 def test_manual_mode_never_calls_bloomberg_workflow(monkeypatch):
@@ -895,7 +907,8 @@ def test_manual_mode_never_calls_bloomberg_workflow(monkeypatch):
     assert len(at.error) >= 1
 
 
-# --- 23. Bloomberg mode: explicit security/side/source_as_of, no preselected side --
+# --- 23. Bloomberg mode: explicit security/side, no preselected side, no
+#         source_as_of / live retrieved_at controls, distinct button label ---------
 
 
 def test_bloomberg_mode_shows_explicit_inputs_with_no_preselected_side():
@@ -906,21 +919,39 @@ def test_bloomberg_mode_shows_explicit_inputs_with_no_preselected_side():
     quote_side_box = next(s for s in at.selectbox if s.label == "Quote side")
     assert list(quote_side_box.options) == ["BID", "MID", "OFFER"]
     assert quote_side_box.value is None
-    assert any(t.label.startswith("source_as_of") for t in at.text_input)
+    # No default anywhere yet.
     # No separate "Active quote side" selector in Bloomberg mode, even in
     # benchmark mode (the Bloomberg quote side drives comparison/calibration).
     _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
     assert not any(s.label == "Active quote side" for s in at.selectbox)
 
 
+def test_bloomberg_mode_has_no_source_as_of_or_live_retrieved_at_controls():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+
+    assert not any(t.label.startswith("source_as_of") for t in at.text_input)
+    assert not any(t.label.startswith("retrieved_at") for t in at.text_input)
+
+
+def test_case_json_mode_still_shows_retrieved_at_control():
+    at = _run_page()
+    assert any(t.label.startswith("retrieved_at") for t in at.text_input)
+
+
+def test_bloomberg_mode_button_label_is_refresh_and_price():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+
+    assert any(b.label == "Refresh Bloomberg quote and price" for b in at.button)
+    assert not any(b.label == "Price standalone option" for b in at.button)
+
+
 def test_bloomberg_mode_missing_security_shows_warning_and_does_not_run():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
     next(s for s in at.selectbox if s.label == "Quote side").set_value("MID").run()
-    next(t for t in at.text_input if t.label.startswith("source_as_of")).set_value(
-        _SOURCE_AS_OF
-    ).run()
-    _press_price(at)
+    _press_bloomberg_refresh(at)
 
     assert not at.exception
     assert any("security" in w.value.lower() for w in at.warning)
@@ -933,27 +964,10 @@ def test_bloomberg_mode_missing_quote_side_shows_warning_and_does_not_run():
     next(t for t in at.text_input if t.label == "Bloomberg security").set_value(
         "91282CQX Govt"
     ).run()
-    next(t for t in at.text_input if t.label.startswith("source_as_of")).set_value(
-        _SOURCE_AS_OF
-    ).run()
-    _press_price(at)
+    _press_bloomberg_refresh(at)
 
     assert not at.exception
     assert any("quote side" in w.value.lower() for w in at.warning)
-    assert len(at.metric) == 0
-
-
-def test_bloomberg_mode_missing_source_as_of_shows_warning_and_does_not_run():
-    at = _run_page()
-    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(
-        "91282CQX Govt"
-    ).run()
-    next(s for s in at.selectbox if s.label == "Quote side").set_value("MID").run()
-    _press_price(at)
-
-    assert not at.exception
-    assert any("source_as_of" in w.value.lower() for w in at.warning)
     assert len(at.metric) == 0
 
 
@@ -986,11 +1000,37 @@ def test_bloomberg_failure_shows_exact_error_and_never_falls_back():
     at = AppTest.from_function(_bloomberg_failure_script, default_timeout=60)
     at.run()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID", source_as_of=_SOURCE_AS_OF)
-    _press_price(at)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
 
     assert not at.exception
     assert any("Bloomberg DAPI session failed to start" in e.value for e in at.error)
+    assert len(at.metric) == 0
+    assert len(at.download_button) == 0
+
+
+def _bloomberg_date_mismatch_script() -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _raise(*args, **kwargs):
+        raise ValueError(
+            "pricing_timestamp ('2026-07-21T09:00:00+00:00', date '2026-07-21') must "
+            "fall on valuation_date ('2026-07-01')"
+        )
+
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _raise
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+def test_bloomberg_date_mismatch_shows_exact_error_and_never_falls_back():
+    at = AppTest.from_function(_bloomberg_date_mismatch_script, default_timeout=60)
+    at.run()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
+
+    assert not at.exception
+    assert any("valuation_date" in e.value for e in at.error)
     assert len(at.metric) == 0
     assert len(at.download_button) == 0
 
@@ -1001,12 +1041,11 @@ def test_bloomberg_failure_shows_exact_error_and_never_falls_back():
 def _bloomberg_price_only_stub_script(calls: list, display: dict) -> None:
     from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
 
-    def _fake_price_only(case, *, bloomberg_security, quote_side, source_as_of, retrieved_at=None):
+    def _fake_price_only(case, *, bloomberg_security, quote_side):
         calls.append(
             {
                 "bloomberg_security": bloomberg_security,
                 "quote_side": quote_side,
-                "source_as_of": source_as_of,
             }
         )
         return None, None, None, display
@@ -1030,13 +1069,11 @@ def test_bloomberg_price_only_mode_calls_correct_workflow_and_renders_live_quote
     )
     at.run()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID", source_as_of=_SOURCE_AS_OF)
-    _press_price(at)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
 
     assert not at.exception
-    assert calls == [
-        {"bloomberg_security": "91282CQX Govt", "quote_side": "MID", "source_as_of": _SOURCE_AS_OF}
-    ]
+    assert calls == [{"bloomberg_security": "91282CQX Govt", "quote_side": "MID"}]
     subheadings = [s.value for s in at.subheader]
     assert "Live Bloomberg Quote" in subheadings
 
@@ -1044,14 +1081,11 @@ def test_bloomberg_price_only_mode_calls_correct_workflow_and_renders_live_quote
 def _bloomberg_benchmark_stub_script(calls: list, display: dict) -> None:
     from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
 
-    def _fake_benchmark(
-        case, benchmark_case, *, bloomberg_security, quote_side, source_as_of, retrieved_at=None
-    ):
+    def _fake_benchmark(case, benchmark_case, *, bloomberg_security, quote_side):
         calls.append(
             {
                 "bloomberg_security": bloomberg_security,
                 "quote_side": quote_side,
-                "source_as_of": source_as_of,
             }
         )
         return None, None, None, None, None, None, display
@@ -1080,13 +1114,11 @@ def test_bloomberg_benchmark_mode_calls_correct_workflow_with_same_side():
     next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
         json.dumps(_benchmark_envelope())
     ).run()
-    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID", source_as_of=_SOURCE_AS_OF)
-    _press_price(at)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
 
     assert not at.exception
-    assert calls == [
-        {"bloomberg_security": "91282CQX Govt", "quote_side": "MID", "source_as_of": _SOURCE_AS_OF}
-    ]
+    assert calls == [{"bloomberg_security": "91282CQX Govt", "quote_side": "MID"}]
     # The same explicit side reached Bloomberg (asserted above) and there is
     # no separate active-side selector for comparison/calibration to diverge.
     assert not any(s.label == "Active quote side" for s in at.selectbox)
@@ -1113,6 +1145,25 @@ def test_live_bloomberg_quote_renders_as_distinct_section_verbatim():
     assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY in json_blocks
 
 
+def test_live_bloomberg_quote_display_has_no_source_as_of_field():
+    assert "source_as_of" not in _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY
+    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["timestamp_basis"] == "SHIORI_ACQUISITION_TIME"
+    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["bloomberg_quote_observation_time"] is None
+    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["refreshed_scope"] == "BOND_QUOTE_ONLY"
+    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["other_market_inputs"] == "CASE_JSON_UNCHANGED"
+
+
+def test_live_bloomberg_quote_section_states_provenance_disclaimer():
+    at = _run_bloomberg_render(_FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY)
+    assert not at.exception
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "quote-observation time is not provided" in captions
+    assert "acquired_at is when Shiori received" in captions
+    assert "Only the bond quote was refreshed" in captions
+    assert "mixed-provenance" in captions
+
+
 # --- 27. Only expected local-input exceptions plus BLIBloombergDapiError caught ----
 
 
@@ -1134,3 +1185,9 @@ def test_ui_source_has_no_broad_bloomberg_side_defaults():
     source = inspect.getsource(ui_module)
     body = source.replace(ui_module.__doc__ or "", "")
     assert body.count("index=None") == 2
+
+
+def test_ui_source_has_no_source_as_of_or_live_retrieved_at_bloomberg_controls():
+    source = inspect.getsource(ui_module)
+    assert "source_as_of (must equal" not in source
+    assert "bloomberg_source_as_of_text" not in source
