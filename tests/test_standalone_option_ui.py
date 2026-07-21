@@ -43,13 +43,18 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
 from shiori_pricing_lab.app.standalone_option_ui import (
+    _BLOOMBERG_SECURITY_EXAMPLE,
+    _BLOOMBERG_SECURITY_LABEL,
     _BOND_QUOTE_SOURCE_BLOOMBERG,
     _BOND_QUOTE_SOURCE_CASE_JSON,
     _MODE_PRICE_AND_BENCHMARK,
     _MODE_PRICE_ONLY,
+    _UPLOAD_SOURCE,
     _decode_uploaded_json_text,
     _load_example_case_text,
     _retrieved_at_or_none,
+    _trader_override_prefill,
+    apply_trader_overrides,
     render_standalone_option_workbench_page,
 )
 from shiori_pricing_lab.app.standalone_option_workbench import (
@@ -298,7 +303,9 @@ def _run_bloomberg_render(display: dict) -> AppTest:
 
 
 def _fill_bloomberg_inputs(at: AppTest, *, security: str, side: str) -> None:
-    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(security).run()
+    next(
+        t for t in at.text_input if t.label == _BLOOMBERG_SECURITY_LABEL
+    ).set_value(security).run()
     next(s for s in at.selectbox if s.label == "Quote side").set_value(side).run()
 
 
@@ -885,7 +892,7 @@ def test_bond_quote_source_selector_defaults_to_case_json_with_no_bloomberg_cont
     radio = next(r for r in at.radio if r.label == "Bond quote source")
     assert list(radio.options) == [_BOND_QUOTE_SOURCE_CASE_JSON, _BOND_QUOTE_SOURCE_BLOOMBERG]
     assert radio.value == _BOND_QUOTE_SOURCE_CASE_JSON
-    assert not any(t.label == "Bloomberg security" for t in at.text_input)
+    assert not any(t.label == _BLOOMBERG_SECURITY_LABEL for t in at.text_input)
     assert any(b.label == "Price standalone option" for b in at.button)
     assert not any(b.label == "Refresh Bloomberg quote and price" for b in at.button)
 
@@ -915,7 +922,7 @@ def test_bloomberg_mode_shows_explicit_inputs_with_no_preselected_side():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
 
-    assert any(t.label == "Bloomberg security" for t in at.text_input)
+    assert any(t.label == _BLOOMBERG_SECURITY_LABEL for t in at.text_input)
     quote_side_box = next(s for s in at.selectbox if s.label == "Quote side")
     assert list(quote_side_box.options) == ["BID", "MID", "OFFER"]
     assert quote_side_box.value is None
@@ -961,7 +968,7 @@ def test_bloomberg_mode_missing_security_shows_warning_and_does_not_run():
 def test_bloomberg_mode_missing_quote_side_shows_warning_and_does_not_run():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(
+    next(t for t in at.text_input if t.label == _BLOOMBERG_SECURITY_LABEL).set_value(
         "91282CQX Govt"
     ).run()
     _press_bloomberg_refresh(at)
@@ -1191,3 +1198,645 @@ def test_ui_source_has_no_source_as_of_or_live_retrieved_at_bloomberg_controls()
     source = inspect.getsource(ui_module)
     assert "source_as_of (must equal" not in source
     assert "bloomberg_source_as_of_text" not in source
+
+
+# ==================================================================================
+# Issue #131: white trader dashboard -- default page, seven trader overrides, the
+# bounded pure overlay helper, read-only instrument header, and the renamed
+# Bloomberg security field. No pricing behavior is asserted here that the existing
+# suites above do not already pin.
+# ==================================================================================
+
+_EXAMPLE_ENVELOPE = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+# The seven approved trader-editable locations, and the example's own values.
+_PREFILL_EXPECTED = {
+    "option_type": "CALL",
+    "position": "BUY",
+    "strike_price": 99.5,
+    "notional": 50.0,
+    "forward_clean_price_per_100": 101.3,
+    "quote_side": "MID",
+    "volatility": 0.18,
+}
+# Deliberately different from every prefill value above, so an assertion can
+# never pass on a value that merely leaked through unchanged.
+_OVERRIDE_VALUES = {
+    "option_type": "PUT",
+    "position": "SELL",
+    "strike_price": 98.25,
+    "notional": 75.0,
+    "forward_clean_price_per_100": 100.125,
+    "quote_side": "BID",
+    "volatility": 0.27,
+}
+
+_WORKFLOW_NAMES = (
+    "price_standalone_option_case",
+    "price_standalone_option_case_with_benchmark",
+    "price_standalone_option_case_with_bloomberg_quote",
+    "price_standalone_option_case_with_bloomberg_quote_and_benchmark",
+)
+_STUB_SENTINEL = "STUB_WORKFLOW_REACHED"
+
+
+@pytest.fixture
+def restore_workflow_bindings():
+    """Restore the module's workflow bindings after a script-level stub.
+
+    The script function below rebinds attributes on the real module object (the
+    established pattern in this file -- see the Bloomberg failure script's note
+    on why an externally-applied patch can miss). This fixture makes that
+    rebinding strictly test-local so no stub leaks into a later test.
+    """
+
+    originals = {name: getattr(ui_module, name) for name in _WORKFLOW_NAMES}
+    yield
+    for name, original in originals.items():
+        setattr(ui_module, name, original)
+
+
+def _capture_case_script(calls: list) -> None:
+    # Stubs all four headless workflows, records the case object each one was
+    # handed, then raises a ValueError the page already catches -- so the proof
+    # needs no renderable display fixture, no QuantLib, and no Bloomberg.
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _record(path):
+        def _stub(case, *args, **kwargs):
+            calls.append({"path": path, "case": case})
+            raise ValueError("STUB_WORKFLOW_REACHED")
+
+        return _stub
+
+    fresh_ui_module.price_standalone_option_case = _record("price_only")
+    fresh_ui_module.price_standalone_option_case_with_benchmark = _record("benchmark")
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _record("bloomberg")
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote_and_benchmark = _record(
+        "bloomberg_benchmark"
+    )
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+def _run_capture_page(calls: list) -> AppTest:
+    at = AppTest.from_function(
+        _capture_case_script, kwargs={"calls": calls}, default_timeout=60
+    )
+    at.run()
+    return at
+
+
+def _set_all_seven_overrides(at: AppTest) -> None:
+    next(s for s in at.selectbox if s.label == "Option type").set_value(
+        _OVERRIDE_VALUES["option_type"]
+    ).run()
+    next(s for s in at.selectbox if s.label == "Position").set_value(
+        _OVERRIDE_VALUES["position"]
+    ).run()
+    next(n for n in at.number_input if n.label == "Strike price").set_value(
+        _OVERRIDE_VALUES["strike_price"]
+    ).run()
+    next(n for n in at.number_input if n.label == "Notional").set_value(
+        _OVERRIDE_VALUES["notional"]
+    ).run()
+    next(n for n in at.number_input if n.label == "Forward clean price per 100").set_value(
+        _OVERRIDE_VALUES["forward_clean_price_per_100"]
+    ).run()
+    next(s for s in at.selectbox if s.label == "Forward quote side").set_value(
+        _OVERRIDE_VALUES["quote_side"]
+    ).run()
+    next(n for n in at.number_input if n.label == "Volatility").set_value(
+        _OVERRIDE_VALUES["volatility"]
+    ).run()
+
+
+def _assert_case_carries_overrides(case: object) -> None:
+    assert isinstance(case, dict), "the overlaid case must reach the workflow as a mapping"
+    assert case["bond_option"]["option_type"] == _OVERRIDE_VALUES["option_type"]
+    assert case["bond_option"]["position"] == _OVERRIDE_VALUES["position"]
+    assert case["bond_option"]["strike_price"] == _OVERRIDE_VALUES["strike_price"]
+    assert case["bond_option"]["notional"] == _OVERRIDE_VALUES["notional"]
+    forward = case["forward_clean_price_input"]
+    assert (
+        forward["forward_clean_price_per_100"]
+        == _OVERRIDE_VALUES["forward_clean_price_per_100"]
+    )
+    assert forward["quote_side"] == _OVERRIDE_VALUES["quote_side"]
+    assert case["volatility_input"]["volatility"] == _OVERRIDE_VALUES["volatility"]
+
+
+def _select_upload_source(at: AppTest) -> None:
+    next(r for r in at.radio if r.label == "Input source").set_value(_UPLOAD_SOURCE).run()
+
+
+def _upload_case(at: AppTest, text: str) -> None:
+    next(
+        u for u in at.file_uploader if u.label.startswith("Upload standalone option case JSON")
+    ).upload("case.json", text.encode("utf-8"), "application/json").run()
+
+
+# --- 28. Default page + both legacy pages remain available ------------------------
+
+
+def test_standalone_workbench_is_the_default_page_and_legacy_pages_remain():
+    source = _APP_PATH.read_text(encoding="utf-8")
+
+    workbench = source.index('"Standalone Bond Option Workbench"')
+    rates = source.index('"Rates Curve Demo"')
+    bli_mvp = source.index('"Bond Option (BLI MVP)"')
+
+    # Streamlit's radio selects its first option by default, so being listed
+    # first in the page list is what makes the workbench the landing page.
+    assert workbench < rates
+    assert workbench < bli_mvp
+
+    # Both legacy pages are still routed to their own unchanged render functions.
+    assert "render_rates_curve_demo_page()" in source
+    assert "render_bli_mvp_page()" in source
+    assert "render_standalone_option_workbench_page()" in source
+
+
+# --- 29. All seven trader inputs are visible and prefilled, editable + uploaded ----
+
+
+def test_editable_example_case_prefills_all_seven_trader_inputs():
+    at = _run_page()
+    assert not at.exception
+
+    selectboxes = {s.label: s.value for s in at.selectbox}
+    numbers = {n.label: n.value for n in at.number_input}
+
+    assert selectboxes["Option type"] == _PREFILL_EXPECTED["option_type"]
+    assert selectboxes["Position"] == _PREFILL_EXPECTED["position"]
+    assert selectboxes["Forward quote side"] == _PREFILL_EXPECTED["quote_side"]
+    assert numbers["Strike price"] == pytest.approx(_PREFILL_EXPECTED["strike_price"])
+    assert numbers["Notional"] == pytest.approx(_PREFILL_EXPECTED["notional"])
+    assert numbers["Forward clean price per 100"] == pytest.approx(
+        _PREFILL_EXPECTED["forward_clean_price_per_100"]
+    )
+    assert numbers["Volatility"] == pytest.approx(_PREFILL_EXPECTED["volatility"])
+
+
+def test_uploaded_case_prefills_all_seven_trader_inputs():
+    uploaded = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    uploaded["bond_option"]["option_type"] = "PUT"
+    uploaded["bond_option"]["position"] = "SELL"
+    uploaded["bond_option"]["strike_price"] = 97.75
+    uploaded["bond_option"]["notional"] = 125.0
+    uploaded["forward_clean_price_input"]["forward_clean_price_per_100"] = 98.5
+    uploaded["forward_clean_price_input"]["quote_side"] = "OFFER"
+    uploaded["volatility_input"]["volatility"] = 0.31
+
+    at = _run_page()
+    _select_upload_source(at)
+    _upload_case(at, json.dumps(uploaded))
+
+    assert not at.exception
+    selectboxes = {s.label: s.value for s in at.selectbox}
+    numbers = {n.label: n.value for n in at.number_input}
+
+    # Prefill follows the uploaded file, never the bundled example.
+    assert selectboxes["Option type"] == "PUT"
+    assert selectboxes["Position"] == "SELL"
+    assert selectboxes["Forward quote side"] == "OFFER"
+    assert numbers["Strike price"] == pytest.approx(97.75)
+    assert numbers["Notional"] == pytest.approx(125.0)
+    assert numbers["Forward clean price per 100"] == pytest.approx(98.5)
+    assert numbers["Volatility"] == pytest.approx(0.31)
+
+
+def test_primary_trader_inputs_are_visible_without_opening_raw_case_json():
+    at = _run_page()
+    labels = {s.label for s in at.selectbox} | {n.label for n in at.number_input}
+    for label in (
+        "Option type",
+        "Position",
+        "Strike price",
+        "Notional",
+        "Forward clean price per 100",
+        "Forward quote side",
+        "Volatility",
+    ):
+        assert label in labels
+
+
+# --- 30. The pure helper replaces exactly the seven values, mutating nothing -------
+
+
+def test_apply_trader_overrides_replaces_exactly_the_seven_approved_values():
+    overlaid = apply_trader_overrides(_EXAMPLE_ENVELOPE, **_OVERRIDE_VALUES)
+    _assert_case_carries_overrides(overlaid)
+
+
+def test_apply_trader_overrides_leaves_every_other_top_level_and_nested_value_equal():
+    overlaid = apply_trader_overrides(_EXAMPLE_ENVELOPE, **_OVERRIDE_VALUES)
+
+    # Identical key sets at the top level and in each touched nested mapping.
+    assert set(overlaid) == set(_EXAMPLE_ENVELOPE)
+    for section in ("bond_option", "forward_clean_price_input", "volatility_input"):
+        assert set(overlaid[section]) == set(_EXAMPLE_ENVELOPE[section])
+
+    changed_paths = {
+        ("bond_option", "option_type"),
+        ("bond_option", "position"),
+        ("bond_option", "strike_price"),
+        ("bond_option", "notional"),
+        ("forward_clean_price_input", "forward_clean_price_per_100"),
+        ("forward_clean_price_input", "quote_side"),
+        ("volatility_input", "volatility"),
+    }
+
+    # Every top-level value outside the three touched sections is untouched.
+    for key, value in _EXAMPLE_ENVELOPE.items():
+        if key in ("bond_option", "forward_clean_price_input", "volatility_input"):
+            continue
+        assert overlaid[key] == value, f"top-level {key!r} changed"
+
+    # Inside the three touched sections, only the seven approved keys differ.
+    for section in ("bond_option", "forward_clean_price_input", "volatility_input"):
+        for key, value in _EXAMPLE_ENVELOPE[section].items():
+            if (section, key) in changed_paths:
+                continue
+            assert overlaid[section][key] == value, f"{section}.{key} changed"
+
+    # Exactly seven values differ in total -- no eighth path was patched.
+    differing = {
+        (section, key)
+        for section in ("bond_option", "forward_clean_price_input", "volatility_input")
+        for key in _EXAMPLE_ENVELOPE[section]
+        if overlaid[section][key] != _EXAMPLE_ENVELOPE[section][key]
+    }
+    assert differing == changed_paths
+
+
+def test_apply_trader_overrides_never_mutates_the_original_or_nested_mappings():
+    original = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    untouched_copy = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+    overlaid = apply_trader_overrides(original, **_OVERRIDE_VALUES)
+
+    # The input mapping and every mapping nested inside it are unchanged.
+    assert original == untouched_copy
+
+    # The result is a genuinely new mapping at the top level and for each
+    # section it rewrites -- not an alias that would mutate the caller's data.
+    assert overlaid is not original
+    for section in ("bond_option", "forward_clean_price_input", "volatility_input"):
+        assert overlaid[section] is not original[section]
+
+    # Mutating the result cannot reach back into the original.
+    overlaid["bond_option"]["strike_price"] = 1.0
+    overlaid["volatility_input"]["volatility"] = 9.0
+    assert original == untouched_copy
+
+
+def test_apply_trader_overrides_requires_every_value_as_an_explicit_keyword():
+    signature = inspect.signature(apply_trader_overrides)
+    parameters = list(signature.parameters.values())
+
+    # One positional envelope, then the seven values as keyword-only names --
+    # not a generic path/patch mapping.
+    assert parameters[0].name == "envelope"
+    keyword_only = [
+        p.name for p in parameters[1:] if p.kind is inspect.Parameter.KEYWORD_ONLY
+    ]
+    assert keyword_only == [
+        "option_type",
+        "position",
+        "strike_price",
+        "notional",
+        "forward_clean_price_per_100",
+        "quote_side",
+        "volatility",
+    ]
+    assert len(parameters) == 8
+
+
+# --- 31. The overlaid case reaches all four existing workflow paths ---------------
+
+
+def test_overlaid_case_reaches_the_price_only_workflow(restore_workflow_bindings):
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_all_seven_overrides(at)
+    _press_price(at)
+
+    assert not at.exception
+    assert [call["path"] for call in calls] == ["price_only"]
+    _assert_case_carries_overrides(calls[0]["case"])
+    assert any(_STUB_SENTINEL in e.value for e in at.error)
+
+
+def test_overlaid_case_reaches_the_benchmark_workflow(restore_workflow_bindings):
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    _set_all_seven_overrides(at)
+    next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
+        json.dumps(_benchmark_envelope())
+    ).run()
+    next(s for s in at.selectbox if s.label == "Active quote side").set_value("MID").run()
+    _press_price(at)
+
+    assert not at.exception
+    assert [call["path"] for call in calls] == ["benchmark"]
+    _assert_case_carries_overrides(calls[0]["case"])
+
+
+def test_overlaid_case_reaches_the_bloomberg_price_only_workflow(restore_workflow_bindings):
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _set_all_seven_overrides(at)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
+
+    assert not at.exception
+    assert [call["path"] for call in calls] == ["bloomberg"]
+    _assert_case_carries_overrides(calls[0]["case"])
+
+
+def test_overlaid_case_reaches_the_bloomberg_benchmark_workflow(restore_workflow_bindings):
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _set_all_seven_overrides(at)
+    next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
+        json.dumps(_benchmark_envelope())
+    ).run()
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
+
+    assert not at.exception
+    assert [call["path"] for call in calls] == ["bloomberg_benchmark"]
+    _assert_case_carries_overrides(calls[0]["case"])
+
+
+def test_bloomberg_replacement_still_happens_after_the_form_overlay(
+    restore_workflow_bindings,
+):
+    # The page overlays the seven trader values and hands that case to the
+    # Bloomberg workflow with its bond_quote and pricing_timestamp still the
+    # case's own -- replacing them stays entirely the headless workflow's job
+    # (pinned by test_standalone_option_workbench.py), never the UI's.
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _set_all_seven_overrides(at)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _press_bloomberg_refresh(at)
+
+    case = calls[0]["case"]
+    _assert_case_carries_overrides(case)
+    assert case["bond_quote"] == _EXAMPLE_ENVELOPE["bond_quote"]
+    assert case["pricing_timestamp"] == _EXAMPLE_ENVELOPE["pricing_timestamp"]
+
+
+# --- 32. Unreadable / incomplete case input never falls back ----------------------
+
+
+def test_malformed_case_json_reaches_the_workflow_verbatim_with_no_example_fallback(
+    restore_workflow_bindings,
+):
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_case_json(at, "{ this is not valid json ")
+    _press_price(at)
+
+    assert not at.exception
+    # The raw text is forwarded unchanged -- never parsed-and-repaired, and
+    # never silently replaced by the bundled example envelope.
+    assert calls[0]["case"] == "{ this is not valid json "
+    assert not isinstance(calls[0]["case"], dict)
+
+
+def test_malformed_case_json_hides_the_override_form_and_the_instrument_header():
+    at = _run_page()
+    _set_case_json(at, "{ this is not valid json ")
+
+    assert not at.exception
+    labels = {s.label for s in at.selectbox} | {n.label for n in at.number_input}
+    for label in ("Option type", "Position", "Strike price", "Volatility"):
+        assert label not in labels
+    assert any("No readable case JSON selected" in c.value for c in at.caption)
+    assert len(at.metric) == 0
+
+
+def test_case_missing_an_approved_value_is_passed_through_unchanged(
+    restore_workflow_bindings,
+):
+    # A case that parses but does not carry all seven values must not get an
+    # invented widget default: the override form is suppressed and the case
+    # text reaches the workflow exactly as written, so its real schema error
+    # surfaces there rather than being papered over here.
+    incomplete = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    del incomplete["volatility_input"]["volatility"]
+    incomplete_text = json.dumps(incomplete)
+
+    calls: list[dict] = []
+    at = _run_capture_page(calls)
+    _set_case_json(at, incomplete_text)
+
+    labels = {n.label for n in at.number_input}
+    assert "Volatility" not in labels
+    assert "Strike price" not in labels
+    assert any("does not carry all seven" in i.value for i in at.info)
+
+    _press_price(at)
+    assert calls[0]["case"] == incomplete_text
+
+
+def test_trader_override_prefill_rejects_incomplete_or_wrongly_typed_values():
+    assert _trader_override_prefill(_EXAMPLE_ENVELOPE) == _PREFILL_EXPECTED
+
+    for mutate in (
+        lambda e: e["bond_option"].pop("option_type"),
+        lambda e: e["bond_option"].update(option_type="STRADDLE"),
+        lambda e: e["bond_option"].update(position="LONG"),
+        lambda e: e["bond_option"].update(strike_price="99.5"),
+        lambda e: e["bond_option"].update(notional=True),
+        lambda e: e["forward_clean_price_input"].update(quote_side="LAST"),
+        lambda e: e["forward_clean_price_input"].update(forward_clean_price_per_100=None),
+        lambda e: e["volatility_input"].update(volatility="0.18"),
+        lambda e: e.update(volatility_input=None),
+    ):
+        envelope = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
+        mutate(envelope)
+        assert _trader_override_prefill(envelope) is None
+
+
+def test_parse_case_for_prefill_never_substitutes_the_bundled_example():
+    from shiori_pricing_lab.app.standalone_option_ui import _parse_case_for_prefill
+
+    assert _parse_case_for_prefill(None) is None
+    assert _parse_case_for_prefill("") is None
+    assert _parse_case_for_prefill("{ not json ") is None
+    assert _parse_case_for_prefill("[1, 2, 3]") is None
+    assert _parse_case_for_prefill('"a string"') is None
+
+
+# --- 33. Read-only instrument header ---------------------------------------------
+
+
+def test_instrument_header_shows_the_case_derived_read_only_fields():
+    at = _run_page()
+    assert not at.exception
+
+    values = [t.value for t in at.text]
+    # Issuer / coupon / maturity / reference currency come from the case's own
+    # bond_reference_data_universe entry for the underlying ISIN.
+    assert "Synthetic Test Issuer A" in values
+    assert "0.0325" in values
+    assert "2030-06-15" in values
+    assert "USD" in values
+    assert "XS0000000001" in values
+    assert "2026-07-01" in values
+    # Case quote side and case clean price, shown when the case carries them.
+    assert "MID" in values
+    assert "101.25" in values
+
+
+def test_instrument_header_renders_no_metrics_before_any_pricing_run():
+    # The header must never look like, or be counted as, a pricing result --
+    # every "no premium before a real result" assertion in this file depends
+    # on the page rendering zero metrics until a workflow actually returns.
+    at = _run_page()
+    assert len(at.metric) == 0
+
+
+def test_instrument_header_shows_no_fabricated_value_for_absent_case_fields():
+    from shiori_pricing_lab.app.standalone_option_ui import _instrument_header_values
+
+    values = _instrument_header_values({"bond_option": {"underlying_isin": "XS0000000001"}})
+    assert values["issuer"] is None
+    assert values["coupon"] is None
+    assert values["case_clean_price_per_100"] is None
+    # No fabricated zero anywhere in the header contract.
+    assert 0 not in values.values()
+    assert 0.0 not in values.values()
+
+
+def test_page_never_interpolates_case_data_into_html():
+    # Uploaded/case JSON is untrusted input, so no value derived from it may
+    # ever reach an unsafe_allow_html render. Checked structurally rather than
+    # by text search: every such call must render a plain string literal, a
+    # module-level constant, or an f-string whose only interpolations are the
+    # static section/field label a caller in this module passes in.
+    import ast
+
+    static_placeholders = {"text", "label"}
+    tree = ast.parse(inspect.getsource(ui_module))
+    html_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and any(keyword.arg == "unsafe_allow_html" for keyword in node.keywords)
+    ]
+    assert html_calls, "expected the page to render its static stylesheet/labels as HTML"
+
+    for call in html_calls:
+        rendered = call.args[0]
+        if isinstance(rendered, (ast.Constant, ast.Name)):
+            continue
+        assert isinstance(rendered, ast.JoinedStr), ast.dump(rendered)
+        for part in rendered.values:
+            if isinstance(part, ast.Constant):
+                continue
+            assert isinstance(part, ast.FormattedValue), ast.dump(part)
+            assert isinstance(part.value, ast.Name), ast.dump(part)
+            assert part.value.id in static_placeholders, ast.dump(part)
+
+    # The one helper that renders a case-derived value does so through st.text,
+    # which escapes it instead of interpreting HTML.
+    assert "st.text(" in inspect.getsource(ui_module._field)
+
+
+# --- 34. Bloomberg field label, helper text, and pre-retrieval expected ISIN -------
+
+
+def test_bloomberg_security_field_uses_the_yellow_key_label_and_helper_text():
+    assert _BLOOMBERG_SECURITY_LABEL == "Bloomberg security (include Yellow Key)"
+    assert _BLOOMBERG_SECURITY_EXAMPLE == "Example: 91282CQX Govt"
+
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+
+    security_input = next(t for t in at.text_input if t.label == _BLOOMBERG_SECURITY_LABEL)
+    assert security_input.placeholder == _BLOOMBERG_SECURITY_EXAMPLE
+    assert security_input.help == _BLOOMBERG_SECURITY_EXAMPLE
+
+
+def test_expected_isin_is_shown_next_to_the_bloomberg_input_before_retrieval():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+
+    assert not at.exception
+    # The case's own expected ISIN is visible before anything is retrieved.
+    assert "XS0000000001" in [t.value for t in at.text]
+    assert any("verified against this by the loader" in c.value for c in at.caption)
+    # ...and no verified ISIN or live status is claimed yet.
+    assert not any("Verified ISIN" in m.value for m in at.markdown)
+    assert len(at.metric) == 0
+
+
+def test_verified_isin_appears_only_after_a_successful_bloomberg_result():
+    at = _run_bloomberg_render(_FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY)
+    assert not at.exception
+    assert any("Verified ISIN" in m.value for m in at.markdown)
+    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["verified_isin"] in [t.value for t in at.text]
+
+
+def test_no_live_status_is_shown_before_a_successful_bloomberg_retrieval():
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+
+    rendered = " ".join(
+        [m.value for m in at.markdown]
+        + [c.value for c in at.caption]
+        + [t.value for t in at.text]
+    )
+    assert "Live Bloomberg Quote" not in rendered
+    assert not any(s.value == "Live Bloomberg Quote" for s in at.subheader)
+
+
+# --- 35. No fabricated risk metrics, charts, or unsupported controls --------------
+
+
+def test_page_renders_no_fabricated_risk_metrics_or_charts():
+    source = inspect.getsource(ui_module)
+    for forbidden in (
+        "Delta",
+        "Gamma",
+        "Vega",
+        "Theta",
+        "DV01",
+        "OAS",
+        "Convexity",
+        "Duration",
+        "line_chart",
+        "area_chart",
+        "bar_chart",
+        "plotly_chart",
+        "altair_chart",
+        "pyplot",
+        "Save Preset",
+        "Scenario",
+        "Alert",
+        "Repo",
+    ):
+        assert forbidden not in source, f"unexpected reference to {forbidden!r}"
+
+
+@_requires_quantlib
+def test_success_render_shows_only_the_approved_result_metrics():
+    at = _run_render(_SUCCESS_DISPLAY)
+    assert not at.exception
+    assert {m.label for m in at.metric} == {
+        "Model fair premium per 100",
+        "Total notional model fair premium",
+        "Forward clean price per 100",
+        "Black-76 PV per 100",
+        "Effective reporting-date discount factor",
+        "Time to expiry (years)",
+    }

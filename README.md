@@ -49,13 +49,49 @@ pytest -q
 streamlit run src/shiori_pricing_lab/app/streamlit_app.py
 ```
 
-The current trader-facing entry point is the **Standalone Bond Option
-Workbench** page in the launched app.
+The app opens on the **Standalone Bond Option Workbench**, the current
+trader-facing entry point. The two earlier demo pages (Rates Curve Demo,
+Bond Option (BLI MVP)) remain available from the sidebar.
 
 Current supported slice: a standalone European, price-based, cash-settled
-bond option (bond-option leg only). Current product objective: enter one
-anonymized real-market case and compare it with Bloomberg, tracked in
-issue #94.
+bond option — the bond-option leg only. The deposit leg and the full
+structured-product value are excluded.
+
+### Workbench workflow
+
+The workbench prices one case at a time and shows only values the pricing
+engine actually produced. It fabricates no prices, risk sensitivities,
+charts, or market data.
+
+1. **Load a case.** Under *Advanced case input*, either edit the bundled
+   example or upload your own `.json` file. The bundled example is
+   sanitized synthetic market-shaped data — not Bloomberg output and not
+   real-market validation. With no uploaded file nothing is priced; invalid
+   UTF-8 or JSON is reported as an explicit error and never falls back to
+   the example.
+2. **Read the instrument header.** Issuer, coupon, maturity, currency,
+   underlying ISIN, valuation date, and the case's own quote side and clean
+   price are shown read-only, derived from the selected case.
+3. **Adjust the seven trader inputs.** Option type, position, strike price,
+   notional, forward clean price per 100, forward quote side, and
+   volatility are editable directly, prefilled from the case. Exactly those
+   seven values are overlaid onto a copy of the case envelope; everything
+   else is passed through unchanged.
+4. **Choose the run setup.** *Mode* selects price-only or price plus
+   benchmark comparison and implied `PRICE_VOL` calibration. *Bond quote
+   source* selects the case JSON's own quote or one Bloomberg DAPI quote.
+   Bloomberg mode needs an explicit security (Yellow Key included) and an
+   explicit quote side — neither has a default — and the case's expected
+   ISIN is shown before retrieval. Refreshing replaces only the bond quote
+   and pricing timestamp; a verified ISIN appears only after a successful
+   retrieval.
+5. **Price, then export.** Results show the model fair premium per 100 and
+   at total notional, the forward clean price, the Black-76 PV per 100, the
+   effective reporting-date discount factor, and the time to expiry, plus
+   full provenance and engine detail. A failed run shows the complete
+   structured errors and no premium or intermediate numbers. Any real
+   result — including a failure — can be exported as current-run JSON or
+   Markdown.
 
 ## Repository layout
 

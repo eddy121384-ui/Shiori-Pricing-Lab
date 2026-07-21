@@ -1,0 +1,6 @@
+# The trader workbench is a white institutional dashboard. Pinning the light
+# theme keeps every widget light regardless of the viewer's OS colour scheme --
+# without it Streamlit follows the system setting and renders dark input fields
+# against the light page. Dark mode is deliberately not implemented.
+[theme]
+base = "light"
