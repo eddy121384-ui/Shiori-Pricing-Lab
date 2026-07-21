@@ -47,6 +47,9 @@ from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_D
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
+from shiori_pricing_lab.pricing.bli_black76_price_option import (
+    black76_dirty_price_option_greeks_per_100,
+)
 from shiori_pricing_lab.pricing.bli_pricing_engine import (
     price_bli_mvp_standalone_option,
 )
@@ -54,7 +57,9 @@ from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_ava
 from shiori_pricing_lab.pricing.result import PricingErrorCode, PricingResult, PricingStatus
 from shiori_pricing_lab.products.enums import (
     ExerciseStyle,
+    OptionType,
     PayoffBasis,
+    Position,
     SettlementType,
     TreasuryFTPQuoteSide,
 )
@@ -225,6 +230,237 @@ def test_standalone_yield_only_spot_quote_still_prices():
     result = price_bli_mvp_standalone_option(request)
     assert result.status is PricingStatus.SUCCESS
     assert result.pv == pytest.approx(_EXPECTED_PV)
+
+
+# --- 1b. European Greeks wiring (Issue #133, Slice A) ------------------------
+
+_GREEK_PER_100_KEYS = (
+    "forward_price_delta_per_100",
+    "forward_price_gamma_per_100",
+    "vega_per_vol_point_per_100",
+    "theta_per_calendar_day_per_100",
+)
+_GREEK_POSITION_TOTAL_KEYS = (
+    "position_forward_price_delta_total",
+    "position_forward_price_gamma_total",
+    "position_vega_per_vol_point_total",
+    "position_theta_per_calendar_day_total",
+)
+
+
+@_requires_quantlib
+def test_standalone_success_reports_greeks_from_the_same_resolved_inputs():
+    # The engine must not resolve inputs a second time or bump anything: the
+    # reported Greeks have to equal the helper called on the SAME dirty
+    # forward/strike, sigma, T, and effective DF the premium already used.
+    result = price_bli_mvp_standalone_option(_supported_request())
+    a = result.assumptions
+
+    expected = black76_dirty_price_option_greeks_per_100(
+        forward_dirty_price=a["forward_dirty_price_per_100"],
+        strike_dirty_price=a["strike_dirty_price_per_100"],
+        price_volatility=a["price_volatility"],
+        time_to_expiry=a["time_to_expiry_year_fraction"],
+        discount_factor=a["effective_reporting_date_discount_factor"],
+        option_type=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.option_type,
+    )
+
+    assert a["forward_price_delta_per_100"] == expected.forward_price_delta_per_100
+    assert a["forward_price_gamma_per_100"] == expected.forward_price_gamma_per_100
+    assert a["vega_per_vol_point_per_100"] == expected.vega_per_vol_point_per_100
+    assert a["theta_per_calendar_day_per_100"] == expected.theta_per_calendar_day_per_100
+    assert a["theta_per_year_per_100"] == expected.theta_per_year_per_100
+    assert a["theta_effective_continuous_rate"] == expected.theta_effective_continuous_rate
+
+    assert a["greeks_methodology"] == "black76_forward_dirty_price_closed_form_european_v1"
+    assert a["greeks_scaling_formula"] == (
+        "position_total = per_100 * notional / 100 * position_multiplier "
+        "(BUY = +1, SELL = -1)"
+    )
+    assert a["greeks_units"]["vega"] == "premium per 100 per +0.01 absolute volatility"
+    assert "+1.00 forward clean price point" in a["greeks_units"]["forward_price_delta"]
+    assert "+1 calendar day" in a["greeks_units"]["theta"]
+    # The two bases are labelled explicitly, not left to the field names alone.
+    assert a["greeks_per_100_position_sign_applied"] is False
+    assert a["greeks_position_total_sign_applied"] is True
+    assert a["greeks_per_100_basis"] == "instrument_analytics_option_type_direction_only"
+    assert a["greeks_position_total_basis"] == (
+        "trader_position_risk_notional_and_buy_sell_sign"
+    )
+
+
+def _buy_sell_options():
+    base = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option
+    return replace(base, position=Position.BUY), replace(base, position=Position.SELL)
+
+
+@_requires_quantlib
+def test_standalone_position_greek_totals_scale_by_notional_and_position_sign():
+    notional = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.notional
+    buy_option, sell_option = _buy_sell_options()
+
+    buy = price_bli_mvp_standalone_option(_supported_request(bond_option=buy_option)).assumptions
+    sell = price_bli_mvp_standalone_option(_supported_request(bond_option=sell_option)).assumptions
+
+    assert buy["position"] == "BUY"
+    assert buy["position_multiplier"] == 1.0
+    assert sell["position"] == "SELL"
+    assert sell["position_multiplier"] == -1.0
+
+    keys = zip(_GREEK_PER_100_KEYS, _GREEK_POSITION_TOTAL_KEYS, strict=True)
+    for per_100_key, total_key in keys:
+        assert buy[total_key] == pytest.approx(
+            buy[per_100_key] * notional / 100.0, rel=1e-15
+        )
+        assert sell[total_key] == pytest.approx(
+            -sell[per_100_key] * notional / 100.0, rel=1e-15
+        )
+
+
+@_requires_quantlib
+def test_standalone_greeks_scale_linearly_with_a_doubled_notional():
+    base = price_bli_mvp_standalone_option(_supported_request()).assumptions
+    doubled_option = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option,
+        notional=SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.notional * 2.0,
+    )
+    doubled = price_bli_mvp_standalone_option(
+        _supported_request(bond_option=doubled_option)
+    ).assumptions
+
+    keys = zip(_GREEK_PER_100_KEYS, _GREEK_POSITION_TOTAL_KEYS, strict=True)
+    for per_100_key, total_key in keys:
+        # Per-100 Greeks are notional-independent; position totals double.
+        assert doubled[per_100_key] == base[per_100_key]
+        assert doubled[total_key] == pytest.approx(2.0 * base[total_key], rel=1e-15)
+
+
+@_requires_quantlib
+def test_standalone_per_100_greeks_are_identical_for_buy_and_sell():
+    # Per-100 values are INSTRUMENT analytics: the option's own CALL/PUT
+    # direction, never the trader's side.
+    buy_option, sell_option = _buy_sell_options()
+    buy = price_bli_mvp_standalone_option(_supported_request(bond_option=buy_option)).assumptions
+    sell = price_bli_mvp_standalone_option(_supported_request(bond_option=sell_option)).assumptions
+
+    for key in _GREEK_PER_100_KEYS:
+        assert buy[key] == sell[key]
+    assert buy["theta_per_year_per_100"] == sell["theta_per_year_per_100"]
+    assert buy["greeks_per_100_position_sign_applied"] is False
+    assert sell["greeks_per_100_position_sign_applied"] is False
+
+
+@_requires_quantlib
+def test_standalone_sell_position_greek_totals_are_the_negative_of_buy():
+    buy_option, sell_option = _buy_sell_options()
+    buy = price_bli_mvp_standalone_option(_supported_request(bond_option=buy_option)).assumptions
+    sell = price_bli_mvp_standalone_option(_supported_request(bond_option=sell_option)).assumptions
+
+    for key in _GREEK_POSITION_TOTAL_KEYS:
+        assert sell[key] == -buy[key]
+        # A real sign flip, not two coincident zeros.
+        assert buy[key] != 0.0
+    assert buy["greeks_position_total_sign_applied"] is True
+    assert sell["greeks_position_total_sign_applied"] is True
+
+
+@_requires_quantlib
+def test_standalone_premium_is_unchanged_by_position_and_stays_unsigned():
+    # The premium contract is untouched by the Greek position rule: pv is an
+    # unsigned fair-value magnitude and position_sign_applied stays False.
+    buy_option, sell_option = _buy_sell_options()
+    buy = price_bli_mvp_standalone_option(_supported_request(bond_option=buy_option))
+    sell = price_bli_mvp_standalone_option(_supported_request(bond_option=sell_option))
+
+    assert buy.pv == sell.pv
+    assert buy.pv == pytest.approx(_EXPECTED_PV)
+    assert buy.pv > 0.0
+    assert buy.assumptions["black76_pv_per_100"] == sell.assumptions["black76_pv_per_100"]
+    assert buy.assumptions["position_sign_applied"] is False
+    assert sell.assumptions["position_sign_applied"] is False
+    assert sell.assumptions["pv_scaling_formula"] == (
+        "pv = black76_pv_per_100 * notional / 100"
+    )
+
+
+@_requires_quantlib
+def test_standalone_sell_put_keeps_option_type_and_position_signs_independent():
+    # The two sign rules compose without cancelling: a SELL PUT has a
+    # negative per-100 delta (PUT) and a POSITIVE position delta total
+    # (negative x SELL's -1).
+    base = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option
+    sell_put = replace(base, option_type=OptionType.PUT, position=Position.SELL)
+    a = price_bli_mvp_standalone_option(_supported_request(bond_option=sell_put)).assumptions
+
+    assert a["forward_price_delta_per_100"] < 0.0
+    assert a["position_forward_price_delta_total"] > 0.0
+    # Gamma/Vega are positive instrument analytics, negative for a short.
+    assert a["forward_price_gamma_per_100"] > 0.0
+    assert a["position_forward_price_gamma_total"] < 0.0
+    assert a["vega_per_vol_point_per_100"] > 0.0
+    assert a["position_vega_per_vol_point_total"] < 0.0
+
+
+@_requires_quantlib
+def test_standalone_call_and_put_greeks_follow_the_option_type_convention():
+    call_option = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option, option_type=OptionType.CALL
+    )
+    put_option = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option, option_type=OptionType.PUT
+    )
+    call = price_bli_mvp_standalone_option(_supported_request(bond_option=call_option)).assumptions
+    put = price_bli_mvp_standalone_option(_supported_request(bond_option=put_option)).assumptions
+
+    assert call["forward_price_delta_per_100"] > 0.0
+    assert put["forward_price_delta_per_100"] < 0.0
+    assert call["forward_price_delta_per_100"] - put["forward_price_delta_per_100"] == (
+        pytest.approx(call["effective_reporting_date_discount_factor"], abs=1e-12)
+    )
+    assert call["forward_price_gamma_per_100"] == put["forward_price_gamma_per_100"]
+    assert call["vega_per_vol_point_per_100"] == put["vega_per_vol_point_per_100"]
+
+
+def test_standalone_failed_result_exposes_no_greek_value():
+    # A guard-rejected request carries no assumptions at all, so no Greek key
+    # -- and therefore no fabricated 0.0 -- can reach a caller.
+    american_option = replace(
+        SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option,
+        exercise_style=ExerciseStyle.AMERICAN,
+        exercise_start_date="2026-06-01",
+    )
+    result = price_bli_mvp_standalone_option(_supported_request(bond_option=american_option))
+
+    assert result.status is PricingStatus.FAILED
+    for key in _GREEK_PER_100_KEYS + _GREEK_POSITION_TOTAL_KEYS:
+        assert key not in result.assumptions
+    assert "greeks_units" not in result.assumptions
+
+
+@_requires_quantlib
+def test_standalone_engine_error_result_exposes_no_greek_value():
+    out_of_range_snapshot = replace(
+        SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT, forward_clean_price_input=_FORWARD_INPUT
+    )
+    result = price_bli_mvp_standalone_option(
+        _supported_request(market_data_snapshot=out_of_range_snapshot)
+    )
+
+    assert result.status is PricingStatus.FAILED
+    for key in _GREEK_PER_100_KEYS + _GREEK_POSITION_TOTAL_KEYS:
+        assert key not in result.assumptions
+
+
+@_requires_quantlib
+def test_bundle_path_reports_no_greeks():
+    # Slice A is the standalone path only; the legacy bundle engine's result
+    # contract is untouched.
+    from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp
+
+    result = price_bli_mvp(SYNTHETIC_BLI_MVP_INPUT_BUNDLE)
+
+    for key in _GREEK_PER_100_KEYS + _GREEK_POSITION_TOTAL_KEYS:
+        assert key not in result.assumptions
 
 
 # --- 2. Out-of-range Option Discount Curve -> FAILED / ENGINE_ERROR ----------

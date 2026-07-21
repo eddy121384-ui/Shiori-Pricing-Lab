@@ -292,7 +292,16 @@ def prepare_standalone_display(
     is copied verbatim under its own key and defaults to ``None``; it is a
     caller-supplied workbench value, kept strictly separate from
     ``source_as_of`` (the snapshot's ``as_of_timestamp``) and never sourced
-    from a clock. ``pv`` (total notional model fair premium) stays ``None`` on
+    from a clock. The Issue #133 Greek fields are read the same verbatim way
+    and therefore stay ``None`` on a ``FAILED`` result, which carries no
+    ``assumptions``: this display context never computes, rescales, or
+    re-signs a Greek. Their two bases keep the engine's own names --
+    ``*_per_100`` (instrument analytics, CALL/PUT direction only) and
+    ``position_*_total`` (trader position risk, notional and the BUY/SELL
+    sign) -- alongside ``position`` / ``position_multiplier`` and the two
+    explicit ``*_sign_applied`` flags, so a consumer can never mistake one
+    basis for the other.
+    ``pv`` (total notional model fair premium) stays ``None`` on
     a failed result, and each original error is preserved **verbatim and
     complete** -- ``code``, ``message``, and the full structured ``detail``
     (e.g. ``product_id`` / ``reasons`` / ``exception_type``) exactly as the
@@ -319,6 +328,35 @@ def prepare_standalone_display(
             "effective_reporting_date_discount_factor"
         ),
         "time_to_expiry_year_fraction": assumptions.get("time_to_expiry_year_fraction"),
+        # Greeks on two separately-named bases: ``*_per_100`` instrument
+        # analytics (CALL/PUT direction only) and ``position_*_total``
+        # trader position risk (notional AND the BUY/SELL sign). Every one
+        # stays ``None`` on a FAILED result (no assumptions exist).
+        "forward_price_delta_per_100": assumptions.get("forward_price_delta_per_100"),
+        "forward_price_gamma_per_100": assumptions.get("forward_price_gamma_per_100"),
+        "vega_per_vol_point_per_100": assumptions.get("vega_per_vol_point_per_100"),
+        "theta_per_calendar_day_per_100": assumptions.get("theta_per_calendar_day_per_100"),
+        "position_forward_price_delta_total": assumptions.get(
+            "position_forward_price_delta_total"
+        ),
+        "position_forward_price_gamma_total": assumptions.get(
+            "position_forward_price_gamma_total"
+        ),
+        "position_vega_per_vol_point_total": assumptions.get(
+            "position_vega_per_vol_point_total"
+        ),
+        "position_theta_per_calendar_day_total": assumptions.get(
+            "position_theta_per_calendar_day_total"
+        ),
+        "position": assumptions.get("position"),
+        "position_multiplier": assumptions.get("position_multiplier"),
+        "greeks_per_100_position_sign_applied": assumptions.get(
+            "greeks_per_100_position_sign_applied"
+        ),
+        "greeks_position_total_sign_applied": assumptions.get(
+            "greeks_position_total_sign_applied"
+        ),
+        "greeks_units": assumptions.get("greeks_units"),
         "pv_scaling_formula": assumptions.get("pv_scaling_formula"),
         "priced_component": assumptions.get("priced_component"),
         "priced_component_scope": assumptions.get("priced_component_scope"),

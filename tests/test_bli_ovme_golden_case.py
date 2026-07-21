@@ -23,6 +23,7 @@ continuous-zero nodes (Issue #94 day-tenor support): 3D to the reporting date
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from math import log
 
 import pytest
 
@@ -106,6 +107,15 @@ _EXPECTED_EFFECTIVE_DF = 0.987242198040646
 _EXPECTED_PREMIUM_PER_100 = 0.6149706611572777
 _EXPECTED_TOTAL_PREMIUM = 6.149706611572777
 _EXPECTED_PREMIUM_OVER_STRIKE_PCT = 0.6183765633224522
+
+# Issue #133 Slice A European Greeks for the same golden inputs, produced by
+# QuantLib's BlackCalculator (deltaForward / gammaForward / vega * 0.01 /
+# thetaPerDay at spot = forward) -- a separate implementation from this
+# repository's own closed forms.
+_EXPECTED_FORWARD_DELTA_PER_100 = 0.4774411175289245
+_EXPECTED_FORWARD_GAMMA_PER_100 = 0.23683896898294127
+_EXPECTED_VEGA_PER_VOL_POINT_PER_100 = 0.19730065466723513
+_EXPECTED_THETA_PER_DAY_PER_100 = -0.003519749080096387
 
 # Bloomberg display bucket for 00-19 5/8 (32nds), section J.
 _DISPLAY_BUCKET_LOW = 0.611328125
@@ -257,6 +267,103 @@ def test_ovme_golden_case_reproduces_every_intermediate_and_output():
 
     # Premium per 100 lies inside the Bloomberg display bucket for 00-19 5/8.
     assert _DISPLAY_BUCKET_LOW <= a["black76_pv_per_100"] <= _DISPLAY_BUCKET_HIGH
+
+
+@_requires_quantlib
+def test_ovme_golden_case_reports_pinned_european_greeks():
+    """Pins the Issue #133 Slice A Greeks for the same sanitized golden case.
+
+    The premium assertions above are deliberately left untouched: adding
+    Greeks must not move a single pinned premium digit. The expected values
+    here were produced by QuantLib's ``BlackCalculator`` on the golden
+    dirty forward/strike, sigma, T, and effective DF -- an implementation
+    entirely separate from this repository's own closed forms.
+    """
+
+    a = price_bli_mvp_standalone_option(_golden_request()).assumptions
+
+    assert a["forward_price_delta_per_100"] == pytest.approx(
+        _EXPECTED_FORWARD_DELTA_PER_100, abs=1e-12
+    )
+    assert a["forward_price_gamma_per_100"] == pytest.approx(
+        _EXPECTED_FORWARD_GAMMA_PER_100, abs=1e-12
+    )
+    assert a["vega_per_vol_point_per_100"] == pytest.approx(
+        _EXPECTED_VEGA_PER_VOL_POINT_PER_100, abs=1e-12
+    )
+    assert a["theta_per_calendar_day_per_100"] == pytest.approx(
+        _EXPECTED_THETA_PER_DAY_PER_100, abs=1e-14
+    )
+
+    # Position totals: per 100 * notional / 100 * position multiplier. The
+    # golden case is a BUY (multiplier +1) with notional 1000.
+    assert a["position"] == "BUY"
+    assert a["position_multiplier"] == 1.0
+    scale = _NOTIONAL / 100.0
+    assert a["position_forward_price_delta_total"] == pytest.approx(
+        _EXPECTED_FORWARD_DELTA_PER_100 * scale, abs=1e-11
+    )
+    assert a["position_forward_price_gamma_total"] == pytest.approx(
+        _EXPECTED_FORWARD_GAMMA_PER_100 * scale, abs=1e-11
+    )
+    assert a["position_vega_per_vol_point_total"] == pytest.approx(
+        _EXPECTED_VEGA_PER_VOL_POINT_PER_100 * scale, abs=1e-11
+    )
+    assert a["position_theta_per_calendar_day_total"] == pytest.approx(
+        _EXPECTED_THETA_PER_DAY_PER_100 * scale, abs=1e-13
+    )
+
+    # r_eff is derived from the effective DF actually used, not a new input.
+    assert a["theta_effective_continuous_rate"] == pytest.approx(
+        -log(_EXPECTED_EFFECTIVE_DF) / _EXPECTED_ACT_ACT, abs=1e-14
+    )
+    # A long call decays: Theta is negative and Delta sits inside (0, DF).
+    assert a["theta_per_calendar_day_per_100"] < 0.0
+    assert 0.0 < a["forward_price_delta_per_100"] < _EXPECTED_EFFECTIVE_DF
+
+
+@_requires_quantlib
+def test_ovme_golden_case_sold_position_flips_only_the_position_totals():
+    """The same golden case sold: per-100 analytics fixed, totals negated.
+
+    Also re-pins the premium on the SELL side: the model fair premium is an
+    unsigned fair-value magnitude, so selling must not move a single digit
+    of it.
+    """
+
+    request = _golden_request()
+    sold = replace(
+        request,
+        bond_option=replace(request.bond_option, position=Position.SELL),
+    )
+    buy = price_bli_mvp_standalone_option(request).assumptions
+    sell_result = price_bli_mvp_standalone_option(sold)
+    sell = sell_result.assumptions
+
+    # Premium unchanged and still unsigned.
+    assert sell["black76_pv_per_100"] == pytest.approx(_EXPECTED_PREMIUM_PER_100, abs=1e-12)
+    assert sell_result.pv == pytest.approx(_EXPECTED_TOTAL_PREMIUM, abs=1e-9)
+    assert sell["position_sign_applied"] is False
+
+    # Per-100 instrument analytics identical.
+    assert sell["forward_price_delta_per_100"] == buy["forward_price_delta_per_100"]
+    assert sell["forward_price_gamma_per_100"] == buy["forward_price_gamma_per_100"]
+    assert sell["vega_per_vol_point_per_100"] == buy["vega_per_vol_point_per_100"]
+    assert sell["theta_per_calendar_day_per_100"] == buy["theta_per_calendar_day_per_100"]
+
+    # Position totals exactly negated.
+    assert sell["position_multiplier"] == -1.0
+    for key in (
+        "position_forward_price_delta_total",
+        "position_forward_price_gamma_total",
+        "position_vega_per_vol_point_total",
+        "position_theta_per_calendar_day_total",
+    ):
+        assert sell[key] == -buy[key]
+        assert buy[key] != 0.0
+    # A short call: negative delta, positive theta (time decay earns).
+    assert sell["position_forward_price_delta_total"] < 0.0
+    assert sell["position_theta_per_calendar_day_total"] > 0.0
 
 
 @_requires_quantlib

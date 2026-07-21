@@ -185,6 +185,25 @@ _CALIBRATION_STATUS_RENDERERS = {
     "FAILED": st.error,
 }
 
+# Issue #133 Slice A. Every label states the unit AND the basis, so no
+# displayed Greek is ambiguous: the left column is instrument analytics
+# (per 100, CALL/PUT direction only) and the right column is trader
+# position risk (notional and BUY/SELL sign applied). Rendered only on a
+# non-FAILED result (a FAILED result returns before the Greeks section,
+# exactly as it already does for the premium).
+_GREEKS_PER_100_FIELDS = (
+    ("Forward delta per 100 (/ +1.00 price pt)", "forward_price_delta_per_100"),
+    ("Forward gamma per 100 (/ price pt^2)", "forward_price_gamma_per_100"),
+    ("Vega per 100 (/ +0.01 vol)", "vega_per_vol_point_per_100"),
+    ("Theta per 100 (/ calendar day)", "theta_per_calendar_day_per_100"),
+)
+_GREEKS_POSITION_TOTAL_FIELDS = (
+    ("Position forward delta total (/ +1.00 price pt)", "position_forward_price_delta_total"),
+    ("Position forward gamma total (/ price pt^2)", "position_forward_price_gamma_total"),
+    ("Position vega total (/ +0.01 vol)", "position_vega_per_vol_point_total"),
+    ("Position theta total (/ calendar day)", "position_theta_per_calendar_day_total"),
+)
+
 
 def _load_example_case_text() -> str:
     """Return the bundled sanitized-synthetic example JSON text, verbatim."""
@@ -212,9 +231,9 @@ def _render_pricing_result(display: dict) -> None:
     """Render the headless workflow's display context verbatim.
 
     The reproducibility/engine context is shown for both SUCCESS and FAILED.
-    Premium/intermediate metrics are shown only for a non-failed result, and
-    a FAILED result shows the full structured errors with no replacement
-    values.
+    Premium/intermediate metrics and the Issue #133 Greeks section are shown
+    only for a non-failed result, and a FAILED result shows the full
+    structured errors with no replacement values and no Greek.
     """
 
     status = display["status"]
@@ -275,6 +294,32 @@ def _render_pricing_result(display: dict) -> None:
     with detail_right:
         st.metric("Black-76 PV per 100", f"{display['black76_pv_per_100']:.6f}")
         st.metric("Time to expiry (years)", f"{display['time_to_expiry_year_fraction']:.6f}")
+
+    st.subheader("Greeks")
+    st.caption(
+        "European Black-76 closed-form Greeks on the same resolved inputs as the "
+        "premium above. Delta/Gamma are per +1.00 forward clean price point, Vega "
+        "is per +0.01 absolute volatility, Theta is per +1 calendar day."
+    )
+    greeks_left, greeks_right = st.columns(2)
+    with greeks_left:
+        st.markdown("**Instrument analytics (per 100)**")
+        st.caption(
+            "CALL/PUT direction only. BUY/SELL position sign is NOT applied — "
+            "an otherwise identical BUY and SELL show the same values here."
+        )
+        for label, key in _GREEKS_PER_100_FIELDS:
+            st.metric(label, f"{display[key]:.6f}")
+    with greeks_right:
+        st.markdown("**Position risk (notional and BUY/SELL sign applied)**")
+        st.caption(
+            f"Position {display['position']} — per 100 x notional / 100 x "
+            f"position multiplier {display['position_multiplier']:+g} "
+            "(BUY = +1, SELL = -1). An otherwise identical SELL total is the "
+            "negative of the BUY total."
+        )
+        for label, key in _GREEKS_POSITION_TOTAL_FIELDS:
+            st.metric(label, f"{display[key]:.6f}")
 
     st.write(f"**Excluded components:** {', '.join(display['excluded_components'])}")
     with st.expander("Assumptions"):

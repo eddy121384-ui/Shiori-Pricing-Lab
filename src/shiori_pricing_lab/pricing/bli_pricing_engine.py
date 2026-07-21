@@ -109,6 +109,32 @@ its own ``product_id`` / ``product_type`` (the bare ``BondOption``'s
 (:func:`price_bli_mvp`) is numerically and contractually unchanged by this
 slice.
 
+**Standalone European Greeks (Issue #133, Slice A):** the same success
+path additionally reports Forward Price Delta, Forward Price Gamma, Vega
+per volatility point, and Black-76 Theta per calendar day, computed by
+``black76_dirty_price_option_greeks_per_100`` from **exactly** the five
+inputs the premium above already used -- the resolver is not run twice, no
+curve is re-read, and nothing is bumped and revalued.
+
+Each Greek appears in ``assumptions`` on **two deliberately distinct
+bases**, named so they cannot be confused:
+
+- ``*_per_100`` -- **instrument analytics**. Carries the CALL/PUT
+  direction only; BUY and SELL produce identical values
+  (``greeks_per_100_position_sign_applied = False``).
+- ``position_*_total`` -- **trader position risk**. Adds notional *and*
+  the BUY/SELL sign (``BUY = +1``, ``SELL = -1``), so an otherwise
+  identical SELL total is exactly the negative of the BUY total
+  (``greeks_position_total_sign_applied = True``). The ``position_``
+  prefix is required: a bare ``*_total`` name would conceal whether the
+  position sign is baked in.
+
+``pv`` is unaffected by this contract -- the model fair premium remains an
+unsigned fair-value magnitude and ``position_sign_applied`` stays
+``False``, referring to ``pv`` alone. A ``FAILED`` result carries no
+``assumptions`` at all and therefore exposes no Greek. ``price_bli_mvp``
+(the bundle path) reports no Greeks and is unchanged.
+
 **Unchanged from the prior skeleton:** ``price_bli_mvp`` still accepts
 only a ``BLIMVPInputBundle`` (never calls ``resolve_bond_reference_data``
 or ``build_bli_mvp_input_bundle``), never mutates ``bundle``, is not
@@ -137,6 +163,9 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
+    CALENDAR_DAYS_PER_YEAR,
+    VOLATILITY_POINT,
+    black76_dirty_price_option_greeks_per_100,
     black76_dirty_price_option_pv_per_100,
     black76_price_option_pv_per_100,
 )
@@ -162,7 +191,12 @@ from shiori_pricing_lab.pricing.result import (
     PricingStatus,
 )
 from shiori_pricing_lab.products.bond_option import BondOption
-from shiori_pricing_lab.products.enums import ExerciseStyle, PayoffBasis, SettlementType
+from shiori_pricing_lab.products.enums import (
+    ExerciseStyle,
+    PayoffBasis,
+    Position,
+    SettlementType,
+)
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
 ENGINE_NAME = "bli_mvp_black76_forward_clean_price_engine"
@@ -205,6 +239,11 @@ _SUPPORTED_VOLATILITY_BASES = (
     BLIVolatilityBasis.PRICE_VOL,
     BLIVolatilityBasis.EQUIVALENT_PRICE_VOL,
 )
+
+# Issue #133 Slice A: the BUY/SELL multiplier applied to the *position*
+# Greek totals only -- never to ``pv`` (the model fair premium stays an
+# unsigned fair-value magnitude) and never to the per-100 analytic Greeks.
+_POSITION_MULTIPLIERS = {Position.BUY: 1.0, Position.SELL: -1.0}
 
 
 def _classify_guard_rejection_from_fields(
@@ -544,6 +583,16 @@ def price_bli_mvp_standalone_option(
             discount_factor=inputs.effective_reporting_date_discount_factor,
             option_type=bond_option.option_type,
         )
+        # Issue #133 Slice A: the same five resolved inputs the premium
+        # above just used -- never a second resolve, curve read, or bump.
+        greeks = black76_dirty_price_option_greeks_per_100(
+            forward_dirty_price=inputs.forward_dirty_price_per_100,
+            strike_dirty_price=inputs.strike_dirty_price_per_100,
+            price_volatility=price_volatility,
+            time_to_expiry=inputs.time_to_expiry_year_fraction,
+            discount_factor=inputs.effective_reporting_date_discount_factor,
+            option_type=bond_option.option_type,
+        )
     except ValueError as exc:
         return PricingResult(
             **common_fields,
@@ -559,6 +608,13 @@ def price_bli_mvp_standalone_option(
         )
 
     pv = pv_per_100 * bond_option.notional / 100.0
+    # Issue #133 Slice A position contract: per-100 analytic Greeks carry
+    # CALL/PUT direction only, while the *position* totals additionally carry
+    # BUY = +1 / SELL = -1. ``pv`` above is deliberately NOT multiplied --
+    # the model fair premium stays an unsigned fair-value magnitude, exactly
+    # as ``position_sign_applied = False`` has always promised.
+    position_multiplier = _POSITION_MULTIPLIERS[bond_option.position]
+    position_scale = position_multiplier * bond_option.notional / 100.0
     forward_input = snapshot.forward_clean_price_input
 
     return PricingResult(
@@ -600,7 +656,64 @@ def price_bli_mvp_standalone_option(
             "black76_pv_per_100": pv_per_100,
             "notional": bond_option.notional,
             "pv_scaling_formula": "pv = black76_pv_per_100 * notional / 100",
+            # --- Issue #133 Slice A: European Black-76 Greeks ---------------
+            # Per-100 = INSTRUMENT analytics (CALL/PUT direction, no BUY/SELL).
+            "forward_price_delta_per_100": greeks.forward_price_delta_per_100,
+            "forward_price_gamma_per_100": greeks.forward_price_gamma_per_100,
+            "vega_per_vol_point_per_100": greeks.vega_per_vol_point_per_100,
+            "theta_per_calendar_day_per_100": greeks.theta_per_calendar_day_per_100,
+            # position_* = TRADER POSITION risk (notional AND BUY/SELL sign).
+            # The ``position_`` prefix is load-bearing: a bare ``*_total``
+            # name would hide whether the position sign is in the number.
+            "position_forward_price_delta_total": (
+                greeks.forward_price_delta_per_100 * position_scale
+            ),
+            "position_forward_price_gamma_total": (
+                greeks.forward_price_gamma_per_100 * position_scale
+            ),
+            "position_vega_per_vol_point_total": (
+                greeks.vega_per_vol_point_per_100 * position_scale
+            ),
+            "position_theta_per_calendar_day_total": (
+                greeks.theta_per_calendar_day_per_100 * position_scale
+            ),
+            "theta_per_year_per_100": greeks.theta_per_year_per_100,
+            "theta_effective_continuous_rate": greeks.theta_effective_continuous_rate,
+            "greeks_methodology": "black76_forward_dirty_price_closed_form_european_v1",
+            "greeks_per_100_basis": "instrument_analytics_option_type_direction_only",
+            "greeks_per_100_position_sign_applied": False,
+            "greeks_position_total_basis": "trader_position_risk_notional_and_buy_sell_sign",
+            "greeks_position_total_sign_applied": True,
+            "position": bond_option.position.value,
+            "position_multiplier": position_multiplier,
+            "greeks_scaling_formula": (
+                "position_total = per_100 * notional / 100 * position_multiplier "
+                "(BUY = +1, SELL = -1)"
+            ),
+            "greeks_units": {
+                "forward_price_delta": "premium per 100 per +1.00 forward clean price point",
+                "forward_price_gamma": (
+                    "delta per 100 per +1.00 forward clean price point "
+                    "(per price point squared)"
+                ),
+                "vega": f"premium per 100 per +{VOLATILITY_POINT} absolute volatility",
+                "theta": (
+                    "premium per 100 per +1 calendar day "
+                    f"(annual theta / {CALENDAR_DAYS_PER_YEAR} calendar days)"
+                ),
+                "theta_effective_continuous_rate": (
+                    "r_eff = -ln(effective_reporting_date_discount_factor) / "
+                    "time_to_expiry_year_fraction"
+                ),
+                "per_100_vs_position_total": (
+                    "per_100 values are unsigned-by-position instrument analytics "
+                    "(CALL/PUT direction only); position_* totals additionally "
+                    "carry notional and the BUY/SELL sign"
+                ),
+            },
             "option_type": bond_option.option_type.value,
+            # Unchanged premium contract: pv is an unsigned fair-value
+            # magnitude. This key refers to pv only, never to the Greeks.
             "position_sign_applied": False,
             "priced_component": "bond_option_leg",
             "priced_component_scope": "option_leg_only_not_full_structured_product",

@@ -66,6 +66,23 @@ def _synthetic_price_only_display(**overrides) -> dict:
         "black76_pv_per_100": _EXPECTED_BLACK76_PV_PER_100,
         "effective_reporting_date_discount_factor": 0.9927830612383566,
         "time_to_expiry_year_fraction": 0.2465753424657534,
+        # Issue #133 Slice A Greek fields, same shape as prepare_standalone_display.
+        "forward_price_delta_per_100": 0.6821450795268977,
+        "forward_price_gamma_per_100": 0.04413241269876543,
+        "vega_per_vol_point_per_100": 0.1418766453210987,
+        "theta_per_calendar_day_per_100": -0.0091827364554321,
+        "position_forward_price_delta_total": 0.34107253976344885,
+        "position_forward_price_gamma_total": 0.022066206349382715,
+        "position_vega_per_vol_point_total": 0.07093832266054935,
+        "position_theta_per_calendar_day_total": -0.00459136822771605,
+        "position": "BUY",
+        "position_multiplier": 1.0,
+        "greeks_per_100_position_sign_applied": False,
+        "greeks_position_total_sign_applied": True,
+        "greeks_units": {
+            "forward_price_delta": "premium per 100 per +1.00 forward clean price point",
+            "vega": "premium per 100 per +0.01 absolute volatility",
+        },
         "pv_scaling_formula": "pv = black76_pv_per_100 * notional / 100",
         "priced_component": "bond_option_leg",
         "priced_component_scope": "option_leg_only_not_full_structured_product",
@@ -268,6 +285,110 @@ def test_markdown_distinguishes_none_from_genuine_zero():
     assert "**Relative residual:** not available" in md
 
 
+# --- 9b. Greeks section (Issue #133, Slice A) ----------------------------------------
+
+_EXPORT_GREEK_PER_100_KEYS = (
+    "forward_price_delta_per_100",
+    "forward_price_gamma_per_100",
+    "vega_per_vol_point_per_100",
+    "theta_per_calendar_day_per_100",
+)
+_EXPORT_GREEK_POSITION_TOTAL_KEYS = (
+    "position_forward_price_delta_total",
+    "position_forward_price_gamma_total",
+    "position_vega_per_vol_point_total",
+    "position_theta_per_calendar_day_total",
+)
+_EXPORT_GREEK_KEYS = _EXPORT_GREEK_PER_100_KEYS + _EXPORT_GREEK_POSITION_TOTAL_KEYS
+
+
+def test_markdown_greeks_section_states_every_unit_and_value_verbatim():
+    display = _synthetic_price_only_display()
+    md = render_standalone_run_as_markdown(display)
+
+    assert "## Greeks" in md
+    # Labels carry the unit, so no exported figure is ambiguous.
+    assert "per +1.00 clean price point" in md
+    assert "per +1.00 clean price point squared" in md
+    assert "per +0.01 absolute volatility" in md
+    assert "per +1 calendar day" in md
+    # Values are verbatim -- full precision, never rounded to the UI's .6f.
+    for key in _EXPORT_GREEK_KEYS:
+        assert str(display[key]) in md
+
+
+def test_markdown_greeks_section_separates_instrument_from_position_basis():
+    display = _synthetic_price_only_display()
+    md = render_standalone_run_as_markdown(display)
+
+    assert "### Instrument analytics (per 100, no position sign)" in md
+    assert "### Position risk (notional and BUY/SELL sign applied)" in md
+    # Each subsection states, in words, whether the position sign is applied.
+    assert "BUY/SELL position sign is NOT applied" in md
+    assert "position multiplier (BUY = +1, SELL = -1)" in md
+
+    instrument_block, position_block = (
+        md.split("### Instrument analytics")[1].split("### Position risk")[0],
+        md.split("### Position risk")[1],
+    )
+    for key in _EXPORT_GREEK_PER_100_KEYS:
+        assert str(display[key]) in instrument_block
+    for key in _EXPORT_GREEK_POSITION_TOTAL_KEYS:
+        assert str(display[key]) in position_block
+    # Every position-total label is position-qualified; no bare "total".
+    for label in ("Position forward price delta total", "Position vega total"):
+        assert f"- **{label}" in md
+    assert "Position multiplier" in position_block
+
+
+def test_json_export_carries_every_greek_key_verbatim():
+    display = _synthetic_price_only_display()
+    round_tripped = json.loads(render_standalone_run_as_json(display))
+
+    for key in _EXPORT_GREEK_KEYS:
+        assert round_tripped[key] == display[key]
+    assert round_tripped["greeks_units"] == display["greeks_units"]
+    assert round_tripped["position"] == "BUY"
+    assert round_tripped["position_multiplier"] == 1.0
+    assert round_tripped["greeks_per_100_position_sign_applied"] is False
+    assert round_tripped["greeks_position_total_sign_applied"] is True
+
+
+def test_markdown_greeks_section_renders_none_as_not_available_never_zero():
+    # A FAILED run's display carries every Greek key as None; the export must
+    # never substitute a fabricated 0.
+    failed = _synthetic_price_only_display(
+        status="FAILED",
+        **{key: None for key in _EXPORT_GREEK_KEYS},
+        greeks_units=None,
+        position=None,
+        position_multiplier=None,
+        greeks_per_100_position_sign_applied=None,
+        greeks_position_total_sign_applied=None,
+    )
+    md = render_standalone_run_as_markdown(failed)
+    greeks_lines = md.split("## Greeks")[1].split("\n## ")[0].splitlines()
+    value_lines = [line for line in greeks_lines if line.startswith("- **")]
+
+    # 8 Greeks + position/multiplier/two sign flags + the units mapping.
+    assert len(value_lines) == len(_EXPORT_GREEK_KEYS) + 5
+    for line in value_lines:
+        # Every value position reads "not available" -- no 0, no placeholder.
+        assert line.split(":**")[1].strip() == "not available"
+
+
+def test_markdown_greek_zero_is_not_reported_as_missing():
+    # A genuine 0.0 Greek (e.g. an infinitesimal delta) is a real value.
+    display = _synthetic_price_only_display(forward_price_delta_per_100=0.0)
+    md = render_standalone_run_as_markdown(display)
+    delta_line = next(
+        line
+        for line in md.splitlines()
+        if line.startswith("- **Forward price delta per 100")
+    )
+    assert delta_line.endswith("0.0")
+
+
 # --- 10. Real-run integration coverage (QuantLib-dependent) ---------------------------
 
 
@@ -282,8 +403,12 @@ def test_price_only_success_export_is_complete():
     md = render_standalone_run_as_markdown(display)
     assert "## Context" in md
     assert "## Pricing" in md
+    assert "## Greeks" in md
     assert "## Assumptions" in md
     assert "## Excluded Components" in md
+    # Every real Greek reaches the export at full precision.
+    for key in _EXPORT_GREEK_KEYS:
+        assert str(display[key]) in md
     assert "## Errors" not in md  # no errors on a SUCCESS result
     assert "## Benchmark" not in md  # price-only: no benchmark section at all
     assert str(_EXPECTED_BLACK76_PV_PER_100) in md

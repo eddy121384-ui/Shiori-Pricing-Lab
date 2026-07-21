@@ -370,6 +370,59 @@ def test_success_render_shows_separate_premium_metrics():
         assert label in metrics
 
 
+@_requires_quantlib
+def test_success_render_shows_every_greek_with_its_unit_in_the_label():
+    at = _run_render(_SUCCESS_DISPLAY)
+    assert not at.exception
+
+    metrics = {m.label: m.value for m in at.metric}
+    expected = {
+        "Forward delta per 100 (/ +1.00 price pt)": "forward_price_delta_per_100",
+        "Forward gamma per 100 (/ price pt^2)": "forward_price_gamma_per_100",
+        "Vega per 100 (/ +0.01 vol)": "vega_per_vol_point_per_100",
+        "Theta per 100 (/ calendar day)": "theta_per_calendar_day_per_100",
+        "Position forward delta total (/ +1.00 price pt)": (
+            "position_forward_price_delta_total"
+        ),
+        "Position forward gamma total (/ price pt^2)": (
+            "position_forward_price_gamma_total"
+        ),
+        "Position vega total (/ +0.01 vol)": "position_vega_per_vol_point_total",
+        "Position theta total (/ calendar day)": "position_theta_per_calendar_day_total",
+    }
+    for label, key in expected.items():
+        assert label in metrics
+        assert float(metrics[label]) == pytest.approx(_SUCCESS_DISPLAY[key], abs=1e-6)
+
+    # Units are stated for every Greek.
+    captions = " ".join(c.value for c in at.caption)
+    assert "+1.00 forward clean price point" in captions
+    assert "+0.01 absolute volatility" in captions
+    assert "+1 calendar day" in captions
+
+
+@_requires_quantlib
+def test_success_render_labels_instrument_analytics_apart_from_position_risk():
+    at = _run_render(_SUCCESS_DISPLAY)
+    assert not at.exception
+
+    markdown = " ".join(m.value for m in at.markdown)
+    assert "**Instrument analytics (per 100)**" in markdown
+    assert "**Position risk (notional and BUY/SELL sign applied)**" in markdown
+
+    captions = " ".join(c.value for c in at.caption)
+    # Each column states, in words, whether the position sign is in the number.
+    assert "BUY/SELL position sign is NOT applied" in captions
+    assert "(BUY = +1, SELL = -1)" in captions
+    assert f"Position {_SUCCESS_DISPLAY['position']}" in captions
+
+    # No bare "total" metric label can hide the position basis.
+    total_labels = [m.label for m in at.metric if "total" in m.label.lower()]
+    assert total_labels
+    for label in total_labels:
+        assert label.startswith("Position ") or "premium" in label.lower()
+
+
 # --- 3. FAILED render: no premium, structured error detail preserved ---------
 
 
