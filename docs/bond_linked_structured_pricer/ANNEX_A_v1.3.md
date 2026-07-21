@@ -101,12 +101,21 @@ Delta_F   = DF × Φ(d1)            # for Call
 Delta_F   = -DF × Φ(-d1)          # for Put
 Gamma_F   = DF × φ(d1) / (F σ √T)
 Vega      = DF × F × φ(d1) × √T          # per 1.00 vol unit；UI 顯示時除以 100
-Theta     = -DF × F × φ(d1) × σ / (2√T) - r × DF × [F Φ(d1) - K Φ(d2)]   # for Call
+Theta     = -DF × F × φ(d1) × σ / (2√T) + r × PV per 100   # PV per 100 = 該 option 自己的 §A.2.3 premium
+Theta/day = Theta / 365                  # per calendar day
 DV01      = bump-and-revalue ±1bp underlying yield（見 §A.9）
 CS01      = bump-and-revalue ±1bp credit spread（見 §A.9）
 ```
 
 其中 Φ = standard normal CDF；φ = standard normal PDF；r = 對應 T 的 discount rate。
+
+**Theta 的 `+ r × PV` 正負號（v1.3 更正）**：本行先前寫成 `- r × DF × [F Φ(d1) - K Φ(d2)]`，
+符號有誤。Theta 定義為 `-dV/dT`（forward 固定）。對 `V = DF(T) × [F Φ(d1) - K Φ(d2)]`、
+`DF = exp(-r T)` 微分得 `dV/dT = -r V + DF × F × φ(d1) × σ / (2√T)`，
+故 `Theta = r V - DF × F × φ(d1) × σ / (2√T)`，即上式。由 `F φ(d1) = K φ(d2)` 可知
+第一項對 Put 同樣成立，而 `PV per 100` 取該 option 自己的 premium，因此 Call / Put 共用一條式子。
+Standalone 路徑的 `r` 取自實際使用的 effective reporting-date DF：`r_eff = -ln(DF) / T`，
+不另外讀 curve、不另引入 rate input。
 
 ---
 

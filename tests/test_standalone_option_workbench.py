@@ -255,6 +255,116 @@ def test_per_100_and_total_premium_are_separate_fields():
     assert per_100 != total  # notional 50 != 100, so they must differ
 
 
+# --- 2b. Greeks reach the display context verbatim (Issue #133, Slice A) -----
+
+_DISPLAY_GREEK_PER_100_KEYS = (
+    "forward_price_delta_per_100",
+    "forward_price_gamma_per_100",
+    "vega_per_vol_point_per_100",
+    "theta_per_calendar_day_per_100",
+)
+_DISPLAY_GREEK_POSITION_TOTAL_KEYS = (
+    "position_forward_price_delta_total",
+    "position_forward_price_gamma_total",
+    "position_vega_per_vol_point_total",
+    "position_theta_per_calendar_day_total",
+)
+_DISPLAY_GREEK_KEYS = _DISPLAY_GREEK_PER_100_KEYS + _DISPLAY_GREEK_POSITION_TOTAL_KEYS
+
+
+@_requires_quantlib
+def test_display_exposes_every_greek_verbatim_under_its_documented_name():
+    _request, result, display = price_standalone_option_case(_example_text())
+
+    for key in _DISPLAY_GREEK_KEYS:
+        # Verbatim read: not rounded, rescaled, re-signed, or re-derived here.
+        assert display[key] == result.assumptions[key]
+    assert display["greeks_units"] == result.assumptions["greeks_units"]
+    assert display["position"] == result.assumptions["position"]
+    assert display["position_multiplier"] == result.assumptions["position_multiplier"]
+
+
+@_requires_quantlib
+def test_display_names_distinguish_instrument_per_100_from_position_totals():
+    _request, _result, display = price_standalone_option_case(_example_text())
+
+    # Every position-signed field is prefixed; no bare *_total field exists
+    # that could hide whether the BUY/SELL sign is baked in.
+    for key in _DISPLAY_GREEK_POSITION_TOTAL_KEYS:
+        assert key.startswith("position_")
+    bare_totals = [
+        key
+        for key in display
+        if key.endswith("_total")
+        and not key.startswith("position_")
+        and "premium" not in key
+    ]
+    assert bare_totals == []
+
+    # The display states both sign contracts explicitly.
+    assert display["greeks_per_100_position_sign_applied"] is False
+    assert display["greeks_position_total_sign_applied"] is True
+
+    # The example's notional is 50 and position BUY, so total = per_100 / 2.
+    keys = zip(_DISPLAY_GREEK_PER_100_KEYS, _DISPLAY_GREEK_POSITION_TOTAL_KEYS, strict=True)
+    for per_100_key, total_key in keys:
+        assert display[per_100_key] != display[total_key]
+        assert display[total_key] == pytest.approx(display[per_100_key] * 0.5, rel=1e-15)
+
+
+@_requires_quantlib
+def test_display_sell_case_negates_only_the_position_totals():
+    envelope = _example_envelope()
+    envelope["bond_option"] = {**envelope["bond_option"], "position": "SELL"}
+    request = build_request_from_standalone_option_case(envelope)
+    sell_display = prepare_standalone_display(price_bli_mvp_standalone_option(request), request)
+    _request, _result, buy_display = price_standalone_option_case(_example_text())
+
+    assert buy_display["position"] == "BUY"
+    assert sell_display["position"] == "SELL"
+    assert sell_display["position_multiplier"] == -1.0
+
+    for key in _DISPLAY_GREEK_PER_100_KEYS:
+        assert sell_display[key] == buy_display[key]
+    for key in _DISPLAY_GREEK_POSITION_TOTAL_KEYS:
+        assert sell_display[key] == -buy_display[key]
+        assert buy_display[key] != 0.0
+
+    # Premium display unchanged and still unsigned.
+    assert sell_display["model_fair_premium_per_100"] == (
+        buy_display["model_fair_premium_per_100"]
+    )
+    assert sell_display["total_notional_model_fair_premium"] == (
+        buy_display["total_notional_model_fair_premium"]
+    )
+
+
+def test_failed_display_exposes_no_greek_value():
+    # A guard-FAILED (YIELD_VOL) case needs no QuantLib and carries no
+    # assumptions, so every Greek key must be present-but-None -- never a
+    # fabricated 0.0 and never absent from the bounded display contract.
+    envelope = _example_envelope()
+    envelope["volatility_input"] = {
+        **envelope["volatility_input"],
+        "volatility_basis": "YIELD_VOL",
+    }
+    request = build_request_from_standalone_option_case(envelope)
+    result = price_bli_mvp_standalone_option(request)
+    display = prepare_standalone_display(result, request)
+
+    assert result.status is PricingStatus.FAILED
+    for key in _DISPLAY_GREEK_KEYS:
+        assert key in display
+        assert display[key] is None
+    assert display["greeks_units"] is None
+    # Including the position-sign metadata: no sign contract is asserted for
+    # a run that produced no Greek at all.
+    assert display["position"] is None
+    assert display["position_multiplier"] is None
+    assert display["greeks_per_100_position_sign_applied"] is None
+    assert display["greeks_position_total_sign_applied"] is None
+
+
 # --- 3. Provenance / identity preserved verbatim through the workflow --------
 
 

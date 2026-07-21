@@ -33,10 +33,10 @@ already carried by the existing display contract (Issue #97 §"never
 fabricating a replacement value").
 
 **Markdown.** ``render_standalone_run_as_markdown`` renders the sections
-Context / Pricing / Live Bloomberg Quote / Benchmark / Comparison /
+Context / Pricing / Greeks / Live Bloomberg Quote / Benchmark / Comparison /
 Calibration / Assumptions / Excluded Components / Errors / Solver
-Diagnostics -- all but Context/Pricing/Assumptions/Excluded Components are
-included only when the corresponding data is actually present in
+Diagnostics -- all but Context/Pricing/Greeks/Assumptions/Excluded
+Components are included only when the corresponding data is actually present in
 ``display`` (mirrors the existing UI's own conditional rendering: Live
 Bloomberg Quote only in Bloomberg-DAPI mode; Benchmark/Comparison/
 Calibration only exist in the merged benchmark-mode display; Solver
@@ -60,6 +60,26 @@ renders as ``not available`` at every nesting depth; a genuine ``0``,
 ``0.0``, ``False``, or ``""`` renders verbatim and is never confused with a
 missing value; any other object type raises ``TypeError`` explicitly rather
 than falling back to Python ``repr``.
+
+**Greeks (Issue #133, Slice A).** JSON export needs no change --
+``json.dumps(display, ...)`` already serializes the display dict's Greek
+keys verbatim. Markdown export adds one unconditional ``## Greeks``
+section split into two clearly headed subsections, so an exported number's
+basis is never ambiguous:
+
+- *Instrument analytics (per 100, no position sign)* -- the ``*_per_100``
+  values, carrying CALL/PUT direction only;
+- *Position risk (notional and BUY/SELL sign applied)* -- the
+  ``position_*_total`` values, plus ``position`` / ``position_multiplier``
+  and the two ``*_sign_applied`` flags.
+
+Every label spells out the unit (per +1.00 clean price point, per +0.01
+absolute volatility, per +1 calendar day), each subsection carries a
+one-line note stating whether the position sign is in the number, and the
+machine-readable ``greeks_units`` mapping the engine emitted is exported
+alongside. Nothing here rescales, rounds, re-signs, or re-derives a Greek;
+a ``FAILED`` run's Greeks are all ``None`` and render as ``not available``,
+exactly like its premium fields already do.
 
 **No system clock, no quote ID, no version, no hidden metadata.** Neither
 function reads the clock or generates an identifier; the only content is
@@ -122,6 +142,59 @@ _PRICING_FIELDS = (
     ("PV scaling formula", "pv_scaling_formula"),
     ("Priced component", "priced_component"),
     ("Priced component scope", "priced_component_scope"),
+)
+
+# Issue #133 Slice A. Labels carry the unit explicitly so the exported
+# number is never ambiguous, and the two bases are rendered as two
+# separately-headed groups: instrument analytics (no BUY/SELL sign) and
+# position risk (notional AND BUY/SELL sign). The machine-readable units
+# mapping the engine emitted is exported alongside them under "Greeks units".
+_GREEKS_INSTRUMENT_FIELDS = (
+    ("Forward price delta per 100 (per +1.00 clean price point)", "forward_price_delta_per_100"),
+    (
+        "Forward price gamma per 100 (per +1.00 clean price point squared)",
+        "forward_price_gamma_per_100",
+    ),
+    ("Vega per 100 (per +0.01 absolute volatility)", "vega_per_vol_point_per_100"),
+    ("Theta per 100 (per +1 calendar day)", "theta_per_calendar_day_per_100"),
+)
+
+_GREEKS_POSITION_FIELDS = (
+    (
+        "Position forward price delta total (per +1.00 clean price point)",
+        "position_forward_price_delta_total",
+    ),
+    (
+        "Position forward price gamma total (per +1.00 clean price point squared)",
+        "position_forward_price_gamma_total",
+    ),
+    (
+        "Position vega total (per +0.01 absolute volatility)",
+        "position_vega_per_vol_point_total",
+    ),
+    (
+        "Position theta total (per +1 calendar day)",
+        "position_theta_per_calendar_day_total",
+    ),
+)
+
+_GREEKS_INSTRUMENT_NOTE = (
+    "Instrument analytics per 100: CALL/PUT direction only. BUY/SELL position "
+    "sign is NOT applied -- an otherwise identical BUY and SELL show the same "
+    "values here."
+)
+
+_GREEKS_POSITION_NOTE = (
+    "Trader position risk: per 100 x notional / 100 x position multiplier "
+    "(BUY = +1, SELL = -1). An otherwise identical SELL total is exactly the "
+    "negative of the BUY total."
+)
+
+_GREEKS_POSITION_CONTEXT_FIELDS = (
+    ("Position", "position"),
+    ("Position multiplier", "position_multiplier"),
+    ("Per-100 position sign applied", "greeks_per_100_position_sign_applied"),
+    ("Position total sign applied", "greeks_position_total_sign_applied"),
 )
 
 _BENCHMARK_FIELDS = (
@@ -419,6 +492,24 @@ def render_standalone_run_as_markdown(display: dict) -> str:
 
     lines.extend(_section("Context", display, _CONTEXT_FIELDS))
     lines.extend(_section("Pricing", display, _PRICING_FIELDS))
+
+    lines.append("## Greeks")
+    lines.append("")
+    lines.append("### Instrument analytics (per 100, no position sign)")
+    lines.append("")
+    lines.append(f"> {_GREEKS_INSTRUMENT_NOTE}")
+    lines.append("")
+    for label, key in _GREEKS_INSTRUMENT_FIELDS:
+        lines.append(f"- **{label}:** {_fmt(display.get(key))}")
+    lines.append("")
+    lines.append("### Position risk (notional and BUY/SELL sign applied)")
+    lines.append("")
+    lines.append(f"> {_GREEKS_POSITION_NOTE}")
+    lines.append("")
+    for label, key in _GREEKS_POSITION_FIELDS + _GREEKS_POSITION_CONTEXT_FIELDS:
+        lines.append(f"- **{label}:** {_fmt(display.get(key))}")
+    lines.extend(_render_field_lines("Greeks units", display.get("greeks_units")))
+    lines.append("")
 
     if "live_bloomberg_quote" in display:
         lines.append("## Live Bloomberg Quote")
