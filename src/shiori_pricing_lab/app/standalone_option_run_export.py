@@ -33,13 +33,15 @@ already carried by the existing display contract (Issue #97 §"never
 fabricating a replacement value").
 
 **Markdown.** ``render_standalone_run_as_markdown`` renders the sections
-Context / Pricing / Benchmark / Comparison / Calibration / Assumptions /
-Excluded Components / Errors / Solver Diagnostics -- the last four are
+Context / Pricing / Live Bloomberg Quote / Benchmark / Comparison /
+Calibration / Assumptions / Excluded Components / Errors / Solver
+Diagnostics -- all but Context/Pricing/Assumptions/Excluded Components are
 included only when the corresponding data is actually present in
-``display`` (mirrors the existing UI's own conditional rendering:
-Benchmark/Comparison/Calibration only exist in the merged benchmark-mode
-display; Solver Diagnostics only when ``calibration["solver_status"]`` is
-not ``None``; Errors only when the errors list is non-empty). Every existing
+``display`` (mirrors the existing UI's own conditional rendering: Live
+Bloomberg Quote only in Bloomberg-DAPI mode; Benchmark/Comparison/
+Calibration only exist in the merged benchmark-mode display; Solver
+Diagnostics only when ``calibration["solver_status"]`` is not ``None``;
+Errors only when the errors list is non-empty). Every existing
 ``None`` value renders as the literal text ``not available`` -- never a
 fabricated ``0`` or other numeric replacement. Every other scalar value is
 ``str(value)`` verbatim -- no rounding, no reformatting, no recomputation
@@ -62,6 +64,22 @@ than falling back to Python ``repr``.
 **No system clock, no quote ID, no version, no hidden metadata.** Neither
 function reads the clock or generates an identifier; the only content is
 what ``display`` already carries.
+
+**Issue #6: live Bloomberg quote provenance, acquisition-time contract
+(issue #6 comment 5028876767, PR #129 comment 5028878866).** JSON export
+needs no change -- ``json.dumps(display, ...)`` already serializes a
+``"live_bloomberg_quote"`` key verbatim if the display dict carries one
+(Bloomberg-DAPI bond-quote-source mode), including its
+``acquired_at``/``timestamp_basis``/``bloomberg_quote_observation_time``/
+``case_as_of_timestamp``/``refreshed_scope``/``other_market_inputs`` fields
+and the absence of any live ``source_as_of`` field. Markdown export adds one
+conditional ``## Live Bloomberg Quote`` section, included only when that key
+is present, with a one-line disclaimer stating that Bloomberg's
+quote-observation time is unavailable, ``acquired_at`` is Shiori's own
+acquisition time, only the bond quote was refreshed, and other case inputs
+are unchanged -- no rounding, no recomputation, no omitted field, and
+``None`` still renders as ``not available``. Manual (Case JSON) mode never
+produces this key, so its Markdown export is unchanged.
 """
 
 from __future__ import annotations
@@ -156,6 +174,30 @@ _CALIBRATION_FIELDS = (
     ("Implied PRICE_VOL", "implied_price_vol"),
     ("Model premium per 100 (solver)", "model_premium_per_100"),
     ("Premium residual per 100 (solver)", "premium_residual_per_100"),
+)
+
+_LIVE_BLOOMBERG_QUOTE_FIELDS = (
+    ("Security", "security"),
+    ("Verified ISIN", "verified_isin"),
+    ("Source system", "source_system"),
+    ("Quote side", "quote_side"),
+    ("Currency", "currency"),
+    ("Clean price per 100", "clean_price_per_100"),
+    ("Accrued interest per 100", "accrued_interest_per_100"),
+    ("Acquired at", "acquired_at"),
+    ("Timestamp basis", "timestamp_basis"),
+    ("Bloomberg quote observation time", "bloomberg_quote_observation_time"),
+    ("Case as-of timestamp", "case_as_of_timestamp"),
+    ("Refreshed scope", "refreshed_scope"),
+    ("Other market inputs", "other_market_inputs"),
+)
+
+_LIVE_BLOOMBERG_QUOTE_DISCLAIMER = (
+    "Bloomberg quote-observation time is not provided by this DAPI path. "
+    "Acquired at is when Shiori received this quote. Only the bond quote was "
+    "refreshed -- curve, forward, volatility, credit-spread, and other market "
+    "inputs remain from the case JSON. This is a current-run mixed-provenance "
+    "calculation, not a historical replay."
 )
 
 _SOLVER_DIAGNOSTICS_FIELDS = (
@@ -377,6 +419,15 @@ def render_standalone_run_as_markdown(display: dict) -> str:
 
     lines.extend(_section("Context", display, _CONTEXT_FIELDS))
     lines.extend(_section("Pricing", display, _PRICING_FIELDS))
+
+    if "live_bloomberg_quote" in display:
+        lines.append("## Live Bloomberg Quote")
+        lines.append("")
+        lines.append(f"> {_LIVE_BLOOMBERG_QUOTE_DISCLAIMER}")
+        lines.append("")
+        for label, key in _LIVE_BLOOMBERG_QUOTE_FIELDS:
+            lines.append(f"- **{label}:** {_fmt(display['live_bloomberg_quote'].get(key))}")
+        lines.append("")
 
     if "benchmark" in display:
         lines.extend(_section("Benchmark", display["benchmark"], _BENCHMARK_FIELDS))

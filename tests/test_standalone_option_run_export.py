@@ -619,3 +619,133 @@ def test_real_pricing_failed_workflow_with_reasons_list_exports_cleanly():
     # JSON export is unaffected by this Markdown-only fix.
     json_text = render_standalone_run_as_json(display)
     assert json.loads(json_text) == display
+
+
+# --- 18. Issue #6: live Bloomberg quote provenance export, acquisition-time
+#     contract (issue #6 comment 5028876767, PR #129 comment 5028878866) -----------
+
+
+def _live_bloomberg_quote_fixture(**overrides) -> dict:
+    fixture = {
+        "security": "91282CQX Govt",
+        "verified_isin": "US91282CQX29",
+        "source_system": "BLOOMBERG_DAPI",
+        "quote_side": "MID",
+        "currency": "USD",
+        "clean_price_per_100": 99.222656,
+        "accrued_interest_per_100": 0.235394,
+        "acquired_at": "2026-07-01T16:05:00+00:00",
+        "timestamp_basis": "SHIORI_ACQUISITION_TIME",
+        "bloomberg_quote_observation_time": None,
+        "case_as_of_timestamp": "2026-07-01T16:00:00Z",
+        "refreshed_scope": "BOND_QUOTE_ONLY",
+        "other_market_inputs": "CASE_JSON_UNCHANGED",
+    }
+    fixture.update(overrides)
+    return fixture
+
+
+def test_json_export_includes_live_bloomberg_quote_section_verbatim():
+    live_quote = _live_bloomberg_quote_fixture()
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    json_text = render_standalone_run_as_json(display)
+
+    assert json.loads(json_text)["live_bloomberg_quote"] == live_quote
+
+
+def test_json_export_has_no_live_source_as_of_field():
+    live_quote = _live_bloomberg_quote_fixture()
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    json_text = render_standalone_run_as_json(display)
+
+    assert "source_as_of" not in json.loads(json_text)["live_bloomberg_quote"]
+
+
+def test_markdown_export_includes_conditional_live_bloomberg_quote_section():
+    live_quote = _live_bloomberg_quote_fixture()
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    md = render_standalone_run_as_markdown(display)
+
+    assert "## Live Bloomberg Quote" in md
+    assert f"- **Security:** {live_quote['security']}" in md
+    assert f"- **Verified ISIN:** {live_quote['verified_isin']}" in md
+    assert f"- **Source system:** {live_quote['source_system']}" in md
+    assert f"- **Quote side:** {live_quote['quote_side']}" in md
+    assert f"- **Currency:** {live_quote['currency']}" in md
+    assert f"- **Clean price per 100:** {live_quote['clean_price_per_100']}" in md
+    assert f"- **Accrued interest per 100:** {live_quote['accrued_interest_per_100']}" in md
+    assert f"- **Acquired at:** {live_quote['acquired_at']}" in md
+    assert f"- **Timestamp basis:** {live_quote['timestamp_basis']}" in md
+    assert "- **Bloomberg quote observation time:** not available" in md
+    assert f"- **Case as-of timestamp:** {live_quote['case_as_of_timestamp']}" in md
+    assert f"- **Refreshed scope:** {live_quote['refreshed_scope']}" in md
+    assert f"- **Other market inputs:** {live_quote['other_market_inputs']}" in md
+    assert "- **Source as-of:**" not in md.split("## Live Bloomberg Quote")[1].split("##")[0]
+    # Distinct from, and placed after, the Pricing section (model fair premium).
+    assert md.index("## Pricing") < md.index("## Live Bloomberg Quote")
+
+
+def test_markdown_export_live_bloomberg_quote_section_states_disclaimer():
+    live_quote = _live_bloomberg_quote_fixture()
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    md = render_standalone_run_as_markdown(display)
+
+    section = md.split("## Live Bloomberg Quote")[1].split("##")[0]
+    assert "quote-observation time is not provided" in section
+    assert "Acquired at is when Shiori received" in section
+    assert "Only the bond quote was refreshed" in section
+    assert "mixed-provenance" in section
+
+
+def test_markdown_export_omits_live_bloomberg_quote_section_when_absent():
+    display = _synthetic_price_only_display()
+    assert "live_bloomberg_quote" not in display
+
+    md = render_standalone_run_as_markdown(display)
+
+    assert "## Live Bloomberg Quote" not in md
+    assert "Live Bloomberg" not in md
+
+
+def test_live_bloomberg_quote_observation_time_none_renders_not_available():
+    live_quote = _live_bloomberg_quote_fixture()
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    md = render_standalone_run_as_markdown(display)
+
+    assert "- **Bloomberg quote observation time:** not available" in md
+
+
+def test_live_bloomberg_quote_values_are_not_rounded_or_recomputed():
+    live_quote = _live_bloomberg_quote_fixture(clean_price_per_100=99.2226561234567)
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    md = render_standalone_run_as_markdown(display)
+
+    assert "- **Clean price per 100:** 99.2226561234567" in md
+
+
+def test_live_bloomberg_quote_export_does_not_mutate_input():
+    display = _synthetic_price_only_display(live_bloomberg_quote=_live_bloomberg_quote_fixture())
+    before = copy.deepcopy(display)
+
+    render_standalone_run_as_json(display)
+    render_standalone_run_as_markdown(display)
+
+    assert display == before
+
+
+def test_manual_mode_display_without_live_quote_key_export_unchanged():
+    # Manual (Case JSON) mode never produces a live_bloomberg_quote key --
+    # export output must be identical whether or not this feature exists.
+    display = _synthetic_price_only_display()
+
+    json_text = render_standalone_run_as_json(display)
+    md = render_standalone_run_as_markdown(display)
+
+    assert "live_bloomberg_quote" not in json.loads(json_text)
+    assert "Live Bloomberg" not in md
