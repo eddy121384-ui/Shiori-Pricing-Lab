@@ -1445,3 +1445,154 @@ def test_manual_mode_never_calls_bloomberg_or_the_live_clock(monkeypatch):
     price_standalone_option_case_with_benchmark(
         envelope, _synthetic_benchmark_text(), active_quote_side="MID"
     )
+
+
+# ==================================================================================
+# Issue #133 Slice B: bounded seven-value trader-input overlay.
+#
+# The overlay is the only bridge between the trader workbench inputs and every
+# existing workflow call. It must replace exactly the seven supported fields on
+# a copy, mutate no input, and leave every other field untouched -- each overlaid
+# value still flows into its existing typed constructor downstream.
+# ==================================================================================
+
+from shiori_pricing_lab.app.standalone_option_workbench import (  # noqa: E402
+    apply_standalone_option_input_overlay,
+)
+
+_OVERLAY_KWARGS = {
+    "option_type": "PUT",
+    "position": "SELL",
+    "strike_price": 98.75,
+    "notional": 125.0,
+    "forward_clean_price_per_100": 100.4,
+    "forward_quote_side": "BID",
+    "volatility": 0.22,
+}
+
+
+def test_overlay_replaces_exactly_the_seven_supported_fields():
+    envelope = _example_envelope()
+    overlaid = apply_standalone_option_input_overlay(envelope, **_OVERLAY_KWARGS)
+
+    assert overlaid["bond_option"]["option_type"] == "PUT"
+    assert overlaid["bond_option"]["position"] == "SELL"
+    assert overlaid["bond_option"]["strike_price"] == 98.75
+    assert overlaid["bond_option"]["notional"] == 125.0
+    assert overlaid["forward_clean_price_input"]["forward_clean_price_per_100"] == 100.4
+    assert overlaid["forward_clean_price_input"]["quote_side"] == "BID"
+    assert overlaid["volatility_input"]["volatility"] == 0.22
+
+
+def test_overlay_leaves_every_other_field_unchanged():
+    envelope = _example_envelope()
+    overlaid = apply_standalone_option_input_overlay(envelope, **_OVERLAY_KWARGS)
+
+    # Untouched top-level keys are carried through byte-for-byte.
+    for key in envelope:
+        if key in ("bond_option", "forward_clean_price_input", "volatility_input"):
+            continue
+        assert overlaid[key] == envelope[key]
+
+    # Within the three touched sub-objects, only the overlaid fields differ.
+    assert overlaid["bond_option"]["underlying_isin"] == envelope["bond_option"]["underlying_isin"]
+    assert overlaid["bond_option"]["exercise_style"] == envelope["bond_option"]["exercise_style"]
+    assert (
+        overlaid["forward_clean_price_input"]["source_system"]
+        == envelope["forward_clean_price_input"]["source_system"]
+    )
+    # volatility_basis is NOT overlaid: PRICE_VOL stays PRICE_VOL.
+    assert (
+        overlaid["volatility_input"]["volatility_basis"]
+        == envelope["volatility_input"]["volatility_basis"]
+    )
+
+
+def test_overlay_does_not_mutate_the_input_envelope_or_its_sub_objects():
+    envelope = _example_envelope()
+    pristine = _example_envelope()
+
+    apply_standalone_option_input_overlay(envelope, **_OVERLAY_KWARGS)
+
+    # The input mapping and each of its nested dicts are unchanged.
+    assert envelope == pristine
+    assert envelope["bond_option"] == pristine["bond_option"]
+    assert envelope["forward_clean_price_input"] == pristine["forward_clean_price_input"]
+    assert envelope["volatility_input"] == pristine["volatility_input"]
+
+
+def test_overlay_returns_new_sub_objects_not_the_input_ones():
+    envelope = _example_envelope()
+    overlaid = apply_standalone_option_input_overlay(envelope, **_OVERLAY_KWARGS)
+
+    assert overlaid is not envelope
+    assert overlaid["bond_option"] is not envelope["bond_option"]
+    assert overlaid["forward_clean_price_input"] is not envelope["forward_clean_price_input"]
+    assert overlaid["volatility_input"] is not envelope["volatility_input"]
+
+
+def test_overlay_accepts_json_string_and_validates_top_level_envelope():
+    overlaid = apply_standalone_option_input_overlay(_example_text(), **_OVERLAY_KWARGS)
+    assert overlaid["bond_option"]["option_type"] == "PUT"
+
+    # Envelope-level validation still applies (missing required key rejected).
+    broken = _example_envelope()
+    del broken["curve_points"]
+    with pytest.raises(ValueError, match="missing required top-level key"):
+        apply_standalone_option_input_overlay(broken, **_OVERLAY_KWARGS)
+
+
+@_requires_quantlib
+def test_overlaid_case_prices_through_the_existing_workflow_with_the_new_inputs():
+    # The overlaid case flows into the unchanged pricing workflow and the
+    # resolved inputs reflect the overlaid values -- proving the overlay is a
+    # real bridge, not a display-only echo. The forward quote side stays
+    # coherent with the case's bond_quote side (MID) so the existing
+    # coherent-observation-side invariant is satisfied (see the mismatch test
+    # below, which proves the overlay never suppresses that invariant).
+    overlaid = apply_standalone_option_input_overlay(
+        _example_envelope(),
+        option_type="PUT",
+        position="SELL",
+        strike_price=98.75,
+        notional=125.0,
+        forward_clean_price_per_100=100.4,
+        forward_quote_side="MID",
+        volatility=0.22,
+    )
+    _request, result, display = price_standalone_option_case(overlaid)
+
+    assert result.status is PricingStatus.SUCCESS
+    assumptions = display["assumptions"]
+    assert assumptions["option_type"] == "PUT"
+    assert assumptions["position"] == "SELL"
+    assert assumptions["strike_clean_price_per_100"] == 98.75
+    assert assumptions["notional"] == 125.0
+    assert assumptions["forward_clean_price_per_100"] == 100.4
+    assert assumptions["forward_clean_price_quote_side"] == "MID"
+    assert assumptions["price_volatility"] == 0.22
+    # SELL flips the position-total sign relative to the BUY example.
+    assert display["position_multiplier"] == -1.0
+
+
+def test_overlay_never_suppresses_the_coherent_quote_side_invariant():
+    # The seven-value overlay applies the forward quote side verbatim; it does
+    # NOT also change bond_quote.quote_side. A forward side that disagrees with
+    # the case's bond_quote side therefore still raises the existing
+    # coherent-observation-side ValueError from the request builder, unremapped
+    # -- the overlay is a pure bridge, never a contract bypass.
+    overlaid = apply_standalone_option_input_overlay(
+        _example_envelope(), **{**_OVERLAY_KWARGS, "forward_quote_side": "BID"}
+    )
+    with pytest.raises(ValueError, match="one coherent observation side"):
+        build_request_from_standalone_option_case(overlaid)
+
+
+def test_overlay_bad_value_propagates_from_the_existing_constructor():
+    # The overlay itself coerces/validates nothing; a bad enum surfaces from
+    # the existing BondOption constructor downstream, unremapped.
+    overlaid = apply_standalone_option_input_overlay(
+        _example_envelope(), **{**_OVERLAY_KWARGS, "option_type": "NOT_AN_OPTION_TYPE"}
+    )
+    with pytest.raises((ValueError, KeyError)):
+        build_request_from_standalone_option_case(overlaid)

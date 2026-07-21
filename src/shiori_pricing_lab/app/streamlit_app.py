@@ -59,12 +59,14 @@ def render_rates_curve_demo_page() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Shiori Pricing Lab", layout="wide")
+    # Issue #133 Slice B: the standalone trader workbench is the default page
+    # (first option). The two legacy pages remain available below it.
     page = st.sidebar.radio(
         "Page",
         [
+            "Standalone Bond Option Workbench",
             "Rates Curve Demo",
             "Bond Option (BLI MVP)",
-            "Standalone Bond Option Workbench",
         ],
     )
     if page == "Rates Curve Demo":

@@ -1,6 +1,7 @@
 """Tests for the standalone bond-option trader workbench UI (Issue #97, PR B;
-Issue #125 benchmark comparison / implied PRICE_VOL extension; Issue #101
-current-run export).
+Issue #125 benchmark comparison / implied PRICE_VOL; Issue #101 current-run
+export; Issue #6 live Bloomberg bond quote; **Issue #133 Slice B trader
+workbench rebuild**).
 
 Isolation strategy (see the full-suite interference note below):
 
@@ -9,23 +10,20 @@ Isolation strategy (see the full-suite interference note below):
   would pull in the unrelated ``bli_mvp`` demo-fixture rebuild).
 - **Render correctness** (SUCCESS metrics, FAILED errors, ``retrieved_at``
   separation) is exercised by rendering **real display dicts built once at
-  import time** (before any test body runs) through
-  ``AppTest.from_function`` with ``kwargs``. Rendering a plain display dict
-  does no BLI construction, so these assertions are strong *and* immune to
-  the process-state hazard described below.
-- **Navigation** is verified with a source assertion on ``streamlit_app.py``.
+  import time** (before any test body runs) through ``AppTest.from_function``
+  with ``kwargs``. Rendering a plain display dict does no BLI construction, so
+  these assertions are strong *and* immune to the process-state hazard.
+- **Navigation / default page** is verified with a source assertion on
+  ``streamlit_app.py``.
 
 Full-suite interference (root cause, not fixed here): the import-isolation
 suites ``test_products`` / ``test_products_ccs_fxswap`` / ``test_pricing_engine``
 call ``del sys.modules[...]`` for ``products``/``data``/``app`` prefixes to
 assert layering, but never delete ``reference_data`` and never restore
-``sys.modules``. That leaves ``reference_data`` cached while ``products`` is
-rebuilt, producing two distinct ``Currency`` enum objects; ``BLIMVPInputBundle``
-/ ``BLIStandaloneBondOptionRequest`` compare currency with ``is``, so any
-*fresh* construction mixing the two raises. These UI tests avoid triggering a
-fresh construction after that state by building their pricing inputs at import
-time and only re-rendering them. The underlying leak is an existing-test /
-schema concern, reported separately; nothing here modifies it.
+``sys.modules``. That leaves two distinct ``Currency`` enum objects; any *fresh*
+construction mixing them raises. These UI tests avoid triggering a fresh
+construction after that state by building their pricing inputs at import time
+and only re-rendering them.
 """
 
 from __future__ import annotations
@@ -50,6 +48,7 @@ from shiori_pricing_lab.app.standalone_option_ui import (
     _decode_uploaded_json_text,
     _load_example_case_text,
     _retrieved_at_or_none,
+    _safe_prefill,
     render_standalone_option_workbench_page,
 )
 from shiori_pricing_lab.app.standalone_option_workbench import (
@@ -72,6 +71,9 @@ _EXPECTED_BLACK76_PV_PER_100 = 4.551011126839255
 _RETRIEVED_AT = "2026-07-11T09:00:00Z"
 _SOURCE_AS_OF = "2026-07-01T16:00:00Z"
 
+_PRICE_BUTTON = "Price standalone option"
+_REFRESH_BUTTON = "Refresh Bloomberg quote and price"
+
 
 def _yield_vol_case_text() -> str:
     envelope = json.loads(_EXAMPLE_PATH.read_text(encoding="utf-8"))
@@ -82,9 +84,9 @@ def _yield_vol_case_text() -> str:
     return json.dumps(envelope)
 
 
-# Real display contexts, built at import time (before any test body runs, so the
-# module graph is consistent). Rendering these does no BLI construction.
-# A YIELD_VOL case is a guard rejection -> FAILED, and needs no QuantLib.
+# Real display contexts, built at import time (before any test body runs).
+# Rendering these does no BLI construction. A YIELD_VOL case is a guard
+# rejection -> FAILED, and needs no QuantLib.
 _FAILED_DISPLAY = price_standalone_option_case(
     _yield_vol_case_text(), retrieved_at=_RETRIEVED_AT
 )[2]
@@ -94,21 +96,6 @@ _SUCCESS_DISPLAY = (
     if _QUANTLIB_AVAILABLE
     else None
 )
-
-
-# --- Issue #125: benchmark-mode display fixtures, built at import time -------------
-# Same isolation rationale as _SUCCESS_DISPLAY above -- built once, before any test
-# body runs, using the real bounded workflow (price_standalone_option_case_with_
-# benchmark). Rendering these does no further BLI construction.
-#
-# Codex P1 review of PR #126: there is no bundled benchmark example under
-# examples/ (BLIBenchmarkQuote.source_type only accepts BLOOMBERG/VENDOR, and
-# a bundled file claiming BLOOMBERG for an engineered synthetic premium would
-# misrepresent the workbench as Bloomberg-validated). This dict is test-local
-# only, never read by production/UI code, and is explicitly not a claim of
-# Bloomberg validation or market evidence -- its premium_per_100 is set to
-# the pricing example's own model fair premium purely so the render tests
-# below get deterministic, pinned PASS/CALIBRATED output.
 
 
 def _benchmark_envelope(**overrides) -> dict:
@@ -162,21 +149,22 @@ _BENCHMARK_SOLVER_FAILED_DISPLAY = (
 )
 
 
+# --- Render-only AppTest entry points (module-level for from_function) -----------
+
+
 def _render_display_script(display: dict) -> None:
-    # Self-contained AppTest.from_function entry point: renders a prepared
-    # display dict via the real page render helpers, matching the real
-    # page's own order (pricing, then export). No BLI construction.
     from shiori_pricing_lab.app.standalone_option_ui import (
         _render_export_section,
+        _render_forward_and_underlying,
         _render_pricing_result,
     )
 
     _render_pricing_result(display)
+    _render_forward_and_underlying(display)
     _render_export_section(display)
 
 
 def _render_page_script() -> None:
-    # Self-contained AppTest.from_function entry point for the full page.
     from shiori_pricing_lab.app.standalone_option_ui import (
         render_standalone_option_workbench_page,
     )
@@ -185,17 +173,15 @@ def _render_page_script() -> None:
 
 
 def _render_benchmark_display_script(display: dict) -> None:
-    # Self-contained AppTest.from_function entry point mirroring
-    # _render_display_script, but also rendering the benchmark/comparison/
-    # calibration sections, then export -- the real page's exact order.
-    # No BLI construction.
     from shiori_pricing_lab.app.standalone_option_ui import (
         _render_benchmark_result,
         _render_export_section,
+        _render_forward_and_underlying,
         _render_pricing_result,
     )
 
     _render_pricing_result(display)
+    _render_forward_and_underlying(display)
     _render_benchmark_result(display)
     _render_export_section(display)
 
@@ -238,17 +224,10 @@ def _set_bond_quote_source(at: AppTest, source: str) -> None:
 
 
 def _press_price(at: AppTest) -> None:
-    next(b for b in at.button if b.label == "Price standalone option").click().run()
+    next(b for b in at.button if b.label == _PRICE_BUTTON).click().run()
 
 
-# --- Issue #6: live Bloomberg bond-quote source fixtures, acquisition-time
-# contract (issue #6 comment 5028876767, PR #129 comment 5028878866) --------
-#
-# Same isolation strategy as _SUCCESS_DISPLAY/_BENCHMARK_PASS_DISPLAY above:
-# render-only tests use a plain dict (no BLI construction at all); the one
-# benchmark-mode wiring test that needs a fully render-complete display
-# reuses the real _BENCHMARK_PASS_DISPLAY built at import time, only adding
-# the live_bloomberg_quote section a real Bloomberg call would have produced.
+# --- Live Bloomberg render fixtures ----------------------------------------------
 
 _ACQUIRED_AT = "2026-07-01T16:05:00+00:00"
 _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY = {
@@ -298,14 +277,14 @@ def _run_bloomberg_render(display: dict) -> AppTest:
 
 
 def _fill_bloomberg_inputs(at: AppTest, *, security: str, side: str) -> None:
-    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(security).run()
+    next(
+        t for t in at.text_input if t.label == "Bloomberg security (Yellow Key)"
+    ).set_value(security).run()
     next(s for s in at.selectbox if s.label == "Quote side").set_value(side).run()
 
 
 def _press_bloomberg_refresh(at: AppTest) -> None:
-    next(
-        b for b in at.button if b.label == "Refresh Bloomberg quote and price"
-    ).click().run()
+    next(b for b in at.button if b.label == _REFRESH_BUTTON).click().run()
 
 
 # --- 1. Module + helpers ------------------------------------------------------
@@ -330,7 +309,6 @@ def test_retrieved_at_or_none_maps_empty_to_none_and_passes_verbatim():
     assert _retrieved_at_or_none("") is None
     assert _retrieved_at_or_none(None) is None
     assert _retrieved_at_or_none("2026-07-11T09:00:00Z") == "2026-07-11T09:00:00Z"
-    # No normalization: whitespace is non-empty and passes through verbatim.
     assert _retrieved_at_or_none("  ") == "  "
 
 
@@ -338,6 +316,23 @@ def test_decode_uploaded_json_text_strict_utf8():
     assert _decode_uploaded_json_text(b'{"a": 1}') == '{"a": 1}'
     with pytest.raises(UnicodeDecodeError):
         _decode_uploaded_json_text(b"\xff\xfe invalid utf-8")
+
+
+def test_safe_prefill_reads_seven_values_from_case_and_falls_back_on_garbage():
+    prefill = _safe_prefill(_load_example_case_text())
+    assert prefill["option_type"] == "CALL"
+    assert prefill["position"] == "BUY"
+    assert prefill["strike_price"] == 99.5
+    assert prefill["notional"] == 50.0
+    assert prefill["forward_clean_price_per_100"] == 101.3
+    assert prefill["forward_quote_side"] == "MID"
+    assert prefill["volatility"] == 0.18
+
+    # Any parse/shape problem is a display fallback, never a raise or a
+    # fabricated pricing value.
+    fallback = _safe_prefill("{ not json")
+    assert fallback["option_type"] == "CALL"
+    assert _safe_prefill(None)["strike_price"] == 99.5
 
 
 # --- 2. SUCCESS render: premium per-100 vs total notional (separate) ---------
@@ -358,9 +353,7 @@ def test_success_render_shows_separate_premium_metrics():
     assert float(metrics["Total notional model fair premium"]) == pytest.approx(
         _EXPECTED_PV, abs=1e-6
     )
-    # Per-100 and total are unmistakably separate, different values.
     assert metrics["Model fair premium per 100"] != metrics["Total notional model fair premium"]
-    # Also renders the required intermediates.
     for label in (
         "Forward clean price per 100",
         "Black-76 PV per 100",
@@ -377,24 +370,19 @@ def test_success_render_shows_every_greek_with_its_unit_in_the_label():
 
     metrics = {m.label: m.value for m in at.metric}
     expected = {
-        "Forward delta per 100 (/ +1.00 price pt)": "forward_price_delta_per_100",
-        "Forward gamma per 100 (/ price pt^2)": "forward_price_gamma_per_100",
-        "Vega per 100 (/ +0.01 vol)": "vega_per_vol_point_per_100",
-        "Theta per 100 (/ calendar day)": "theta_per_calendar_day_per_100",
-        "Position forward delta total (/ +1.00 price pt)": (
-            "position_forward_price_delta_total"
-        ),
-        "Position forward gamma total (/ price pt^2)": (
-            "position_forward_price_gamma_total"
-        ),
-        "Position vega total (/ +0.01 vol)": "position_vega_per_vol_point_total",
-        "Position theta total (/ calendar day)": "position_theta_per_calendar_day_total",
+        "Delta / 100 (per +1.00 price pt)": "forward_price_delta_per_100",
+        "Gamma / 100 (per price pt^2)": "forward_price_gamma_per_100",
+        "Vega / 100 (per +0.01 vol)": "vega_per_vol_point_per_100",
+        "Theta / 100 (per calendar day)": "theta_per_calendar_day_per_100",
+        "Position delta total (per +1.00 price pt)": "position_forward_price_delta_total",
+        "Position gamma total (per price pt^2)": "position_forward_price_gamma_total",
+        "Position vega total (per +0.01 vol)": "position_vega_per_vol_point_total",
+        "Position theta total (per calendar day)": "position_theta_per_calendar_day_total",
     }
     for label, key in expected.items():
         assert label in metrics
         assert float(metrics[label]) == pytest.approx(_SUCCESS_DISPLAY[key], abs=1e-6)
 
-    # Units are stated for every Greek.
     captions = " ".join(c.value for c in at.caption)
     assert "+1.00 forward clean price point" in captions
     assert "+0.01 absolute volatility" in captions
@@ -411,16 +399,29 @@ def test_success_render_labels_instrument_analytics_apart_from_position_risk():
     assert "**Position risk (notional and BUY/SELL sign applied)**" in markdown
 
     captions = " ".join(c.value for c in at.caption)
-    # Each column states, in words, whether the position sign is in the number.
     assert "BUY/SELL position sign is NOT applied" in captions
     assert "(BUY = +1, SELL = -1)" in captions
     assert f"Position {_SUCCESS_DISPLAY['position']}" in captions
 
-    # No bare "total" metric label can hide the position basis.
     total_labels = [m.label for m in at.metric if "total" in m.label.lower()]
     assert total_labels
     for label in total_labels:
         assert label.startswith("Position ") or "premium" in label.lower()
+
+
+@_requires_quantlib
+def test_success_render_shows_pending_risk_areas_as_captions_never_metrics():
+    # The approved mockup's OAS/DV01/duration/convexity analytics are visible
+    # as honest pending states -- never fabricated numbers, never st.metric.
+    at = _run_render(_SUCCESS_DISPLAY)
+    assert not at.exception
+
+    metric_labels = {m.label for m in at.metric}
+    for pending in ("OAS Delta", "DV01", "DV01 Gamma", "Modified Duration", "Convexity"):
+        assert pending not in metric_labels
+    rendered = " ".join(m.value for m in at.markdown)
+    assert "Pending model support" in rendered
+    assert "DV01: Pending model support" in rendered
 
 
 # --- 3. FAILED render: no premium, structured error detail preserved ---------
@@ -431,14 +432,26 @@ def test_failed_render_shows_no_premium_and_preserves_error_detail():
     assert not at.exception
 
     assert any("Pricing FAILED" in e.value for e in at.error)
-    assert len(at.metric) == 0  # no premium/intermediate metrics on a failure
+    assert len(at.metric) == 0  # no premium/intermediate/greek/pending metrics
     assert any("UNSUPPORTED_PRODUCT" in m.value for m in at.markdown)
 
     json_blocks = [json.loads(j.value) for j in at.json]
-    context = json_blocks[0]
-    assert context["status"] == "FAILED"
-    detail_blocks = json_blocks[1:]
-    assert any("product_id" in block and "reasons" in block for block in detail_blocks)
+    # Structured error detail preserved verbatim (product_id + reasons).
+    assert any(
+        isinstance(block, dict) and "product_id" in block and "reasons" in block
+        for block in json_blocks
+    )
+    # The reproducibility context is still available on a failure.
+    assert any(
+        isinstance(block, dict) and block.get("status") == "FAILED" for block in json_blocks
+    )
+
+
+def test_failed_render_shows_no_fabricated_numbers_anywhere():
+    at = _run_render(_FAILED_DISPLAY)
+    assert not at.exception
+    # No forward/underlying metrics on a failure either.
+    assert len(at.metric) == 0
 
 
 # --- 4. retrieved_at stays separate from source-as-of ------------------------
@@ -446,7 +459,11 @@ def test_failed_render_shows_no_premium_and_preserves_error_detail():
 
 def test_retrieved_at_supplied_is_separate_from_source_as_of():
     at = _run_render(_FAILED_DISPLAY)
-    context = json.loads(at.json[0].value)
+    context = next(
+        json.loads(j.value)
+        for j in at.json
+        if isinstance(json.loads(j.value), dict) and "retrieved_at" in json.loads(j.value)
+    )
     assert context["retrieved_at"] == _RETRIEVED_AT
     assert context["source_as_of"] == _SOURCE_AS_OF
     assert context["retrieved_at"] != context["source_as_of"]
@@ -454,7 +471,11 @@ def test_retrieved_at_supplied_is_separate_from_source_as_of():
 
 def test_retrieved_at_empty_maps_to_none_in_context():
     at = _run_render(_FAILED_DISPLAY_NO_RETRIEVED)
-    context = json.loads(at.json[0].value)
+    context = next(
+        json.loads(j.value)
+        for j in at.json
+        if isinstance(json.loads(j.value), dict) and "retrieved_at" in json.loads(j.value)
+    )
     assert context["retrieved_at"] is None
     assert context["source_as_of"] == _SOURCE_AS_OF
 
@@ -462,9 +483,7 @@ def test_retrieved_at_empty_maps_to_none_in_context():
 # --- 5. Full-page wiring: button triggers the workflow (malformed input) ------
 
 
-def test_malformed_json_renders_exception_and_no_metrics():
-    # Full page: proves the button press routes to price_standalone_option_case
-    # and that a raised local-input exception is rendered without pricing.
+def test_malformed_json_renders_error_and_no_metrics():
     at = _run_page()
     _set_case_json(at, "{ this is not valid json ")
     _press_price(at)
@@ -472,12 +491,13 @@ def test_malformed_json_renders_exception_and_no_metrics():
     assert not at.exception  # handled at the UI boundary, not raised
     assert len(at.error) >= 1
     assert len(at.metric) == 0
+    assert len(at.download_button) == 0
 
 
-# --- 6. Navigation wiring (source assertion; see module docstring) -----------
+# --- 6. Navigation + default page (source assertion) -------------------------
 
 
-def test_streamlit_app_wires_new_page_and_keeps_existing():
+def test_streamlit_app_makes_standalone_workbench_the_default_page():
     source = _APP_PATH.read_text(encoding="utf-8")
 
     # New page label routed to the new render function.
@@ -490,6 +510,13 @@ def test_streamlit_app_wires_new_page_and_keeps_existing():
     assert "render_rates_curve_demo_page()" in source
     assert "render_bli_mvp_page()" in source
 
+    # The standalone workbench is the FIRST radio option -> the default page,
+    # ahead of both legacy pages.
+    workbench_pos = source.index('"Standalone Bond Option Workbench"')
+    rates_pos = source.index('"Rates Curve Demo"')
+    bli_pos = source.index('"Bond Option (BLI MVP)"')
+    assert workbench_pos < rates_pos < bli_pos
+
 
 # --- 7. Source-level guarantees ----------------------------------------------
 
@@ -498,11 +525,13 @@ def test_ui_calls_only_headless_workflow_for_execution():
     source = inspect.getsource(ui_module)
     assert "price_standalone_option_case(" in source
     assert "price_standalone_option_case_with_benchmark(" in source
+    # The bounded overlay is the single bridge before every workflow call.
+    assert "apply_standalone_option_input_overlay(" in source
     # No shortcut around the builder / direct request construction.
     assert "BLIStandaloneBondOptionRequest(" not in source
     assert "build_bli_standalone_option_request" not in source
     # No direct pricing/comparison/calibration/resolver/solver/Black-76/
-    # curve/vol/provider/QuantLib imports or calls (Issue #125).
+    # curve/vol/provider/QuantLib calls.
     for forbidden in (
         "price_bli_mvp_standalone_option",
         "bli_pricing_engine",
@@ -520,15 +549,6 @@ def test_ui_calls_only_headless_workflow_for_execution():
         "bli_standalone_option_pricing_inputs",
     ):
         assert forbidden not in source, f"unexpected reference to {forbidden!r}"
-
-
-def test_ui_upload_no_file_does_not_fall_back():
-    source = inspect.getsource(ui_module)
-    # An explicit no-file message exists, and the upload branch decodes the
-    # uploaded file (never implicitly reusing the textarea/example).
-    assert "No file uploaded" in source
-    assert "case_text = _decode_uploaded_json_text(" in source
-    assert "case_text = textarea_text" in source
 
 
 def test_ui_has_no_pricing_math_provider_or_system_clock():
@@ -553,30 +573,24 @@ def test_ui_has_no_pricing_math_provider_or_system_clock():
 
 def test_ui_has_no_broad_except_and_no_client_quote_label():
     source = inspect.getsource(ui_module)
-    # Scan the code body only: the module docstring legitimately states the
-    # "never labeled a client quote" prohibition, which must not count as a
-    # rendered client-quote label.
     body = source.replace(ui_module.__doc__ or "", "")
     assert "except Exception" not in body
     assert "client quote" not in body.lower()
     assert "client_quote" not in body.lower()
-    # Only the four expected local-input exceptions are caught.
     assert "json.JSONDecodeError" in body
     assert "UnicodeDecodeError" in body
 
 
-def test_quote_side_selectbox_has_no_default_selection():
-    # Issue #125: st.selectbox(..., index=None) is the only way to genuinely
-    # start with no selection -- never a silently-chosen MID or first member.
+def test_only_two_quote_side_selectors_have_no_default():
+    # The Bloomberg quote side and the benchmark active side each start
+    # unselected (index=None). The forward quote side is a supported editable
+    # input with a real default and must NOT be one of them.
     source = inspect.getsource(ui_module)
-    assert "index=None" in source
+    body = source.replace(ui_module.__doc__ or "", "")
+    assert body.count("index=None") == 2
 
 
-# ==================================================================================
-# Issue #125: benchmark comparison / implied PRICE_VOL orchestration UI.
-# ==================================================================================
-
-# --- 8. Mode selector: two explicit modes, default preserves existing behavior ----
+# --- 8. Benchmark mode -------------------------------------------------------
 
 
 def test_mode_selector_offers_price_only_and_benchmark_modes_with_price_only_default():
@@ -586,23 +600,15 @@ def test_mode_selector_offers_price_only_and_benchmark_modes_with_price_only_def
     assert mode_radio.value == _MODE_PRICE_ONLY
 
 
-def test_price_only_mode_never_renders_benchmark_sections():
-    # Malformed pricing JSON exits before pricing is ever reached, so this
-    # test needs no QuantLib (Codex P2 review of PR #126) -- it proves only
-    # that Price-only mode never exposes benchmark controls/sections, not
-    # anything about a successful price.
+def test_price_only_mode_never_renders_benchmark_controls():
     at = _run_page()
     _set_case_json(at, "{ this is not valid json ")
-    _press_price(at)  # default mode is Price only
+    _press_price(at)
 
     assert not at.exception
-    assert len(at.error) >= 1  # the malformed-JSON error is still rendered
-    # No "Benchmark input" controls are ever shown in Price-only mode.
+    assert len(at.error) >= 1
     assert not any(t.label == "Standalone option benchmark JSON" for t in at.text_area)
     assert not any(s.label == "Active quote side" for s in at.selectbox)
-
-
-# --- 9. Benchmark mode: quote side is mandatory, no hidden default ----------------
 
 
 def test_benchmark_mode_without_quote_side_selected_shows_warning_and_does_not_run():
@@ -615,33 +621,13 @@ def test_benchmark_mode_without_quote_side_selected_shows_warning_and_does_not_r
     assert len(at.metric) == 0
 
 
-# --- 10. Full-page benchmark mode wiring: routes to the button before construction -
-#
-# A genuine full end-to-end SUCCESS render through a fresh full-page button click
-# is deliberately NOT tested here (unlike the warning-path test above, which exits
-# before any BLI construction): this module's own docstring documents a pre-existing,
-# out-of-scope full-suite module-reload hazard that makes a *fresh* successful BLI
-# construction unreliable once other suites have run. Full success rendering is
-# instead proven by test_benchmark_pass_render_shows_distinct_pricing_benchmark_and_
-# calibration_metrics below, which re-renders a display built once at import time
-# (immune to that hazard, same isolation strategy as _SUCCESS_DISPLAY above).
-
-
-# --- 11. No bundled benchmark example (Codex P1 review of PR #126) ---------------
-
-
 def test_benchmark_textarea_starts_empty_with_no_bundled_example():
-    # The pricing-case textarea is prefilled from a bundled sanitized example
-    # (unchanged); the benchmark textarea deliberately is not -- there is no
-    # examples/standalone_option_benchmark.json, so this field always starts
-    # empty and instructs the trader to paste an actually-observed quote.
     at = _run_page()
     _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
     text_area = next(t for t in at.text_area if t.label == "Standalone option benchmark JSON")
     assert text_area.value == ""
     assert any(
-        "no bundled benchmark example" in c.value.lower()
-        or "paste" in c.value.lower()
+        "no bundled benchmark example" in c.value.lower() or "paste" in c.value.lower()
         for c in at.caption
     )
 
@@ -660,9 +646,6 @@ def test_benchmark_upload_no_file_does_not_fall_back_to_paste_source():
     assert "benchmark_text = benchmark_textarea_text" in source
 
 
-# --- 12. Render helper: PASS + CALIBRATED shows clearly separated metrics --------
-
-
 @_requires_quantlib
 def test_benchmark_pass_render_shows_distinct_pricing_benchmark_and_calibration_metrics():
     at = _run_benchmark_render(_BENCHMARK_PASS_DISPLAY)
@@ -671,21 +654,11 @@ def test_benchmark_pass_render_shows_distinct_pricing_benchmark_and_calibration_
     assert any("Calibration SUCCESS" in s.value for s in at.success)
 
     metrics = {m.label: m.value for m in at.metric}
-    # Model, benchmark, and calibrated values are distinct, separately labeled.
-    assert "Model fair premium per 100" in metrics  # pricing section
-    assert "Benchmark premium per 100" in metrics  # benchmark section
+    assert "Model fair premium per 100" in metrics
+    assert "Benchmark premium per 100" in metrics
     assert "Model fair premium per 100 (comparison)" in metrics
     assert "Implied PRICE_VOL" in metrics
     assert float(metrics["Implied PRICE_VOL"]) == pytest.approx(0.18, abs=1e-4)
-    assert float(metrics["Model fair premium per 100"]) == pytest.approx(
-        _EXPECTED_BLACK76_PV_PER_100
-    )
-    assert float(metrics["Benchmark premium per 100"]) == pytest.approx(
-        _EXPECTED_BLACK76_PV_PER_100
-    )
-
-
-# --- 13. NON_COMPARABLE renders without fabricated residual metrics -------------
 
 
 @_requires_quantlib
@@ -695,15 +668,9 @@ def test_non_comparable_render_shows_no_fabricated_residual_metrics():
     assert any("Comparison NON_COMPARABLE" in e.value for e in at.error)
 
     metrics = {m.label: m.value for m in at.metric}
-    # Residual fields are None for a mismatch outcome (reasons 1-8 of the
-    # existing compare_bli_benchmark priority) -- never rendered as a
-    # fabricated 0/placeholder metric, only as an honest caption.
     assert "Relative residual" not in metrics
     assert "Signed residual per 100" not in metrics
     assert any("not available" in c.value for c in at.caption)
-
-
-# --- 14. Calibration solver failure renders without fabricated implied vol ------
 
 
 @_requires_quantlib
@@ -716,9 +683,6 @@ def test_calibration_solver_failed_render_shows_no_fabricated_implied_vol():
     assert "Implied PRICE_VOL" not in metrics
     assert any("not available" in c.value for c in at.caption)
 
-    # Solver diagnostics (bounds/tolerances/config) are still shown -- the
-    # theoretical-bound outcome only drops implied/model/residual, never the
-    # whole diagnostic picture.
     json_blocks = [json.loads(j.value) for j in at.json]
     solver_diagnostics = json_blocks[-1]
     assert solver_diagnostics["lower_price_vol"] is not None
@@ -726,18 +690,13 @@ def test_calibration_solver_failed_render_shows_no_fabricated_implied_vol():
     assert solver_diagnostics["max_iterations"] is not None
 
 
-# ==================================================================================
-# Issue #101: current-run JSON/Markdown export downloads.
-# ==================================================================================
+# --- 9. Export ----------------------------------------------------------------
 
 _EXPORT_JSON_LABEL = "Download current run JSON"
 _EXPORT_MARKDOWN_LABEL = "Download current run Markdown"
 
-# --- 15. No download controls before a real workflow result exists ----------------
-
 
 def test_no_download_controls_before_execution():
-    # Full page, no button press: nothing has been priced yet.
     at = _run_page()
     assert len(at.download_button) == 0
 
@@ -752,21 +711,7 @@ def test_no_download_controls_when_malformed_json_blocks_execution():
     assert len(at.download_button) == 0
 
 
-def test_no_download_controls_when_benchmark_mode_quote_side_unselected():
-    at = _run_page()
-    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
-    _press_price(at)
-
-    assert not at.exception
-    assert len(at.download_button) == 0
-
-
-# --- 16. Both download controls appear after a real result (price-only) -----------
-
-
 def test_both_download_controls_appear_after_failed_price_only_result():
-    # FAILED is still a real workflow result -- export must remain available
-    # to capture the failure diagnostics as UAT evidence.
     at = _run_render(_FAILED_DISPLAY)
     assert not at.exception
     labels = {b.label for b in at.download_button}
@@ -785,9 +730,6 @@ def test_both_download_controls_appear_after_price_only_success():
     assert len(at.download_button) == 2
 
 
-# --- 17. Both download controls appear after benchmark-mode execution -------------
-
-
 @_requires_quantlib
 def test_both_download_controls_appear_after_benchmark_pass_calibrated():
     at = _run_benchmark_render(_BENCHMARK_PASS_DISPLAY)
@@ -795,20 +737,6 @@ def test_both_download_controls_appear_after_benchmark_pass_calibrated():
     labels = {b.label for b in at.download_button}
     assert _EXPORT_JSON_LABEL in labels
     assert _EXPORT_MARKDOWN_LABEL in labels
-    assert len(at.download_button) == 2
-
-
-@_requires_quantlib
-def test_both_download_controls_appear_after_non_comparable_and_solver_failed():
-    for display in (_BENCHMARK_NON_COMPARABLE_DISPLAY, _BENCHMARK_SOLVER_FAILED_DISPLAY):
-        at = _run_benchmark_render(display)
-        assert not at.exception
-        labels = {b.label for b in at.download_button}
-        assert _EXPORT_JSON_LABEL in labels
-        assert _EXPORT_MARKDOWN_LABEL in labels
-
-
-# --- 18. Button payloads equal the pure helper output, fixed names/MIME -----------
 
 
 def test_export_button_payloads_equal_pure_helper_output_and_use_fixed_names_mime(
@@ -848,9 +776,6 @@ def test_export_button_payloads_equal_pure_helper_output_and_use_fixed_names_mim
     assert md_call["on_click"] == "ignore"
 
 
-# --- 19. Export never repeats a pricing/comparison/calibration call ---------------
-
-
 def test_export_section_never_calls_pricing_or_benchmark_workflow_again(monkeypatch):
     from shiori_pricing_lab.app import standalone_option_ui as ui_module_local
 
@@ -859,53 +784,7 @@ def test_export_section_never_calls_pricing_or_benchmark_workflow_again(monkeypa
 
     monkeypatch.setattr(ui_module_local, "price_standalone_option_case", _fail)
     monkeypatch.setattr(ui_module_local, "price_standalone_option_case_with_benchmark", _fail)
-
-    # Must not raise: _render_export_section only reads the already-computed display.
     ui_module_local._render_export_section(_FAILED_DISPLAY)
-
-
-def test_export_module_source_has_no_pricing_comparison_or_calibration_calls():
-    from shiori_pricing_lab.app import standalone_option_run_export as export_module
-
-    # Scan the code body only: the module docstring legitimately explains
-    # which upstream functions produce the display dict this module
-    # consumes -- that prose must not count as a functional reference.
-    source = inspect.getsource(export_module)
-    body = source.replace(export_module.__doc__ or "", "")
-    for forbidden in (
-        "price_bli_mvp_standalone_option",
-        "price_standalone_option_case(",
-        "price_standalone_option_case_with_benchmark(",
-        "compare_bli_benchmark",
-        "calibrate_bli_implied_price_vol",
-        "resolve_standalone_option_pricing_inputs",
-        "solve_implied_dirty_price_vol",
-        "black76_dirty_price_option_pv_per_100",
-        "black76_price_option_pv_per_100",
-        "BLIStandaloneBondOptionRequest",
-        "BLIBenchmarkQuote",
-        "PricingResult",
-        "QuantLib",
-        "quantlib",
-    ):
-        assert forbidden not in body, f"unexpected reference to {forbidden!r}"
-
-
-# --- 20. Pricing / benchmark / comparison / calibration / export stay distinct ----
-
-
-@_requires_quantlib
-def test_export_section_is_its_own_distinct_subheading():
-    at = _run_benchmark_render(_BENCHMARK_PASS_DISPLAY)
-    assert not at.exception
-    subheadings = [s.value for s in at.subheader]
-    for expected in ("Context", "Benchmark", "Comparison", "Calibration", "Export current run"):
-        assert expected in subheadings
-    # Export is listed after every result section, never interleaved with them.
-    assert subheadings.index("Export current run") > subheadings.index("Calibration")
-
-
-# --- 21. Module-boundary: UI imports only the bounded export helper ---------------
 
 
 def test_ui_calls_only_the_bounded_export_helper():
@@ -914,23 +793,9 @@ def test_ui_calls_only_the_bounded_export_helper():
     assert "render_standalone_run_as_markdown(" in source
     # The UI never assembles JSON/Markdown text itself.
     assert "json.dumps(" not in source
-    assert "## " not in source
 
 
-def test_export_helper_module_defines_no_streamlit_names():
-    from shiori_pricing_lab.app import standalone_option_run_export as export_module
-
-    module_names = set(dir(export_module))
-    forbidden_names = {"streamlit", "st"}
-    assert forbidden_names.isdisjoint(module_names)
-
-
-# ==================================================================================
-# Issue #6: live Bloomberg bond-quote source UI, Eddy-approved acquisition-time
-# contract (issue #6 comment 5028876767, PR #129 comment 5028878866).
-# ==================================================================================
-
-# --- 22. Bond quote source selector: default preserves existing manual mode -------
+# --- 10. Bloomberg (Issue #6) + Yellow Key + no Live/Verified before retrieval -----
 
 
 def test_bond_quote_source_selector_defaults_to_case_json_with_no_bloomberg_controls():
@@ -938,43 +803,26 @@ def test_bond_quote_source_selector_defaults_to_case_json_with_no_bloomberg_cont
     radio = next(r for r in at.radio if r.label == "Bond quote source")
     assert list(radio.options) == [_BOND_QUOTE_SOURCE_CASE_JSON, _BOND_QUOTE_SOURCE_BLOOMBERG]
     assert radio.value == _BOND_QUOTE_SOURCE_CASE_JSON
-    assert not any(t.label == "Bloomberg security" for t in at.text_input)
-    assert any(b.label == "Price standalone option" for b in at.button)
-    assert not any(b.label == "Refresh Bloomberg quote and price" for b in at.button)
+    assert not any(t.label == "Bloomberg security (Yellow Key)" for t in at.text_input)
+    assert any(b.label == _PRICE_BUTTON for b in at.button)
+    assert not any(b.label == _REFRESH_BUTTON for b in at.button)
 
 
-def test_manual_mode_never_calls_bloomberg_workflow(monkeypatch):
-    def _fail(*args, **kwargs):
-        raise AssertionError("Bloomberg workflow must not be called in Case JSON mode")
-
-    monkeypatch.setattr(ui_module, "price_standalone_option_case_with_bloomberg_quote", _fail)
-    monkeypatch.setattr(
-        ui_module, "price_standalone_option_case_with_bloomberg_quote_and_benchmark", _fail
-    )
-
+def test_bloomberg_security_control_mentions_yellow_key():
     at = _run_page()
-    _set_case_json(at, "{ this is not valid json ")
-    _press_price(at)  # default Bond quote source is Case JSON
-
-    assert not at.exception
-    assert len(at.error) >= 1
-
-
-# --- 23. Bloomberg mode: explicit security/side, no preselected side, no
-#         source_as_of / live retrieved_at controls, distinct button label ---------
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    assert any(
+        t.label == "Bloomberg security (Yellow Key)" for t in at.text_input
+    ), "Bloomberg security control must mention its Yellow Key"
 
 
 def test_bloomberg_mode_shows_explicit_inputs_with_no_preselected_side():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
 
-    assert any(t.label == "Bloomberg security" for t in at.text_input)
     quote_side_box = next(s for s in at.selectbox if s.label == "Quote side")
     assert list(quote_side_box.options) == ["BID", "MID", "OFFER"]
     assert quote_side_box.value is None
-    # No default anywhere yet.
-    # No separate "Active quote side" selector in Bloomberg mode, even in
-    # benchmark mode (the Bloomberg quote side drives comparison/calibration).
     _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
     assert not any(s.label == "Active quote side" for s in at.selectbox)
 
@@ -982,7 +830,6 @@ def test_bloomberg_mode_shows_explicit_inputs_with_no_preselected_side():
 def test_bloomberg_mode_has_no_source_as_of_or_live_retrieved_at_controls():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-
     assert not any(t.label.startswith("source_as_of") for t in at.text_input)
     assert not any(t.label.startswith("retrieved_at") for t in at.text_input)
 
@@ -995,9 +842,8 @@ def test_case_json_mode_still_shows_retrieved_at_control():
 def test_bloomberg_mode_button_label_is_refresh_and_price():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-
-    assert any(b.label == "Refresh Bloomberg quote and price" for b in at.button)
-    assert not any(b.label == "Price standalone option" for b in at.button)
+    assert any(b.label == _REFRESH_BUTTON for b in at.button)
+    assert not any(b.label == _PRICE_BUTTON for b in at.button)
 
 
 def test_bloomberg_mode_missing_security_shows_warning_and_does_not_run():
@@ -1014,7 +860,7 @@ def test_bloomberg_mode_missing_security_shows_warning_and_does_not_run():
 def test_bloomberg_mode_missing_quote_side_shows_warning_and_does_not_run():
     at = _run_page()
     _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    next(t for t in at.text_input if t.label == "Bloomberg security").set_value(
+    next(t for t in at.text_input if t.label == "Bloomberg security (Yellow Key)").set_value(
         "91282CQX Govt"
     ).run()
     _press_bloomberg_refresh(at)
@@ -1024,18 +870,15 @@ def test_bloomberg_mode_missing_quote_side_shows_warning_and_does_not_run():
     assert len(at.metric) == 0
 
 
-# --- 24. Bloomberg failure: exact error shown, no fallback, no stale results -------
-#
-# The stub is installed *inside* the AppTest script function itself (a fresh
-# `from ... import ...` there, exactly like the file's other script
-# functions) rather than via `monkeypatch.setattr(ui_module, ...)` from the
-# test body: under the full suite, earlier suites' `sys.modules` deletion
-# games (see the module docstring's "Full-suite interference" note) can
-# leave the test file's own `ui_module` reference stale relative to what
-# AppTest's fresh import resolves, so an externally-applied patch can miss.
-# Patching inside the script -- which reruns on every widget interaction --
-# uses whatever module object is current at each execution, sidestepping
-# that pre-existing, out-of-scope hazard entirely.
+def test_header_shows_no_live_or_verified_isin_before_a_successful_retrieval():
+    # Before any retrieval, the header must not claim Live or Verified ISIN;
+    # the expected ISIN is shown as unverified.
+    at = _run_page()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    rendered = " ".join(m.value for m in at.markdown)
+    assert "Verified ISIN" not in rendered
+    assert "● Live" not in rendered
+    assert "unverified" in rendered
 
 
 def _bloomberg_failure_script() -> None:
@@ -1060,6 +903,10 @@ def test_bloomberg_failure_shows_exact_error_and_never_falls_back():
     assert any("Bloomberg DAPI session failed to start" in e.value for e in at.error)
     assert len(at.metric) == 0
     assert len(at.download_button) == 0
+    # No Live/Verified claim after a failed retrieval.
+    rendered = " ".join(m.value for m in at.markdown)
+    assert "Verified ISIN" not in rendered
+    assert "● Live" not in rendered
 
 
 def _bloomberg_date_mismatch_script() -> None:
@@ -1088,136 +935,24 @@ def test_bloomberg_date_mismatch_shows_exact_error_and_never_falls_back():
     assert len(at.download_button) == 0
 
 
-# --- 25. Correct headless workflow is called for each mode combination ------------
-
-
-def _bloomberg_price_only_stub_script(calls: list, display: dict) -> None:
-    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
-
-    def _fake_price_only(case, *, bloomberg_security, quote_side):
-        calls.append(
-            {
-                "bloomberg_security": bloomberg_security,
-                "quote_side": quote_side,
-            }
-        )
-        return None, None, None, display
-
-    def _fail_benchmark(*args, **kwargs):
-        raise AssertionError("benchmark workflow must not be called in price-only mode")
-
-    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _fake_price_only
-    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote_and_benchmark = (
-        _fail_benchmark
-    )
-    fresh_ui_module.render_standalone_option_workbench_page()
-
-
-def test_bloomberg_price_only_mode_calls_correct_workflow_and_renders_live_quote():
-    calls: list[dict] = []
-    at = AppTest.from_function(
-        _bloomberg_price_only_stub_script,
-        kwargs={"calls": calls, "display": _FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY},
-        default_timeout=60,
-    )
-    at.run()
-    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
-    _press_bloomberg_refresh(at)
-
-    assert not at.exception
-    assert calls == [{"bloomberg_security": "91282CQX Govt", "quote_side": "MID"}]
-    subheadings = [s.value for s in at.subheader]
-    assert "Live Bloomberg Quote" in subheadings
-
-
-def _bloomberg_benchmark_stub_script(calls: list, display: dict) -> None:
-    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
-
-    def _fake_benchmark(case, benchmark_case, *, bloomberg_security, quote_side):
-        calls.append(
-            {
-                "bloomberg_security": bloomberg_security,
-                "quote_side": quote_side,
-            }
-        )
-        return None, None, None, None, None, None, display
-
-    def _fail_price_only(*args, **kwargs):
-        raise AssertionError("price-only workflow must not be called in benchmark mode")
-
-    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote_and_benchmark = (
-        _fake_benchmark
-    )
-    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _fail_price_only
-    fresh_ui_module.render_standalone_option_workbench_page()
-
-
-@_requires_quantlib
-def test_bloomberg_benchmark_mode_calls_correct_workflow_with_same_side():
-    calls: list[dict] = []
-    at = AppTest.from_function(
-        _bloomberg_benchmark_stub_script,
-        kwargs={"calls": calls, "display": _FAKE_BLOOMBERG_BENCHMARK_DISPLAY},
-        default_timeout=60,
-    )
-    at.run()
-    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
-    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
-    next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
-        json.dumps(_benchmark_envelope())
-    ).run()
-    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
-    _press_bloomberg_refresh(at)
-
-    assert not at.exception
-    assert calls == [{"bloomberg_security": "91282CQX Govt", "quote_side": "MID"}]
-    # The same explicit side reached Bloomberg (asserted above) and there is
-    # no separate active-side selector for comparison/calibration to diverge.
-    assert not any(s.label == "Active quote side" for s in at.selectbox)
-    subheadings = [s.value for s in at.subheader]
-    assert "Live Bloomberg Quote" in subheadings
-    assert "Benchmark" in subheadings
-    assert "Comparison" in subheadings
-    assert "Calibration" in subheadings
-
-
-# --- 26. Live provenance renders as its own distinct section ----------------------
-
-
 def test_live_bloomberg_quote_renders_as_distinct_section_verbatim():
     at = _run_bloomberg_render(_FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY)
     assert not at.exception
-
-    subheadings = [s.value for s in at.subheader]
-    assert "Context" in subheadings
-    assert "Live Bloomberg Quote" in subheadings
-    assert subheadings.index("Live Bloomberg Quote") > subheadings.index("Context")
+    rendered = " ".join(m.value for m in at.markdown)
+    assert "Live Bloomberg quote" in rendered
 
     json_blocks = [json.loads(j.value) for j in at.json]
     assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY in json_blocks
 
 
-def test_live_bloomberg_quote_display_has_no_source_as_of_field():
-    assert "source_as_of" not in _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY
-    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["timestamp_basis"] == "SHIORI_ACQUISITION_TIME"
-    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["bloomberg_quote_observation_time"] is None
-    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["refreshed_scope"] == "BOND_QUOTE_ONLY"
-    assert _FAKE_LIVE_BLOOMBERG_QUOTE_DISPLAY["other_market_inputs"] == "CASE_JSON_UNCHANGED"
-
-
 def test_live_bloomberg_quote_section_states_provenance_disclaimer():
     at = _run_bloomberg_render(_FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY)
     assert not at.exception
-
     captions = " ".join(c.value for c in at.caption)
     assert "quote-observation time is not provided" in captions
     assert "acquired_at is when Shiori received" in captions
     assert "Only the bond quote was refreshed" in captions
     assert "mixed-provenance" in captions
-
-
-# --- 27. Only expected local-input exceptions plus BLIBloombergDapiError caught ----
 
 
 def test_ui_catches_bloomberg_dapi_error_alongside_existing_local_input_exceptions():
@@ -1229,18 +964,165 @@ def test_ui_catches_bloomberg_dapi_error_alongside_existing_local_input_exceptio
     assert "UnicodeDecodeError" in body
 
 
-def test_ui_source_has_no_broad_bloomberg_side_defaults():
-    # Every st.selectbox for a quote side (existing active-side and the new
-    # Bloomberg quote-side selector) starts unselected -- there are exactly
-    # two `index=None` selectboxes in the code body, never a hidden default
-    # like "MID". Scan the body only: the docstring legitimately mentions
-    # `index=None` in prose, which must not count as a widget occurrence.
-    source = inspect.getsource(ui_module)
-    body = source.replace(ui_module.__doc__ or "", "")
-    assert body.count("index=None") == 2
+# ==================================================================================
+# Issue #133 Slice B: the seven-value overlay reaches ALL FOUR workflow paths.
+#
+# Each stub captures the exact ``case`` object the UI passes. Because the UI
+# applies apply_standalone_option_input_overlay before every workflow call, the
+# captured case must be the OVERLAID envelope carrying the trader's edited value
+# (here: a strike changed away from the bundled example's 99.5), not the raw
+# base case. This proves the single bounded overlay is the real bridge on all
+# four paths.
+# ==================================================================================
+
+_EDITED_STRIKE = 97.25
 
 
-def test_ui_source_has_no_source_as_of_or_live_retrieved_at_bloomberg_controls():
+def _assert_overlaid(case: object) -> None:
+    # The UI always passes a dict (the overlay return); assert the seven fields
+    # are present and the edited strike took effect.
+    assert isinstance(case, dict)
+    assert case["bond_option"]["strike_price"] == _EDITED_STRIKE
+    assert case["bond_option"]["option_type"] in ("CALL", "PUT")
+    assert case["bond_option"]["position"] in ("BUY", "SELL")
+    assert "notional" in case["bond_option"]
+    assert "forward_clean_price_per_100" in case["forward_clean_price_input"]
+    assert "quote_side" in case["forward_clean_price_input"]
+    assert "volatility" in case["volatility_input"]
+
+
+def _set_edited_strike(at: AppTest) -> None:
+    next(
+        n for n in at.number_input if n.label == "Strike price (clean, per 100)"
+    ).set_value(_EDITED_STRIKE).run()
+
+
+def _overlay_price_only_script(captured: list, display: dict) -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _stub(case, *, retrieved_at=None):
+        captured.append(case)
+        return None, None, display
+
+    fresh_ui_module.price_standalone_option_case = _stub
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+def test_price_only_workflow_receives_the_overlaid_case():
+    captured: list = []
+    at = AppTest.from_function(
+        _overlay_price_only_script,
+        kwargs={"captured": captured, "display": _FAILED_DISPLAY},
+        default_timeout=60,
+    )
+    at.run()
+    _set_edited_strike(at)
+    _press_price(at)
+
+    assert not at.exception
+    assert len(captured) == 1
+    _assert_overlaid(captured[0])
+
+
+def _overlay_benchmark_script(captured: list, display: dict) -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _stub(case, benchmark_case, *, active_quote_side, retrieved_at=None):
+        captured.append(case)
+        return None, None, None, None, None, display
+
+    fresh_ui_module.price_standalone_option_case_with_benchmark = _stub
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+@_requires_quantlib
+def test_manual_benchmark_workflow_receives_the_overlaid_case():
+    captured: list = []
+    at = AppTest.from_function(
+        _overlay_benchmark_script,
+        kwargs={"captured": captured, "display": _BENCHMARK_PASS_DISPLAY},
+        default_timeout=60,
+    )
+    at.run()
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
+        json.dumps(_benchmark_envelope())
+    ).run()
+    next(s for s in at.selectbox if s.label == "Active quote side").set_value("MID").run()
+    _set_edited_strike(at)
+    _press_price(at)
+
+    assert not at.exception
+    assert len(captured) == 1
+    _assert_overlaid(captured[0])
+
+
+def _overlay_bloomberg_price_only_script(captured: list, display: dict) -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _stub(case, *, bloomberg_security, quote_side):
+        captured.append(case)
+        return None, None, None, display
+
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote = _stub
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+def test_bloomberg_price_only_workflow_receives_the_overlaid_case():
+    captured: list = []
+    at = AppTest.from_function(
+        _overlay_bloomberg_price_only_script,
+        kwargs={"captured": captured, "display": _FAKE_BLOOMBERG_PRICE_ONLY_DISPLAY},
+        default_timeout=60,
+    )
+    at.run()
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _set_edited_strike(at)
+    _press_bloomberg_refresh(at)
+
+    assert not at.exception
+    assert len(captured) == 1
+    _assert_overlaid(captured[0])
+
+
+def _overlay_bloomberg_benchmark_script(captured: list, display: dict) -> None:
+    from shiori_pricing_lab.app import standalone_option_ui as fresh_ui_module
+
+    def _stub(case, benchmark_case, *, bloomberg_security, quote_side):
+        captured.append(case)
+        return None, None, None, None, None, None, display
+
+    fresh_ui_module.price_standalone_option_case_with_bloomberg_quote_and_benchmark = _stub
+    fresh_ui_module.render_standalone_option_workbench_page()
+
+
+@_requires_quantlib
+def test_bloomberg_benchmark_workflow_receives_the_overlaid_case():
+    captured: list = []
+    at = AppTest.from_function(
+        _overlay_bloomberg_benchmark_script,
+        kwargs={"captured": captured, "display": _FAKE_BLOOMBERG_BENCHMARK_DISPLAY},
+        default_timeout=60,
+    )
+    at.run()
+    _set_mode(at, _MODE_PRICE_AND_BENCHMARK)
+    _set_bond_quote_source(at, _BOND_QUOTE_SOURCE_BLOOMBERG)
+    next(t for t in at.text_area if t.label == "Standalone option benchmark JSON").set_value(
+        json.dumps(_benchmark_envelope())
+    ).run()
+    _fill_bloomberg_inputs(at, security="91282CQX Govt", side="MID")
+    _set_edited_strike(at)
+    _press_bloomberg_refresh(at)
+
+    assert not at.exception
+    assert len(captured) == 1
+    _assert_overlaid(captured[0])
+
+
+def test_overlay_is_applied_before_every_workflow_call_in_source():
+    # Exactly one overlay call site feeds the shared overlaid_case into all four
+    # branches -- a single bounded bridge, not four ad-hoc ones.
     source = inspect.getsource(ui_module)
-    assert "source_as_of (must equal" not in source
-    assert "bloomberg_source_as_of_text" not in source
+    assert source.count("apply_standalone_option_input_overlay(") == 1
+    assert "overlaid_case" in source

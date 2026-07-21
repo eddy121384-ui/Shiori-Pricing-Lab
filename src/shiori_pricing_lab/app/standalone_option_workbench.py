@@ -403,6 +403,83 @@ def price_standalone_option_case(
     return request, result, display
 
 
+# --- Issue #133 Slice B: bounded seven-value trader-input overlay -----------------
+
+# The exact set of case fields the trader workbench exposes as editable inputs
+# (Issue #133 Slice B contract). Every other case field stays read-only. Each
+# tuple is (top_level_envelope_key, nested_field_name) -- the overlay replaces
+# only these nested fields, on a copy, and touches nothing else.
+_OVERLAY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("bond_option", "option_type"),
+    ("bond_option", "position"),
+    ("bond_option", "strike_price"),
+    ("bond_option", "notional"),
+    ("forward_clean_price_input", "forward_clean_price_per_100"),
+    ("forward_clean_price_input", "quote_side"),
+    ("volatility_input", "volatility"),
+)
+
+
+def apply_standalone_option_input_overlay(
+    case: str | dict,
+    *,
+    option_type: str,
+    position: str,
+    strike_price: float,
+    notional: float,
+    forward_clean_price_per_100: float,
+    forward_quote_side: str,
+    volatility: str | float,
+) -> dict:
+    """Return a copy of ``case`` with only the seven supported trader inputs replaced.
+
+    The bounded, **non-mutating** overlay that sits between the workbench UI
+    and every existing workflow call (Issue #133 Slice B): it validates the
+    top-level envelope through the same :func:`_parse_standalone_option_case`
+    rules, then returns a **new** envelope dict whose ``bond_option``,
+    ``forward_clean_price_input``, and ``volatility_input`` sub-objects are
+    fresh copies with exactly the seven overlaid values written in --
+
+    - ``bond_option.option_type``, ``bond_option.position``,
+      ``bond_option.strike_price``, ``bond_option.notional``;
+    - ``forward_clean_price_input.forward_clean_price_per_100``,
+      ``forward_clean_price_input.quote_side``;
+    - ``volatility_input.volatility``.
+
+    Every other field (curve points, reference universe, bond quote, credit
+    spread, dates, provenance, ``volatility_basis``, ...) is carried through
+    unchanged. The input ``case`` -- whether a JSON string or an
+    already-parsed mapping -- is never mutated: the top level and each of the
+    three touched sub-objects are shallow-copied before a value is written,
+    and the untouched sub-objects are shared by reference but never modified.
+    This helper performs no coercion, defaulting, or validation of the seven
+    values themselves; each still flows into its existing typed constructor
+    (``BondOption`` / ``BLIForwardCleanPriceInput`` / ``BLIVolatilityInput``)
+    downstream, which raises unremapped on a bad value exactly as before.
+    """
+
+    envelope = _parse_standalone_option_case(case)
+    return {
+        **envelope,
+        "bond_option": {
+            **envelope["bond_option"],
+            "option_type": option_type,
+            "position": position,
+            "strike_price": strike_price,
+            "notional": notional,
+        },
+        "forward_clean_price_input": {
+            **envelope["forward_clean_price_input"],
+            "forward_clean_price_per_100": forward_clean_price_per_100,
+            "quote_side": forward_quote_side,
+        },
+        "volatility_input": {
+            **envelope["volatility_input"],
+            "volatility": volatility,
+        },
+    }
+
+
 # --- Issue #125: benchmark comparison / implied PRICE_VOL orchestration ----------
 
 # Exactly the BLIBenchmarkQuote dataclass field names (data/bli_benchmark_quote.py)
