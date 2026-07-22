@@ -48,10 +48,32 @@
     detailsFrequency: document.getElementById("details-frequency"),
     detailsCurrency: document.getElementById("details-currency"),
     sidebarAsOf: document.getElementById("sidebar-as-of-timestamp"),
+    optionTermsPricingTimestamp: document.getElementById("option-terms-pricing-timestamp"),
+    optionTermsExpiryTimestamp: document.getElementById("option-terms-expiry-timestamp"),
+    optionTermsSettlementLag: document.getElementById("option-terms-settlement-lag"),
   };
 
   let baseOverlay = null;
   let baseDisplay = null;
+
+  // Codex review follow-up: every async operation that can update the
+  // Pricing Results panel (the initial /api/base load and each Price click)
+  // captures the current generation number before it starts, and refuses to
+  // render if the generation has moved on by the time it resolves. Clear and
+  // a new Price click both bump the generation, so a slow/stale response
+  // (an earlier Price request that resolves after a later one, or after
+  // Clear) can never overwrite newer state -- only the single most recent
+  // request may render.
+  let currentGeneration = 0;
+  let inFlightPriceController = null;
+
+  function beginRequest() {
+    return ++currentGeneration;
+  }
+
+  function isStaleRequest(generation) {
+    return generation !== currentGeneration;
+  }
 
   function fmt(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -115,6 +137,10 @@
     els.detailsCurrency.textContent = context.currency;
 
     els.sidebarAsOf.textContent = context.as_of_timestamp;
+
+    els.optionTermsPricingTimestamp.textContent = context.pricing_timestamp;
+    els.optionTermsExpiryTimestamp.textContent = context.expiry_timestamp;
+    setTextOrNotAvailable(els.optionTermsSettlementLag, context.settlement_lag_days);
   }
 
   function setToggle(toggleEl, value) {
@@ -147,28 +173,32 @@
     };
   }
 
-  function renderDisplay(display) {
-    if (display.status === "FAILED") {
-      els.priceTotal.textContent = "—";
-      els.priceTotalCcy.textContent = "";
-      els.pricePer100.textContent = "—";
-      els.resultCurrency.textContent = "—";
-      els.greekDelta.textContent = "—";
-      els.greekGamma.textContent = "—";
-      els.greekVega.textContent = "—";
-      els.greekTheta.textContent = "—";
+  function clearResultFields() {
+    els.priceTotal.textContent = "—";
+    els.priceTotalCcy.textContent = "";
+    els.pricePer100.textContent = "—";
+    els.resultCurrency.textContent = "—";
+    els.greekDelta.textContent = "—";
+    els.greekGamma.textContent = "—";
+    els.greekVega.textContent = "—";
+    els.greekTheta.textContent = "—";
+  }
 
-      const messages = (display.errors || [])
-        .map((e) => `${e.code}: ${e.message}`)
-        .join(" | ");
-      els.errorBanner.textContent = messages || "Pricing failed.";
-      els.errorBanner.hidden = false;
+  // The single, unified failure path (Codex review follow-up): used for a
+  // FAILED PricingResult, an HTTP 400/non-2xx bridge response, a
+  // network-level fetch rejection, and a non-JSON response body alike.
+  // Every one of these clears every premium/currency/Greek field and shows
+  // an explicit error banner plus a failed status -- never leaves a prior
+  // successful result or its green "loaded" status on screen.
+  function renderFailure(message) {
+    clearResultFields();
+    els.errorBanner.textContent = message;
+    els.errorBanner.hidden = false;
+    els.statusIndicator.classList.add("failed");
+    els.statusText.textContent = "Pricing failed";
+  }
 
-      els.statusIndicator.classList.add("failed");
-      els.statusText.textContent = "Pricing failed";
-      return;
-    }
-
+  function renderSuccess(display) {
     els.errorBanner.hidden = true;
     els.errorBanner.textContent = "";
     els.statusIndicator.classList.remove("failed");
@@ -184,18 +214,32 @@
     els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
   }
 
-  function showFetchError(message) {
-    els.errorBanner.textContent = message;
-    els.errorBanner.hidden = false;
-    els.statusIndicator.classList.add("failed");
-    els.statusText.textContent = "Request failed";
+  function renderDisplay(display) {
+    if (display.status === "FAILED") {
+      const messages = (display.errors || [])
+        .map((e) => `${e.code}: ${e.message}`)
+        .join(" | ");
+      renderFailure(messages || "Pricing failed.");
+      return;
+    }
+    renderSuccess(display);
   }
 
   async function loadBase() {
-    const response = await fetch("/api/base");
-    const payload = await response.json();
+    const generation = beginRequest();
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/base");
+      payload = await response.json();
+    } catch (err) {
+      if (isStaleRequest(generation)) return;
+      renderFailure("Failed to load base case: " + err.message);
+      return;
+    }
+    if (isStaleRequest(generation)) return;
     if (!response.ok) {
-      showFetchError(payload.error || "Failed to load base case.");
+      renderFailure(payload.error || "Failed to load base case.");
       return;
     }
     baseOverlay = payload.overlay;
@@ -207,20 +251,47 @@
 
   async function priceCurrentForm() {
     const overlay = readOverlayFromForm();
-    const response = await fetch("/api/price", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(overlay),
-    });
-    const payload = await response.json();
+    const generation = beginRequest();
+
+    if (inFlightPriceController) {
+      inFlightPriceController.abort();
+    }
+    const controller = new AbortController();
+    inFlightPriceController = controller;
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/price", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(overlay),
+        signal: controller.signal,
+      });
+      payload = await response.json();
+    } catch (err) {
+      // Either a genuine network/JSON failure, or this request was
+      // superseded (aborted by a newer Price click or by Clear) -- either
+      // way, a stale generation means a newer render has already happened
+      // and must not be overwritten.
+      if (isStaleRequest(generation)) return;
+      renderFailure("Pricing request failed: " + err.message);
+      return;
+    }
+    if (isStaleRequest(generation)) return;
     if (!response.ok) {
-      showFetchError(payload.error || "Pricing request failed.");
+      renderFailure(payload.error || "Pricing request failed.");
       return;
     }
     renderDisplay(payload);
   }
 
   function clearToBase() {
+    beginRequest(); // invalidate any in-flight Price request's eventual response
+    if (inFlightPriceController) {
+      inFlightPriceController.abort();
+      inFlightPriceController = null;
+    }
     if (!baseOverlay || !baseDisplay) {
       return;
     }

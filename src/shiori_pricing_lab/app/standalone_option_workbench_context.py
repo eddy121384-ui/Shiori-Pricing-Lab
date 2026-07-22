@@ -6,6 +6,7 @@ Scope: one small, pure function -- :func:`extract_standalone_option_case_context
 standalone-option-case mapping and returns them verbatim in a flat dict. No
 new schema/dataclass, no pricing, no market/derived value of any kind: every
 returned value is either a direct top-level case field, a direct field on
+``bond_option`` (``expiry_date``, ``settlement_lag_days``), a direct field on
 the one ``bond_reference_data_universe`` record whose ``isin`` matches
 ``bond_option.underlying_isin``, or a direct field on ``bond_quote``. A field
 the case does not carry at all (e.g. a CUSIP -- this schema has no such
@@ -20,17 +21,32 @@ ran against the bundled synthetic bond -- a screenshot showing a real
 premium next to a fake instrument identity is misleading. This function
 makes the real case's own identity/date/quote fields available to the page,
 with zero pricing or derivation logic added.
+
+**Codex review follow-up.** ``pricing_timestamp``, ``expiry_timestamp``, and
+``settlement_lag_days`` were added so the prototype's "Time to Expiry" and
+"Delivery Delay" rows -- previously a hardcoded fabricated countdown
+(``"090 18:25"``) and a hardcoded ``"1"`` -- can show the case's own real
+timestamps/lag instead. No countdown, day-count, or business-day math is
+computed anywhere in this module; the two timestamps and the lag are
+returned exactly as stored.
 """
 
 from __future__ import annotations
 
 _TOP_LEVEL_FIELDS = (
     "valuation_date",
+    "pricing_timestamp",
+    "expiry_timestamp",
     "forward_settlement_date",
     "option_settlement_date",
     "source_system",
     "as_of_timestamp",
     "snapshot_id",
+)
+
+_BOND_OPTION_FIELDS = (
+    "expiry_date",
+    "settlement_lag_days",
 )
 
 _REFERENCE_DATA_FIELDS = (
@@ -77,10 +93,9 @@ def extract_standalone_option_case_context(case: dict) -> dict:
     reference_data = matches[0]
     bond_quote = case["bond_quote"]
 
-    context: dict = {
-        "underlying_isin": underlying_isin,
-        "expiry_date": bond_option["expiry_date"],
-    }
+    context: dict = {"underlying_isin": underlying_isin}
+    for field in _BOND_OPTION_FIELDS:
+        context[field] = bond_option[field]
     for field in _REFERENCE_DATA_FIELDS:
         context[field] = reference_data[field]
     for field in _BOND_QUOTE_FIELDS:

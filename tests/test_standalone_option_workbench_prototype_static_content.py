@@ -1,12 +1,13 @@
 """Proves the prototype's static files no longer carry the old hardcoded
 reference-image market claims that a real pricing case now runs underneath
-(PR #136 correctness follow-up).
+(PR #136 correctness follow-up, and the Codex review follow-up round).
 
 This is a plain text-content check on the on-disk HTML/JS -- no browser, no
 DOM -- deliberately narrow: it exists only to catch a regression where
 someone reintroduces the fictitious "US TREASURY" identity, its CUSIP/ISIN,
-or the 32nds-formatted "96-15" price next to a screenshot of a real pricing
-run against the bundled synthetic bond.
+the 32nds-formatted "96-15" price, the fabricated countdown/delay/vol/rate
+numbers, or the US flag icon next to a screenshot of a real pricing run
+against the bundled synthetic bond (which has no country field at all).
 """
 
 from __future__ import annotations
@@ -20,6 +21,12 @@ _STALE_MARKET_CLAIMS = (
     "91282CPZ7",  # the old fabricated CUSIP
     "US91282CPZ72",  # the old fabricated ISIN
     "96-15",  # the old 32nds-formatted price
+    "090 18:25",  # the old fabricated "time to expiry" countdown
+    "71.500",  # the old fabricated Normal Yield Vol (bp)
+    "15.54",  # the old fabricated Lognormal Yield Vol
+    "3.750",  # the old fabricated USD Rate (MMkt)
+    "#b22234",  # the old US flag's red (Codex review: no country field exists)
+    "#3c3b6e",  # the old US flag's blue
 )
 
 
@@ -44,3 +51,21 @@ def test_index_html_references_the_real_case_isin_field() -> None:
     assert "XS0000000001" not in text
     assert 'id="instr-isin"' in text
     assert 'id="instr-title"' in text
+
+
+def test_index_html_has_no_us_flag_element() -> None:
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'class="flag"' not in text
+
+
+def test_index_html_wires_timing_fields_to_real_context_elements() -> None:
+    # The old hardcoded "Time to Expiry" (090 18:25) and "Delivery Delay"
+    # ("1") controls are gone; these element IDs are populated by script.js
+    # from context.pricing_timestamp / expiry_timestamp / settlement_lag_days.
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "option-terms-pricing-timestamp",
+        "option-terms-expiry-timestamp",
+        "option-terms-settlement-lag",
+    ):
+        assert f'id="{element_id}"' in text
