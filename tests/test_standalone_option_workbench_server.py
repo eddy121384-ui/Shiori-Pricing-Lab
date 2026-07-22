@@ -21,6 +21,9 @@ from collections.abc import Iterator
 import pytest
 
 from shiori_pricing_lab.app.standalone_option_workbench import price_standalone_option_case
+from shiori_pricing_lab.app.standalone_option_workbench_context import (
+    extract_standalone_option_case_context,
+)
 from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     apply_standalone_option_case_overlay,
     extract_standalone_option_case_overlay,
@@ -98,6 +101,8 @@ def test_api_base_matches_direct_call_to_price_standalone_option_case(server_url
 
     assert payload["display"] == expected_display
     assert payload["overlay"] == extract_standalone_option_case_overlay(base_case)
+    assert payload["context"] == extract_standalone_option_case_context(base_case)
+    assert "cusip" not in payload["context"]
 
 
 @_QUANTLIB_SKIP

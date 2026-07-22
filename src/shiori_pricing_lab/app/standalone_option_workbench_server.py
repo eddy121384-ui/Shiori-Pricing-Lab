@@ -18,9 +18,10 @@ JSON.
 - ``GET /`` -- serves ``prototype/bond-option-workbench/index.html``.
 - ``GET /styles.css`` / ``GET /script.js`` -- serve the matching static file.
 - ``GET /api/base`` -- prices the unmodified base case and returns
-  ``{"overlay": <6-field dict>, "display": <display dict>}``. The page loads
-  this once on startup so its initial values and its "Clear" action both come
-  from the exact same base case / pricing response.
+  ``{"overlay": <6-field dict>, "context": <read-only identity/date/quote
+  dict>, "display": <display dict>}``. The page loads this once on startup
+  so its initial values, its instrument identity, and its "Clear" action all
+  come from the exact same base case / pricing response.
 - ``POST /api/price`` -- body is a JSON object with exactly the six overlay
   keys (see ``standalone_option_workbench_overlay.OVERLAY_FIELDS``). Applies
   the overlay to a fresh copy of the base case, prices it, and returns the
@@ -43,6 +44,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from shiori_pricing_lab.app.standalone_option_workbench import price_standalone_option_case
+from shiori_pricing_lab.app.standalone_option_workbench_context import (
+    extract_standalone_option_case_context,
+)
 from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     apply_standalone_option_case_overlay,
     extract_standalone_option_case_overlay,
@@ -70,16 +74,25 @@ def load_base_case() -> dict:
 
 
 def price_base_case() -> dict:
-    """Price the unmodified base case and return ``{"overlay", "display"}``.
+    """Price the unmodified base case and return ``{"overlay", "context", "display"}``.
 
     Both this function and :func:`price_overlay_case` are the only two ways
     this module ever calls the pricing entry point -- always through the
-    unmodified ``price_standalone_option_case``.
+    unmodified ``price_standalone_option_case``. ``context`` is the bounded,
+    read-only identity/date/quote dict from
+    ``standalone_option_workbench_context`` -- it never changes across a
+    ``/api/price`` call in this round, since none of the six overlay fields
+    touch the underlying instrument's identity, so it is fetched here once,
+    on ``/api/base``, and never resent by ``/api/price``.
     """
 
     base_case = load_base_case()
     _, _, display = price_standalone_option_case(base_case)
-    return {"overlay": extract_standalone_option_case_overlay(base_case), "display": display}
+    return {
+        "overlay": extract_standalone_option_case_overlay(base_case),
+        "context": extract_standalone_option_case_context(base_case),
+        "display": display,
+    }
 
 
 def price_overlay_case(overlay: dict) -> dict:

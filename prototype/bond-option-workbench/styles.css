@@ -296,6 +296,19 @@ html, body {
   font-style: italic;
   font-size: 12.5px;
 }
+/* Overrides for value classes with higher base specificity than a bare
+   .pending-value (e.g. ".stat .s-val") -- otherwise a "Not available"
+   placeholder would render with the real-value styling it is standing in
+   for (large/bold/dark), which defeats the point of a placeholder. */
+.stat .s-val.pending-value,
+.us-item .u-v.pending-value,
+.id-block .i-v.pending-value {
+  font-size: 12.5px;
+  font-weight: 500;
+  font-style: italic;
+  color: var(--muted-2);
+  letter-spacing: normal;
+}
 .chart-pending {
   align-items: center;
   justify-content: center;

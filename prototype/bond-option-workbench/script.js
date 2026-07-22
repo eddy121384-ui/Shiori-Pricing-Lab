@@ -29,6 +29,25 @@
     greekGamma: document.getElementById("greek-gamma"),
     greekVega: document.getElementById("greek-vega"),
     greekTheta: document.getElementById("greek-theta"),
+    instrTitle: document.getElementById("instr-title"),
+    instrIsin: document.getElementById("instr-isin"),
+    quoteSideBadge: document.getElementById("quote-side-badge"),
+    statCleanPrice: document.getElementById("stat-clean-price"),
+    statYieldMid: document.getElementById("stat-yield-mid"),
+    statValuationDate: document.getElementById("stat-valuation-date"),
+    statOptionSettlement: document.getElementById("stat-option-settlement"),
+    optionTermsExpiry: document.getElementById("option-terms-expiry"),
+    forwardSettlementNote: document.getElementById("forward-settlement-note"),
+    snapshotCleanPrice: document.getElementById("snapshot-clean-price"),
+    snapshotYield: document.getElementById("snapshot-yield"),
+    snapshotAccruedInterest: document.getElementById("snapshot-accrued-interest"),
+    detailsIssuer: document.getElementById("details-issuer"),
+    detailsCoupon: document.getElementById("details-coupon"),
+    detailsMaturity: document.getElementById("details-maturity"),
+    detailsDayCount: document.getElementById("details-day-count"),
+    detailsFrequency: document.getElementById("details-frequency"),
+    detailsCurrency: document.getElementById("details-currency"),
+    sidebarAsOf: document.getElementById("sidebar-as-of-timestamp"),
   };
 
   let baseOverlay = null;
@@ -39,6 +58,63 @@
       return "—"; // em dash: never a fabricated zero
     }
     return value.toFixed(6);
+  }
+
+  // Displays a raw, dimensionless coupon fraction (e.g. 0.0325) as a
+  // percentage (3.250%). This is the one display-only arithmetic transform
+  // this file applies anywhere: value * 100, deterministic, no market
+  // assumption or model involved -- showing the raw fraction unlabeled
+  // would misrepresent a 3.25% coupon as an apparent 0.0325% one.
+  function fmtCouponPercent(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return "Not available";
+    }
+    return (value * 100).toFixed(3) + "%";
+  }
+
+  function naIfNull(value) {
+    return value === null || value === undefined ? "Not available" : String(value);
+  }
+
+  function setTextOrNotAvailable(el, value) {
+    const text = naIfNull(value);
+    el.textContent = text;
+    el.classList.toggle("pending-value", text === "Not available");
+  }
+
+  // Renders the bounded, read-only context dict verbatim (see
+  // standalone_option_workbench_context.py) -- every value here is exactly
+  // as it appears in examples/standalone_option_case.json, with the single
+  // coupon percent transform above. Called once, right after /api/base
+  // resolves: none of the six overlay fields change the underlying
+  // instrument's identity, so this never needs to be re-rendered by Price
+  // or Clear.
+  function renderContext(context) {
+    els.instrTitle.textContent = context.issuer;
+    els.instrIsin.textContent = context.underlying_isin;
+    els.quoteSideBadge.textContent = context.quote_side;
+
+    setTextOrNotAvailable(els.statCleanPrice, context.clean_price_per_100);
+    setTextOrNotAvailable(els.statYieldMid, context.yield_value);
+    els.statValuationDate.textContent = context.valuation_date;
+    els.statOptionSettlement.textContent = context.option_settlement_date;
+
+    els.optionTermsExpiry.textContent = context.expiry_date;
+    els.forwardSettlementNote.textContent =
+      "Forward settlement: " + context.forward_settlement_date;
+
+    setTextOrNotAvailable(els.snapshotCleanPrice, context.clean_price_per_100);
+    setTextOrNotAvailable(els.snapshotYield, context.yield_value);
+    setTextOrNotAvailable(els.snapshotAccruedInterest, context.accrued_interest_per_100);
+
+    els.detailsIssuer.textContent = context.issuer;
+    els.detailsCoupon.textContent = fmtCouponPercent(context.coupon);
+    els.detailsMaturity.textContent = context.maturity_date;
+    els.detailsDayCount.textContent = context.day_count;
+    els.detailsFrequency.textContent = context.coupon_frequency;
+    els.detailsCurrency.textContent = context.currency;
+
+    els.sidebarAsOf.textContent = context.as_of_timestamp;
   }
 
   function setToggle(toggleEl, value) {
@@ -124,6 +200,7 @@
     }
     baseOverlay = payload.overlay;
     baseDisplay = payload.display;
+    renderContext(payload.context);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
   }

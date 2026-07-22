@@ -29,7 +29,7 @@
     <div class="nav-right">
       <span class="pill"><span class="dot"></span>Local Case</span>
       <span class="pill"><span class="dot" style="background:var(--muted-2)"></span>Synthetic Data</span>
-      <span class="mid-badge">MID</span>
+      <span class="mid-badge" id="quote-side-badge">&hellip;</span>
       <span class="icon-btn">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
       </span>
@@ -80,7 +80,7 @@
       <div class="sidebar-foot">
         <div class="lbl">Market Data</div>
         <div class="live"><span class="dot"></span>Local Case</div>
-        <div class="asof">As of 10:55:32 ET<br/>07/21/2026</div>
+        <div class="asof">As of<br/><span id="sidebar-as-of-timestamp">&mdash;</span></div>
       </div>
     </aside>
 
@@ -94,45 +94,41 @@
             <span class="flag">
               <svg width="30" height="30" viewBox="0 0 30 30"><clipPath id="fc"><circle cx="15" cy="15" r="15"/></clipPath><g clip-path="url(#fc)"><rect width="30" height="30" fill="#b22234"/><g fill="#fff"><rect y="2.3" width="30" height="2.3"/><rect y="6.9" width="30" height="2.3"/><rect y="11.5" width="30" height="2.3"/><rect y="16.1" width="30" height="2.3"/><rect y="20.7" width="30" height="2.3"/><rect y="25.3" width="30" height="2.3"/></g><rect width="14" height="12.7" fill="#3c3b6e"/></g></svg>
             </span>
-            <span class="instr-title">US TREASURY N/B 4.125% 02/15/2036</span>
+            <span class="instr-title" id="instr-title">Loading&hellip;</span>
             <span class="star">
               <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><polygon points="12 2 15 9 22 9.3 16.5 14 18.5 21 12 17 5.5 21 7.5 14 2 9.3 9 9"/></svg>
             </span>
           </div>
           <div class="badges">
-            <span class="badge"><span class="k">CUSIP</span><span class="v">91282CPZ7</span></span>
-            <span class="badge"><span class="k">ISIN</span><span class="v">US91282CPZ72</span></span>
+            <span class="badge"><span class="k">ISIN</span><span class="v" id="instr-isin">&hellip;</span></span>
           </div>
         </div>
 
         <div class="stats">
           <div class="stat">
-            <span class="s-lbl">Price (Mid)</span>
-            <span class="pending-value">Pending model support</span>
+            <span class="s-lbl">Clean Price (Mid)</span>
+            <span class="s-val" id="stat-clean-price">&mdash;</span>
           </div>
           <div class="stat">
             <span class="s-lbl">Yield (Mid)</span>
-            <span class="s-val">4.585<span class="pct">%</span></span>
+            <span class="s-val" id="stat-yield-mid">&mdash;</span>
           </div>
           <div class="stat">
-            <span class="s-lbl">Trade Date</span>
+            <span class="s-lbl">Pricing Date</span>
             <div class="date-row">
               <span class="field-box">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                07/21/2026
+                <span id="stat-valuation-date">&mdash;</span>
               </span>
-              <span class="field-box sm">10:55</span>
-              <span class="suffix-txt">ET</span>
             </div>
           </div>
           <div class="stat">
-            <span class="s-lbl">Settlement Date</span>
+            <span class="s-lbl">Option Settlement</span>
             <div class="date-row">
               <span class="field-box">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                07/22/2026
+                <span id="stat-option-settlement">&mdash;</span>
               </span>
-              <span class="suffix-txt">T+1</span>
             </div>
           </div>
         </div>
@@ -167,11 +163,7 @@
             <input class="control" id="notional-input" type="text" inputmode="decimal" value="50.0">
           </div>
           <div class="form-row"><label>Expiry</label>
-            <div class="date-row">
-              <span class="control" style="width:auto;flex:1;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted-2)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>10/20/2026</span>
-              <span class="control" style="width:70px;">05:20</span>
-              <span class="suffix-txt">ET</span>
-            </div>
+            <span class="control" style="width:auto;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted-2)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span id="option-terms-expiry">&mdash;</span></span>
           </div>
           <div class="form-row"><label>Time to Expiry</label>
             <div class="control select">090 18:25<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
@@ -225,8 +217,11 @@
         <div class="right-bottom">
           <div class="card forward-carry">
             <div class="card-title">Forward &amp; Carry</div>
-            <div class="fc-row"><label>Forward Price (per 100)</label>
-              <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
+            <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Price (per 100)</label>
+              <div>
+                <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
+                <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
+              </div>
             </div>
             <div class="fc-row"><label>USD Rate (MMkt)</label>
               <div class="fc-rate">
@@ -244,9 +239,9 @@
             <div class="card-title">Underlying Snapshot</div>
             <div class="us-body">
               <div class="us-list">
-                <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="pending-value">Pending model support</span></div>
-                <div class="us-item"><span class="u-k">Yield (Mid)</span><span class="u-v">4.585 %</span></div>
-                <div class="us-item"><span class="u-k">Accrued Interest</span><span class="u-v">1.0928</span></div>
+                <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="u-v" id="snapshot-clean-price">&mdash;</span></div>
+                <div class="us-item"><span class="u-k">Yield (Mid)</span><span class="u-v" id="snapshot-yield">&mdash;</span></div>
+                <div class="us-item"><span class="u-k">Accrued Interest</span><span class="u-v" id="snapshot-accrued-interest">&mdash;</span></div>
                 <div class="us-item"><span class="u-k">Modified Duration</span><span class="pending-value">Pending model support</span></div>
                 <div class="us-item"><span class="u-k">Convexity</span><span class="pending-value">Pending model support</span></div>
                 <div class="us-item"><span class="u-k">OAS (Mid)</span><span class="pending-value">Pending model support</span></div>
@@ -271,24 +266,24 @@
         </div>
         <div class="id-grid">
           <div class="id-block">
-            <span class="i-k">Issuer</span><span class="i-v">United States Treasury</span>
-            <span class="i-k">Coupon</span><span class="i-v">4.125%</span>
-            <span class="i-k">Maturity</span><span class="i-v">02/15/2036</span>
-            <span class="i-k">Next Call Date</span><span class="i-v">N/A</span>
+            <span class="i-k">Issuer</span><span class="i-v" id="details-issuer">&mdash;</span>
+            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
+            <span class="i-k">Maturity</span><span class="i-v" id="details-maturity">&mdash;</span>
+            <span class="i-k">Next Call Date</span><span class="i-v pending-value">Not available</span>
           </div>
           <div class="id-block">
-            <span class="i-k">Callable</span><span class="i-v">No</span>
-            <span class="i-k">Day Count</span><span class="i-v">ACT/ACT</span>
-            <span class="i-k">Frequency</span><span class="i-v">Semi-Annual</span>
-            <span class="i-k">Ex-Dividend Date</span><span class="i-v">02/01/2036</span>
+            <span class="i-k">Callable</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
+            <span class="i-k">Frequency</span><span class="i-v" id="details-frequency">&mdash;</span>
+            <span class="i-k">Ex-Dividend Date</span><span class="i-v pending-value">Not available</span>
           </div>
           <div class="id-block">
-            <span class="i-k">Listing</span><span class="i-v">--</span>
-            <span class="i-k">Country</span><span class="i-v">United States</span>
-            <span class="i-k">Currency</span><span class="i-v">USD</span>
-            <span class="i-k">Domicile</span><span class="i-v">United States</span>
+            <span class="i-k">Listing</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Country</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Currency</span><span class="i-v" id="details-currency">&mdash;</span>
+            <span class="i-k">Domicile</span><span class="i-v pending-value">Not available</span>
           </div>
-          <div class="notes-block">--</div>
+          <div class="notes-block pending-value">Not available</div>
         </div>
       </section>
 
