@@ -27,13 +27,9 @@
       </span>
     </nav>
     <div class="nav-right">
-      <span class="pill"><span class="dot"></span>Live</span>
-      <span class="pill"><span class="dot"></span>Bloomberg DAPI</span>
+      <span class="pill"><span class="dot"></span>Local Case</span>
+      <span class="pill"><span class="dot" style="background:var(--muted-2)"></span>Synthetic Data</span>
       <span class="mid-badge">MID</span>
-      <span class="pill verified">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
-        Verified ISIN
-      </span>
       <span class="icon-btn">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
       </span>
@@ -83,7 +79,7 @@
 
       <div class="sidebar-foot">
         <div class="lbl">Market Data</div>
-        <div class="live"><span class="dot"></span>Live</div>
+        <div class="live"><span class="dot"></span>Local Case</div>
         <div class="asof">As of 10:55:32 ET<br/>07/21/2026</div>
       </div>
     </aside>
@@ -112,8 +108,7 @@
         <div class="stats">
           <div class="stat">
             <span class="s-lbl">Price (Mid)</span>
-            <span class="s-val">96-15</span>
-            <span class="s-sub">(96.4688)</span>
+            <span class="pending-value">Pending model support</span>
           </div>
           <div class="stat">
             <span class="s-lbl">Yield (Mid)</span>
@@ -160,25 +155,16 @@
             <div class="control select">European<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
           <div class="form-row"><label>Call / Put</label>
-            <div class="toggle"><span class="opt on">Call</span><span class="opt">Put</span></div>
+            <div class="toggle" id="option-type-toggle"><span class="opt on" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
           </div>
           <div class="form-row"><label>Direction</label>
-            <div class="control select">Buy<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+            <div class="toggle" id="position-toggle"><span class="opt on" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
           </div>
-          <div class="form-row"><label>Strike</label>
-            <div class="two-col">
-              <div class="control select">96-15+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-              <div class="control select">ATM<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-            </div>
+          <div class="form-row"><label>Strike (per 100)</label>
+            <input class="control" id="strike-price-input" type="text" inputmode="decimal" value="99.5">
           </div>
-          <div class="form-row"><label>Strike Mode</label>
-            <div class="control select">% of Money<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-          </div>
-          <div class="form-row"><label>Strike (Yield)</label>
-            <div class="control">4.5943<span class="unit">%</span></div>
-          </div>
-          <div class="form-row"><label>Position</label>
-            <div class="control">1.00</div>
+          <div class="form-row"><label>Notional</label>
+            <input class="control" id="notional-input" type="text" inputmode="decimal" value="50.0">
           </div>
           <div class="form-row"><label>Expiry</label>
             <div class="date-row">
@@ -199,8 +185,8 @@
           <div class="form-row"><label>Model</label>
             <div class="control select">Black (Modified)<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
-          <div class="form-row"><label>Price Volatility (σ)</label>
-            <div class="control">5.412<span class="unit">%</span></div>
+          <div class="form-row"><label>Price Vol (σ, decimal)</label>
+            <input class="control" id="volatility-input" type="text" inputmode="decimal" value="0.18">
           </div>
           <div class="form-row"><label>Normal Yield Vol (bp)</label>
             <div class="control">71.500</div>
@@ -213,24 +199,25 @@
         <!-- Pricing results -->
         <div class="card pricing-results">
           <div class="card-title">Pricing Results</div>
+          <div class="error-banner" id="pricing-error-banner" hidden></div>
           <div class="pr-row r1">
-            <div class="pr-cell"><div class="p-lbl">Price (Total)</div><div class="p-val teal">1.0212</div><div class="p-sub">USD</div></div>
-            <div class="pr-cell"><div class="p-lbl">Price (Unit)</div><div class="p-val teal">00-31+</div><div class="p-sub">(0.9844)</div></div>
-            <div class="pr-cell"><div class="p-lbl">Price (%)</div><div class="p-val">1.0212 <span style="font-size:15px;color:var(--muted);">%</span></div></div>
-            <div class="pr-cell"><div class="p-lbl">Currency</div><div class="p-val">USD</div></div>
+            <div class="pr-cell"><div class="p-lbl">Price (Total)</div><div class="p-val teal" id="price-total">&mdash;</div><div class="p-sub" id="price-total-ccy"></div></div>
+            <div class="pr-cell"><div class="p-lbl">Price (Per 100)</div><div class="p-val teal" id="price-per-100">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Price (%)</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">Currency</div><div class="p-val" id="result-currency">&mdash;</div></div>
           </div>
           <div class="pr-row r2">
-            <div class="pr-cell"><div class="p-lbl">Delta</div><div class="p-val">0.1534</div></div>
-            <div class="pr-cell"><div class="p-lbl">Gamma</div><div class="p-val">0.000154</div></div>
-            <div class="pr-cell"><div class="p-lbl">Vega</div><div class="p-val">0.1402</div></div>
-            <div class="pr-cell"><div class="p-lbl">Theta</div><div class="p-val warn">-0.0501</div></div>
+            <div class="pr-cell"><div class="p-lbl">Delta (per 100)</div><div class="p-val" id="greek-delta">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Gamma (per 100)</div><div class="p-val" id="greek-gamma">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Vega (per 100)</div><div class="p-val" id="greek-vega">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Theta (per 100, per day)</div><div class="p-val" id="greek-theta">&mdash;</div></div>
           </div>
           <div class="pr-row r3">
-            <div class="pr-cell"><div class="p-lbl">OAS Delta</div><div class="p-val">0.3800</div></div>
-            <div class="pr-cell"><div class="p-lbl">DV01</div><div class="p-val">0.3600</div></div>
-            <div class="pr-cell"><div class="p-lbl">DV01 Gamma</div><div class="p-val">0.0100</div></div>
-            <div class="pr-cell"><div class="p-lbl">Mod Duration</div><div class="p-val">3.750</div></div>
-            <div class="pr-cell"><div class="p-lbl">Convexity</div><div class="p-val">9.100</div></div>
+            <div class="pr-cell"><div class="p-lbl">OAS Delta</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">DV01</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">DV01 Gamma</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">Mod Duration</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">Convexity</div><div class="pending-value">Pending model support</div></div>
           </div>
         </div>
 
@@ -238,11 +225,8 @@
         <div class="right-bottom">
           <div class="card forward-carry">
             <div class="card-title">Forward &amp; Carry</div>
-            <div class="fc-row"><label>Forward Price</label>
-              <div class="fc-carry">
-                <div class="control select" style="height:44px;">Carry<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-                <div class="value-box"><span class="vb-main">96-11+</span><span class="vb-sub">(96.3438)</span></div>
-              </div>
+            <div class="fc-row"><label>Forward Price (per 100)</label>
+              <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
             </div>
             <div class="fc-row"><label>USD Rate (MMkt)</label>
               <div class="fc-rate">
@@ -252,10 +236,7 @@
               </div>
             </div>
             <div class="fc-row" style="margin-bottom:0;"><label>Repo Rate</label>
-              <div class="fc-rate" style="grid-template-columns:1fr auto;">
-                <div class="control">3.81838</div>
-                <span class="suffix-txt">%</span>
-              </div>
+              <div class="pending-value">Pending model support</div>
             </div>
           </div>
 
@@ -263,52 +244,18 @@
             <div class="card-title">Underlying Snapshot</div>
             <div class="us-body">
               <div class="us-list">
-                <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="u-v">96-15<span class="u-extra">(96.4688)</span></span></div>
+                <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="pending-value">Pending model support</span></div>
                 <div class="us-item"><span class="u-k">Yield (Mid)</span><span class="u-v">4.585 %</span></div>
                 <div class="us-item"><span class="u-k">Accrued Interest</span><span class="u-v">1.0928</span></div>
-                <div class="us-item"><span class="u-k">Modified Duration</span><span class="u-v">3.848</span></div>
-                <div class="us-item"><span class="u-k">Convexity</span><span class="u-v">9.102</span></div>
-                <div class="us-item"><span class="u-k">OAS (Mid)</span><span class="u-v">48.90 bp</span></div>
-                <div class="us-item"><span class="u-k">DV01 (per 1mm)</span><span class="u-v">0.3600</span></div>
+                <div class="us-item"><span class="u-k">Modified Duration</span><span class="pending-value">Pending model support</span></div>
+                <div class="us-item"><span class="u-k">Convexity</span><span class="pending-value">Pending model support</span></div>
+                <div class="us-item"><span class="u-k">OAS (Mid)</span><span class="pending-value">Pending model support</span></div>
+                <div class="us-item"><span class="u-k">DV01 (per 1mm)</span><span class="pending-value">Pending model support</span></div>
               </div>
               <div class="chart-wrap">
                 <div class="chart-title">Yield (Mid) – 1Y</div>
-                <div class="chart-area">
-                  <svg width="300" height="132" viewBox="0 0 300 132">
-                    <defs>
-                      <linearGradient id="yieldFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="var(--chart-fill-top)"/>
-                        <stop offset="100%" stop-color="var(--chart-fill-bottom)"/>
-                      </linearGradient>
-                    </defs>
-                    <!-- gridlines -->
-                    <g stroke="#eef0f4" stroke-width="1">
-                      <line x1="0" y1="10" x2="250" y2="10"/>
-                      <line x1="0" y1="35" x2="250" y2="35"/>
-                      <line x1="0" y1="60" x2="250" y2="60"/>
-                      <line x1="0" y1="85" x2="250" y2="85"/>
-                      <line x1="0" y1="110" x2="250" y2="110"/>
-                    </g>
-                    <!-- area + line -->
-                    <path d="M0,85 L12,74.3 L24,80 L36,56 L48,45 L60,31.4 L72,17 L84,13.6 L96,24 L108,18.6 L120,38.6 L132,49 L144,42 L156,60 L168,70.7 L180,67 L192,81.4 L204,92 L216,99 L228,95.7 L240,87 L250,81.4 L250,110 L0,110 Z" fill="url(#yieldFill)"/>
-                    <path d="M0,85 L12,74.3 L24,80 L36,56 L48,45 L60,31.4 L72,17 L84,13.6 L96,24 L108,18.6 L120,38.6 L132,49 L144,42 L156,60 L168,70.7 L180,67 L192,81.4 L204,92 L216,99 L228,95.7 L240,87 L250,81.4" fill="none" stroke="var(--chart-line)" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/>
-                    <!-- y axis labels -->
-                    <g fill="#99a1b0" font-size="10" font-family="Inter, Arial, sans-serif">
-                      <text x="256" y="13">5.60%</text>
-                      <text x="256" y="38">5.10%</text>
-                      <text x="256" y="63">4.80%</text>
-                      <text x="256" y="88">4.50%</text>
-                      <text x="256" y="113">4.20%</text>
-                    </g>
-                    <!-- x axis labels -->
-                    <g fill="#99a1b0" font-size="10" font-family="Inter, Arial, sans-serif" text-anchor="middle">
-                      <text x="6" y="126">Jul '25</text>
-                      <text x="66" y="126">Oct '25</text>
-                      <text x="126" y="126">Jan '26</text>
-                      <text x="186" y="126">Apr '26</text>
-                      <text x="244" y="126">Jul '26</text>
-                    </g>
-                  </svg>
+                <div class="chart-area chart-pending">
+                  <span class="pending-value">Pending model support</span>
                 </div>
               </div>
             </div>
@@ -350,21 +297,25 @@
 
   <!-- ===================== FOOTER ===================== -->
   <footer class="footer">
-    <div class="valid">
-      <span class="check">
+    <div class="valid" id="status-indicator">
+      <span class="check check-ok">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
       </span>
-      Inputs valid
+      <span class="check check-fail">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+      </span>
+      <span id="status-text">Local synthetic case loaded</span>
     </div>
     <div class="foot-actions">
-      <span class="btn ghost">Clear</span>
+      <span class="btn ghost" id="clear-btn">Clear</span>
       <span class="btn outline">Save Preset</span>
-      <span class="btn primary">Price
+      <span class="btn primary" id="price-btn">Price
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" stroke="none"/></svg>
       </span>
     </div>
   </footer>
 
 </div>
+<script src="script.js"></script>
 </body>
 </html>

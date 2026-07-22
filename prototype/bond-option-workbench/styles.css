@@ -282,3 +282,39 @@ html, body {
 .btn.ghost { background: #fff; border-color: var(--border-strong); color: #3d4658; }
 .btn.outline { background: #fff; border-color: #bcd3f7; color: var(--blue); }
 .btn.primary { background: var(--blue); color: #fff; padding: 0 26px; }
+.btn.ghost, .btn.outline, .btn.primary { cursor: pointer; }
+.valid .check-fail { display: none; }
+.valid.failed .check-ok { display: none; }
+.valid.failed .check-fail { display: flex; color: var(--orange); }
+
+/* ---------- Manual pricing bridge additions (PR #136) ---------- */
+/* Honest placeholder for any value with no real model output this round --
+   never a fabricated number, never styled to look like a real result. */
+.pending-value {
+  color: var(--muted-2);
+  font-weight: 500;
+  font-style: italic;
+  font-size: 12.5px;
+}
+.chart-pending {
+  align-items: center;
+  justify-content: center;
+  height: 132px;
+}
+input.control {
+  font-family: inherit;
+  outline: none;
+}
+input.control:focus {
+  border-color: var(--blue);
+}
+.error-banner {
+  background: #fdeeea;
+  border: 1px solid #f3c6b8;
+  color: #b3401f;
+  font-size: 12.5px;
+  border-radius: 7px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+.error-banner:empty { display: none; }
