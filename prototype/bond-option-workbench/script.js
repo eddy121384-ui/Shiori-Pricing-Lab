@@ -54,16 +54,37 @@
   };
 
   let baseOverlay = null;
+  let baseContext = null;
   let baseDisplay = null;
 
-  // Codex review follow-up: every async operation that can update the
-  // Pricing Results panel (the initial /api/base load and each Price click)
-  // captures the current generation number before it starts, and refuses to
-  // render if the generation has moved on by the time it resolves. Clear and
-  // a new Price click both bump the generation, so a slow/stale response
-  // (an earlier Price request that resolves after a later one, or after
-  // Clear) can never overwrite newer state -- only the single most recent
-  // request may render.
+  // Codex final re-review fix: bootstrap (the one-shot initial /api/base
+  // load) and pricing requests (Price/Clear) now have entirely separate
+  // lifecycles/state. Bootstrap never participates in the pricing
+  // generation counter below -- there is only ever one bootstrap call, so
+  // it can never race against a competing bootstrap call, and it must
+  // never be invalidated by a Price/Clear click that happens to fire
+  // before it resolves. `bootstrapReady` gates Price/Clear at the JS logic
+  // level (not just a visual CSS class), so it cannot be bypassed by a
+  // programmatic click, a keyboard activation, or any other non-standard
+  // trigger: both handlers return immediately, with zero side effects, if
+  // bootstrap has not yet completed successfully.
+  let bootstrapReady = false;
+
+  function setControlsEnabled(enabled) {
+    bootstrapReady = enabled;
+    els.priceBtn.classList.toggle("is-disabled", !enabled);
+    els.clearBtn.classList.toggle("is-disabled", !enabled);
+  }
+
+  // Pricing-only request generation/abort tracking (unchanged from the
+  // prior round) -- scoped exclusively to priceCurrentForm/clearToBase,
+  // never touched by loadBase. Every async operation that can update the
+  // Pricing Results panel captures the current generation number before it
+  // starts, and refuses to render if the generation has moved on by the
+  // time it resolves. Clear and a new Price click both bump the
+  // generation, so a slow/stale response (an earlier Price request that
+  // resolves after a later one, or after Clear) can never overwrite newer
+  // state -- only the single most recent request may render.
   let currentGeneration = 0;
   let inFlightPriceController = null;
 
@@ -107,10 +128,10 @@
   // Renders the bounded, read-only context dict verbatim (see
   // standalone_option_workbench_context.py) -- every value here is exactly
   // as it appears in examples/standalone_option_case.json, with the single
-  // coupon percent transform above. Called once, right after /api/base
-  // resolves: none of the six overlay fields change the underlying
-  // instrument's identity, so this never needs to be re-rendered by Price
-  // or Clear.
+  // coupon percent transform above. Called after /api/base resolves, and
+  // again (idempotently, on the same cached baseContext) by Clear -- none
+  // of the six overlay fields change the underlying instrument's identity,
+  // so Price never needs to touch it.
   function renderContext(context) {
     els.instrTitle.textContent = context.issuer;
     els.instrIsin.textContent = context.underlying_isin;
@@ -225,31 +246,39 @@
     renderSuccess(display);
   }
 
+  // The one-shot bootstrap load. Runs to completion unconditionally --
+  // nothing can invalidate, cancel, or race against it, since it is the
+  // only bootstrap call there will ever be. It ends in exactly one of two
+  // states: success (baseOverlay/baseContext/baseDisplay cached, context +
+  // form + base result rendered, controls enabled) or failure (unified
+  // failure state shown, controls left disabled forever -- there is no
+  // retry in this round).
   async function loadBase() {
-    const generation = beginRequest();
     let response;
     let payload;
     try {
       response = await fetch("/api/base");
       payload = await response.json();
     } catch (err) {
-      if (isStaleRequest(generation)) return;
       renderFailure("Failed to load base case: " + err.message);
       return;
     }
-    if (isStaleRequest(generation)) return;
     if (!response.ok) {
       renderFailure(payload.error || "Failed to load base case.");
       return;
     }
     baseOverlay = payload.overlay;
+    baseContext = payload.context;
     baseDisplay = payload.display;
-    renderContext(payload.context);
+    renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
+    setControlsEnabled(true);
   }
 
   async function priceCurrentForm() {
+    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
+
     const overlay = readOverlayFromForm();
     const generation = beginRequest();
 
@@ -287,14 +316,17 @@
   }
 
   function clearToBase() {
+    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
+
     beginRequest(); // invalidate any in-flight Price request's eventual response
     if (inFlightPriceController) {
       inFlightPriceController.abort();
       inFlightPriceController = null;
     }
-    if (!baseOverlay || !baseDisplay) {
+    if (!baseOverlay || !baseContext || !baseDisplay) {
       return;
     }
+    renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
   }

@@ -177,14 +177,8 @@
           <div class="form-row"><label>Model</label>
             <div class="control select">Black (Modified)<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
-          <div class="form-row"><label>Price Vol (σ, decimal)</label>
+          <div class="form-row" style="margin-bottom:0;"><label>Price Vol (σ, decimal)</label>
             <input class="control" id="volatility-input" type="text" inputmode="decimal" value="0.18">
-          </div>
-          <div class="form-row"><label>Normal Yield Vol (bp)</label>
-            <div class="pending-value">Not available</div>
-          </div>
-          <div class="form-row" style="margin-bottom:0;"><label>Lognormal Yield Vol</label>
-            <div class="pending-value">Not available</div>
           </div>
         </div>
 
@@ -222,9 +216,6 @@
                 <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
                 <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
               </div>
-            </div>
-            <div class="fc-row"><label>USD Rate (MMkt)</label>
-              <div class="pending-value">Not available</div>
             </div>
             <div class="fc-row" style="margin-bottom:0;"><label>Repo Rate</label>
               <div class="pending-value">Pending model support</div>
@@ -298,9 +289,9 @@
       <span id="status-text">Loading&hellip;</span>
     </div>
     <div class="foot-actions">
-      <span class="btn ghost" id="clear-btn">Clear</span>
+      <span class="btn ghost is-disabled" id="clear-btn">Clear</span>
       <span class="btn outline">Save Preset</span>
-      <span class="btn primary" id="price-btn">Price
+      <span class="btn primary is-disabled" id="price-btn">Price
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" stroke="none"/></svg>
       </span>
     </div>

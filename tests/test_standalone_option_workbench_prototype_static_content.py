@@ -27,6 +27,13 @@ _STALE_MARKET_CLAIMS = (
     "3.750",  # the old fabricated USD Rate (MMkt)
     "#b22234",  # the old US flag's red (Codex review: no country field exists)
     "#3c3b6e",  # the old US flag's blue
+    # Codex final re-review: these rows/labels are fully removed (not
+    # relabeled "Not available") -- none of these concepts exist in the
+    # base case schema at all, and leaving the label with a placeholder
+    # value still implied the product supports them.
+    "Normal Yield Vol",
+    "Lognormal Yield Vol",
+    "USD Rate (MMkt)",
 )
 
 

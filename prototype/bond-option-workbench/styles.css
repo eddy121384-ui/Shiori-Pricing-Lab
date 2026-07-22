@@ -283,6 +283,10 @@ html, body {
 .btn.outline { background: #fff; border-color: #bcd3f7; color: var(--blue); }
 .btn.primary { background: var(--blue); color: #fff; padding: 0 26px; }
 .btn.ghost, .btn.outline, .btn.primary { cursor: pointer; }
+/* Bootstrap-gated state (Codex final re-review fix): visual companion to
+   the JS-level bootstrapReady guard in script.js -- Price/Clear are dimmed
+   and inert until the initial /api/base load has actually succeeded. */
+.btn.is-disabled { opacity: 0.45; pointer-events: none; cursor: not-allowed; }
 .valid .check-fail { display: none; }
 .valid.failed .check-ok { display: none; }
 .valid.failed .check-fail { display: flex; color: var(--orange); }
