@@ -63,7 +63,7 @@ tests/          # deterministic and behavioral tests
 docs/           # methodology, architecture, and reference material
 ```
 
-Read only the documents required by the current approved slice. Historical or future-state documents must not expand the task.
+Read only the documents required by the current task. Historical or future-state documents must not expand the task.
 
 ## Safety
 
