@@ -21,18 +21,10 @@ Product terms
 
 Data access, pricing logic, UI rendering, AI assistance, and persistence should remain separate where the current workflow actually needs those boundaries.
 
-## Development model
+## Development approach
 
-Implementation scope is defined one approved GitHub issue or PR slice at a time.
-
-Long-term vision, roadmaps, architecture documents, product specifications, annexes, and future phases are reference material. They do not authorize implementation by themselves.
-
-Agents must follow [`AGENTS.md`](AGENTS.md). Keep changes lean:
-
-1. Do not build what the current slice does not need.
-2. Reuse existing behavior.
-3. Prefer the standard library, platform-native features, and installed dependencies.
-4. Write only the smallest complete implementation that remains financially correct and testable.
+Work directly toward Eddy's current requested outcome using the simplest safe path.
+Pricing-method changes require deterministic tests and Eddy's approval.
 
 ## Quickstart
 

@@ -59,13 +59,11 @@ from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 class BondReferenceData:
     """Bond Master reference data: static, security-level terms only.
 
-    Required field set transcribed from
-    ``docs/bond_linked_structured_pricer/ANNEX_B_v1.3.md`` §B.5, per
-    ``docs/20`` §4. Every field here is required -- Annex B §B.5 marks the
-    whole set required and this schema does not downgrade any of them,
-    including ``first_coupon_date`` / ``last_coupon_date`` (docs/20 §4/§10:
-    a missing first/last coupon date must be rejected, not silently
-    treated as "no stub").
+    Every field here is required (per ``docs/20`` §4): the full Bond Master
+    field set must be present and this schema does not downgrade any of them
+    to optional, including ``first_coupon_date`` / ``last_coupon_date``
+    (docs/20 §4/§10: a missing first/last coupon date must be rejected, not
+    silently treated as "no stub").
     """
 
     isin: str
