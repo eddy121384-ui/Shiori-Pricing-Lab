@@ -27,7 +27,7 @@ Implementation scope is defined one approved GitHub issue or PR slice at a time.
 
 Long-term vision, roadmaps, architecture documents, product specifications, annexes, and future phases are reference material. They do not authorize implementation by themselves.
 
-Agents must follow [`AGENTS.md`](AGENTS.md), including the lean implementation gate:
+Agents must follow [`AGENTS.md`](AGENTS.md). Keep changes lean:
 
 1. Do not build what the current slice does not need.
 2. Reuse existing behavior.
@@ -68,7 +68,7 @@ src/shiori_pricing_lab/
 └── journal/    # research and workflow notes
 
 tests/          # deterministic and behavioral tests
-docs/           # methodology, architecture, runbooks, and reference material
+docs/           # methodology, architecture, and reference material
 ```
 
 Read only the documents required by the current approved slice. Historical or future-state documents must not expand the task.
