@@ -269,6 +269,13 @@ def classify_port(url: str, timeout: float = 1.0, opener=urllib.request.urlopen)
         with opener(url, timeout=timeout) as response:
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError:
+        # A real HTTP error response (401/404/500/...) is proof something
+        # is listening and answering -- just not us -- so it must never be
+        # treated the same as "nothing there" (HTTPError is itself a
+        # URLError subclass, so it has to be caught ahead of the broader
+        # except below or it would fall into "not_listening").
+        return "occupied_by_other"
     except (urllib.error.URLError, OSError, TimeoutError):
         return "not_listening"
     if status == 200 and _EXPECTED_PAGE_MARKER in body:

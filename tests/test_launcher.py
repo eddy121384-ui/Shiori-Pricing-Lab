@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import types
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -324,6 +325,18 @@ def test_classify_port_ours_when_marker_present():
 def test_classify_port_occupied_by_other_when_marker_absent():
     def opener(url, timeout=None):
         return _FakeResponse(200, "<html>some other app</html>")
+
+    assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "occupied_by_other"
+
+
+def test_classify_port_occupied_by_other_on_http_error_status():
+    # Codex review (PR #139): urllib raises HTTPError (a URLError subclass)
+    # for a real HTTP error response like 404/401/500 -- that must be
+    # classified as "occupied_by_other" (something is definitely listening),
+    # never "not_listening", or the launcher would try to install
+    # dependencies and start its own server on a port that already answers.
+    def opener(url, timeout=None):
+        raise urllib.error.HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
 
     assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "occupied_by_other"
 
