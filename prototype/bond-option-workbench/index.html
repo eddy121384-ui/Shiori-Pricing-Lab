@@ -27,6 +27,10 @@
       </span>
     </nav>
     <div class="nav-right">
+      <label class="pill load-case-btn is-disabled" id="load-case-label" for="case-file-input">
+        <span class="dot" style="background:var(--blue)"></span>Load Case JSON
+      </label>
+      <input type="file" id="case-file-input" accept=".json" hidden disabled>
       <span class="pill"><span class="dot"></span>Local Case</span>
       <span class="pill"><span class="dot" style="background:var(--muted-2)"></span>Synthetic Data</span>
       <span class="mid-badge" id="quote-side-badge">&hellip;</span>
@@ -289,6 +293,8 @@
       <span id="status-text">Loading&hellip;</span>
     </div>
     <div class="foot-actions">
+      <span class="btn ghost is-disabled" id="download-json-btn">Download JSON</span>
+      <span class="btn ghost is-disabled" id="download-markdown-btn">Download Markdown</span>
       <span class="btn ghost is-disabled" id="clear-btn">Clear</span>
       <span class="btn outline">Save Preset</span>
       <span class="btn primary is-disabled" id="price-btn">Price

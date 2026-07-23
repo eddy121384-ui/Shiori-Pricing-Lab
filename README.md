@@ -44,6 +44,23 @@ streamlit run src/shiori_pricing_lab/app/streamlit_app.py
 The current trader-facing entry point is the **Standalone Bond Option
 Workbench** page in the launched app.
 
+## Standalone bond-option workbench (local, no setup)
+
+**Windows:** double-click `start_shiori.bat` in the repository root. It
+opens the workbench at `http://127.0.0.1:8765/` once ready.
+
+**Manual fallback (any OS):**
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -e ".[quant]"   # Windows: .venv\Scripts\pip
+.venv/bin/python -m shiori_pricing_lab.app.standalone_option_workbench_server
+```
+
+First launch needs an internet connection to install dependencies
+(including QuantLib) into a repo-local `.venv`. Keep the server window open
+while you use the workbench; close it (or press Ctrl+C) to stop the server.
+
 Current supported slice: a standalone European, price-based, cash-settled
 bond option (bond-option leg only). Current product objective: enter one
 anonymized real-market case and compare it with Bloomberg, tracked in
