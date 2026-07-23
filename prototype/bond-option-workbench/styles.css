@@ -347,11 +347,15 @@ input.control:focus {
 .bloomberg-refresh .card-title { margin-bottom: 9px; }
 .bloomberg-controls {
   display: grid;
-  grid-template-columns: 320px 220px auto;
+  grid-template-columns: 320px 260px auto;
   align-items: center;
   gap: 16px;
 }
-.bloomberg-controls .form-row { margin-bottom: 0; }
+/* Overrides the base .form-row's fixed 146px label column -- "Quote Side"
+   and "Bloomberg Security" are shorter labels than the Option Terms panel's,
+   and the 3-way toggle needs the room a fixed 146px label would otherwise
+   take from it (BID/MID/OFFER was clipping to "OFF" at that width). */
+.bloomberg-controls .form-row { margin-bottom: 0; grid-template-columns: auto 1fr; gap: 10px; }
 /* A 3-way toggle (BID/MID/OFFER) with deliberately no default selected --
    see setControlsEnabled()/script.js: nothing gets an "on" class until the
    trader clicks one, unlike the 2-way Call/Put and Buy/Sell toggles above,
