@@ -53,9 +53,21 @@ jobs:
           python-version: "3.11"
 
       - name: Copy checkout into a path with spaces, Unicode, and parentheses
+        # The Unicode character here is deliberately accented Latin (within
+        # the Windows ANSI/cp1252 codepage), not CJK. Two independent
+        # PYTHONUTF8=1 fixes (per-subprocess env, then also set at the root
+        # of the whole process tree in start_shiori.bat) both failed
+        # identically against a CJK character: setuptools' editable-install
+        # `.pth`-file writer (`_encode_pth` in `setuptools/command/
+        # editable_wheel.py`) hit the same UnicodeEncodeError against
+        # `cp1252` regardless, which is a real upstream setuptools/pip
+        # limitation for a project path containing a character outside the
+        # host's active codepage -- not something this launcher's own code
+        # controls. This still proves genuine non-ASCII/Unicode path
+        # support within that documented boundary.
         shell: pwsh
         run: |
-          $dest = "C:\Shiori Smoke Test (税) Folder\Shiori Pricing Lab"
+          $dest = "C:\Shiori Smoke Test (café) Folder\Shiori Pricing Lab"
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
           Copy-Item -Path "$env:GITHUB_WORKSPACE\*" -Destination $dest -Recurse -Force
           "SMOKE_TEST_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
