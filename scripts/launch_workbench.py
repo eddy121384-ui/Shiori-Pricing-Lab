@@ -155,12 +155,45 @@ def subprocess_env() -> dict[str, str]:
     return env
 
 
-def ensure_venv(project_root: Path, python_exe: str, run=subprocess.run) -> Path:
-    """Create ``<project_root>/.venv`` if it does not already have a python, and return it."""
+def venv_is_valid(venv_python_exe: Path, run=subprocess.run) -> bool:
+    """Return True only if ``venv_python_exe`` exists and can actually run pip.
+
+    A venv left behind by an interrupted or partially-deleted creation can
+    have a python executable on disk while everything else is missing or
+    broken -- the existence check alone is not proof the venv is usable.
+    """
+
+    if not venv_python_exe.exists():
+        return False
+    result = run(
+        [str(venv_python_exe), "-m", "pip", "--version"],
+        capture_output=True,
+        text=True,
+        env=subprocess_env(),
+    )
+    return result.returncode == 0
+
+
+def ensure_venv(
+    project_root: Path, python_exe: str, run=subprocess.run, rmtree=shutil.rmtree
+) -> Path:
+    """Create or repair ``<project_root>/.venv`` and return its python executable.
+
+    An existing venv is reused only if it passes :func:`venv_is_valid`. An
+    incomplete or corrupted one (python present but pip broken, e.g. from an
+    interrupted first launch) is removed and recreated automatically rather
+    than being handed back as if it were fine -- Eddy's local UAT hit exactly
+    this: a half-finished ``.venv`` that this function previously treated as
+    already set up.
+    """
 
     target = venv_python(project_root)
-    if target.exists():
+    if venv_is_valid(target, run=run):
         return target
+
+    root = venv_dir(project_root)
+    if root.exists():
+        rmtree(root)
 
     result = run(
         build_venv_create_command(python_exe, project_root),

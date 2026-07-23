@@ -9,6 +9,7 @@ in this file.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import types
@@ -95,16 +96,26 @@ def test_build_venv_create_command(tmp_path):
     assert command == ["python", "-m", "venv", str(tmp_path / ".venv")]
 
 
-def test_ensure_venv_reuses_existing_venv_without_running_anything(tmp_path):
+def test_ensure_venv_reuses_valid_existing_venv(tmp_path):
+    # Reuse must be gated on the venv actually working (pip runs inside it),
+    # not merely on the python executable existing on disk.
     target = lw.venv_python(tmp_path)
     target.parent.mkdir(parents=True)
     target.write_text("", encoding="utf-8")
 
-    def _run(*args, **kwargs):
-        raise AssertionError("must not run anything when the venv already exists")
+    calls = []
 
-    result = lw.ensure_venv(tmp_path, "python", run=_run)
+    def _run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="pip 24.0", stderr="")
+
+    def _rmtree(path):
+        raise AssertionError("must not remove a valid venv")
+
+    result = lw.ensure_venv(tmp_path, "python", run=_run, rmtree=_rmtree)
+
     assert result == target
+    assert calls == [[str(target), "-m", "pip", "--version"]]
 
 
 def test_ensure_venv_creates_when_missing(tmp_path):
@@ -128,6 +139,62 @@ def test_ensure_venv_failure_is_visible_and_actionable(tmp_path):
 
     with pytest.raises(lw.LauncherError, match="permission denied"):
         lw.ensure_venv(tmp_path, "python", run=_run)
+
+
+def test_ensure_venv_rebuilds_when_python_exists_but_pip_is_missing(tmp_path):
+    # Eddy's local UAT: a half-finished venv can have a python executable
+    # with no working pip inside it. This must be detected and rebuilt, not
+    # handed back as if it were a valid, already-set-up venv.
+    target = lw.venv_python(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text("", encoding="utf-8")
+
+    calls = []
+    removed = []
+
+    def _run(command, **kwargs):
+        calls.append(command)
+        if command[1:] == ["-m", "pip", "--version"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="No module named pip"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def _rmtree(path):
+        removed.append(path)
+        shutil.rmtree(path)
+
+    result = lw.ensure_venv(tmp_path, "python", run=_run, rmtree=_rmtree)
+
+    assert result == target
+    assert removed == [lw.venv_dir(tmp_path)]
+    assert calls[0] == [str(target), "-m", "pip", "--version"]
+    assert calls[1] == ["python", "-m", "venv", str(tmp_path / ".venv")]
+
+
+def test_ensure_venv_rebuilds_a_corrupted_venv_automatically(tmp_path):
+    # A venv that is present but broken in some other way (not just a
+    # missing pip module -- e.g. a corrupted install) must also be detected
+    # via the same pip-invocation check and rebuilt automatically.
+    target = lw.venv_python(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text("not actually a working interpreter", encoding="utf-8")
+    (lw.venv_dir(tmp_path) / "pyvenv.cfg").write_text("corrupted", encoding="utf-8")
+
+    def _run(command, **kwargs):
+        if command[1:] == ["-m", "pip", "--version"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="corrupted venv")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = lw.ensure_venv(tmp_path, "python", run=_run, rmtree=shutil.rmtree)
+
+    assert result == target
+    assert target.exists()
+    assert not (lw.venv_dir(tmp_path) / "pyvenv.cfg").exists()
 
 
 # --- Dependency install ----------------------------------------------------------
