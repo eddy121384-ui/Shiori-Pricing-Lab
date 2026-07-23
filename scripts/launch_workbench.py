@@ -96,10 +96,14 @@ def select_interpreter_command(which=shutil.which) -> list[str]:
     ``start_shiori.bat`` performs before any Python code can run at all --
     batch is the only thing that can execute before an interpreter is known
     to exist, so the ``.bat`` file encodes this same order directly. This
-    function exists so that order, and the "neither is present" failure, has
-    deterministic test coverage even though the literal batch-file bytes
-    cannot be executed by pytest. The real entry point is proven separately
-    by the Windows CI smoke job (see ``.github/workflows``).
+    function exists purely so that order, and the "neither is present"
+    failure, has deterministic test coverage even though the literal
+    batch-file bytes cannot be executed by pytest -- :func:`run` below does
+    **not** call this (it uses ``sys.executable``, the interpreter already
+    proven to satisfy :func:`check_python_version`, for every subprocess it
+    starts, rather than re-deriving a selection that could disagree with
+    it). The real entry point is proven separately by the Windows CI smoke
+    job (see ``.github/workflows``).
     """
 
     if which("python") is not None:
@@ -306,8 +310,16 @@ def run(argv=None) -> int:
 
         process = None
         if status == "not_listening":
-            interpreter = select_interpreter_command()[0]
-            venv_py = ensure_venv(project_root, interpreter)
+            # Codex review (PR #139): re-deriving the interpreter here via
+            # select_interpreter_command()[0] silently drops the "-3" flag
+            # from a ["py", "-3"] fallback result, so the venv could be
+            # created with the `py` launcher's *default* Python (which may
+            # not be 3.11+, or may be Python 2) instead of the interpreter
+            # this launcher is actually running under -- the one
+            # check_python_version() just verified above. sys.executable is
+            # the absolute path to that exact, already-verified interpreter,
+            # so there is no re-selection ambiguity at all.
+            venv_py = ensure_venv(project_root, sys.executable)
             if dependencies_missing(venv_py):
                 print("Installing workbench dependencies (first launch only)...")
                 install_dependencies(project_root, venv_py)

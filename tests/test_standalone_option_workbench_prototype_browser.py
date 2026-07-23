@@ -1046,3 +1046,48 @@ def test_export_available_after_a_domain_failed_price_action(server_url, page) -
     # completed run and must remain exportable.
     assert not _is_disabled(page, "#download-json-btn")
     assert not _is_disabled(page, "#download-markdown-btn")
+
+
+@_PLAYWRIGHT_SKIP
+def test_stale_export_response_cannot_download_after_display_changes(server_url, page) -> None:
+    """Codex review (PR #139): an export request in flight for the
+    displayed run must not turn into a download if a Price/Load/Clear
+    action changes the displayed run before that export's response
+    arrives."""
+
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    downloads = []
+    page.on("download", lambda download: downloads.append(download))
+
+    pending_export = []
+    page.route(
+        "**/api/export/json",
+        lambda route: pending_export.append(route),
+    )
+    page.click("#download-json-btn")
+    _wait_until_via_page(page, lambda: len(pending_export) == 1)
+
+    # While that export is still pending, a real Price action changes the
+    # displayed run.
+    page.route(
+        "**/api/case/price",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_fake_display(777.0))
+        ),
+    )
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") == "777.000000")
+
+    # Only now release the stale export response.
+    pending_export[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {"content": "stale", "filename": "stale.json", "mime": "application/json"}
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert downloads == []

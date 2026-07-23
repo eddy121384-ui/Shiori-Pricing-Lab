@@ -84,6 +84,22 @@
   // completely untouched.
   let currentDisplay = null;
 
+  // Codex review (PR #139): a pending export request captures the display
+  // it was asked to export; if a Price/Load/Clear action changes
+  // currentDisplay before that export's response arrives, the download must
+  // not happen at all -- downloading it would silently hand the user a file
+  // for a run that is no longer the one on screen. displayGeneration is
+  // bumped every time currentDisplay changes (via setCurrentDisplay, the
+  // only place that ever assigns it), and downloadCurrentRun checks it
+  // after the response arrives, before ever building the Blob/download.
+  let displayGeneration = 0;
+
+  function setCurrentDisplay(display) {
+    displayGeneration++;
+    currentDisplay = display;
+    setExportEnabled(display !== null);
+  }
+
   function setExportEnabled(enabled) {
     els.downloadJsonBtn.classList.toggle("is-disabled", !enabled);
     els.downloadMarkdownBtn.classList.toggle("is-disabled", !enabled);
@@ -375,8 +391,7 @@
     renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
-    currentDisplay = baseDisplay;
-    setExportEnabled(true);
+    setCurrentDisplay(baseDisplay);
     setControlsEnabled(true);
   }
 
@@ -408,20 +423,17 @@
       // load) -- either way, a stale generation means a newer render has
       // already happened and must not be overwritten.
       if (isStaleRequest(generation)) return;
-      currentDisplay = null;
-      setExportEnabled(false);
+      setCurrentDisplay(null);
       renderFailure("Pricing request failed: " + err.message);
       return;
     }
     if (isStaleRequest(generation)) return;
     if (!response.ok) {
-      currentDisplay = null;
-      setExportEnabled(false);
+      setCurrentDisplay(null);
       renderFailure(payload.error || "Pricing request failed.");
       return;
     }
-    currentDisplay = payload;
-    setExportEnabled(true);
+    setCurrentDisplay(payload);
     renderDisplay(payload);
   }
 
@@ -435,8 +447,7 @@
     renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
-    currentDisplay = baseDisplay;
-    setExportEnabled(true);
+    setCurrentDisplay(baseDisplay);
   }
 
   // Issue #138: load a local Case JSON file, validate/price it through the
@@ -517,18 +528,22 @@
     renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
-    currentDisplay = baseDisplay;
-    setExportEnabled(true);
+    setCurrentDisplay(baseDisplay);
   }
 
   // Issue #138: download the current run as JSON/Markdown, reusing only the
-  // existing pure export helpers server-side. Reads currentDisplay AT CLICK
-  // TIME, so the downloaded content always reflects whatever is on screen
-  // right now -- there is no cached/stale export state to invalidate. Never
-  // sends a request to any pricing route.
+  // existing pure export helpers server-side. Sends exactly the display
+  // dict active at click time. Codex review (PR #139): a Price/Load/Clear
+  // action can change currentDisplay while this request is still in
+  // flight, so the response is checked against displayGeneration before it
+  // is ever turned into a download -- a stale response (for a run that is
+  // no longer the one on screen) is discarded outright, never downloaded.
+  // Never sends a request to any pricing route.
   async function downloadCurrentRun(format) {
     if (!currentDisplay) return; // mirrors the is-disabled state; never fabricate a download
 
+    const generation = displayGeneration;
+    const displayAtRequestTime = currentDisplay;
     const route = format === "json" ? "/api/export/json" : "/api/export/markdown";
     let response;
     let payload;
@@ -536,12 +551,13 @@
       response = await fetch(route, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ display: currentDisplay }),
+        body: JSON.stringify({ display: displayAtRequestTime }),
       });
       payload = await response.json();
     } catch (err) {
       return; // no display change results from a failed export attempt
     }
+    if (generation !== displayGeneration) return; // stale: the displayed run changed while this was in flight
     if (!response.ok) {
       return;
     }

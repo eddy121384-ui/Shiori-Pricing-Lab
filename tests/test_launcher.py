@@ -323,6 +323,47 @@ def _patch_happy_path(monkeypatch, call_order, process=None):
     monkeypatch.setattr(lw, "open_browser", _open_browser)
 
 
+def test_run_creates_the_venv_with_the_already_running_interpreter(monkeypatch):
+    # Codex review (PR #139): re-deriving the interpreter via
+    # select_interpreter_command()[0] silently drops the "-3" flag from a
+    # ["py", "-3"] fallback, so the venv could end up created with the `py`
+    # launcher's *default* Python instead of the interpreter this launcher
+    # is actually running under (the one check_python_version() already
+    # verified). run() must use sys.executable for venv creation, never a
+    # re-derived selection.
+    monkeypatch.setattr(lw, "check_python_version", lambda: None)
+    monkeypatch.setattr(lw, "classify_port", lambda url: "not_listening")
+
+    def _select_interpreter_command_must_not_be_called():
+        raise AssertionError("run() must not re-derive an interpreter selection")
+
+    monkeypatch.setattr(
+        lw, "select_interpreter_command", _select_interpreter_command_must_not_be_called
+    )
+
+    captured = {}
+
+    def _ensure_venv(root, interpreter):
+        captured["interpreter"] = interpreter
+        return Path("/fake/venv/python")
+
+    monkeypatch.setattr(lw, "ensure_venv", _ensure_venv)
+    monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(
+        lw,
+        "start_server_process",
+        lambda venv_py, root: types.SimpleNamespace(
+            terminate=lambda: None, wait=lambda timeout=None: None
+        ),
+    )
+    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url: True)
+
+    exit_code = lw.run(["--no-browser"])
+
+    assert exit_code == 0
+    assert captured["interpreter"] == sys.executable
+
+
 def test_readiness_polling_happens_before_browser_open(monkeypatch):
     call_order = []
     _patch_happy_path(monkeypatch, call_order)
