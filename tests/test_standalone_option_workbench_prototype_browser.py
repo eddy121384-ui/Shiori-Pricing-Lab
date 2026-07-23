@@ -246,6 +246,56 @@ def test_base_load_failure_never_shows_loaded_status(server_url, page) -> None:
     assert _is_disabled(page, "#clear-btn")
 
 
+@_PLAYWRIGHT_SKIP
+def test_base_load_http_200_with_failed_display_never_enables_controls(server_url, page) -> None:
+    """A well-formed HTTP 200 /api/base response can still carry a FAILED
+    PricingResult (the base case itself failed to price) -- that is a
+    bootstrap failure exactly like a non-2xx response, and must be handled
+    identically: show the real error, clear results, and never enable
+    Price/Clear or cache a base state to price/clear against."""
+
+    page.route(
+        "**/api/base",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "overlay": {},
+                    "context": {},
+                    "display": _fake_display(0.0, status="FAILED"),
+                }
+            ),
+        ),
+    )
+    price_requests = []
+    page.route("**/api/price", lambda route: price_requests.append(route))
+
+    page.goto(f"{server_url}/")
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#status-text") != "Local synthetic case loaded"
+    assert page.eval_on_selector("#status-indicator", "el => el.classList.contains('failed')")
+    assert page.inner_text("#pricing-error-banner") != ""
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#price-per-100") == "—"
+    assert page.inner_text("#greek-delta") == "—"
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#clear-btn")
+
+    # Even a forced click (bypassing the disabled-button actionability check,
+    # modeling a non-standard trigger) must not send a pricing request -- the
+    # JS-level bootstrapReady guard, not the CSS, is what protects this, and
+    # it must never have flipped true on a FAILED base display.
+    page.click("#price-btn", force=True)
+    page.click("#clear-btn", force=True)
+    page.wait_for_timeout(200)
+
+    assert price_requests == []
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#clear-btn")
+
+
 # --- In-flight pricing race (non-blocking route-holding) --------------------
 
 

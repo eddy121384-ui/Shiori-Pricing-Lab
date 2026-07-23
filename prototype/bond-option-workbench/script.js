@@ -251,8 +251,18 @@
   // only bootstrap call there will ever be. It ends in exactly one of two
   // states: success (baseOverlay/baseContext/baseDisplay cached, context +
   // form + base result rendered, controls enabled) or failure (unified
-  // failure state shown, controls left disabled forever -- there is no
-  // retry in this round).
+  // failure state shown, controls left disabled forever, nothing cached --
+  // there is no retry in this round).
+  //
+  // Codex final re-review fix: HTTP success is not domain success. A
+  // well-formed HTTP 200 /api/base response can still carry a FAILED
+  // PricingResult (base-case pricing itself failed) -- that is a bootstrap
+  // failure exactly like a non-2xx response, a network rejection, or a
+  // JSON decode failure, and must be handled identically: render the real
+  // failure, cache nothing, and never flip bootstrapReady/enable
+  // Price/Clear. Only when the HTTP response is ok, the JSON payload is
+  // well-formed, AND baseDisplay.status is not FAILED do all three of
+  // (cache base state, enable controls) happen together.
   async function loadBase() {
     let response;
     let payload;
@@ -267,9 +277,24 @@
       renderFailure(payload.error || "Failed to load base case.");
       return;
     }
+
+    const display = payload.display;
+    if (!display) {
+      renderFailure("Base case response is missing a display payload.");
+      return;
+    }
+    if (display.status === "FAILED") {
+      // Reuses the existing FAILED-display rendering path verbatim -- no
+      // new failure UI, no partial cache, no cached overlay/context, and
+      // bootstrapReady stays false so Price/Clear stay disabled and no
+      // /api/price request can ever be sent.
+      renderDisplay(display);
+      return;
+    }
+
     baseOverlay = payload.overlay;
     baseContext = payload.context;
-    baseDisplay = payload.display;
+    baseDisplay = display;
     renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
