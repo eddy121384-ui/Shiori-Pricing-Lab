@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1672" />
+<title>Bond Option Pricer — Static Prototype</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== TOP NAV ===================== -->
+  <header class="topnav">
+    <div class="brand">
+      <span class="logo">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 6"/><polyline points="15 6 21 6 21 12"/></svg>
+      </span>
+      <span class="name">Bond Option Pricer</span>
+    </div>
+    <nav class="tabs">
+      <span class="tab active">Pricing</span>
+      <span class="tab">Benchmark</span>
+      <span class="tab">Calibration</span>
+      <span class="tab">Scenarios</span>
+      <span class="tab">Export
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </span>
+    </nav>
+    <div class="nav-right">
+      <span class="pill"><span class="dot"></span>Local Case</span>
+      <span class="pill"><span class="dot" style="background:var(--muted-2)"></span>Synthetic Data</span>
+      <span class="mid-badge" id="quote-side-badge">&hellip;</span>
+      <span class="icon-btn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+      </span>
+      <span class="icon-btn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7"/><line x1="12" y1="16.5" x2="12" y2="16.5"/></svg>
+      </span>
+      <span class="avatar">TR</span>
+    </div>
+  </header>
+
+  <div class="body">
+
+    <!-- ===================== SIDEBAR ===================== -->
+    <aside class="sidebar">
+      <div class="nav-item active">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="8" y1="16" x2="8" y2="12"/><line x1="12" y1="16" x2="12" y2="8"/><line x1="16" y1="16" x2="16" y2="11"/></svg>
+        Pricing
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="21"/><path d="M4 21V10l8-5 8 5v11"/><line x1="9" y1="21" x2="9" y2="13"/><line x1="15" y1="21" x2="15" y2="13"/></svg>
+        Instruments
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/></svg>
+        Markets
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M12 3a9 9 0 0 1 9 9h-9z" opacity="0.5"/></svg>
+        Analytics
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        Alerts
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+        Saved
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/></svg>
+        Reports
+      </div>
+      <div class="nav-item">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        Settings
+      </div>
+
+      <div class="sidebar-foot">
+        <div class="lbl">Market Data</div>
+        <div class="live"><span class="dot"></span>Local Case</div>
+        <div class="asof">As of<br/><span id="sidebar-as-of-timestamp">&mdash;</span></div>
+      </div>
+    </aside>
+
+    <!-- ===================== MAIN ===================== -->
+    <main class="main">
+
+      <!-- Instrument header -->
+      <section class="card instr-header">
+        <div class="instr-left">
+          <div class="instr-title-row">
+            <span class="instr-title" id="instr-title">Loading&hellip;</span>
+            <span class="star">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><polygon points="12 2 15 9 22 9.3 16.5 14 18.5 21 12 17 5.5 21 7.5 14 2 9.3 9 9"/></svg>
+            </span>
+          </div>
+          <div class="badges">
+            <span class="badge"><span class="k">ISIN</span><span class="v" id="instr-isin">&hellip;</span></span>
+          </div>
+        </div>
+
+        <div class="stats">
+          <div class="stat">
+            <span class="s-lbl">Clean Price (Mid)</span>
+            <span class="s-val" id="stat-clean-price">&mdash;</span>
+          </div>
+          <div class="stat">
+            <span class="s-lbl">Yield (Mid)</span>
+            <span class="s-val" id="stat-yield-mid">&mdash;</span>
+          </div>
+          <div class="stat">
+            <span class="s-lbl">Pricing Date</span>
+            <div class="date-row">
+              <span class="field-box">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                <span id="stat-valuation-date">&mdash;</span>
+              </span>
+            </div>
+          </div>
+          <div class="stat">
+            <span class="s-lbl">Option Settlement</span>
+            <div class="date-row">
+              <span class="field-box">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                <span id="stat-option-settlement">&mdash;</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Workspace -->
+      <section class="workspace">
+
+        <!-- Option terms -->
+        <div class="card option-terms">
+          <div class="card-title">Option Terms</div>
+
+          <div class="form-row"><label>Product Type</label>
+            <div class="control select">European Vanilla<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+          </div>
+          <div class="form-row"><label>Style</label>
+            <div class="control select">Vanilla<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+          </div>
+          <div class="form-row"><label>Exercise</label>
+            <div class="control select">European<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+          </div>
+          <div class="form-row"><label>Call / Put</label>
+            <div class="toggle" id="option-type-toggle"><span class="opt on" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
+          </div>
+          <div class="form-row"><label>Direction</label>
+            <div class="toggle" id="position-toggle"><span class="opt on" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
+          </div>
+          <div class="form-row"><label>Strike (per 100)</label>
+            <input class="control" id="strike-price-input" type="text" inputmode="decimal" value="99.5">
+          </div>
+          <div class="form-row"><label>Notional</label>
+            <input class="control" id="notional-input" type="text" inputmode="decimal" value="50.0">
+          </div>
+          <div class="form-row"><label>Expiry</label>
+            <span class="control" style="width:auto;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted-2)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span id="option-terms-expiry">&mdash;</span></span>
+          </div>
+          <div class="form-row"><label>Pricing Timestamp</label>
+            <div class="control" id="option-terms-pricing-timestamp">&mdash;</div>
+          </div>
+          <div class="form-row"><label>Expiry Timestamp</label>
+            <div class="control" id="option-terms-expiry-timestamp">&mdash;</div>
+          </div>
+          <div class="form-row"><label>Delivery Delay</label>
+            <div class="split">
+              <div class="control" id="option-terms-settlement-lag">&mdash;</div>
+              <div class="control select dd-days">Days<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+            </div>
+          </div>
+          <div class="form-row"><label>Model</label>
+            <div class="control select">Black (Modified)<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+          </div>
+          <div class="form-row" style="margin-bottom:0;"><label>Price Vol (σ, decimal)</label>
+            <input class="control" id="volatility-input" type="text" inputmode="decimal" value="0.18">
+          </div>
+        </div>
+
+        <!-- Pricing results -->
+        <div class="card pricing-results">
+          <div class="card-title">Pricing Results</div>
+          <div class="error-banner" id="pricing-error-banner" hidden></div>
+          <div class="pr-row r1">
+            <div class="pr-cell"><div class="p-lbl">Price (Total)</div><div class="p-val teal" id="price-total">&mdash;</div><div class="p-sub" id="price-total-ccy"></div></div>
+            <div class="pr-cell"><div class="p-lbl">Price (Per 100)</div><div class="p-val teal" id="price-per-100">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Price (%)</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">Currency</div><div class="p-val" id="result-currency">&mdash;</div></div>
+          </div>
+          <div class="pr-row r2">
+            <div class="pr-cell"><div class="p-lbl">Delta (per 100)</div><div class="p-val" id="greek-delta">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Gamma (per 100)</div><div class="p-val" id="greek-gamma">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Vega (per 100)</div><div class="p-val" id="greek-vega">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Theta (per 100, per day)</div><div class="p-val" id="greek-theta">&mdash;</div></div>
+          </div>
+          <div class="pr-row r3">
+            <div class="pr-cell"><div class="p-lbl">OAS Delta</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">DV01</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">DV01 Gamma</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">Mod Duration</div><div class="pending-value">Pending model support</div></div>
+            <div class="pr-cell"><div class="p-lbl">Convexity</div><div class="pending-value">Pending model support</div></div>
+          </div>
+        </div>
+
+        <!-- Right bottom: forward & carry + underlying snapshot -->
+        <div class="right-bottom">
+          <div class="card forward-carry">
+            <div class="card-title">Forward &amp; Carry</div>
+            <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Price (per 100)</label>
+              <div>
+                <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
+                <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
+              </div>
+            </div>
+            <div class="fc-row" style="margin-bottom:0;"><label>Repo Rate</label>
+              <div class="pending-value">Pending model support</div>
+            </div>
+          </div>
+
+          <div class="card underlying">
+            <div class="card-title">Underlying Snapshot</div>
+            <div class="us-body">
+              <div class="us-list">
+                <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="u-v" id="snapshot-clean-price">&mdash;</span></div>
+                <div class="us-item"><span class="u-k">Yield (Mid)</span><span class="u-v" id="snapshot-yield">&mdash;</span></div>
+                <div class="us-item"><span class="u-k">Accrued Interest</span><span class="u-v" id="snapshot-accrued-interest">&mdash;</span></div>
+                <div class="us-item"><span class="u-k">Modified Duration</span><span class="pending-value">Pending model support</span></div>
+                <div class="us-item"><span class="u-k">Convexity</span><span class="pending-value">Pending model support</span></div>
+                <div class="us-item"><span class="u-k">OAS (Mid)</span><span class="pending-value">Pending model support</span></div>
+                <div class="us-item"><span class="u-k">DV01 (per 1mm)</span><span class="pending-value">Pending model support</span></div>
+              </div>
+              <div class="chart-wrap">
+                <div class="chart-title">Yield (Mid) – 1Y</div>
+                <div class="chart-area chart-pending">
+                  <span class="pending-value">Pending model support</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Instrument details -->
+      <section class="card instrument-details">
+        <div class="id-head">
+          <div class="card-title">Instrument Details</div>
+          <div class="card-title notes">Notes</div>
+        </div>
+        <div class="id-grid">
+          <div class="id-block">
+            <span class="i-k">Issuer</span><span class="i-v" id="details-issuer">&mdash;</span>
+            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
+            <span class="i-k">Maturity</span><span class="i-v" id="details-maturity">&mdash;</span>
+            <span class="i-k">Next Call Date</span><span class="i-v pending-value">Not available</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Callable</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
+            <span class="i-k">Frequency</span><span class="i-v" id="details-frequency">&mdash;</span>
+            <span class="i-k">Ex-Dividend Date</span><span class="i-v pending-value">Not available</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Listing</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Country</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Currency</span><span class="i-v" id="details-currency">&mdash;</span>
+            <span class="i-k">Domicile</span><span class="i-v pending-value">Not available</span>
+          </div>
+          <div class="notes-block pending-value">Not available</div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="footer">
+    <div class="valid" id="status-indicator">
+      <span class="check check-ok">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+      </span>
+      <span class="check check-fail">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+      </span>
+      <span id="status-text">Loading&hellip;</span>
+    </div>
+    <div class="foot-actions">
+      <span class="btn ghost is-disabled" id="clear-btn">Clear</span>
+      <span class="btn outline">Save Preset</span>
+      <span class="btn primary is-disabled" id="price-btn">Price
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" stroke="none"/></svg>
+      </span>
+    </div>
+  </footer>
+
+</div>
+<script src="script.js"></script>
+</body>
+</html>
