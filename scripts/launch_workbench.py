@@ -38,6 +38,7 @@ launcher did not itself start in the current run (see
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -129,6 +130,27 @@ def build_venv_create_command(python_exe: str, project_root: Path) -> list[str]:
     return [python_exe, "-m", "venv", str(venv_dir(project_root))]
 
 
+def subprocess_env() -> dict[str, str]:
+    """Return the environment for every child process this launcher starts.
+
+    Sets ``PYTHONUTF8=1`` (PEP 540) on top of the inherited environment.
+    Without it, a Python interpreter on Windows defaults text-file I/O with
+    no explicit ``encoding=`` to the system ANSI codepage rather than UTF-8;
+    setuptools' editable-install machinery writes its ``.pth`` file exactly
+    that way, so a repository path containing a non-Latin-1 Unicode
+    character (fully valid on an NTFS filesystem) made the whole
+    ``pip install -e`` step fail with ``UnicodeEncodeError`` -- precisely
+    the "path contains Unicode" case this launcher is required to support.
+    UTF-8 mode fixes the encoding used for that file (and any other
+    default-encoded I/O these child processes perform) regardless of the
+    host's configured codepage/locale.
+    """
+
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def ensure_venv(project_root: Path, python_exe: str, run=subprocess.run) -> Path:
     """Create ``<project_root>/.venv`` if it does not already have a python, and return it."""
 
@@ -137,7 +159,10 @@ def ensure_venv(project_root: Path, python_exe: str, run=subprocess.run) -> Path
         return target
 
     result = run(
-        build_venv_create_command(python_exe, project_root), capture_output=True, text=True
+        build_venv_create_command(python_exe, project_root),
+        capture_output=True,
+        text=True,
+        env=subprocess_env(),
     )
     if result.returncode != 0 or not target.exists():
         raise LauncherError(
@@ -157,7 +182,9 @@ def dependencies_missing(venv_python_exe: Path, run=subprocess.run) -> bool:
         "):\n"
         "    importlib.import_module(module_name)\n"
     )
-    result = run([str(venv_python_exe), "-c", probe], capture_output=True, text=True)
+    result = run(
+        [str(venv_python_exe), "-c", probe], capture_output=True, text=True, env=subprocess_env()
+    )
     return result.returncode != 0
 
 
@@ -179,6 +206,7 @@ def install_dependencies(project_root: Path, venv_python_exe: Path, run=subproce
         cwd=str(project_root),
         capture_output=True,
         text=True,
+        env=subprocess_env(),
     )
     if result.returncode != 0:
         raise LauncherError(
@@ -236,6 +264,7 @@ def start_server_process(venv_python_exe: Path, project_root: Path, popen=subpro
     return popen(
         [str(venv_python_exe), "-m", "shiori_pricing_lab.app.standalone_option_workbench_server"],
         cwd=str(project_root),
+        env=subprocess_env(),
     )
 
 

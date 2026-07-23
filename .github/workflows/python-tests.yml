@@ -65,3 +65,4 @@ jobs:
         run: |
           cd /d "%SMOKE_TEST_DIR%"
           call start_shiori.bat --no-browser
+          if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%

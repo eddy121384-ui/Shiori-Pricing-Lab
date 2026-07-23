@@ -159,6 +159,40 @@ def test_install_dependencies_runs_from_the_actual_repository_root(tmp_path):
     assert cwd == str(tmp_path)
 
 
+def test_install_dependencies_sets_pythonutf8_for_unicode_paths(tmp_path):
+    # Real Windows CI finding: setuptools' editable-install machinery writes
+    # its .pth file using the platform-default text encoding, which on
+    # Windows is the system ANSI codepage unless UTF-8 mode is enabled --
+    # any repository path containing a non-Latin-1 Unicode character then
+    # fails the whole install with UnicodeEncodeError. PYTHONUTF8=1 fixes
+    # the encoding those child processes default to, independent of locale.
+    captured_env = {}
+
+    def _run(command, cwd=None, env=None, **kwargs):
+        captured_env.update(env or {})
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+    lw.install_dependencies(tmp_path, venv_py, run=_run)
+
+    assert captured_env.get("PYTHONUTF8") == "1"
+
+
+def test_ensure_venv_sets_pythonutf8_for_unicode_paths(tmp_path):
+    target = lw.venv_python(tmp_path)
+    captured_env = {}
+
+    def _run(command, env=None, **kwargs):
+        captured_env.update(env or {})
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    lw.ensure_venv(tmp_path, "python", run=_run)
+
+    assert captured_env.get("PYTHONUTF8") == "1"
+
+
 def test_install_dependencies_failure_is_visible_and_actionable(tmp_path):
     def _run(command, cwd=None, **kwargs):
         return subprocess.CompletedProcess(
