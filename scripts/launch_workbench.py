@@ -160,17 +160,24 @@ def venv_is_valid(venv_python_exe: Path, run=subprocess.run) -> bool:
 
     A venv left behind by an interrupted or partially-deleted creation can
     have a python executable on disk while everything else is missing or
-    broken -- the existence check alone is not proof the venv is usable.
+    broken -- the existence check alone is not proof the venv is usable. A
+    truncated or non-executable interpreter file makes ``run`` raise
+    ``OSError`` (e.g. ``PermissionError``, "not a valid Win32 application")
+    rather than returning a failed ``CompletedProcess``, so that must also
+    count as invalid rather than escaping as an unhandled traceback.
     """
 
     if not venv_python_exe.exists():
         return False
-    result = run(
-        [str(venv_python_exe), "-m", "pip", "--version"],
-        capture_output=True,
-        text=True,
-        env=subprocess_env(),
-    )
+    try:
+        result = run(
+            [str(venv_python_exe), "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            env=subprocess_env(),
+        )
+    except OSError:
+        return False
     return result.returncode == 0
 
 

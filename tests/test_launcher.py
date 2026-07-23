@@ -198,6 +198,32 @@ def test_ensure_venv_rebuilds_a_corrupted_venv_automatically(tmp_path):
     assert not (lw.venv_dir(tmp_path) / "pyvenv.cfg").exists()
 
 
+def test_ensure_venv_rebuilds_when_the_interpreter_cannot_even_be_launched(tmp_path):
+    # Codex review (PR #139): a truncated or non-executable interpreter file
+    # makes subprocess.run raise OSError/PermissionError rather than return
+    # a failed CompletedProcess. That must be treated as "invalid, rebuild
+    # it" too, not escape as an unhandled traceback.
+    target = lw.venv_python(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text("not an executable", encoding="utf-8")
+
+    calls = []
+
+    def _run(command, **kwargs):
+        calls.append(command)
+        if command[1:] == ["-m", "pip", "--version"]:
+            raise PermissionError("not a valid Win32 application")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = lw.ensure_venv(tmp_path, "python", run=_run, rmtree=shutil.rmtree)
+
+    assert result == target
+    assert target.exists()
+    assert calls[1] == ["python", "-m", "venv", str(tmp_path / ".venv")]
+
+
 # --- Dependency install ----------------------------------------------------------
 
 
