@@ -153,12 +153,18 @@ def _upload_fake_case_file(page, name: str = "case.json") -> None:
     )
 
 
-def _wait_until(predicate, timeout: float = 8.0, interval: float = 0.02) -> None:
+def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> None:
     """Poll ``predicate`` from the test thread until it's true or time out.
 
     This is test-side polling only -- it never runs inside a Playwright
     route handler, so it cannot reintroduce the blocking-handler bug this
-    file exists to fix (see module docstring).
+    file exists to fix (see module docstring). The default timeout is
+    generous (20s, not a tight bound) because these tests assert that a
+    condition *eventually* becomes true, not how fast -- a real CI runner
+    can be meaningfully slower/more contended than a local sandbox (this
+    was observed directly: test_early_click_during_bootstrap_does_not_break_initialization
+    failed twice on GitHub Actions at an 8s bound while passing reliably
+    locally), and a longer bound never weakens what is actually asserted.
     """
 
     deadline = time.monotonic() + timeout
@@ -169,7 +175,7 @@ def _wait_until(predicate, timeout: float = 8.0, interval: float = 0.02) -> None
     raise AssertionError(f"condition not met within {timeout}s")
 
 
-def _wait_until_via_page(page, predicate, timeout: float = 8.0, interval_ms: int = 20) -> None:
+def _wait_until_via_page(page, predicate, timeout: float = 20.0, interval_ms: int = 20) -> None:
     """Like :func:`_wait_until`, but pumps Playwright's own event loop
     between polls via ``page.wait_for_timeout()`` instead of a bare
     ``time.sleep()``.
@@ -197,10 +203,18 @@ def _wait_until_via_page(page, predicate, timeout: float = 8.0, interval_ms: int
 
 
 def _wait_bootstrap_ready(page) -> None:
-    _wait_until(
+    # Uses _wait_until_via_page, not the bare _wait_until: several tests call
+    # this immediately after resolving (fulfilling/continuing) a route that
+    # was held open, and CDP event delivery in that situation was directly
+    # observed (see _wait_until_via_page's own docstring, and the CI-only
+    # failures of test_early_click_during_bootstrap_does_not_break_initialization
+    # this fix responds to) to sometimes need a page-level wait to be pumped
+    # promptly -- a bare time.sleep() polling loop does not reliably do that.
+    _wait_until_via_page(
+        page,
         lambda: not page.eval_on_selector(
             "#price-btn", "el => el.classList.contains('is-disabled')"
-        )
+        ),
     )
 
 
