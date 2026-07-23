@@ -341,3 +341,37 @@ input.control:focus {
   margin-bottom: 12px;
 }
 .error-banner:empty { display: none; }
+
+/* ---------- Bloomberg quote refresh ---------- */
+.bloomberg-refresh { padding: 12px 18px; }
+.bloomberg-refresh .card-title { margin-bottom: 9px; }
+.bloomberg-controls {
+  display: grid;
+  grid-template-columns: 320px 220px auto;
+  align-items: center;
+  gap: 16px;
+}
+.bloomberg-controls .form-row { margin-bottom: 0; }
+/* A 3-way toggle (BID/MID/OFFER) with deliberately no default selected --
+   see setControlsEnabled()/script.js: nothing gets an "on" class until the
+   trader clicks one, unlike the 2-way Call/Put and Buy/Sell toggles above,
+   which always start with one option pre-selected. */
+.toggle.toggle-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+.live-bloomberg-panel {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #eef0f4;
+}
+.lbq-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--orange);
+  margin-bottom: 10px;
+}
+.lbq-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 24px; }
+.lbq-item { display: flex; flex-direction: column; gap: 2px; }
+.lbq-item .lbq-k { font-size: 12px; color: var(--muted); }
+.lbq-item .lbq-v { font-size: 13.5px; color: var(--text-strong); font-weight: 600; }

@@ -60,6 +60,20 @@
     optionTermsPricingTimestamp: document.getElementById("option-terms-pricing-timestamp"),
     optionTermsExpiryTimestamp: document.getElementById("option-terms-expiry-timestamp"),
     optionTermsSettlementLag: document.getElementById("option-terms-settlement-lag"),
+    bloombergSecurityInput: document.getElementById("bloomberg-security-input"),
+    quoteSideToggle: document.getElementById("quote-side-toggle"),
+    bloombergRefreshBtn: document.getElementById("bloomberg-refresh-btn"),
+    liveBloombergPanel: document.getElementById("live-bloomberg-panel"),
+    bloombergQuoteSecurity: document.getElementById("bloomberg-quote-security"),
+    bloombergQuoteIsin: document.getElementById("bloomberg-quote-isin"),
+    bloombergQuoteSide: document.getElementById("bloomberg-quote-side"),
+    bloombergQuoteCurrency: document.getElementById("bloomberg-quote-currency"),
+    bloombergQuoteCleanPrice: document.getElementById("bloomberg-quote-clean-price"),
+    bloombergQuoteAccrued: document.getElementById("bloomberg-quote-accrued"),
+    bloombergQuoteAcquiredAt: document.getElementById("bloomberg-quote-acquired-at"),
+    bloombergQuoteTimestampBasis: document.getElementById("bloomberg-quote-timestamp-basis"),
+    bloombergQuoteScope: document.getElementById("bloomberg-quote-scope"),
+    bloombergQuoteOtherInputs: document.getElementById("bloomberg-quote-other-inputs"),
   };
 
   // The active full case (Issue #138): starts as the bundled default from
@@ -125,6 +139,7 @@
     els.clearBtn.classList.toggle("is-disabled", !enabled);
     els.loadCaseLabel.classList.toggle("is-disabled", !enabled);
     els.caseFileInput.disabled = !enabled;
+    els.bloombergRefreshBtn.classList.toggle("is-disabled", !enabled);
   }
 
   // Pricing-only request generation/abort tracking -- scoped exclusively to
@@ -186,6 +201,32 @@
     if (inFlightCaseLoadController) {
       inFlightCaseLoadController.abort();
       inFlightCaseLoadController = null;
+    }
+  }
+
+  // Bloomberg-refresh-only request generation/abort tracking -- a third,
+  // independent counter alongside the pricing and case-load ones above, so
+  // the same latest-action-wins model covers all four action types
+  // symmetrically: a stale Bloomberg response can never overwrite a later
+  // Price, Clear, Case Load, or newer Bloomberg action, and starting any of
+  // those other three always invalidates a pending Bloomberg response too
+  // (see invalidatePendingBloombergRequest() calls in each of them).
+  let bloombergGeneration = 0;
+  let inFlightBloombergController = null;
+
+  function beginBloombergRequest() {
+    return ++bloombergGeneration;
+  }
+
+  function isStaleBloombergRequest(generation) {
+    return generation !== bloombergGeneration;
+  }
+
+  function invalidatePendingBloombergRequest() {
+    beginBloombergRequest();
+    if (inFlightBloombergController) {
+      inFlightBloombergController.abort();
+      inFlightBloombergController = null;
     }
   }
 
@@ -281,6 +322,15 @@
     return toggleEl.querySelector(".opt.on").dataset.value;
   }
 
+  // Unlike getToggleValue() above (Call/Put, Buy/Sell -- always exactly one
+  // ".on"), the Quote Side toggle deliberately starts with no option
+  // selected (no hidden BID/MID/OFFER default), so this returns null rather
+  // than throwing until the trader has explicitly clicked one.
+  function getOptionalToggleValue(toggleEl) {
+    const selected = toggleEl.querySelector(".opt.on");
+    return selected ? selected.dataset.value : null;
+  }
+
   function setFormFromOverlay(overlay) {
     setToggle(els.optionTypeToggle, overlay.option_type);
     setToggle(els.positionToggle, overlay.position);
@@ -340,6 +390,21 @@
     els.statusText.textContent = "Case load failed";
   }
 
+  // A Bloomberg refresh failure is deliberately NOT renderFailure either,
+  // for the same reason as renderCaseLoadError: it must preserve the
+  // previously active case and completed display exactly as they were --
+  // never fall back to the case's old bond quote, and never show partial
+  // live provenance or fabricated values. Only the banner communicates that
+  // this particular refresh attempt failed; the live-quote panel (if one
+  // was already showing from an earlier successful refresh) is also left
+  // untouched here.
+  function renderBloombergError(message) {
+    els.errorBanner.textContent = message;
+    els.errorBanner.hidden = false;
+    els.statusIndicator.classList.add("failed");
+    els.statusText.textContent = "Bloomberg refresh failed";
+  }
+
   function renderSuccess(display) {
     els.errorBanner.hidden = true;
     els.errorBanner.textContent = "";
@@ -360,15 +425,44 @@
     els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
   }
 
+  // Renders the bounded, verbatim live_bloomberg_quote section (see
+  // prepare_live_bloomberg_quote_display in standalone_option_workbench.py)
+  // -- present only on a display produced by a Bloomberg refresh. Passing
+  // null hides/clears the panel: every other action (bootstrap, Price,
+  // Clear, Case Load) prices from the case's own unchanged bond quote, so
+  // showing stale live-quote fields next to that run would misrepresent its
+  // provenance (Codex review: "do not label the whole run or all market
+  // inputs as Bloomberg live"). Every field here is a direct read of the
+  // section -- no calculation, no inference.
+  function renderLiveBloombergQuote(quote) {
+    if (!quote) {
+      els.liveBloombergPanel.hidden = true;
+      return;
+    }
+    els.liveBloombergPanel.hidden = false;
+    els.bloombergQuoteSecurity.textContent = quote.security;
+    els.bloombergQuoteIsin.textContent = quote.verified_isin;
+    els.bloombergQuoteSide.textContent = quote.quote_side;
+    els.bloombergQuoteCurrency.textContent = quote.currency;
+    els.bloombergQuoteCleanPrice.textContent = fmt(quote.clean_price_per_100);
+    els.bloombergQuoteAccrued.textContent = fmt(quote.accrued_interest_per_100);
+    els.bloombergQuoteAcquiredAt.textContent = quote.acquired_at;
+    els.bloombergQuoteTimestampBasis.textContent = quote.timestamp_basis;
+    els.bloombergQuoteScope.textContent = quote.refreshed_scope;
+    els.bloombergQuoteOtherInputs.textContent = quote.other_market_inputs;
+  }
+
   function renderDisplay(display) {
     if (display.status === "FAILED") {
       const messages = (display.errors || [])
         .map((e) => `${e.code}: ${e.message}`)
         .join(" | ");
       renderFailure(messages || "Pricing failed.");
+      renderLiveBloombergQuote(display.live_bloomberg_quote || null);
       return;
     }
     renderSuccess(display);
+    renderLiveBloombergQuote(display.live_bloomberg_quote || null);
   }
 
   // The one-shot bootstrap load. Runs to completion unconditionally --
@@ -434,6 +528,7 @@
     const overlay = readOverlayFromForm();
     const generation = beginRequest();
     invalidatePendingCaseLoadRequest(); // a Price click must beat any older pending Case Load
+    invalidatePendingBloombergRequest(); // a Price click must beat any older pending Bloomberg refresh
 
     if (inFlightPriceController) {
       inFlightPriceController.abort();
@@ -476,6 +571,7 @@
 
     invalidatePendingPriceRequest(); // invalidate any in-flight Price request's eventual response
     invalidatePendingCaseLoadRequest(); // a Clear click must beat any older pending Case Load
+    invalidatePendingBloombergRequest(); // a Clear click must beat any older pending Bloomberg refresh
     if (!baseCase || !baseOverlay || !baseContext || !baseDisplay) {
       return;
     }
@@ -496,6 +592,7 @@
 
     const generation = beginCaseLoadRequest();
     invalidatePendingPriceRequest(); // a case load in flight invalidates any pending Price response
+    invalidatePendingBloombergRequest(); // ...and any pending Bloomberg refresh response too
 
     if (inFlightCaseLoadController) {
       inFlightCaseLoadController.abort();
@@ -553,9 +650,10 @@
 
     // Genuine success: replace the active base atomically (all four
     // together, synchronously, so nothing can observe a partial swap), then
-    // invalidate any pre-swap Price response so it can never overwrite this
-    // freshly rendered base.
+    // invalidate any pre-swap Price/Bloomberg response so neither can
+    // overwrite this freshly rendered base.
     invalidatePendingPriceRequest();
+    invalidatePendingBloombergRequest();
     baseCase = payload.case;
     baseOverlay = payload.overlay;
     baseContext = payload.context;
@@ -564,6 +662,72 @@
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
     setCurrentDisplay(baseDisplay);
+  }
+
+  // Bloomberg quote refresh: prices the current active case (bundled or
+  // uploaded, whichever baseCase already is) with the current form overlay,
+  // using one fresh Bloomberg bond quote in place of the case's own --
+  // exactly like Price, except the bridge substitutes one live quote before
+  // pricing. This never changes baseCase/baseOverlay/baseContext/baseDisplay
+  // (no instrument-identity change): clicking Clear afterwards still
+  // restores the case's own original bond quote, not this Bloomberg-priced
+  // run. quote_side is required and has no default -- a click with either
+  // field empty is rejected client-side before any request is sent.
+  async function refreshBloombergAndPrice() {
+    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
+
+    const bloombergSecurity = els.bloombergSecurityInput.value.trim();
+    const quoteSide = getOptionalToggleValue(els.quoteSideToggle);
+    if (!bloombergSecurity || !quoteSide) {
+      renderBloombergError(
+        "Enter a Bloomberg Security and select a Quote Side before refreshing."
+      );
+      return;
+    }
+
+    const overlay = readOverlayFromForm();
+    const generation = beginBloombergRequest();
+    invalidatePendingPriceRequest(); // a Bloomberg refresh must beat any older pending Price
+    invalidatePendingCaseLoadRequest(); // ...and any older pending Case Load
+
+    if (inFlightBloombergController) {
+      inFlightBloombergController.abort();
+    }
+    const controller = new AbortController();
+    inFlightBloombergController = controller;
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/case/bloomberg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          case: baseCase,
+          overlay,
+          bloomberg_security: bloombergSecurity,
+          quote_side: quoteSide,
+        }),
+        signal: controller.signal,
+      });
+      payload = await response.json();
+    } catch (err) {
+      // Either a genuine network/JSON failure, or this request was
+      // superseded (aborted by a newer Bloomberg click, Price, Clear, or a
+      // case load) -- either way, preserve the previous active case and
+      // completed display; never fall back to the case's old bond quote.
+      if (isStaleBloombergRequest(generation)) return;
+      renderBloombergError("Bloomberg refresh failed: " + err.message);
+      return;
+    }
+    if (isStaleBloombergRequest(generation)) return;
+    if (!response.ok) {
+      renderBloombergError(payload.error || "Bloomberg refresh failed.");
+      return;
+    }
+
+    setCurrentDisplay(payload);
+    renderDisplay(payload);
   }
 
   // Issue #138: download the current run as JSON/Markdown, reusing only the
@@ -620,11 +784,18 @@
       setToggle(els.positionToggle, opt.dataset.value);
     }
   });
+  els.quoteSideToggle.addEventListener("click", (event) => {
+    const opt = event.target.closest(".opt");
+    if (opt) {
+      setToggle(els.quoteSideToggle, opt.dataset.value);
+    }
+  });
 
   els.priceBtn.addEventListener("click", priceCurrentForm);
   els.clearBtn.addEventListener("click", clearToBase);
   els.downloadJsonBtn.addEventListener("click", () => downloadCurrentRun("json"));
   els.downloadMarkdownBtn.addEventListener("click", () => downloadCurrentRun("markdown"));
+  els.bloombergRefreshBtn.addEventListener("click", refreshBloombergAndPrice);
   els.caseFileInput.addEventListener("change", (event) => {
     const file = event.target.files && event.target.files[0];
     event.target.value = ""; // allow re-selecting the same filename again later

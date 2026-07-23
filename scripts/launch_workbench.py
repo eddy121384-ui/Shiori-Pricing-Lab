@@ -27,6 +27,14 @@ editable-install target is exactly the kind of thing that breaks on some
 pip/setuptools versions; using ``cwd`` instead sidesteps the whole class of
 problem. See :func:`build_install_command`.
 
+**Bloomberg's blpapi package.** Installed as its own separate pip step (see
+:func:`build_bloomberg_install_command`), using Bloomberg's own package
+index (``blpapi`` is not published on PyPI) -- never folded into
+``".[quant]"`` or any other requirement, so the project's other
+dependencies are never resolved against Bloomberg's index. A failure here
+is a visible, actionable :class:`LauncherError` like every other install
+step, not a silent skip.
+
 **No PowerShell, no admin, no unrelated-process termination.** Every
 external command this module runs is a plain, argv-list ``subprocess`` call
 (no shell string, no PowerShell). Nothing here ever calls ``taskkill``,
@@ -62,7 +70,7 @@ DEFAULT_PORT = 8765
 # title -- so a stale server from a parent revision is never mistaken for a
 # current, reusable one. Bump this alongside the server module's own
 # API_CONTRACT_ID whenever the API contract changes.
-_EXPECTED_API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-v1"
+_EXPECTED_API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v2"
 
 
 class LauncherError(Exception):
@@ -271,6 +279,55 @@ def install_dependencies(project_root: Path, venv_python_exe: Path, run=subproce
         )
 
 
+# Bloomberg quote refresh: blpapi is not on PyPI -- Bloomberg publishes it on
+# its own package index. It is installed as a separate pip step, never
+# folded into ".[quant]" or any other requirement, so the project's other
+# dependencies are never resolved against Bloomberg's index.
+_BLOOMBERG_PACKAGE_INDEX_URL = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
+
+
+def bloomberg_dependency_missing(venv_python_exe: Path, run=subprocess.run) -> bool:
+    """Return True unless ``blpapi`` already imports cleanly in the venv."""
+
+    result = run(
+        [str(venv_python_exe), "-c", "import blpapi"],
+        capture_output=True,
+        text=True,
+        env=subprocess_env(),
+    )
+    return result.returncode != 0
+
+
+def build_bloomberg_install_command(venv_python_exe: Path) -> list[str]:
+    """Return the exact ``blpapi`` install command, using Bloomberg's own package index."""
+
+    return [
+        str(venv_python_exe),
+        "-m",
+        "pip",
+        "install",
+        f"--index-url={_BLOOMBERG_PACKAGE_INDEX_URL}",
+        "blpapi",
+    ]
+
+
+def install_bloomberg_dependency(venv_python_exe: Path, run=subprocess.run) -> None:
+    result = run(
+        build_bloomberg_install_command(venv_python_exe),
+        capture_output=True,
+        text=True,
+        env=subprocess_env(),
+    )
+    if result.returncode != 0:
+        raise LauncherError(
+            "Failed to install Bloomberg's blpapi package with:\n"
+            f"  {' '.join(build_bloomberg_install_command(venv_python_exe))}\n"
+            "This requires network access to Bloomberg's package index (a "
+            "Bloomberg-networked workstation). Details:\n"
+            f"{result.stderr}"
+        )
+
+
 def classify_port(url: str, timeout: float = 1.0, opener=urllib.request.urlopen) -> str:
     """Return ``"not_listening"``, ``"ours"``, or ``"occupied_by_other"`` for ``url``.
 
@@ -437,6 +494,9 @@ def run(argv=None) -> int:
             if dependencies_missing(venv_py):
                 print("Installing workbench dependencies (first launch only)...")
                 install_dependencies(project_root, venv_py)
+            if bloomberg_dependency_missing(venv_py):
+                print("Installing Bloomberg's blpapi package (first launch only)...")
+                install_bloomberg_dependency(venv_py)
             process = start_server_process(venv_py, project_root)
 
         outcome = wait_for_server_ready(url, process=process)

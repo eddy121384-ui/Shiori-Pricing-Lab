@@ -67,6 +67,21 @@ the browser holds whichever case is currently active and resends it):
   of any kind -- they format an already-computed display dict the browser
   sends them, nothing else -- and write nothing to disk.
 
+**Bloomberg quote refresh.** One more stateless route:
+
+- ``POST /api/case/bloomberg`` -- body is ``{"case": <full case>, "overlay":
+  <6-field dict>, "bloomberg_security": <str>, "quote_side": "BID"|"MID"|
+  "OFFER"}``. Applies the overlay to a fresh copy of ``case`` exactly like
+  ``/api/case/price``, then calls the existing
+  ``price_standalone_option_case_with_bloomberg_quote`` exactly once -- the
+  expected ISIN always comes from the (overlaid) case's own
+  ``bond_option.underlying_isin``, never from a separately supplied value.
+  Returns the display dict verbatim, including its ``live_bloomberg_quote``
+  section, on HTTP 200. Any validation, date, Bloomberg DAPI, or builder
+  failure returns HTTP 400 with ``{"error": "..."}`` -- the case's own
+  previous bond quote is never used as a fallback, and this route reprices
+  fresh from Bloomberg every call (no cache, no polling).
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -83,7 +98,10 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_json,
     render_standalone_run_as_markdown,
 )
-from shiori_pricing_lab.app.standalone_option_workbench import price_standalone_option_case
+from shiori_pricing_lab.app.standalone_option_workbench import (
+    price_standalone_option_case,
+    price_standalone_option_case_with_bloomberg_quote,
+)
 from shiori_pricing_lab.app.standalone_option_workbench_context import (
     extract_standalone_option_case_context,
 )
@@ -116,7 +134,11 @@ DEFAULT_PORT = 8765
 # instead, so a server lacking it (any older revision, or an unrelated
 # process on this port) is never mistaken for a current, reusable one. Bump
 # this literal string whenever a route in this module's contract changes.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-v1"
+#
+# Bumped to -v2 for the new POST /api/case/bloomberg route (Bloomberg quote
+# refresh) -- an older server predating that route must not be reused
+# either, for the same reason.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v2"
 
 
 def load_base_case() -> dict:
@@ -213,6 +235,36 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
     _, _, display = price_standalone_option_case(overlaid_case)
+    return display
+
+
+def price_case_with_bloomberg_quote(
+    case: dict, overlay: dict, bloomberg_security: str, quote_side: str
+) -> dict:
+    """Apply ``overlay`` to a fresh copy of ``case``, then price with one live Bloomberg quote.
+
+    Reuses :func:`apply_standalone_option_case_overlay` exactly like
+    :func:`price_explicit_case_with_overlay`, then calls the existing
+    ``price_standalone_option_case_with_bloomberg_quote`` exactly once --
+    this function duplicates no Bloomberg field mapping, ISIN verification,
+    pricing, discounting, Greek, timestamp, or provenance logic of its own.
+    ``quote_side`` is passed through as given (a raw string is fine; the
+    existing loader coerces and validates it) -- required, no default is
+    ever substituted here. The expected ISIN the loader verifies against
+    always comes from the (overlaid) case's own
+    ``bond_option.underlying_isin``; this function accepts no separate
+    expected-ISIN input. Returns the display dict verbatim, including its
+    ``live_bloomberg_quote`` section. Raises whatever
+    ``price_standalone_option_case_with_bloomberg_quote`` itself raises for
+    a blank security, invalid quote side, envelope/date problem, or
+    Bloomberg DAPI failure -- never caught or remapped here, and the case's
+    original bond quote is never used as a fallback.
+    """
+
+    overlaid_case = apply_standalone_option_case_overlay(case, overlay)
+    _, _, _, display = price_standalone_option_case_with_bloomberg_quote(
+        overlaid_case, bloomberg_security=bloomberg_security, quote_side=quote_side
+    )
     return display
 
 
@@ -335,6 +387,33 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, display)
 
+    def _handle_api_case_bloomberg(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        required_keys = {"case", "overlay", "bloomberg_security", "quote_side"}
+        if not isinstance(body, dict) or not required_keys.issubset(body):
+            self._write_json(
+                400,
+                {
+                    "error": (
+                        "request body must be a JSON object with 'case', 'overlay', "
+                        "'bloomberg_security', and 'quote_side'"
+                    )
+                },
+            )
+            return
+        try:
+            display = price_case_with_bloomberg_quote(
+                body["case"], body["overlay"], body["bloomberg_security"], body["quote_side"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, display)
+
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
         try:
             body = json.loads(raw_body)
@@ -361,6 +440,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/price": _handle_api_price,
         "/api/case": _handle_api_case,
         "/api/case/price": _handle_api_case_price,
+        "/api/case/bloomberg": _handle_api_case_bloomberg,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

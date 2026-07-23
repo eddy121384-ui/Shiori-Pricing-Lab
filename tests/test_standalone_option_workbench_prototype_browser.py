@@ -1010,6 +1010,349 @@ def test_uploaded_case_shows_its_own_source_system_not_synthetic_data(server_url
     assert page.inner_text("#provenance-badge") != "Synthetic Data"
 
 
+# --- Bloomberg quote refresh --------------------------------------------------
+
+
+def _fake_live_bloomberg_quote(**overrides) -> dict:
+    quote = {
+        "security": "91282CQX Govt",
+        "verified_isin": "XS9999999999",
+        "source_system": "BLOOMBERG_DAPI",
+        "quote_side": "MID",
+        "currency": "USD",
+        "clean_price_per_100": 101.25,
+        "accrued_interest_per_100": 0.42,
+        "acquired_at": "2026-07-01T16:05:00+00:00",
+        "timestamp_basis": "SHIORI_ACQUISITION_TIME",
+        "bloomberg_quote_observation_time": None,
+        "case_as_of_timestamp": "2026-07-01T00:00:00Z",
+        "refreshed_scope": "BOND_QUOTE_ONLY",
+        "other_market_inputs": "CASE_JSON_UNCHANGED",
+    }
+    quote.update(overrides)
+    return quote
+
+
+def _fake_bloomberg_display(premium_per_100: float = 444.0, **quote_overrides) -> dict:
+    display = _fake_display(premium_per_100)
+    display["live_bloomberg_quote"] = _fake_live_bloomberg_quote(**quote_overrides)
+    return display
+
+
+def _select_quote_side(page, side: str) -> None:
+    page.click(f'#quote-side-toggle .opt[data-value="{side}"]')
+
+
+def _live_bloomberg_panel_hidden(page) -> bool:
+    return page.eval_on_selector("#live-bloomberg-panel", "el => el.hidden")
+
+
+@_PLAYWRIGHT_SKIP
+def test_bloomberg_refresh_requires_security_and_quote_side(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    calls = []
+    page.route("**/api/case/bloomberg", lambda route: calls.append(route) or route.abort())
+
+    page.click("#bloomberg-refresh-btn")
+    page.wait_for_timeout(150)
+
+    assert calls == []
+    assert "Enter a Bloomberg Security and select a Quote Side" in page.inner_text(
+        "#pricing-error-banner"
+    )
+
+
+@_PLAYWRIGHT_SKIP
+def test_bloomberg_refresh_success_renders_display_and_live_quote_panel(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_fake_bloomberg_display(premium_per_100=555.0)),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") == "555.000000")
+
+    # The instrument identity/context never changes -- only the Pricing
+    # Results and the Live Bloomberg Quote panel update.
+    assert page.inner_text("#instr-title") == original_title
+    assert not _live_bloomberg_panel_hidden(page)
+    assert page.inner_text("#bloomberg-quote-security") == "91282CQX Govt"
+    assert page.inner_text("#bloomberg-quote-scope") == "BOND_QUOTE_ONLY"
+    assert page.inner_text("#bloomberg-quote-other-inputs") == "CASE_JSON_UNCHANGED"
+
+
+@_PLAYWRIGHT_SKIP
+def test_bloomberg_refresh_never_changes_the_active_case(server_url, page) -> None:
+    """Clicking Clear after a Bloomberg refresh must restore the case's own
+    original bond quote, not the Bloomberg-priced run -- the refresh never
+    changes the underlying instrument identity or active case."""
+
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_price = page.inner_text("#price-per-100")
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_fake_bloomberg_display(premium_per_100=555.0)),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") == "555.000000")
+
+    page.click("#clear-btn")
+
+    assert page.inner_text("#price-per-100") == original_price
+    assert _live_bloomberg_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_bloomberg_refresh_failure_preserves_previous_case_and_display(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+    original_price = page.inner_text("#price-per-100")
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    page.wait_for_timeout(200)
+
+    assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
+    # Nothing about the previously active case/display is disturbed -- no
+    # fallback to the case's old bond quote, no partial live provenance.
+    assert page.inner_text("#instr-title") == original_title
+    assert page.inner_text("#price-per-100") == original_price
+    assert _live_bloomberg_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_bloomberg_invalidates_a_pending_price_request(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    pending_price = []
+    page.route("**/api/case/price", lambda route: pending_price.append(route))
+    page.click("#price-btn")
+    _wait_until(lambda: len(pending_price) == 1)
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_fake_bloomberg_display(premium_per_100=777.0)),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") == "777.000000")
+
+    # Only now release the stale Price response.
+    pending_price[0].fulfill(
+        status=200, content_type="application/json", body=json.dumps(_fake_display(999.0))
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#price-per-100") == "777.000000"
+
+
+@_PLAYWRIGHT_SKIP
+def test_bloomberg_invalidates_a_pending_case_load(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+
+    pending_case = []
+    page.route("**/api/case", lambda route: pending_case.append(route))
+    _upload_fake_case_file(page)
+    _wait_until_via_page(page, lambda: len(pending_case) == 1)
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_fake_bloomberg_display(premium_per_100=777.0)),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") == "777.000000")
+
+    # Only now release the stale, slower Case Load's success response.
+    pending_case[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _fake_case_load_payload(issuer="Should Never Appear", premium_per_100=222.0)
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#instr-title") == original_title
+    assert page.inner_text("#price-per-100") == "777.000000"
+
+
+@_PLAYWRIGHT_SKIP
+def test_price_invalidates_a_pending_bloomberg_request(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    pending_bloomberg = []
+    page.route("**/api/case/bloomberg", lambda route: pending_bloomberg.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: len(pending_bloomberg) == 1)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") != "—")
+    price_after_click = page.inner_text("#price-per-100")
+
+    # Only now release the stale Bloomberg response.
+    pending_bloomberg[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_fake_bloomberg_display(premium_per_100=777.0)),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#price-per-100") == price_after_click
+    assert _live_bloomberg_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_invalidates_a_pending_bloomberg_request(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_price = page.inner_text("#price-per-100")
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    pending_bloomberg = []
+    page.route("**/api/case/bloomberg", lambda route: pending_bloomberg.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: len(pending_bloomberg) == 1)
+
+    page.click("#clear-btn")
+
+    # Only now release the stale Bloomberg response.
+    pending_bloomberg[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_fake_bloomberg_display(premium_per_100=777.0)),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#price-per-100") == original_price
+    assert _live_bloomberg_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_case_load_invalidates_a_pending_bloomberg_request(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+    pending_bloomberg = []
+    page.route("**/api/case/bloomberg", lambda route: pending_bloomberg.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: len(pending_bloomberg) == 1)
+
+    page.route(
+        "**/api/case",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _fake_case_load_payload(issuer="Loaded While Bloomberg", premium_per_100=333.0)
+            ),
+        ),
+    )
+    _upload_fake_case_file(page)
+    _wait_until(lambda: page.inner_text("#instr-title") == "Loaded While Bloomberg")
+
+    # Only now release the stale Bloomberg response.
+    pending_bloomberg[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_fake_bloomberg_display(premium_per_100=777.0)),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#price-per-100") == "333.000000"
+    assert _live_bloomberg_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_newer_bloomberg_request_beats_an_older_one(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    page.fill("#bloomberg-security-input", "91282CQX Govt")
+    _select_quote_side(page, "MID")
+
+    pending: list = []
+    request_count = 0
+
+    def route_bloomberg(route):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            pending.append(route)
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_fake_bloomberg_display(premium_per_100=222.0)),
+            )
+
+    page.route("**/api/case/bloomberg", route_bloomberg)
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: len(pending) == 1)
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") == "222.000000")
+
+    # Only now release the first (stale) Bloomberg response.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_fake_bloomberg_display(premium_per_100=111.0)),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#price-per-100") == "222.000000"
+
+
 # --- Issue #138: current-run export (Download JSON / Download Markdown) ------
 
 

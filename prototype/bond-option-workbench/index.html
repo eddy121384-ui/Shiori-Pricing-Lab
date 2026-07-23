@@ -249,6 +249,40 @@
         </div>
       </section>
 
+      <!-- Bloomberg quote refresh -->
+      <section class="card bloomberg-refresh">
+        <div class="card-title">Bloomberg Refresh</div>
+        <div class="bloomberg-controls">
+          <div class="form-row"><label>Bloomberg Security</label>
+            <input class="control" id="bloomberg-security-input" type="text" placeholder="e.g. 91282CQX Govt">
+          </div>
+          <div class="form-row"><label>Quote Side</label>
+            <div class="toggle toggle-3" id="quote-side-toggle">
+              <span class="opt" data-value="BID">Bid</span>
+              <span class="opt" data-value="MID">Mid</span>
+              <span class="opt" data-value="OFFER">Offer</span>
+            </div>
+          </div>
+          <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
+        </div>
+
+        <div class="live-bloomberg-panel" id="live-bloomberg-panel" hidden>
+          <div class="lbq-label">Live &mdash; Bloomberg (this quote only)</div>
+          <div class="lbq-grid">
+            <div class="lbq-item"><span class="lbq-k">Security</span><span class="lbq-v" id="bloomberg-quote-security">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Verified ISIN</span><span class="lbq-v" id="bloomberg-quote-isin">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Quote Side</span><span class="lbq-v" id="bloomberg-quote-side">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Currency</span><span class="lbq-v" id="bloomberg-quote-currency">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Clean Price (per 100)</span><span class="lbq-v" id="bloomberg-quote-clean-price">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Accrued Interest (per 100)</span><span class="lbq-v" id="bloomberg-quote-accrued">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Shiori Acquisition Time</span><span class="lbq-v" id="bloomberg-quote-acquired-at">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Timestamp Basis</span><span class="lbq-v" id="bloomberg-quote-timestamp-basis">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Refreshed Scope</span><span class="lbq-v" id="bloomberg-quote-scope">&mdash;</span></div>
+            <div class="lbq-item"><span class="lbq-k">Other Market Inputs</span><span class="lbq-v" id="bloomberg-quote-other-inputs">&mdash;</span></div>
+          </div>
+        </div>
+      </section>
+
       <!-- Instrument details -->
       <section class="card instrument-details">
         <div class="id-head">
