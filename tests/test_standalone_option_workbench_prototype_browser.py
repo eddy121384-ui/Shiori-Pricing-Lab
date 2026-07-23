@@ -228,22 +228,58 @@ def _goto_and_capture_route(page, url: str, route_pattern: str, pending: list, a
     handler *and* never completes normally either (confirmed empirically:
     0/25 misses with no routing at all vs. an occasional miss with routing
     registered right before the first goto). This is a test-harness timing
-    artifact, not a product bug -- retried here by reloading (routes stay
-    registered across a reload) rather than by adding any retry to the
-    application itself.
+    artifact, not a product bug -- retried here by reloading rather than by
+    adding any retry to the application itself.
+
+    Reproduced-on-CI fix: each attempt gets its own private list and its own
+    route registration, rather than all attempts sharing and re-clearing one
+    list. A prior version cleared the shared list and reloaded, but a
+    request from the *old* (about-to-be-abandoned) page can still be in
+    flight when the reload fires, and its callback can append into the
+    shared list *after* the clear -- so ``pending`` could end up holding a
+    stale route from the old page alongside (or instead of) the real one
+    from the reloaded page, and a caller that reads ``pending[0]`` assuming
+    exactly one live entry could silently ``.continue_()``/``.fulfill()``
+    the wrong (dead) request while the page's actual in-flight fetch -- tied
+    to the *other* entry -- is never resolved and hangs forever. Only the
+    winning attempt's own private list is ever copied into the caller's
+    ``pending``, so a late-arriving callback from an abandoned attempt can
+    no longer land there at all.
+
+    Unrouting only ever happens on a *failed* attempt, right before the next
+    one registers its own fresh handler -- never on the winning attempt.
+    ``page.unroute()`` was observed to force-resolve (auto-continue) any
+    already-paused request still matching the pattern being removed, which
+    would silently let the real captured request through before the caller
+    ever gets a chance to inspect or resolve it itself via
+    ``route.continue_()``/``route.fulfill()`` -- exactly the "hold this
+    request open" contract every caller of this helper depends on.
     """
 
-    page.route(route_pattern, lambda route: pending.append(route))
-    page.goto(url)
     for attempt in range(attempts):
+        attempt_pending: list = []
+
+        def _capture(route, request=None, _attempt_pending=attempt_pending):
+            # Playwright invokes route handlers as handler(route,
+            # route.request) -- accept and ignore that second positional
+            # arg so it can never collide with the _attempt_pending default.
+            _attempt_pending.append(route)
+
+        page.route(route_pattern, _capture)
+        if attempt == 0:
+            page.goto(url)
+        else:
+            page.reload()
         try:
-            _wait_until(lambda: len(pending) >= 1, timeout=2.0)
+            _wait_until(
+                lambda _pending=attempt_pending: len(_pending) >= 1, timeout=2.0
+            )
+            pending.extend(attempt_pending)
             return
         except AssertionError:
+            page.unroute(route_pattern, _capture)
             if attempt == attempts - 1:
                 raise
-            pending.clear()
-            page.reload()
 
 
 def _is_disabled(page, selector: str) -> bool:
