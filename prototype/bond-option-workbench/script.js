@@ -40,6 +40,7 @@
     instrTitle: document.getElementById("instr-title"),
     instrIsin: document.getElementById("instr-isin"),
     quoteSideBadge: document.getElementById("quote-side-badge"),
+    provenanceBadge: document.getElementById("provenance-badge"),
     statCleanPrice: document.getElementById("stat-clean-price"),
     statYieldMid: document.getElementById("stat-yield-mid"),
     statValuationDate: document.getElementById("stat-valuation-date"),
@@ -173,6 +174,21 @@
     return generation !== caseLoadGeneration;
   }
 
+  // Codex review (PR #139): a case-load generation was previously advanced
+  // only by another case load, so a slow upload's eventual response (success
+  // or failure) could still land -- and overwrite the active case, form,
+  // result, status, and banner -- after a *later* Price or Clear action had
+  // already produced a newer, different result. Price and Clear must each
+  // call this so the latest user action always wins across request types,
+  // exactly like invalidatePendingPriceRequest() already does for pricing.
+  function invalidatePendingCaseLoadRequest() {
+    beginCaseLoadRequest();
+    if (inFlightCaseLoadController) {
+      inFlightCaseLoadController.abort();
+      inFlightCaseLoadController = null;
+    }
+  }
+
   function fmt(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       return "—"; // em dash: never a fabricated zero
@@ -202,6 +218,18 @@
     el.classList.toggle("pending-value", text === "Not available");
   }
 
+  // Codex review (PR #139): the header badge was a static "Synthetic Data"
+  // label, so an uploaded real case still displayed false provenance next
+  // to a real pricing result. This shows the case's own declared
+  // source_system field verbatim -- never a guess at whether it is
+  // synthetic or real -- since that field is the one place the case itself
+  // states where it came from. Provenance-neutral wording is used only when
+  // the case does not declare a source_system at all.
+  function describeProvenance(context) {
+    const sourceSystem = context && context.source_system;
+    return sourceSystem ? String(sourceSystem) : "Source not declared";
+  }
+
   // Renders the bounded, read-only context dict verbatim (see
   // standalone_option_workbench_context.py) -- every value here is exactly
   // as it appears in the active case (the bundled default, or a
@@ -213,6 +241,7 @@
   function renderContext(context) {
     els.instrTitle.textContent = context.issuer;
     els.instrIsin.textContent = context.underlying_isin;
+    els.provenanceBadge.textContent = describeProvenance(context);
     els.quoteSideBadge.textContent = context.quote_side;
 
     setTextOrNotAvailable(els.statCleanPrice, context.clean_price_per_100);
@@ -315,7 +344,11 @@
     els.errorBanner.hidden = true;
     els.errorBanner.textContent = "";
     els.statusIndicator.classList.remove("failed");
-    els.statusText.textContent = "Local synthetic case loaded";
+    // Codex review (PR #139): this text must never claim "synthetic" --
+    // it renders for both the bundled base case and any uploaded case, and
+    // the provenance badge (see describeProvenance) is the one place that
+    // states where the active case actually came from.
+    els.statusText.textContent = "Case loaded and priced";
 
     els.priceTotal.textContent = fmt(display.total_notional_model_fair_premium);
     els.priceTotalCcy.textContent = display.result_currency || "";
@@ -400,6 +433,7 @@
 
     const overlay = readOverlayFromForm();
     const generation = beginRequest();
+    invalidatePendingCaseLoadRequest(); // a Price click must beat any older pending Case Load
 
     if (inFlightPriceController) {
       inFlightPriceController.abort();
@@ -441,6 +475,7 @@
     if (!bootstrapReady) return; // ignore any click before bootstrap has completed
 
     invalidatePendingPriceRequest(); // invalidate any in-flight Price request's eventual response
+    invalidatePendingCaseLoadRequest(); // a Clear click must beat any older pending Case Load
     if (!baseCase || !baseOverlay || !baseContext || !baseDisplay) {
       return;
     }

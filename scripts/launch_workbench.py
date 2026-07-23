@@ -53,7 +53,16 @@ DEFAULT_PORT = 8765
 # Duplicated (not imported) from standalone_option_workbench_server.py on
 # purpose: this launcher must run even before the workbench's own package
 # and its dependencies are installed, so it cannot import that module.
-_EXPECTED_PAGE_MARKER = "Bond Option Pricer"
+#
+# Codex review (PR #139): this used to be the static page title, which an
+# older revision's already-running server still serves unchanged even
+# though its in-memory route table predates the Case JSON/export routes.
+# The launcher must verify this exact, revision-specific API contract
+# (served by GET /api/health) before reusing port 8765, not just the page
+# title -- so a stale server from a parent revision is never mistaken for a
+# current, reusable one. Bump this alongside the server module's own
+# API_CONTRACT_ID whenever the API contract changes.
+_EXPECTED_API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-v1"
 
 
 class LauncherError(Exception):
@@ -265,27 +274,35 @@ def install_dependencies(project_root: Path, venv_python_exe: Path, run=subproce
 def classify_port(url: str, timeout: float = 1.0, opener=urllib.request.urlopen) -> str:
     """Return ``"not_listening"``, ``"ours"``, or ``"occupied_by_other"`` for ``url``.
 
-    Only a response that actually looks like this workbench (HTTP 200 with
-    the expected page marker) is treated as ``"ours"`` -- a bare "something
-    answered" is not enough, since blindly reusing or overwriting an
-    unrelated service on the same port would be unsafe. Never terminates or
-    otherwise touches whatever is listening; classification only.
+    Probes ``<url>api/health`` rather than ``url`` itself: only a response
+    that carries the expected, revision-specific API contract ID is treated
+    as ``"ours"`` -- a bare "something answered", or even a page that looks
+    like this workbench's own static HTML, is not enough, since an older
+    revision's already-running server still serves that same unchanged page
+    while lacking the Case JSON/export routes this revision requires (Codex
+    review, PR #139). Blindly reusing or overwriting an unrelated service,
+    or a stale server from a different revision, on the same port would be
+    unsafe. Never terminates or otherwise touches whatever is listening;
+    classification only.
     """
 
+    health_url = url.rstrip("/") + "/api/health"
     try:
-        with opener(url, timeout=timeout) as response:
+        with opener(health_url, timeout=timeout) as response:
             status = response.status
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError:
-        # A real HTTP error response (401/404/500/...) is proof something
-        # is listening and answering -- just not us -- so it must never be
+        # A real HTTP error response (401/404/500/...) is proof something is
+        # listening and answering -- just not us -- so it must never be
         # treated the same as "nothing there" (HTTPError is itself a
         # URLError subclass, so it has to be caught ahead of the broader
-        # except below or it would fall into "not_listening").
+        # except below or it would fall into "not_listening"). This is also
+        # exactly what an older revision's server returns here, since
+        # /api/health did not exist before this fix.
         return "occupied_by_other"
     except (urllib.error.URLError, OSError, TimeoutError):
         return "not_listening"
-    if status == 200 and _EXPECTED_PAGE_MARKER in body:
+    if status == 200 and _EXPECTED_API_CONTRACT_ID in body:
         return "ours"
     return "occupied_by_other"
 

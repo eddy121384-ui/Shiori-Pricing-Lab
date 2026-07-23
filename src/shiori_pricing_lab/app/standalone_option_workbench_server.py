@@ -17,6 +17,11 @@ JSON.
 
 - ``GET /`` -- serves ``prototype/bond-option-workbench/index.html``.
 - ``GET /styles.css`` / ``GET /script.js`` -- serve the matching static file.
+- ``GET /api/health`` -- returns ``{"api_contract": API_CONTRACT_ID}``, a
+  revision-specific marker (Codex review, PR #139) the launcher probes
+  before reusing an already-running process on this port, so a stale server
+  from an older revision (lacking the Case JSON/export routes below) is
+  never mistaken for a current, reusable one.
 - ``GET /api/base`` -- prices the unmodified base case and returns
   ``{"case": <the bundled base case dict>, "overlay": <6-field dict>,
   "context": <read-only identity/date/quote dict>, "display": <display
@@ -100,6 +105,18 @@ _STATIC_FILES = {
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+# Codex review (PR #139): the launcher previously identified an already-
+# running server as "ours" only by the static page title, which an older
+# revision (started from a parent commit, before the Case JSON/export routes
+# existed) still carries unchanged -- the launcher would then reuse that
+# stale process, and the browser would load this commit's UI against a
+# process whose in-memory route table 404s on /api/case, /api/case/price,
+# and the export routes. GET /api/health exposes this exact API contract
+# instead, so a server lacking it (any older revision, or an unrelated
+# process on this port) is never mistaken for a current, reusable one. Bump
+# this literal string whenever a route in this module's contract changes.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-v1"
 
 
 def load_base_case() -> dict:
@@ -259,6 +276,9 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         if self.path in _STATIC_FILES:
             file_name, content_type = _STATIC_FILES[self.path]
             self._write_static_file(file_name, content_type)
+            return
+        if self.path == "/api/health":
+            self._write_json(200, {"api_contract": API_CONTRACT_ID})
             return
         if self.path == "/api/base":
             try:

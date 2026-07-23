@@ -9,6 +9,7 @@ in this file.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -341,16 +342,38 @@ def test_classify_port_not_listening_when_connection_refused():
     assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "not_listening"
 
 
-def test_classify_port_ours_when_marker_present():
+def test_classify_port_probes_the_health_endpoint_not_the_page():
+    requested = []
+
     def opener(url, timeout=None):
-        return _FakeResponse(200, "<title>Bond Option Pricer — Static Prototype</title>")
+        requested.append(url)
+        return _FakeResponse(200, json.dumps({"api_contract": lw._EXPECTED_API_CONTRACT_ID}))
+
+    assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "ours"
+    assert requested == ["http://127.0.0.1:8765/api/health"]
+
+
+def test_classify_port_ours_when_api_contract_matches():
+    def opener(url, timeout=None):
+        return _FakeResponse(200, json.dumps({"api_contract": lw._EXPECTED_API_CONTRACT_ID}))
 
     assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "ours"
 
 
-def test_classify_port_occupied_by_other_when_marker_absent():
+def test_classify_port_rejects_an_older_revisions_stale_server():
+    # Codex review (PR #139): an older revision's already-running server
+    # still serves the unchanged page title, but its in-memory route table
+    # predates /api/health entirely -- it 404s, which HTTPError turns into
+    # occupied_by_other, so that stale process is never reused.
     def opener(url, timeout=None):
-        return _FakeResponse(200, "<html>some other app</html>")
+        raise urllib.error.HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+
+    assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "occupied_by_other"
+
+
+def test_classify_port_occupied_by_other_when_contract_id_absent():
+    def opener(url, timeout=None):
+        return _FakeResponse(200, json.dumps({"api_contract": "some-other-service-v1"}))
 
     assert lw.classify_port("http://127.0.0.1:8765/", opener=opener) == "occupied_by_other"
 

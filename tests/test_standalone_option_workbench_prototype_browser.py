@@ -914,6 +914,102 @@ def test_stale_case_load_response_cannot_overwrite_newer_state(server_url, page)
     assert page.inner_text("#price-per-100") == "555.000000"
 
 
+@_PLAYWRIGHT_SKIP
+def test_price_invalidates_a_pending_case_load(server_url, page) -> None:
+    """Codex review (PR #139): starting Price while a Case Load is in flight
+    must invalidate that Case Load -- its eventual success response must
+    never overwrite the Price result that started later."""
+
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+
+    pending_case = []
+    page.route("**/api/case", lambda route: pending_case.append(route))
+    _upload_fake_case_file(page)
+    _wait_until_via_page(page, lambda: len(pending_case) == 1)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") != "—")
+    price_after_click = page.inner_text("#price-per-100")
+
+    # Only now release the stale, slower Case Load's success response.
+    pending_case[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _fake_case_load_payload(issuer="Should Never Appear", premium_per_100=777.0)
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#instr-title") == original_title
+    assert page.inner_text("#price-per-100") == price_after_click
+    assert "777" not in page.inner_text("#price-per-100")
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_invalidates_a_pending_case_load(server_url, page) -> None:
+    """Codex review (PR #139): clicking Clear while a Case Load is in flight
+    must invalidate that Case Load -- its eventual failure response must
+    never disturb the state Clear just restored, nor show an error banner
+    for an attempt the user has already moved on from."""
+
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+    original_price = page.inner_text("#price-per-100")
+
+    pending_case = []
+    page.route("**/api/case", lambda route: pending_case.append(route))
+    _upload_fake_case_file(page)
+    _wait_until_via_page(page, lambda: len(pending_case) == 1)
+
+    page.fill("#strike-price-input", "12345.0")
+    page.click("#clear-btn")
+    assert page.inner_text("#instr-title") == original_title
+    assert page.input_value("#strike-price-input") != "12345.0"
+
+    # Only now release the stale Case Load's *failure* response.
+    pending_case[0].fulfill(
+        status=400,
+        content_type="application/json",
+        body=json.dumps({"error": "schema violation: missing field"}),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#instr-title") == original_title
+    assert page.inner_text("#price-per-100") == original_price
+    assert page.inner_text("#pricing-error-banner") == ""
+
+
+@_PLAYWRIGHT_SKIP
+def test_uploaded_case_shows_its_own_source_system_not_synthetic_data(server_url, page) -> None:
+    """Codex review (PR #139): the provenance badge must never claim
+    "Synthetic Data" for an uploaded case that declares a different, real
+    source_system -- it must show the case's own declared value verbatim."""
+
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    assert page.inner_text("#provenance-badge") != "Synthetic Data"
+
+    page.route(
+        "**/api/case",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _fake_case_load_payload(issuer="Real Desk Upload", premium_per_100=333.0)
+            ),
+        ),
+    )
+    _upload_fake_case_file(page)
+    _wait_until(lambda: page.inner_text("#instr-title") == "Real Desk Upload")
+
+    assert page.inner_text("#provenance-badge") == "TEST_SOURCE"
+    assert page.inner_text("#provenance-badge") != "Synthetic Data"
+
+
 # --- Issue #138: current-run export (Download JSON / Download Markdown) ------
 
 

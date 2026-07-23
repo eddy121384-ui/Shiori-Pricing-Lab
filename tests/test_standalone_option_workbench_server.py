@@ -112,6 +112,15 @@ def test_unknown_route_returns_404(server_url: str) -> None:
     assert "error" in payload
 
 
+def test_api_health_exposes_the_revision_specific_api_contract_id(server_url: str) -> None:
+    # Codex review (PR #139): the launcher's classify_port() must be able to
+    # tell this revision's server apart from an older one lacking the Case
+    # JSON/export routes -- this is the endpoint it probes to do that.
+    status, payload = _get_json(f"{server_url}/api/health")
+    assert status == 200
+    assert payload == {"api_contract": server_module.API_CONTRACT_ID}
+
+
 @_QUANTLIB_SKIP
 def test_api_base_matches_direct_call_to_price_standalone_option_case(server_url: str) -> None:
     status, payload = _get_json(f"{server_url}/api/base")
