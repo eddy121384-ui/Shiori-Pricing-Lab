@@ -245,31 +245,81 @@ def classify_port(url: str, timeout: float = 1.0, opener=urllib.request.urlopen)
 
 def wait_for_server_ready(
     url: str,
-    timeout_seconds: float = 30.0,
+    process=None,
+    timeout_seconds: float = 60.0,
     poll_interval: float = 0.25,
     probe=classify_port,
     sleep=time.sleep,
     clock=time.monotonic,
-) -> bool:
-    """Poll ``url`` until it looks like our own server, or ``timeout_seconds`` elapses."""
+) -> str:
+    """Poll ``url`` until it looks like our own server, ``process`` exits, or timeout.
+
+    Returns ``"ready"``, ``"exited"``, or ``"timed_out"``. ``process`` is
+    optional -- pass ``None`` when there is no child process to monitor
+    (reusing an already-running server this launcher did not itself
+    start). The process is checked on *every* poll, not only after the
+    full timeout elapses, so a server that crashes early is reported
+    immediately with its real exit code and output (see :func:`run`)
+    instead of only after silently waiting out the whole timeout window
+    -- this is what Eddy's first local UAT was missing: a 30s wait that
+    reported only "did not become ready" whether the server was merely
+    slow or had already died.
+    """
 
     deadline = clock() + timeout_seconds
     while True:
         if probe(url) == "ours":
-            return True
+            return "ready"
+        if process is not None and process.poll() is not None:
+            return "exited"
         if clock() >= deadline:
-            return False
+            return "timed_out"
         sleep(poll_interval)
 
 
-def start_server_process(venv_python_exe: Path, project_root: Path, popen=subprocess.Popen):
-    """Start the workbench server as a visible child process and return it (not waited on)."""
+def server_log_path(project_root: Path) -> Path:
+    """Return the fixed path the server's own stdout/stderr are captured to."""
 
-    return popen(
-        [str(venv_python_exe), "-m", "shiori_pricing_lab.app.standalone_option_workbench_server"],
-        cwd=str(project_root),
-        env=subprocess_env(),
-    )
+    return venv_dir(project_root) / "server_startup.log"
+
+
+def read_server_log(project_root: Path) -> str:
+    """Return the server's captured output so far, or a short note if none exists."""
+
+    try:
+        return server_log_path(project_root).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "(no server output was captured)"
+
+
+def start_server_process(venv_python_exe: Path, project_root: Path, popen=subprocess.Popen):
+    """Start the workbench server as a visible child process and return it (not waited on).
+
+    stdout/stderr are redirected to a plain text file (see
+    :func:`server_log_path`), truncated fresh on every start, rather than
+    inherited -- the simplest way to make the server's real output
+    available for diagnosis if it crashes early or is merely slow to
+    become ready, without building any logging framework. The launcher's
+    own status messages (printed via plain ``print()``) still appear in
+    the console exactly as before; only the child's own output moves to
+    this file.
+    """
+
+    log_file = open(server_log_path(project_root), "w", encoding="utf-8", buffering=1)
+    try:
+        return popen(
+            [
+                str(venv_python_exe),
+                "-m",
+                "shiori_pricing_lab.app.standalone_option_workbench_server",
+            ],
+            cwd=str(project_root),
+            env=subprocess_env(),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        log_file.close()
 
 
 def open_browser(url: str, opener=None) -> None:
@@ -325,11 +375,28 @@ def run(argv=None) -> int:
                 install_dependencies(project_root, venv_py)
             process = start_server_process(venv_py, project_root)
 
-        if not wait_for_server_ready(url):
+        outcome = wait_for_server_ready(url, process=process)
+        if outcome == "exited":
+            exit_code = process.poll()
+            raise LauncherError(
+                f"The Shiori workbench server process exited early (exit code "
+                f"{exit_code}) before it became ready at {url}. Its captured "
+                f"output:\n{read_server_log(project_root)}"
+            )
+        if outcome == "timed_out":
             if process is not None:
                 process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
             raise LauncherError(
-                f"The Shiori workbench server did not become ready at {url} in time."
+                f"The Shiori workbench server did not become ready at {url} in "
+                "time. It was still running but never answered as expected. "
+                f"Its captured output so far:\n{read_server_log(project_root)}\n"
+                "To diagnose further, run it directly with:\n"
+                f"  {venv_python(project_root)} -m "
+                "shiori_pricing_lab.app.standalone_option_workbench_server"
             )
 
         print(f"Shiori workbench is ready at {url}")

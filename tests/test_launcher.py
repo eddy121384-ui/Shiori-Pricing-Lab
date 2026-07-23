@@ -272,12 +272,15 @@ def test_wait_for_server_ready_polls_until_ready():
     sleeps = []
     clock_values = iter([0.0, 0.0, 0.1, 0.2])
 
-    assert lw.wait_for_server_ready(
-        "http://127.0.0.1:8765/",
-        timeout_seconds=5.0,
-        probe=probe,
-        sleep=sleeps.append,
-        clock=lambda: next(clock_values),
+    assert (
+        lw.wait_for_server_ready(
+            "http://127.0.0.1:8765/",
+            timeout_seconds=5.0,
+            probe=probe,
+            sleep=sleeps.append,
+            clock=lambda: next(clock_values),
+        )
+        == "ready"
     )
     assert len(calls) == 3
     assert len(sleeps) == 2
@@ -285,13 +288,56 @@ def test_wait_for_server_ready_polls_until_ready():
 
 def test_wait_for_server_ready_times_out():
     clock_values = iter([0.0, 1.0, 2.0, 3.0])
-    assert not lw.wait_for_server_ready(
+    assert (
+        lw.wait_for_server_ready(
+            "http://127.0.0.1:8765/",
+            timeout_seconds=2.0,
+            probe=lambda url: "not_listening",
+            sleep=lambda _seconds: None,
+            clock=lambda: next(clock_values),
+        )
+        == "timed_out"
+    )
+
+
+def test_wait_for_server_ready_reports_exited_process_before_timeout():
+    # The core of Eddy's UAT fix: a server that crashes early must be
+    # reported as "exited" immediately, not silently waited out for the
+    # full timeout window.
+    clock_values = iter([0.0, 0.1, 0.2, 100.0])
+    poll_results = iter([None, None, 7])
+    process = types.SimpleNamespace(poll=lambda: next(poll_results))
+
+    outcome = lw.wait_for_server_ready(
         "http://127.0.0.1:8765/",
-        timeout_seconds=2.0,
+        process=process,
+        timeout_seconds=60.0,
         probe=lambda url: "not_listening",
         sleep=lambda _seconds: None,
         clock=lambda: next(clock_values),
     )
+
+    assert outcome == "exited"
+
+
+def test_wait_for_server_ready_does_not_falsely_reject_a_slow_but_alive_process():
+    # A process that is merely slow to answer (poll() keeps returning None,
+    # i.e. still running) must eventually be reported "ready" once it does
+    # answer, never "exited", and not before the deadline.
+    clock_values = iter([0.0, 1.0, 2.0, 3.0, 4.0])
+    probe_results = iter(["not_listening", "not_listening", "not_listening", "ours"])
+    process = types.SimpleNamespace(poll=lambda: None)
+
+    outcome = lw.wait_for_server_ready(
+        "http://127.0.0.1:8765/",
+        process=process,
+        timeout_seconds=60.0,
+        probe=lambda url: next(probe_results),
+        sleep=lambda _seconds: None,
+        clock=lambda: next(clock_values),
+    )
+
+    assert outcome == "ready"
 
 
 # --- Full orchestration: ordering, occupied-port safety, no-browser mode -------
@@ -311,9 +357,9 @@ def _patch_happy_path(monkeypatch, call_order, process=None):
             wait=lambda timeout=None: call_order.append("wait"),
         )
 
-    def _wait_for_server_ready(url):
+    def _wait_for_server_ready(url, process=None):
         call_order.append("wait_for_server_ready")
-        return True
+        return "ready"
 
     def _open_browser(url):
         call_order.append("open_browser")
@@ -356,7 +402,7 @@ def test_run_creates_the_venv_with_the_already_running_interpreter(monkeypatch):
             terminate=lambda: None, wait=lambda timeout=None: None
         ),
     )
-    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url: True)
+    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url, process=None: "ready")
 
     exit_code = lw.run(["--no-browser"])
 
@@ -450,7 +496,11 @@ def test_already_running_own_server_skips_install_and_reuses_it(monkeypatch):
     monkeypatch.setattr(lw, "ensure_venv", _must_not_be_called)
     monkeypatch.setattr(lw, "install_dependencies", _must_not_be_called)
     monkeypatch.setattr(lw, "start_server_process", _must_not_be_called)
-    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url: call_order.append("wait") or True)
+    monkeypatch.setattr(
+        lw,
+        "wait_for_server_ready",
+        lambda url, process=None: call_order.append("wait") or "ready",
+    )
     monkeypatch.setattr(lw, "open_browser", lambda url: call_order.append("open_browser"))
 
     exit_code = lw.run([])
@@ -491,10 +541,47 @@ def test_readiness_timeout_terminates_the_started_process_and_reports_error(monk
             wait=lambda timeout=None: call_order.append("wait"),
         ),
     )
-    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url: False)
+    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url, process=None: "timed_out")
+    monkeypatch.setattr(lw, "read_server_log", lambda project_root: "(captured server output)")
 
     exit_code = lw.run([])
 
     assert exit_code == 1
     assert "terminate" in call_order
-    assert "did not become ready" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "did not become ready" in err
+    assert "(captured server output)" in err
+
+
+def test_readiness_early_exit_reports_exit_code_and_server_output(monkeypatch, capsys):
+    # This is the core UAT fix: a server that crashes during the readiness
+    # wait must be reported immediately with its real exit code and output,
+    # not just "did not become ready" after waiting out the full timeout.
+    call_order = []
+    monkeypatch.setattr(lw, "check_python_version", lambda: None)
+    monkeypatch.setattr(lw, "classify_port", lambda url: "not_listening")
+    monkeypatch.setattr(lw, "select_interpreter_command", lambda: ["python"])
+    monkeypatch.setattr(lw, "ensure_venv", lambda root, interpreter: Path("/fake/venv/python"))
+    monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(
+        lw,
+        "start_server_process",
+        lambda venv_py, root: types.SimpleNamespace(
+            poll=lambda: 3,
+            terminate=lambda: call_order.append("terminate"),
+            wait=lambda timeout=None: call_order.append("wait"),
+        ),
+    )
+    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url, process=None: "exited")
+    monkeypatch.setattr(
+        lw, "read_server_log", lambda project_root: "Traceback: something went wrong"
+    )
+
+    exit_code = lw.run([])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "exit code 3" in err
+    assert "Traceback: something went wrong" in err
+    # An already-exited process must not be terminated again.
+    assert "terminate" not in call_order
