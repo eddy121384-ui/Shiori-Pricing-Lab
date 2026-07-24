@@ -27,13 +27,8 @@
       </span>
     </nav>
     <div class="nav-right">
-      <label class="pill load-case-btn is-disabled" id="load-case-label" for="case-file-input">
-        <span class="dot" style="background:var(--blue)"></span>Load Case JSON
-      </label>
-      <input type="file" id="case-file-input" accept=".json" hidden disabled>
-      <span class="pill"><span class="dot"></span>Local Case</span>
-      <span class="pill"><span class="dot" style="background:var(--muted-2)"></span><span id="provenance-badge">&hellip;</span></span>
-      <span class="mid-badge" id="quote-side-badge">&hellip;</span>
+      <span class="pill" id="provenance-pill" hidden><span class="dot" style="background:var(--muted-2)"></span><span id="provenance-badge">&hellip;</span></span>
+      <span class="mid-badge" id="quote-side-badge" hidden>&hellip;</span>
       <span class="icon-btn">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
       </span>
@@ -83,8 +78,8 @@
 
       <div class="sidebar-foot">
         <div class="lbl">Market Data</div>
-        <div class="live"><span class="dot"></span>Local Case</div>
-        <div class="asof">As of<br/><span id="sidebar-as-of-timestamp">&mdash;</span></div>
+        <div class="live" id="sidebar-live-row" hidden><span class="dot"></span><span id="sidebar-source-system">&mdash;</span></div>
+        <div class="asof" id="sidebar-asof-row" hidden>As of<br/><span id="sidebar-as-of-timestamp">&mdash;</span></div>
       </div>
     </aside>
 
@@ -105,7 +100,7 @@
               <span class="opt" data-value="OFFER">Offer</span>
             </div>
           </div>
-          <span class="btn primary is-disabled" id="load-bloomberg-bond-btn">Load Bloomberg Bond</span>
+          <span class="btn primary" id="load-bloomberg-bond-btn">Load Bloomberg Bond</span>
         </div>
 
         <div class="resolved-bond-panel" id="resolved-bond-panel" hidden>
@@ -121,7 +116,10 @@
           </div>
         </div>
 
-        <div class="bond-mismatch-note" id="bond-mismatch-note" hidden>Load a Case JSON for this ISIN before pricing.</div>
+        <div class="draft-incomplete-note" id="draft-incomplete-note" hidden>
+          <div>Complete the required pricing inputs before pricing.</div>
+          <ul class="missing-fields-list" id="missing-fields-list"></ul>
+        </div>
 
         <div class="underlying-bond-actions">
           <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
@@ -129,10 +127,10 @@
       </section>
 
       <!-- Instrument header -->
-      <section class="card instr-header" id="instrument-header-section">
+      <section class="card instr-header" id="instrument-header-section" hidden>
         <div class="instr-left">
           <div class="instr-title-row">
-            <span class="instr-title" id="instr-title">Loading&hellip;</span>
+            <span class="instr-title" id="instr-title">&mdash;</span>
             <span class="star">
               <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><polygon points="12 2 15 9 22 9.3 16.5 14 18.5 21 12 17 5.5 21 7.5 14 2 9.3 9 9"/></svg>
             </span>
@@ -173,7 +171,7 @@
       </section>
 
       <!-- Workspace -->
-      <section class="workspace" id="workspace-section">
+      <section class="workspace" id="workspace-section" hidden>
 
         <!-- Option terms -->
         <div class="card option-terms">
@@ -189,16 +187,16 @@
             <div class="control select">European<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
           <div class="form-row"><label>Call / Put</label>
-            <div class="toggle" id="option-type-toggle"><span class="opt on" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
+            <div class="toggle" id="option-type-toggle"><span class="opt" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
           </div>
           <div class="form-row"><label>Direction</label>
-            <div class="toggle" id="position-toggle"><span class="opt on" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
+            <div class="toggle" id="position-toggle"><span class="opt" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
           </div>
           <div class="form-row"><label>Strike (per 100)</label>
-            <input class="control" id="strike-price-input" type="text" inputmode="decimal" value="99.5">
+            <input class="control" id="strike-price-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
           <div class="form-row"><label>Notional</label>
-            <input class="control" id="notional-input" type="text" inputmode="decimal" value="50.0">
+            <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
           <div class="form-row"><label>Expiry</label>
             <span class="control" style="width:auto;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted-2)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span id="option-terms-expiry">&mdash;</span></span>
@@ -219,7 +217,7 @@
             <div class="control select">Black (Modified)<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
           <div class="form-row" style="margin-bottom:0;"><label>Price Vol (σ, decimal)</label>
-            <input class="control" id="volatility-input" type="text" inputmode="decimal" value="0.18">
+            <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
         </div>
 
@@ -254,7 +252,7 @@
             <div class="card-title">Forward &amp; Carry</div>
             <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Price (per 100)</label>
               <div>
-                <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
+                <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="Not entered">
                 <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
               </div>
             </div>
@@ -287,7 +285,7 @@
       </section>
 
       <!-- Instrument details -->
-      <section class="card instrument-details" id="instrument-details-section">
+      <section class="card instrument-details" id="instrument-details-section" hidden>
         <div class="id-head">
           <div class="card-title">Instrument Details</div>
           <div class="card-title notes">Notes</div>
@@ -327,12 +325,12 @@
       <span class="check check-fail">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
       </span>
-      <span id="status-text">Loading&hellip;</span>
+      <span id="status-text">No bond loaded</span>
     </div>
     <div class="foot-actions">
       <span class="btn ghost is-disabled" id="download-json-btn">Download JSON</span>
       <span class="btn ghost is-disabled" id="download-markdown-btn">Download Markdown</span>
-      <span class="btn ghost is-disabled" id="clear-btn">Clear</span>
+      <span class="btn ghost" id="clear-btn">Clear</span>
       <span class="btn outline">Save Preset</span>
       <span class="btn primary is-disabled" id="price-btn">Price
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" stroke="none"/></svg>

@@ -1,14 +1,28 @@
-// Manual functional prototype wiring (PR #136, extended by Issue #138). This
-// file performs no pricing, discounting, accrual, scaling, or Greek math of
-// any kind -- it only reads/writes the six approved form fields, calls the
-// local HTTP bridge (see
+// Manual functional prototype wiring (PR #136, extended by Issue #138, #140).
+// This file performs no pricing, discounting, accrual, scaling, or Greek
+// math of any kind -- it only reads/writes trader-editable form fields,
+// calls the local HTTP bridge (see
 // src/shiori_pricing_lab/app/standalone_option_workbench_server.py), and
 // renders the returned display dict verbatim. Every numeric value shown is
 // formatted with toFixed(6), the same display precision the existing
 // Streamlit workbench uses -- never rounded, rescaled, or re-signed. It also
-// performs no JSON-schema validation of an uploaded case and no Markdown/JSON
-// export formatting of its own -- both are delegated to the bridge, which
-// itself delegates to the existing, unmodified pricing/export helpers.
+// performs no JSON-schema validation of its own -- that is delegated to the
+// bridge, which itself delegates to the existing, unmodified
+// pricing/export helpers.
+//
+// Trader-draft revision (Issue #140 second revision): the bundled synthetic
+// case and its "Load Case JSON" control are no longer part of the trader
+// workflow at all -- the normal page starts with no active instrument,
+// pricing result, market data, or provenance. A trader-driven Bloomberg
+// bond lookup is the only way to start a run; it seeds a brand-new
+// in-memory pricing draft containing only the fields Bloomberg itself
+// returned, never anything copied from a prior draft or the bundled
+// fixture. Every other pricing input starts empty and stays empty until the
+// trader enters it. Price and Refresh Bloomberg & Price stay disabled, with
+// a concrete list of still-missing fields shown, until the draft can
+// actually be built and priced through the existing reviewed builder
+// (POST /api/case, reused unchanged -- the same route the developer-only
+// Case JSON workflow already used).
 
 (function () {
   "use strict";
@@ -24,8 +38,6 @@
     clearBtn: document.getElementById("clear-btn"),
     downloadJsonBtn: document.getElementById("download-json-btn"),
     downloadMarkdownBtn: document.getElementById("download-markdown-btn"),
-    caseFileInput: document.getElementById("case-file-input"),
-    loadCaseLabel: document.getElementById("load-case-label"),
     statusIndicator: document.getElementById("status-indicator"),
     statusText: document.getElementById("status-text"),
     errorBanner: document.getElementById("pricing-error-banner"),
@@ -40,6 +52,7 @@
     instrTitle: document.getElementById("instr-title"),
     instrIsin: document.getElementById("instr-isin"),
     quoteSideBadge: document.getElementById("quote-side-badge"),
+    provenancePill: document.getElementById("provenance-pill"),
     provenanceBadge: document.getElementById("provenance-badge"),
     statCleanPrice: document.getElementById("stat-clean-price"),
     statYieldMid: document.getElementById("stat-yield-mid"),
@@ -56,6 +69,9 @@
     detailsDayCount: document.getElementById("details-day-count"),
     detailsFrequency: document.getElementById("details-frequency"),
     detailsCurrency: document.getElementById("details-currency"),
+    sidebarLiveRow: document.getElementById("sidebar-live-row"),
+    sidebarSourceSystem: document.getElementById("sidebar-source-system"),
+    sidebarAsofRow: document.getElementById("sidebar-asof-row"),
     sidebarAsOf: document.getElementById("sidebar-as-of-timestamp"),
     optionTermsPricingTimestamp: document.getElementById("option-terms-pricing-timestamp"),
     optionTermsExpiryTimestamp: document.getElementById("option-terms-expiry-timestamp"),
@@ -73,43 +89,42 @@
     resolvedBondAccrued: document.getElementById("resolved-bond-accrued"),
     resolvedBondAcquiredAt: document.getElementById("resolved-bond-acquired-at"),
     resolvedBondSource: document.getElementById("resolved-bond-source"),
-    bondMismatchNote: document.getElementById("bond-mismatch-note"),
+    draftIncompleteNote: document.getElementById("draft-incomplete-note"),
+    missingFieldsList: document.getElementById("missing-fields-list"),
     instrumentHeaderSection: document.getElementById("instrument-header-section"),
     workspaceSection: document.getElementById("workspace-section"),
     instrumentDetailsSection: document.getElementById("instrument-details-section"),
   };
 
-  // The active full case (Issue #138): starts as the bundled default from
-  // /api/base, and is wholesale-replaced only by a fully successful upload
-  // via /api/case -- never partially updated, never written anywhere but
-  // this in-memory variable. baseOverlay/baseContext/baseDisplay always
-  // describe this exact case; all four are assigned together, synchronously,
-  // so there is no way to observe one without the other three already
-  // matching it.
-  let baseCase = null;
-  let baseOverlay = null;
-  let baseContext = null;
-  let baseDisplay = null;
+  // The resolved Bloomberg bond identity from the instrument-first lookup --
+  // null until a lookup succeeds, and reset to null only by Clear or a
+  // newer successful lookup.
+  let resolvedBloombergBond = null;
 
-  // The currently displayed, exportable run (Issue #138) -- set to a
-  // display dict only at the four points where a *completed* pricing
-  // outcome (bootstrap success, case-load success, a real Price response,
-  // or Clear) is rendered, whether that outcome is SUCCESS or a structured
-  // FAILED PricingResult. Explicitly cleared (and export disabled) only when
-  // a Price action fails at the transport/decode level and leaves nothing
-  // valid on screen. Never set or cleared by a case-load failure -- that
-  // path leaves the previously active base, and therefore this variable,
-  // completely untouched.
+  // The in-memory pricing draft (trader-draft revision): a full standalone-
+  // option-case-shaped object, created fresh by buildInitialDraftFromBloomberg
+  // on every successful lookup -- never derived from, or merged with, a
+  // prior draft or the bundled synthetic fixture. Every field Bloomberg did
+  // not itself return starts `null` and stays `null` until the trader
+  // enters it via the Option Terms form. null until a bond has been
+  // resolved.
+  let currentDraft = null;
+
+  // The currently displayed, exportable run -- set to a display dict only
+  // once a genuine POST /api/case or POST /api/case/bloomberg call against
+  // the current draft succeeds (HTTP 200), whether that outcome is SUCCESS
+  // or a structured FAILED PricingResult. Cleared (and export disabled) by
+  // a fresh Bloomberg lookup, by Clear, and by a Price/Refresh transport-
+  // level failure that leaves nothing valid on screen.
   let currentDisplay = null;
 
   // Codex review (PR #139): a pending export request captures the display
-  // it was asked to export; if a Price/Load/Clear action changes
-  // currentDisplay before that export's response arrives, the download must
-  // not happen at all -- downloading it would silently hand the user a file
-  // for a run that is no longer the one on screen. displayGeneration is
-  // bumped every time currentDisplay changes (via setCurrentDisplay, the
-  // only place that ever assigns it), and downloadCurrentRun checks it
-  // after the response arrives, before ever building the Blob/download.
+  // it was asked to export; if a later action changes currentDisplay before
+  // that export's response arrives, the download must not happen at all.
+  // displayGeneration is bumped every time currentDisplay changes (via
+  // setCurrentDisplay, the only place that ever assigns it), and
+  // downloadCurrentRun checks it after the response arrives, before ever
+  // building the Blob/download.
   let displayGeneration = 0;
 
   function setCurrentDisplay(display) {
@@ -123,80 +138,113 @@
     els.downloadMarkdownBtn.classList.toggle("is-disabled", !enabled);
   }
 
-  // Codex final re-review fix (PR #136): bootstrap (the one-shot initial
-  // /api/base load) and pricing requests (Price/Clear) have entirely
-  // separate lifecycles/state. Bootstrap never participates in the pricing
-  // generation counter below -- there is only ever one bootstrap call, so it
-  // can never race against a competing bootstrap call, and it must never be
-  // invalidated by a Price/Clear click that happens to fire before it
-  // resolves. `bootstrapReady` gates Price/Clear/Load-Case-JSON at the JS
-  // logic level (not just a visual CSS class), so it cannot be bypassed by a
-  // programmatic click, a keyboard activation, or any other non-standard
-  // trigger: each handler returns immediately, with zero side effects, if
-  // bootstrap has not yet completed successfully.
-  let bootstrapReady = false;
+  // Reused exactly, mirroring standalone_option_workbench.build_request_from_
+  // standalone_option_case's own required-field shape (products/bond_option.py,
+  // data/bli_snapshot.py, reference_data/bond_reference_data.py) -- not a new
+  // financial rule, just this workbench's own record of which leaves those
+  // existing typed constructors require non-null. Anything not listed here
+  // either has a real default on the dataclass itself (e.g. strike_yield,
+  // exercise_start_date, product_type) or is always populated verbatim from
+  // Bloomberg the moment a draft exists (isin/currency/issuer/quote_side/
+  // clean_price_per_100/accrued_interest_per_100/source_system), so it can
+  // never appear in this workbench's own missing-input list.
+  const REQUIRED_DRAFT_FIELD_CHECKS = [
+    ["bond_option.product_id", "Product ID"],
+    ["bond_option.payoff_basis", "Payoff Basis"],
+    ["bond_option.option_type", "Call / Put"],
+    ["bond_option.exercise_style", "Exercise Style"],
+    ["bond_option.settlement_type", "Settlement Type"],
+    ["bond_option.settlement_lag_days", "Settlement Lag (days)"],
+    ["bond_option.expiry_date", "Expiry Date"],
+    ["bond_option.notional", "Notional"],
+    ["bond_option.position", "Direction (Buy/Sell)"],
+    ["bond_option.strike_price", "Strike (per 100)"],
+    ["bond_reference_data_universe.0.coupon", "Bond Reference Data: Coupon"],
+    ["bond_reference_data_universe.0.coupon_frequency", "Bond Reference Data: Coupon Frequency"],
+    ["bond_reference_data_universe.0.maturity_date", "Bond Reference Data: Maturity Date"],
+    ["bond_reference_data_universe.0.issue_date", "Bond Reference Data: Issue Date"],
+    ["bond_reference_data_universe.0.day_count", "Bond Reference Data: Day Count"],
+    [
+      "bond_reference_data_universe.0.business_day_convention",
+      "Bond Reference Data: Business Day Convention",
+    ],
+    ["bond_reference_data_universe.0.redemption_amount", "Bond Reference Data: Redemption Amount"],
+    ["bond_reference_data_universe.0.callable_flag", "Bond Reference Data: Callable Flag"],
+    ["bond_reference_data_universe.0.sinkable_flag", "Bond Reference Data: Sinkable Flag"],
+    ["bond_reference_data_universe.0.bond_type", "Bond Reference Data: Bond Type"],
+    ["bond_reference_data_universe.0.yield_convention", "Bond Reference Data: Yield Convention"],
+    ["bond_reference_data_universe.0.ex_dividend_days", "Bond Reference Data: Ex-Dividend Days"],
+    ["bond_reference_data_universe.0.first_coupon_date", "Bond Reference Data: First Coupon Date"],
+    ["bond_reference_data_universe.0.last_coupon_date", "Bond Reference Data: Last Coupon Date"],
+    ["bond_reference_data_universe.0.status", "Bond Reference Data: Status"],
+    ["valuation_date", "Valuation Date"],
+    ["as_of_timestamp", "As-Of Timestamp"],
+    ["pricing_timestamp", "Pricing Timestamp"],
+    ["expiry_timestamp", "Expiry Timestamp"],
+    ["reporting_date", "Reporting Date"],
+    ["forward_settlement_date", "Forward Settlement Date"],
+    ["option_settlement_date", "Option Settlement Date"],
+    ["source_system", "Source System"],
+    ["snapshot_id", "Snapshot ID"],
+    ["snapshot_status", "Snapshot Status"],
+    ["bond_quote.price_type", "Bond Quote: Price Type"],
+    ["bond_quote.status", "Bond Quote: Status"],
+    ["forward_clean_price_input.forward_clean_price_per_100", "Forward Clean Price (per 100)"],
+    ["forward_clean_price_input.quote_side", "Forward Clean Price: Quote Side"],
+    ["forward_clean_price_input.source_system", "Forward Clean Price: Source System"],
+    ["forward_clean_price_input.status", "Forward Clean Price: Status"],
+    ["volatility_input.volatility", "Price Vol (σ)"],
+    ["volatility_input.volatility_basis", "Volatility Basis"],
+    ["volatility_input.source_system", "Volatility: Source System"],
+    ["volatility_input.status", "Volatility: Status"],
+    ["credit_spread_input.spread_treatment", "Credit Spread: Treatment"],
+    ["credit_spread_input.source_system", "Credit Spread: Source System"],
+    ["credit_spread_input.status", "Credit Spread: Status"],
+    ["credit_spread_input.credit_spread", "Credit Spread"],
+    ["credit_spread_input.credit_spread_basis", "Credit Spread: Basis"],
+  ];
 
-  // The instrument-first Bloomberg lookup's resolved bond identity (Issue
-  // #140 revision) -- null until a lookup succeeds, and reset to null only
-  // by Clear. Distinct from baseCase/baseOverlay/baseContext/baseDisplay:
-  // this describes the bond the trader selected via Bloomberg, which may or
-  // may not be the same instrument as the active pricing case.
-  let resolvedBloombergBond = null;
-
-  // True only when a resolved Bloomberg bond's own ISIN matches the active
-  // case's underlying_isin -- the sole condition under which Price and the
-  // existing Bloomberg quote-refresh-and-price path may run against it.
-  function bondMatchesActiveCase() {
-    return (
-      !!resolvedBloombergBond &&
-      !!baseContext &&
-      resolvedBloombergBond.isin === baseContext.underlying_isin
-    );
+  function readDottedPath(root, path) {
+    return path.split(".").reduce((node, key) => (node == null ? undefined : node[key]), root);
   }
 
-  // Recomputes every visual/logic consequence of the current
-  // resolvedBloombergBond + active-case pairing. Called after bootstrap,
-  // after a successful bond lookup, after Clear, and after a case load --
-  // every point where either side of the comparison can change. A mismatch
-  // hides the old case's instrument header, workspace (option terms +
-  // pricing results), and instrument details -- never mutates baseCase/
-  // baseOverlay/baseContext/baseDisplay themselves, only what is shown --
-  // and disables Price and the Bloomberg refresh-and-price path until a
-  // matching Case JSON is loaded or the mismatched bond is cleared.
-  function syncBondGating() {
-    const mismatch = !!resolvedBloombergBond && !bondMatchesActiveCase();
+  // Structural presence only -- never a financial judgment about whether a
+  // present value is itself valid (that stays the existing typed
+  // constructors' job, applied when Price/Refresh actually call the real
+  // builder). `0` and `false` are real values, never treated as missing.
+  function computeMissingDraftFields(draft) {
+    const missing = REQUIRED_DRAFT_FIELD_CHECKS.filter(([path]) => {
+      const value = readDottedPath(draft, path);
+      return value === null || value === undefined || value === "";
+    }).map(([, label]) => label);
 
-    els.instrumentHeaderSection.hidden = mismatch;
-    els.workspaceSection.hidden = mismatch;
-    els.instrumentDetailsSection.hidden = mismatch;
-    els.bondMismatchNote.hidden = !mismatch;
-
-    els.priceBtn.classList.toggle("is-disabled", !bootstrapReady || mismatch);
-    els.bloombergRefreshBtn.classList.toggle(
-      "is-disabled",
-      !bootstrapReady || !bondMatchesActiveCase()
-    );
+    if (!Array.isArray(draft.curve_points) || draft.curve_points.length === 0) {
+      missing.push("Option Discount Curve");
+    }
+    return missing;
   }
 
-  function setControlsEnabled(enabled) {
-    bootstrapReady = enabled;
-    els.priceBtn.classList.toggle("is-disabled", !enabled);
-    els.clearBtn.classList.toggle("is-disabled", !enabled);
-    els.loadCaseLabel.classList.toggle("is-disabled", !enabled);
-    els.caseFileInput.disabled = !enabled;
-    els.loadBloombergBondBtn.classList.toggle("is-disabled", !enabled);
-    syncBondGating();
+  // Bond-lookup-only request generation/abort tracking.
+  let bondLookupGeneration = 0;
+  let inFlightBondLookupController = null;
+
+  function beginBondLookupRequest() {
+    return ++bondLookupGeneration;
   }
 
-  // Pricing-only request generation/abort tracking -- scoped exclusively to
-  // priceCurrentForm/clearToBase (and, via invalidatePendingPriceRequest(),
-  // to a case load starting or succeeding), never touched by loadBase.
-  // Every async operation that can update the Pricing Results panel captures
-  // the current generation number before it starts, and refuses to render
-  // if the generation has moved on by the time it resolves. Clear, a new
-  // Price click, and a case load (starting or succeeding) all bump the
-  // generation, so a slow/stale response can never overwrite newer state --
-  // only the single most recent request may render.
+  function isStaleBondLookupRequest(generation) {
+    return generation !== bondLookupGeneration;
+  }
+
+  function invalidatePendingBondLookupRequest() {
+    beginBondLookupRequest();
+    if (inFlightBondLookupController) {
+      inFlightBondLookupController.abort();
+      inFlightBondLookupController = null;
+    }
+  }
+
+  // Pricing-only request generation/abort tracking.
   let currentGeneration = 0;
   let inFlightPriceController = null;
 
@@ -216,47 +264,7 @@
     }
   }
 
-  // Case-load-only request generation/abort tracking (Issue #138) -- an
-  // entirely separate counter from the pricing one above, so two case loads
-  // racing each other resolve the same way pricing races do: only the
-  // single most recent case-load request may ever replace the active base
-  // or show its outcome. A stale case-load response (superseded by a newer
-  // case-load call that has already started) is discarded outright -- no
-  // render at all, success or failure, since a newer attempt has already
-  // superseded it.
-  let caseLoadGeneration = 0;
-  let inFlightCaseLoadController = null;
-
-  function beginCaseLoadRequest() {
-    return ++caseLoadGeneration;
-  }
-
-  function isStaleCaseLoadRequest(generation) {
-    return generation !== caseLoadGeneration;
-  }
-
-  // Codex review (PR #139): a case-load generation was previously advanced
-  // only by another case load, so a slow upload's eventual response (success
-  // or failure) could still land -- and overwrite the active case, form,
-  // result, status, and banner -- after a *later* Price or Clear action had
-  // already produced a newer, different result. Price and Clear must each
-  // call this so the latest user action always wins across request types,
-  // exactly like invalidatePendingPriceRequest() already does for pricing.
-  function invalidatePendingCaseLoadRequest() {
-    beginCaseLoadRequest();
-    if (inFlightCaseLoadController) {
-      inFlightCaseLoadController.abort();
-      inFlightCaseLoadController = null;
-    }
-  }
-
-  // Bloomberg-refresh-only request generation/abort tracking -- a third,
-  // independent counter alongside the pricing and case-load ones above, so
-  // the same latest-action-wins model covers all four action types
-  // symmetrically: a stale Bloomberg response can never overwrite a later
-  // Price, Clear, Case Load, or newer Bloomberg action, and starting any of
-  // those other three always invalidates a pending Bloomberg response too
-  // (see invalidatePendingBloombergRequest() calls in each of them).
+  // Bloomberg-refresh-only request generation/abort tracking.
   let bloombergGeneration = 0;
   let inFlightBloombergController = null;
 
@@ -273,32 +281,6 @@
     if (inFlightBloombergController) {
       inFlightBloombergController.abort();
       inFlightBloombergController = null;
-    }
-  }
-
-  // Bond-lookup-only request generation/abort tracking -- a fourth,
-  // independent counter alongside pricing/case-load/Bloomberg-refresh above,
-  // completing the latest-action-wins model across all four action types:
-  // a stale lookup response can never overwrite a later Price, Clear, Case
-  // Load, Bloomberg refresh, or newer lookup, and starting any of those
-  // other four always invalidates a pending lookup response too (see
-  // invalidatePendingBondLookupRequest() calls in each of them).
-  let bondLookupGeneration = 0;
-  let inFlightBondLookupController = null;
-
-  function beginBondLookupRequest() {
-    return ++bondLookupGeneration;
-  }
-
-  function isStaleBondLookupRequest(generation) {
-    return generation !== bondLookupGeneration;
-  }
-
-  function invalidatePendingBondLookupRequest() {
-    beginBondLookupRequest();
-    if (inFlightBondLookupController) {
-      inFlightBondLookupController.abort();
-      inFlightBondLookupController = null;
     }
   }
 
@@ -327,11 +309,19 @@
     return value.toFixed(6);
   }
 
+  // A blank trader-entered numeric field must never silently become 0
+  // (Number("") === 0 in JS) -- blank means "not entered", not zero.
+  function numberOrNull(raw) {
+    const trimmed = (raw || "").trim();
+    if (trimmed === "") return null;
+    const value = Number(trimmed);
+    return Number.isFinite(value) ? value : null;
+  }
+
   // Displays a raw, dimensionless coupon fraction (e.g. 0.0325) as a
   // percentage (3.250%). This is the one display-only arithmetic transform
   // this file applies anywhere: value * 100, deterministic, no market
-  // assumption or model involved -- showing the raw fraction unlabeled
-  // would misrepresent a 3.25% coupon as an apparent 0.0325% one.
+  // assumption or model involved.
   function fmtCouponPercent(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       return "Not available";
@@ -349,30 +339,24 @@
     el.classList.toggle("pending-value", text === "Not available");
   }
 
-  // Codex review (PR #139): the header badge was a static "Synthetic Data"
-  // label, so an uploaded real case still displayed false provenance next
-  // to a real pricing result. This shows the case's own declared
-  // source_system field verbatim -- never a guess at whether it is
-  // synthetic or real -- since that field is the one place the case itself
-  // states where it came from. Provenance-neutral wording is used only when
-  // the case does not declare a source_system at all.
+  // Codex review (PR #139): shows the case's own declared source_system
+  // field verbatim -- never a guess at whether it is synthetic or real.
   function describeProvenance(context) {
     const sourceSystem = context && context.source_system;
     return sourceSystem ? String(sourceSystem) : "Source not declared";
   }
 
   // Renders the bounded, read-only context dict verbatim (see
-  // standalone_option_workbench_context.py) -- every value here is exactly
-  // as it appears in the active case (the bundled default, or a
-  // successfully uploaded one), with the single coupon percent transform
-  // above. Called after /api/base or /api/case resolves successfully, and
-  // again (idempotently, on the same cached baseContext) by Clear -- none of
-  // the six overlay fields change the underlying instrument's identity, so
-  // Price never needs to touch it.
+  // standalone_option_workbench_context.py) -- called only once a real
+  // Price or Refresh Bloomberg & Price call has actually succeeded against
+  // the current draft, since only then does every field this reads
+  // genuinely exist.
   function renderContext(context) {
     els.instrTitle.textContent = context.issuer;
     els.instrIsin.textContent = context.underlying_isin;
+    els.provenancePill.hidden = false;
     els.provenanceBadge.textContent = describeProvenance(context);
+    els.quoteSideBadge.hidden = false;
     els.quoteSideBadge.textContent = context.quote_side;
 
     setTextOrNotAvailable(els.statCleanPrice, context.clean_price_per_100);
@@ -395,11 +379,64 @@
     els.detailsFrequency.textContent = context.coupon_frequency;
     els.detailsCurrency.textContent = context.currency;
 
+    els.sidebarLiveRow.hidden = false;
+    els.sidebarSourceSystem.textContent = describeProvenance(context);
+    els.sidebarAsofRow.hidden = false;
     els.sidebarAsOf.textContent = context.as_of_timestamp;
 
     els.optionTermsPricingTimestamp.textContent = context.pricing_timestamp;
     els.optionTermsExpiryTimestamp.textContent = context.expiry_timestamp;
     setTextOrNotAvailable(els.optionTermsSettlementLag, context.settlement_lag_days);
+  }
+
+  // The inverse of renderContext: hides every context-driven display back
+  // to its untouched default. Called by a fresh Bloomberg lookup (a new
+  // draft has no priced context yet) and by Clear.
+  function hideContext() {
+    els.provenancePill.hidden = true;
+    els.quoteSideBadge.hidden = true;
+    els.sidebarLiveRow.hidden = true;
+    els.sidebarAsofRow.hidden = true;
+  }
+
+  // Client-side mirror of extract_standalone_option_case_context
+  // (standalone_option_workbench_context.py), field-for-field -- used only
+  // for the Bloomberg refresh-and-price path, whose response
+  // (price_case_with_bloomberg_quote) carries a display dict but no
+  // separate context section, unlike POST /api/case. Every value is a
+  // direct read off the already-complete draft (Price/Refresh are disabled
+  // until it is complete) -- no computation, no inference.
+  function extractContextFromDraft(draft) {
+    const bondOption = draft.bond_option;
+    const isin = bondOption.underlying_isin;
+    const referenceData = (draft.bond_reference_data_universe || []).find(
+      (record) => record.isin === isin
+    );
+    const bondQuote = draft.bond_quote;
+    return {
+      underlying_isin: isin,
+      expiry_date: bondOption.expiry_date,
+      settlement_lag_days: bondOption.settlement_lag_days,
+      issuer: referenceData.issuer,
+      currency: referenceData.currency,
+      coupon: referenceData.coupon,
+      maturity_date: referenceData.maturity_date,
+      coupon_frequency: referenceData.coupon_frequency,
+      day_count: referenceData.day_count,
+      bond_type: referenceData.bond_type,
+      quote_side: bondQuote.quote_side,
+      clean_price_per_100: bondQuote.clean_price_per_100,
+      accrued_interest_per_100: bondQuote.accrued_interest_per_100,
+      yield_value: bondQuote.yield_value,
+      valuation_date: draft.valuation_date,
+      pricing_timestamp: draft.pricing_timestamp,
+      expiry_timestamp: draft.expiry_timestamp,
+      forward_settlement_date: draft.forward_settlement_date,
+      option_settlement_date: draft.option_settlement_date,
+      source_system: draft.source_system,
+      as_of_timestamp: draft.as_of_timestamp,
+      snapshot_id: draft.snapshot_id,
+    };
   }
 
   function setToggle(toggleEl, value) {
@@ -408,37 +445,62 @@
     });
   }
 
-  function getToggleValue(toggleEl) {
-    return toggleEl.querySelector(".opt.on").dataset.value;
-  }
-
-  // Unlike getToggleValue() above (Call/Put, Buy/Sell -- always exactly one
-  // ".on"), the Quote Side toggle deliberately starts with no option
-  // selected (no hidden BID/MID/OFFER default), so this returns null rather
-  // than throwing until the trader has explicitly clicked one.
+  // No option ever starts pre-selected in this revision (Call/Put and
+  // Buy/Sell included, alongside the Quote Side toggles) -- this returns
+  // null rather than throwing until the trader has explicitly clicked one.
   function getOptionalToggleValue(toggleEl) {
     const selected = toggleEl.querySelector(".opt.on");
     return selected ? selected.dataset.value : null;
   }
 
+  function clearOptionTermsForm() {
+    setToggle(els.optionTypeToggle, null);
+    setToggle(els.positionToggle, null);
+    els.strikePrice.value = "";
+    els.notional.value = "";
+    els.volatility.value = "";
+    els.forwardPrice.value = "";
+  }
+
   function setFormFromOverlay(overlay) {
     setToggle(els.optionTypeToggle, overlay.option_type);
     setToggle(els.positionToggle, overlay.position);
-    els.strikePrice.value = overlay.strike_price;
-    els.notional.value = overlay.notional;
-    els.volatility.value = overlay.volatility;
-    els.forwardPrice.value = overlay.forward_clean_price_per_100;
+    els.strikePrice.value = overlay.strike_price ?? "";
+    els.notional.value = overlay.notional ?? "";
+    els.volatility.value = overlay.volatility ?? "";
+    els.forwardPrice.value = overlay.forward_clean_price_per_100 ?? "";
   }
 
-  function readOverlayFromForm() {
+  // The six trader-editable fields, read directly off the current draft
+  // (kept in sync by applyOptionTermsToDraft on every input change) rather
+  // than re-reading the DOM -- the single source of truth for both what the
+  // form shows and what gets sent to the existing overlay-shaped Bloomberg
+  // refresh-and-price route.
+  function extractOverlayFromDraft(draft) {
     return {
-      option_type: getToggleValue(els.optionTypeToggle),
-      position: getToggleValue(els.positionToggle),
-      strike_price: Number(els.strikePrice.value),
-      notional: Number(els.notional.value),
-      volatility: Number(els.volatility.value),
-      forward_clean_price_per_100: Number(els.forwardPrice.value),
+      option_type: draft.bond_option.option_type,
+      position: draft.bond_option.position,
+      strike_price: draft.bond_option.strike_price,
+      notional: draft.bond_option.notional,
+      volatility: draft.volatility_input.volatility,
+      forward_clean_price_per_100: draft.forward_clean_price_input.forward_clean_price_per_100,
     };
+  }
+
+  // Writes the six Option Terms form controls into the current draft and
+  // re-syncs gating. A no-op if there is no draft yet (nothing to write
+  // into). Called on every relevant input's change/input event.
+  function applyOptionTermsToDraft() {
+    if (!currentDraft) return;
+    currentDraft.bond_option.option_type = getOptionalToggleValue(els.optionTypeToggle);
+    currentDraft.bond_option.position = getOptionalToggleValue(els.positionToggle);
+    currentDraft.bond_option.strike_price = numberOrNull(els.strikePrice.value);
+    currentDraft.bond_option.notional = numberOrNull(els.notional.value);
+    currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
+    currentDraft.forward_clean_price_input.forward_clean_price_per_100 = numberOrNull(
+      els.forwardPrice.value
+    );
+    syncDraftGating();
   }
 
   function clearResultFields() {
@@ -452,12 +514,11 @@
     els.greekTheta.textContent = "—";
   }
 
-  // The single, unified failure path (Codex review follow-up, PR #136): used
-  // for a FAILED PricingResult, an HTTP 400/non-2xx bridge response, a
-  // network-level fetch rejection, and a non-JSON response body alike.
-  // Every one of these clears every premium/currency/Greek field and shows
-  // an explicit error banner plus a failed status -- never leaves a prior
-  // successful result or its green "loaded" status on screen.
+  // The single, unified failure path: used for a FAILED PricingResult, an
+  // HTTP 400/non-2xx bridge response, a network-level fetch rejection, and
+  // a non-JSON response body alike. Never leaves a prior successful result
+  // or its green "loaded" status on screen; never touches currentDraft, so
+  // the trader can fix the form and retry.
   function renderFailure(message) {
     clearResultFields();
     els.errorBanner.textContent = message;
@@ -466,29 +527,10 @@
     els.statusText.textContent = "Pricing failed";
   }
 
-  // Issue #138: the case-load failure path is deliberately NOT renderFailure.
-  // A failed *attempt* to load a new case must never disturb the currently
-  // active base -- the previous context, form values, premium, and Greeks
-  // all stay exactly as they were (still a completely valid, still-current
-  // run); only the banner communicates that this particular upload failed.
-  // currentDisplay/export availability are untouched here for the same
-  // reason: the currently exportable run has not changed.
-  function renderCaseLoadError(message) {
-    els.errorBanner.textContent = message;
-    els.errorBanner.hidden = false;
-    els.statusIndicator.classList.add("failed");
-    els.statusText.textContent = "Case load failed";
-  }
-
   // A Bloomberg failure -- whether an instrument-first bond lookup or the
-  // existing quote-refresh-and-price path -- is deliberately NOT
-  // renderFailure, for the same reason as renderCaseLoadError: it must
-  // preserve the previously active case and completed display exactly as
-  // they were, and (for a lookup) the previously resolved bond exactly as
-  // it was -- never fall back to stale data, and never show partial
-  // provenance or fabricated values. Only the banner communicates that this
-  // particular attempt failed; the resolved-bond panel (if already showing
-  // from an earlier successful lookup) is left untouched here.
+  // existing quote-refresh-and-price path -- must preserve the previously
+  // resolved bond, draft, and completed display exactly as they were; only
+  // the banner communicates that this particular attempt failed.
   function renderBloombergError(message) {
     els.errorBanner.textContent = message;
     els.errorBanner.hidden = false;
@@ -500,11 +542,7 @@
     els.errorBanner.hidden = true;
     els.errorBanner.textContent = "";
     els.statusIndicator.classList.remove("failed");
-    // Codex review (PR #139): this text must never claim "synthetic" --
-    // it renders for both the bundled base case and any uploaded case, and
-    // the provenance badge (see describeProvenance) is the one place that
-    // states where the active case actually came from.
-    els.statusText.textContent = "Case loaded and priced";
+    els.statusText.textContent = "Draft priced";
 
     els.priceTotal.textContent = fmt(display.total_notional_model_fair_premium);
     els.priceTotalCcy.textContent = display.result_currency || "";
@@ -516,10 +554,9 @@
     els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
   }
 
-  // Renders the resolved Bloomberg bond identity (Issue #140 revision) --
-  // the instrument-first lookup's own result, kept on screen independently
-  // of whatever the active pricing case's display currently shows. Passing
-  // null (only ever done by Clear) hides the panel entirely.
+  // Renders the resolved Bloomberg bond identity -- the instrument-first
+  // lookup's own result. Passing null (only ever done by Clear) hides the
+  // panel entirely.
   function renderResolvedBondPanel() {
     if (!resolvedBloombergBond) {
       els.resolvedBondPanel.hidden = true;
@@ -542,9 +579,7 @@
   // refresh-and-price path. Folds its currency/price/accrued/acquisition
   // fields into the same Underlying Bond panel the instrument-first lookup
   // populates, since both describe the one Bloomberg bond currently
-  // selected -- never the old case's own bond quote. A null/absent quote
-  // (every other action: bootstrap, Price, Clear, Case Load) leaves the
-  // panel exactly as the last lookup or refresh left it.
+  // selected.
   function applyLiveBloombergQuote(quote) {
     if (!quote || !resolvedBloombergBond) {
       return;
@@ -568,302 +603,138 @@
     applyLiveBloombergQuote(display.live_bloomberg_quote || null);
   }
 
-  // The one-shot bootstrap load. Runs to completion unconditionally --
-  // nothing can invalidate, cancel, or race against it, since it is the
-  // only bootstrap call there will ever be. It ends in exactly one of two
-  // states: success (baseCase/baseOverlay/baseContext/baseDisplay cached,
-  // context + form + base result rendered, controls enabled, export
-  // enabled) or failure (unified failure state shown, controls left
-  // disabled forever, nothing cached -- there is no retry in this round).
-  //
-  // Codex final re-review fix: HTTP success is not domain success. A
-  // well-formed HTTP 200 /api/base response can still carry a FAILED
-  // PricingResult (base-case pricing itself failed) -- that is a bootstrap
-  // failure exactly like a non-2xx response, a network rejection, or a
-  // JSON decode failure, and must be handled identically: render the real
-  // failure, cache nothing, and never flip bootstrapReady/enable
-  // Price/Clear/Load-Case-JSON. Only when the HTTP response is ok, the JSON
-  // payload is well-formed, AND baseDisplay.status is not FAILED do all of
-  // (cache base state, enable controls, enable export) happen together.
-  async function loadBase() {
-    let response;
-    let payload;
-    try {
-      response = await fetch("/api/base");
-      payload = await response.json();
-    } catch (err) {
-      renderFailure("Failed to load base case: " + err.message);
-      return;
-    }
-    if (!response.ok) {
-      renderFailure(payload.error || "Failed to load base case.");
-      return;
-    }
-
-    const display = payload.display;
-    if (!display) {
-      renderFailure("Base case response is missing a display payload.");
-      return;
-    }
-    if (display.status === "FAILED") {
-      // Reuses the existing FAILED-display rendering path verbatim -- no
-      // new failure UI, no partial cache, no cached case/overlay/context,
-      // and bootstrapReady stays false so Price/Clear/Load-Case-JSON stay
-      // disabled and no pricing request can ever be sent.
-      renderDisplay(display);
-      return;
-    }
-
-    baseCase = payload.case;
-    baseOverlay = payload.overlay;
-    baseContext = payload.context;
-    baseDisplay = display;
-    renderContext(baseContext);
-    setFormFromOverlay(baseOverlay);
-    renderDisplay(baseDisplay);
-    setCurrentDisplay(baseDisplay);
-    setControlsEnabled(true);
+  function renderMissingFieldsList(missing) {
+    els.missingFieldsList.innerHTML = "";
+    missing.forEach((label) => {
+      const item = document.createElement("li");
+      item.textContent = label;
+      els.missingFieldsList.appendChild(item);
+    });
   }
 
-  async function priceCurrentForm() {
-    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
-    if (resolvedBloombergBond && !bondMatchesActiveCase()) return; // blocked: mismatched Bloomberg bond
+  // Recomputes every visual/logic consequence of the current draft: whether
+  // the pricing form is shown at all (as soon as a draft exists, so the
+  // trader can start filling it in), whether the instrument header/details
+  // (which need a genuinely completed price) are shown, the concrete
+  // missing-input list, and whether Price/Refresh Bloomberg & Price are
+  // enabled. Called after every lookup, form edit, Price/Refresh outcome,
+  // and Clear.
+  function syncDraftGating() {
+    const hasDraft = !!currentDraft;
+    const missing = hasDraft ? computeMissingDraftFields(currentDraft) : [];
+    const incomplete = hasDraft && missing.length > 0;
+    const hasResult = currentDisplay !== null;
 
-    const overlay = readOverlayFromForm();
-    const generation = beginRequest();
-    invalidatePendingCaseLoadRequest(); // a Price click must beat any older pending Case Load
-    invalidatePendingBloombergRequest(); // a Price click must beat any older pending Bloomberg refresh
-    invalidatePendingBondLookupRequest(); // ...and any older pending bond lookup
+    els.workspaceSection.hidden = !hasDraft;
+    els.instrumentHeaderSection.hidden = !hasResult;
+    els.instrumentDetailsSection.hidden = !hasResult;
 
-    if (inFlightPriceController) {
-      inFlightPriceController.abort();
-    }
-    const controller = new AbortController();
-    inFlightPriceController = controller;
+    els.draftIncompleteNote.hidden = !incomplete;
+    renderMissingFieldsList(missing);
 
-    let response;
-    let payload;
-    try {
-      response = await fetch("/api/case/price", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ case: baseCase, overlay }),
-        signal: controller.signal,
-      });
-      payload = await response.json();
-    } catch (err) {
-      // Either a genuine network/JSON failure, or this request was
-      // superseded (aborted by a newer Price click, by Clear, or by a case
-      // load) -- either way, a stale generation means a newer render has
-      // already happened and must not be overwritten.
-      if (isStaleRequest(generation)) return;
-      setCurrentDisplay(null);
-      renderFailure("Pricing request failed: " + err.message);
-      return;
-    }
-    if (isStaleRequest(generation)) return;
-    if (!response.ok) {
-      setCurrentDisplay(null);
-      renderFailure(payload.error || "Pricing request failed.");
-      return;
-    }
-    setCurrentDisplay(payload);
-    renderDisplay(payload);
+    els.priceBtn.classList.toggle("is-disabled", !hasDraft || incomplete);
+    els.bloombergRefreshBtn.classList.toggle("is-disabled", !hasDraft || incomplete);
   }
 
-  function clearToBase() {
-    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
-
-    invalidatePendingPriceRequest(); // invalidate any in-flight Price request's eventual response
-    invalidatePendingCaseLoadRequest(); // a Clear click must beat any older pending Case Load
-    invalidatePendingBloombergRequest(); // a Clear click must beat any older pending Bloomberg refresh
-    invalidatePendingBondLookupRequest(); // ...and any older pending bond lookup
-
-    // Clear also removes the selected Bloomberg bond state entirely (Issue
-    // #140 revision requirement 7) -- a fresh Clear returns strictly to the
-    // bundled case, with no resolved bond, no mismatch note, and no gating.
-    resolvedBloombergBond = null;
-    renderResolvedBondPanel();
-
-    if (!baseCase || !baseOverlay || !baseContext || !baseDisplay) {
-      syncBondGating();
-      return;
-    }
-    renderContext(baseContext);
-    setFormFromOverlay(baseOverlay);
-    renderDisplay(baseDisplay);
-    setCurrentDisplay(baseDisplay);
-    syncBondGating();
+  // Trader-draft revision (Issue #140 second revision): builds a brand-new
+  // draft containing only the fields Bloomberg itself returned for this
+  // bond -- every other required field starts null. Never reads from, or
+  // is seeded by, any prior draft or the bundled synthetic fixture (never
+  // loaded by this file at all any more).
+  function buildInitialDraftFromBloomberg(bond) {
+    return {
+      bond_option: {
+        product_id: null,
+        underlying_isin: bond.isin,
+        currency: bond.currency,
+        payoff_basis: null,
+        option_type: null,
+        exercise_style: null,
+        settlement_type: null,
+        settlement_lag_days: null,
+        expiry_date: null,
+        notional: null,
+        position: null,
+        strike_price: null,
+        strike_yield: null,
+        exercise_start_date: null,
+      },
+      bond_reference_data_universe: [
+        {
+          isin: bond.isin,
+          issuer: bond.name,
+          currency: bond.currency,
+          coupon: null,
+          coupon_frequency: null,
+          maturity_date: null,
+          issue_date: null,
+          day_count: null,
+          business_day_convention: null,
+          redemption_amount: null,
+          callable_flag: null,
+          sinkable_flag: null,
+          bond_type: null,
+          yield_convention: null,
+          ex_dividend_days: null,
+          first_coupon_date: null,
+          last_coupon_date: null,
+          status: null,
+        },
+      ],
+      valuation_date: null,
+      as_of_timestamp: null,
+      pricing_timestamp: null,
+      expiry_timestamp: null,
+      reporting_date: null,
+      forward_settlement_date: null,
+      option_settlement_date: null,
+      source_system: null,
+      snapshot_id: null,
+      snapshot_status: null,
+      bond_quote: {
+        isin: bond.isin,
+        currency: bond.currency,
+        price_type: null,
+        quote_side: bond.quote_side,
+        source_system: bond.source_system,
+        status: null,
+        clean_price_per_100: bond.clean_price_per_100,
+        yield_value: null,
+        accrued_interest_per_100: bond.accrued_interest_per_100,
+      },
+      forward_clean_price_input: {
+        forward_clean_price_per_100: null,
+        quote_side: null,
+        source_system: null,
+        status: null,
+      },
+      curve_points: [],
+      volatility_input: {
+        volatility: null,
+        volatility_basis: null,
+        source_system: null,
+        status: null,
+        override_or_fallback_audit: null,
+      },
+      credit_spread_input: {
+        spread_treatment: null,
+        source_system: null,
+        status: null,
+        credit_spread: null,
+        credit_spread_basis: null,
+        override_or_fallback_audit: null,
+      },
+      deposit_rate_observation: null,
+      bond_reference_source_name: null,
+    };
   }
 
-  // Issue #138: load a local Case JSON file, validate/price it through the
-  // bridge's /api/case route (the only entry point -- no schema validation
-  // or pricing logic is duplicated here), and, only on complete success,
-  // replace the active base wholesale. A stale response (superseded by a
-  // newer case-load call) is discarded outright; a failed load leaves the
-  // previously active base completely untouched and fully displayed.
-  async function loadCaseFile(file) {
-    if (!bootstrapReady) return; // the control is disabled anyway before bootstrap succeeds
-
-    const generation = beginCaseLoadRequest();
-    invalidatePendingPriceRequest(); // a case load in flight invalidates any pending Price response
-    invalidatePendingBloombergRequest(); // ...and any pending Bloomberg refresh response too
-    invalidatePendingBondLookupRequest(); // ...and any pending bond lookup response too
-
-    if (inFlightCaseLoadController) {
-      inFlightCaseLoadController.abort();
-    }
-    const controller = new AbortController();
-    inFlightCaseLoadController = controller;
-
-    let bytes;
-    try {
-      // Read raw bytes (never file.text()): only the server's strict
-      // bytes.decode("utf-8") is the authority on whether this upload is
-      // valid UTF-8 -- the browser must never silently replace an invalid
-      // byte sequence on its own before the bridge ever sees it.
-      bytes = await file.arrayBuffer();
-    } catch (err) {
-      if (isStaleCaseLoadRequest(generation)) return;
-      renderCaseLoadError("Failed to read the selected file: " + err.message);
-      return;
-    }
-
-    let response;
-    let payload;
-    try {
-      response = await fetch("/api/case", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: bytes,
-        signal: controller.signal,
-      });
-      payload = await response.json();
-    } catch (err) {
-      if (isStaleCaseLoadRequest(generation)) return;
-      renderCaseLoadError("Failed to load the case file: " + err.message);
-      return;
-    }
-    if (isStaleCaseLoadRequest(generation)) return;
-
-    if (!response.ok) {
-      renderCaseLoadError(payload.error || "Failed to load the case file.");
-      return;
-    }
-
-    const display = payload.display;
-    if (!display || display.status === "FAILED") {
-      // Domain FAILED during a case *load* is a load failure (mirrors the
-      // bootstrap FAILED fix above) -- the uploaded case never becomes the
-      // active base, nothing is cached, and the previous base stays fully
-      // intact and displayed.
-      const messages = display
-        ? (display.errors || []).map((e) => `${e.code}: ${e.message}`).join(" | ")
-        : "";
-      renderCaseLoadError(messages || "The uploaded case failed to price.");
-      return;
-    }
-
-    // Genuine success: replace the active base atomically (all four
-    // together, synchronously, so nothing can observe a partial swap), then
-    // invalidate any pre-swap Price/Bloomberg/lookup response so none of
-    // them can overwrite this freshly rendered base.
-    invalidatePendingPriceRequest();
-    invalidatePendingBloombergRequest();
-    invalidatePendingBondLookupRequest();
-    baseCase = payload.case;
-    baseOverlay = payload.overlay;
-    baseContext = payload.context;
-    baseDisplay = display;
-    renderContext(baseContext);
-    setFormFromOverlay(baseOverlay);
-    renderDisplay(baseDisplay);
-    setCurrentDisplay(baseDisplay);
-    // Requirement 6: a newly loaded case whose ISIN now matches the
-    // selected Bloomberg bond re-enables Price and the refresh-and-price
-    // path; one that still doesn't match keeps them gated.
-    syncBondGating();
-  }
-
-  // Bloomberg quote refresh: prices the current active case (bundled or
-  // uploaded, whichever baseCase already is) with the current form overlay,
-  // using one fresh Bloomberg bond quote in place of the case's own --
-  // exactly like Price, except the bridge substitutes one live quote before
-  // pricing. This never changes baseCase/baseOverlay/baseContext/baseDisplay
-  // (no instrument-identity change): clicking Clear afterwards still
-  // restores the case's own original bond quote, not this Bloomberg-priced
-  // run. Only runs at all once a Bloomberg bond has been resolved (Issue
-  // #140 revision requirement 6) whose own ISIN matches the active case --
-  // the same qualified identifier the lookup already validated is reused
-  // here, never a separately typed Bloomberg security string. quote_side is
-  // required and has no default -- a click with the toggle unselected is
-  // rejected client-side before any request is sent.
-  async function refreshBloombergAndPrice() {
-    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
-    if (!resolvedBloombergBond || !bondMatchesActiveCase()) return; // gated: see syncBondGating
-
-    const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
-    if (!quoteSide) {
-      renderBloombergError("Select a Quote Side before refreshing.");
-      return;
-    }
-
-    const overlay = readOverlayFromForm();
-    const generation = beginBloombergRequest();
-    invalidatePendingPriceRequest(); // a Bloomberg refresh must beat any older pending Price
-    invalidatePendingCaseLoadRequest(); // ...and any older pending Case Load
-    invalidatePendingBondLookupRequest(); // ...and any older pending bond lookup
-
-    if (inFlightBloombergController) {
-      inFlightBloombergController.abort();
-    }
-    const controller = new AbortController();
-    inFlightBloombergController = controller;
-
-    let response;
-    let payload;
-    try {
-      response = await fetch("/api/case/bloomberg", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          case: baseCase,
-          overlay,
-          bloomberg_security: resolvedBloombergBond.qualifiedIdentifier,
-          quote_side: quoteSide,
-        }),
-        signal: controller.signal,
-      });
-      payload = await response.json();
-    } catch (err) {
-      // Either a genuine network/JSON failure, or this request was
-      // superseded (aborted by a newer Bloomberg click, Price, Clear, or a
-      // case load) -- either way, preserve the previous active case and
-      // completed display; never fall back to the case's old bond quote.
-      if (isStaleBloombergRequest(generation)) return;
-      renderBloombergError("Bloomberg refresh failed: " + err.message);
-      return;
-    }
-    if (isStaleBloombergRequest(generation)) return;
-    if (!response.ok) {
-      renderBloombergError(payload.error || "Bloomberg refresh failed.");
-      return;
-    }
-
-    setCurrentDisplay(payload);
-    renderDisplay(payload);
-  }
-
-  // Instrument-first Bloomberg bond lookup (Issue #140 revision): resolves
-  // one bond's own identity and one quote side's price via
-  // /api/bloomberg/bond -- no active case involved, no expected-ISIN check.
-  // On success this updates the visible bond identity immediately and
-  // re-syncs Price/refresh-and-price gating against the active case; a
-  // mismatch does not clear or touch baseCase/baseOverlay/baseContext/
-  // baseDisplay in any way, only what is shown and what is clickable.
+  // Instrument-first Bloomberg bond lookup: resolves one bond's own
+  // identity and one quote side's price via /api/bloomberg/bond -- no
+  // active case involved, no expected-ISIN check. On success this always
+  // starts a brand-new draft (never retaining any prior draft's inputs) and
+  // shows the pricing form immediately.
   async function loadBloombergBond() {
-    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
-
     const rawIdentifier = els.bondIdentifierInput.value;
     const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
     const parsed = parseBondIdentifier(rawIdentifier);
@@ -875,9 +746,8 @@
     }
 
     const generation = beginBondLookupRequest();
-    invalidatePendingPriceRequest(); // a bond lookup must beat any older pending Price
-    invalidatePendingCaseLoadRequest(); // ...and any older pending Case Load
-    invalidatePendingBloombergRequest(); // ...and any older pending Bloomberg refresh
+    invalidatePendingPriceRequest();
+    invalidatePendingBloombergRequest();
 
     if (inFlightBondLookupController) {
       inFlightBondLookupController.abort();
@@ -897,9 +767,9 @@
       payload = await response.json();
     } catch (err) {
       // Either a genuine network/JSON failure, or this request was
-      // superseded (aborted by a newer lookup, Price, Clear, or a case
-      // load) -- either way, a failed lookup must preserve the previously
-      // resolved bond and completed screen exactly as they were.
+      // superseded -- either way, a failed lookup must preserve the
+      // previously resolved bond, draft, and completed screen exactly as
+      // they were.
       if (isStaleBondLookupRequest(generation)) return;
       renderBloombergError("Bloomberg bond lookup failed: " + err.message);
       return;
@@ -910,10 +780,6 @@
       return;
     }
 
-    // A successful lookup for a different ISIN intentionally invalidates
-    // the old pricing display -- it belongs to another bond -- which
-    // syncBondGating() below enforces by hiding the instrument header,
-    // workspace, and instrument details until a matching case is loaded.
     resolvedBloombergBond = {
       qualifiedIdentifier: parsed.qualified,
       isin: payload.isin,
@@ -927,21 +793,168 @@
       source_system: payload.source_system,
     };
 
+    // A fresh lookup intentionally invalidates any prior draft/result -- it
+    // belongs to another bond -- and never copies a bond-specific or market
+    // input from it.
+    currentDraft = buildInitialDraftFromBloomberg(resolvedBloombergBond);
+    setCurrentDisplay(null);
+    hideContext();
+    clearResultFields();
+    clearOptionTermsForm();
+
     els.errorBanner.hidden = true;
     els.errorBanner.textContent = "";
     els.statusIndicator.classList.remove("failed");
+    els.statusText.textContent = "Bloomberg bond loaded";
     renderResolvedBondPanel();
-    syncBondGating();
+    syncDraftGating();
   }
 
-  // Issue #138: download the current run as JSON/Markdown, reusing only the
-  // existing pure export helpers server-side. Sends exactly the display
-  // dict active at click time. Codex review (PR #139): a Price/Load/Clear
+  // Prices the current draft through the existing reviewed builder --
+  // reuses POST /api/case unchanged (the same route the developer-only
+  // Case JSON workflow already used) rather than adding any new pricing
+  // route or logic: a full case dict in, {case, overlay, context, display}
+  // out. Disabled (see syncDraftGating) until the draft has no missing
+  // required field; this direct guard is defense-in-depth against a forced
+  // click bypassing the CSS state.
+  async function priceCurrentDraft() {
+    if (!currentDraft) return;
+    if (computeMissingDraftFields(currentDraft).length > 0) return;
+
+    const generation = beginRequest();
+    invalidatePendingBondLookupRequest();
+    invalidatePendingBloombergRequest();
+
+    if (inFlightPriceController) {
+      inFlightPriceController.abort();
+    }
+    const controller = new AbortController();
+    inFlightPriceController = controller;
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/case", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(currentDraft),
+        signal: controller.signal,
+      });
+      payload = await response.json();
+    } catch (err) {
+      if (isStaleRequest(generation)) return;
+      setCurrentDisplay(null);
+      renderFailure("Pricing request failed: " + err.message);
+      return;
+    }
+    if (isStaleRequest(generation)) return;
+    if (!response.ok) {
+      setCurrentDisplay(null);
+      renderFailure(payload.error || "Pricing request failed.");
+      return;
+    }
+
+    currentDraft = payload.case;
+    renderContext(payload.context);
+    setFormFromOverlay(extractOverlayFromDraft(currentDraft));
+    setCurrentDisplay(payload.display);
+    renderDisplay(payload.display);
+    syncDraftGating();
+  }
+
+  function clearDraft() {
+    invalidatePendingPriceRequest();
+    invalidatePendingBloombergRequest();
+    invalidatePendingBondLookupRequest();
+
+    // Clear removes the selected Bloomberg bond and the current draft
+    // entirely -- it must never restore or display the bundled synthetic
+    // case, which this file no longer loads at all.
+    resolvedBloombergBond = null;
+    currentDraft = null;
+    setCurrentDisplay(null);
+    renderResolvedBondPanel();
+    hideContext();
+    clearResultFields();
+    clearOptionTermsForm();
+
+    els.errorBanner.hidden = true;
+    els.errorBanner.textContent = "";
+    els.statusIndicator.classList.remove("failed");
+    els.statusText.textContent = "No bond loaded";
+    syncDraftGating();
+  }
+
+  // Bloomberg quote refresh: prices the current draft with one fresh
+  // Bloomberg bond quote in place of its own -- exactly like Price, except
+  // the bridge substitutes one live quote before pricing. Reuses the
+  // existing POST /api/case/bloomberg route unchanged: the resolved bond's
+  // qualified identifier is sent as `bloomberg_security` (Bloomberg DAPI
+  // accepts it natively) and the six trader-editable fields are read
+  // straight off the draft as the route's existing `overlay` shape. Only
+  // runs once the draft is complete (see syncDraftGating), same gate as
+  // Price. Its response carries no separate context section (unlike
+  // POST /api/case), so context is derived client-side from the
+  // already-complete draft via extractContextFromDraft.
+  async function refreshBloombergAndPrice() {
+    if (!currentDraft || !resolvedBloombergBond) return;
+    if (computeMissingDraftFields(currentDraft).length > 0) return;
+
+    const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
+    if (!quoteSide) {
+      renderBloombergError("Select a Quote Side before refreshing.");
+      return;
+    }
+
+    const overlay = extractOverlayFromDraft(currentDraft);
+    const generation = beginBloombergRequest();
+    invalidatePendingPriceRequest();
+    invalidatePendingBondLookupRequest();
+
+    if (inFlightBloombergController) {
+      inFlightBloombergController.abort();
+    }
+    const controller = new AbortController();
+    inFlightBloombergController = controller;
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/case/bloomberg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          case: currentDraft,
+          overlay,
+          bloomberg_security: resolvedBloombergBond.qualifiedIdentifier,
+          quote_side: quoteSide,
+        }),
+        signal: controller.signal,
+      });
+      payload = await response.json();
+    } catch (err) {
+      if (isStaleBloombergRequest(generation)) return;
+      renderBloombergError("Bloomberg refresh failed: " + err.message);
+      return;
+    }
+    if (isStaleBloombergRequest(generation)) return;
+    if (!response.ok) {
+      renderBloombergError(payload.error || "Bloomberg refresh failed.");
+      return;
+    }
+
+    renderContext(extractContextFromDraft(currentDraft));
+    setCurrentDisplay(payload);
+    renderDisplay(payload);
+    syncDraftGating();
+  }
+
+  // Download the current run as JSON/Markdown, reusing only the existing
+  // pure export helpers server-side. Sends exactly the display dict active
+  // at click time. Codex review (PR #139): a Price/Refresh/Clear/lookup
   // action can change currentDisplay while this request is still in
   // flight, so the response is checked against displayGeneration before it
-  // is ever turned into a download -- a stale response (for a run that is
-  // no longer the one on screen) is discarded outright, never downloaded.
-  // Never sends a request to any pricing route.
+  // is ever turned into a download.
   async function downloadCurrentRun(format) {
     if (!currentDisplay) return; // mirrors the is-disabled state; never fabricate a download
 
@@ -980,12 +993,14 @@
     const opt = event.target.closest(".opt");
     if (opt) {
       setToggle(els.optionTypeToggle, opt.dataset.value);
+      applyOptionTermsToDraft();
     }
   });
   els.positionToggle.addEventListener("click", (event) => {
     const opt = event.target.closest(".opt");
     if (opt) {
       setToggle(els.positionToggle, opt.dataset.value);
+      applyOptionTermsToDraft();
     }
   });
   els.bondQuoteSideToggle.addEventListener("click", (event) => {
@@ -994,20 +1009,20 @@
       setToggle(els.bondQuoteSideToggle, opt.dataset.value);
     }
   });
+  [els.strikePrice, els.notional, els.volatility, els.forwardPrice].forEach((input) => {
+    input.addEventListener("input", applyOptionTermsToDraft);
+  });
 
-  els.priceBtn.addEventListener("click", priceCurrentForm);
-  els.clearBtn.addEventListener("click", clearToBase);
+  els.priceBtn.addEventListener("click", priceCurrentDraft);
+  els.clearBtn.addEventListener("click", clearDraft);
   els.downloadJsonBtn.addEventListener("click", () => downloadCurrentRun("json"));
   els.downloadMarkdownBtn.addEventListener("click", () => downloadCurrentRun("markdown"));
   els.bloombergRefreshBtn.addEventListener("click", refreshBloombergAndPrice);
   els.loadBloombergBondBtn.addEventListener("click", loadBloombergBond);
-  els.caseFileInput.addEventListener("change", (event) => {
-    const file = event.target.files && event.target.files[0];
-    event.target.value = ""; // allow re-selecting the same filename again later
-    if (file) {
-      loadCaseFile(file);
-    }
-  });
 
-  loadBase();
+  // No bootstrap: the trader-draft revision starts with nothing loaded at
+  // all (Issue #140 second revision, requirement 1) -- syncDraftGating()
+  // establishes the correct all-hidden/all-disabled initial state without
+  // any network call.
+  syncDraftGating();
 })();

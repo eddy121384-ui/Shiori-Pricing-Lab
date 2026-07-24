@@ -86,6 +86,19 @@ html, body {
 .pill.verified { color: var(--blue-soft-text); border-color: #bcd3f7; }
 .pill.verified svg { color: var(--blue-soft-text); }
 .mid-badge { font-size: 14px; font-weight: 600; color: var(--blue-soft-text); padding: 0 4px; }
+/* Trader-draft revision: provenance/quote-side badges and the sidebar's
+   live-source row start `hidden` (no case loaded yet) and are un-hidden by
+   script.js's renderContext only once a real price exists. Each of these
+   classes sets its own explicit `display` above, which otherwise ties the
+   UA stylesheet's `[hidden] { display: none }` rule in specificity and (as
+   the later, author rule) wins -- silently defeating the JS-level
+   `el.hidden = true` toggle, exactly like the instr-header/workspace/
+   instrument-details fix earlier in this file. */
+.pill[hidden],
+.mid-badge[hidden],
+.sidebar-foot .live[hidden] {
+  display: none;
+}
 .icon-btn { color: var(--muted); display: flex; align-items: center; cursor: default; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
@@ -128,7 +141,8 @@ html, body {
   flex-direction: column;
   gap: 9px;
   min-width: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Several .main children set their own explicit `display` below (flex/grid),
@@ -295,16 +309,10 @@ html, body {
 .btn.outline { background: #fff; border-color: #bcd3f7; color: var(--blue); }
 .btn.primary { background: var(--blue); color: #fff; padding: 0 26px; }
 .btn.ghost, .btn.outline, .btn.primary { cursor: pointer; }
-/* Bootstrap-gated state (Codex final re-review fix): visual companion to
-   the JS-level bootstrapReady guard in script.js -- Price/Clear are dimmed
-   and inert until the initial /api/base load has actually succeeded. */
+/* Draft-gated state: visual companion to the JS-level draft/missing-fields
+   guard in script.js -- Price/Refresh are dimmed and inert until the current
+   draft has every required pricing input. */
 .btn.is-disabled { opacity: 0.45; pointer-events: none; cursor: not-allowed; }
-/* Issue #138: "Load Case JSON" is a <label> styled like the existing
-   .pill nav badges but clickable (wraps a hidden file input). Disabled the
-   same way as the footer buttons: dimmed and inert until bootstrap has
-   completed successfully. */
-.load-case-btn { cursor: pointer; }
-.load-case-btn.is-disabled { opacity: 0.45; pointer-events: none; cursor: not-allowed; }
 .valid .check-fail { display: none; }
 .valid.failed .check-ok { display: none; }
 .valid.failed .check-fail { display: flex; color: var(--orange); }
@@ -385,7 +393,7 @@ input.control:focus {
 .rb-item .rb-v { font-size: 13.5px; color: var(--text-strong); font-weight: 600; }
 .rb-item.rb-name { grid-column: 1 / -1; }
 
-.bond-mismatch-note {
+.draft-incomplete-note {
   margin-top: 12px;
   background: #fff4e5;
   border: 1px solid #f3d9ae;
@@ -393,6 +401,18 @@ input.control:focus {
   font-size: 12.5px;
   border-radius: 7px;
   padding: 8px 12px;
+}
+.missing-fields-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  columns: 2;
+  column-gap: 24px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.missing-fields-list li {
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .underlying-bond-actions { margin-top: 12px; }

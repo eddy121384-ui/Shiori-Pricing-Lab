@@ -82,6 +82,17 @@ the browser holds whichever case is currently active and resends it):
   previous bond quote is never used as a fallback, and this route reprices
   fresh from Bloomberg every call (no cache, no polling).
 
+**Trader-draft revision.** ``GET /api/base`` and ``POST /api/case`` are kept
+unchanged for automated regression and developer use only -- the trader-facing
+``index.html``/``script.js`` no longer calls either on load or expose a
+"Load Case JSON" control. The normal trader workflow now starts with no
+active case at all; a successful ``POST /api/bloomberg/bond`` lookup below
+seeds an in-memory draft client-side (the bundled synthetic base case is
+never copied into it), and completing that draft still goes through
+``POST /api/case`` (reused, unmodified) once the trader has filled in every
+required field, since that route already validates and prices a full case
+dict exactly like this one.
+
 **Instrument-first Bloomberg lookup.** One more stateless route:
 
 - ``POST /api/bloomberg/bond`` -- body is ``{"bond_identifier": <str>,
@@ -163,7 +174,12 @@ DEFAULT_PORT = 8765
 #
 # Bumped to -v3 for the new POST /api/bloomberg/bond route (instrument-first
 # Bloomberg lookup) -- same reasoning again.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v3"
+#
+# Bumped to -v4 for the trader-draft revision: no route signature changed,
+# but the served index.html/script.js/styles.css changed substantially (no
+# more synthetic-case bootstrap, no Load Case JSON control) -- a stale
+# already-running process must not be reused and keep serving the old page.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v4"
 
 
 def load_base_case() -> dict:
