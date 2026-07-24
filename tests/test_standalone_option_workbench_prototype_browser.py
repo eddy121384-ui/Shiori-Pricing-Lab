@@ -142,7 +142,26 @@ def _missing_fields_text(page) -> list[str]:
     )
 
 
-def _default_bloomberg_bond_lookup_response(**overrides) -> dict:
+_EMPTY_BOND_MASTER = {
+    "coupon": None,
+    "coupon_frequency": None,
+    "issue_date": None,
+    "maturity_date": None,
+    "day_count": None,
+    "first_coupon_date": None,
+    "last_coupon_date": None,
+    "redemption_amount": None,
+    "callable_flag": None,
+    "sinkable_flag": None,
+    "bond_type": None,
+    "yield_convention": None,
+    "business_day_convention": None,
+}
+
+
+def _default_bloomberg_bond_lookup_response(
+    *, bond_master: dict | None = None, **overrides
+) -> dict:
     payload = {
         "isin": "US91282CLJ89",
         "cusip": "91282CLJ8",
@@ -153,6 +172,7 @@ def _default_bloomberg_bond_lookup_response(**overrides) -> dict:
         "accrued_interest_per_100": 0.42,
         "acquired_at": "2026-07-01T16:05:00+00:00",
         "source_system": "BLOOMBERG_DAPI",
+        "bond_master": {**_EMPTY_BOND_MASTER, **(bond_master or {})},
     }
     payload.update(overrides)
     return payload
@@ -288,24 +308,31 @@ def test_successful_lookup_shows_resolved_bond_identity_and_pricing_form(server_
     assert page.inner_text("#resolved-bond-accrued") == "0.420000"
     assert page.inner_text("#resolved-bond-source") == "BLOOMBERG_DAPI"
 
-    # The pricing form (Option Terms) shows immediately -- but the old
-    # instrument header/details, which need a genuinely completed price,
-    # stay hidden.
+    # The pricing form (Option Terms) and Instrument Details (Bloomberg Bond
+    # Master) both show immediately -- but the old instrument header, which
+    # needs a genuinely completed price, stays hidden.
     assert not page.eval_on_selector("#workspace-section", "el => el.hidden")
     assert (
         page.eval_on_selector("#workspace-section", "el => getComputedStyle(el).display")
         != "none"
     )
     assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
-    assert page.eval_on_selector("#instrument-details-section", "el => el.hidden")
+    assert not page.eval_on_selector("#instrument-details-section", "el => el.hidden")
+    assert page.inner_text("#details-issuer") == "UNITED STATES TREAS NTS"
+    assert page.inner_text("#details-isin") == "US91282CLJ89"
+    assert page.inner_text("#details-cusip") == "91282CLJ8"
+    assert page.inner_text("#details-coupon") == "Not available"
 
     assert not page.eval_on_selector("#draft-incomplete-note", "el => el.hidden")
     assert "Complete the required pricing inputs before pricing." in page.inner_text(
         "#draft-incomplete-note"
     )
     missing = _missing_fields_text(page)
-    assert "Strike (per 100)" in missing
-    assert "Call / Put" in missing
+    assert any("Strike (per 100)" in item for item in missing)
+    assert any("Call / Put" in item for item in missing)
+    # Category summary badges show first, full detail only after "Show details".
+    assert "Option terms incomplete" in page.inner_text("#missing-categories")
+    assert "Bond reference data incomplete" in page.inner_text("#missing-categories")
 
     assert _is_disabled(page, "#price-btn")
     assert _is_disabled(page, "#bloomberg-refresh-btn")
@@ -375,6 +402,164 @@ def test_newer_lookup_replaces_the_draft_and_discards_prior_trader_input(server_
     assert page.query_selector("#option-type-toggle .opt.on") is None
 
 
+# --- Bloomberg Bond Master (Issue #140 third revision) ------------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_confirmed_bond_master_values_enter_the_clean_draft_and_render(server_url, page) -> None:
+    """A field the loader actually returns a value for (simulating a
+    confirmed mnemonic) shows in both the top summary and Instrument
+    Details -- never just silently dropped."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(
+            bond_master={"coupon": "4.125", "maturity_date": "2031-01-31"}
+        ),
+    )
+
+    assert page.inner_text("#resolved-bond-coupon") == "4.125"
+    assert page.inner_text("#resolved-bond-maturity") == "2031-01-31"
+    assert page.inner_text("#details-coupon") == "4.125"
+    assert page.inner_text("#details-maturity") == "2031-01-31"
+    # A field still unconfirmed/unreturned stays honestly "Not available",
+    # never a fabricated or synthetic value.
+    assert page.inner_text("#details-day-count") == "Not available"
+    assert page.inner_text("#details-callable") == "Not available"
+
+
+@_PLAYWRIGHT_SKIP
+def test_missing_bond_master_fields_show_not_available_and_never_pollute_identity(
+    server_url, page
+) -> None:
+    """The default (all-fields-unconfirmed) lookup response must still show
+    every identity/quote field correctly -- a wholly-null bond_master must
+    never degrade the already-reliable identity/quote result."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page)  # default response: bond_master entirely None
+
+    assert page.inner_text("#resolved-bond-name") == "UNITED STATES TREAS NTS"
+    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
+    assert page.inner_text("#resolved-bond-clean-price") == "99.750000"
+    assert page.inner_text("#resolved-bond-coupon") == "Not available"
+    assert page.inner_text("#resolved-bond-maturity") == "Not available"
+
+    for details_id in (
+        "details-coupon",
+        "details-coupon-frequency",
+        "details-issue-date",
+        "details-maturity",
+        "details-day-count",
+        "details-first-coupon-date",
+        "details-last-coupon-date",
+        "details-redemption-amount",
+        "details-callable",
+        "details-sinkable",
+        "details-bond-type",
+        "details-yield-convention",
+        "details-business-day-convention",
+    ):
+        assert page.inner_text(f"#{details_id}") == "Not available"
+    # Identity fields Bloomberg genuinely returned are never blanked out.
+    assert page.inner_text("#details-issuer") == "UNITED STATES TREAS NTS"
+    assert page.inner_text("#details-isin") == "US91282CLJ89"
+    assert page.inner_text("#details-cusip") == "91282CLJ8"
+    assert page.inner_text("#details-source") == "BLOOMBERG_DAPI"
+
+
+@_PLAYWRIGHT_SKIP
+def test_new_lookup_fully_replaces_the_prior_bonds_bond_master(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": "4.125"}),
+    )
+    assert page.inner_text("#details-coupon") == "4.125"
+
+    _load_bloomberg_bond(
+        page,
+        identifier="XS9999999999",
+        response=_default_bloomberg_bond_lookup_response(
+            isin="XS9999999999", cusip="999999999", name="SECOND RESOLVED BOND"
+        ),
+    )
+
+    # The new bond's own (entirely unconfirmed) Bond Master replaces the old
+    # one completely -- no leftover value from the first bond.
+    assert page.inner_text("#details-issuer") == "SECOND RESOLVED BOND"
+    assert page.inner_text("#details-coupon") == "Not available"
+    assert page.inner_text("#resolved-bond-coupon") == "Not available"
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_resets_bond_master_to_empty(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": "4.125"}),
+    )
+    assert page.inner_text("#details-coupon") == "4.125"
+
+    page.click("#clear-btn")
+    page.wait_for_timeout(150)
+
+    assert page.eval_on_selector("#instrument-details-section", "el => el.hidden")
+    assert page.inner_text("#details-issuer") == "—"
+    assert page.inner_text("#details-coupon") == "Not available"
+
+
+@_PLAYWRIGHT_SKIP
+def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+
+    pending: list = []
+    request_count = 0
+
+    def route_lookup(route):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            pending.append(route)
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    _default_bloomberg_bond_lookup_response(
+                        name="SECOND LOOKUP BOND", bond_master={"coupon": "2.5"}
+                    )
+                ),
+            )
+
+    page.route("**/api/bloomberg/bond", route_lookup)
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    page.click('#bond-quote-side-toggle .opt[data-value="MID"]')
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: len(pending) == 1)
+
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND")
+    assert page.inner_text("#details-coupon") == "2.5"
+
+    # Only now release the first (stale) lookup's response -- it must not
+    # overwrite the newer draft's Bond Master or identity.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _default_bloomberg_bond_lookup_response(
+                name="FIRST LOOKUP BOND", bond_master={"coupon": "9.999"}
+            )
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
+    assert page.inner_text("#details-coupon") == "2.5"
+
+
 # --- Missing-input gating -----------------------------------------------------
 
 
@@ -384,8 +569,8 @@ def test_filling_option_terms_fields_shrinks_the_missing_list_live(server_url, p
     _load_bloomberg_bond(page)
 
     before = _missing_fields_text(page)
-    assert "Strike (per 100)" in before
-    assert "Call / Put" in before
+    assert any("Strike (per 100)" in item for item in before)
+    assert any("Call / Put" in item for item in before)
 
     page.fill("#strike-price-input", "99.5")
     page.fill("#notional-input", "50")
@@ -396,16 +581,19 @@ def test_filling_option_terms_fields_shrinks_the_missing_list_live(server_url, p
     page.wait_for_timeout(150)
 
     after = _missing_fields_text(page)
-    assert "Strike (per 100)" not in after
-    assert "Call / Put" not in after
-    assert "Notional" not in after
-    assert "Direction (Buy/Sell)" not in after
-    assert "Price Vol (σ)" not in after
-    assert "Forward Clean Price (per 100)" not in after
+    assert not any("Strike (per 100)" in item for item in after)
+    assert not any("Call / Put" in item for item in after)
+    assert not any("Notional" in item for item in after)
+    assert not any("Direction (Buy/Sell)" in item for item in after)
+    assert not any("Price Vol (σ)" in item for item in after)
+    assert not any("Forward Clean Price (per 100)" in item for item in after)
     # Fields with no manual-entry UI in this revision (curve, credit spread,
     # full bond reference data, dates) remain honestly reported as missing
     # -- Price stays disabled rather than guessing or defaulting them.
-    assert "Option Discount Curve" in after
+    assert any("Option Discount Curve" in item for item in after)
+    assert len(after) < len(before)
+    assert "Bond reference data incomplete" in page.inner_text("#missing-categories")
+    assert "Market curves unavailable" in page.inner_text("#missing-categories")
     assert _is_disabled(page, "#price-btn")
 
 

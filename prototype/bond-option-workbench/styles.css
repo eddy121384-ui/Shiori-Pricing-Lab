@@ -283,15 +283,18 @@ html, body {
 .chart-title { font-size: 12.5px; color: var(--muted); text-align: center; margin-bottom: 6px; }
 .chart-area { display: flex; }
 
-/* ---------- Instrument details ---------- */
+/* ---------- Instrument details: Bloomberg Bond Master ---------- */
 .instrument-details { padding: 10px 22px; }
-.id-head { display: flex; justify-content: space-between; margin-bottom: 9px; }
-.id-head .card-title.notes { margin-right: 130px; }
-.id-grid { display: grid; grid-template-columns: repeat(3, 1fr) 1.1fr; gap: 8px 24px; }
-.id-block { display: grid; grid-template-columns: 130px 1fr; row-gap: 7px; }
+.id-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
+.collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
+/* auto-fit rather than a fixed column count: this grid holds five blocks
+   (Bloomberg Bond Master has more line items than the old placeholder
+   panel it replaced) and should wrap gracefully rather than break if a
+   block is ever added or removed again. */
+.id-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px 24px; }
+.id-block { display: grid; grid-template-columns: 150px 1fr; row-gap: 7px; align-content: start; }
 .id-block .i-k { font-size: 13.5px; color: var(--muted); }
 .id-block .i-v { font-size: 13.5px; color: var(--text-strong); font-weight: 500; }
-.notes-block { font-size: 14px; color: var(--muted-2); }
 
 /* ---------- Footer ---------- */
 .footer {
@@ -402,6 +405,24 @@ input.control:focus {
   border-radius: 7px;
   padding: 8px 12px;
 }
+.missing-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.missing-category-badge {
+  display: inline-flex;
+  align-items: center;
+  background: #fce9c9;
+  border: 1px solid #eec97a;
+  color: #7a5300;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.draft-incomplete-note .collapse-toggle { color: #8a5a00; }
 .missing-fields-list {
   margin: 6px 0 0;
   padding-left: 18px;

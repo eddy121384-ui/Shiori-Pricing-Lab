@@ -64,11 +64,26 @@
     snapshotYield: document.getElementById("snapshot-yield"),
     snapshotAccruedInterest: document.getElementById("snapshot-accrued-interest"),
     detailsIssuer: document.getElementById("details-issuer"),
+    detailsIsin: document.getElementById("details-isin"),
+    detailsCusip: document.getElementById("details-cusip"),
     detailsCoupon: document.getElementById("details-coupon"),
+    detailsCouponFrequency: document.getElementById("details-coupon-frequency"),
+    detailsIssueDate: document.getElementById("details-issue-date"),
     detailsMaturity: document.getElementById("details-maturity"),
     detailsDayCount: document.getElementById("details-day-count"),
-    detailsFrequency: document.getElementById("details-frequency"),
+    detailsFirstCouponDate: document.getElementById("details-first-coupon-date"),
+    detailsLastCouponDate: document.getElementById("details-last-coupon-date"),
+    detailsRedemptionAmount: document.getElementById("details-redemption-amount"),
+    detailsCallable: document.getElementById("details-callable"),
+    detailsSinkable: document.getElementById("details-sinkable"),
+    detailsBondType: document.getElementById("details-bond-type"),
+    detailsYieldConvention: document.getElementById("details-yield-convention"),
+    detailsBusinessDayConvention: document.getElementById("details-business-day-convention"),
+    detailsSource: document.getElementById("details-source"),
+    detailsAcquiredAt: document.getElementById("details-acquired-at"),
     detailsCurrency: document.getElementById("details-currency"),
+    bondMasterToggleBtn: document.getElementById("bond-master-toggle-btn"),
+    bondMasterBody: document.getElementById("bond-master-body"),
     sidebarLiveRow: document.getElementById("sidebar-live-row"),
     sidebarSourceSystem: document.getElementById("sidebar-source-system"),
     sidebarAsofRow: document.getElementById("sidebar-asof-row"),
@@ -87,9 +102,13 @@
     resolvedBondCurrency: document.getElementById("resolved-bond-currency"),
     resolvedBondCleanPrice: document.getElementById("resolved-bond-clean-price"),
     resolvedBondAccrued: document.getElementById("resolved-bond-accrued"),
+    resolvedBondCoupon: document.getElementById("resolved-bond-coupon"),
+    resolvedBondMaturity: document.getElementById("resolved-bond-maturity"),
     resolvedBondAcquiredAt: document.getElementById("resolved-bond-acquired-at"),
     resolvedBondSource: document.getElementById("resolved-bond-source"),
     draftIncompleteNote: document.getElementById("draft-incomplete-note"),
+    missingCategories: document.getElementById("missing-categories"),
+    missingDetailsToggleBtn: document.getElementById("missing-details-toggle-btn"),
     missingFieldsList: document.getElementById("missing-fields-list"),
     instrumentHeaderSection: document.getElementById("instrument-header-section"),
     workspaceSection: document.getElementById("workspace-section"),
@@ -148,60 +167,132 @@
   // Bloomberg the moment a draft exists (isin/currency/issuer/quote_side/
   // clean_price_per_100/accrued_interest_per_100/source_system), so it can
   // never appear in this workbench's own missing-input list.
+  // Category labels shown to the trader as an actionable summary (Issue
+  // #140 third revision) -- grouping this workbench's own established
+  // required-field list, never a new financial rule.
+  const CATEGORY_OPTION_TERMS = "Option terms incomplete";
+  const CATEGORY_BOND_REFERENCE_DATA = "Bond reference data incomplete";
+  const CATEGORY_MARKET_CURVES = "Market curves unavailable";
+  const CATEGORY_FORWARD_CLEAN_PRICE = "Forward clean price unavailable";
+  const CATEGORY_PRICE_VOLATILITY = "Price volatility required";
+  const CATEGORY_VALUATION_METADATA = "Valuation & snapshot metadata incomplete";
+
   const REQUIRED_DRAFT_FIELD_CHECKS = [
-    ["bond_option.product_id", "Product ID"],
-    ["bond_option.payoff_basis", "Payoff Basis"],
-    ["bond_option.option_type", "Call / Put"],
-    ["bond_option.exercise_style", "Exercise Style"],
-    ["bond_option.settlement_type", "Settlement Type"],
-    ["bond_option.settlement_lag_days", "Settlement Lag (days)"],
-    ["bond_option.expiry_date", "Expiry Date"],
-    ["bond_option.notional", "Notional"],
-    ["bond_option.position", "Direction (Buy/Sell)"],
-    ["bond_option.strike_price", "Strike (per 100)"],
-    ["bond_reference_data_universe.0.coupon", "Bond Reference Data: Coupon"],
-    ["bond_reference_data_universe.0.coupon_frequency", "Bond Reference Data: Coupon Frequency"],
-    ["bond_reference_data_universe.0.maturity_date", "Bond Reference Data: Maturity Date"],
-    ["bond_reference_data_universe.0.issue_date", "Bond Reference Data: Issue Date"],
-    ["bond_reference_data_universe.0.day_count", "Bond Reference Data: Day Count"],
+    ["bond_option.product_id", "Product ID", CATEGORY_OPTION_TERMS],
+    ["bond_option.payoff_basis", "Payoff Basis", CATEGORY_OPTION_TERMS],
+    ["bond_option.option_type", "Call / Put", CATEGORY_OPTION_TERMS],
+    ["bond_option.exercise_style", "Exercise Style", CATEGORY_OPTION_TERMS],
+    ["bond_option.settlement_type", "Settlement Type", CATEGORY_OPTION_TERMS],
+    ["bond_option.settlement_lag_days", "Settlement Lag (days)", CATEGORY_OPTION_TERMS],
+    ["bond_option.expiry_date", "Expiry Date", CATEGORY_OPTION_TERMS],
+    ["bond_option.notional", "Notional", CATEGORY_OPTION_TERMS],
+    ["bond_option.position", "Direction (Buy/Sell)", CATEGORY_OPTION_TERMS],
+    ["bond_option.strike_price", "Strike (per 100)", CATEGORY_OPTION_TERMS],
+
+    ["bond_reference_data_universe.0.coupon", "Coupon", CATEGORY_BOND_REFERENCE_DATA],
+    [
+      "bond_reference_data_universe.0.coupon_frequency",
+      "Coupon Frequency",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    ["bond_reference_data_universe.0.maturity_date", "Maturity Date", CATEGORY_BOND_REFERENCE_DATA],
+    ["bond_reference_data_universe.0.issue_date", "Issue Date", CATEGORY_BOND_REFERENCE_DATA],
+    ["bond_reference_data_universe.0.day_count", "Day Count", CATEGORY_BOND_REFERENCE_DATA],
     [
       "bond_reference_data_universe.0.business_day_convention",
-      "Bond Reference Data: Business Day Convention",
+      "Business Day Convention",
+      CATEGORY_BOND_REFERENCE_DATA,
     ],
-    ["bond_reference_data_universe.0.redemption_amount", "Bond Reference Data: Redemption Amount"],
-    ["bond_reference_data_universe.0.callable_flag", "Bond Reference Data: Callable Flag"],
-    ["bond_reference_data_universe.0.sinkable_flag", "Bond Reference Data: Sinkable Flag"],
-    ["bond_reference_data_universe.0.bond_type", "Bond Reference Data: Bond Type"],
-    ["bond_reference_data_universe.0.yield_convention", "Bond Reference Data: Yield Convention"],
-    ["bond_reference_data_universe.0.ex_dividend_days", "Bond Reference Data: Ex-Dividend Days"],
-    ["bond_reference_data_universe.0.first_coupon_date", "Bond Reference Data: First Coupon Date"],
-    ["bond_reference_data_universe.0.last_coupon_date", "Bond Reference Data: Last Coupon Date"],
-    ["bond_reference_data_universe.0.status", "Bond Reference Data: Status"],
-    ["valuation_date", "Valuation Date"],
-    ["as_of_timestamp", "As-Of Timestamp"],
-    ["pricing_timestamp", "Pricing Timestamp"],
-    ["expiry_timestamp", "Expiry Timestamp"],
-    ["reporting_date", "Reporting Date"],
-    ["forward_settlement_date", "Forward Settlement Date"],
-    ["option_settlement_date", "Option Settlement Date"],
-    ["source_system", "Source System"],
-    ["snapshot_id", "Snapshot ID"],
-    ["snapshot_status", "Snapshot Status"],
-    ["bond_quote.price_type", "Bond Quote: Price Type"],
-    ["bond_quote.status", "Bond Quote: Status"],
-    ["forward_clean_price_input.forward_clean_price_per_100", "Forward Clean Price (per 100)"],
-    ["forward_clean_price_input.quote_side", "Forward Clean Price: Quote Side"],
-    ["forward_clean_price_input.source_system", "Forward Clean Price: Source System"],
-    ["forward_clean_price_input.status", "Forward Clean Price: Status"],
-    ["volatility_input.volatility", "Price Vol (σ)"],
-    ["volatility_input.volatility_basis", "Volatility Basis"],
-    ["volatility_input.source_system", "Volatility: Source System"],
-    ["volatility_input.status", "Volatility: Status"],
-    ["credit_spread_input.spread_treatment", "Credit Spread: Treatment"],
-    ["credit_spread_input.source_system", "Credit Spread: Source System"],
-    ["credit_spread_input.status", "Credit Spread: Status"],
-    ["credit_spread_input.credit_spread", "Credit Spread"],
-    ["credit_spread_input.credit_spread_basis", "Credit Spread: Basis"],
+    [
+      "bond_reference_data_universe.0.redemption_amount",
+      "Redemption Amount",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    [
+      "bond_reference_data_universe.0.callable_flag",
+      "Callable Flag",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    [
+      "bond_reference_data_universe.0.sinkable_flag",
+      "Sinkable Flag",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    ["bond_reference_data_universe.0.bond_type", "Bond Type", CATEGORY_BOND_REFERENCE_DATA],
+    [
+      "bond_reference_data_universe.0.yield_convention",
+      "Yield Convention",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    [
+      "bond_reference_data_universe.0.ex_dividend_days",
+      "Ex-Dividend Days",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    [
+      "bond_reference_data_universe.0.first_coupon_date",
+      "First Coupon Date",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    [
+      "bond_reference_data_universe.0.last_coupon_date",
+      "Last Coupon Date",
+      CATEGORY_BOND_REFERENCE_DATA,
+    ],
+    ["bond_reference_data_universe.0.status", "Status", CATEGORY_BOND_REFERENCE_DATA],
+
+    ["valuation_date", "Valuation Date", CATEGORY_VALUATION_METADATA],
+    ["as_of_timestamp", "As-Of Timestamp", CATEGORY_VALUATION_METADATA],
+    ["pricing_timestamp", "Pricing Timestamp", CATEGORY_VALUATION_METADATA],
+    ["expiry_timestamp", "Expiry Timestamp", CATEGORY_VALUATION_METADATA],
+    ["reporting_date", "Reporting Date", CATEGORY_VALUATION_METADATA],
+    ["forward_settlement_date", "Forward Settlement Date", CATEGORY_VALUATION_METADATA],
+    ["option_settlement_date", "Option Settlement Date", CATEGORY_VALUATION_METADATA],
+    ["source_system", "Source System", CATEGORY_VALUATION_METADATA],
+    ["snapshot_id", "Snapshot ID", CATEGORY_VALUATION_METADATA],
+    ["snapshot_status", "Snapshot Status", CATEGORY_VALUATION_METADATA],
+    ["bond_quote.price_type", "Bond Quote Price Type", CATEGORY_VALUATION_METADATA],
+    ["bond_quote.status", "Bond Quote Status", CATEGORY_VALUATION_METADATA],
+
+    [
+      "forward_clean_price_input.forward_clean_price_per_100",
+      "Forward Clean Price (per 100)",
+      CATEGORY_FORWARD_CLEAN_PRICE,
+    ],
+    [
+      "forward_clean_price_input.quote_side",
+      "Forward Clean Price Quote Side",
+      CATEGORY_FORWARD_CLEAN_PRICE,
+    ],
+    [
+      "forward_clean_price_input.source_system",
+      "Forward Clean Price Source System",
+      CATEGORY_FORWARD_CLEAN_PRICE,
+    ],
+    ["forward_clean_price_input.status", "Forward Clean Price Status", CATEGORY_FORWARD_CLEAN_PRICE],
+
+    ["volatility_input.volatility", "Price Vol (σ)", CATEGORY_PRICE_VOLATILITY],
+    ["volatility_input.volatility_basis", "Volatility Basis", CATEGORY_PRICE_VOLATILITY],
+    ["volatility_input.source_system", "Volatility Source System", CATEGORY_PRICE_VOLATILITY],
+    ["volatility_input.status", "Volatility Status", CATEGORY_PRICE_VOLATILITY],
+
+    ["credit_spread_input.spread_treatment", "Credit Spread Treatment", CATEGORY_MARKET_CURVES],
+    ["credit_spread_input.source_system", "Credit Spread Source System", CATEGORY_MARKET_CURVES],
+    ["credit_spread_input.status", "Credit Spread Status", CATEGORY_MARKET_CURVES],
+    ["credit_spread_input.credit_spread", "Credit Spread", CATEGORY_MARKET_CURVES],
+    ["credit_spread_input.credit_spread_basis", "Credit Spread Basis", CATEGORY_MARKET_CURVES],
+  ];
+
+  // Fixed display order: the trader-facing categories in a stable,
+  // intentional sequence, independent of REQUIRED_DRAFT_FIELD_CHECKS'
+  // own declaration order.
+  const MISSING_CATEGORY_ORDER = [
+    CATEGORY_OPTION_TERMS,
+    CATEGORY_BOND_REFERENCE_DATA,
+    CATEGORY_MARKET_CURVES,
+    CATEGORY_FORWARD_CLEAN_PRICE,
+    CATEGORY_PRICE_VOLATILITY,
+    CATEGORY_VALUATION_METADATA,
   ];
 
   function readDottedPath(root, path) {
@@ -212,14 +303,16 @@
   // present value is itself valid (that stays the existing typed
   // constructors' job, applied when Price/Refresh actually call the real
   // builder). `0` and `false` are real values, never treated as missing.
+  // Returns a flat list of {label, category} -- grouping into the
+  // trader-facing category summary is renderMissingFieldsSummary's job.
   function computeMissingDraftFields(draft) {
     const missing = REQUIRED_DRAFT_FIELD_CHECKS.filter(([path]) => {
       const value = readDottedPath(draft, path);
       return value === null || value === undefined || value === "";
-    }).map(([, label]) => label);
+    }).map(([, label, category]) => ({ label, category }));
 
     if (!Array.isArray(draft.curve_points) || draft.curve_points.length === 0) {
-      missing.push("Option Discount Curve");
+      missing.push({ label: "Option Discount Curve", category: CATEGORY_MARKET_CURVES });
     }
     return missing;
   }
@@ -376,7 +469,7 @@
     els.detailsCoupon.textContent = fmtCouponPercent(context.coupon);
     els.detailsMaturity.textContent = context.maturity_date;
     els.detailsDayCount.textContent = context.day_count;
-    els.detailsFrequency.textContent = context.coupon_frequency;
+    els.detailsCouponFrequency.textContent = context.coupon_frequency;
     els.detailsCurrency.textContent = context.currency;
 
     els.sidebarLiveRow.hidden = false;
@@ -569,8 +662,68 @@
     els.resolvedBondCurrency.textContent = resolvedBloombergBond.currency;
     els.resolvedBondCleanPrice.textContent = fmt(resolvedBloombergBond.clean_price_per_100);
     els.resolvedBondAccrued.textContent = fmt(resolvedBloombergBond.accrued_interest_per_100);
+    setTextOrNotAvailable(els.resolvedBondCoupon, resolvedBloombergBond.bond_master.coupon);
+    setTextOrNotAvailable(els.resolvedBondMaturity, resolvedBloombergBond.bond_master.maturity_date);
     els.resolvedBondAcquiredAt.textContent = resolvedBloombergBond.acquired_at;
     els.resolvedBondSource.textContent = resolvedBloombergBond.source_system;
+  }
+
+  // Renders the Instrument Details card as the Bloomberg Bond Master
+  // display (PR #141 second revision) -- every field not yet confirmed via
+  // tools/bloomberg_dapi_probe.py (see
+  // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP)
+  // shows "Not available", never a fabricated or synthetic value. Shown
+  // immediately once a bond is resolved (see syncDraftGating), independent
+  // of whether the draft can yet be priced.
+  function renderBondMaster(bond) {
+    const bondMaster = bond.bond_master || {};
+    els.detailsIssuer.textContent = bond.name;
+    els.detailsIsin.textContent = bond.isin;
+    els.detailsCusip.textContent = bond.cusip;
+    els.detailsCurrency.textContent = bond.currency;
+    setTextOrNotAvailable(els.detailsCoupon, bondMaster.coupon);
+    setTextOrNotAvailable(els.detailsCouponFrequency, bondMaster.coupon_frequency);
+    setTextOrNotAvailable(els.detailsIssueDate, bondMaster.issue_date);
+    setTextOrNotAvailable(els.detailsMaturity, bondMaster.maturity_date);
+    setTextOrNotAvailable(els.detailsDayCount, bondMaster.day_count);
+    setTextOrNotAvailable(els.detailsFirstCouponDate, bondMaster.first_coupon_date);
+    setTextOrNotAvailable(els.detailsLastCouponDate, bondMaster.last_coupon_date);
+    setTextOrNotAvailable(els.detailsRedemptionAmount, bondMaster.redemption_amount);
+    setTextOrNotAvailable(els.detailsCallable, bondMaster.callable_flag);
+    setTextOrNotAvailable(els.detailsSinkable, bondMaster.sinkable_flag);
+    setTextOrNotAvailable(els.detailsBondType, bondMaster.bond_type);
+    setTextOrNotAvailable(els.detailsYieldConvention, bondMaster.yield_convention);
+    setTextOrNotAvailable(els.detailsBusinessDayConvention, bondMaster.business_day_convention);
+    els.detailsSource.textContent = bond.source_system;
+    els.detailsAcquiredAt.textContent = bond.acquired_at;
+  }
+
+  function clearBondMaster() {
+    [
+      els.detailsIssuer,
+      els.detailsIsin,
+      els.detailsCusip,
+      els.detailsCurrency,
+      els.detailsSource,
+      els.detailsAcquiredAt,
+    ].forEach((el) => {
+      el.textContent = "—";
+    });
+    [
+      els.detailsCoupon,
+      els.detailsCouponFrequency,
+      els.detailsIssueDate,
+      els.detailsMaturity,
+      els.detailsDayCount,
+      els.detailsFirstCouponDate,
+      els.detailsLastCouponDate,
+      els.detailsRedemptionAmount,
+      els.detailsCallable,
+      els.detailsSinkable,
+      els.detailsBondType,
+      els.detailsYieldConvention,
+      els.detailsBusinessDayConvention,
+    ].forEach((el) => setTextOrNotAvailable(el, null));
   }
 
   // Renders the bounded, verbatim live_bloomberg_quote section (see
@@ -603,11 +756,30 @@
     applyLiveBloombergQuote(display.live_bloomberg_quote || null);
   }
 
-  function renderMissingFieldsList(missing) {
+  // Renders the actionable category summary (always visible once
+  // incomplete) plus the full per-field detail list (collapsed by default
+  // -- "Show details" reveals it). `missing` is computeMissingDraftFields's
+  // flat {label, category} list.
+  function renderMissingFieldsSummary(missing) {
+    const byCategory = new Map();
+    missing.forEach(({ label, category }) => {
+      if (!byCategory.has(category)) byCategory.set(category, []);
+      byCategory.get(category).push(label);
+    });
+
+    els.missingCategories.innerHTML = "";
+    MISSING_CATEGORY_ORDER.filter((category) => byCategory.has(category)).forEach((category) => {
+      const labels = byCategory.get(category);
+      const badge = document.createElement("span");
+      badge.className = "missing-category-badge";
+      badge.textContent = `${category} (${labels.length})`;
+      els.missingCategories.appendChild(badge);
+    });
+
     els.missingFieldsList.innerHTML = "";
-    missing.forEach((label) => {
+    missing.forEach(({ label, category }) => {
       const item = document.createElement("li");
-      item.textContent = label;
+      item.textContent = `${category}: ${label}`;
       els.missingFieldsList.appendChild(item);
     });
   }
@@ -627,10 +799,14 @@
 
     els.workspaceSection.hidden = !hasDraft;
     els.instrumentHeaderSection.hidden = !hasResult;
-    els.instrumentDetailsSection.hidden = !hasResult;
+    // Instrument Details shows Bloomberg's own Bond Master data (PR #141
+    // second revision) -- available the moment a bond is resolved, well
+    // before a complete/priced request exists, unlike the instrument
+    // header above (which shows the priced case's own context).
+    els.instrumentDetailsSection.hidden = !hasDraft;
 
     els.draftIncompleteNote.hidden = !incomplete;
-    renderMissingFieldsList(missing);
+    renderMissingFieldsSummary(missing);
 
     els.priceBtn.classList.toggle("is-disabled", !hasDraft || incomplete);
     els.bloombergRefreshBtn.classList.toggle("is-disabled", !hasDraft || incomplete);
@@ -642,6 +818,13 @@
   // is seeded by, any prior draft or the bundled synthetic fixture (never
   // loaded by this file at all any more).
   function buildInitialDraftFromBloomberg(bond) {
+    // Bond Master (PR #141 second revision): populated from bond.bond_master
+    // (every destination key always present, null unless Eddy has confirmed
+    // that field's Bloomberg mnemonic -- see
+    // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP).
+    // ex_dividend_days and status have no Bloomberg mnemonic candidate yet
+    // and stay null here regardless.
+    const bondMaster = bond.bond_master || {};
     return {
       bond_option: {
         product_id: null,
@@ -664,20 +847,20 @@
           isin: bond.isin,
           issuer: bond.name,
           currency: bond.currency,
-          coupon: null,
-          coupon_frequency: null,
-          maturity_date: null,
-          issue_date: null,
-          day_count: null,
-          business_day_convention: null,
-          redemption_amount: null,
-          callable_flag: null,
-          sinkable_flag: null,
-          bond_type: null,
-          yield_convention: null,
+          coupon: bondMaster.coupon ?? null,
+          coupon_frequency: bondMaster.coupon_frequency ?? null,
+          maturity_date: bondMaster.maturity_date ?? null,
+          issue_date: bondMaster.issue_date ?? null,
+          day_count: bondMaster.day_count ?? null,
+          business_day_convention: bondMaster.business_day_convention ?? null,
+          redemption_amount: bondMaster.redemption_amount ?? null,
+          callable_flag: bondMaster.callable_flag ?? null,
+          sinkable_flag: bondMaster.sinkable_flag ?? null,
+          bond_type: bondMaster.bond_type ?? null,
+          yield_convention: bondMaster.yield_convention ?? null,
           ex_dividend_days: null,
-          first_coupon_date: null,
-          last_coupon_date: null,
+          first_coupon_date: bondMaster.first_coupon_date ?? null,
+          last_coupon_date: bondMaster.last_coupon_date ?? null,
           status: null,
         },
       ],
@@ -791,6 +974,13 @@
       accrued_interest_per_100: payload.accrued_interest_per_100,
       acquired_at: payload.acquired_at,
       source_system: payload.source_system,
+      // Bond Master (PR #141 second revision): every field here is either a
+      // confirmed Bloomberg mnemonic's real value or null pending Eddy's own
+      // real-DAPI confirmation (see tools/bloomberg_dapi_probe.py) -- never
+      // guessed or filled from the synthetic fixture. `payload.bond_master`
+      // always carries every destination key regardless of how many are
+      // currently confirmed.
+      bond_master: payload.bond_master || {},
     };
 
     // A fresh lookup intentionally invalidates any prior draft/result -- it
@@ -807,6 +997,7 @@
     els.statusIndicator.classList.remove("failed");
     els.statusText.textContent = "Bloomberg bond loaded";
     renderResolvedBondPanel();
+    renderBondMaster(resolvedBloombergBond);
     syncDraftGating();
   }
 
@@ -874,6 +1065,7 @@
     currentDraft = null;
     setCurrentDisplay(null);
     renderResolvedBondPanel();
+    clearBondMaster();
     hideContext();
     clearResultFields();
     clearOptionTermsForm();
@@ -1019,6 +1211,21 @@
   els.downloadMarkdownBtn.addEventListener("click", () => downloadCurrentRun("markdown"));
   els.bloombergRefreshBtn.addEventListener("click", refreshBloombergAndPrice);
   els.loadBloombergBondBtn.addEventListener("click", loadBloombergBond);
+  // Collapsible Bond Master body -- expanded by default (requirement: the
+  // main data must be directly visible without any extra click) and purely
+  // a display toggle, no state this file tracks elsewhere.
+  els.bondMasterToggleBtn.addEventListener("click", () => {
+    const collapsed = !els.bondMasterBody.hidden;
+    els.bondMasterBody.hidden = collapsed;
+    els.bondMasterToggleBtn.textContent = collapsed ? "Expand" : "Collapse";
+  });
+  // Full per-field missing-input detail is collapsed by default -- only the
+  // category summary shows until the trader asks for more.
+  els.missingDetailsToggleBtn.addEventListener("click", () => {
+    const expanded = els.missingFieldsList.hidden;
+    els.missingFieldsList.hidden = !expanded;
+    els.missingDetailsToggleBtn.textContent = expanded ? "Hide details" : "Show details";
+  });
 
   // No bootstrap: the trader-draft revision starts with nothing loaded at
   // all (Issue #140 second revision, requirement 1) -- syncDraftGating()

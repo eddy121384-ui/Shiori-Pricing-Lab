@@ -593,6 +593,56 @@ def test_api_bloomberg_bond_resolves_isin_and_calls_loader_with_qualified_identi
     assert calls == [{"identifier": "/isin/US91282CLJ89", "quote_side": "MID"}]
 
 
+def test_api_bloomberg_bond_passes_bond_master_through_verbatim(
+    server_url: str, monkeypatch
+) -> None:
+    """PR #141 second revision: the loader's ``bond_master`` dict (whatever
+    it currently contains, confirmed or still-None pending mnemonic
+    confirmation) flows through this route unchanged -- the server adds no
+    Bond Master mapping/parsing of its own."""
+
+    bond_master = {
+        "coupon": None,
+        "coupon_frequency": None,
+        "issue_date": None,
+        "maturity_date": None,
+        "day_count": None,
+        "first_coupon_date": None,
+        "last_coupon_date": None,
+        "redemption_amount": None,
+        "callable_flag": None,
+        "sinkable_flag": None,
+        "bond_type": None,
+        "yield_convention": None,
+        "business_day_convention": None,
+    }
+
+    def fake_loader(*, identifier, quote_side):
+        return {
+            "isin": "US91282CLJ89",
+            "cusip": "91282CLJ8",
+            "name": "T 4 1/8 01/31/31 Govt",
+            "currency": "USD",
+            "quote_side": quote_side,
+            "clean_price_per_100": 99.75,
+            "accrued_interest_per_100": 0.51,
+            "bond_master": bond_master,
+        }
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+    monkeypatch.setattr(
+        server_module, "_shiori_acquisition_now", lambda: datetime(2026, 7, 1, 16, 5, 0, tzinfo=UTC)
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": "MID"},
+    )
+
+    assert status == 200
+    assert payload["bond_master"] == bond_master
+
+
 def test_api_bloomberg_bond_clock_captured_only_after_successful_loader_return(
     server_url: str, monkeypatch
 ) -> None:

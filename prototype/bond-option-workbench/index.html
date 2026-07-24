@@ -111,6 +111,8 @@
             <div class="rb-item"><span class="rb-k">Currency</span><span class="rb-v" id="resolved-bond-currency">&mdash;</span></div>
             <div class="rb-item"><span class="rb-k">Clean Price</span><span class="rb-v" id="resolved-bond-clean-price">&mdash;</span></div>
             <div class="rb-item"><span class="rb-k">Accrued Interest</span><span class="rb-v" id="resolved-bond-accrued">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Coupon</span><span class="rb-v" id="resolved-bond-coupon">Not available</span></div>
+            <div class="rb-item"><span class="rb-k">Maturity</span><span class="rb-v" id="resolved-bond-maturity">Not available</span></div>
             <div class="rb-item"><span class="rb-k">Bloomberg Acquisition Time</span><span class="rb-v" id="resolved-bond-acquired-at">&mdash;</span></div>
             <div class="rb-item"><span class="rb-k">Source</span><span class="rb-v" id="resolved-bond-source">&mdash;</span></div>
           </div>
@@ -118,7 +120,9 @@
 
         <div class="draft-incomplete-note" id="draft-incomplete-note" hidden>
           <div>Complete the required pricing inputs before pricing.</div>
-          <ul class="missing-fields-list" id="missing-fields-list"></ul>
+          <div class="missing-categories" id="missing-categories"></div>
+          <span class="collapse-toggle" id="missing-details-toggle-btn">Show details</span>
+          <ul class="missing-fields-list" id="missing-fields-list" hidden></ul>
         </div>
 
         <div class="underlying-bond-actions">
@@ -284,32 +288,42 @@
         </div>
       </section>
 
-      <!-- Instrument details -->
+      <!-- Instrument details: Bloomberg Bond Master -->
       <section class="card instrument-details" id="instrument-details-section" hidden>
         <div class="id-head">
-          <div class="card-title">Instrument Details</div>
-          <div class="card-title notes">Notes</div>
+          <div class="card-title">Instrument Details &mdash; Bloomberg Bond Master</div>
+          <span class="collapse-toggle" id="bond-master-toggle-btn">Collapse</span>
         </div>
-        <div class="id-grid">
+        <div class="id-grid" id="bond-master-body">
           <div class="id-block">
-            <span class="i-k">Issuer</span><span class="i-v" id="details-issuer">&mdash;</span>
-            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
-            <span class="i-k">Maturity</span><span class="i-v" id="details-maturity">&mdash;</span>
-            <span class="i-k">Next Call Date</span><span class="i-v pending-value">Not available</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Callable</span><span class="i-v pending-value">Not available</span>
-            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
-            <span class="i-k">Frequency</span><span class="i-v" id="details-frequency">&mdash;</span>
-            <span class="i-k">Ex-Dividend Date</span><span class="i-v pending-value">Not available</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Listing</span><span class="i-v pending-value">Not available</span>
-            <span class="i-k">Country</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Issuer / Security Description</span><span class="i-v" id="details-issuer">&mdash;</span>
+            <span class="i-k">ISIN</span><span class="i-v" id="details-isin">&mdash;</span>
+            <span class="i-k">CUSIP</span><span class="i-v" id="details-cusip">&mdash;</span>
             <span class="i-k">Currency</span><span class="i-v" id="details-currency">&mdash;</span>
-            <span class="i-k">Domicile</span><span class="i-v pending-value">Not available</span>
           </div>
-          <div class="notes-block pending-value">Not available</div>
+          <div class="id-block">
+            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
+            <span class="i-k">Coupon Frequency</span><span class="i-v" id="details-coupon-frequency">&mdash;</span>
+            <span class="i-k">Issue Date</span><span class="i-v" id="details-issue-date">&mdash;</span>
+            <span class="i-k">Maturity Date</span><span class="i-v" id="details-maturity">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
+            <span class="i-k">First Coupon Date</span><span class="i-v" id="details-first-coupon-date">&mdash;</span>
+            <span class="i-k">Last Coupon Date</span><span class="i-v" id="details-last-coupon-date">&mdash;</span>
+            <span class="i-k">Redemption Amount</span><span class="i-v" id="details-redemption-amount">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Callable</span><span class="i-v" id="details-callable">&mdash;</span>
+            <span class="i-k">Sinkable</span><span class="i-v" id="details-sinkable">&mdash;</span>
+            <span class="i-k">Bond Type</span><span class="i-v" id="details-bond-type">&mdash;</span>
+            <span class="i-k">Yield Convention</span><span class="i-v" id="details-yield-convention">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Business Day Convention</span><span class="i-v" id="details-business-day-convention">&mdash;</span>
+            <span class="i-k">Source</span><span class="i-v" id="details-source">&mdash;</span>
+            <span class="i-k">Acquisition Time</span><span class="i-v" id="details-acquired-at">&mdash;</span>
+          </div>
         </div>
       </section>
 

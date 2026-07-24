@@ -759,6 +759,14 @@ _ISIN_IDENTIFIER = "/isin/US91282CLJ89"
 _CUSIP_IDENTIFIER = "/cusip/91282CLJ8"
 
 
+def _empty_bond_master() -> dict:
+    """The expected ``bond_master`` shape with `_BOND_MASTER_FIELD_MAP` empty
+    (its default, real state until a mnemonic is confirmed) -- every
+    destination present, every value ``None``."""
+
+    return dict.fromkeys(module._BOND_MASTER_DESTINATION_FIELDS)
+
+
 def _identity_fields(*, price_field="PX_MID", price_value="99.75", **overrides):
     fields = {
         "ID_ISIN": "US91282CLJ89",
@@ -829,6 +837,7 @@ def test_identity_lookup_returns_canonical_isin_cusip_and_name(monkeypatch):
         "quote_side": "MID",
         "clean_price_per_100": 99.75,
         "accrued_interest_per_100": 0.51,
+        "bond_master": _empty_bond_master(),
     }
 
 
@@ -934,6 +943,107 @@ def test_identity_lookup_session_stopped_on_failure(monkeypatch):
             identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
         )
 
+    assert holder["session"].stopped is True
+
+
+# --- Bond Master fields (PR #141 second revision): gated, best-effort ---------
+#
+# _BOND_MASTER_FIELD_MAP is empty by default (no mnemonic confirmed yet) --
+# these tests inject a fake entry via monkeypatch to prove the extraction
+# mechanism itself, without wiring any real, unconfirmed mnemonic into
+# production use.
+
+
+def test_identity_lookup_requests_no_extra_fields_with_an_empty_bond_master_map(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert holder["session"].last_request.fields == [
+        "ID_ISIN",
+        "ID_CUSIP",
+        "NAME",
+        "SECURITY_DES",
+        "CRNCY",
+        "PX_MID",
+        "INT_ACC",
+    ]
+
+
+def test_identity_lookup_requests_a_confirmed_bond_master_field(monkeypatch):
+    monkeypatch.setitem(module._BOND_MASTER_FIELD_MAP, "coupon", "CPN")
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER, fields=_identity_fields(CPN="4.125")
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert "CPN" in holder["session"].last_request.fields
+    assert result["bond_master"]["coupon"] == "4.125"
+    # Every other Bond Master destination stays None -- only the one
+    # confirmed-for-this-test field was mapped.
+    assert result["bond_master"]["maturity_date"] is None
+
+
+def test_identity_lookup_bond_master_field_absence_never_fails_the_request(monkeypatch):
+    monkeypatch.setitem(module._BOND_MASTER_FIELD_MAP, "coupon", "CPN")
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    # CPN was requested but never returned (absent from fieldData, e.g. a
+    # field exception) -- the field is simply None, and the already-reliable
+    # identity/quote result is completely unaffected.
+    assert result["bond_master"]["coupon"] is None
+    assert result["isin"] == "US91282CLJ89"
+    assert result["clean_price_per_100"] == 99.75
+
+
+def test_identity_lookup_bond_master_field_exception_never_fails_the_request(monkeypatch):
+    monkeypatch.setitem(module._BOND_MASTER_FIELD_MAP, "coupon", "CPN")
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(),
+                    field_exceptions=["[BAD_FLD] CPN not applicable to security"],
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon"] is None
+    assert result["isin"] == "US91282CLJ89"
+    assert result["cusip"] == "91282CLJ8"
     assert holder["session"].stopped is True
 
 

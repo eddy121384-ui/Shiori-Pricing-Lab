@@ -101,6 +101,19 @@ find a bond by ISIN/CUSIP before any Case JSON exists. Deliberately a
 separate, self-contained implementation rather than sharing
 :func:`load_bloomberg_bond_quote`'s internals, so that function's production
 behavior is never put at risk by this one's needs.
+
+**Bond Master fields (PR #141 second revision).** The same lookup also
+returns a best-effort ``"bond_master"`` dict covering every
+``BondReferenceData`` field (coupon, coupon frequency, issue/maturity/first/
+last coupon dates, redemption amount, callable/sinkable flags, bond type,
+yield convention, business-day convention). No Bloomberg mnemonic is guessed
+into production use: ``_BOND_MASTER_FIELD_MAP`` starts empty and every field
+is ``None`` until Eddy confirms its mnemonic on a real Bloomberg workstation
+via ``tools/bloomberg_dapi_probe.py`` (see that script and PR #141's body for
+the exact probe command). A Bond Master field's absence, field exception, or
+simply not being mapped yet never fails the request -- unlike the seven
+required identity/quote fields above, which still make this call succeed or
+fail as a whole exactly as before.
 """
 
 from __future__ import annotations
@@ -396,6 +409,41 @@ _NAME_FIELD = "NAME"
 _SECURITY_DESCRIPTION_FIELD = "SECURITY_DES"
 _CUSIP_FIELD = "ID_CUSIP"
 
+# --- Bond Master (bond_reference_data_universe) fields, PR #141 second
+# revision -------------------------------------------------------------------
+#
+# Empty until a candidate Bloomberg mnemonic has been confirmed against a
+# live DAPI response (see tools/bloomberg_dapi_probe.py and PR #141's body
+# for the exact probe command). No mnemonic is guessed into production use
+# here -- add a `destination_field: "MNEMONIC"` entry only after Eddy
+# confirms it on his own Bloomberg workstation; it is then automatically
+# requested and populated below with no other code change required.
+#
+# Keys are BondReferenceData's own field names verbatim (never invented);
+# every one of them is always a key in the returned "bond_master" dict
+# regardless of how many entries this map currently has, so a caller never
+# has to guess which keys might be present -- an unconfirmed, not-yet-
+# requested, absent, or field-exceptioned value is simply None, exactly
+# like a genuine Bloomberg-side miss (requirement: never let one bad/
+# unconfirmed field take down the rest of an otherwise-successful lookup).
+_BOND_MASTER_FIELD_MAP: dict[str, str] = {}
+
+_BOND_MASTER_DESTINATION_FIELDS = (
+    "coupon",
+    "coupon_frequency",
+    "issue_date",
+    "maturity_date",
+    "day_count",
+    "first_coupon_date",
+    "last_coupon_date",
+    "redemption_amount",
+    "callable_flag",
+    "sinkable_flag",
+    "bond_type",
+    "yield_convention",
+    "business_day_convention",
+)
+
 
 def load_bloomberg_bond_identity_and_quote(
     *,
@@ -422,15 +470,26 @@ def load_bloomberg_bond_identity_and_quote(
 
     Returns one complete result as a dict with keys ``"isin"``, ``"cusip"``,
     ``"name"``, ``"currency"``, ``"quote_side"``, ``"clean_price_per_100"``,
-    ``"accrued_interest_per_100"`` -- never a partial one. ``"name"`` prefers
-    Bloomberg's ``SECURITY_DES`` (a human-readable security description),
-    falling back to ``NAME`` only if ``SECURITY_DES`` itself is blank.
+    ``"accrued_interest_per_100"`` -- never a partial one for these seven --
+    plus ``"bond_master"`` (PR #141 second revision): a dict with one key per
+    ``BondReferenceData`` field this lookup can ever populate
+    (``_BOND_MASTER_DESTINATION_FIELDS``), each ``None`` unless
+    ``_BOND_MASTER_FIELD_MAP`` has a confirmed Bloomberg mnemonic for it (see
+    that map's own docstring -- it is empty until Eddy confirms a mnemonic via
+    ``tools/bloomberg_dapi_probe.py``). Unlike the seven required fields
+    above, a Bond Master field that is absent, field-exceptioned, or simply
+    not yet mapped is reported as ``None`` and never fails the request --
+    the identity/quote result this function has always returned is never put
+    at risk by an unconfirmed or unentitled Bond Master field. ``"name"``
+    prefers Bloomberg's ``SECURITY_DES`` (a human-readable security
+    description), falling back to ``NAME`` only if ``SECURITY_DES`` itself is
+    blank.
 
     Raises ``ValueError`` if ``identifier`` is blank or ``quote_side`` is not
     a valid ``TreasuryFTPQuoteSide``. Raises ``BLIBloombergDapiError`` for
-    every Bloomberg-side failure, with the same session-lifecycle,
-    exactly-one-record, security-identity, security-level-error, field-
-    exception, and malformed-element handling as
+    every Bloomberg-side failure on the seven required fields, with the same
+    session-lifecycle, exactly-one-record, security-identity, security-
+    level-error, and malformed-element handling as
     :func:`load_bloomberg_bond_quote` -- deliberately a separate, self-
     contained implementation rather than a shared one, so that function's
     own production behavior and extensive existing test coverage are never
@@ -474,6 +533,11 @@ def load_bloomberg_bond_identity_and_quote(
         request.append("fields", _CURRENCY_FIELD)
         request.append("fields", price_field)
         request.append("fields", _ACCRUED_INTEREST_FIELD)
+        # Bond Master fields: only ever the confirmed subset of
+        # _BOND_MASTER_FIELD_MAP (empty by default -- see its own docstring
+        # above). Requesting zero extra fields is a complete no-op.
+        for bloomberg_mnemonic in _BOND_MASTER_FIELD_MAP.values():
+            request.append("fields", bloomberg_mnemonic)
 
         session.sendRequest(request)
 
@@ -547,14 +611,15 @@ def load_bloomberg_bond_identity_and_quote(
             f"{security_data.getElement('securityError')}"
         )
 
-    if security_data.hasElement("fieldExceptions"):
-        field_exceptions = security_data.getElement("fieldExceptions")
-        if field_exceptions.numValues() > 0:
-            raise BLIBloombergDapiError(
-                f"Bloomberg DAPI field exception for {identifier!r}: "
-                f"{field_exceptions.getValueAsElement(0)}"
-            )
-
+    # No blanket "any field exception fails the whole request" check here
+    # (unlike load_bloomberg_bond_quote, whose fields are all required and
+    # size-of-seven): the Bond Master fields added below are best-effort and
+    # must be able to fail individually -- a field exception on one of them
+    # must never take down the already-reliable identity/quote fields. Each
+    # required field's own presence in fieldData is still independently
+    # enforced by _require_field immediately below (a field exception always
+    # means the field is simply absent from fieldData), so required-field
+    # strictness is unchanged.
     field_data = security_data.getElement("fieldData")
 
     def _require_field(field_name: str) -> str:
@@ -568,6 +633,22 @@ def load_bloomberg_bond_identity_and_quote(
                 f"Bloomberg DAPI response for {identifier!r} is missing {field_name}"
             )
         return raw_value
+
+    def _optional_field(field_name: str) -> str | None:
+        """Best-effort read: absent, blank, or a malformed value all become
+        ``None`` rather than aborting the request -- unlike ``_require_field``,
+        used only for the not-yet-confirmed Bond Master fields in
+        ``_BOND_MASTER_FIELD_MAP``. Returns the raw Bloomberg string verbatim
+        (no numeric/enum coercion) -- deciding how to parse a field's value
+        is a separate, explicit step for once its mnemonic is confirmed."""
+
+        if not field_data.hasElement(field_name):
+            return None
+        try:
+            raw_value = _get_element_as_string(blpapi, field_data, field_name, identifier)
+        except BLIBloombergDapiError:
+            return None
+        return raw_value or None
 
     raw_isin = _require_field(_ISIN_FIELD)
     raw_cusip = _require_field(_CUSIP_FIELD)
@@ -590,6 +671,17 @@ def load_bloomberg_bond_identity_and_quote(
     clean_price_per_100 = _parse_finite_float(raw_price, price_field)
     accrued_interest_per_100 = _parse_finite_float(raw_accrued, _ACCRUED_INTEREST_FIELD)
 
+    # Every BondReferenceData destination is always a key here, whether or
+    # not _BOND_MASTER_FIELD_MAP currently has a confirmed mnemonic for it --
+    # an unmapped, absent, or field-exceptioned one is simply None, exactly
+    # like a genuine Bloomberg-side miss (never a fabricated/synthetic value).
+    bond_master: dict[str, str | None] = {}
+    for destination_field in _BOND_MASTER_DESTINATION_FIELDS:
+        bloomberg_mnemonic = _BOND_MASTER_FIELD_MAP.get(destination_field)
+        bond_master[destination_field] = (
+            _optional_field(bloomberg_mnemonic) if bloomberg_mnemonic is not None else None
+        )
+
     return {
         "isin": raw_isin,
         "cusip": raw_cusip,
@@ -598,6 +690,7 @@ def load_bloomberg_bond_identity_and_quote(
         "quote_side": quote_side.value,
         "clean_price_per_100": clean_price_per_100,
         "accrued_interest_per_100": accrued_interest_per_100,
+        "bond_master": bond_master,
     }
 
 

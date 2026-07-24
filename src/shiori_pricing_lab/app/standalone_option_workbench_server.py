@@ -105,8 +105,13 @@ dict exactly like this one.
   one bond's own identity and one quote side's price/accrued interest.
   Returns that loader's dict verbatim, plus ``"acquired_at"`` (a Shiori
   acquisition timestamp) and ``"source_system"``, on HTTP 200 -- one
-  complete result or a full HTTP 400 failure, never a partial one. This is
-  a distinct concern from ``/api/case/bloomberg`` above, which still
+  complete result or a full HTTP 400 failure, never a partial one. The
+  loader's ``"bond_master"`` sub-dict (PR #141 second revision -- coupon,
+  coupon frequency, dates, redemption amount, callable/sinkable flags, bond
+  type, yield convention, business-day convention) passes through
+  unchanged; this route performs no Bond Master field mapping, parsing, or
+  confirmation of its own. This is a distinct concern from
+  ``/api/case/bloomberg`` above, which still
   requires and reprices an active case; this route never touches or
   requires one.
 
@@ -179,7 +184,13 @@ DEFAULT_PORT = 8765
 # but the served index.html/script.js/styles.css changed substantially (no
 # more synthetic-case bootstrap, no Load Case JSON control) -- a stale
 # already-running process must not be reused and keep serving the old page.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v4"
+#
+# Bumped to -v5 for Bloomberg Bond Master loading/display: POST
+# /api/bloomberg/bond's response gained a new "bond_master" key (see
+# lookup_bloomberg_bond below), and the served index.html/script.js changed
+# to read and display it -- a stale process predating this key must not be
+# reused either, even though the frontend degrades gracefully if it is.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v5"
 
 
 def load_base_case() -> dict:
