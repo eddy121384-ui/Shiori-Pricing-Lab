@@ -91,8 +91,45 @@
     <!-- ===================== MAIN ===================== -->
     <main class="main">
 
+      <!-- Underlying Bond: instrument-first Bloomberg lookup -->
+      <section class="card underlying-bond">
+        <div class="card-title">Underlying Bond</div>
+        <div class="underlying-bond-controls">
+          <div class="form-row"><label>Bond Identifier</label>
+            <input class="control" id="bond-identifier-input" type="text" placeholder="ISIN or CUSIP">
+          </div>
+          <div class="form-row"><label>Quote Side</label>
+            <div class="toggle toggle-3" id="bond-quote-side-toggle">
+              <span class="opt" data-value="BID">Bid</span>
+              <span class="opt" data-value="MID">Mid</span>
+              <span class="opt" data-value="OFFER">Offer</span>
+            </div>
+          </div>
+          <span class="btn primary is-disabled" id="load-bloomberg-bond-btn">Load Bloomberg Bond</span>
+        </div>
+
+        <div class="resolved-bond-panel" id="resolved-bond-panel" hidden>
+          <div class="rb-grid">
+            <div class="rb-item rb-name"><span class="rb-k">Security</span><span class="rb-v" id="resolved-bond-name">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">ISIN</span><span class="rb-v" id="resolved-bond-isin">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">CUSIP</span><span class="rb-v" id="resolved-bond-cusip">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Currency</span><span class="rb-v" id="resolved-bond-currency">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Clean Price</span><span class="rb-v" id="resolved-bond-clean-price">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Accrued Interest</span><span class="rb-v" id="resolved-bond-accrued">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Bloomberg Acquisition Time</span><span class="rb-v" id="resolved-bond-acquired-at">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Source</span><span class="rb-v" id="resolved-bond-source">&mdash;</span></div>
+          </div>
+        </div>
+
+        <div class="bond-mismatch-note" id="bond-mismatch-note" hidden>Load a Case JSON for this ISIN before pricing.</div>
+
+        <div class="underlying-bond-actions">
+          <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
+        </div>
+      </section>
+
       <!-- Instrument header -->
-      <section class="card instr-header">
+      <section class="card instr-header" id="instrument-header-section">
         <div class="instr-left">
           <div class="instr-title-row">
             <span class="instr-title" id="instr-title">Loading&hellip;</span>
@@ -136,7 +173,7 @@
       </section>
 
       <!-- Workspace -->
-      <section class="workspace">
+      <section class="workspace" id="workspace-section">
 
         <!-- Option terms -->
         <div class="card option-terms">
@@ -249,42 +286,8 @@
         </div>
       </section>
 
-      <!-- Bloomberg quote refresh -->
-      <section class="card bloomberg-refresh">
-        <div class="card-title">Bloomberg Refresh</div>
-        <div class="bloomberg-controls">
-          <div class="form-row"><label>Bloomberg Security</label>
-            <input class="control" id="bloomberg-security-input" type="text" placeholder="e.g. 91282CQX Govt">
-          </div>
-          <div class="form-row"><label>Quote Side</label>
-            <div class="toggle toggle-3" id="quote-side-toggle">
-              <span class="opt" data-value="BID">Bid</span>
-              <span class="opt" data-value="MID">Mid</span>
-              <span class="opt" data-value="OFFER">Offer</span>
-            </div>
-          </div>
-          <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
-        </div>
-
-        <div class="live-bloomberg-panel" id="live-bloomberg-panel" hidden>
-          <div class="lbq-label">Live &mdash; Bloomberg (this quote only)</div>
-          <div class="lbq-grid">
-            <div class="lbq-item"><span class="lbq-k">Security</span><span class="lbq-v" id="bloomberg-quote-security">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Verified ISIN</span><span class="lbq-v" id="bloomberg-quote-isin">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Quote Side</span><span class="lbq-v" id="bloomberg-quote-side">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Currency</span><span class="lbq-v" id="bloomberg-quote-currency">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Clean Price (per 100)</span><span class="lbq-v" id="bloomberg-quote-clean-price">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Accrued Interest (per 100)</span><span class="lbq-v" id="bloomberg-quote-accrued">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Shiori Acquisition Time</span><span class="lbq-v" id="bloomberg-quote-acquired-at">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Timestamp Basis</span><span class="lbq-v" id="bloomberg-quote-timestamp-basis">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Refreshed Scope</span><span class="lbq-v" id="bloomberg-quote-scope">&mdash;</span></div>
-            <div class="lbq-item"><span class="lbq-k">Other Market Inputs</span><span class="lbq-v" id="bloomberg-quote-other-inputs">&mdash;</span></div>
-          </div>
-        </div>
-      </section>
-
       <!-- Instrument details -->
-      <section class="card instrument-details">
+      <section class="card instrument-details" id="instrument-details-section">
         <div class="id-head">
           <div class="card-title">Instrument Details</div>
           <div class="card-title notes">Notes</div>

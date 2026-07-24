@@ -27,7 +27,9 @@ from shiori_pricing_lab.data import bloomberg_bond_quote as module
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLIMarketDataStatus, BLIQuoteBasis
 from shiori_pricing_lab.data.bloomberg_bond_quote import (
     BLIBloombergDapiError,
+    load_bloomberg_bond_identity_and_quote,
     load_bloomberg_bond_quote,
+    parse_bond_identifier,
 )
 from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 
@@ -742,3 +744,246 @@ def test_isin_field_exception_raises_clear_error(monkeypatch):
         _load_mid()
 
     assert holder["session"].stopped is True
+
+
+# --- load_bloomberg_bond_identity_and_quote (instrument-first lookup) -----------
+#
+# Same fake-blpapi harness as above, reused directly -- no expected-ISIN
+# verification exists in this function, so these tests focus on: the exact
+# symbology-qualified identifier is sent verbatim (no yellow-key guessing),
+# quote side is required with no default, identity fields are returned
+# alongside the quote, and the same all-or-nothing/session-lifecycle
+# guarantees hold.
+
+_ISIN_IDENTIFIER = "/isin/US91282CLJ89"
+_CUSIP_IDENTIFIER = "/cusip/91282CLJ8"
+
+
+def _identity_fields(*, price_field="PX_MID", price_value="99.75", **overrides):
+    fields = {
+        "ID_ISIN": "US91282CLJ89",
+        "ID_CUSIP": "91282CLJ8",
+        "NAME": "T 4 1/8 01/31/31",
+        "SECURITY_DES": "T 4 1/8 01/31/31 Govt",
+        "CRNCY": "USD",
+        price_field: price_value,
+        "INT_ACC": "0.51",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_identity_lookup_sends_the_identifier_verbatim_no_yellow_key_guessing(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert holder["session"].last_request.securities == [_ISIN_IDENTIFIER]
+
+
+def test_identity_lookup_accepts_a_cusip_identifier_verbatim(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_CUSIP_IDENTIFIER,
+                    fields=_identity_fields(ID_ISIN="US91282CLJ89", ID_CUSIP="91282CLJ8"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_CUSIP_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert holder["session"].last_request.securities == [_CUSIP_IDENTIFIER]
+    assert result["cusip"] == "91282CLJ8"
+
+
+def test_identity_lookup_returns_canonical_isin_cusip_and_name(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result == {
+        "isin": "US91282CLJ89",
+        "cusip": "91282CLJ8",
+        "name": "T 4 1/8 01/31/31 Govt",
+        "currency": "USD",
+        "quote_side": "MID",
+        "clean_price_per_100": 99.75,
+        "accrued_interest_per_100": 0.51,
+    }
+
+
+def test_identity_lookup_requests_exactly_one_price_field_per_quote_side(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(price_field="PX_BID", price_value="99.5"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.BID
+    )
+
+    assert result["clean_price_per_100"] == 99.5
+    assert holder["session"].last_request.fields.count("PX_BID") == 1
+    assert "PX_MID" not in holder["session"].last_request.fields
+    assert "PX_ASK" not in holder["session"].last_request.fields
+
+
+def test_identity_lookup_prefers_security_des_over_name(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(NAME="short name", SECURITY_DES="full description"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["name"] == "full description"
+
+
+def test_identity_lookup_falls_back_to_name_when_security_des_blank(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(SECURITY_DES="", NAME="fallback name"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["name"] == "fallback name"
+
+
+def test_identity_lookup_fails_outright_when_cusip_missing(monkeypatch):
+    fields = _identity_fields()
+    del fields["ID_CUSIP"]
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[_response_event(_security_data(security=_ISIN_IDENTIFIER, fields=fields))],
+    )
+
+    with pytest.raises(BLIBloombergDapiError, match="missing ID_CUSIP"):
+        load_bloomberg_bond_identity_and_quote(
+            identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+    assert holder["session"].stopped is True
+
+
+def test_identity_lookup_requires_quote_side_with_no_default():
+    # coerce_enum's blank/invalid-quote_side check runs before blpapi is even
+    # imported, so no fake session is needed here at all -- this can never
+    # reach Bloomberg with an invalid quote_side.
+    with pytest.raises(ValueError, match="quote_side"):
+        load_bloomberg_bond_identity_and_quote(identifier=_ISIN_IDENTIFIER, quote_side="")
+
+
+def test_identity_lookup_rejects_blank_identifier():
+    with pytest.raises(ValueError, match="identifier"):
+        load_bloomberg_bond_identity_and_quote(
+            identifier="   ", quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+
+def test_identity_lookup_session_stopped_on_failure(monkeypatch):
+    holder = _install_fake_blpapi(monkeypatch, start_result=False)
+
+    with pytest.raises(BLIBloombergDapiError, match="failed to start"):
+        load_bloomberg_bond_identity_and_quote(
+            identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+    assert holder["session"].stopped is True
+
+
+# --- parse_bond_identifier (bounded ISIN/CUSIP parser) --------------------------
+
+
+def test_parse_bond_identifier_recognizes_a_12_character_isin():
+    kind, identifier = parse_bond_identifier("US91282CLJ89")
+    assert kind == "ISIN"
+    assert identifier == "/isin/US91282CLJ89"
+
+
+def test_parse_bond_identifier_recognizes_a_9_character_cusip():
+    kind, identifier = parse_bond_identifier("91282CLJ8")
+    assert kind == "CUSIP"
+    assert identifier == "/cusip/91282CLJ8"
+
+
+def test_parse_bond_identifier_normalizes_lowercase_and_outer_whitespace():
+    kind, identifier = parse_bond_identifier("  us91282clj89  ")
+    assert kind == "ISIN"
+    assert identifier == "/isin/US91282CLJ89"
+
+    kind, identifier = parse_bond_identifier("\t91282clj8\n")
+    assert kind == "CUSIP"
+    assert identifier == "/cusip/91282CLJ8"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "US91282CLJ8",  # 11 chars
+        "US91282CLJ890",  # 13 chars
+        "91282CLJ",  # 8 chars
+        "91282CLJ89",  # 10 chars
+        "US91282-LJ89",  # 12 chars but contains a hyphen
+        "91282CQX Govt",  # a Bloomberg yellow-key ticker -- never accepted
+        "91282CQX",  # 8 chars, part of a yellow key
+    ],
+)
+def test_parse_bond_identifier_rejects_every_other_format(raw):
+    with pytest.raises(ValueError, match="ISIN|CUSIP"):
+        parse_bond_identifier(raw)
+
+
+def test_parse_bond_identifier_never_appends_a_yellow_key_suffix():
+    # A bare, valid 9-character CUSIP must resolve to exactly "/cusip/<value>"
+    # -- never silently gain a " Govt" (or any other) yellow-key suffix.
+    _kind, identifier = parse_bond_identifier("91282CLJ8")
+    assert "Govt" not in identifier
+    assert identifier == "/cusip/91282CLJ8"

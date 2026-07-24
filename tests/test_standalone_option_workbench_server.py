@@ -546,6 +546,218 @@ def test_api_case_bloomberg_rejects_blank_security(server_url: str, monkeypatch)
     assert calls == []
 
 
+# --- Instrument-first Bloomberg lookup: /api/bloomberg/bond ----------------------
+
+
+def test_api_bloomberg_bond_resolves_isin_and_calls_loader_with_qualified_identifier(
+    server_url: str, monkeypatch
+) -> None:
+    calls = []
+
+    def fake_loader(*, identifier, quote_side):
+        calls.append({"identifier": identifier, "quote_side": quote_side})
+        return {
+            "isin": "US91282CLJ89",
+            "cusip": "91282CLJ8",
+            "name": "T 4 1/8 01/31/31 Govt",
+            "currency": "USD",
+            "quote_side": quote_side,
+            "clean_price_per_100": 99.75,
+            "accrued_interest_per_100": 0.51,
+        }
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+    monkeypatch.setattr(
+        server_module, "_shiori_acquisition_now", lambda: datetime(2026, 7, 1, 16, 5, 0, tzinfo=UTC)
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "us91282clj89", "quote_side": "MID"},
+    )
+
+    assert status == 200
+    assert payload == {
+        "isin": "US91282CLJ89",
+        "cusip": "91282CLJ8",
+        "name": "T 4 1/8 01/31/31 Govt",
+        "currency": "USD",
+        "quote_side": "MID",
+        "clean_price_per_100": 99.75,
+        "accrued_interest_per_100": 0.51,
+        "acquired_at": "2026-07-01T16:05:00+00:00",
+        "source_system": "BLOOMBERG_DAPI",
+    }
+    # lowercased/whitespace-laden input still resolves to the exact
+    # symbology-qualified, uppercased identifier -- never a yellow-key guess.
+    assert calls == [{"identifier": "/isin/US91282CLJ89", "quote_side": "MID"}]
+
+
+def test_api_bloomberg_bond_clock_captured_only_after_successful_loader_return(
+    server_url: str, monkeypatch
+) -> None:
+    order: list[str] = []
+
+    def fake_loader(*, identifier, quote_side):
+        order.append("loader")
+        return {
+            "isin": "US91282CLJ89",
+            "cusip": "91282CLJ8",
+            "name": "x",
+            "currency": "USD",
+            "quote_side": quote_side,
+            "clean_price_per_100": 100.0,
+            "accrued_interest_per_100": 0.1,
+        }
+
+    def fake_clock():
+        order.append("clock")
+        return datetime(2026, 7, 1, 16, 5, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+    monkeypatch.setattr(server_module, "_shiori_acquisition_now", fake_clock)
+
+    status, _payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": "MID"},
+    )
+
+    assert status == 200
+    assert order == ["loader", "clock"]
+
+
+def test_api_bloomberg_bond_clock_never_called_when_loader_raises(
+    server_url: str, monkeypatch
+) -> None:
+    clock_calls = []
+
+    def fake_loader(*, identifier, quote_side):
+        raise BLIBloombergDapiError("boom")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+    monkeypatch.setattr(
+        server_module, "_shiori_acquisition_now", lambda: clock_calls.append(1) or datetime.now()
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": "MID"},
+    )
+
+    assert status == 400
+    assert "boom" in payload["error"]
+    assert clock_calls == []
+
+
+def test_api_bloomberg_bond_resolves_a_cusip(server_url: str, monkeypatch) -> None:
+    calls = []
+
+    def fake_loader(*, identifier, quote_side):
+        calls.append(identifier)
+        return {
+            "isin": "US91282CLJ89",
+            "cusip": "91282CLJ8",
+            "name": "x",
+            "currency": "USD",
+            "quote_side": quote_side,
+            "clean_price_per_100": 100.0,
+            "accrued_interest_per_100": 0.1,
+        }
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "91282CLJ8", "quote_side": "BID"},
+    )
+
+    assert status == 200
+    assert payload["cusip"] == "91282CLJ8"
+    assert calls == ["/cusip/91282CLJ8"]
+
+
+def test_api_bloomberg_bond_rejects_a_yellow_key_ticker(server_url: str, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        server_module,
+        "load_bloomberg_bond_identity_and_quote",
+        lambda **kwargs: calls.append(kwargs) or {},
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "91282CQX Govt", "quote_side": "MID"},
+    )
+
+    assert status == 400
+    assert "ISIN" in payload["error"] and "CUSIP" in payload["error"]
+    assert calls == []
+
+
+def test_api_bloomberg_bond_rejects_missing_required_keys(server_url: str) -> None:
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond", {"bond_identifier": "US91282CLJ89"}
+    )
+    assert status == 400
+    assert "error" in payload
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/bond", {"quote_side": "MID"})
+    assert status == 400
+    assert "error" in payload
+
+
+def test_api_bloomberg_bond_requires_quote_side_with_no_hidden_default(server_url: str) -> None:
+    # No monkeypatching: quote_side validation happens before any Bloomberg
+    # call, so this never needs blpapi installed.
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": ""},
+    )
+    assert status == 400
+    assert "quote_side" in payload["error"]
+
+
+def test_api_bloomberg_bond_failure_returns_the_real_error(server_url: str, monkeypatch) -> None:
+    def fake_loader(*, identifier, quote_side):
+        raise BLIBloombergDapiError("Bloomberg DAPI session failed to start")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": "MID"},
+    )
+
+    assert status == 400
+    assert "Bloomberg DAPI session failed to start" in payload["error"]
+
+
+def test_api_bloomberg_bond_never_calls_pricing(server_url: str, monkeypatch) -> None:
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("bond lookup must never call the pricing entry point")
+
+    monkeypatch.setattr(server_module, "price_standalone_option_case", _must_not_be_called)
+    monkeypatch.setattr(
+        server_module,
+        "load_bloomberg_bond_identity_and_quote",
+        lambda **kwargs: {
+            "isin": "US91282CLJ89",
+            "cusip": "91282CLJ8",
+            "name": "x",
+            "currency": "USD",
+            "quote_side": kwargs["quote_side"],
+            "clean_price_per_100": 100.0,
+            "accrued_interest_per_100": 0.1,
+        },
+    )
+
+    status, _payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": "MID"},
+    )
+    assert status == 200
+
+
 # --- Issue #138: /api/export/json and /api/export/markdown ----------------------
 
 

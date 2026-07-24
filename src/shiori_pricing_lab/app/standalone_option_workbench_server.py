@@ -82,6 +82,23 @@ the browser holds whichever case is currently active and resends it):
   previous bond quote is never used as a fallback, and this route reprices
   fresh from Bloomberg every call (no cache, no polling).
 
+**Instrument-first Bloomberg lookup.** One more stateless route:
+
+- ``POST /api/bloomberg/bond`` -- body is ``{"bond_identifier": <str>,
+  "quote_side": "BID"|"MID"|"OFFER"}``. ``bond_identifier`` is a plain
+  12-character ISIN or 9-character CUSIP as the trader typed it (never a
+  Bloomberg yellow-key ticker) -- parsed and symbology-qualified server-side
+  via ``parse_bond_identifier``, then resolved via
+  ``load_bloomberg_bond_identity_and_quote`` exactly once. Takes no expected
+  ISIN: there is no active pricing case involved in this lookup at all, only
+  one bond's own identity and one quote side's price/accrued interest.
+  Returns that loader's dict verbatim, plus ``"acquired_at"`` (a Shiori
+  acquisition timestamp) and ``"source_system"``, on HTTP 200 -- one
+  complete result or a full HTTP 400 failure, never a partial one. This is
+  a distinct concern from ``/api/case/bloomberg`` above, which still
+  requires and reprices an active case; this route never touches or
+  requires one.
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -91,6 +108,7 @@ reprices from it, so results are always reproducible from
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -108,6 +126,10 @@ from shiori_pricing_lab.app.standalone_option_workbench_context import (
 from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     apply_standalone_option_case_overlay,
     extract_standalone_option_case_overlay,
+)
+from shiori_pricing_lab.data.bloomberg_bond_quote import (
+    load_bloomberg_bond_identity_and_quote,
+    parse_bond_identifier,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -138,7 +160,10 @@ DEFAULT_PORT = 8765
 # Bumped to -v2 for the new POST /api/case/bloomberg route (Bloomberg quote
 # refresh) -- an older server predating that route must not be reused
 # either, for the same reason.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v2"
+#
+# Bumped to -v3 for the new POST /api/bloomberg/bond route (instrument-first
+# Bloomberg lookup) -- same reasoning again.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v3"
 
 
 def load_base_case() -> dict:
@@ -266,6 +291,51 @@ def price_case_with_bloomberg_quote(
         overlaid_case, bloomberg_security=bloomberg_security, quote_side=quote_side
     )
     return display
+
+
+def _shiori_acquisition_now() -> datetime:
+    """Return one offset-aware Shiori acquisition timestamp via the platform clock.
+
+    Mirrors ``standalone_option_workbench._shiori_acquisition_now`` exactly
+    (not imported -- that one is module-private and scoped to the case-based
+    Bloomberg pricing workflow's own ``pricing_timestamp``/``valuation_date``
+    invariant, which does not apply here). The instrument-first bond lookup
+    has no case or pricing timestamp to satisfy; this is the same kind of
+    clock read, just for display alongside the resolved bond identity.
+    Tests monkeypatch this exact function so no real clock is read in CI.
+    """
+
+    return datetime.now().astimezone()
+
+
+_BLOOMBERG_SOURCE_SYSTEM = "BLOOMBERG_DAPI"
+
+
+def lookup_bloomberg_bond(bond_identifier: str, quote_side: str) -> dict:
+    """Parse ``bond_identifier`` (ISIN/CUSIP) and resolve one Bloomberg identity + quote.
+
+    Instrument-first Bloomberg lookup: reuses :func:`parse_bond_identifier`
+    to reject anything that is not a bounded 12-character ISIN or
+    9-character CUSIP and to build the symbology-qualified request string
+    (never a guessed yellow-key ticker), then calls
+    :func:`load_bloomberg_bond_identity_and_quote` exactly once. Takes no
+    expected ISIN and involves no active case at all -- this is a pure
+    bond-identity/quote lookup, distinct from
+    :func:`price_case_with_bloomberg_quote` above. Returns that loader's
+    dict verbatim, plus ``"acquired_at"`` (one Shiori acquisition timestamp,
+    captured only after a successful loader return) and
+    ``"source_system"`` for display. Raises ``ValueError`` for an invalid
+    identifier/quote_side, and ``BLIBloombergDapiError`` for any Bloomberg-side
+    failure -- never caught or remapped here, and the clock is never read
+    before the loader has actually succeeded.
+    """
+
+    _, bloomberg_identifier = parse_bond_identifier(bond_identifier)
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=bloomberg_identifier, quote_side=quote_side
+    )
+    acquired_at = _shiori_acquisition_now().isoformat(timespec="seconds")
+    return {**result, "acquired_at": acquired_at, "source_system": _BLOOMBERG_SOURCE_SYSTEM}
 
 
 _EXPORT_JSON_FILENAME = "shiori_standalone_option_run.json"
@@ -414,6 +484,31 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, display)
 
+    def _handle_api_bloomberg_bond(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        required_keys = {"bond_identifier", "quote_side"}
+        if not isinstance(body, dict) or not required_keys.issubset(body):
+            self._write_json(
+                400,
+                {
+                    "error": (
+                        "request body must be a JSON object with 'bond_identifier' "
+                        "and 'quote_side'"
+                    )
+                },
+            )
+            return
+        try:
+            result = lookup_bloomberg_bond(body["bond_identifier"], body["quote_side"])
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, result)
+
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
         try:
             body = json.loads(raw_body)
@@ -441,6 +536,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/case": _handle_api_case,
         "/api/case/price": _handle_api_case_price,
         "/api/case/bloomberg": _handle_api_case_bloomberg,
+        "/api/bloomberg/bond": _handle_api_bloomberg_bond,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

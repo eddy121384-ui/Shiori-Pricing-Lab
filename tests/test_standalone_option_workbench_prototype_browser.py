@@ -137,11 +137,12 @@ def _fake_case_load_payload(
     premium_per_100: float = 333.0,
     status: str = "SUCCESS",
     case_marker: str | None = None,
+    **context_overrides,
 ) -> dict:
     return {
         "case": {"marker": case_marker or issuer},
         "overlay": _fake_overlay(),
-        "context": _fake_context(issuer=issuer),
+        "context": _fake_context(issuer=issuer, **context_overrides),
         "display": _fake_display(premium_per_100, status=status),
     }
 
@@ -1010,13 +1011,18 @@ def test_uploaded_case_shows_its_own_source_system_not_synthetic_data(server_url
     assert page.inner_text("#provenance-badge") != "Synthetic Data"
 
 
-# --- Bloomberg quote refresh --------------------------------------------------
+# --- Instrument-first Bloomberg bond lookup ----------------------------------
+#
+# The bundled default case's own ISIN (see examples/standalone_option_case.json)
+# is XS0000000001 -- resolving a lookup to that same ISIN is how these tests
+# get a "matching" Bloomberg bond without needing a real DAPI connection or a
+# second uploaded case.
 
 
 def _fake_live_bloomberg_quote(**overrides) -> dict:
     quote = {
-        "security": "91282CQX Govt",
-        "verified_isin": "XS9999999999",
+        "security": "/isin/XS0000000001",
+        "verified_isin": "XS0000000001",
         "source_system": "BLOOMBERG_DAPI",
         "quote_side": "MID",
         "currency": "USD",
@@ -1040,38 +1046,367 @@ def _fake_bloomberg_display(premium_per_100: float = 444.0, **quote_overrides) -
 
 
 def _select_quote_side(page, side: str) -> None:
-    page.click(f'#quote-side-toggle .opt[data-value="{side}"]')
+    page.click(f'#bond-quote-side-toggle .opt[data-value="{side}"]')
 
 
-def _live_bloomberg_panel_hidden(page) -> bool:
-    return page.eval_on_selector("#live-bloomberg-panel", "el => el.hidden")
+def _resolved_bond_panel_hidden(page) -> bool:
+    return page.eval_on_selector("#resolved-bond-panel", "el => el.hidden")
+
+
+def _bond_mismatch_note_hidden(page) -> bool:
+    return page.eval_on_selector("#bond-mismatch-note", "el => el.hidden")
+
+
+def _default_bloomberg_bond_lookup_response(**overrides) -> dict:
+    payload = {
+        "isin": "XS0000000001",
+        "cusip": "000000000",
+        "name": "SYNTHETIC TEST ISSUER A",
+        "currency": "USD",
+        "quote_side": "MID",
+        "clean_price_per_100": 99.75,
+        "accrued_interest_per_100": 0.12,
+        "acquired_at": "2026-07-01T16:05:00+00:00",
+        "source_system": "BLOOMBERG_DAPI",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _load_bloomberg_bond(
+    page, *, identifier: str = "XS0000000001", side: str = "MID", response: dict | None = None
+) -> None:
+    """Mocks ``/api/bloomberg/bond`` and drives one full successful lookup
+    through the real UI controls, waiting for the resolved-bond panel to
+    actually appear before returning. Defaults to an ISIN that matches the
+    bundled default case, so ``#bloomberg-refresh-btn`` is enabled
+    immediately afterward; callers wanting a mismatch pass a ``response``
+    with a different ``isin``."""
+
+    payload = response if response is not None else _default_bloomberg_bond_lookup_response()
+
+    def _handle(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+    page.route("**/api/bloomberg/bond", _handle)
+    page.fill("#bond-identifier-input", identifier)
+    _select_quote_side(page, side)
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: not _resolved_bond_panel_hidden(page))
+    page.unroute("**/api/bloomberg/bond", _handle)
 
 
 @_PLAYWRIGHT_SKIP
-def test_bloomberg_refresh_requires_security_and_quote_side(server_url, page) -> None:
+def test_load_bloomberg_bond_rejects_an_invalid_identifier_without_calling_the_server(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    calls = []
+    page.route("**/api/bloomberg/bond", lambda route: calls.append(route) or route.abort())
+
+    page.fill("#bond-identifier-input", "TOOSHORT")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    page.wait_for_timeout(150)
+
+    assert calls == []
+    assert "ISIN or 9-character CUSIP" in page.inner_text("#pricing-error-banner")
+    assert _resolved_bond_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_load_bloomberg_bond_requires_a_quote_side(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    calls = []
+    page.route("**/api/bloomberg/bond", lambda route: calls.append(route) or route.abort())
+
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    page.click("#load-bloomberg-bond-btn")
+    page.wait_for_timeout(150)
+
+    assert calls == []
+    assert "Quote Side" in page.inner_text("#pricing-error-banner")
+
+
+@_PLAYWRIGHT_SKIP
+def test_successful_lookup_updates_the_resolved_bond_panel(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    _load_bloomberg_bond(
+        page,
+        identifier="us91282clj89",  # lowercase + no yellow-key suffix, normalized client-side
+        response=_default_bloomberg_bond_lookup_response(
+            isin="US91282CLJ89", cusip="91282CLJ8", name="UNITED STATES TREAS NTS"
+        ),
+    )
+
+    assert page.inner_text("#resolved-bond-name") == "UNITED STATES TREAS NTS"
+    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
+    assert page.inner_text("#resolved-bond-cusip") == "91282CLJ8"
+    assert page.inner_text("#resolved-bond-currency") == "USD"
+    assert page.inner_text("#resolved-bond-clean-price") == "99.750000"
+    assert page.inner_text("#resolved-bond-accrued") == "0.120000"
+    assert page.inner_text("#resolved-bond-source") == "BLOOMBERG_DAPI"
+
+
+@_PLAYWRIGHT_SKIP
+def test_lookup_for_a_different_isin_hides_the_old_case_and_blocks_price(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CLJ89",
+        response=_default_bloomberg_bond_lookup_response(
+            isin="US91282CLJ89", cusip="91282CLJ8", name="UNITED STATES TREAS NTS"
+        ),
+    )
+
+    # The mismatched bond stays visible, but the old case's own display is
+    # hidden and Price/refresh-and-price are both blocked.
+    assert not _resolved_bond_panel_hidden(page)
+    assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
+    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert page.eval_on_selector("#instrument-details-section", "el => el.hidden")
+    assert not _bond_mismatch_note_hidden(page)
+    assert (
+        page.inner_text("#bond-mismatch-note")
+        == "Load a Case JSON for this ISIN before pricing."
+    )
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
+
+    price_requests = []
+    page.route("**/api/case/price", lambda route: price_requests.append(route))
+    page.click("#price-btn", force=True)
+    page.wait_for_timeout(150)
+    assert price_requests == []
+
+
+@_PLAYWRIGHT_SKIP
+def test_matching_case_load_re_enables_price_and_refresh_after_a_mismatch(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CLJ89",
+        response=_default_bloomberg_bond_lookup_response(
+            isin="US91282CLJ89", cusip="91282CLJ8", name="UNITED STATES TREAS NTS"
+        ),
+    )
+    assert _is_disabled(page, "#price-btn")
+
+    page.route(
+        "**/api/case",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _fake_case_load_payload(
+                    issuer="Matching Treasury Case", underlying_isin="US91282CLJ89"
+                )
+            ),
+        ),
+    )
+    _upload_fake_case_file(page)
+    _wait_until(lambda: page.inner_text("#instr-title") == "Matching Treasury Case")
+
+    assert not _is_disabled(page, "#price-btn")
+    assert not _is_disabled(page, "#bloomberg-refresh-btn")
+    assert _bond_mismatch_note_hidden(page)
+    assert not page.eval_on_selector("#workspace-section", "el => el.hidden")
+
+
+@_PLAYWRIGHT_SKIP
+def test_lookup_failure_preserves_the_prior_screen(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+    original_price = page.inner_text("#price-per-100")
+
+    page.route(
+        "**/api/bloomberg/bond",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    page.wait_for_timeout(200)
+
+    assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
+    assert _resolved_bond_panel_hidden(page)
+    assert page.inner_text("#instr-title") == original_title
+    assert page.inner_text("#price-per-100") == original_price
+    assert not _is_disabled(page, "#price-btn")
+
+
+@_PLAYWRIGHT_SKIP
+def test_price_invalidates_a_pending_bond_lookup(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_title = page.inner_text("#instr-title")
+
+    pending_lookup = []
+    page.route("**/api/bloomberg/bond", lambda route: pending_lookup.append(route))
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: len(pending_lookup) == 1)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#price-per-100") != "—")
+
+    # Only now release the stale lookup response.
+    pending_lookup[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_default_bloomberg_bond_lookup_response(isin="US91282CLJ89")),
+    )
+    page.wait_for_timeout(300)
+
+    # The stale lookup must not have hidden the just-priced screen.
+    assert page.inner_text("#instr-title") == original_title
+    assert not page.eval_on_selector("#workspace-section", "el => el.hidden")
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_invalidates_a_pending_bond_lookup(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+    original_price = page.inner_text("#price-per-100")
+
+    pending_lookup = []
+    page.route("**/api/bloomberg/bond", lambda route: pending_lookup.append(route))
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: len(pending_lookup) == 1)
+
+    page.click("#clear-btn")
+
+    pending_lookup[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_default_bloomberg_bond_lookup_response(isin="US91282CLJ89")),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#price-per-100") == original_price
+    assert _resolved_bond_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_bond_lookup_invalidates_a_pending_price_request(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    pending_price = []
+    page.route("**/api/case/price", lambda route: pending_price.append(route))
+    page.click("#price-btn")
+    _wait_until(lambda: len(pending_price) == 1)
+
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CLJ89",
+        response=_default_bloomberg_bond_lookup_response(isin="US91282CLJ89"),
+    )
+
+    # Only now release the stale Price response.
+    pending_price[0].fulfill(
+        status=200, content_type="application/json", body=json.dumps(_fake_display(999.0))
+    )
+    page.wait_for_timeout(300)
+
+    # The stale Price response must not re-show the workspace the mismatched
+    # lookup just hid.
+    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+
+
+@_PLAYWRIGHT_SKIP
+def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _wait_bootstrap_ready(page)
+
+    pending: list = []
+    request_count = 0
+
+    def route_lookup(route):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            pending.append(route)
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    _default_bloomberg_bond_lookup_response(
+                        isin="US91282CLJ89", name="SECOND LOOKUP BOND"
+                    )
+                ),
+            )
+
+    page.route("**/api/bloomberg/bond", route_lookup)
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: len(pending) == 1)
+
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND")
+
+    # Only now release the first (stale) lookup response.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _default_bloomberg_bond_lookup_response(isin="US91282CLJ89", name="FIRST LOOKUP BOND")
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
+
+
+# --- Bloomberg quote refresh (existing path, now gated on a resolved bond) ---
+
+
+@_PLAYWRIGHT_SKIP
+def test_refresh_does_not_run_without_a_resolved_matching_bloomberg_bond(server_url, page) -> None:
     page.goto(f"{server_url}/")
     _wait_bootstrap_ready(page)
 
     calls = []
     page.route("**/api/case/bloomberg", lambda route: calls.append(route) or route.abort())
 
-    page.click("#bloomberg-refresh-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
+    page.click("#bloomberg-refresh-btn", force=True)
     page.wait_for_timeout(150)
 
     assert calls == []
-    assert "Enter a Bloomberg Security and select a Quote Side" in page.inner_text(
-        "#pricing-error-banner"
-    )
 
 
 @_PLAYWRIGHT_SKIP
-def test_bloomberg_refresh_success_renders_display_and_live_quote_panel(server_url, page) -> None:
+def test_refresh_success_renders_display_and_updates_the_resolved_bond_panel(
+    server_url, page
+) -> None:
     page.goto(f"{server_url}/")
     _wait_bootstrap_ready(page)
     original_title = page.inner_text("#instr-title")
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)  # matches the bundled case's own ISIN
+    assert not _is_disabled(page, "#bloomberg-refresh-btn")
+
     page.route(
         "**/api/case/bloomberg",
         lambda route: route.fulfill(
@@ -1084,12 +1419,11 @@ def test_bloomberg_refresh_success_renders_display_and_live_quote_panel(server_u
     _wait_until(lambda: page.inner_text("#price-per-100") == "555.000000")
 
     # The instrument identity/context never changes -- only the Pricing
-    # Results and the Live Bloomberg Quote panel update.
+    # Results and the resolved-bond panel's live-quote fields update.
     assert page.inner_text("#instr-title") == original_title
-    assert not _live_bloomberg_panel_hidden(page)
-    assert page.inner_text("#bloomberg-quote-security") == "91282CQX Govt"
-    assert page.inner_text("#bloomberg-quote-scope") == "BOND_QUOTE_ONLY"
-    assert page.inner_text("#bloomberg-quote-other-inputs") == "CASE_JSON_UNCHANGED"
+    assert not _resolved_bond_panel_hidden(page)
+    assert page.inner_text("#resolved-bond-clean-price") == "101.250000"
+    assert page.inner_text("#resolved-bond-accrued") == "0.420000"
 
 
 @_PLAYWRIGHT_SKIP
@@ -1102,8 +1436,7 @@ def test_bloomberg_refresh_never_changes_the_active_case(server_url, page) -> No
     _wait_bootstrap_ready(page)
     original_price = page.inner_text("#price-per-100")
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     page.route(
         "**/api/case/bloomberg",
         lambda route: route.fulfill(
@@ -1118,7 +1451,7 @@ def test_bloomberg_refresh_never_changes_the_active_case(server_url, page) -> No
     page.click("#clear-btn")
 
     assert page.inner_text("#price-per-100") == original_price
-    assert _live_bloomberg_panel_hidden(page)
+    assert _resolved_bond_panel_hidden(page)
 
 
 @_PLAYWRIGHT_SKIP
@@ -1128,8 +1461,7 @@ def test_bloomberg_refresh_failure_preserves_previous_case_and_display(server_ur
     original_title = page.inner_text("#instr-title")
     original_price = page.inner_text("#price-per-100")
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     page.route(
         "**/api/case/bloomberg",
         lambda route: route.fulfill(
@@ -1146,7 +1478,7 @@ def test_bloomberg_refresh_failure_preserves_previous_case_and_display(server_ur
     # fallback to the case's old bond quote, no partial live provenance.
     assert page.inner_text("#instr-title") == original_title
     assert page.inner_text("#price-per-100") == original_price
-    assert _live_bloomberg_panel_hidden(page)
+    assert not _resolved_bond_panel_hidden(page)
 
 
 @_PLAYWRIGHT_SKIP
@@ -1159,8 +1491,7 @@ def test_bloomberg_invalidates_a_pending_price_request(server_url, page) -> None
     page.click("#price-btn")
     _wait_until(lambda: len(pending_price) == 1)
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     page.route(
         "**/api/case/bloomberg",
         lambda route: route.fulfill(
@@ -1192,8 +1523,7 @@ def test_bloomberg_invalidates_a_pending_case_load(server_url, page) -> None:
     _upload_fake_case_file(page)
     _wait_until_via_page(page, lambda: len(pending_case) == 1)
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     page.route(
         "**/api/case/bloomberg",
         lambda route: route.fulfill(
@@ -1224,8 +1554,7 @@ def test_price_invalidates_a_pending_bloomberg_request(server_url, page) -> None
     page.goto(f"{server_url}/")
     _wait_bootstrap_ready(page)
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     pending_bloomberg = []
     page.route("**/api/case/bloomberg", lambda route: pending_bloomberg.append(route))
     page.click("#bloomberg-refresh-btn")
@@ -1244,7 +1573,6 @@ def test_price_invalidates_a_pending_bloomberg_request(server_url, page) -> None
     page.wait_for_timeout(300)
 
     assert page.inner_text("#price-per-100") == price_after_click
-    assert _live_bloomberg_panel_hidden(page)
 
 
 @_PLAYWRIGHT_SKIP
@@ -1253,8 +1581,7 @@ def test_clear_invalidates_a_pending_bloomberg_request(server_url, page) -> None
     _wait_bootstrap_ready(page)
     original_price = page.inner_text("#price-per-100")
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     pending_bloomberg = []
     page.route("**/api/case/bloomberg", lambda route: pending_bloomberg.append(route))
     page.click("#bloomberg-refresh-btn")
@@ -1271,7 +1598,7 @@ def test_clear_invalidates_a_pending_bloomberg_request(server_url, page) -> None
     page.wait_for_timeout(300)
 
     assert page.inner_text("#price-per-100") == original_price
-    assert _live_bloomberg_panel_hidden(page)
+    assert _resolved_bond_panel_hidden(page)
 
 
 @_PLAYWRIGHT_SKIP
@@ -1279,8 +1606,7 @@ def test_case_load_invalidates_a_pending_bloomberg_request(server_url, page) -> 
     page.goto(f"{server_url}/")
     _wait_bootstrap_ready(page)
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
     pending_bloomberg = []
     page.route("**/api/case/bloomberg", lambda route: pending_bloomberg.append(route))
     page.click("#bloomberg-refresh-btn")
@@ -1292,7 +1618,11 @@ def test_case_load_invalidates_a_pending_bloomberg_request(server_url, page) -> 
             status=200,
             content_type="application/json",
             body=json.dumps(
-                _fake_case_load_payload(issuer="Loaded While Bloomberg", premium_per_100=333.0)
+                _fake_case_load_payload(
+                    issuer="Loaded While Bloomberg",
+                    premium_per_100=333.0,
+                    underlying_isin="XS0000000001",  # still matches the resolved bond
+                )
             ),
         ),
     )
@@ -1308,7 +1638,6 @@ def test_case_load_invalidates_a_pending_bloomberg_request(server_url, page) -> 
     page.wait_for_timeout(300)
 
     assert page.inner_text("#price-per-100") == "333.000000"
-    assert _live_bloomberg_panel_hidden(page)
 
 
 @_PLAYWRIGHT_SKIP
@@ -1316,8 +1645,7 @@ def test_newer_bloomberg_request_beats_an_older_one(server_url, page) -> None:
     page.goto(f"{server_url}/")
     _wait_bootstrap_ready(page)
 
-    page.fill("#bloomberg-security-input", "91282CQX Govt")
-    _select_quote_side(page, "MID")
+    _load_bloomberg_bond(page)
 
     pending: list = []
     request_count = 0

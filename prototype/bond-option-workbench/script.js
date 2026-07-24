@@ -60,20 +60,23 @@
     optionTermsPricingTimestamp: document.getElementById("option-terms-pricing-timestamp"),
     optionTermsExpiryTimestamp: document.getElementById("option-terms-expiry-timestamp"),
     optionTermsSettlementLag: document.getElementById("option-terms-settlement-lag"),
-    bloombergSecurityInput: document.getElementById("bloomberg-security-input"),
-    quoteSideToggle: document.getElementById("quote-side-toggle"),
     bloombergRefreshBtn: document.getElementById("bloomberg-refresh-btn"),
-    liveBloombergPanel: document.getElementById("live-bloomberg-panel"),
-    bloombergQuoteSecurity: document.getElementById("bloomberg-quote-security"),
-    bloombergQuoteIsin: document.getElementById("bloomberg-quote-isin"),
-    bloombergQuoteSide: document.getElementById("bloomberg-quote-side"),
-    bloombergQuoteCurrency: document.getElementById("bloomberg-quote-currency"),
-    bloombergQuoteCleanPrice: document.getElementById("bloomberg-quote-clean-price"),
-    bloombergQuoteAccrued: document.getElementById("bloomberg-quote-accrued"),
-    bloombergQuoteAcquiredAt: document.getElementById("bloomberg-quote-acquired-at"),
-    bloombergQuoteTimestampBasis: document.getElementById("bloomberg-quote-timestamp-basis"),
-    bloombergQuoteScope: document.getElementById("bloomberg-quote-scope"),
-    bloombergQuoteOtherInputs: document.getElementById("bloomberg-quote-other-inputs"),
+    bondIdentifierInput: document.getElementById("bond-identifier-input"),
+    bondQuoteSideToggle: document.getElementById("bond-quote-side-toggle"),
+    loadBloombergBondBtn: document.getElementById("load-bloomberg-bond-btn"),
+    resolvedBondPanel: document.getElementById("resolved-bond-panel"),
+    resolvedBondName: document.getElementById("resolved-bond-name"),
+    resolvedBondIsin: document.getElementById("resolved-bond-isin"),
+    resolvedBondCusip: document.getElementById("resolved-bond-cusip"),
+    resolvedBondCurrency: document.getElementById("resolved-bond-currency"),
+    resolvedBondCleanPrice: document.getElementById("resolved-bond-clean-price"),
+    resolvedBondAccrued: document.getElementById("resolved-bond-accrued"),
+    resolvedBondAcquiredAt: document.getElementById("resolved-bond-acquired-at"),
+    resolvedBondSource: document.getElementById("resolved-bond-source"),
+    bondMismatchNote: document.getElementById("bond-mismatch-note"),
+    instrumentHeaderSection: document.getElementById("instrument-header-section"),
+    workspaceSection: document.getElementById("workspace-section"),
+    instrumentDetailsSection: document.getElementById("instrument-details-section"),
   };
 
   // The active full case (Issue #138): starts as the bundled default from
@@ -133,13 +136,56 @@
   // bootstrap has not yet completed successfully.
   let bootstrapReady = false;
 
+  // The instrument-first Bloomberg lookup's resolved bond identity (Issue
+  // #140 revision) -- null until a lookup succeeds, and reset to null only
+  // by Clear. Distinct from baseCase/baseOverlay/baseContext/baseDisplay:
+  // this describes the bond the trader selected via Bloomberg, which may or
+  // may not be the same instrument as the active pricing case.
+  let resolvedBloombergBond = null;
+
+  // True only when a resolved Bloomberg bond's own ISIN matches the active
+  // case's underlying_isin -- the sole condition under which Price and the
+  // existing Bloomberg quote-refresh-and-price path may run against it.
+  function bondMatchesActiveCase() {
+    return (
+      !!resolvedBloombergBond &&
+      !!baseContext &&
+      resolvedBloombergBond.isin === baseContext.underlying_isin
+    );
+  }
+
+  // Recomputes every visual/logic consequence of the current
+  // resolvedBloombergBond + active-case pairing. Called after bootstrap,
+  // after a successful bond lookup, after Clear, and after a case load --
+  // every point where either side of the comparison can change. A mismatch
+  // hides the old case's instrument header, workspace (option terms +
+  // pricing results), and instrument details -- never mutates baseCase/
+  // baseOverlay/baseContext/baseDisplay themselves, only what is shown --
+  // and disables Price and the Bloomberg refresh-and-price path until a
+  // matching Case JSON is loaded or the mismatched bond is cleared.
+  function syncBondGating() {
+    const mismatch = !!resolvedBloombergBond && !bondMatchesActiveCase();
+
+    els.instrumentHeaderSection.hidden = mismatch;
+    els.workspaceSection.hidden = mismatch;
+    els.instrumentDetailsSection.hidden = mismatch;
+    els.bondMismatchNote.hidden = !mismatch;
+
+    els.priceBtn.classList.toggle("is-disabled", !bootstrapReady || mismatch);
+    els.bloombergRefreshBtn.classList.toggle(
+      "is-disabled",
+      !bootstrapReady || !bondMatchesActiveCase()
+    );
+  }
+
   function setControlsEnabled(enabled) {
     bootstrapReady = enabled;
     els.priceBtn.classList.toggle("is-disabled", !enabled);
     els.clearBtn.classList.toggle("is-disabled", !enabled);
     els.loadCaseLabel.classList.toggle("is-disabled", !enabled);
     els.caseFileInput.disabled = !enabled;
-    els.bloombergRefreshBtn.classList.toggle("is-disabled", !enabled);
+    els.loadBloombergBondBtn.classList.toggle("is-disabled", !enabled);
+    syncBondGating();
   }
 
   // Pricing-only request generation/abort tracking -- scoped exclusively to
@@ -228,6 +274,50 @@
       inFlightBloombergController.abort();
       inFlightBloombergController = null;
     }
+  }
+
+  // Bond-lookup-only request generation/abort tracking -- a fourth,
+  // independent counter alongside pricing/case-load/Bloomberg-refresh above,
+  // completing the latest-action-wins model across all four action types:
+  // a stale lookup response can never overwrite a later Price, Clear, Case
+  // Load, Bloomberg refresh, or newer lookup, and starting any of those
+  // other four always invalidates a pending lookup response too (see
+  // invalidatePendingBondLookupRequest() calls in each of them).
+  let bondLookupGeneration = 0;
+  let inFlightBondLookupController = null;
+
+  function beginBondLookupRequest() {
+    return ++bondLookupGeneration;
+  }
+
+  function isStaleBondLookupRequest(generation) {
+    return generation !== bondLookupGeneration;
+  }
+
+  function invalidatePendingBondLookupRequest() {
+    beginBondLookupRequest();
+    if (inFlightBondLookupController) {
+      inFlightBondLookupController.abort();
+      inFlightBondLookupController = null;
+    }
+  }
+
+  // Mirrors parse_bond_identifier in
+  // src/shiori_pricing_lab/data/bloomberg_bond_quote.py -- client-side only
+  // for immediate UX feedback and to build the Bloomberg symbology-qualified
+  // identifier for the existing quote-refresh-and-price path below; the
+  // server independently re-parses and is the actual authority. Never
+  // guesses a format and never appends a yellow-key suffix.
+  function parseBondIdentifier(raw) {
+    if (typeof raw !== "string") return null;
+    const normalized = raw.trim().toUpperCase();
+    if (/^[A-Z0-9]{12}$/.test(normalized)) {
+      return { kind: "ISIN", identifier: normalized, qualified: "/isin/" + normalized };
+    }
+    if (/^[A-Z0-9]{9}$/.test(normalized)) {
+      return { kind: "CUSIP", identifier: normalized, qualified: "/cusip/" + normalized };
+    }
+    return null;
   }
 
   function fmt(value) {
@@ -390,19 +480,20 @@
     els.statusText.textContent = "Case load failed";
   }
 
-  // A Bloomberg refresh failure is deliberately NOT renderFailure either,
-  // for the same reason as renderCaseLoadError: it must preserve the
-  // previously active case and completed display exactly as they were --
-  // never fall back to the case's old bond quote, and never show partial
-  // live provenance or fabricated values. Only the banner communicates that
-  // this particular refresh attempt failed; the live-quote panel (if one
-  // was already showing from an earlier successful refresh) is also left
-  // untouched here.
+  // A Bloomberg failure -- whether an instrument-first bond lookup or the
+  // existing quote-refresh-and-price path -- is deliberately NOT
+  // renderFailure, for the same reason as renderCaseLoadError: it must
+  // preserve the previously active case and completed display exactly as
+  // they were, and (for a lookup) the previously resolved bond exactly as
+  // it was -- never fall back to stale data, and never show partial
+  // provenance or fabricated values. Only the banner communicates that this
+  // particular attempt failed; the resolved-bond panel (if already showing
+  // from an earlier successful lookup) is left untouched here.
   function renderBloombergError(message) {
     els.errorBanner.textContent = message;
     els.errorBanner.hidden = false;
     els.statusIndicator.classList.add("failed");
-    els.statusText.textContent = "Bloomberg refresh failed";
+    els.statusText.textContent = "Bloomberg request failed";
   }
 
   function renderSuccess(display) {
@@ -425,31 +516,43 @@
     els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
   }
 
-  // Renders the bounded, verbatim live_bloomberg_quote section (see
-  // prepare_live_bloomberg_quote_display in standalone_option_workbench.py)
-  // -- present only on a display produced by a Bloomberg refresh. Passing
-  // null hides/clears the panel: every other action (bootstrap, Price,
-  // Clear, Case Load) prices from the case's own unchanged bond quote, so
-  // showing stale live-quote fields next to that run would misrepresent its
-  // provenance (Codex review: "do not label the whole run or all market
-  // inputs as Bloomberg live"). Every field here is a direct read of the
-  // section -- no calculation, no inference.
-  function renderLiveBloombergQuote(quote) {
-    if (!quote) {
-      els.liveBloombergPanel.hidden = true;
+  // Renders the resolved Bloomberg bond identity (Issue #140 revision) --
+  // the instrument-first lookup's own result, kept on screen independently
+  // of whatever the active pricing case's display currently shows. Passing
+  // null (only ever done by Clear) hides the panel entirely.
+  function renderResolvedBondPanel() {
+    if (!resolvedBloombergBond) {
+      els.resolvedBondPanel.hidden = true;
       return;
     }
-    els.liveBloombergPanel.hidden = false;
-    els.bloombergQuoteSecurity.textContent = quote.security;
-    els.bloombergQuoteIsin.textContent = quote.verified_isin;
-    els.bloombergQuoteSide.textContent = quote.quote_side;
-    els.bloombergQuoteCurrency.textContent = quote.currency;
-    els.bloombergQuoteCleanPrice.textContent = fmt(quote.clean_price_per_100);
-    els.bloombergQuoteAccrued.textContent = fmt(quote.accrued_interest_per_100);
-    els.bloombergQuoteAcquiredAt.textContent = quote.acquired_at;
-    els.bloombergQuoteTimestampBasis.textContent = quote.timestamp_basis;
-    els.bloombergQuoteScope.textContent = quote.refreshed_scope;
-    els.bloombergQuoteOtherInputs.textContent = quote.other_market_inputs;
+    els.resolvedBondPanel.hidden = false;
+    els.resolvedBondName.textContent = resolvedBloombergBond.name;
+    els.resolvedBondIsin.textContent = resolvedBloombergBond.isin;
+    els.resolvedBondCusip.textContent = resolvedBloombergBond.cusip;
+    els.resolvedBondCurrency.textContent = resolvedBloombergBond.currency;
+    els.resolvedBondCleanPrice.textContent = fmt(resolvedBloombergBond.clean_price_per_100);
+    els.resolvedBondAccrued.textContent = fmt(resolvedBloombergBond.accrued_interest_per_100);
+    els.resolvedBondAcquiredAt.textContent = resolvedBloombergBond.acquired_at;
+    els.resolvedBondSource.textContent = resolvedBloombergBond.source_system;
+  }
+
+  // Renders the bounded, verbatim live_bloomberg_quote section (see
+  // prepare_live_bloomberg_quote_display in standalone_option_workbench.py)
+  // -- present only on a display produced by the existing Bloomberg
+  // refresh-and-price path. Folds its currency/price/accrued/acquisition
+  // fields into the same Underlying Bond panel the instrument-first lookup
+  // populates, since both describe the one Bloomberg bond currently
+  // selected -- never the old case's own bond quote. A null/absent quote
+  // (every other action: bootstrap, Price, Clear, Case Load) leaves the
+  // panel exactly as the last lookup or refresh left it.
+  function applyLiveBloombergQuote(quote) {
+    if (!quote || !resolvedBloombergBond) {
+      return;
+    }
+    els.resolvedBondCurrency.textContent = quote.currency;
+    els.resolvedBondCleanPrice.textContent = fmt(quote.clean_price_per_100);
+    els.resolvedBondAccrued.textContent = fmt(quote.accrued_interest_per_100);
+    els.resolvedBondAcquiredAt.textContent = quote.acquired_at;
   }
 
   function renderDisplay(display) {
@@ -458,11 +561,11 @@
         .map((e) => `${e.code}: ${e.message}`)
         .join(" | ");
       renderFailure(messages || "Pricing failed.");
-      renderLiveBloombergQuote(display.live_bloomberg_quote || null);
+      applyLiveBloombergQuote(display.live_bloomberg_quote || null);
       return;
     }
     renderSuccess(display);
-    renderLiveBloombergQuote(display.live_bloomberg_quote || null);
+    applyLiveBloombergQuote(display.live_bloomberg_quote || null);
   }
 
   // The one-shot bootstrap load. Runs to completion unconditionally --
@@ -524,11 +627,13 @@
 
   async function priceCurrentForm() {
     if (!bootstrapReady) return; // ignore any click before bootstrap has completed
+    if (resolvedBloombergBond && !bondMatchesActiveCase()) return; // blocked: mismatched Bloomberg bond
 
     const overlay = readOverlayFromForm();
     const generation = beginRequest();
     invalidatePendingCaseLoadRequest(); // a Price click must beat any older pending Case Load
     invalidatePendingBloombergRequest(); // a Price click must beat any older pending Bloomberg refresh
+    invalidatePendingBondLookupRequest(); // ...and any older pending bond lookup
 
     if (inFlightPriceController) {
       inFlightPriceController.abort();
@@ -572,13 +677,23 @@
     invalidatePendingPriceRequest(); // invalidate any in-flight Price request's eventual response
     invalidatePendingCaseLoadRequest(); // a Clear click must beat any older pending Case Load
     invalidatePendingBloombergRequest(); // a Clear click must beat any older pending Bloomberg refresh
+    invalidatePendingBondLookupRequest(); // ...and any older pending bond lookup
+
+    // Clear also removes the selected Bloomberg bond state entirely (Issue
+    // #140 revision requirement 7) -- a fresh Clear returns strictly to the
+    // bundled case, with no resolved bond, no mismatch note, and no gating.
+    resolvedBloombergBond = null;
+    renderResolvedBondPanel();
+
     if (!baseCase || !baseOverlay || !baseContext || !baseDisplay) {
+      syncBondGating();
       return;
     }
     renderContext(baseContext);
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
     setCurrentDisplay(baseDisplay);
+    syncBondGating();
   }
 
   // Issue #138: load a local Case JSON file, validate/price it through the
@@ -593,6 +708,7 @@
     const generation = beginCaseLoadRequest();
     invalidatePendingPriceRequest(); // a case load in flight invalidates any pending Price response
     invalidatePendingBloombergRequest(); // ...and any pending Bloomberg refresh response too
+    invalidatePendingBondLookupRequest(); // ...and any pending bond lookup response too
 
     if (inFlightCaseLoadController) {
       inFlightCaseLoadController.abort();
@@ -650,10 +766,11 @@
 
     // Genuine success: replace the active base atomically (all four
     // together, synchronously, so nothing can observe a partial swap), then
-    // invalidate any pre-swap Price/Bloomberg response so neither can
-    // overwrite this freshly rendered base.
+    // invalidate any pre-swap Price/Bloomberg/lookup response so none of
+    // them can overwrite this freshly rendered base.
     invalidatePendingPriceRequest();
     invalidatePendingBloombergRequest();
+    invalidatePendingBondLookupRequest();
     baseCase = payload.case;
     baseOverlay = payload.overlay;
     baseContext = payload.context;
@@ -662,6 +779,10 @@
     setFormFromOverlay(baseOverlay);
     renderDisplay(baseDisplay);
     setCurrentDisplay(baseDisplay);
+    // Requirement 6: a newly loaded case whose ISIN now matches the
+    // selected Bloomberg bond re-enables Price and the refresh-and-price
+    // path; one that still doesn't match keeps them gated.
+    syncBondGating();
   }
 
   // Bloomberg quote refresh: prices the current active case (bundled or
@@ -671,17 +792,19 @@
   // pricing. This never changes baseCase/baseOverlay/baseContext/baseDisplay
   // (no instrument-identity change): clicking Clear afterwards still
   // restores the case's own original bond quote, not this Bloomberg-priced
-  // run. quote_side is required and has no default -- a click with either
-  // field empty is rejected client-side before any request is sent.
+  // run. Only runs at all once a Bloomberg bond has been resolved (Issue
+  // #140 revision requirement 6) whose own ISIN matches the active case --
+  // the same qualified identifier the lookup already validated is reused
+  // here, never a separately typed Bloomberg security string. quote_side is
+  // required and has no default -- a click with the toggle unselected is
+  // rejected client-side before any request is sent.
   async function refreshBloombergAndPrice() {
     if (!bootstrapReady) return; // ignore any click before bootstrap has completed
+    if (!resolvedBloombergBond || !bondMatchesActiveCase()) return; // gated: see syncBondGating
 
-    const bloombergSecurity = els.bloombergSecurityInput.value.trim();
-    const quoteSide = getOptionalToggleValue(els.quoteSideToggle);
-    if (!bloombergSecurity || !quoteSide) {
-      renderBloombergError(
-        "Enter a Bloomberg Security and select a Quote Side before refreshing."
-      );
+    const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
+    if (!quoteSide) {
+      renderBloombergError("Select a Quote Side before refreshing.");
       return;
     }
 
@@ -689,6 +812,7 @@
     const generation = beginBloombergRequest();
     invalidatePendingPriceRequest(); // a Bloomberg refresh must beat any older pending Price
     invalidatePendingCaseLoadRequest(); // ...and any older pending Case Load
+    invalidatePendingBondLookupRequest(); // ...and any older pending bond lookup
 
     if (inFlightBloombergController) {
       inFlightBloombergController.abort();
@@ -705,7 +829,7 @@
         body: JSON.stringify({
           case: baseCase,
           overlay,
-          bloomberg_security: bloombergSecurity,
+          bloomberg_security: resolvedBloombergBond.qualifiedIdentifier,
           quote_side: quoteSide,
         }),
         signal: controller.signal,
@@ -728,6 +852,86 @@
 
     setCurrentDisplay(payload);
     renderDisplay(payload);
+  }
+
+  // Instrument-first Bloomberg bond lookup (Issue #140 revision): resolves
+  // one bond's own identity and one quote side's price via
+  // /api/bloomberg/bond -- no active case involved, no expected-ISIN check.
+  // On success this updates the visible bond identity immediately and
+  // re-syncs Price/refresh-and-price gating against the active case; a
+  // mismatch does not clear or touch baseCase/baseOverlay/baseContext/
+  // baseDisplay in any way, only what is shown and what is clickable.
+  async function loadBloombergBond() {
+    if (!bootstrapReady) return; // ignore any click before bootstrap has completed
+
+    const rawIdentifier = els.bondIdentifierInput.value;
+    const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
+    const parsed = parseBondIdentifier(rawIdentifier);
+    if (!parsed || !quoteSide) {
+      renderBloombergError(
+        "Enter a 12-character ISIN or 9-character CUSIP and select a Quote Side before loading."
+      );
+      return;
+    }
+
+    const generation = beginBondLookupRequest();
+    invalidatePendingPriceRequest(); // a bond lookup must beat any older pending Price
+    invalidatePendingCaseLoadRequest(); // ...and any older pending Case Load
+    invalidatePendingBloombergRequest(); // ...and any older pending Bloomberg refresh
+
+    if (inFlightBondLookupController) {
+      inFlightBondLookupController.abort();
+    }
+    const controller = new AbortController();
+    inFlightBondLookupController = controller;
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/bloomberg/bond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bond_identifier: parsed.identifier, quote_side: quoteSide }),
+        signal: controller.signal,
+      });
+      payload = await response.json();
+    } catch (err) {
+      // Either a genuine network/JSON failure, or this request was
+      // superseded (aborted by a newer lookup, Price, Clear, or a case
+      // load) -- either way, a failed lookup must preserve the previously
+      // resolved bond and completed screen exactly as they were.
+      if (isStaleBondLookupRequest(generation)) return;
+      renderBloombergError("Bloomberg bond lookup failed: " + err.message);
+      return;
+    }
+    if (isStaleBondLookupRequest(generation)) return;
+    if (!response.ok) {
+      renderBloombergError(payload.error || "Bloomberg bond lookup failed.");
+      return;
+    }
+
+    // A successful lookup for a different ISIN intentionally invalidates
+    // the old pricing display -- it belongs to another bond -- which
+    // syncBondGating() below enforces by hiding the instrument header,
+    // workspace, and instrument details until a matching case is loaded.
+    resolvedBloombergBond = {
+      qualifiedIdentifier: parsed.qualified,
+      isin: payload.isin,
+      cusip: payload.cusip,
+      name: payload.name,
+      currency: payload.currency,
+      quote_side: payload.quote_side,
+      clean_price_per_100: payload.clean_price_per_100,
+      accrued_interest_per_100: payload.accrued_interest_per_100,
+      acquired_at: payload.acquired_at,
+      source_system: payload.source_system,
+    };
+
+    els.errorBanner.hidden = true;
+    els.errorBanner.textContent = "";
+    els.statusIndicator.classList.remove("failed");
+    renderResolvedBondPanel();
+    syncBondGating();
   }
 
   // Issue #138: download the current run as JSON/Markdown, reusing only the
@@ -784,10 +988,10 @@
       setToggle(els.positionToggle, opt.dataset.value);
     }
   });
-  els.quoteSideToggle.addEventListener("click", (event) => {
+  els.bondQuoteSideToggle.addEventListener("click", (event) => {
     const opt = event.target.closest(".opt");
     if (opt) {
-      setToggle(els.quoteSideToggle, opt.dataset.value);
+      setToggle(els.bondQuoteSideToggle, opt.dataset.value);
     }
   });
 
@@ -796,6 +1000,7 @@
   els.downloadJsonBtn.addEventListener("click", () => downloadCurrentRun("json"));
   els.downloadMarkdownBtn.addEventListener("click", () => downloadCurrentRun("markdown"));
   els.bloombergRefreshBtn.addEventListener("click", refreshBloombergAndPrice);
+  els.loadBloombergBondBtn.addEventListener("click", loadBloombergBond);
   els.caseFileInput.addEventListener("change", (event) => {
     const file = event.target.files && event.target.files[0];
     event.target.value = ""; // allow re-selecting the same filename again later
