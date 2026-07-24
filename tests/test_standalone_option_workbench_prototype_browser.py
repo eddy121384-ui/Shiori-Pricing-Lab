@@ -1168,11 +1168,21 @@ def test_lookup_for_a_different_isin_hides_the_old_case_and_blocks_price(server_
     )
 
     # The mismatched bond stays visible, but the old case's own display is
-    # hidden and Price/refresh-and-price are both blocked.
+    # hidden and Price/refresh-and-price are both blocked. Checks the actual
+    # rendered `display`, not just the `hidden` IDL property -- a section
+    # whose own CSS class sets an explicit `display` can tie the `[hidden]`
+    # UA rule in specificity and stay visually rendered even with `hidden`
+    # true, which `el.hidden` alone would not catch.
     assert not _resolved_bond_panel_hidden(page)
-    assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
-    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
-    assert page.eval_on_selector("#instrument-details-section", "el => el.hidden")
+    for section_id in (
+        "#instrument-header-section",
+        "#workspace-section",
+        "#instrument-details-section",
+    ):
+        assert page.eval_on_selector(section_id, "el => el.hidden")
+        assert (
+            page.eval_on_selector(section_id, "el => getComputedStyle(el).display") == "none"
+        )
     assert not _bond_mismatch_note_hidden(page)
     assert (
         page.inner_text("#bond-mismatch-note")
@@ -1221,6 +1231,10 @@ def test_matching_case_load_re_enables_price_and_refresh_after_a_mismatch(server
     assert not _is_disabled(page, "#bloomberg-refresh-btn")
     assert _bond_mismatch_note_hidden(page)
     assert not page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert (
+        page.eval_on_selector("#workspace-section", "el => getComputedStyle(el).display")
+        != "none"
+    )
 
 
 @_PLAYWRIGHT_SKIP
@@ -1277,6 +1291,10 @@ def test_price_invalidates_a_pending_bond_lookup(server_url, page) -> None:
     # The stale lookup must not have hidden the just-priced screen.
     assert page.inner_text("#instr-title") == original_title
     assert not page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert (
+        page.eval_on_selector("#workspace-section", "el => getComputedStyle(el).display")
+        != "none"
+    )
 
 
 @_PLAYWRIGHT_SKIP
@@ -1330,6 +1348,10 @@ def test_bond_lookup_invalidates_a_pending_price_request(server_url, page) -> No
     # The stale Price response must not re-show the workspace the mismatched
     # lookup just hid.
     assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert (
+        page.eval_on_selector("#workspace-section", "el => getComputedStyle(el).display")
+        == "none"
+    )
 
 
 @_PLAYWRIGHT_SKIP

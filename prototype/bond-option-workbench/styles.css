@@ -131,6 +131,18 @@ html, body {
   overflow: hidden;
 }
 
+/* Several .main children set their own explicit `display` below (flex/grid),
+   which otherwise ties in specificity with the UA stylesheet's
+   `[hidden] { display: none }` and (being the later, author rule) wins --
+   silently defeating a JS-level `el.hidden = true` toggle. These `[hidden]`
+   overrides restore the expected behavior for the sections the instrument-
+   first Bloomberg mismatch gating (script.js syncBondGating) hides. */
+.instr-header[hidden],
+.workspace[hidden],
+.instrument-details[hidden] {
+  display: none;
+}
+
 .card {
   background: var(--card);
   border: 1px solid var(--border);
