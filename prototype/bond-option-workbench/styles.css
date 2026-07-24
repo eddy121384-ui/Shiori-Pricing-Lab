@@ -168,6 +168,42 @@ html, body {
   color: #55607a; text-transform: uppercase;
 }
 
+/* ---------- Collapsible section headers (PR #141 third revision) ---------- */
+/* Every top-level card/section this round gets a clickable header row --
+   the whole row toggles its section's body, not just the small indicator
+   text inside it -- and the section title stays visible while collapsed
+   (only the body's `hidden` state changes). */
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 9px;
+  cursor: pointer;
+}
+.card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card-summary {
+  font-size: 12.5px;
+  color: var(--muted-2);
+  font-style: italic;
+}
+.card-summary:empty {
+  display: none;
+}
+/* .card-body carries no explicit `display` of its own -- deliberately, so
+   the plain UA `[hidden] { display: none }` rule always wins and a
+   collapsed section's body is actually invisible. Some collapsible bodies
+   (`.id-grid`, used by Instrument Details) DO set their own explicit
+   `display`, which ties the UA rule in specificity and (as the later,
+   author rule) wins -- silently defeating `el.hidden = true` exactly like
+   the .instr-header/.workspace/.instrument-details fix above. */
+.id-grid[hidden] {
+  display: none;
+}
+
 /* ---------- Instrument header ---------- */
 .instr-header { display: flex; align-items: center; padding: 8px 22px; gap: 24px; }
 .instr-left { display: flex; flex-direction: column; gap: 6px; min-width: 430px; }
@@ -215,7 +251,7 @@ html, body {
 }
 
 /* ---------- Option terms form ---------- */
-.option-terms .card-title { margin-bottom: 9px; }
+.option-terms .card-head { margin-bottom: 9px; }
 .form-row {
   display: grid; grid-template-columns: 146px 1fr;
   align-items: center; gap: 10px; margin-bottom: 3px;
@@ -242,7 +278,7 @@ html, body {
 .toggle .opt.on { background: var(--teal); color: #fff; font-weight: 600; }
 
 /* ---------- Pricing results ---------- */
-.pricing-results .card-title { margin-bottom: 12px; }
+.pricing-results .card-head { margin-bottom: 12px; }
 .pr-row { display: grid; padding: 12px 0; }
 .pr-row.r1 { grid-template-columns: repeat(4, 1fr); padding-top: 0; }
 .pr-row.r2 { grid-template-columns: repeat(4, 1fr); border-top: 1px solid #eef0f4; }
@@ -258,7 +294,7 @@ html, body {
 
 /* ---------- Forward & carry ---------- */
 .forward-carry { padding: 13px 18px; }
-.forward-carry .card-title { margin-bottom: 13px; }
+.forward-carry .card-head { margin-bottom: 13px; }
 .fc-row { display: grid; grid-template-columns: 118px 1fr; align-items: center; gap: 10px; margin-bottom: 12px; }
 .fc-row > label { font-size: 14px; color: #4b5563; }
 .fc-carry { display: grid; grid-template-columns: 96px 1fr; gap: 8px; }
@@ -272,7 +308,7 @@ html, body {
 
 /* ---------- Underlying snapshot ---------- */
 .underlying { padding: 13px 18px; display: flex; flex-direction: column; }
-.underlying .card-title { margin-bottom: 11px; }
+.underlying .card-head { margin-bottom: 11px; }
 .us-body { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
 .us-list { display: flex; flex-direction: column; gap: 8px; }
 .us-item { display: flex; justify-content: space-between; font-size: 13px; }
@@ -285,7 +321,6 @@ html, body {
 
 /* ---------- Instrument details: Bloomberg Bond Master ---------- */
 .instrument-details { padding: 10px 22px; }
-.id-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
 .collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
 /* auto-fit rather than a fixed column count: this grid holds five blocks
    (Bloomberg Bond Master has more line items than the old placeholder
@@ -294,6 +329,12 @@ html, body {
 .id-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px 24px; }
 .id-block { display: grid; grid-template-columns: 150px 1fr; row-gap: 7px; align-content: start; }
 .id-block .i-k { font-size: 13.5px; color: var(--muted); }
+/* min-width: 0 lets a long label/value (e.g. "Bloomberg Calculation Type" /
+   "STREET CONVENTION") actually wrap and shrink to its 1fr grid track
+   instead of overflowing into the next block -- grid items default to
+   min-width: auto (their content's min-content size), which otherwise
+   forces the track wider than the space this grid actually has. */
+.id-block .i-k, .id-block .i-v { min-width: 0; overflow-wrap: break-word; }
 .id-block .i-v { font-size: 13.5px; color: var(--text-strong); font-weight: 500; }
 
 /* ---------- Footer ---------- */
@@ -367,7 +408,7 @@ input.control:focus {
 
 /* ---------- Underlying Bond: instrument-first Bloomberg lookup ---------- */
 .underlying-bond { padding: 12px 18px; }
-.underlying-bond .card-title { margin-bottom: 9px; }
+.underlying-bond .card-head { margin-bottom: 9px; }
 .underlying-bond-controls {
   display: grid;
   grid-template-columns: 320px 260px auto;

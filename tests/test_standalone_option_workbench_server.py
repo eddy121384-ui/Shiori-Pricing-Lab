@@ -643,6 +643,63 @@ def test_api_bloomberg_bond_passes_bond_master_through_verbatim(
     assert payload["bond_master"] == bond_master
 
 
+def test_api_bloomberg_bond_passes_bond_master_raw_through_verbatim(
+    server_url: str, monkeypatch
+) -> None:
+    """PR #141 third revision: the loader's ``bond_master_raw`` dict (raw,
+    display-only Bloomberg fields such as day count/maturity type/calc type)
+    flows through this route unchanged, exactly like ``bond_master`` -- the
+    server adds no Bond Master mapping/parsing of its own."""
+
+    bond_master_raw = {
+        "day_count": "ACT/ACT",
+        "maturity_type": "AT MATURITY",
+        "calc_type": "STREET CONVENTION",
+    }
+
+    def fake_loader(*, identifier, quote_side):
+        return {
+            "isin": "US91282CLJ89",
+            "cusip": "91282CLJ8",
+            "name": "T 4 1/8 01/31/31 Govt",
+            "currency": "USD",
+            "quote_side": quote_side,
+            "clean_price_per_100": 99.75,
+            "accrued_interest_per_100": 0.51,
+            "bond_master": dict.fromkeys(
+                (
+                    "coupon",
+                    "coupon_frequency",
+                    "issue_date",
+                    "maturity_date",
+                    "day_count",
+                    "first_coupon_date",
+                    "last_coupon_date",
+                    "redemption_amount",
+                    "callable_flag",
+                    "sinkable_flag",
+                    "bond_type",
+                    "yield_convention",
+                    "business_day_convention",
+                )
+            ),
+            "bond_master_raw": bond_master_raw,
+        }
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", fake_loader)
+    monkeypatch.setattr(
+        server_module, "_shiori_acquisition_now", lambda: datetime(2026, 7, 1, 16, 5, 0, tzinfo=UTC)
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/bloomberg/bond",
+        {"bond_identifier": "US91282CLJ89", "quote_side": "MID"},
+    )
+
+    assert status == 200
+    assert payload["bond_master_raw"] == bond_master_raw
+
+
 def test_api_bloomberg_bond_clock_captured_only_after_successful_loader_return(
     server_url: str, monkeypatch
 ) -> None:

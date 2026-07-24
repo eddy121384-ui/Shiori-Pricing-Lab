@@ -79,11 +79,32 @@
     detailsBondType: document.getElementById("details-bond-type"),
     detailsYieldConvention: document.getElementById("details-yield-convention"),
     detailsBusinessDayConvention: document.getElementById("details-business-day-convention"),
+    detailsBloombergDayCount: document.getElementById("details-bloomberg-day-count"),
+    detailsBloombergMaturityType: document.getElementById("details-bloomberg-maturity-type"),
+    detailsBloombergCalcType: document.getElementById("details-bloomberg-calc-type"),
     detailsSource: document.getElementById("details-source"),
     detailsAcquiredAt: document.getElementById("details-acquired-at"),
     detailsCurrency: document.getElementById("details-currency"),
+    bondMasterHead: document.getElementById("bond-master-head"),
     bondMasterToggleBtn: document.getElementById("bond-master-toggle-btn"),
+    bondMasterSummary: document.getElementById("bond-master-summary"),
     bondMasterBody: document.getElementById("bond-master-body"),
+    underlyingBondHead: document.getElementById("underlying-bond-head"),
+    underlyingBondIndicator: document.getElementById("underlying-bond-indicator"),
+    underlyingBondBody: document.getElementById("underlying-bond-body"),
+    optionTermsHead: document.getElementById("option-terms-head"),
+    optionTermsIndicator: document.getElementById("option-terms-indicator"),
+    optionTermsBody: document.getElementById("option-terms-body"),
+    pricingResultsHead: document.getElementById("pricing-results-head"),
+    pricingResultsIndicator: document.getElementById("pricing-results-indicator"),
+    pricingResultsBody: document.getElementById("pricing-results-body"),
+    forwardCarryHead: document.getElementById("forward-carry-head"),
+    forwardCarryIndicator: document.getElementById("forward-carry-indicator"),
+    forwardCarrySummary: document.getElementById("forward-carry-summary"),
+    forwardCarryBody: document.getElementById("forward-carry-body"),
+    underlyingSnapshotHead: document.getElementById("underlying-snapshot-head"),
+    underlyingSnapshotIndicator: document.getElementById("underlying-snapshot-indicator"),
+    underlyingSnapshotBody: document.getElementById("underlying-snapshot-body"),
     sidebarLiveRow: document.getElementById("sidebar-live-row"),
     sidebarSourceSystem: document.getElementById("sidebar-source-system"),
     sidebarAsofRow: document.getElementById("sidebar-asof-row"),
@@ -114,6 +135,84 @@
     workspaceSection: document.getElementById("workspace-section"),
     instrumentDetailsSection: document.getElementById("instrument-details-section"),
   };
+
+  // Collapsible sections (PR #141 third revision): purely a display toggle
+  // on each section's own body element, entirely independent of the
+  // draft/pricing/Bloomberg state machines below -- collapsing a section
+  // never refetches data, clears a form, or mutates currentDraft/
+  // currentDisplay. One click listener per section head (never a second one
+  // on the indicator/summary spans nested inside it) toggles that section's
+  // body `hidden` state, so clicking anywhere in the header row never
+  // double-toggles. Registration order doubles as each section's default
+  // (collapsed vs expanded) state, restored verbatim by resetCollapseStates
+  // on Clear.
+  function registerCollapsibleSection({ head, body, indicator, summary, defaultCollapsed, summaryText }) {
+    function applyState(collapsed) {
+      body.hidden = collapsed;
+      indicator.textContent = collapsed ? "Expand" : "Collapse";
+      if (summary) {
+        summary.textContent = collapsed && summaryText ? summaryText() : "";
+      }
+    }
+    head.addEventListener("click", () => {
+      applyState(!body.hidden);
+    });
+    applyState(defaultCollapsed);
+    return { reset: () => applyState(defaultCollapsed) };
+  }
+
+  const collapsibleSections = [
+    registerCollapsibleSection({
+      head: els.underlyingBondHead,
+      body: els.underlyingBondBody,
+      indicator: els.underlyingBondIndicator,
+      defaultCollapsed: false,
+    }),
+    registerCollapsibleSection({
+      head: els.optionTermsHead,
+      body: els.optionTermsBody,
+      indicator: els.optionTermsIndicator,
+      defaultCollapsed: false,
+    }),
+    registerCollapsibleSection({
+      head: els.pricingResultsHead,
+      body: els.pricingResultsBody,
+      indicator: els.pricingResultsIndicator,
+      defaultCollapsed: false,
+    }),
+    registerCollapsibleSection({
+      head: els.forwardCarryHead,
+      body: els.forwardCarryBody,
+      indicator: els.forwardCarryIndicator,
+      summary: els.forwardCarrySummary,
+      defaultCollapsed: true,
+      // Forward/carry has no computed value this round (forward calculation
+      // is explicitly out of scope) -- "Not available" is simply true,
+      // never a placeholder standing in for a real number.
+      summaryText: () => "Not available",
+    }),
+    registerCollapsibleSection({
+      head: els.underlyingSnapshotHead,
+      body: els.underlyingSnapshotBody,
+      indicator: els.underlyingSnapshotIndicator,
+      defaultCollapsed: true,
+    }),
+    registerCollapsibleSection({
+      head: els.bondMasterHead,
+      body: els.bondMasterBody,
+      indicator: els.bondMasterToggleBtn,
+      summary: els.bondMasterSummary,
+      defaultCollapsed: true,
+      // Instrument Details is only ever shown once a bond has been resolved
+      // via Bloomberg (see syncDraftGating's hasDraft gate), so its source
+      // is always Bloomberg DAPI whenever this summary is visible at all.
+      summaryText: () => "Bloomberg DAPI",
+    }),
+  ];
+
+  function resetCollapseStates() {
+    collapsibleSections.forEach((section) => section.reset());
+  }
 
   // The resolved Bloomberg bond identity from the instrument-first lookup --
   // null until a lookup succeeds, and reset to null only by Clear or a
@@ -669,14 +768,19 @@
   }
 
   // Renders the Instrument Details card as the Bloomberg Bond Master
-  // display (PR #141 second revision) -- every field not yet confirmed via
+  // display (PR #141 third revision) -- every field not yet confirmed via
   // tools/bloomberg_dapi_probe.py (see
   // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP)
-  // shows "Not available", never a fabricated or synthetic value. Shown
-  // immediately once a bond is resolved (see syncDraftGating), independent
-  // of whether the draft can yet be priced.
+  // shows "Not available", never a fabricated or synthetic value.
+  // bond.bond_master_raw carries three further Bloomberg mnemonics
+  // (day count / maturity type / calculation type) that are confirmed to
+  // return a value but are display-only -- shown in their own "Bloomberg
+  // ..." labeled rows, never written into the typed schema fields above.
+  // Shown immediately once a bond is resolved (see syncDraftGating),
+  // independent of whether the draft can yet be priced.
   function renderBondMaster(bond) {
     const bondMaster = bond.bond_master || {};
+    const bondMasterRaw = bond.bond_master_raw || {};
     els.detailsIssuer.textContent = bond.name;
     els.detailsIsin.textContent = bond.isin;
     els.detailsCusip.textContent = bond.cusip;
@@ -694,6 +798,9 @@
     setTextOrNotAvailable(els.detailsBondType, bondMaster.bond_type);
     setTextOrNotAvailable(els.detailsYieldConvention, bondMaster.yield_convention);
     setTextOrNotAvailable(els.detailsBusinessDayConvention, bondMaster.business_day_convention);
+    setTextOrNotAvailable(els.detailsBloombergDayCount, bondMasterRaw.day_count);
+    setTextOrNotAvailable(els.detailsBloombergMaturityType, bondMasterRaw.maturity_type);
+    setTextOrNotAvailable(els.detailsBloombergCalcType, bondMasterRaw.calc_type);
     els.detailsSource.textContent = bond.source_system;
     els.detailsAcquiredAt.textContent = bond.acquired_at;
   }
@@ -723,6 +830,9 @@
       els.detailsBondType,
       els.detailsYieldConvention,
       els.detailsBusinessDayConvention,
+      els.detailsBloombergDayCount,
+      els.detailsBloombergMaturityType,
+      els.detailsBloombergCalcType,
     ].forEach((el) => setTextOrNotAvailable(el, null));
   }
 
@@ -800,7 +910,7 @@
     els.workspaceSection.hidden = !hasDraft;
     els.instrumentHeaderSection.hidden = !hasResult;
     // Instrument Details shows Bloomberg's own Bond Master data (PR #141
-    // second revision) -- available the moment a bond is resolved, well
+    // third revision) -- available the moment a bond is resolved, well
     // before a complete/priced request exists, unlike the instrument
     // header above (which shows the priced case's own context).
     els.instrumentDetailsSection.hidden = !hasDraft;
@@ -818,9 +928,11 @@
   // is seeded by, any prior draft or the bundled synthetic fixture (never
   // loaded by this file at all any more).
   function buildInitialDraftFromBloomberg(bond) {
-    // Bond Master (PR #141 second revision): populated from bond.bond_master
-    // (every destination key always present, null unless Eddy has confirmed
-    // that field's Bloomberg mnemonic -- see
+    // Bond Master (PR #141 third revision): populated from bond.bond_master
+    // only -- never bond.bond_master_raw, which is display-only and must
+    // never enter the typed schema. Every destination key is always
+    // present, null unless Eddy has confirmed that field's Bloomberg
+    // mnemonic (see
     // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP).
     // ex_dividend_days and status have no Bloomberg mnemonic candidate yet
     // and stay null here regardless.
@@ -974,13 +1086,17 @@
       accrued_interest_per_100: payload.accrued_interest_per_100,
       acquired_at: payload.acquired_at,
       source_system: payload.source_system,
-      // Bond Master (PR #141 second revision): every field here is either a
+      // Bond Master (PR #141 third revision): every field here is either a
       // confirmed Bloomberg mnemonic's real value or null pending Eddy's own
       // real-DAPI confirmation (see tools/bloomberg_dapi_probe.py) -- never
       // guessed or filled from the synthetic fixture. `payload.bond_master`
       // always carries every destination key regardless of how many are
-      // currently confirmed.
+      // currently confirmed. `payload.bond_master_raw` carries the three
+      // confirmed-but-display-only Bloomberg mnemonics (day count/maturity
+      // type/calc type) -- these must never be read into currentDraft's
+      // typed schema, only shown verbatim in Instrument Details.
       bond_master: payload.bond_master || {},
+      bond_master_raw: payload.bond_master_raw || {},
     };
 
     // A fresh lookup intentionally invalidates any prior draft/result -- it
@@ -1075,6 +1191,7 @@
     els.statusIndicator.classList.remove("failed");
     els.statusText.textContent = "No bond loaded";
     syncDraftGating();
+    resetCollapseStates();
   }
 
   // Bloomberg quote refresh: prices the current draft with one fresh
@@ -1211,14 +1328,6 @@
   els.downloadMarkdownBtn.addEventListener("click", () => downloadCurrentRun("markdown"));
   els.bloombergRefreshBtn.addEventListener("click", refreshBloombergAndPrice);
   els.loadBloombergBondBtn.addEventListener("click", loadBloombergBond);
-  // Collapsible Bond Master body -- expanded by default (requirement: the
-  // main data must be directly visible without any extra click) and purely
-  // a display toggle, no state this file tracks elsewhere.
-  els.bondMasterToggleBtn.addEventListener("click", () => {
-    const collapsed = !els.bondMasterBody.hidden;
-    els.bondMasterBody.hidden = collapsed;
-    els.bondMasterToggleBtn.textContent = collapsed ? "Expand" : "Collapse";
-  });
   // Full per-field missing-input detail is collapsed by default -- only the
   // category summary shows until the trader asks for more.
   els.missingDetailsToggleBtn.addEventListener("click", () => {

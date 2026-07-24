@@ -158,9 +158,15 @@ _EMPTY_BOND_MASTER = {
     "business_day_convention": None,
 }
 
+_EMPTY_BOND_MASTER_RAW = {
+    "day_count": None,
+    "maturity_type": None,
+    "calc_type": None,
+}
+
 
 def _default_bloomberg_bond_lookup_response(
-    *, bond_master: dict | None = None, **overrides
+    *, bond_master: dict | None = None, bond_master_raw: dict | None = None, **overrides
 ) -> dict:
     payload = {
         "isin": "US91282CLJ89",
@@ -173,6 +179,7 @@ def _default_bloomberg_bond_lookup_response(
         "acquired_at": "2026-07-01T16:05:00+00:00",
         "source_system": "BLOOMBERG_DAPI",
         "bond_master": {**_EMPTY_BOND_MASTER, **(bond_master or {})},
+        "bond_master_raw": {**_EMPTY_BOND_MASTER_RAW, **(bond_master_raw or {})},
     }
     payload.update(overrides)
     return payload
@@ -460,6 +467,9 @@ def test_missing_bond_master_fields_show_not_available_and_never_pollute_identit
         "details-bond-type",
         "details-yield-convention",
         "details-business-day-convention",
+        "details-bloomberg-day-count",
+        "details-bloomberg-maturity-type",
+        "details-bloomberg-calc-type",
     ):
         assert page.inner_text(f"#{details_id}") == "Not available"
     # Identity fields Bloomberg genuinely returned are never blanked out.
@@ -467,6 +477,38 @@ def test_missing_bond_master_fields_show_not_available_and_never_pollute_identit
     assert page.inner_text("#details-isin") == "US91282CLJ89"
     assert page.inner_text("#details-cusip") == "91282CLJ8"
     assert page.inner_text("#details-source") == "BLOOMBERG_DAPI"
+
+
+@_PLAYWRIGHT_SKIP
+def test_bond_master_raw_fields_render_display_only_and_never_enter_typed_schema(
+    server_url, page
+) -> None:
+    """Bloomberg's raw Day Count/Maturity Type/Calculation Type mnemonics are
+    confirmed to return a value but must never be coerced into the typed
+    ``details-day-count``/``details-bond-type``/``details-yield-convention``
+    fields (e.g. "ACT/ACT" must never become "ACT_ACT_ISDA") -- they render
+    only in their own "Bloomberg ..." labeled rows."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(
+            bond_master_raw={
+                "day_count": "ACT/ACT",
+                "maturity_type": "AT MATURITY",
+                "calc_type": "STREET CONVENTION",
+            }
+        ),
+    )
+
+    assert page.inner_text("#details-bloomberg-day-count") == "ACT/ACT"
+    assert page.inner_text("#details-bloomberg-maturity-type") == "AT MATURITY"
+    assert page.inner_text("#details-bloomberg-calc-type") == "STREET CONVENTION"
+    # The typed schema fields stay honestly "Not available" -- never
+    # auto-converted from the raw Bloomberg description strings above.
+    assert page.inner_text("#details-day-count") == "Not available"
+    assert page.inner_text("#details-bond-type") == "Not available"
+    assert page.inner_text("#details-yield-convention") == "Not available"
 
 
 @_PLAYWRIGHT_SKIP
@@ -575,6 +617,9 @@ def test_filling_option_terms_fields_shrinks_the_missing_list_live(server_url, p
     page.fill("#strike-price-input", "99.5")
     page.fill("#notional-input", "50")
     page.fill("#volatility-input", "0.18")
+    # Forward & Carry is collapsed by default this revision -- expand it to
+    # reach the real, visible Forward Price input.
+    page.click("#forward-carry-head")
     page.fill("#forward-price-input", "101.3")
     page.click('#option-type-toggle .opt[data-value="CALL"]')
     page.click('#position-toggle .opt[data-value="BUY"]')
@@ -740,3 +785,187 @@ def test_download_buttons_disabled_with_an_incomplete_draft(server_url, page) ->
 
     assert _is_disabled(page, "#download-json-btn")
     assert _is_disabled(page, "#download-markdown-btn")
+
+
+# --- Collapsible sections (PR #141 third revision) ---------------------------
+#
+# Each of the six main sections has a whole-header-row toggle that shows/
+# hides only its own body element -- no data refetch, no form clearing, no
+# draft/pricing-result mutation. `getComputedStyle(...).display` is checked
+# (not just the `hidden` IDL property) because a body element whose own CSS
+# sets an explicit `display` (e.g. `.id-grid`'s `display: grid`) can tie the
+# UA stylesheet's `[hidden] { display: none }` rule in specificity and,
+# being an author rule, win -- silently defeating `el.hidden = true` even
+# though the property itself reads `true`. This exact bug was already fixed
+# once for `.instrument-details`/`.workspace`/`.instr-header`; this section
+# proves it doesn't recur for the newly collapsible `.id-grid` (Instrument
+# Details' body) or the plain new `.card-body` wrappers.
+
+_COLLAPSIBLE_SECTIONS = {
+    "underlying-bond": (
+        "underlying-bond-head",
+        "underlying-bond-body",
+        "underlying-bond-indicator",
+    ),
+    "option-terms": ("option-terms-head", "option-terms-body", "option-terms-indicator"),
+    "pricing-results": (
+        "pricing-results-head",
+        "pricing-results-body",
+        "pricing-results-indicator",
+    ),
+    "forward-carry": ("forward-carry-head", "forward-carry-body", "forward-carry-indicator"),
+    "underlying-snapshot": (
+        "underlying-snapshot-head",
+        "underlying-snapshot-body",
+        "underlying-snapshot-indicator",
+    ),
+    "instrument-details": ("bond-master-head", "bond-master-body", "bond-master-toggle-btn"),
+}
+
+
+def _is_actually_hidden(page, element_id: str) -> bool:
+    """True only if the element is genuinely not rendered (computed
+    `display: none`), never merely the `hidden` IDL property -- the whole
+    point of this check is to catch the CSS-specificity bug described above,
+    which leaves `hidden` reading `true` on an element still visibly
+    rendered on screen."""
+
+    return (
+        page.eval_on_selector(f"#{element_id}", "el => getComputedStyle(el).display") == "none"
+    )
+
+
+@_PLAYWRIGHT_SKIP
+def test_default_collapse_states_before_any_lookup(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+
+    # Expanded by default.
+    for body_id in ("underlying-bond-body", "option-terms-body", "pricing-results-body"):
+        assert not _is_actually_hidden(page, body_id)
+        assert not page.eval_on_selector(f"#{body_id}", "el => el.hidden")
+
+    # Collapsed by default -- both the IDL property and the real rendered
+    # state must agree.
+    for body_id, indicator_id in (
+        ("forward-carry-body", "forward-carry-indicator"),
+        ("underlying-snapshot-body", "underlying-snapshot-indicator"),
+        ("bond-master-body", "bond-master-toggle-btn"),
+    ):
+        assert page.eval_on_selector(f"#{body_id}", "el => el.hidden")
+        assert _is_actually_hidden(page, body_id)
+        assert page.inner_text(f"#{indicator_id}") == "Expand"
+
+    for indicator_id in (
+        "underlying-bond-indicator",
+        "option-terms-indicator",
+        "pricing-results-indicator",
+    ):
+        assert page.inner_text(f"#{indicator_id}") == "Collapse"
+
+    assert page.inner_text("#forward-carry-summary") == "Not available"
+
+
+@_PLAYWRIGHT_SKIP
+def test_instrument_details_collapsed_by_default_after_a_lookup(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page)
+
+    assert page.eval_on_selector("#bond-master-body", "el => el.hidden")
+    assert _is_actually_hidden(page, "bond-master-body")
+    assert page.inner_text("#bond-master-toggle-btn") == "Expand"
+    assert page.inner_text("#bond-master-summary") == "Bloomberg DAPI"
+
+
+@pytest.mark.parametrize("section", list(_COLLAPSIBLE_SECTIONS))
+@_PLAYWRIGHT_SKIP
+def test_clicking_the_header_row_toggles_the_section(server_url, page, section) -> None:
+    head_id, body_id, indicator_id = _COLLAPSIBLE_SECTIONS[section]
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page)  # so Instrument Details is present to toggle too
+
+    was_hidden = page.eval_on_selector(f"#{body_id}", "el => el.hidden")
+
+    page.click(f"#{head_id}")
+
+    assert page.eval_on_selector(f"#{body_id}", "el => el.hidden") != was_hidden
+    assert _is_actually_hidden(page, body_id) == (not was_hidden)
+    expected_indicator = "Expand" if not was_hidden else "Collapse"
+    assert page.inner_text(f"#{indicator_id}") == expected_indicator
+
+    # Toggling back restores the original state exactly.
+    page.click(f"#{head_id}")
+    assert page.eval_on_selector(f"#{body_id}", "el => el.hidden") == was_hidden
+    assert _is_actually_hidden(page, body_id) == was_hidden
+
+
+@_PLAYWRIGHT_SKIP
+def test_collapse_expand_never_triggers_a_lookup_price_or_clear(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page)
+    page.fill("#strike-price-input", "99.5")
+
+    bloomberg_calls = []
+    case_calls = []
+    page.route("**/api/bloomberg/bond", lambda route: bloomberg_calls.append(route))
+    page.route("**/api/case", lambda route: case_calls.append(route))
+
+    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
+        page.click(f"#{head_id}")
+
+    page.wait_for_timeout(200)
+
+    assert bloomberg_calls == []
+    assert case_calls == []
+    # Neither the resolved bond nor the trader's own input was disturbed.
+    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
+    assert page.input_value("#strike-price-input") == "99.5"
+
+
+@_PLAYWRIGHT_SKIP
+def test_values_survive_a_collapse_expand_round_trip(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": "4.125"}),
+    )
+    page.click('#option-type-toggle .opt[data-value="PUT"]')
+    page.click('#position-toggle .opt[data-value="SELL"]')
+    page.fill("#strike-price-input", "101.25")
+    page.fill("#notional-input", "2500000")
+    page.fill("#volatility-input", "0.22")
+    page.click("#forward-carry-head")  # expand
+    page.fill("#forward-price-input", "100.75")
+
+    # Collapse every section, then expand every section again.
+    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
+        page.click(f"#{head_id}")
+    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
+        page.click(f"#{head_id}")
+
+    assert page.query_selector('#option-type-toggle .opt[data-value="PUT"].on') is not None
+    assert page.query_selector('#position-toggle .opt[data-value="SELL"].on') is not None
+    assert page.input_value("#strike-price-input") == "101.25"
+    assert page.input_value("#notional-input") == "2500000"
+    assert page.input_value("#volatility-input") == "0.22"
+    assert page.input_value("#forward-price-input") == "100.75"
+    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
+    assert page.inner_text("#details-coupon") == "4.125"
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_restores_default_collapse_states(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page)
+
+    # Leave every section in the opposite of its default state.
+    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
+        page.click(f"#{head_id}")
+
+    page.click("#clear-btn")
+    page.wait_for_timeout(150)
+
+    for body_id in ("underlying-bond-body", "option-terms-body", "pricing-results-body"):
+        assert not page.eval_on_selector(f"#{body_id}", "el => el.hidden")
+    for body_id in ("forward-carry-body", "underlying-snapshot-body", "bond-master-body"):
+        assert page.eval_on_selector(f"#{body_id}", "el => el.hidden")
+    assert page.inner_text("#forward-carry-summary") == "Not available"

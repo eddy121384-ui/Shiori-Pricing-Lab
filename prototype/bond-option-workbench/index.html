@@ -88,7 +88,11 @@
 
       <!-- Underlying Bond: instrument-first Bloomberg lookup -->
       <section class="card underlying-bond">
-        <div class="card-title">Underlying Bond</div>
+        <div class="card-head" id="underlying-bond-head">
+          <div class="card-title">Underlying Bond</div>
+          <span class="collapse-toggle" id="underlying-bond-indicator">Collapse</span>
+        </div>
+        <div class="card-body" id="underlying-bond-body">
         <div class="underlying-bond-controls">
           <div class="form-row"><label>Bond Identifier</label>
             <input class="control" id="bond-identifier-input" type="text" placeholder="ISIN or CUSIP">
@@ -127,6 +131,7 @@
 
         <div class="underlying-bond-actions">
           <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
+        </div>
         </div>
       </section>
 
@@ -179,7 +184,11 @@
 
         <!-- Option terms -->
         <div class="card option-terms">
-          <div class="card-title">Option Terms</div>
+          <div class="card-head" id="option-terms-head">
+            <div class="card-title">Option Terms</div>
+            <span class="collapse-toggle" id="option-terms-indicator">Collapse</span>
+          </div>
+          <div class="card-body" id="option-terms-body">
 
           <div class="form-row"><label>Product Type</label>
             <div class="control select">European Vanilla<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
@@ -223,11 +232,16 @@
           <div class="form-row" style="margin-bottom:0;"><label>Price Vol (σ, decimal)</label>
             <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
+          </div>
         </div>
 
         <!-- Pricing results -->
         <div class="card pricing-results">
-          <div class="card-title">Pricing Results</div>
+          <div class="card-head" id="pricing-results-head">
+            <div class="card-title">Pricing Results</div>
+            <span class="collapse-toggle" id="pricing-results-indicator">Collapse</span>
+          </div>
+          <div class="card-body" id="pricing-results-body">
           <div class="error-banner" id="pricing-error-banner" hidden></div>
           <div class="pr-row r1">
             <div class="pr-cell"><div class="p-lbl">Price (Total)</div><div class="p-val teal" id="price-total">&mdash;</div><div class="p-sub" id="price-total-ccy"></div></div>
@@ -248,12 +262,20 @@
             <div class="pr-cell"><div class="p-lbl">Mod Duration</div><div class="pending-value">Pending model support</div></div>
             <div class="pr-cell"><div class="p-lbl">Convexity</div><div class="pending-value">Pending model support</div></div>
           </div>
+          </div>
         </div>
 
         <!-- Right bottom: forward & carry + underlying snapshot -->
         <div class="right-bottom">
           <div class="card forward-carry">
-            <div class="card-title">Forward &amp; Carry</div>
+            <div class="card-head" id="forward-carry-head">
+              <div class="card-title">Forward &amp; Carry</div>
+              <div class="card-head-right">
+                <span class="card-summary" id="forward-carry-summary"></span>
+                <span class="collapse-toggle" id="forward-carry-indicator">Expand</span>
+              </div>
+            </div>
+            <div class="card-body" id="forward-carry-body" hidden>
             <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Price (per 100)</label>
               <div>
                 <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="Not entered">
@@ -263,10 +285,15 @@
             <div class="fc-row" style="margin-bottom:0;"><label>Repo Rate</label>
               <div class="pending-value">Pending model support</div>
             </div>
+            </div>
           </div>
 
           <div class="card underlying">
-            <div class="card-title">Underlying Snapshot</div>
+            <div class="card-head" id="underlying-snapshot-head">
+              <div class="card-title">Underlying Snapshot</div>
+              <span class="collapse-toggle" id="underlying-snapshot-indicator">Expand</span>
+            </div>
+            <div class="card-body" id="underlying-snapshot-body" hidden>
             <div class="us-body">
               <div class="us-list">
                 <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="u-v" id="snapshot-clean-price">&mdash;</span></div>
@@ -284,17 +311,21 @@
                 </div>
               </div>
             </div>
+            </div>
           </div>
         </div>
       </section>
 
       <!-- Instrument details: Bloomberg Bond Master -->
       <section class="card instrument-details" id="instrument-details-section" hidden>
-        <div class="id-head">
+        <div class="card-head" id="bond-master-head">
           <div class="card-title">Instrument Details &mdash; Bloomberg Bond Master</div>
-          <span class="collapse-toggle" id="bond-master-toggle-btn">Collapse</span>
+          <div class="card-head-right">
+            <span class="card-summary" id="bond-master-summary"></span>
+            <span class="collapse-toggle" id="bond-master-toggle-btn">Expand</span>
+          </div>
         </div>
-        <div class="id-grid" id="bond-master-body">
+        <div class="id-grid" id="bond-master-body" hidden>
           <div class="id-block">
             <span class="i-k">Issuer / Security Description</span><span class="i-v" id="details-issuer">&mdash;</span>
             <span class="i-k">ISIN</span><span class="i-v" id="details-isin">&mdash;</span>
@@ -323,6 +354,11 @@
             <span class="i-k">Business Day Convention</span><span class="i-v" id="details-business-day-convention">&mdash;</span>
             <span class="i-k">Source</span><span class="i-v" id="details-source">&mdash;</span>
             <span class="i-k">Acquisition Time</span><span class="i-v" id="details-acquired-at">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Bloomberg Day Count</span><span class="i-v" id="details-bloomberg-day-count">&mdash;</span>
+            <span class="i-k">Bloomberg Maturity Type</span><span class="i-v" id="details-bloomberg-maturity-type">&mdash;</span>
+            <span class="i-k">Bloomberg Calculation Type</span><span class="i-v" id="details-bloomberg-calc-type">&mdash;</span>
           </div>
         </div>
       </section>

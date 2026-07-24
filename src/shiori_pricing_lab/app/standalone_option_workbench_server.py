@@ -106,14 +106,16 @@ dict exactly like this one.
   Returns that loader's dict verbatim, plus ``"acquired_at"`` (a Shiori
   acquisition timestamp) and ``"source_system"``, on HTTP 200 -- one
   complete result or a full HTTP 400 failure, never a partial one. The
-  loader's ``"bond_master"`` sub-dict (PR #141 second revision -- coupon,
-  coupon frequency, dates, redemption amount, callable/sinkable flags, bond
-  type, yield convention, business-day convention) passes through
-  unchanged; this route performs no Bond Master field mapping, parsing, or
-  confirmation of its own. This is a distinct concern from
-  ``/api/case/bloomberg`` above, which still
-  requires and reprices an active case; this route never touches or
-  requires one.
+  loader's ``"bond_master"`` sub-dict (coupon, coupon frequency, dates,
+  redemption amount, callable/sinkable flags, bond type, yield convention,
+  business-day convention -- seven of these confirmed against real
+  Bloomberg DAPI evidence as of PR #141's third revision) and its
+  ``"bond_master_raw"`` sub-dict (three further Bloomberg mnemonics
+  confirmed to return a value but kept display-only, never coerced into a
+  typed field) both pass through unchanged; this route performs no Bond
+  Master field mapping, parsing, or confirmation of its own. This is a
+  distinct concern from ``/api/case/bloomberg`` above, which still requires
+  and reprices an active case; this route never touches or requires one.
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -190,7 +192,15 @@ DEFAULT_PORT = 8765
 # lookup_bloomberg_bond below), and the served index.html/script.js changed
 # to read and display it -- a stale process predating this key must not be
 # reused either, even though the frontend degrades gracefully if it is.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v5"
+#
+# Bumped to -v6 for PR #141's third revision: POST /api/bloomberg/bond's
+# response gained a new "bond_master_raw" key (confirmed Bloomberg mnemonics
+# that are display-only, never coerced into a typed BondReferenceData
+# field), and the served index.html/script.js/styles.css changed
+# substantially again (every main workbench section is now individually
+# collapsible/expandable) -- a stale process predating either change must
+# not be reused.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v6"
 
 
 def load_base_case() -> dict:
