@@ -422,18 +422,63 @@ def test_confirmed_bond_master_values_enter_the_clean_draft_and_render(server_ur
     _load_bloomberg_bond(
         page,
         response=_default_bloomberg_bond_lookup_response(
-            bond_master={"coupon": "4.125", "maturity_date": "2031-01-31"}
+            bond_master={"coupon": 0.04125, "maturity_date": "2031-01-31"}
         ),
     )
 
-    assert page.inner_text("#resolved-bond-coupon") == "4.125"
+    # Stored/priced internally as a decimal fraction (0.04125), but the
+    # trader-facing UI displays it as a percentage (4.125%).
+    assert page.inner_text("#resolved-bond-coupon") == "4.125%"
     assert page.inner_text("#resolved-bond-maturity") == "2031-01-31"
-    assert page.inner_text("#details-coupon") == "4.125"
+    assert page.inner_text("#details-coupon") == "4.125%"
     assert page.inner_text("#details-maturity") == "2031-01-31"
     # A field still unconfirmed/unreturned stays honestly "Not available",
     # never a fabricated or synthetic value.
     assert page.inner_text("#details-day-count") == "Not available"
     assert page.inner_text("#details-callable") == "Not available"
+
+
+@pytest.mark.parametrize(
+    ("raw_coupon", "expected_percent"),
+    [(0.0375, "3.750%"), (0.01625, "1.625%")],
+)
+@_PLAYWRIGHT_SKIP
+def test_coupon_displays_as_a_percentage_while_the_draft_keeps_the_decimal_fraction(
+    server_url, page, raw_coupon, expected_percent
+) -> None:
+    """Coupon is stored/priced internally as a decimal fraction (Bloomberg's
+    CPN percentage point divided by 100, e.g. 0.0375) -- this only changes
+    how it is *displayed* to the trader (3.750%). Checks both halves: the
+    Underlying Bond summary and Instrument Details show the percentage, and
+    the underlying draft's own coupon field is untouched."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": raw_coupon}),
+    )
+
+    assert page.inner_text("#resolved-bond-coupon") == expected_percent
+    assert page.inner_text("#details-coupon") == expected_percent
+
+    draft_coupon = page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0].coupon"
+    )
+    assert draft_coupon == raw_coupon
+
+
+@_PLAYWRIGHT_SKIP
+def test_null_coupon_still_shows_not_available_not_a_blank_percentage(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page)  # default response: bond_master.coupon is None
+
+    assert page.inner_text("#resolved-bond-coupon") == "Not available"
+    assert page.inner_text("#details-coupon") == "Not available"
+
+    draft_coupon = page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0].coupon"
+    )
+    assert draft_coupon is None
 
 
 @_PLAYWRIGHT_SKIP
@@ -516,9 +561,9 @@ def test_new_lookup_fully_replaces_the_prior_bonds_bond_master(server_url, page)
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page,
-        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": "4.125"}),
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": 0.04125}),
     )
-    assert page.inner_text("#details-coupon") == "4.125"
+    assert page.inner_text("#details-coupon") == "4.125%"
 
     _load_bloomberg_bond(
         page,
@@ -540,9 +585,9 @@ def test_clear_resets_bond_master_to_empty(server_url, page) -> None:
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page,
-        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": "4.125"}),
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": 0.04125}),
     )
-    assert page.inner_text("#details-coupon") == "4.125"
+    assert page.inner_text("#details-coupon") == "4.125%"
 
     page.click("#clear-btn")
     page.wait_for_timeout(150)
@@ -570,7 +615,7 @@ def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, pa
                 content_type="application/json",
                 body=json.dumps(
                     _default_bloomberg_bond_lookup_response(
-                        name="SECOND LOOKUP BOND", bond_master={"coupon": "2.5"}
+                        name="SECOND LOOKUP BOND", bond_master={"coupon": 0.025}
                     )
                 ),
             )
@@ -583,7 +628,7 @@ def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, pa
 
     page.click("#load-bloomberg-bond-btn")
     _wait_until(lambda: page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND")
-    assert page.inner_text("#details-coupon") == "2.5"
+    assert page.inner_text("#details-coupon") == "2.500%"
 
     # Only now release the first (stale) lookup's response -- it must not
     # overwrite the newer draft's Bond Master or identity.
@@ -592,14 +637,14 @@ def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, pa
         content_type="application/json",
         body=json.dumps(
             _default_bloomberg_bond_lookup_response(
-                name="FIRST LOOKUP BOND", bond_master={"coupon": "9.999"}
+                name="FIRST LOOKUP BOND", bond_master={"coupon": 0.09999}
             )
         ),
     )
     page.wait_for_timeout(300)
 
     assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
-    assert page.inner_text("#details-coupon") == "2.5"
+    assert page.inner_text("#details-coupon") == "2.500%"
 
 
 # --- Missing-input gating -----------------------------------------------------
@@ -926,7 +971,7 @@ def test_values_survive_a_collapse_expand_round_trip(server_url, page) -> None:
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page,
-        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": "4.125"}),
+        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": 0.04125}),
     )
     page.click('#option-type-toggle .opt[data-value="PUT"]')
     page.click('#position-toggle .opt[data-value="SELL"]')
@@ -949,7 +994,7 @@ def test_values_survive_a_collapse_expand_round_trip(server_url, page) -> None:
     assert page.input_value("#volatility-input") == "0.22"
     assert page.input_value("#forward-price-input") == "100.75"
     assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
-    assert page.inner_text("#details-coupon") == "4.125"
+    assert page.inner_text("#details-coupon") == "4.125%"
 
 
 @_PLAYWRIGHT_SKIP

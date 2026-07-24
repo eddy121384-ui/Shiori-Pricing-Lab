@@ -531,6 +531,17 @@
     el.classList.toggle("pending-value", text === "Not available");
   }
 
+  // Coupon is stored/priced as a decimal fraction (e.g. 0.0375) throughout
+  // the draft, API response, and Bloomberg conversion -- this only changes
+  // how it's *displayed* to the trader (as a percentage), via the same
+  // fmtCouponPercent already used for the priced case's own coupon in
+  // renderContext.
+  function setCouponPercentOrNotAvailable(el, value) {
+    const text = fmtCouponPercent(value);
+    el.textContent = text;
+    el.classList.toggle("pending-value", text === "Not available");
+  }
+
   // Codex review (PR #139): shows the case's own declared source_system
   // field verbatim -- never a guess at whether it is synthetic or real.
   function describeProvenance(context) {
@@ -761,7 +772,7 @@
     els.resolvedBondCurrency.textContent = resolvedBloombergBond.currency;
     els.resolvedBondCleanPrice.textContent = fmt(resolvedBloombergBond.clean_price_per_100);
     els.resolvedBondAccrued.textContent = fmt(resolvedBloombergBond.accrued_interest_per_100);
-    setTextOrNotAvailable(els.resolvedBondCoupon, resolvedBloombergBond.bond_master.coupon);
+    setCouponPercentOrNotAvailable(els.resolvedBondCoupon, resolvedBloombergBond.bond_master.coupon);
     setTextOrNotAvailable(els.resolvedBondMaturity, resolvedBloombergBond.bond_master.maturity_date);
     els.resolvedBondAcquiredAt.textContent = resolvedBloombergBond.acquired_at;
     els.resolvedBondSource.textContent = resolvedBloombergBond.source_system;
@@ -785,7 +796,7 @@
     els.detailsIsin.textContent = bond.isin;
     els.detailsCusip.textContent = bond.cusip;
     els.detailsCurrency.textContent = bond.currency;
-    setTextOrNotAvailable(els.detailsCoupon, bondMaster.coupon);
+    setCouponPercentOrNotAvailable(els.detailsCoupon, bondMaster.coupon);
     setTextOrNotAvailable(els.detailsCouponFrequency, bondMaster.coupon_frequency);
     setTextOrNotAvailable(els.detailsIssueDate, bondMaster.issue_date);
     setTextOrNotAvailable(els.detailsMaturity, bondMaster.maturity_date);
@@ -1341,4 +1352,10 @@
   // establishes the correct all-hidden/all-disabled initial state without
   // any network call.
   syncDraftGating();
+
+  // Test-only, read-only accessor: changes no stored value, API response,
+  // conversion, or pricing behavior -- it only lets a browser test confirm
+  // that currentDraft's own coupon stays a decimal fraction (e.g. 0.0375)
+  // even though the UI now displays it as a percentage.
+  window.__shioriTestGetCurrentDraft = () => currentDraft;
 })();
