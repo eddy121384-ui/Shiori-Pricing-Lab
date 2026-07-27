@@ -59,20 +59,27 @@ fields**: an unknown or missing top-level key is rejected explicitly, and any
 nested field/enum problem raises directly from the existing typed
 constructor, unremapped.
 
-**The one normalization performed here (Issue #143).** ``as_of_timestamp``,
-``pricing_timestamp``, and ``expiry_timestamp`` denote datetime *instants*.
-If one is supplied as an offset-aware ISO-8601 datetime with a genuinely
-non-zero offset (e.g. a trader-entered ``2026-07-20T11:28:00+08:00``), the
-same instant is respelled in UTC (``2026-07-20T03:28:00Z``) before the typed
-constructors see it -- see :func:`_normalize_datetime_instant_to_utc`. A
-value already in UTC, a bare date, a naive datetime, and an unparseable
-string are all passed through completely unchanged, as is every explicit
-calendar-date field (``valuation_date``, ``reporting_date``,
+**The one normalization performed here (Issue #143).** ``as_of_timestamp``
+alone is respelled in UTC when it carries a genuinely non-zero offset (a
+trader-entered ``2026-07-20T11:28:00+08:00`` becomes
+``2026-07-20T03:28:00Z``) before the typed constructors see it -- see
+:func:`_normalize_datetime_instant_to_utc`. That is what this field's own
+no-look-ahead check already wants: it is documented as needing the UTC
+calendar date, and rejected non-UTC offsets precisely to avoid being handed
+a local one.
+
+``pricing_timestamp`` and ``expiry_timestamp`` are deliberately **not**
+normalized. Their explicit offset is preserved exactly as supplied, because
+the existing timing contract compares their represented **local** calendar
+date against ``valuation_date`` / ``bond_option.expiry_date`` -- so
+``2026-10-20T05:20:00+08:00`` matches an ``expiry_date`` of ``2026-10-20``,
+as intended. A value already in UTC, a bare date, a naive datetime, and an
+unparseable string are all passed through completely unchanged, as is every
+explicit calendar-date field (``valuation_date``, ``reporting_date``,
 ``forward_settlement_date``, ``option_settlement_date``, and every date
 nested inside ``bond_option`` / ``bond_reference_data_universe``), which
-remain independent inputs. This changes spelling only, never the instant --
-no timezone, market close, holiday, business-day adjustment, or settlement
-date is inferred anywhere.
+remain independent inputs. Nothing about a timezone, market close, holiday,
+business-day adjustment, or settlement date is inferred anywhere.
 
 **Timestamp boundary (Issue #97, carried from #94/#96).** ``as_of_timestamp``
 is the source observation / source-as-of value and flows unchanged into the
@@ -193,32 +200,39 @@ _OPTIONAL_TOP_LEVEL_KEYS = frozenset(
 )
 _ALLOWED_TOP_LEVEL_KEYS = _REQUIRED_TOP_LEVEL_KEYS | _OPTIONAL_TOP_LEVEL_KEYS
 
-# The three envelope keys that denote a *datetime instant* -- a specific
-# moment in time, which is the same moment however it is spelled. Every
-# other date-bearing key in the envelope (valuation_date, reporting_date,
-# forward_settlement_date, option_settlement_date, and every date inside
-# bond_option / bond_reference_data_universe) is an explicit *calendar
-# date*, an independent input in its own right, and is never touched by
-# the normalization below (Issue #143).
-_DATETIME_INSTANT_ENVELOPE_KEYS = ("as_of_timestamp", "pricing_timestamp", "expiry_timestamp")
+# The one envelope key normalized below (Issue #143). Deliberately *not*
+# pricing_timestamp / expiry_timestamp: those two are compared against
+# valuation_date / bond_option.expiry_date by their represented **local**
+# calendar date (``datetime.fromisoformat(...).date()`` on an offset-aware
+# value returns that offset's own date), which is existing, intentional
+# timing-contract behavior. Rewriting them to UTC first would silently move
+# that comparison to the UTC date and break a perfectly valid local-time
+# entry across a UTC date boundary. Every explicit calendar-date key
+# (valuation_date, reporting_date, forward_settlement_date,
+# option_settlement_date, and every date inside bond_option /
+# bond_reference_data_universe) is likewise untouched.
+_UTC_NORMALIZED_ENVELOPE_KEYS = ("as_of_timestamp",)
 
 
 def _normalize_datetime_instant_to_utc(value: object) -> object:
     """Return ``value`` as a canonical ``Z``-suffixed UTC instant, or unchanged.
 
-    Issue #143's approved timestamp rule: a trader may enter a datetime with
-    an explicit local offset (``2026-07-20T11:28:00+08:00``), and Shiori
-    normalizes the *instant* to UTC (``2026-07-20T03:28:00Z``) at this
-    contract boundary. This is a pure change of spelling for one identical
-    moment -- never a timezone guess, a market-close assumption, a holiday
-    or business-day adjustment, or a settlement-date derivation.
+    Applied to ``as_of_timestamp`` only -- see
+    ``_UTC_NORMALIZED_ENVELOPE_KEYS`` for why the other two datetime
+    instants are deliberately left exactly as entered.
 
-    Resolves the #142 defect where ``pricing_timestamp`` / ``expiry_timestamp``
+    Resolves the #142 defect that ``pricing_timestamp`` / ``expiry_timestamp``
     *require* an explicit offset while ``as_of_timestamp`` (via
-    ``_parse_as_of_calendar_date``) *rejects* every non-UTC offset: after
-    normalization all three carry ``+00:00``, so one consistently-entered
-    ``+08:00`` set is accepted by all three instead of exactly one of them
-    failing.
+    ``_parse_as_of_calendar_date``) *rejects* every non-UTC offset, so one
+    consistently-entered ``+08:00`` set failed on exactly one of the three.
+    Normalizing this field is what that field's own contract already wants:
+    its no-look-ahead check is documented as needing the **UTC** calendar
+    date, and it rejected non-UTC offsets precisely because
+    ``fromisoformat(...).date()`` would otherwise hand it a local date. So a
+    ``+08:00`` value is now accepted *and* compared on the UTC date the check
+    was designed around -- a pure change of spelling for one identical
+    moment, never a timezone guess, a market-close assumption, a holiday or
+    business-day adjustment, or a settlement-date derivation.
 
     **Anything that is not an offset-aware ISO-8601 datetime is returned
     completely unchanged** -- a non-string, a bare date, a naive datetime, a
@@ -257,16 +271,20 @@ def _normalize_datetime_instant_to_utc(value: object) -> object:
 
 
 def _normalize_case_datetime_instants_to_utc(envelope: dict) -> dict:
-    """Return a copy of ``envelope`` with its datetime instants in UTC.
+    """Return a copy of ``envelope`` with ``as_of_timestamp`` in UTC.
 
-    Only the three keys in ``_DATETIME_INSTANT_ENVELOPE_KEYS`` are rewritten,
-    and only when they already parse as an offset-aware ISO-8601 datetime
-    (see :func:`_normalize_datetime_instant_to_utc`). Explicit calendar-date
-    fields are left exactly as supplied. Never mutates the caller's mapping.
+    Only the keys in ``_UTC_NORMALIZED_ENVELOPE_KEYS`` are rewritten, and
+    only when they already parse as an offset-aware ISO-8601 datetime with a
+    non-zero offset (see :func:`_normalize_datetime_instant_to_utc`).
+    ``pricing_timestamp`` and ``expiry_timestamp`` keep their explicit offset
+    exactly as supplied, so the existing timing contract still compares their
+    represented **local** calendar dates against ``valuation_date`` /
+    ``bond_option.expiry_date``. Explicit calendar-date fields are likewise
+    left exactly as supplied. Never mutates the caller's mapping.
     """
 
     normalized = dict(envelope)
-    for key in _DATETIME_INSTANT_ENVELOPE_KEYS:
+    for key in _UTC_NORMALIZED_ENVELOPE_KEYS:
         if key in normalized:
             normalized[key] = _normalize_datetime_instant_to_utc(normalized[key])
     return normalized

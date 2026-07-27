@@ -1157,24 +1157,38 @@ def test_bloomberg_loaded_bond_prices_end_to_end_without_case_json(server_url, p
 
 
 @_PLAYWRIGHT_SKIP
-def test_local_offset_timestamps_normalize_to_utc_and_dates_stay_explicit(
+def test_local_offset_timestamps_are_accepted_and_dates_stay_explicit(
     server_url, page
 ) -> None:
-    """`+08:00` instants are accepted and shown as the UTC instant that will
-    actually be used; the explicit calendar-date fields are never rewritten."""
+    """`+08:00` timestamps are accepted; the preview is transparency only and
+    labels which single field is actually normalized."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
     _complete_draft(page)
 
-    assert page.inner_text("#pricing-timestamp-utc") == "UTC instant used: 2026-07-20T03:28:00Z"
-    assert page.inner_text("#as-of-timestamp-utc") == "UTC instant used: 2026-07-20T03:28:00Z"
-    assert page.inner_text("#expiry-timestamp-utc") == "UTC instant used: 2026-10-20T09:20:00Z"
+    # Only as_of is respelled in UTC at the contract boundary...
+    assert page.inner_text("#as-of-timestamp-utc") == "Normalized to UTC: 2026-07-20T03:28:00Z"
+    # ...the other two are sent exactly as entered, with the UTC equivalent
+    # shown purely so the trader can see the instant.
+    assert page.inner_text("#pricing-timestamp-utc") == (
+        "Sent as entered · same instant in UTC: 2026-07-20T03:28:00Z"
+    )
+    assert page.inner_text("#expiry-timestamp-utc") == (
+        "Sent as entered · same instant in UTC: 2026-10-20T09:20:00Z"
+    )
 
     # The trader's own text is preserved verbatim in the fields themselves --
     # the UI never silently rewrites what was typed.
     assert page.input_value("#pricing-timestamp-input") == "2026-07-20T11:28:00+08:00"
-    # Explicit calendar dates are independent inputs, untouched by normalization.
+    assert page.input_value("#expiry-timestamp-input") == "2026-10-20T17:20:00+08:00"
+    # ... and in the draft that will actually be sent.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["pricing_timestamp"] == "2026-07-20T11:28:00+08:00"
+    assert draft["expiry_timestamp"] == "2026-10-20T17:20:00+08:00"
+    assert draft["as_of_timestamp"] == "2026-07-20T11:28:00+08:00"
+
+    # Explicit calendar dates are independent inputs, untouched.
     assert page.input_value("#valuation-date-input") == "2026-07-20"
     assert page.input_value("#reporting-date-input") == "2026-10-21"
     assert page.input_value("#option-settlement-date-input") == "2026-10-21"
@@ -1182,6 +1196,37 @@ def test_local_offset_timestamps_normalize_to_utc_and_dates_stay_explicit(
     # And the whole thing prices, which is what the #142 D2 defect prevented:
     # `as_of_timestamp` rejected every non-UTC offset while the other two
     # required an explicit offset.
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    assert float(page.inner_text("#price-total")) > 0
+
+
+@_PLAYWRIGHT_SKIP
+def test_local_times_whose_utc_date_differs_still_match_their_explicit_dates(
+    server_url, page
+) -> None:
+    """The timing contract compares the *represented local* calendar date.
+
+    An 05:20 +08:00 expiry is the previous day in UTC, but it belongs to the
+    local expiry date the trader entered -- so it must price. Normalizing
+    these two instants to UTC would wrongly reject this.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+
+    # Both are early-morning local times whose UTC date is the day before.
+    page.fill("#pricing-timestamp-input", "2026-07-20T05:00:00+08:00")
+    page.fill("#expiry-timestamp-input", "2026-10-20T05:20:00+08:00")
+    page.wait_for_timeout(150)
+
+    assert page.inner_text("#expiry-timestamp-utc") == (
+        "Sent as entered · same instant in UTC: 2026-10-19T21:20:00Z"
+    )
+    # The explicit expiry date is still the local one, and is not adjusted.
+    assert page.input_value("#expiry-date-input") == "2026-10-20"
+
     page.click("#price-btn")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
     assert float(page.inner_text("#price-total")) > 0
@@ -1197,6 +1242,7 @@ def test_malformed_timestamp_is_flagged_rather_than_silently_repaired(server_url
 
     preview = page.inner_text("#pricing-timestamp-utc")
     assert "explicit offset" in preview
+    assert "same instant in UTC" not in preview
     assert page.eval_on_selector(
         "#pricing-timestamp-utc", "el => el.classList.contains('is-invalid')"
     )

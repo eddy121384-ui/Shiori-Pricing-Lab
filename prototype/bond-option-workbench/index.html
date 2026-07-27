@@ -325,12 +325,17 @@
           </div>
           <div class="card-body" id="timing-body">
             <div class="fixed-route-note">
-              Datetime instants accept an explicit offset (e.g.
-              <code>2026-07-20T11:28:00+08:00</code>) and are normalized to UTC at the
-              contract boundary &mdash; the UTC instant actually used is shown beside each
-              one. Calendar dates below are independent explicit inputs: Shiori never
-              infers a timezone, market close, holiday, business-day adjustment, or a
-              settlement date from them.
+              Timestamps accept an explicit offset (e.g.
+              <code>2026-07-20T11:28:00+08:00</code>) and are sent exactly as entered.
+              <strong>Pricing Timestamp</strong> and <strong>Expiry Timestamp</strong> are
+              matched against Valuation Date and Expiry Date by the <em>local</em> calendar
+              date they represent, so <code>2026-10-20T05:20:00+08:00</code> belongs to
+              Expiry Date <code>2026-10-20</code>. <strong>As-Of Timestamp</strong> is the
+              one value respelled in UTC at the contract boundary, because its
+              no-look-ahead check works on the UTC date. The UTC equivalent shown beneath
+              each field is for transparency only and never changes what is sent. Calendar
+              dates are independent explicit inputs: Shiori never infers a timezone, market
+              close, holiday, business-day adjustment, or a settlement date from them.
             </div>
             <div class="entry-grid">
               <div class="form-row"><label>Valuation Date</label>

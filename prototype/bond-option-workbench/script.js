@@ -957,16 +957,17 @@
 
   // --- Datetime instant preview (Issue #143) ---------------------------------
   //
-  // The approved rule normalizes a datetime *instant* to UTC at the contract
-  // boundary. This preview shows the trader the exact UTC instant that will
-  // be used, so the normalization is visible rather than hidden -- and so a
-  // local time whose UTC calendar date differs from the explicit date field
-  // beside it is obvious before Price is pressed, not after the contract
-  // rejects it.
+  // Transparency only. This preview never replaces or mutates what is sent:
+  // every timestamp goes to the server exactly as typed. Only
+  // `as_of_timestamp` is respelled in UTC at the contract boundary (its own
+  // no-look-ahead check is documented as needing the UTC calendar date);
+  // `pricing_timestamp` and `expiry_timestamp` keep their offset, because the
+  // timing contract compares the *local* calendar date they represent against
+  // the explicit date fields beside them.
 
   function utcInstantPreview(raw) {
     const text = (raw || "").trim();
-    if (text === "") return { text: "—", invalid: false };
+    if (text === "") return { text: "—", instant: null, invalid: false };
     // Mirrors the server's own acceptance shape: canonical uppercase "T"
     // separator plus an explicit offset. Anything else is left to the
     // server's validator, and flagged here rather than silently "fixed".
@@ -976,27 +977,38 @@
     if (!match) {
       return {
         text: "Not a valid ISO-8601 datetime with an explicit offset (e.g. …T11:28:00+08:00)",
+        instant: null,
         invalid: true,
       };
     }
     const parsed = new Date(text);
     if (Number.isNaN(parsed.getTime())) {
-      return { text: "Not a valid datetime", invalid: true };
+      return { text: "Not a valid datetime", instant: null, invalid: true };
     }
     const iso = parsed.toISOString().replace(/\.000Z$/, "Z");
-    return { text: `UTC instant used: ${iso}`, invalid: false };
+    return { text: iso, instant: iso, invalid: false };
   }
 
-  function renderTimestampUtcPreview(input, target) {
+  function renderTimestampUtcPreview(input, target, { normalized }) {
     const preview = utcInstantPreview(input.value);
-    target.textContent = preview.text;
+    if (preview.instant === null) {
+      target.textContent = preview.text;
+    } else if (normalized) {
+      target.textContent = `Normalized to UTC: ${preview.instant}`;
+    } else {
+      target.textContent = `Sent as entered · same instant in UTC: ${preview.instant}`;
+    }
     target.classList.toggle("is-invalid", preview.invalid);
   }
 
   function renderTimestampUtcPreviews() {
-    renderTimestampUtcPreview(els.asOfTimestamp, els.asOfTimestampUtc);
-    renderTimestampUtcPreview(els.pricingTimestamp, els.pricingTimestampUtc);
-    renderTimestampUtcPreview(els.expiryTimestamp, els.expiryTimestampUtc);
+    renderTimestampUtcPreview(els.asOfTimestamp, els.asOfTimestampUtc, { normalized: true });
+    renderTimestampUtcPreview(els.pricingTimestamp, els.pricingTimestampUtc, {
+      normalized: false,
+    });
+    renderTimestampUtcPreview(els.expiryTimestamp, els.expiryTimestampUtc, {
+      normalized: false,
+    });
   }
 
   // --- Option Discount Curve editor (Issue #143) -----------------------------
