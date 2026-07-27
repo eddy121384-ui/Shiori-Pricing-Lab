@@ -190,14 +190,11 @@
           </div>
           <div class="card-body" id="option-terms-body">
 
-          <div class="form-row"><label>Product Type</label>
-            <div class="control select">European Vanilla<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-          </div>
-          <div class="form-row"><label>Style</label>
-            <div class="control select">Vanilla<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-          </div>
-          <div class="form-row"><label>Exercise</label>
-            <div class="control select">European<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+          <div class="fixed-route-note">
+            Fixed for this route: payoff <strong>PRICE</strong> &middot;
+            <strong>EUROPEAN</strong> exercise &middot; <strong>CASH</strong> settlement &middot;
+            Black-76. These are the only values the reviewed pricing guard accepts, so
+            Shiori sets them; they are not trader choices.
           </div>
           <div class="form-row"><label>Call / Put</label>
             <div class="toggle" id="option-type-toggle"><span class="opt" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
@@ -211,26 +208,28 @@
           <div class="form-row"><label>Notional</label>
             <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
-          <div class="form-row"><label>Expiry</label>
-            <span class="control" style="width:auto;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted-2)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span id="option-terms-expiry">&mdash;</span></span>
-          </div>
-          <div class="form-row"><label>Pricing Timestamp</label>
-            <div class="control" id="option-terms-pricing-timestamp">&mdash;</div>
-          </div>
-          <div class="form-row"><label>Expiry Timestamp</label>
-            <div class="control" id="option-terms-expiry-timestamp">&mdash;</div>
+          <div class="form-row"><label>Expiry Date</label>
+            <input class="control" id="expiry-date-input" type="date">
           </div>
           <div class="form-row"><label>Delivery Delay</label>
             <div class="split">
-              <div class="control" id="option-terms-settlement-lag">&mdash;</div>
+              <input class="control" id="settlement-lag-input" type="text" inputmode="numeric" placeholder="Not entered">
               <div class="control select dd-days">Days<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
             </div>
           </div>
-          <div class="form-row"><label>Model</label>
-            <div class="control select">Black (Modified)<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-          </div>
-          <div class="form-row" style="margin-bottom:0;"><label>Price Vol (σ, decimal)</label>
+          <div class="form-row"><label>Price Vol (&sigma;, decimal)</label>
             <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
+          </div>
+          <div class="form-row" style="margin-bottom:0;"><label>Volatility Basis</label>
+            <select class="control" id="volatility-basis-select">
+              <option value="PRICE_VOL">PRICE_VOL</option>
+              <option value="EQUIVALENT_PRICE_VOL">EQUIVALENT_PRICE_VOL</option>
+            </select>
+          </div>
+          <div class="fixed-route-note">
+            YIELD_VOL is not accepted by the pricing guard and is not offered here.
+            Bloomberg&rsquo;s normal/lognormal yield vols must not be converted &mdash;
+            that conversion is a separate, unapproved methodology.
           </div>
           </div>
         </div>
@@ -312,6 +311,194 @@
               </div>
             </div>
             </div>
+          </div>
+        </div>
+
+        <!-- Valuation, timing and settlement dates (Issue #143) -->
+        <div class="card wide-card timing-card">
+          <div class="card-head" id="timing-head">
+            <div class="card-title">Valuation, Timing &amp; Settlement</div>
+            <div class="card-head-right">
+              <span class="card-summary" id="timing-summary"></span>
+              <span class="collapse-toggle" id="timing-indicator">Collapse</span>
+            </div>
+          </div>
+          <div class="card-body" id="timing-body">
+            <div class="fixed-route-note">
+              Datetime instants accept an explicit offset (e.g.
+              <code>2026-07-20T11:28:00+08:00</code>) and are normalized to UTC at the
+              contract boundary &mdash; the UTC instant actually used is shown beside each
+              one. Calendar dates below are independent explicit inputs: Shiori never
+              infers a timezone, market close, holiday, business-day adjustment, or a
+              settlement date from them.
+            </div>
+            <div class="entry-grid">
+              <div class="form-row"><label>Valuation Date</label>
+                <input class="control" id="valuation-date-input" type="date">
+              </div>
+              <div class="form-row"><label>Reporting Date</label>
+                <input class="control" id="reporting-date-input" type="date">
+              </div>
+              <div class="form-row"><label>Forward Settlement Date</label>
+                <input class="control" id="forward-settlement-date-input" type="date">
+              </div>
+              <div class="form-row"><label>Option Settlement Date</label>
+                <input class="control" id="option-settlement-date-input" type="date">
+              </div>
+            </div>
+            <div class="entry-grid entry-grid-wide">
+              <div class="form-row"><label>As-Of Timestamp</label>
+                <div>
+                  <input class="control" id="as-of-timestamp-input" type="text" placeholder="2026-07-20T11:28:00+08:00">
+                  <div class="utc-preview" id="as-of-timestamp-utc">&mdash;</div>
+                </div>
+              </div>
+              <div class="form-row"><label>Pricing Timestamp</label>
+                <div>
+                  <input class="control" id="pricing-timestamp-input" type="text" placeholder="2026-07-20T11:28:00+08:00">
+                  <div class="utc-preview" id="pricing-timestamp-utc">&mdash;</div>
+                </div>
+              </div>
+              <div class="form-row"><label>Expiry Timestamp</label>
+                <div>
+                  <input class="control" id="expiry-timestamp-input" type="text" placeholder="2026-10-20T05:20:00+08:00">
+                  <div class="utc-preview" id="expiry-timestamp-utc">&mdash;</div>
+                </div>
+              </div>
+            </div>
+            <div class="fixed-route-note">
+              Provenance recorded for every manually entered value:
+              source <strong id="timing-source-system">&mdash;</strong>, snapshot
+              <strong id="timing-snapshot-id">&mdash;</strong>, status
+              <strong>ACTIVE</strong>. <em>ACTIVE is the only status the current snapshot
+              contract accepts; a MANUAL_VERIFIED status would need an audit policy
+              (who/when/why) that does not exist yet.</em>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bond reference completion: the eight fields Bloomberg does not confirm -->
+        <div class="card wide-card bond-ref-card">
+          <div class="card-head" id="bond-ref-head">
+            <div class="card-title">Bond Reference Completion</div>
+            <div class="card-head-right">
+              <span class="card-summary" id="bond-ref-summary"></span>
+              <span class="collapse-toggle" id="bond-ref-indicator">Collapse</span>
+            </div>
+          </div>
+          <div class="card-body" id="bond-ref-body">
+            <div class="fixed-route-note">
+              Bloomberg confirms coupon, frequency, issue/maturity/first-coupon dates and
+              the callable/sinkable flags. The fields below have no confirmed mnemonic
+              (<code>REDEMPTION_VALUE</code> and <code>PENULTIMATE_COUPON_DATE</code> both
+              returned <code>BAD_FLD</code>), so the trader supplies them. Where Bloomberg
+              returns a raw description it is shown beneath the field as a
+              <em>hint only</em> &mdash; Shiori never maps <code>DAY_CNT_DES</code>,
+              <code>MTY_TYP</code> or <code>CALC_TYP_DES</code> into a typed enum.
+            </div>
+            <div class="entry-grid">
+              <div class="form-row"><label>Day Count</label>
+                <div>
+                  <select class="control" id="day-count-select">
+                    <option value="">Not entered</option>
+                    <option value="ACT_360">ACT_360</option>
+                    <option value="ACT_365_FIXED">ACT_365_FIXED</option>
+                    <option value="THIRTY_360">THIRTY_360</option>
+                    <option value="ACT_ACT_ISDA">ACT_ACT_ISDA</option>
+                  </select>
+                  <div class="bbg-hint">Bloomberg <code>DAY_CNT_DES</code>: <span id="hint-day-count">Not available</span></div>
+                </div>
+              </div>
+              <div class="form-row"><label>Bond Type</label>
+                <div>
+                  <select class="control" id="bond-type-select">
+                    <option value="">Not entered</option>
+                    <option value="FIXED_COUPON_BULLET">FIXED_COUPON_BULLET</option>
+                    <option value="FLOATING_RATE_NOTE">FLOATING_RATE_NOTE</option>
+                    <option value="AMORTIZING">AMORTIZING</option>
+                    <option value="CONVERTIBLE">CONVERTIBLE</option>
+                    <option value="INFLATION_LINKED">INFLATION_LINKED</option>
+                    <option value="PERPETUAL">PERPETUAL</option>
+                    <option value="STRUCTURED_NOTE">STRUCTURED_NOTE</option>
+                  </select>
+                  <div class="bbg-hint">Bloomberg <code>MTY_TYP</code>: <span id="hint-bond-type">Not available</span></div>
+                </div>
+              </div>
+              <div class="form-row"><label>Yield Convention</label>
+                <div>
+                  <select class="control" id="yield-convention-select">
+                    <option value="">Not entered</option>
+                    <option value="SEMI_ANNUAL_COMPOUND">SEMI_ANNUAL_COMPOUND</option>
+                    <option value="ANNUAL_COMPOUND">ANNUAL_COMPOUND</option>
+                    <option value="SIMPLE_YIELD">SIMPLE_YIELD</option>
+                    <option value="JAPANESE_COMPOUND">JAPANESE_COMPOUND</option>
+                    <option value="OTHER">OTHER</option>
+                  </select>
+                  <div class="bbg-hint">Bloomberg <code>CALC_TYP_DES</code>: <span id="hint-yield-convention">Not available</span></div>
+                </div>
+              </div>
+              <div class="form-row"><label>Business Day Convention</label>
+                <select class="control" id="business-day-convention-select">
+                  <option value="">Not entered</option>
+                  <option value="FOLLOWING">FOLLOWING</option>
+                  <option value="MODIFIED_FOLLOWING">MODIFIED_FOLLOWING</option>
+                  <option value="PRECEDING">PRECEDING</option>
+                  <option value="MODIFIED_PRECEDING">MODIFIED_PRECEDING</option>
+                  <option value="NONE">NONE</option>
+                </select>
+              </div>
+              <div class="form-row"><label>Redemption Amount (per 100)</label>
+                <input class="control" id="redemption-amount-input" type="text" inputmode="decimal" placeholder="Not entered">
+              </div>
+              <div class="form-row"><label>Ex-Dividend Days</label>
+                <input class="control" id="ex-dividend-days-input" type="text" inputmode="numeric" placeholder="Not entered">
+              </div>
+              <div class="form-row"><label>Last Coupon Date</label>
+                <input class="control" id="last-coupon-date-input" type="date">
+              </div>
+              <div class="form-row"><label>Bond Status</label>
+                <select class="control" id="bond-status-select">
+                  <option value="">Not entered</option>
+                  <option value="ACTIVE">ACTIVE</option>
+                  <option value="INACTIVE">INACTIVE</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Option Discount Curve: explicit continuous-zero nodes only -->
+        <div class="card wide-card curve-card">
+          <div class="card-head" id="curve-head">
+            <div class="card-title">Option Discount Curve</div>
+            <div class="card-head-right">
+              <span class="card-summary" id="curve-summary"></span>
+              <span class="collapse-toggle" id="curve-indicator">Collapse</span>
+            </div>
+          </div>
+          <div class="card-body" id="curve-body">
+            <div class="fixed-route-note">
+              Nodes are recorded as
+              <strong>OPTION_DISCOUNT_CURVE</strong> /
+              <strong>CONTINUOUS_ZERO_RATE</strong> in
+              <strong id="curve-currency-label">&mdash;</strong>. Tenors use the existing
+              grammar only: <code>nD</code>, <code>nM</code>, <code>nY</code>.
+              <strong>Enter genuine continuously-compounded zero rates.</strong>
+              Bloomberg OVME&rsquo;s <code>MMkt</code> and <code>repo</code> rates, and any
+              par/swap/FTP rate, are <em>not</em> continuous zero rates and must not be
+              entered here. Shiori does not bootstrap, convert, or extrapolate a curve;
+              rates are interpolated in-range only.
+            </div>
+            <table class="curve-table">
+              <thead>
+                <tr><th>Tenor</th><th>Continuous zero rate (decimal)</th><th></th></tr>
+              </thead>
+              <tbody id="curve-rows"></tbody>
+            </table>
+            <div class="curve-actions">
+              <span class="btn ghost btn-small" id="curve-add-row-btn">Add node</span>
+            </div>
+            <div class="curve-coverage" id="curve-coverage">&mdash;</div>
           </div>
         </div>
       </section>

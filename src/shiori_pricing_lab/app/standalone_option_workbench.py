@@ -54,10 +54,25 @@ JSON object with exactly these top-level keys:
 ``bond_reference_data_universe`` and ``curve_points`` are JSON **arrays** of
 objects. Every nested object mirrors the existing dataclass field names
 exactly, and every enum is its existing ``StrEnum.value`` string. There are
-**no aliases, hidden defaults, unit conversions, fallbacks, case/timestamp
-normalization, or inferred fields**: an unknown or missing top-level key is
-rejected explicitly, and any nested field/enum problem raises directly from
-the existing typed constructor, unremapped.
+**no aliases, hidden defaults, unit conversions, fallbacks, or inferred
+fields**: an unknown or missing top-level key is rejected explicitly, and any
+nested field/enum problem raises directly from the existing typed
+constructor, unremapped.
+
+**The one normalization performed here (Issue #143).** ``as_of_timestamp``,
+``pricing_timestamp``, and ``expiry_timestamp`` denote datetime *instants*.
+If one is supplied as an offset-aware ISO-8601 datetime with a genuinely
+non-zero offset (e.g. a trader-entered ``2026-07-20T11:28:00+08:00``), the
+same instant is respelled in UTC (``2026-07-20T03:28:00Z``) before the typed
+constructors see it -- see :func:`_normalize_datetime_instant_to_utc`. A
+value already in UTC, a bare date, a naive datetime, and an unparseable
+string are all passed through completely unchanged, as is every explicit
+calendar-date field (``valuation_date``, ``reporting_date``,
+``forward_settlement_date``, ``option_settlement_date``, and every date
+nested inside ``bond_option`` / ``bond_reference_data_universe``), which
+remain independent inputs. This changes spelling only, never the instant --
+no timezone, market close, holiday, business-day adjustment, or settlement
+date is inferred anywhere.
 
 **Timestamp boundary (Issue #97, carried from #94/#96).** ``as_of_timestamp``
 is the source observation / source-as-of value and flows unchanged into the
@@ -120,7 +135,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote, BLIBenchmarkQuoteSide
 from shiori_pricing_lab.data.bli_snapshot import (
@@ -178,6 +193,84 @@ _OPTIONAL_TOP_LEVEL_KEYS = frozenset(
 )
 _ALLOWED_TOP_LEVEL_KEYS = _REQUIRED_TOP_LEVEL_KEYS | _OPTIONAL_TOP_LEVEL_KEYS
 
+# The three envelope keys that denote a *datetime instant* -- a specific
+# moment in time, which is the same moment however it is spelled. Every
+# other date-bearing key in the envelope (valuation_date, reporting_date,
+# forward_settlement_date, option_settlement_date, and every date inside
+# bond_option / bond_reference_data_universe) is an explicit *calendar
+# date*, an independent input in its own right, and is never touched by
+# the normalization below (Issue #143).
+_DATETIME_INSTANT_ENVELOPE_KEYS = ("as_of_timestamp", "pricing_timestamp", "expiry_timestamp")
+
+
+def _normalize_datetime_instant_to_utc(value: object) -> object:
+    """Return ``value`` as a canonical ``Z``-suffixed UTC instant, or unchanged.
+
+    Issue #143's approved timestamp rule: a trader may enter a datetime with
+    an explicit local offset (``2026-07-20T11:28:00+08:00``), and Shiori
+    normalizes the *instant* to UTC (``2026-07-20T03:28:00Z``) at this
+    contract boundary. This is a pure change of spelling for one identical
+    moment -- never a timezone guess, a market-close assumption, a holiday
+    or business-day adjustment, or a settlement-date derivation.
+
+    Resolves the #142 defect where ``pricing_timestamp`` / ``expiry_timestamp``
+    *require* an explicit offset while ``as_of_timestamp`` (via
+    ``_parse_as_of_calendar_date``) *rejects* every non-UTC offset: after
+    normalization all three carry ``+00:00``, so one consistently-entered
+    ``+08:00`` set is accepted by all three instead of exactly one of them
+    failing.
+
+    **Anything that is not an offset-aware ISO-8601 datetime is returned
+    completely unchanged** -- a non-string, a bare date, a naive datetime, a
+    malformed separator, or an unparseable string. Normalization never
+    repairs, defaults, or swallows a bad value; each of those is still
+    reported by the existing field-level validator that owns it, with its
+    own unchanged error message.
+
+    **A value already in UTC is returned unchanged too**, whichever way it is
+    spelled (``Z`` or ``+00:00``): it is already normalized, and re-spelling
+    it would gratuitously change existing observable behavior -- notably the
+    Bloomberg-refresh path's invariant that ``pricing_timestamp`` is string-
+    equal to the recorded acquisition timestamp. Only a genuinely non-zero
+    offset is rewritten.
+    """
+
+    if not isinstance(value, str):
+        return value
+    if len(value) < 11 or value[10] != "T":
+        # A bare date or a non-canonical separator: leave it for the
+        # field's own validator (each has a different rule about which of
+        # those it accepts).
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    offset = parsed.utcoffset()
+    if parsed.tzinfo is None or offset is None or offset == timedelta(0):
+        return value
+
+    normalized = parsed.astimezone(UTC).isoformat()
+    if normalized.endswith("+00:00"):
+        normalized = f"{normalized[:-6]}Z"
+    return normalized
+
+
+def _normalize_case_datetime_instants_to_utc(envelope: dict) -> dict:
+    """Return a copy of ``envelope`` with its datetime instants in UTC.
+
+    Only the three keys in ``_DATETIME_INSTANT_ENVELOPE_KEYS`` are rewritten,
+    and only when they already parse as an offset-aware ISO-8601 datetime
+    (see :func:`_normalize_datetime_instant_to_utc`). Explicit calendar-date
+    fields are left exactly as supplied. Never mutates the caller's mapping.
+    """
+
+    normalized = dict(envelope)
+    for key in _DATETIME_INSTANT_ENVELOPE_KEYS:
+        if key in normalized:
+            normalized[key] = _normalize_datetime_instant_to_utc(normalized[key])
+    return normalized
+
 
 def _parse_standalone_option_case(case: str | dict) -> dict:
     """Return the validated top-level envelope mapping for ``case``.
@@ -228,7 +321,7 @@ def build_request_from_standalone_option_case(
     wrapped.
     """
 
-    envelope = _parse_standalone_option_case(case)
+    envelope = _normalize_case_datetime_instants_to_utc(_parse_standalone_option_case(case))
 
     bond_option = BondOption(**envelope["bond_option"])
 

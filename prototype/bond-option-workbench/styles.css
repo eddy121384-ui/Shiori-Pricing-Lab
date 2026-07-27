@@ -478,3 +478,82 @@ input.control:focus {
 }
 
 .underlying-bond-actions { margin-top: 12px; }
+
+/* ---------- Manual completion sections (Issue #143) ---------- */
+/* Full-width rows inside the two-column workspace grid: the trader-entry
+   sections that complete a Bloomberg-loaded draft. They live inside
+   #workspace-section so they inherit its existing hasDraft gating. */
+.wide-card { grid-column: 1 / -1; padding: 12px 18px; }
+.wide-card .card-head { margin-bottom: 9px; }
+
+/* Honest, non-decorative explanation of what Shiori fixes, what the trader
+   owns, and what must never be auto-mapped. Deliberately plain text, never
+   styled to look like a value. */
+.fixed-route-note {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  background: #f7f8fa;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+}
+.fixed-route-note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  background: #eceef2;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.fixed-route-note strong { color: var(--text-strong); }
+
+.entry-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 20px; }
+.entry-grid-wide { grid-template-columns: repeat(3, 1fr); margin-top: 6px; }
+.entry-grid .form-row { grid-template-columns: 152px 1fr; margin-bottom: 6px; }
+
+select.control { font-family: inherit; outline: none; cursor: pointer; }
+select.control:focus { border-color: var(--blue); }
+
+/* The UTC instant that will actually be sent to the contract, shown live so
+   the normalization is visible rather than hidden. */
+.utc-preview { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; }
+.utc-preview.is-invalid { color: #b3401f; }
+
+/* Bloomberg's raw description string, shown only as a hint next to the enum
+   the trader must choose. Never written into the typed draft. */
+.bbg-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; }
+.bbg-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+/* ---------- Option Discount Curve editor ---------- */
+.curve-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.curve-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.curve-table td { padding: 4px 8px 4px 0; vertical-align: top; }
+.curve-table td:first-child { width: 160px; }
+.curve-table td:nth-child(2) { width: 260px; }
+.curve-row-remove {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 600;
+  user-select: none;
+}
+.curve-row-remove:hover { color: #b3401f; }
+.curve-actions { margin-bottom: 8px; }
+.btn.btn-small { height: 30px; padding: 0 14px; font-size: 13px; }
+
+/* Exact, blocking curve-coverage state -- never a soft warning that still
+   lets a fabricated discount factor through. */
+.curve-coverage { font-size: 12px; line-height: 1.5; color: var(--muted); }
+.curve-coverage.is-blocking { color: #b3401f; font-weight: 500; }
+.curve-coverage.is-covered { color: var(--green); font-weight: 500; }

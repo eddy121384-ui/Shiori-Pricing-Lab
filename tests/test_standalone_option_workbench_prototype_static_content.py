@@ -65,14 +65,52 @@ def test_index_html_has_no_us_flag_element() -> None:
     assert 'class="flag"' not in text
 
 
-def test_index_html_wires_timing_fields_to_real_context_elements() -> None:
+def test_index_html_wires_timing_fields_to_real_trader_inputs() -> None:
     # The old hardcoded "Time to Expiry" (090 18:25) and "Delivery Delay"
-    # ("1") controls are gone; these element IDs are populated by script.js
-    # from context.pricing_timestamp / expiry_timestamp / settlement_lag_days.
+    # ("1") controls are long gone. As of Issue #143 the timing fields are no
+    # longer read-only echoes of a priced case's context either -- the trader
+    # owns them, so each is a real input the manual completion path fills.
     text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
     for element_id in (
+        "pricing-timestamp-input",
+        "expiry-timestamp-input",
+        "as-of-timestamp-input",
+        "settlement-lag-input",
+        "expiry-date-input",
+        "valuation-date-input",
+        "reporting-date-input",
+        "forward-settlement-date-input",
+        "option-settlement-date-input",
+    ):
+        assert f'id="{element_id}"' in text
+    # The superseded display-only elements must not linger alongside the
+    # inputs that replaced them -- two places showing the same field is
+    # exactly the ambiguity this replacement removes.
+    for removed_id in (
         "option-terms-pricing-timestamp",
         "option-terms-expiry-timestamp",
         "option-terms-settlement-lag",
+        "option-terms-expiry",
     ):
-        assert f'id="{element_id}"' in text
+        assert f'id="{removed_id}"' not in text
+
+
+def test_index_html_offers_no_yield_vol_basis_anywhere() -> None:
+    # YIELD_VOL is rejected by the reviewed pricing guard and converting a
+    # Bloomberg yield vol is unapproved methodology (#103), so the basis
+    # control must not offer it at all.
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'value="PRICE_VOL"' in text
+    assert 'value="EQUIVALENT_PRICE_VOL"' in text
+    assert 'value="YIELD_VOL"' not in text
+
+
+def test_curve_editor_locks_the_rate_basis_and_warns_against_relabeling() -> None:
+    # The curve editor may only produce CONTINUOUS_ZERO_RATE nodes, and must
+    # say plainly that OVME's MMkt/repo rates are not continuous zero rates.
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    assert "CONTINUOUS_ZERO_RATE" in text
+    assert "OPTION_DISCOUNT_CURVE" in text
+    assert "MMkt" in text and "repo" in text
+    # No Bond Reference Curve is offered on this route.
+    assert "BOND_REFERENCE_CURVE" not in text
