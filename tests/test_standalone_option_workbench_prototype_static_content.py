@@ -65,11 +65,11 @@ def test_index_html_has_no_us_flag_element() -> None:
     assert 'class="flag"' not in text
 
 
-def test_index_html_wires_timing_fields_to_real_trader_inputs() -> None:
+def test_index_html_wires_timing_fields_without_duplicate_trader_entry() -> None:
     # The old hardcoded "Time to Expiry" (090 18:25) and "Delivery Delay"
-    # ("1") controls are long gone. As of Issue #143 the timing fields are no
-    # longer read-only echoes of a priced case's context either -- the trader
-    # owns them, so each is a real input the manual completion path fills.
+    # ("1") controls are long gone. Fields still owned by the trader remain
+    # real inputs. Pricing/as-of/valuation are read-only because the Bloomberg
+    # acquisition event now supplies them mechanically.
     text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
     for element_id in (
         "pricing-timestamp-input",
@@ -83,6 +83,14 @@ def test_index_html_wires_timing_fields_to_real_trader_inputs() -> None:
         "option-settlement-date-input",
     ):
         assert f'id="{element_id}"' in text
+    for element_id in (
+        "pricing-timestamp-input",
+        "as-of-timestamp-input",
+        "valuation-date-input",
+    ):
+        assert f'id="{element_id}"' in text
+        start = text.index(f'id="{element_id}"')
+        assert "readonly" in text[start : start + 180]
     # The superseded display-only elements must not linger alongside the
     # inputs that replaced them -- two places showing the same field is
     # exactly the ambiguity this replacement removes.

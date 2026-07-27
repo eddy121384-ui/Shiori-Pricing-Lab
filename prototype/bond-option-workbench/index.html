@@ -123,7 +123,9 @@
         </div>
 
         <div class="draft-incomplete-note" id="draft-incomplete-note" hidden>
-          <div>Complete the required pricing inputs before pricing.</div>
+          <div class="remaining-input-summary" id="remaining-input-summary">
+            Complete the required pricing inputs before pricing.
+          </div>
           <div class="missing-categories" id="missing-categories"></div>
           <span class="collapse-toggle" id="missing-details-toggle-btn">Show details</span>
           <ul class="missing-fields-list" id="missing-fields-list" hidden></ul>
@@ -211,10 +213,10 @@
           <div class="form-row"><label>Expiry Date</label>
             <input class="control" id="expiry-date-input" type="date">
           </div>
-          <div class="form-row"><label>Delivery Delay</label>
-            <div class="split">
-              <input class="control" id="settlement-lag-input" type="text" inputmode="numeric" placeholder="Not entered">
-              <div class="control select dd-days">Days<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+          <div class="form-row"><label>Expiry Time</label>
+            <div>
+              <input class="control" id="expiry-timestamp-input" type="text" placeholder="2026-10-20T05:20:00+08:00">
+              <div class="utc-preview" id="expiry-timestamp-utc">&mdash;</div>
             </div>
           </div>
           <div class="form-row"><label>Price Vol (&sigma;, decimal)</label>
@@ -275,7 +277,7 @@
               </div>
             </div>
             <div class="card-body" id="forward-carry-body" hidden>
-            <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Price (per 100)</label>
+            <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Clean Price (per 100)</label>
               <div>
                 <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="Not entered">
                 <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
@@ -314,10 +316,10 @@
           </div>
         </div>
 
-        <!-- Valuation, timing and settlement dates (Issue #143) -->
+        <!-- Advanced valuation, timing and settlement details -->
         <div class="card wide-card timing-card">
           <div class="card-head" id="timing-head">
-            <div class="card-title">Valuation, Timing &amp; Settlement</div>
+            <div class="card-title">Advanced &mdash; Timing, Settlement &amp; Metadata</div>
             <div class="card-head-right">
               <span class="card-summary" id="timing-summary"></span>
               <span class="collapse-toggle" id="timing-indicator">Collapse</span>
@@ -325,21 +327,20 @@
           </div>
           <div class="card-body" id="timing-body">
             <div class="fixed-route-note">
-              Timestamps accept an explicit offset (e.g.
-              <code>2026-07-20T11:28:00+08:00</code>) and are sent exactly as entered.
-              <strong>Pricing Timestamp</strong> and <strong>Expiry Timestamp</strong> are
-              matched against Valuation Date and Expiry Date by the <em>local</em> calendar
-              date they represent, so <code>2026-10-20T05:20:00+08:00</code> belongs to
-              Expiry Date <code>2026-10-20</code>. <strong>As-Of Timestamp</strong> is the
-              one value respelled in UTC at the contract boundary, because its
-              no-look-ahead check works on the UTC date. The UTC equivalent shown beneath
-              each field is for transparency only and never changes what is sent. Calendar
-              dates are independent explicit inputs: Shiori never infers a timezone, market
-              close, holiday, business-day adjustment, or a settlement date from them.
+              The Bloomberg acquisition event mechanically supplies
+              <strong>Pricing Timestamp</strong>. Shiori uses its represented local
+              calendar date for <strong>Valuation Date</strong> and applies the approved
+              UTC normalization rule to <strong>As-Of Timestamp</strong>. The original
+              Pricing Timestamp spelling and offset are preserved. Expiry, reporting and
+              settlement fields remain explicit trader inputs: Shiori never infers a
+              timezone, market close, holiday, business-day adjustment, or settlement date.
             </div>
             <div class="entry-grid">
               <div class="form-row"><label>Valuation Date</label>
-                <input class="control" id="valuation-date-input" type="date">
+                <div>
+                  <input class="control derived-control" id="valuation-date-input" type="date" readonly>
+                  <div class="derived-source">Derived from Pricing Timestamp&rsquo;s represented local date</div>
+                </div>
               </div>
               <div class="form-row"><label>Reporting Date</label>
                 <input class="control" id="reporting-date-input" type="date">
@@ -350,34 +351,37 @@
               <div class="form-row"><label>Option Settlement Date</label>
                 <input class="control" id="option-settlement-date-input" type="date">
               </div>
+              <div class="form-row"><label>Delivery Delay</label>
+                <div class="split">
+                  <input class="control" id="settlement-lag-input" type="text" inputmode="numeric" placeholder="Not entered">
+                  <div class="control select dd-days">Days<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
+                </div>
+              </div>
             </div>
-            <div class="entry-grid entry-grid-wide">
+            <div class="entry-grid entry-grid-wide derived-timing-grid">
               <div class="form-row"><label>As-Of Timestamp</label>
                 <div>
-                  <input class="control" id="as-of-timestamp-input" type="text" placeholder="2026-07-20T11:28:00+08:00">
+                  <input class="control derived-control" id="as-of-timestamp-input" type="text" readonly>
                   <div class="utc-preview" id="as-of-timestamp-utc">&mdash;</div>
+                  <div class="derived-source">Bloomberg acquisition event &middot; normalized by approved rule</div>
                 </div>
               </div>
               <div class="form-row"><label>Pricing Timestamp</label>
                 <div>
-                  <input class="control" id="pricing-timestamp-input" type="text" placeholder="2026-07-20T11:28:00+08:00">
+                  <input class="control derived-control" id="pricing-timestamp-input" type="text" readonly>
                   <div class="utc-preview" id="pricing-timestamp-utc">&mdash;</div>
-                </div>
-              </div>
-              <div class="form-row"><label>Expiry Timestamp</label>
-                <div>
-                  <input class="control" id="expiry-timestamp-input" type="text" placeholder="2026-10-20T05:20:00+08:00">
-                  <div class="utc-preview" id="expiry-timestamp-utc">&mdash;</div>
+                  <div class="derived-source">Bloomberg acquisition event &middot; preserved exactly</div>
                 </div>
               </div>
             </div>
-            <div class="fixed-route-note">
-              Provenance recorded for every manually entered value:
-              source <strong id="timing-source-system">&mdash;</strong>, snapshot
-              <strong id="timing-snapshot-id">&mdash;</strong>, status
-              <strong>ACTIVE</strong>. <em>ACTIVE is the only status the current snapshot
-              contract accepts; a MANUAL_VERIFIED status would need an audit policy
-              (who/when/why) that does not exist yet.</em>
+            <div class="route-metadata-grid">
+              <div><span>Product ID</span><strong id="timing-product-id">&mdash;</strong></div>
+              <div><span>Snapshot ID</span><strong id="timing-snapshot-id">&mdash;</strong></div>
+              <div><span>Snapshot</span><strong id="timing-snapshot-metadata">&mdash;</strong></div>
+              <div><span>Bond quote</span><strong id="timing-bond-quote-metadata">&mdash;</strong></div>
+              <div><span>Forward input</span><strong id="timing-forward-metadata">&mdash;</strong></div>
+              <div><span>Volatility input</span><strong id="timing-volatility-metadata">&mdash;</strong></div>
+              <div><span>Credit spread policy</span><strong id="timing-credit-metadata">&mdash;</strong></div>
             </div>
           </div>
         </div>
@@ -385,7 +389,7 @@
         <!-- Bond reference completion: the eight fields Bloomberg does not confirm -->
         <div class="card wide-card bond-ref-card">
           <div class="card-head" id="bond-ref-head">
-            <div class="card-title">Bond Reference Completion</div>
+            <div class="card-title">Advanced &mdash; Bond Reference &amp; Contract Fields</div>
             <div class="card-head-right">
               <span class="card-summary" id="bond-ref-summary"></span>
               <span class="collapse-toggle" id="bond-ref-indicator">Collapse</span>

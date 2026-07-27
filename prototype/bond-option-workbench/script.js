@@ -73,7 +73,6 @@
     pricingTimestampUtc: document.getElementById("pricing-timestamp-utc"),
     expiryTimestamp: document.getElementById("expiry-timestamp-input"),
     expiryTimestampUtc: document.getElementById("expiry-timestamp-utc"),
-    timingSourceSystem: document.getElementById("timing-source-system"),
     timingSnapshotId: document.getElementById("timing-snapshot-id"),
     dayCount: document.getElementById("day-count-select"),
     bondTypeSelect: document.getElementById("bond-type-select"),
@@ -168,8 +167,15 @@
     resolvedBondSource: document.getElementById("resolved-bond-source"),
     draftIncompleteNote: document.getElementById("draft-incomplete-note"),
     missingCategories: document.getElementById("missing-categories"),
+    remainingInputSummary: document.getElementById("remaining-input-summary"),
     missingDetailsToggleBtn: document.getElementById("missing-details-toggle-btn"),
     missingFieldsList: document.getElementById("missing-fields-list"),
+    timingProductId: document.getElementById("timing-product-id"),
+    timingSnapshotMetadata: document.getElementById("timing-snapshot-metadata"),
+    timingBondQuoteMetadata: document.getElementById("timing-bond-quote-metadata"),
+    timingForwardMetadata: document.getElementById("timing-forward-metadata"),
+    timingVolatilityMetadata: document.getElementById("timing-volatility-metadata"),
+    timingCreditMetadata: document.getElementById("timing-credit-metadata"),
     instrumentHeaderSection: document.getElementById("instrument-header-section"),
     workspaceSection: document.getElementById("workspace-section"),
     instrumentDetailsSection: document.getElementById("instrument-details-section"),
@@ -190,10 +196,10 @@
   // The in-memory pricing draft (trader-draft revision): a full standalone-
   // option-case-shaped object, created fresh by buildInitialDraftFromBloomberg
   // on every successful lookup -- never derived from, or merged with, a
-  // prior draft or the bundled synthetic fixture. Every field Bloomberg did
-  // not itself return starts `null` and stays `null` until the trader
-  // enters it via the Option Terms form. null until a bond has been
-  // resolved.
+  // prior draft or the bundled synthetic fixture. Only values supplied by
+  // Bloomberg or fixed mechanically by the existing route/contract are
+  // seeded; every genuine trader decision starts null. null until a bond has
+  // been resolved.
   let currentDraft = null;
 
   // Collapsible sections (PR #141 third revision): purely a display toggle
@@ -223,6 +229,7 @@
     }
     function applyState(collapsed) {
       body.hidden = collapsed;
+      head.setAttribute("aria-expanded", String(!collapsed));
       indicator.textContent = collapsed ? "Expand" : "Collapse";
       refreshSummary();
     }
@@ -230,7 +237,12 @@
       applyState(!body.hidden);
     });
     applyState(defaultCollapsed);
-    return { reset: () => applyState(defaultCollapsed), refreshSummary };
+    return {
+      body,
+      expand: () => applyState(false),
+      reset: () => applyState(defaultCollapsed),
+      refreshSummary,
+    };
   }
 
   // Live count of what one manual-completion section still needs. Reads the
@@ -271,11 +283,9 @@
       body: els.forwardCarryBody,
       indicator: els.forwardCarryIndicator,
       summary: els.forwardCarrySummary,
-      defaultCollapsed: true,
-      // Forward/carry has no computed value this round (forward calculation
-      // is explicitly out of scope) -- "Not available" is simply true,
-      // never a placeholder standing in for a real number.
-      summaryText: () => "Not available",
+      defaultCollapsed: false,
+      alwaysShowSummary: true,
+      summaryText: missingCountSummary(CATEGORY_FORWARD_CLEAN_PRICE),
     }),
     registerCollapsibleSection({
       head: els.underlyingSnapshotHead,
@@ -283,15 +293,15 @@
       indicator: els.underlyingSnapshotIndicator,
       defaultCollapsed: true,
     }),
-    // The three manual-completion sections (Issue #143) default to expanded:
-    // every field in them blocks pricing, so hiding the work by default
-    // would be actively unhelpful. They stay collapsible for the trader.
+    // Advanced timing and bond-reference fields default collapsed, but their
+    // live required counts stay visible in the header. The Option Discount
+    // Curve is a primary trader decision and remains expanded.
     registerCollapsibleSection({
       head: els.timingHead,
       body: els.timingBody,
       indicator: els.timingIndicator,
       summary: els.timingSummary,
-      defaultCollapsed: false,
+      defaultCollapsed: true,
       alwaysShowSummary: true,
       summaryText: missingCountSummary(CATEGORY_VALUATION_METADATA),
     }),
@@ -300,7 +310,7 @@
       body: els.bondRefBody,
       indicator: els.bondRefIndicator,
       summary: els.bondRefSummary,
-      defaultCollapsed: false,
+      defaultCollapsed: true,
       alwaysShowSummary: true,
       summaryText: missingCountSummary(CATEGORY_BOND_REFERENCE_DATA),
     }),
@@ -377,7 +387,11 @@
     ["bond_option.option_type", "Call / Put", CATEGORY_OPTION_TERMS],
     ["bond_option.exercise_style", "Exercise Style", CATEGORY_OPTION_TERMS],
     ["bond_option.settlement_type", "Settlement Type", CATEGORY_OPTION_TERMS],
-    ["bond_option.settlement_lag_days", "Settlement Lag (days)", CATEGORY_OPTION_TERMS],
+    [
+      "bond_option.settlement_lag_days",
+      "Settlement Lag (days)",
+      CATEGORY_VALUATION_METADATA,
+    ],
     ["bond_option.expiry_date", "Expiry Date", CATEGORY_OPTION_TERMS],
     ["bond_option.notional", "Notional", CATEGORY_OPTION_TERMS],
     ["bond_option.position", "Direction (Buy/Sell)", CATEGORY_OPTION_TERMS],
@@ -438,7 +452,7 @@
     ["valuation_date", "Valuation Date", CATEGORY_VALUATION_METADATA],
     ["as_of_timestamp", "As-Of Timestamp", CATEGORY_VALUATION_METADATA],
     ["pricing_timestamp", "Pricing Timestamp", CATEGORY_VALUATION_METADATA],
-    ["expiry_timestamp", "Expiry Timestamp", CATEGORY_VALUATION_METADATA],
+    ["expiry_timestamp", "Expiry Timestamp", CATEGORY_OPTION_TERMS],
     ["reporting_date", "Reporting Date", CATEGORY_VALUATION_METADATA],
     ["forward_settlement_date", "Forward Settlement Date", CATEGORY_VALUATION_METADATA],
     ["option_settlement_date", "Option Settlement Date", CATEGORY_VALUATION_METADATA],
@@ -533,6 +547,90 @@
     CATEGORY_PRICE_VOLATILITY,
     CATEGORY_VALUATION_METADATA,
   ];
+
+  // Every unresolved item can take the trader to the control or source detail
+  // that owns it. The mapping changes no completion rule: labels still come
+  // exclusively from computeMissingDraftFields, and the target is navigation
+  // only. Bloomberg-owned fields that unexpectedly arrive null point to their
+  // Bond Master detail rather than pretending there is a safe manual default.
+  const MISSING_FIELD_LOCATORS = new Map([
+    ["Call / Put", { selector: "#option-type-toggle", bodyId: "option-terms-body" }],
+    ["Direction (Buy/Sell)", { selector: "#position-toggle", bodyId: "option-terms-body" }],
+    ["Strike (per 100)", { selector: "#strike-price-input", bodyId: "option-terms-body" }],
+    ["Notional", { selector: "#notional-input", bodyId: "option-terms-body" }],
+    ["Expiry Date", { selector: "#expiry-date-input", bodyId: "option-terms-body" }],
+    ["Expiry Timestamp", { selector: "#expiry-timestamp-input", bodyId: "option-terms-body" }],
+    ["Settlement Lag (days)", { selector: "#settlement-lag-input", bodyId: "timing-body" }],
+    ["Price Vol (σ)", { selector: "#volatility-input", bodyId: "option-terms-body" }],
+    ["Volatility Basis", { selector: "#volatility-basis-select", bodyId: "option-terms-body" }],
+    [
+      "Forward Clean Price (per 100)",
+      { selector: "#forward-price-input", bodyId: "forward-carry-body" },
+    ],
+    ["Day Count", { selector: "#day-count-select", bodyId: "bond-ref-body" }],
+    ["Business Day Convention", { selector: "#business-day-convention-select", bodyId: "bond-ref-body" }],
+    ["Redemption Amount", { selector: "#redemption-amount-input", bodyId: "bond-ref-body" }],
+    ["Ex-Dividend Days", { selector: "#ex-dividend-days-input", bodyId: "bond-ref-body" }],
+    ["Last Coupon Date", { selector: "#last-coupon-date-input", bodyId: "bond-ref-body" }],
+    ["Bond Type", { selector: "#bond-type-select", bodyId: "bond-ref-body" }],
+    ["Yield Convention", { selector: "#yield-convention-select", bodyId: "bond-ref-body" }],
+    ["Status", { selector: "#bond-status-select", bodyId: "bond-ref-body" }],
+    ["Valuation Date", { selector: "#valuation-date-input", bodyId: "timing-body" }],
+    ["As-Of Timestamp", { selector: "#as-of-timestamp-input", bodyId: "timing-body" }],
+    ["Pricing Timestamp", { selector: "#pricing-timestamp-input", bodyId: "timing-body" }],
+    ["Reporting Date", { selector: "#reporting-date-input", bodyId: "timing-body" }],
+    [
+      "Forward Settlement Date",
+      { selector: "#forward-settlement-date-input", bodyId: "timing-body" },
+    ],
+    [
+      "Option Settlement Date",
+      { selector: "#option-settlement-date-input", bodyId: "timing-body" },
+    ],
+    [
+      "Option Discount Curve",
+      { selector: "#curve-rows .curve-tenor-input", bodyId: "curve-body" },
+    ],
+    ["Coupon", { selector: "#details-coupon", bodyId: "bond-master-body" }],
+    ["Coupon Frequency", { selector: "#details-coupon-frequency", bodyId: "bond-master-body" }],
+    ["Maturity Date", { selector: "#details-maturity", bodyId: "bond-master-body" }],
+    ["Issue Date", { selector: "#details-issue-date", bodyId: "bond-master-body" }],
+    ["Callable Flag", { selector: "#details-callable", bodyId: "bond-master-body" }],
+    ["Sinkable Flag", { selector: "#details-sinkable", bodyId: "bond-master-body" }],
+    ["First Coupon Date", { selector: "#details-first-coupon-date", bodyId: "bond-master-body" }],
+  ]);
+
+  const MISSING_CATEGORY_FALLBACKS = new Map([
+    [CATEGORY_OPTION_TERMS, { selector: "#option-terms-head", bodyId: "option-terms-body" }],
+    [
+      CATEGORY_BOND_REFERENCE_DATA,
+      { selector: "#bond-ref-head", bodyId: "bond-ref-body" },
+    ],
+    [CATEGORY_MARKET_CURVES, { selector: "#curve-head", bodyId: "curve-body" }],
+    [
+      CATEGORY_FORWARD_CLEAN_PRICE,
+      { selector: "#forward-carry-head", bodyId: "forward-carry-body" },
+    ],
+    [CATEGORY_PRICE_VOLATILITY, { selector: "#volatility-input", bodyId: "option-terms-body" }],
+    [
+      CATEGORY_VALUATION_METADATA,
+      { selector: "#timing-head", bodyId: "timing-body" },
+    ],
+  ]);
+
+  function revealMissingField(label, category) {
+    const locator = MISSING_FIELD_LOCATORS.get(label) || MISSING_CATEGORY_FALLBACKS.get(category);
+    if (!locator) return;
+    const section = collapsibleSections.find((candidate) => candidate.body.id === locator.bodyId);
+    if (section) section.expand();
+    const target = document.querySelector(locator.selector);
+    if (!target) return;
+    if (!target.matches("input, select, button, textarea, [tabindex]")) {
+      target.setAttribute("tabindex", "-1");
+    }
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   function readDottedPath(root, path) {
     return path.split(".").reduce((node, key) => (node == null ? undefined : node[key]), root);
@@ -812,17 +910,20 @@
     els.volatility,
     els.forwardPrice,
     els.expiryDate,
+    els.expiryTimestamp,
     els.settlementLag,
-    els.valuationDate,
     els.reportingDate,
     els.forwardSettlementDate,
     els.optionSettlementDate,
-    els.asOfTimestamp,
-    els.pricingTimestamp,
-    els.expiryTimestamp,
     els.redemptionAmount,
     els.exDividendDays,
     els.lastCouponDate,
+  ];
+
+  const DERIVED_TIMING_INPUTS = () => [
+    els.valuationDate,
+    els.asOfTimestamp,
+    els.pricingTimestamp,
   ];
 
   const MANUAL_SELECTS = () => [
@@ -839,6 +940,9 @@
     MANUAL_TEXT_INPUTS().forEach((input) => {
       input.value = "";
     });
+    DERIVED_TIMING_INPUTS().forEach((input) => {
+      input.value = "";
+    });
     MANUAL_SELECTS().forEach((select) => {
       select.value = "";
     });
@@ -852,6 +956,13 @@
     addCurveRow("", "");
     renderTimestampUtcPreviews();
     renderCurveCoverage();
+  }
+
+  function setDerivedTimingFormFromDraft() {
+    els.valuationDate.value = currentDraft ? currentDraft.valuation_date || "" : "";
+    els.asOfTimestamp.value = currentDraft ? currentDraft.as_of_timestamp || "" : "";
+    els.pricingTimestamp.value = currentDraft ? currentDraft.pricing_timestamp || "" : "";
+    renderTimestampUtcPreviews();
   }
 
   function setFormFromOverlay(overlay) {
@@ -931,15 +1042,12 @@
     referenceData.last_coupon_date = textOrNull(els.lastCouponDate.value);
     referenceData.status = selectValueOrNull(els.bondStatus);
 
-    // Datetime instants are sent exactly as typed (offset and all); the
-    // server normalizes them to UTC at the contract boundary. Calendar
-    // dates are independent explicit inputs and are never derived here.
-    currentDraft.valuation_date = textOrNull(els.valuationDate.value);
+    // The three acquisition-derived values are deliberately not read back
+    // from the DOM: their source is the recorded Bloomberg event, and editing
+    // any unrelated trader control must never overwrite that provenance.
     currentDraft.reporting_date = textOrNull(els.reportingDate.value);
     currentDraft.forward_settlement_date = textOrNull(els.forwardSettlementDate.value);
     currentDraft.option_settlement_date = textOrNull(els.optionSettlementDate.value);
-    currentDraft.as_of_timestamp = textOrNull(els.asOfTimestamp.value);
-    currentDraft.pricing_timestamp = textOrNull(els.pricingTimestamp.value);
     currentDraft.expiry_timestamp = textOrNull(els.expiryTimestamp.value);
 
     currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
@@ -1009,6 +1117,30 @@
     renderTimestampUtcPreview(els.expiryTimestamp, els.expiryTimestampUtc, {
       normalized: false,
     });
+  }
+
+  const ACQUISITION_TIMESTAMP_PATTERN =
+    /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+  function representedLocalCalendarDate(raw) {
+    const text = (raw || "").trim();
+    const match = ACQUISITION_TIMESTAMP_PATTERN.exec(text);
+    if (!match || utcInstantPreview(text).invalid) return null;
+    // This is intentionally the date written in the timestamp, not the UTC
+    // date produced by JavaScript's Date object.
+    return match[1];
+  }
+
+  function normalizeAsOfFromAcquisition(raw) {
+    const text = (raw || "").trim();
+    const match = ACQUISITION_TIMESTAMP_PATTERN.exec(text);
+    if (!match) return textOrNull(text);
+    // Match the approved Python boundary exactly for acquisition timestamps:
+    // already-UTC spellings are preserved, while a genuinely non-zero offset
+    // is respelled as the same instant in UTC.
+    if (match[4] === "Z" || /^[+-]00:00$/.test(match[4])) return text;
+    const preview = utcInstantPreview(text);
+    return preview.instant === null ? text : preview.instant;
   }
 
   // --- Option Discount Curve editor (Issue #143) -----------------------------
@@ -1403,7 +1535,17 @@
   // incomplete) plus the full per-field detail list (collapsed by default
   // -- "Show details" reveals it). `missing` is computeMissingDraftFields's
   // flat {label, category} list.
+  function resetMissingDetails() {
+    els.missingFieldsList.hidden = true;
+    els.missingDetailsToggleBtn.textContent = "Show details";
+  }
+
   function renderMissingFieldsSummary(missing) {
+    const count = missing.length;
+    els.remainingInputSummary.textContent =
+      count === 1
+        ? "1 required input still unresolved"
+        : `${count} required inputs still unresolved`;
     const byCategory = new Map();
     missing.forEach(({ label, category }) => {
       if (!byCategory.has(category)) byCategory.set(category, []);
@@ -1422,7 +1564,12 @@
     els.missingFieldsList.innerHTML = "";
     missing.forEach(({ label, category }) => {
       const item = document.createElement("li");
-      item.textContent = `${category}: ${label}`;
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "missing-field-link";
+      link.textContent = `${category}: ${label}`;
+      link.addEventListener("click", () => revealMissingField(label, category));
+      item.appendChild(link);
       els.missingFieldsList.appendChild(item);
     });
   }
@@ -1463,8 +1610,30 @@
   // returned. The raw descriptions are hints beside the enum selects and are
   // never written into the typed draft.
   function renderManualCompletionContext() {
-    els.timingSourceSystem.textContent = currentDraft ? currentDraft.source_system : "—";
+    const metadata = (source, status) => (source && status ? `${source} · ${status}` : "—");
+    els.timingProductId.textContent = currentDraft ? currentDraft.bond_option.product_id : "—";
     els.timingSnapshotId.textContent = currentDraft ? currentDraft.snapshot_id : "—";
+    els.timingSnapshotMetadata.textContent = currentDraft
+      ? metadata(currentDraft.source_system, currentDraft.snapshot_status)
+      : "—";
+    els.timingBondQuoteMetadata.textContent = currentDraft
+      ? metadata(currentDraft.bond_quote.source_system, currentDraft.bond_quote.status)
+      : "—";
+    els.timingForwardMetadata.textContent = currentDraft
+      ? metadata(
+          currentDraft.forward_clean_price_input.source_system,
+          currentDraft.forward_clean_price_input.status
+        )
+      : "—";
+    els.timingVolatilityMetadata.textContent = currentDraft
+      ? metadata(currentDraft.volatility_input.source_system, currentDraft.volatility_input.status)
+      : "—";
+    els.timingCreditMetadata.textContent = currentDraft
+      ? `${currentDraft.credit_spread_input.spread_treatment} · ${metadata(
+          currentDraft.credit_spread_input.source_system,
+          currentDraft.credit_spread_input.status
+        )}`
+      : "—";
     els.curveCurrencyLabel.textContent = currentDraft
       ? currentDraft.bond_option.currency
       : "—";
@@ -1512,6 +1681,7 @@
     // and stay null here regardless.
     const bondMaster = bond.bond_master || {};
     const identifierSuffix = shioriIdentifierSuffix(bond);
+    const pricingTimestamp = textOrNull(bond.acquired_at);
     return {
       bond_option: {
         // payoff_basis / exercise_style / settlement_type are the only
@@ -1555,11 +1725,14 @@
           status: null,
         },
       ],
-      // Explicit calendar dates and datetime instants: trader-entered, never
-      // derived from settlement lag, delivery delay, a calendar, or a clock.
-      valuation_date: null,
-      as_of_timestamp: null,
-      pricing_timestamp: null,
+      // The acquisition event is already the source for these three values.
+      // Its timestamp is preserved exactly for pricing, its represented local
+      // date supplies valuation_date, and only as_of_timestamp is respelled
+      // under the approved UTC normalization rule. No settlement or expiry
+      // date is inferred.
+      valuation_date: representedLocalCalendarDate(pricingTimestamp),
+      as_of_timestamp: normalizeAsOfFromAcquisition(pricingTimestamp),
+      pricing_timestamp: pricingTimestamp,
       expiry_timestamp: null,
       reporting_date: null,
       forward_settlement_date: null,
@@ -1699,6 +1872,8 @@
     hideContext();
     clearResultFields();
     clearOptionTermsForm();
+    setDerivedTimingFormFromDraft();
+    resetMissingDetails();
     renderManualCompletionContext();
 
     els.errorBanner.hidden = true;
@@ -1778,6 +1953,7 @@
     hideContext();
     clearResultFields();
     clearOptionTermsForm();
+    resetMissingDetails();
 
     els.errorBanner.hidden = true;
     els.errorBanner.textContent = "";

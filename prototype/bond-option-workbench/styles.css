@@ -446,6 +446,10 @@ input.control:focus {
   border-radius: 7px;
   padding: 8px 12px;
 }
+.remaining-input-summary {
+  font-size: 14px;
+  font-weight: 700;
+}
 .missing-categories {
   display: flex;
   flex-wrap: wrap;
@@ -475,6 +479,26 @@ input.control:focus {
 .missing-fields-list li {
   font-size: 12px;
   line-height: 1.6;
+}
+.missing-field-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #765000;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: #d3a84f;
+  text-underline-offset: 2px;
+}
+.missing-field-link:hover,
+.missing-field-link:focus {
+  color: var(--blue);
+  outline: none;
+  text-decoration-color: var(--blue);
 }
 
 .underlying-bond-actions { margin-top: 12px; }
@@ -514,6 +538,43 @@ input.control:focus {
 
 select.control { font-family: inherit; outline: none; cursor: pointer; }
 select.control:focus { border-color: var(--blue); }
+
+.derived-control[readonly] {
+  background: #f4f6f8;
+  color: #344054;
+  cursor: default;
+}
+.derived-source {
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 3px;
+}
+.derived-timing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.route-metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 7px 18px;
+  background: #f7f8fa;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 10px;
+}
+.route-metadata-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.route-metadata-grid span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.route-metadata-grid strong {
+  color: var(--text-strong);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 
 /* The UTC instant that will actually be sent to the contract, shown live so
    the normalization is visible rather than hidden. */
