@@ -27,7 +27,9 @@ from shiori_pricing_lab.data import bloomberg_bond_quote as module
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLIMarketDataStatus, BLIQuoteBasis
 from shiori_pricing_lab.data.bloomberg_bond_quote import (
     BLIBloombergDapiError,
+    load_bloomberg_bond_identity_and_quote,
     load_bloomberg_bond_quote,
+    parse_bond_identifier,
 )
 from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 
@@ -742,3 +744,587 @@ def test_isin_field_exception_raises_clear_error(monkeypatch):
         _load_mid()
 
     assert holder["session"].stopped is True
+
+
+# --- load_bloomberg_bond_identity_and_quote (instrument-first lookup) -----------
+#
+# Same fake-blpapi harness as above, reused directly -- no expected-ISIN
+# verification exists in this function, so these tests focus on: the exact
+# symbology-qualified identifier is sent verbatim (no yellow-key guessing),
+# quote side is required with no default, identity fields are returned
+# alongside the quote, and the same all-or-nothing/session-lifecycle
+# guarantees hold.
+
+_ISIN_IDENTIFIER = "/isin/US91282CLJ89"
+_CUSIP_IDENTIFIER = "/cusip/91282CLJ8"
+
+
+def _empty_bond_master() -> dict:
+    """The expected ``bond_master`` shape when a fixture supplies none of the
+    confirmed Bloomberg mnemonics -- every destination present, every value
+    ``None`` (never a fabricated/synthetic value)."""
+
+    return dict.fromkeys(module._BOND_MASTER_DESTINATION_FIELDS)
+
+
+def _empty_bond_master_raw() -> dict:
+    """The expected ``bond_master_raw`` shape when a fixture supplies none of
+    the confirmed raw display-only mnemonics."""
+
+    return dict.fromkeys(module._BOND_MASTER_RAW_DISPLAY_FIELD_MAP)
+
+
+def _identity_fields(*, price_field="PX_MID", price_value="99.75", **overrides):
+    fields = {
+        "ID_ISIN": "US91282CLJ89",
+        "ID_CUSIP": "91282CLJ8",
+        "NAME": "T 4 1/8 01/31/31",
+        "SECURITY_DES": "T 4 1/8 01/31/31 Govt",
+        "CRNCY": "USD",
+        price_field: price_value,
+        "INT_ACC": "0.51",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_identity_lookup_sends_the_identifier_verbatim_no_yellow_key_guessing(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert holder["session"].last_request.securities == [_ISIN_IDENTIFIER]
+
+
+def test_identity_lookup_accepts_a_cusip_identifier_verbatim(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_CUSIP_IDENTIFIER,
+                    fields=_identity_fields(ID_ISIN="US91282CLJ89", ID_CUSIP="91282CLJ8"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_CUSIP_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert holder["session"].last_request.securities == [_CUSIP_IDENTIFIER]
+    assert result["cusip"] == "91282CLJ8"
+
+
+def test_identity_lookup_returns_canonical_isin_cusip_and_name(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result == {
+        "isin": "US91282CLJ89",
+        "cusip": "91282CLJ8",
+        "name": "T 4 1/8 01/31/31 Govt",
+        "currency": "USD",
+        "quote_side": "MID",
+        "clean_price_per_100": 99.75,
+        "accrued_interest_per_100": 0.51,
+        "bond_master": _empty_bond_master(),
+        "bond_master_raw": _empty_bond_master_raw(),
+    }
+
+
+def test_identity_lookup_requests_exactly_one_price_field_per_quote_side(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(price_field="PX_BID", price_value="99.5"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.BID
+    )
+
+    assert result["clean_price_per_100"] == 99.5
+    assert holder["session"].last_request.fields.count("PX_BID") == 1
+    assert "PX_MID" not in holder["session"].last_request.fields
+    assert "PX_ASK" not in holder["session"].last_request.fields
+
+
+def test_identity_lookup_prefers_security_des_over_name(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(NAME="short name", SECURITY_DES="full description"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["name"] == "full description"
+
+
+def test_identity_lookup_falls_back_to_name_when_security_des_blank(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(SECURITY_DES="", NAME="fallback name"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["name"] == "fallback name"
+
+
+def test_identity_lookup_fails_outright_when_cusip_missing(monkeypatch):
+    fields = _identity_fields()
+    del fields["ID_CUSIP"]
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[_response_event(_security_data(security=_ISIN_IDENTIFIER, fields=fields))],
+    )
+
+    with pytest.raises(BLIBloombergDapiError, match="missing ID_CUSIP"):
+        load_bloomberg_bond_identity_and_quote(
+            identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+    assert holder["session"].stopped is True
+
+
+def test_identity_lookup_requires_quote_side_with_no_default():
+    # coerce_enum's blank/invalid-quote_side check runs before blpapi is even
+    # imported, so no fake session is needed here at all -- this can never
+    # reach Bloomberg with an invalid quote_side.
+    with pytest.raises(ValueError, match="quote_side"):
+        load_bloomberg_bond_identity_and_quote(identifier=_ISIN_IDENTIFIER, quote_side="")
+
+
+def test_identity_lookup_rejects_blank_identifier():
+    with pytest.raises(ValueError, match="identifier"):
+        load_bloomberg_bond_identity_and_quote(
+            identifier="   ", quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+
+def test_identity_lookup_session_stopped_on_failure(monkeypatch):
+    holder = _install_fake_blpapi(monkeypatch, start_result=False)
+
+    with pytest.raises(BLIBloombergDapiError, match="failed to start"):
+        load_bloomberg_bond_identity_and_quote(
+            identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+        )
+
+    assert holder["session"].stopped is True
+
+
+# --- Bond Master fields (PR #141 third revision): confirmed mappings ----------
+#
+# Eddy confirmed seven typed-schema mnemonics (CPN, CPN_FREQ, ISSUE_DT,
+# MATURITY, FIRST_CPN_DT, CALLABLE, SINKABLE) and three display-only-raw
+# mnemonics (DAY_CNT_DES, MTY_TYP, CALC_TYP_DES) against real Bloomberg DAPI
+# responses for a US Treasury (US91282CLJ89) and a UK Gilt (GB00BFX0ZL78) --
+# see PR #141's body for his evidence. PENULTIMATE_COUPON_DATE and
+# REDEMPTION_VALUE came back as a confirmed BAD_FLD field exception and must
+# never be requested.
+
+
+def test_identity_lookup_requests_every_confirmed_bond_master_and_raw_field(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    sent_fields = holder["session"].last_request.fields
+    for mnemonic in (
+        "CPN",
+        "CPN_FREQ",
+        "ISSUE_DT",
+        "MATURITY",
+        "FIRST_CPN_DT",
+        "CALLABLE",
+        "SINKABLE",
+        "DAY_CNT_DES",
+        "MTY_TYP",
+        "CALC_TYP_DES",
+    ):
+        assert mnemonic in sent_fields
+    # Confirmed BAD_FLD mnemonics must never be re-added to the request.
+    assert "PENULTIMATE_COUPON_DATE" not in sent_fields
+    assert "REDEMPTION_VALUE" not in sent_fields
+
+
+def test_identity_lookup_bond_master_all_none_when_fixture_supplies_no_confirmed_values(
+    monkeypatch,
+):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"] == _empty_bond_master()
+    assert result["bond_master_raw"] == _empty_bond_master_raw()
+
+
+def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_fixture(
+    monkeypatch,
+):
+    # US91282CLJ89 -- Eddy's real US Treasury DAPI evidence (PR #141 body).
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(
+                        CPN="3.75",
+                        CPN_FREQ="2",
+                        ISSUE_DT="2024-01-31",
+                        MATURITY="2031-01-31",
+                        FIRST_CPN_DT="2024-07-31",
+                        CALLABLE="N",
+                        SINKABLE="N",
+                        DAY_CNT_DES="ACT/ACT",
+                        MTY_TYP="AT MATURITY",
+                        CALC_TYP_DES="STREET CONVENTION",
+                    ),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"] == {
+        "coupon": pytest.approx(0.0375),
+        "coupon_frequency": "SEMI_ANNUAL",
+        "issue_date": "2024-01-31",
+        "maturity_date": "2031-01-31",
+        "day_count": None,
+        "first_coupon_date": "2024-07-31",
+        "last_coupon_date": None,
+        "redemption_amount": None,
+        "callable_flag": False,
+        "sinkable_flag": False,
+        "bond_type": None,
+        "yield_convention": None,
+        "business_day_convention": None,
+    }
+    assert result["bond_master_raw"] == {
+        "day_count": "ACT/ACT",
+        "maturity_type": "AT MATURITY",
+        "calc_type": "STREET CONVENTION",
+    }
+    # Never auto-converted into a Shiori enum: ACT/ACT must never become
+    # ACT_ACT_ISDA, AT MATURITY must never become FIXED_COUPON_BULLET, and
+    # STREET CONVENTION must never become a yield convention.
+    assert result["bond_master"]["day_count"] is None
+    assert result["bond_master"]["bond_type"] is None
+    assert result["bond_master"]["yield_convention"] is None
+
+
+def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_gilt_fixture(monkeypatch):
+    # GB00BFX0ZL78 -- Eddy's real UK Gilt DAPI evidence (PR #141 body).
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(
+                        CPN="1.625",
+                        CPN_FREQ="2",
+                        CALLABLE="N",
+                        SINKABLE="N",
+                        DAY_CNT_DES="ACT/ACT",
+                        MTY_TYP="NORMAL",
+                        CALC_TYP_DES="UK:BUMP/DMO METHOD",
+                    ),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon"] == pytest.approx(0.01625)
+    assert result["bond_master"]["coupon_frequency"] == "SEMI_ANNUAL"
+    assert result["bond_master_raw"]["maturity_type"] == "NORMAL"
+    assert result["bond_master_raw"]["calc_type"] == "UK:BUMP/DMO METHOD"
+    # Never auto-converted into a Shiori enum.
+    assert result["bond_master"]["bond_type"] is None
+    assert result["bond_master"]["yield_convention"] is None
+
+
+def test_identity_lookup_coupon_frequency_unknown_code_stays_none(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields(CPN_FREQ="99"))
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon_frequency"] is None
+
+
+def test_identity_lookup_callable_flag_unknown_value_stays_none(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields(CALLABLE="MAYBE"))
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["callable_flag"] is None
+
+
+# --- Bond Master transform functions (unit-level) ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("3.75", 0.0375), ("1.625", 0.01625), ("0", 0.0), ("100", 1.0)],
+)
+def test_coupon_from_bloomberg_percent_confirmed_values(raw, expected):
+    assert module._coupon_from_bloomberg_percent(raw) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("raw", ["N/A", "", "nan", "inf", "-inf"])
+def test_coupon_from_bloomberg_percent_unparseable_or_non_finite_stays_none(raw):
+    assert module._coupon_from_bloomberg_percent(raw) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [("1", "ANNUAL"), ("2", "SEMI_ANNUAL"), ("4", "QUARTERLY"), ("12", "MONTHLY")],
+)
+def test_coupon_frequency_from_bloomberg_code_confirmed_values(code, expected):
+    assert module._coupon_frequency_from_bloomberg_code(code) == expected
+
+
+@pytest.mark.parametrize("code", ["3", "6", "", "ANNUAL", "0"])
+def test_coupon_frequency_from_bloomberg_code_unknown_stays_none(code):
+    assert module._coupon_frequency_from_bloomberg_code(code) is None
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("Y", True), ("N", False)])
+def test_boolean_flag_from_bloomberg_yes_no_confirmed_values(raw, expected):
+    assert module._boolean_flag_from_bloomberg_yes_no(raw) is expected
+
+
+@pytest.mark.parametrize("raw", ["y", "n", "YES", "NO", "", "TRUE", "Yes"])
+def test_boolean_flag_from_bloomberg_yes_no_unknown_stays_none(raw):
+    # Deliberately not normalized/case-folded -- only exact "Y"/"N" match
+    # Eddy's confirmed convention.
+    assert module._boolean_flag_from_bloomberg_yes_no(raw) is None
+
+
+def test_passthrough_bloomberg_string_returns_the_raw_value_unchanged():
+    assert module._passthrough_bloomberg_string("2031-01-31") == "2031-01-31"
+
+
+# --- Bond Master extensibility mechanism (still-unconfirmed destination) ------
+#
+# redemption_amount has no confirmed mnemonic at all (REDEMPTION_VALUE was
+# confirmed BAD_FLD and rejected -- see the module docstring) -- these tests
+# use it purely to prove the generic map-driven extraction mechanism itself
+# via monkeypatch, without wiring any real, unconfirmed mnemonic into
+# production use.
+
+
+def test_identity_lookup_requests_a_newly_mapped_bond_master_field(monkeypatch):
+    monkeypatch.setitem(
+        module._BOND_MASTER_FIELD_MAP,
+        "redemption_amount",
+        ("REDEMPTION_VALUE_TEST", lambda raw: raw),
+    )
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER, fields=_identity_fields(REDEMPTION_VALUE_TEST="100")
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert "REDEMPTION_VALUE_TEST" in holder["session"].last_request.fields
+    assert result["bond_master"]["redemption_amount"] == "100"
+    # Every other Bond Master destination stays None -- only the one
+    # newly-mapped-for-this-test field was populated.
+    assert result["bond_master"]["maturity_date"] is None
+
+
+def test_identity_lookup_bond_master_field_absence_never_fails_the_request(monkeypatch):
+    monkeypatch.setitem(
+        module._BOND_MASTER_FIELD_MAP,
+        "redemption_amount",
+        ("REDEMPTION_VALUE_TEST", lambda raw: raw),
+    )
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    # REDEMPTION_VALUE_TEST was requested but never returned (absent from
+    # fieldData) -- the field is simply None, and the already-reliable
+    # identity/quote result is completely unaffected.
+    assert result["bond_master"]["redemption_amount"] is None
+    assert result["isin"] == "US91282CLJ89"
+    assert result["clean_price_per_100"] == 99.75
+
+
+def test_identity_lookup_bond_master_field_exception_never_fails_the_request(monkeypatch):
+    monkeypatch.setitem(
+        module._BOND_MASTER_FIELD_MAP,
+        "redemption_amount",
+        ("REDEMPTION_VALUE_TEST", lambda raw: raw),
+    )
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(),
+                    field_exceptions=["[BAD_FLD] REDEMPTION_VALUE_TEST not applicable to security"],
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["redemption_amount"] is None
+    assert result["isin"] == "US91282CLJ89"
+    assert result["cusip"] == "91282CLJ8"
+    assert holder["session"].stopped is True
+
+
+# --- parse_bond_identifier (bounded ISIN/CUSIP parser) --------------------------
+
+
+def test_parse_bond_identifier_recognizes_a_12_character_isin():
+    kind, identifier = parse_bond_identifier("US91282CLJ89")
+    assert kind == "ISIN"
+    assert identifier == "/isin/US91282CLJ89"
+
+
+def test_parse_bond_identifier_recognizes_a_9_character_cusip():
+    kind, identifier = parse_bond_identifier("91282CLJ8")
+    assert kind == "CUSIP"
+    assert identifier == "/cusip/91282CLJ8"
+
+
+def test_parse_bond_identifier_normalizes_lowercase_and_outer_whitespace():
+    kind, identifier = parse_bond_identifier("  us91282clj89  ")
+    assert kind == "ISIN"
+    assert identifier == "/isin/US91282CLJ89"
+
+    kind, identifier = parse_bond_identifier("\t91282clj8\n")
+    assert kind == "CUSIP"
+    assert identifier == "/cusip/91282CLJ8"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "US91282CLJ8",  # 11 chars
+        "US91282CLJ890",  # 13 chars
+        "91282CLJ",  # 8 chars
+        "91282CLJ89",  # 10 chars
+        "US91282-LJ89",  # 12 chars but contains a hyphen
+        "91282CQX Govt",  # a Bloomberg yellow-key ticker -- never accepted
+        "91282CQX",  # 8 chars, part of a yellow key
+    ],
+)
+def test_parse_bond_identifier_rejects_every_other_format(raw):
+    with pytest.raises(ValueError, match="ISIN|CUSIP"):
+        parse_bond_identifier(raw)
+
+
+def test_parse_bond_identifier_never_appends_a_yellow_key_suffix():
+    # A bare, valid 9-character CUSIP must resolve to exactly "/cusip/<value>"
+    # -- never silently gain a " Govt" (or any other) yellow-key suffix.
+    _kind, identifier = parse_bond_identifier("91282CLJ8")
+    assert "Govt" not in identifier
+    assert identifier == "/cusip/91282CLJ8"

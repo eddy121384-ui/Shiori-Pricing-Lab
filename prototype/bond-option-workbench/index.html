@@ -27,13 +27,8 @@
       </span>
     </nav>
     <div class="nav-right">
-      <label class="pill load-case-btn is-disabled" id="load-case-label" for="case-file-input">
-        <span class="dot" style="background:var(--blue)"></span>Load Case JSON
-      </label>
-      <input type="file" id="case-file-input" accept=".json" hidden disabled>
-      <span class="pill"><span class="dot"></span>Local Case</span>
-      <span class="pill"><span class="dot" style="background:var(--muted-2)"></span><span id="provenance-badge">&hellip;</span></span>
-      <span class="mid-badge" id="quote-side-badge">&hellip;</span>
+      <span class="pill" id="provenance-pill" hidden><span class="dot" style="background:var(--muted-2)"></span><span id="provenance-badge">&hellip;</span></span>
+      <span class="mid-badge" id="quote-side-badge" hidden>&hellip;</span>
       <span class="icon-btn">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
       </span>
@@ -83,19 +78,68 @@
 
       <div class="sidebar-foot">
         <div class="lbl">Market Data</div>
-        <div class="live"><span class="dot"></span>Local Case</div>
-        <div class="asof">As of<br/><span id="sidebar-as-of-timestamp">&mdash;</span></div>
+        <div class="live" id="sidebar-live-row" hidden><span class="dot"></span><span id="sidebar-source-system">&mdash;</span></div>
+        <div class="asof" id="sidebar-asof-row" hidden>As of<br/><span id="sidebar-as-of-timestamp">&mdash;</span></div>
       </div>
     </aside>
 
     <!-- ===================== MAIN ===================== -->
     <main class="main">
 
+      <!-- Underlying Bond: instrument-first Bloomberg lookup -->
+      <section class="card underlying-bond">
+        <div class="card-head" id="underlying-bond-head">
+          <div class="card-title">Underlying Bond</div>
+          <span class="collapse-toggle" id="underlying-bond-indicator">Collapse</span>
+        </div>
+        <div class="card-body" id="underlying-bond-body">
+        <div class="underlying-bond-controls">
+          <div class="form-row"><label>Bond Identifier</label>
+            <input class="control" id="bond-identifier-input" type="text" placeholder="ISIN or CUSIP">
+          </div>
+          <div class="form-row"><label>Quote Side</label>
+            <div class="toggle toggle-3" id="bond-quote-side-toggle">
+              <span class="opt" data-value="BID">Bid</span>
+              <span class="opt" data-value="MID">Mid</span>
+              <span class="opt" data-value="OFFER">Offer</span>
+            </div>
+          </div>
+          <span class="btn primary" id="load-bloomberg-bond-btn">Load Bloomberg Bond</span>
+        </div>
+
+        <div class="resolved-bond-panel" id="resolved-bond-panel" hidden>
+          <div class="rb-grid">
+            <div class="rb-item rb-name"><span class="rb-k">Security</span><span class="rb-v" id="resolved-bond-name">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">ISIN</span><span class="rb-v" id="resolved-bond-isin">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">CUSIP</span><span class="rb-v" id="resolved-bond-cusip">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Currency</span><span class="rb-v" id="resolved-bond-currency">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Clean Price</span><span class="rb-v" id="resolved-bond-clean-price">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Accrued Interest</span><span class="rb-v" id="resolved-bond-accrued">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Coupon</span><span class="rb-v" id="resolved-bond-coupon">Not available</span></div>
+            <div class="rb-item"><span class="rb-k">Maturity</span><span class="rb-v" id="resolved-bond-maturity">Not available</span></div>
+            <div class="rb-item"><span class="rb-k">Bloomberg Acquisition Time</span><span class="rb-v" id="resolved-bond-acquired-at">&mdash;</span></div>
+            <div class="rb-item"><span class="rb-k">Source</span><span class="rb-v" id="resolved-bond-source">&mdash;</span></div>
+          </div>
+        </div>
+
+        <div class="draft-incomplete-note" id="draft-incomplete-note" hidden>
+          <div>Complete the required pricing inputs before pricing.</div>
+          <div class="missing-categories" id="missing-categories"></div>
+          <span class="collapse-toggle" id="missing-details-toggle-btn">Show details</span>
+          <ul class="missing-fields-list" id="missing-fields-list" hidden></ul>
+        </div>
+
+        <div class="underlying-bond-actions">
+          <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
+        </div>
+        </div>
+      </section>
+
       <!-- Instrument header -->
-      <section class="card instr-header">
+      <section class="card instr-header" id="instrument-header-section" hidden>
         <div class="instr-left">
           <div class="instr-title-row">
-            <span class="instr-title" id="instr-title">Loading&hellip;</span>
+            <span class="instr-title" id="instr-title">&mdash;</span>
             <span class="star">
               <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><polygon points="12 2 15 9 22 9.3 16.5 14 18.5 21 12 17 5.5 21 7.5 14 2 9.3 9 9"/></svg>
             </span>
@@ -136,11 +180,15 @@
       </section>
 
       <!-- Workspace -->
-      <section class="workspace">
+      <section class="workspace" id="workspace-section" hidden>
 
         <!-- Option terms -->
         <div class="card option-terms">
-          <div class="card-title">Option Terms</div>
+          <div class="card-head" id="option-terms-head">
+            <div class="card-title">Option Terms</div>
+            <span class="collapse-toggle" id="option-terms-indicator">Collapse</span>
+          </div>
+          <div class="card-body" id="option-terms-body">
 
           <div class="form-row"><label>Product Type</label>
             <div class="control select">European Vanilla<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
@@ -152,16 +200,16 @@
             <div class="control select">European<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
           <div class="form-row"><label>Call / Put</label>
-            <div class="toggle" id="option-type-toggle"><span class="opt on" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
+            <div class="toggle" id="option-type-toggle"><span class="opt" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
           </div>
           <div class="form-row"><label>Direction</label>
-            <div class="toggle" id="position-toggle"><span class="opt on" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
+            <div class="toggle" id="position-toggle"><span class="opt" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
           </div>
           <div class="form-row"><label>Strike (per 100)</label>
-            <input class="control" id="strike-price-input" type="text" inputmode="decimal" value="99.5">
+            <input class="control" id="strike-price-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
           <div class="form-row"><label>Notional</label>
-            <input class="control" id="notional-input" type="text" inputmode="decimal" value="50.0">
+            <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="Not entered">
           </div>
           <div class="form-row"><label>Expiry</label>
             <span class="control" style="width:auto;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--muted-2)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span id="option-terms-expiry">&mdash;</span></span>
@@ -182,13 +230,18 @@
             <div class="control select">Black (Modified)<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
           </div>
           <div class="form-row" style="margin-bottom:0;"><label>Price Vol (σ, decimal)</label>
-            <input class="control" id="volatility-input" type="text" inputmode="decimal" value="0.18">
+            <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
+          </div>
           </div>
         </div>
 
         <!-- Pricing results -->
         <div class="card pricing-results">
-          <div class="card-title">Pricing Results</div>
+          <div class="card-head" id="pricing-results-head">
+            <div class="card-title">Pricing Results</div>
+            <span class="collapse-toggle" id="pricing-results-indicator">Collapse</span>
+          </div>
+          <div class="card-body" id="pricing-results-body">
           <div class="error-banner" id="pricing-error-banner" hidden></div>
           <div class="pr-row r1">
             <div class="pr-cell"><div class="p-lbl">Price (Total)</div><div class="p-val teal" id="price-total">&mdash;</div><div class="p-sub" id="price-total-ccy"></div></div>
@@ -209,25 +262,38 @@
             <div class="pr-cell"><div class="p-lbl">Mod Duration</div><div class="pending-value">Pending model support</div></div>
             <div class="pr-cell"><div class="p-lbl">Convexity</div><div class="pending-value">Pending model support</div></div>
           </div>
+          </div>
         </div>
 
         <!-- Right bottom: forward & carry + underlying snapshot -->
         <div class="right-bottom">
           <div class="card forward-carry">
-            <div class="card-title">Forward &amp; Carry</div>
+            <div class="card-head" id="forward-carry-head">
+              <div class="card-title">Forward &amp; Carry</div>
+              <div class="card-head-right">
+                <span class="card-summary" id="forward-carry-summary"></span>
+                <span class="collapse-toggle" id="forward-carry-indicator">Expand</span>
+              </div>
+            </div>
+            <div class="card-body" id="forward-carry-body" hidden>
             <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Price (per 100)</label>
               <div>
-                <input class="control" id="forward-price-input" type="text" inputmode="decimal" value="101.3">
+                <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="Not entered">
                 <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
               </div>
             </div>
             <div class="fc-row" style="margin-bottom:0;"><label>Repo Rate</label>
               <div class="pending-value">Pending model support</div>
             </div>
+            </div>
           </div>
 
           <div class="card underlying">
-            <div class="card-title">Underlying Snapshot</div>
+            <div class="card-head" id="underlying-snapshot-head">
+              <div class="card-title">Underlying Snapshot</div>
+              <span class="collapse-toggle" id="underlying-snapshot-indicator">Expand</span>
+            </div>
+            <div class="card-body" id="underlying-snapshot-body" hidden>
             <div class="us-body">
               <div class="us-list">
                 <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="u-v" id="snapshot-clean-price">&mdash;</span></div>
@@ -245,36 +311,55 @@
                 </div>
               </div>
             </div>
+            </div>
           </div>
         </div>
       </section>
 
-      <!-- Instrument details -->
-      <section class="card instrument-details">
-        <div class="id-head">
-          <div class="card-title">Instrument Details</div>
-          <div class="card-title notes">Notes</div>
+      <!-- Instrument details: Bloomberg Bond Master -->
+      <section class="card instrument-details" id="instrument-details-section" hidden>
+        <div class="card-head" id="bond-master-head">
+          <div class="card-title">Instrument Details &mdash; Bloomberg Bond Master</div>
+          <div class="card-head-right">
+            <span class="card-summary" id="bond-master-summary"></span>
+            <span class="collapse-toggle" id="bond-master-toggle-btn">Expand</span>
+          </div>
         </div>
-        <div class="id-grid">
+        <div class="id-grid" id="bond-master-body" hidden>
           <div class="id-block">
-            <span class="i-k">Issuer</span><span class="i-v" id="details-issuer">&mdash;</span>
-            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
-            <span class="i-k">Maturity</span><span class="i-v" id="details-maturity">&mdash;</span>
-            <span class="i-k">Next Call Date</span><span class="i-v pending-value">Not available</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Callable</span><span class="i-v pending-value">Not available</span>
-            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
-            <span class="i-k">Frequency</span><span class="i-v" id="details-frequency">&mdash;</span>
-            <span class="i-k">Ex-Dividend Date</span><span class="i-v pending-value">Not available</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Listing</span><span class="i-v pending-value">Not available</span>
-            <span class="i-k">Country</span><span class="i-v pending-value">Not available</span>
+            <span class="i-k">Issuer / Security Description</span><span class="i-v" id="details-issuer">&mdash;</span>
+            <span class="i-k">ISIN</span><span class="i-v" id="details-isin">&mdash;</span>
+            <span class="i-k">CUSIP</span><span class="i-v" id="details-cusip">&mdash;</span>
             <span class="i-k">Currency</span><span class="i-v" id="details-currency">&mdash;</span>
-            <span class="i-k">Domicile</span><span class="i-v pending-value">Not available</span>
           </div>
-          <div class="notes-block pending-value">Not available</div>
+          <div class="id-block">
+            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
+            <span class="i-k">Coupon Frequency</span><span class="i-v" id="details-coupon-frequency">&mdash;</span>
+            <span class="i-k">Issue Date</span><span class="i-v" id="details-issue-date">&mdash;</span>
+            <span class="i-k">Maturity Date</span><span class="i-v" id="details-maturity">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
+            <span class="i-k">First Coupon Date</span><span class="i-v" id="details-first-coupon-date">&mdash;</span>
+            <span class="i-k">Last Coupon Date</span><span class="i-v" id="details-last-coupon-date">&mdash;</span>
+            <span class="i-k">Redemption Amount</span><span class="i-v" id="details-redemption-amount">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Callable</span><span class="i-v" id="details-callable">&mdash;</span>
+            <span class="i-k">Sinkable</span><span class="i-v" id="details-sinkable">&mdash;</span>
+            <span class="i-k">Bond Type</span><span class="i-v" id="details-bond-type">&mdash;</span>
+            <span class="i-k">Yield Convention</span><span class="i-v" id="details-yield-convention">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Business Day Convention</span><span class="i-v" id="details-business-day-convention">&mdash;</span>
+            <span class="i-k">Source</span><span class="i-v" id="details-source">&mdash;</span>
+            <span class="i-k">Acquisition Time</span><span class="i-v" id="details-acquired-at">&mdash;</span>
+          </div>
+          <div class="id-block">
+            <span class="i-k">Bloomberg Day Count</span><span class="i-v" id="details-bloomberg-day-count">&mdash;</span>
+            <span class="i-k">Bloomberg Maturity Type</span><span class="i-v" id="details-bloomberg-maturity-type">&mdash;</span>
+            <span class="i-k">Bloomberg Calculation Type</span><span class="i-v" id="details-bloomberg-calc-type">&mdash;</span>
+          </div>
         </div>
       </section>
 
@@ -290,12 +375,12 @@
       <span class="check check-fail">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
       </span>
-      <span id="status-text">Loading&hellip;</span>
+      <span id="status-text">No bond loaded</span>
     </div>
     <div class="foot-actions">
       <span class="btn ghost is-disabled" id="download-json-btn">Download JSON</span>
       <span class="btn ghost is-disabled" id="download-markdown-btn">Download Markdown</span>
-      <span class="btn ghost is-disabled" id="clear-btn">Clear</span>
+      <span class="btn ghost" id="clear-btn">Clear</span>
       <span class="btn outline">Save Preset</span>
       <span class="btn primary is-disabled" id="price-btn">Price
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" stroke="none"/></svg>

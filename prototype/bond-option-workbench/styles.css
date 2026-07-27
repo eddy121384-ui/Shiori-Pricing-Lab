@@ -86,6 +86,19 @@ html, body {
 .pill.verified { color: var(--blue-soft-text); border-color: #bcd3f7; }
 .pill.verified svg { color: var(--blue-soft-text); }
 .mid-badge { font-size: 14px; font-weight: 600; color: var(--blue-soft-text); padding: 0 4px; }
+/* Trader-draft revision: provenance/quote-side badges and the sidebar's
+   live-source row start `hidden` (no case loaded yet) and are un-hidden by
+   script.js's renderContext only once a real price exists. Each of these
+   classes sets its own explicit `display` above, which otherwise ties the
+   UA stylesheet's `[hidden] { display: none }` rule in specificity and (as
+   the later, author rule) wins -- silently defeating the JS-level
+   `el.hidden = true` toggle, exactly like the instr-header/workspace/
+   instrument-details fix earlier in this file. */
+.pill[hidden],
+.mid-badge[hidden],
+.sidebar-foot .live[hidden] {
+  display: none;
+}
 .icon-btn { color: var(--muted); display: flex; align-items: center; cursor: default; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
@@ -128,7 +141,20 @@ html, body {
   flex-direction: column;
   gap: 9px;
   min-width: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Several .main children set their own explicit `display` below (flex/grid),
+   which otherwise ties in specificity with the UA stylesheet's
+   `[hidden] { display: none }` and (being the later, author rule) wins --
+   silently defeating a JS-level `el.hidden = true` toggle. These `[hidden]`
+   overrides restore the expected behavior for the sections the instrument-
+   first Bloomberg mismatch gating (script.js syncBondGating) hides. */
+.instr-header[hidden],
+.workspace[hidden],
+.instrument-details[hidden] {
+  display: none;
 }
 
 .card {
@@ -140,6 +166,42 @@ html, body {
 .card-title {
   font-size: 12.5px; font-weight: 700; letter-spacing: 0.06em;
   color: #55607a; text-transform: uppercase;
+}
+
+/* ---------- Collapsible section headers (PR #141 third revision) ---------- */
+/* Every top-level card/section this round gets a clickable header row --
+   the whole row toggles its section's body, not just the small indicator
+   text inside it -- and the section title stays visible while collapsed
+   (only the body's `hidden` state changes). */
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 9px;
+  cursor: pointer;
+}
+.card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card-summary {
+  font-size: 12.5px;
+  color: var(--muted-2);
+  font-style: italic;
+}
+.card-summary:empty {
+  display: none;
+}
+/* .card-body carries no explicit `display` of its own -- deliberately, so
+   the plain UA `[hidden] { display: none }` rule always wins and a
+   collapsed section's body is actually invisible. Some collapsible bodies
+   (`.id-grid`, used by Instrument Details) DO set their own explicit
+   `display`, which ties the UA rule in specificity and (as the later,
+   author rule) wins -- silently defeating `el.hidden = true` exactly like
+   the .instr-header/.workspace/.instrument-details fix above. */
+.id-grid[hidden] {
+  display: none;
 }
 
 /* ---------- Instrument header ---------- */
@@ -189,7 +251,7 @@ html, body {
 }
 
 /* ---------- Option terms form ---------- */
-.option-terms .card-title { margin-bottom: 9px; }
+.option-terms .card-head { margin-bottom: 9px; }
 .form-row {
   display: grid; grid-template-columns: 146px 1fr;
   align-items: center; gap: 10px; margin-bottom: 3px;
@@ -216,7 +278,7 @@ html, body {
 .toggle .opt.on { background: var(--teal); color: #fff; font-weight: 600; }
 
 /* ---------- Pricing results ---------- */
-.pricing-results .card-title { margin-bottom: 12px; }
+.pricing-results .card-head { margin-bottom: 12px; }
 .pr-row { display: grid; padding: 12px 0; }
 .pr-row.r1 { grid-template-columns: repeat(4, 1fr); padding-top: 0; }
 .pr-row.r2 { grid-template-columns: repeat(4, 1fr); border-top: 1px solid #eef0f4; }
@@ -232,7 +294,7 @@ html, body {
 
 /* ---------- Forward & carry ---------- */
 .forward-carry { padding: 13px 18px; }
-.forward-carry .card-title { margin-bottom: 13px; }
+.forward-carry .card-head { margin-bottom: 13px; }
 .fc-row { display: grid; grid-template-columns: 118px 1fr; align-items: center; gap: 10px; margin-bottom: 12px; }
 .fc-row > label { font-size: 14px; color: #4b5563; }
 .fc-carry { display: grid; grid-template-columns: 96px 1fr; gap: 8px; }
@@ -246,7 +308,7 @@ html, body {
 
 /* ---------- Underlying snapshot ---------- */
 .underlying { padding: 13px 18px; display: flex; flex-direction: column; }
-.underlying .card-title { margin-bottom: 11px; }
+.underlying .card-head { margin-bottom: 11px; }
 .us-body { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
 .us-list { display: flex; flex-direction: column; gap: 8px; }
 .us-item { display: flex; justify-content: space-between; font-size: 13px; }
@@ -257,15 +319,23 @@ html, body {
 .chart-title { font-size: 12.5px; color: var(--muted); text-align: center; margin-bottom: 6px; }
 .chart-area { display: flex; }
 
-/* ---------- Instrument details ---------- */
+/* ---------- Instrument details: Bloomberg Bond Master ---------- */
 .instrument-details { padding: 10px 22px; }
-.id-head { display: flex; justify-content: space-between; margin-bottom: 9px; }
-.id-head .card-title.notes { margin-right: 130px; }
-.id-grid { display: grid; grid-template-columns: repeat(3, 1fr) 1.1fr; gap: 8px 24px; }
-.id-block { display: grid; grid-template-columns: 130px 1fr; row-gap: 7px; }
+.collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
+/* auto-fit rather than a fixed column count: this grid holds five blocks
+   (Bloomberg Bond Master has more line items than the old placeholder
+   panel it replaced) and should wrap gracefully rather than break if a
+   block is ever added or removed again. */
+.id-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px 24px; }
+.id-block { display: grid; grid-template-columns: 150px 1fr; row-gap: 7px; align-content: start; }
 .id-block .i-k { font-size: 13.5px; color: var(--muted); }
+/* min-width: 0 lets a long label/value (e.g. "Bloomberg Calculation Type" /
+   "STREET CONVENTION") actually wrap and shrink to its 1fr grid track
+   instead of overflowing into the next block -- grid items default to
+   min-width: auto (their content's min-content size), which otherwise
+   forces the track wider than the space this grid actually has. */
+.id-block .i-k, .id-block .i-v { min-width: 0; overflow-wrap: break-word; }
 .id-block .i-v { font-size: 13.5px; color: var(--text-strong); font-weight: 500; }
-.notes-block { font-size: 14px; color: var(--muted-2); }
 
 /* ---------- Footer ---------- */
 .footer {
@@ -283,16 +353,10 @@ html, body {
 .btn.outline { background: #fff; border-color: #bcd3f7; color: var(--blue); }
 .btn.primary { background: var(--blue); color: #fff; padding: 0 26px; }
 .btn.ghost, .btn.outline, .btn.primary { cursor: pointer; }
-/* Bootstrap-gated state (Codex final re-review fix): visual companion to
-   the JS-level bootstrapReady guard in script.js -- Price/Clear are dimmed
-   and inert until the initial /api/base load has actually succeeded. */
+/* Draft-gated state: visual companion to the JS-level draft/missing-fields
+   guard in script.js -- Price/Refresh are dimmed and inert until the current
+   draft has every required pricing input. */
 .btn.is-disabled { opacity: 0.45; pointer-events: none; cursor: not-allowed; }
-/* Issue #138: "Load Case JSON" is a <label> styled like the existing
-   .pill nav badges but clickable (wraps a hidden file input). Disabled the
-   same way as the footer buttons: dimmed and inert until bootstrap has
-   completed successfully. */
-.load-case-btn { cursor: pointer; }
-.load-case-btn.is-disabled { opacity: 0.45; pointer-events: none; cursor: not-allowed; }
 .valid .check-fail { display: none; }
 .valid.failed .check-ok { display: none; }
 .valid.failed .check-fail { display: flex; color: var(--orange); }
@@ -341,3 +405,76 @@ input.control:focus {
   margin-bottom: 12px;
 }
 .error-banner:empty { display: none; }
+
+/* ---------- Underlying Bond: instrument-first Bloomberg lookup ---------- */
+.underlying-bond { padding: 12px 18px; }
+.underlying-bond .card-head { margin-bottom: 9px; }
+.underlying-bond-controls {
+  display: grid;
+  grid-template-columns: 320px 260px auto;
+  align-items: center;
+  gap: 16px;
+}
+/* Overrides the base .form-row's fixed 146px label column -- "Quote Side"
+   and "Bond Identifier" are shorter labels than the Option Terms panel's,
+   and the 3-way toggle needs the room a fixed 146px label would otherwise
+   take from it (BID/MID/OFFER was clipping to "OFF" at that width). */
+.underlying-bond-controls .form-row { margin-bottom: 0; grid-template-columns: auto 1fr; gap: 10px; }
+/* A 3-way toggle (BID/MID/OFFER) with deliberately no default selected --
+   see setControlsEnabled()/script.js: nothing gets an "on" class until the
+   trader clicks one, unlike the 2-way Call/Put and Buy/Sell toggles above,
+   which always start with one option pre-selected. */
+.toggle.toggle-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+.resolved-bond-panel {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #eef0f4;
+}
+.rb-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 24px; }
+.rb-item { display: flex; flex-direction: column; gap: 2px; }
+.rb-item .rb-k { font-size: 12px; color: var(--muted); }
+.rb-item .rb-v { font-size: 13.5px; color: var(--text-strong); font-weight: 600; }
+.rb-item.rb-name { grid-column: 1 / -1; }
+
+.draft-incomplete-note {
+  margin-top: 12px;
+  background: #fff4e5;
+  border: 1px solid #f3d9ae;
+  color: #8a5a00;
+  font-size: 12.5px;
+  border-radius: 7px;
+  padding: 8px 12px;
+}
+.missing-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.missing-category-badge {
+  display: inline-flex;
+  align-items: center;
+  background: #fce9c9;
+  border: 1px solid #eec97a;
+  color: #7a5300;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.draft-incomplete-note .collapse-toggle { color: #8a5a00; }
+.missing-fields-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  columns: 2;
+  column-gap: 24px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.missing-fields-list li {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.underlying-bond-actions { margin-top: 12px; }

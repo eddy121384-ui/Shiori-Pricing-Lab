@@ -317,6 +317,85 @@ def test_dependencies_missing_false_when_imports_succeed(tmp_path):
     assert lw.dependencies_missing(venv_py, run=_run) is False
 
 
+# --- Bloomberg quote refresh: separate blpapi install step -----------------------
+
+
+def test_build_bloomberg_install_command_uses_bloombergs_index_not_pypi(tmp_path):
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+    command = lw.build_bloomberg_install_command(venv_py)
+    assert command == [
+        str(venv_py),
+        "-m",
+        "pip",
+        "install",
+        f"--index-url={lw._BLOOMBERG_PACKAGE_INDEX_URL}",
+        "blpapi",
+    ]
+    # Never folded into the project's own ".[quant]" (or any other)
+    # requirement spec -- this must stay a fully separate pip invocation.
+    assert ".[quant]" not in command
+
+
+def test_build_install_command_never_uses_bloombergs_index(tmp_path):
+    # The project's own dependencies must never be resolved against
+    # Bloomberg's package index -- only the dedicated blpapi step above does.
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+    command = lw.build_install_command(venv_py)
+    assert lw._BLOOMBERG_PACKAGE_INDEX_URL not in command
+
+
+def test_install_bloomberg_dependency_runs_the_bloomberg_index_command(tmp_path):
+    calls = []
+
+    def _run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+    lw.install_bloomberg_dependency(venv_py, run=_run)
+
+    assert calls == [lw.build_bloomberg_install_command(venv_py)]
+
+
+def test_install_bloomberg_dependency_failure_is_visible_and_actionable(tmp_path):
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command, 1, stdout="", stderr="No matching distribution found for blpapi"
+        )
+
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+    with pytest.raises(lw.LauncherError, match="No matching distribution found for blpapi"):
+        lw.install_bloomberg_dependency(venv_py, run=_run)
+
+
+def test_bloomberg_dependency_missing_true_on_import_failure(tmp_path):
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="ModuleNotFoundError")
+
+    assert lw.bloomberg_dependency_missing(venv_py, run=_run) is True
+
+
+def test_bloomberg_dependency_missing_false_when_blpapi_imports(tmp_path):
+    venv_py = tmp_path / ".venv" / "bin" / "python"
+
+    def _run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    assert lw.bloomberg_dependency_missing(venv_py, run=_run) is False
+
+
+def test_expected_api_contract_id_matches_the_server_modules_own_value():
+    # These two literals are deliberately duplicated (the launcher cannot
+    # import the server module -- see the docstring on
+    # _EXPECTED_API_CONTRACT_ID) but must always agree, or classify_port()
+    # would never recognize this launcher's own server as "ours" again.
+    from shiori_pricing_lab.app import standalone_option_workbench_server as server_module
+
+    assert lw._EXPECTED_API_CONTRACT_ID == server_module.API_CONTRACT_ID
+
+
 # --- Port classification / readiness polling -------------------------------------
 
 
@@ -478,6 +557,7 @@ def _patch_happy_path(monkeypatch, call_order, process=None):
     monkeypatch.setattr(lw, "select_interpreter_command", lambda: ["python"])
     monkeypatch.setattr(lw, "ensure_venv", lambda root, interpreter: Path("/fake/venv/python"))
     monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(lw, "bloomberg_dependency_missing", lambda venv_py: False)
 
     def _start_server_process(venv_py, root):
         call_order.append("start_server_process")
@@ -496,6 +576,34 @@ def _patch_happy_path(monkeypatch, call_order, process=None):
     monkeypatch.setattr(lw, "start_server_process", _start_server_process)
     monkeypatch.setattr(lw, "wait_for_server_ready", _wait_for_server_ready)
     monkeypatch.setattr(lw, "open_browser", _open_browser)
+
+
+def test_run_installs_bloomberg_dependency_when_missing(monkeypatch):
+    call_order = []
+    monkeypatch.setattr(lw, "check_python_version", lambda: None)
+    monkeypatch.setattr(lw, "classify_port", lambda url: "not_listening")
+    monkeypatch.setattr(lw, "select_interpreter_command", lambda: ["python"])
+    monkeypatch.setattr(lw, "ensure_venv", lambda root, interpreter: Path("/fake/venv/python"))
+    monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(lw, "bloomberg_dependency_missing", lambda venv_py: True)
+    monkeypatch.setattr(
+        lw,
+        "install_bloomberg_dependency",
+        lambda venv_py: call_order.append("install_bloomberg_dependency"),
+    )
+    monkeypatch.setattr(
+        lw,
+        "start_server_process",
+        lambda venv_py, root: types.SimpleNamespace(
+            terminate=lambda: None, wait=lambda timeout=None: None
+        ),
+    )
+    monkeypatch.setattr(lw, "wait_for_server_ready", lambda url, process=None: "ready")
+
+    exit_code = lw.run(["--no-browser"])
+
+    assert exit_code == 0
+    assert call_order == ["install_bloomberg_dependency"]
 
 
 def test_run_creates_the_venv_with_the_already_running_interpreter(monkeypatch):
@@ -524,6 +632,7 @@ def test_run_creates_the_venv_with_the_already_running_interpreter(monkeypatch):
 
     monkeypatch.setattr(lw, "ensure_venv", _ensure_venv)
     monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(lw, "bloomberg_dependency_missing", lambda venv_py: False)
     monkeypatch.setattr(
         lw,
         "start_server_process",
@@ -596,6 +705,8 @@ def test_occupied_port_does_not_install_start_or_terminate_anything(monkeypatch)
     monkeypatch.setattr(lw, "ensure_venv", _must_not_be_called)
     monkeypatch.setattr(lw, "dependencies_missing", _must_not_be_called)
     monkeypatch.setattr(lw, "install_dependencies", _must_not_be_called)
+    monkeypatch.setattr(lw, "bloomberg_dependency_missing", _must_not_be_called)
+    monkeypatch.setattr(lw, "install_bloomberg_dependency", _must_not_be_called)
     monkeypatch.setattr(lw, "start_server_process", _must_not_be_called)
     monkeypatch.setattr(lw, "open_browser", _must_not_be_called)
 
@@ -662,6 +773,7 @@ def test_readiness_timeout_terminates_the_started_process_and_reports_error(monk
     monkeypatch.setattr(lw, "select_interpreter_command", lambda: ["python"])
     monkeypatch.setattr(lw, "ensure_venv", lambda root, interpreter: Path("/fake/venv/python"))
     monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(lw, "bloomberg_dependency_missing", lambda venv_py: False)
     monkeypatch.setattr(
         lw,
         "start_server_process",
@@ -692,6 +804,7 @@ def test_readiness_early_exit_reports_exit_code_and_server_output(monkeypatch, c
     monkeypatch.setattr(lw, "select_interpreter_command", lambda: ["python"])
     monkeypatch.setattr(lw, "ensure_venv", lambda root, interpreter: Path("/fake/venv/python"))
     monkeypatch.setattr(lw, "dependencies_missing", lambda venv_py: False)
+    monkeypatch.setattr(lw, "bloomberg_dependency_missing", lambda venv_py: False)
     monkeypatch.setattr(
         lw,
         "start_server_process",

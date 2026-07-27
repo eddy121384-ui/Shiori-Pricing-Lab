@@ -90,12 +90,47 @@ is not currently called by any of them), no forward price, no
 calculation of any kind, no provider interface, base class, factory,
 registry, cache, configuration framework, persistence, or compatibility
 wrapper. ``BLIBondQuote`` and its sibling schemas are unmodified.
+
+**Instrument-first Bloomberg lookup (added alongside, not in place of, the
+above):** :func:`load_bloomberg_bond_identity_and_quote` resolves one bond's
+own identity (``ID_ISIN``, ``ID_CUSIP``, name) and one quote side's price
+via a symbology-qualified identifier (``/isin/...`` or ``/cusip/...``) the
+caller has already validated, with no expected-ISIN verification (there is
+no case yet to verify against) -- the entry point for a trader who wants to
+find a bond by ISIN/CUSIP before any Case JSON exists. Deliberately a
+separate, self-contained implementation rather than sharing
+:func:`load_bloomberg_bond_quote`'s internals, so that function's production
+behavior is never put at risk by this one's needs.
+
+**Bond Master fields (PR #141 third revision).** The same lookup also
+returns a best-effort ``"bond_master"`` dict covering every
+``BondReferenceData`` field (coupon, coupon frequency, issue/maturity/first/
+last coupon dates, redemption amount, callable/sinkable flags, bond type,
+yield convention, business-day convention). No Bloomberg mnemonic is guessed
+into production use: only the seven mnemonics Eddy explicitly confirmed
+against real Bloomberg DAPI responses for a US Treasury (``US91282CLJ89``)
+and a UK Gilt (``GB00BFX0ZL78``) are enabled in ``_BOND_MASTER_FIELD_MAP``
+(``CPN``, ``CPN_FREQ``, ``ISSUE_DT``, ``MATURITY``, ``FIRST_CPN_DT``,
+``CALLABLE``, ``SINKABLE`` -- see PR #141's body for his evidence and that
+map's own docstring for each field's exact value-transform rule). Every
+other ``BondReferenceData`` field stays ``None`` until Eddy confirms a
+mnemonic for it the same way via ``tools/bloomberg_dapi_probe.py``. A second,
+separate dict, ``"bond_master_raw"``, carries three further mnemonics
+(``DAY_CNT_DES``, ``MTY_TYP``, ``CALC_TYP_DES``) Eddy confirmed return a
+value but are *not* safe to coerce into a typed ``BondReferenceData`` field
+(e.g. ``"ACT/ACT"`` must never be auto-converted to ``ACT_ACT_ISDA``) --
+these are display-only, for Instrument Details, and must never be written
+into ``bond_master`` or any typed schema. A Bond Master field's absence,
+field exception, or simply not being mapped yet never fails the request --
+unlike the seven required identity/quote fields above, which still make this
+call succeed or fail as a whole exactly as before.
 """
 
 from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 
 from shiori_pricing_lab.data._validation import _require_non_blank
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLIMarketDataStatus, BLIQuoteBasis
@@ -140,6 +175,38 @@ class BLIBloombergDapiError(RuntimeError):
     caller-remediation outcome ("Bloomberg DAPI did not return one usable
     quote"), not distinct conditions a caller would remediate differently.
     """
+
+
+def parse_bond_identifier(raw: str) -> tuple[str, str]:
+    """Parse a trader-entered bond identifier into a Bloomberg symbology-qualified string.
+
+    Instrument-first Bloomberg lookup: the trader enters a plain ISIN or
+    CUSIP -- never a Bloomberg yellow-key ticker (e.g. ``"... Govt"``), and
+    this function never guesses, infers, or appends one. ``raw`` is trimmed
+    of outer whitespace and uppercased; exactly 12 remaining alphanumeric
+    characters is treated as an ISIN, exactly 9 as a CUSIP. Every other
+    length or any non-alphanumeric character is rejected outright with a
+    ``ValueError`` naming the original input -- there is no fallback format.
+
+    Returns ``(kind, bloomberg_identifier)`` where ``kind`` is ``"ISIN"`` or
+    ``"CUSIP"`` and ``bloomberg_identifier`` is the symbology-qualified
+    string Bloomberg DAPI accepts directly as a "securities" entry
+    (``"/isin/<ISIN>"`` or ``"/cusip/<CUSIP>"``) -- this internal request
+    string is meant for :func:`load_bloomberg_bond_identity_and_quote` only,
+    never for display in an editable UI field.
+    """
+
+    if not isinstance(raw, str):
+        raise ValueError("bond identifier must be a string")
+    normalized = raw.strip().upper()
+    if len(normalized) == 12 and normalized.isalnum():
+        return "ISIN", f"/isin/{normalized}"
+    if len(normalized) == 9 and normalized.isalnum():
+        return "CUSIP", f"/cusip/{normalized}"
+    raise ValueError(
+        "bond identifier must be a 12-character ISIN or a 9-character CUSIP "
+        f"(alphanumeric only), got {raw!r}"
+    )
 
 
 def load_bloomberg_bond_quote(
@@ -347,6 +414,419 @@ def load_bloomberg_bond_quote(
         clean_price_per_100=clean_price_per_100,
         accrued_interest_per_100=accrued_interest_per_100,
     )
+
+
+_NAME_FIELD = "NAME"
+_SECURITY_DESCRIPTION_FIELD = "SECURITY_DES"
+_CUSIP_FIELD = "ID_CUSIP"
+
+def _coupon_from_bloomberg_percent(raw: str) -> float | None:
+    """CPN -- Bloomberg returns a percentage point (e.g. ``"3.75"``);
+    ``BondReferenceData.coupon`` is a decimal fraction (``0.0375``). Any
+    value that does not parse as a finite number is ``None``, never
+    guessed."""
+
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value / 100.0
+
+
+_CONFIRMED_COUPON_FREQUENCY_CODES = {
+    "1": "ANNUAL",
+    "2": "SEMI_ANNUAL",
+    "4": "QUARTERLY",
+    "12": "MONTHLY",
+}
+
+
+def _coupon_frequency_from_bloomberg_code(raw: str) -> str | None:
+    """CPN_FREQ -- only the four codes Eddy confirmed (1/2/4/12) map to a
+    ``Frequency`` enum value; any other code stays ``None`` rather than
+    guessed."""
+
+    return _CONFIRMED_COUPON_FREQUENCY_CODES.get(raw.strip())
+
+
+_CONFIRMED_YES_NO_FLAGS = {"Y": True, "N": False}
+
+
+def _boolean_flag_from_bloomberg_yes_no(raw: str) -> bool | None:
+    """CALLABLE / SINKABLE -- only exact ``"Y"``/``"N"`` map to
+    ``True``/``False`` (Eddy's confirmed convention, not normalized/
+    case-folded); any other value stays ``None`` rather than guessed."""
+
+    return _CONFIRMED_YES_NO_FLAGS.get(raw.strip())
+
+
+def _passthrough_bloomberg_string(raw: str) -> str:
+    """ISSUE_DT / MATURITY / FIRST_CPN_DT -- Eddy confirmed these mnemonics
+    resolve correctly for a real security; no date-format conversion is
+    applied here (that would be a separate, explicit decision) -- the raw
+    Bloomberg string passes through unchanged."""
+
+    return raw
+
+
+# --- Bond Master (bond_reference_data_universe) fields, PR #141 ------------
+#
+# Third revision: Eddy confirmed the following mnemonics against real
+# Bloomberg DAPI responses for a US Treasury (US91282CLJ89) and a UK Gilt
+# (GB00BFX0ZL78) -- see PR #141's body for his evidence. Only what he
+# explicitly confirmed is enabled below; every value transform is exactly
+# what he specified, never an inferred/guessed conversion:
+#
+# - CPN -> coupon: Bloomberg returns a percentage point (e.g. "3.75",
+#   "1.625"); divided by 100 to Shiori's decimal fraction (0.0375, 0.01625).
+# - CPN_FREQ -> coupon_frequency: only codes 1/2/4/12 map to
+#   ANNUAL/SEMI_ANNUAL/QUARTERLY/MONTHLY; any other code is None, never
+#   guessed.
+# - ISSUE_DT -> issue_date, MATURITY -> maturity_date,
+#   FIRST_CPN_DT -> first_coupon_date: passed through verbatim, no date-
+#   format conversion (that would be a separate, explicit decision).
+# - CALLABLE / SINKABLE -> callable_flag / sinkable_flag: only exact "Y"/"N"
+#   map to True/False; any other value is None, never guessed.
+#
+# Explicitly rejected, never added to this map or the request below:
+# PENULTIMATE_COUPON_DATE and REDEMPTION_VALUE both came back as a
+# confirmed BAD_FLD field exception against both test securities -- they
+# must not be re-added without a fresh, separately-approved confirmation.
+#
+# Still None (no confirmed-safe mnemonic or mapping at all):
+# last_coupon_date, redemption_amount, business_day_convention, bond_type,
+# yield_convention, ex_dividend_days, status. day_count, bond type, and
+# yield/calculation convention specifically must never be *inferred* from
+# DAY_CNT_DES / MTY_TYP / CALC_TYP_DES (e.g. "ACT/ACT" -> ACT_ACT_ISDA,
+# "NORMAL"/"AT MATURITY" -> FIXED_COUPON_BULLET, "STREET CONVENTION" /
+# "UK:BUMP/DMO METHOD" -> a yield convention) -- those three raw strings are
+# shown to the trader verbatim instead (see _BOND_MASTER_RAW_DISPLAY_FIELD_MAP
+# below), never coerced into a Shiori enum.
+#
+# Keys are BondReferenceData's own field names verbatim (never invented);
+# every one of them is always a key in the returned "bond_master" dict
+# regardless of how many entries this map currently has, so a caller never
+# has to guess which keys might be present -- an unmapped, absent, or
+# field-exceptioned value is simply None, exactly like a genuine
+# Bloomberg-side miss (never let one bad/unconfirmed field take down the
+# rest of an otherwise-successful lookup). Add a new
+# `destination_field: (mnemonic, transform)` entry only after Eddy confirms
+# it on his own Bloomberg workstation.
+_BOND_MASTER_FIELD_MAP: dict[str, tuple[str, Callable[[str], object | None]]] = {
+    "coupon": ("CPN", _coupon_from_bloomberg_percent),
+    "coupon_frequency": ("CPN_FREQ", _coupon_frequency_from_bloomberg_code),
+    "issue_date": ("ISSUE_DT", _passthrough_bloomberg_string),
+    "maturity_date": ("MATURITY", _passthrough_bloomberg_string),
+    "first_coupon_date": ("FIRST_CPN_DT", _passthrough_bloomberg_string),
+    "callable_flag": ("CALLABLE", _boolean_flag_from_bloomberg_yes_no),
+    "sinkable_flag": ("SINKABLE", _boolean_flag_from_bloomberg_yes_no),
+}
+
+_BOND_MASTER_DESTINATION_FIELDS = (
+    "coupon",
+    "coupon_frequency",
+    "issue_date",
+    "maturity_date",
+    "day_count",
+    "first_coupon_date",
+    "last_coupon_date",
+    "redemption_amount",
+    "callable_flag",
+    "sinkable_flag",
+    "bond_type",
+    "yield_convention",
+    "business_day_convention",
+)
+
+# Confirmed Bloomberg mnemonics whose *raw string value* Eddy approved for
+# display only -- never coerced into a BondReferenceData typed field (see
+# the "never infer" list above). Shown in Instrument Details as "Bloomberg
+# Day Count" / "Bloomberg Maturity Type" / "Bloomberg Calculation Type".
+_BOND_MASTER_RAW_DISPLAY_FIELD_MAP: dict[str, str] = {
+    "day_count": "DAY_CNT_DES",
+    "maturity_type": "MTY_TYP",
+    "calc_type": "CALC_TYP_DES",
+}
+
+
+def load_bloomberg_bond_identity_and_quote(
+    *,
+    identifier: str,
+    quote_side: TreasuryFTPQuoteSide,
+) -> dict:
+    """Load one live Bloomberg bond's identity and quote via a symbology-qualified identifier.
+
+    Instrument-first Bloomberg lookup entry point: ``identifier`` must
+    already be a Bloomberg symbology-qualified security string --
+    ``/isin/<12-character ISIN>`` or ``/cusip/<9-character CUSIP>`` --
+    constructed by the caller from a bounded, validated identifier (see the
+    workbench's own bond-identifier parser). This function never guesses,
+    appends, or falls back to a yellow-key ticker (e.g. ``"... Govt"``):
+    whatever Bloomberg DAPI reports for the exact identifier given is
+    reported back unchanged, success or failure, with no fallback chain.
+
+    Unlike :func:`load_bloomberg_bond_quote`, this function takes no
+    caller-supplied expected ISIN to verify against -- there is no active
+    pricing case yet at this point in the workflow; it exists purely to
+    resolve one bond's own identity (its canonical ``ID_ISIN``, ``ID_CUSIP``,
+    and a human-readable name) alongside one quote side's clean price and
+    accrued interest, before any Case JSON has been loaded.
+
+    Returns one complete result as a dict with keys ``"isin"``, ``"cusip"``,
+    ``"name"``, ``"currency"``, ``"quote_side"``, ``"clean_price_per_100"``,
+    ``"accrued_interest_per_100"`` -- never a partial one for these seven --
+    plus two Bond Master dicts (PR #141 third revision):
+
+    - ``"bond_master"``: one key per ``BondReferenceData`` field this lookup
+      can ever populate (``_BOND_MASTER_DESTINATION_FIELDS``). Seven of them
+      (``coupon``, ``coupon_frequency``, ``issue_date``, ``maturity_date``,
+      ``first_coupon_date``, ``callable_flag``, ``sinkable_flag``) are
+      populated from the mnemonics Eddy confirmed against real Bloomberg DAPI
+      responses (see ``_BOND_MASTER_FIELD_MAP``'s own docstring for each
+      field's exact value-transform rule); every other key is ``None`` until
+      Eddy confirms a mnemonic for it the same way.
+    - ``"bond_master_raw"``: three further Bloomberg mnemonics
+      (``DAY_CNT_DES``, ``MTY_TYP``, ``CALC_TYP_DES``) Eddy confirmed return a
+      value but are display-only -- never coerced into a typed
+      ``BondReferenceData`` field (e.g. ``"ACT/ACT"`` is never auto-converted
+      to ``ACT_ACT_ISDA``). Keyed by ``"day_count"``, ``"maturity_type"``,
+      ``"calc_type"``; a caller must never write these into ``bond_master``
+      or any typed schema.
+
+    Unlike the seven required fields above, a Bond Master field (typed or
+    raw) that is absent, field-exceptioned, or simply not yet mapped is
+    reported as ``None`` and never fails the request -- the identity/quote
+    result this function has always returned is never put at risk by an
+    unconfirmed or unentitled Bond Master field. ``"name"`` prefers
+    Bloomberg's ``SECURITY_DES`` (a human-readable security description),
+    falling back to ``NAME`` only if ``SECURITY_DES`` itself is blank.
+
+    Raises ``ValueError`` if ``identifier`` is blank or ``quote_side`` is not
+    a valid ``TreasuryFTPQuoteSide``. Raises ``BLIBloombergDapiError`` for
+    every Bloomberg-side failure on the seven required fields, with the same
+    session-lifecycle, exactly-one-record, security-identity, security-
+    level-error, and malformed-element handling as
+    :func:`load_bloomberg_bond_quote` -- deliberately a separate, self-
+    contained implementation rather than a shared one, so that function's
+    own production behavior and extensive existing test coverage are never
+    put at risk by this one's needs.
+    """
+
+    _require_non_blank(identifier, "identifier")
+    quote_side = coerce_enum(quote_side, TreasuryFTPQuoteSide, "quote_side")
+    price_field = _PRICE_FIELD_BY_QUOTE_SIDE[quote_side]
+
+    try:
+        import blpapi
+    except ImportError as exc:
+        raise BLIBloombergDapiError(
+            "blpapi is not installed -- Bloomberg's official blpapi package is "
+            "required in this environment to load a live Bloomberg bond identity/quote"
+        ) from exc
+
+    session_options = blpapi.SessionOptions()
+    session_options.setServerHost(_DAPI_HOST)
+    session_options.setServerPort(_DAPI_PORT)
+    session = blpapi.Session(session_options)
+
+    try:
+        if not session.start():
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
+                "-- confirm a Bloomberg Terminal is running and logged in locally"
+            )
+
+        if not session.openService(_REFDATA_SERVICE):
+            raise BLIBloombergDapiError(f"Bloomberg DAPI failed to open service {_REFDATA_SERVICE}")
+
+        service = session.getService(_REFDATA_SERVICE)
+        request = service.createRequest("ReferenceDataRequest")
+        request.append("securities", identifier)
+        request.append("fields", _ISIN_FIELD)
+        request.append("fields", _CUSIP_FIELD)
+        request.append("fields", _NAME_FIELD)
+        request.append("fields", _SECURITY_DESCRIPTION_FIELD)
+        request.append("fields", _CURRENCY_FIELD)
+        request.append("fields", price_field)
+        request.append("fields", _ACCRUED_INTEREST_FIELD)
+        # Confirmed Bond Master fields (typed schema, via _BOND_MASTER_FIELD_MAP)
+        # plus confirmed raw display-only fields (_BOND_MASTER_RAW_DISPLAY_FIELD_MAP)
+        # -- both requested in the same call; see their own docstrings above.
+        for bloomberg_mnemonic, _transform in _BOND_MASTER_FIELD_MAP.values():
+            request.append("fields", bloomberg_mnemonic)
+        for bloomberg_mnemonic in _BOND_MASTER_RAW_DISPLAY_FIELD_MAP.values():
+            request.append("fields", bloomberg_mnemonic)
+
+        session.sendRequest(request)
+
+        security_data_records = []
+
+        deadline = _monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
+        done = False
+        while not done:
+            remaining_seconds = deadline - _monotonic()
+            if remaining_seconds <= 0:
+                raise BLIBloombergDapiError(
+                    f"Bloomberg DAPI request timed out waiting for a response for {identifier!r}"
+                )
+            remaining_ms = max(1, int(remaining_seconds * 1000))
+            event = session.nextEvent(remaining_ms)
+
+            if event.eventType() == blpapi.Event.TIMEOUT:
+                raise BLIBloombergDapiError(
+                    f"Bloomberg DAPI request timed out waiting for a response for {identifier!r}"
+                )
+
+            if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
+                continue
+
+            for msg in event:
+                if msg.hasElement("responseError"):
+                    raise BLIBloombergDapiError(
+                        f"Bloomberg DAPI responseError for {identifier!r}: "
+                        f"{msg.getElement('responseError')}"
+                    )
+
+                security_data_array = msg.getElement("securityData")
+                for i in range(security_data_array.numValues()):
+                    security_data_records.append(security_data_array.getValueAsElement(i))
+
+            if event.eventType() == blpapi.Event.RESPONSE:
+                done = True
+    finally:
+        session.stop()
+
+    if len(security_data_records) == 0:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI returned zero securityData records for {identifier!r}, "
+            "expected exactly one"
+        )
+    if len(security_data_records) > 1:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI returned {len(security_data_records)} securityData records for "
+            f"{identifier!r}, expected exactly one"
+        )
+
+    security_data = security_data_records[0]
+
+    if not security_data.hasElement(_SECURITY_IDENTIFIER_FIELD):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI securityData record for {identifier!r} is missing its own "
+            "security identifier"
+        )
+    returned_security = _get_element_as_string(
+        blpapi, security_data, _SECURITY_IDENTIFIER_FIELD, identifier
+    )
+    if returned_security != identifier:
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI securityData record identifier {returned_security!r} does not "
+            f"match requested identifier {identifier!r}"
+        )
+
+    if security_data.hasElement("securityError"):
+        raise BLIBloombergDapiError(
+            f"Bloomberg DAPI securityError for {identifier!r}: "
+            f"{security_data.getElement('securityError')}"
+        )
+
+    # No blanket "any field exception fails the whole request" check here
+    # (unlike load_bloomberg_bond_quote, whose fields are all required and
+    # size-of-seven): the Bond Master fields added below are best-effort and
+    # must be able to fail individually -- a field exception on one of them
+    # must never take down the already-reliable identity/quote fields. Each
+    # required field's own presence in fieldData is still independently
+    # enforced by _require_field immediately below (a field exception always
+    # means the field is simply absent from fieldData), so required-field
+    # strictness is unchanged.
+    field_data = security_data.getElement("fieldData")
+
+    def _require_field(field_name: str) -> str:
+        if not field_data.hasElement(field_name):
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI response for {identifier!r} is missing {field_name}"
+            )
+        raw_value = _get_element_as_string(blpapi, field_data, field_name, identifier)
+        if not raw_value:
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI response for {identifier!r} is missing {field_name}"
+            )
+        return raw_value
+
+    def _optional_field(field_name: str) -> str | None:
+        """Best-effort read: absent, blank, or a malformed value all become
+        ``None`` rather than aborting the request -- unlike ``_require_field``,
+        used only for the not-yet-confirmed Bond Master fields in
+        ``_BOND_MASTER_FIELD_MAP``. Returns the raw Bloomberg string verbatim
+        (no numeric/enum coercion) -- deciding how to parse a field's value
+        is a separate, explicit step for once its mnemonic is confirmed."""
+
+        if not field_data.hasElement(field_name):
+            return None
+        try:
+            raw_value = _get_element_as_string(blpapi, field_data, field_name, identifier)
+        except BLIBloombergDapiError:
+            return None
+        return raw_value or None
+
+    raw_isin = _require_field(_ISIN_FIELD)
+    raw_cusip = _require_field(_CUSIP_FIELD)
+    raw_currency = _require_field(_CURRENCY_FIELD)
+    raw_price = _require_field(price_field)
+    raw_accrued = _require_field(_ACCRUED_INTEREST_FIELD)
+
+    # SECURITY_DES (a human-readable security description) is preferred for
+    # display; NAME is used only if SECURITY_DES itself is blank. Both are
+    # still required fields overall -- a response missing both fails
+    # outright rather than silently substituting an empty name.
+    raw_name = ""
+    if field_data.hasElement(_SECURITY_DESCRIPTION_FIELD):
+        raw_name = _get_element_as_string(
+            blpapi, field_data, _SECURITY_DESCRIPTION_FIELD, identifier
+        )
+    if not raw_name:
+        raw_name = _require_field(_NAME_FIELD)
+
+    clean_price_per_100 = _parse_finite_float(raw_price, price_field)
+    accrued_interest_per_100 = _parse_finite_float(raw_accrued, _ACCRUED_INTEREST_FIELD)
+
+    # Every BondReferenceData destination is always a key here, whether or
+    # not _BOND_MASTER_FIELD_MAP currently has a confirmed mnemonic for it --
+    # an unmapped, absent, or field-exceptioned one is simply None, exactly
+    # like a genuine Bloomberg-side miss (never a fabricated/synthetic value).
+    # A field with a confirmed mnemonic still becomes None if its raw value
+    # doesn't match that field's own transform's confirmed cases -- never a
+    # guessed/normalized fallback.
+    bond_master: dict[str, object | None] = {}
+    for destination_field in _BOND_MASTER_DESTINATION_FIELDS:
+        mapping = _BOND_MASTER_FIELD_MAP.get(destination_field)
+        if mapping is None:
+            bond_master[destination_field] = None
+            continue
+        bloomberg_mnemonic, transform = mapping
+        raw_value = _optional_field(bloomberg_mnemonic)
+        bond_master[destination_field] = transform(raw_value) if raw_value is not None else None
+
+    # Raw display-only fields (never coerced into a typed schema): confirmed
+    # to return a value, but not safe to map into a BondReferenceData enum --
+    # see _BOND_MASTER_RAW_DISPLAY_FIELD_MAP's own docstring above.
+    bond_master_raw: dict[str, str | None] = {
+        display_field: _optional_field(bloomberg_mnemonic)
+        for display_field, bloomberg_mnemonic in _BOND_MASTER_RAW_DISPLAY_FIELD_MAP.items()
+    }
+
+    return {
+        "isin": raw_isin,
+        "cusip": raw_cusip,
+        "name": raw_name,
+        "currency": raw_currency,
+        "quote_side": quote_side.value,
+        "clean_price_per_100": clean_price_per_100,
+        "accrued_interest_per_100": accrued_interest_per_100,
+        "bond_master": bond_master,
+        "bond_master_raw": bond_master_raw,
+    }
 
 
 def _get_element_as_string(blpapi, element, field_name: str, security: str) -> str:
