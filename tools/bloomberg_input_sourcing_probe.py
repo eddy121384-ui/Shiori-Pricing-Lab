@@ -551,10 +551,11 @@ INPUT_ROWS: tuple[InputRow, ...] = (
                 disclosure=MARKET_LEVEL,
                 typed_mapping_safe=False,
                 note=(
-                    "Sent bare unless --override was supplied, so the run records what "
-                    "Bloomberg itself demands instead of a guessed override name. A "
-                    "returned number stays DISPLAY_ONLY until quote side, override set, "
-                    "unit and acquisition timestamp are separately confirmed."
+                    "The run discovers this field's own documented overrides and sends the "
+                    "ones whose meaning Eddy has confirmed (OP046 pricing model, OP188 "
+                    "valuation date); OP131 is the equity/index dividend yield and is never "
+                    "sent. A returned number still stays DISPLAY_ONLY until quote side, unit "
+                    "and Bloomberg's own as-of timestamp are separately confirmed."
                 ),
             ),
         ),
@@ -747,6 +748,8 @@ class DiscoveryEvidence:
 OVERRIDE_APPLIED = "OVERRIDE_APPLIED"
 OVERRIDE_ROLE_UNRESOLVED = "OVERRIDE_ROLE_UNRESOLVED"
 OVERRIDE_FIXTURE_MISSING = "OVERRIDE_FIXTURE_MISSING"
+OVERRIDE_VALUE_UNCONFIRMED = "OVERRIDE_VALUE_UNCONFIRMED"
+OVERRIDE_NOT_APPLICABLE = "OVERRIDE_NOT_APPLICABLE"
 
 # The option context this probe sends when a discovered override's role is
 # approved: the repo's own committed, synthetic standalone-option case. No
@@ -768,17 +771,53 @@ _FIXTURE_ROLE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("expiry_timestamp", ("expiry_timestamp",)),
     ("forward_settlement_date", ("forward_settlement_date",)),
     ("option_settlement_date", ("option_settlement_date",)),
+    ("valuation_date", ("valuation_date",)),
 )
 
-# Bloomberg override field id -> option-context role. **Deliberately empty.**
-# The run discovers which overrides a field documents from Bloomberg itself
-# (see `describe_fields`); what an override *means* is a semantic question
-# #149 forbids guessing, so an entry appears here only after Eddy confirms
-# that meaning. Adding one entry is the whole change needed -- the next
-# ordinary run then sends that override automatically, with its value taken
-# from the fixture above. Until then the override is reported
-# OVERRIDE_ROLE_UNRESOLVED, never handed to the user as a lookup task.
-APPROVED_OVERRIDE_ROLES: dict[str, str] = {}
+# Roles whose value is a fixed documented constant rather than a value read
+# out of the option case (which carries a trade's own terms, not a model
+# choice).
+_FIXED_ROLE_NAMES = ("pricing_model",)
+
+# The exact override value for each fixed role, recorded verbatim from
+# Bloomberg's own documentation -- never guessed, never inferred from a
+# label. `pricing_model` is the Black bond-option model Eddy confirmed on
+# the workstation; its exact token has to be recorded here before the probe
+# will send it. While a fixed role has no recorded token, its override is
+# reported OVERRIDE_VALUE_UNCONFIRMED and simply not sent -- the rest of the
+# run, including every other override, still proceeds.
+FIXED_ROLE_VALUES: dict[str, str] = {}
+
+# Overrides confirmed on the workstation as *not* belonging on a bond-option
+# request, with the reason. Checked before APPROVED_OVERRIDE_ROLES and before
+# any --override, so one of these can never be sent by a later role entry or
+# by a command-line argument.
+NEVER_MAPPED_OVERRIDES: dict[str, str] = {
+    "OP131": (
+        "Confirmed on the Bloomberg workstation as the equity / index dividend yield "
+        "override. It is not a bond-option input, is mapped to no Shiori role, and is "
+        "never sent with these requests."
+    ),
+}
+
+# Bloomberg override field id -> option-context role. An entry appears here
+# only after Eddy confirms that override's meaning on the workstation --
+# what an override *means* is a semantic question #149 forbids guessing, and
+# the run's own metadata discovery (see `describe_fields`) records what
+# Bloomberg publishes without ever deciding a role. Once an entry exists,
+# every later ordinary run sends that override automatically with its value
+# from the option case or from FIXED_ROLE_VALUES; an override with no entry
+# is reported OVERRIDE_ROLE_UNRESOLVED, never handed to the user as a lookup
+# task.
+#
+# Workstation-confirmed (Issue #149):
+# - OP046 is the pricing model; Bloomberg's documentation fixes it to the
+#   Black bond-option model for this route.
+# - OP188 is the valuation date, which is Shiori's own valuation date.
+APPROVED_OVERRIDE_ROLES: dict[str, str] = {
+    "OP046": "pricing_model",
+    "OP188": "valuation_date",
+}
 
 
 def _utc_now() -> str:
@@ -919,7 +958,7 @@ def discover_option_context_metadata(
 
 def plan_overrides(
     discovery: DiscoveryEvidence,
-    fixture: dict[str, str],
+    context: dict[str, str],
     user_overrides: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[OverridePlanEntry, ...], tuple[AppliedOverride, ...]]:
     """Turn discovered override ids plus the fixture into the overrides actually sent.
@@ -944,6 +983,24 @@ def plan_overrides(
     applied: list[AppliedOverride] = []
 
     for override_field, fields in required_by.items():
+        if override_field in NEVER_MAPPED_OVERRIDES:
+            plan.append(
+                OverridePlanEntry(
+                    override_field=override_field,
+                    required_by=tuple(fields),
+                    status=OVERRIDE_NOT_APPLICABLE,
+                    role=None,
+                    source=None,
+                    note=NEVER_MAPPED_OVERRIDES[override_field]
+                    + (
+                        " A --override for it was ignored."
+                        if override_field in user_supplied
+                        else ""
+                    ),
+                    metadata=metadata_by_field.get(override_field),
+                )
+            )
+            continue
         if override_field in user_supplied:
             applied.append(
                 AppliedOverride(
@@ -1003,24 +1060,37 @@ def plan_overrides(
                 )
             )
             continue
-        if role not in fixture:
+        is_fixed_role = role in _FIXED_ROLE_NAMES
+        if role not in context:
             plan.append(
                 OverridePlanEntry(
                     override_field=override_field,
                     required_by=tuple(fields),
-                    status=OVERRIDE_FIXTURE_MISSING,
+                    status=(
+                        OVERRIDE_VALUE_UNCONFIRMED if is_fixed_role else OVERRIDE_FIXTURE_MISSING
+                    ),
                     role=role,
                     source=None,
                     note=(
-                        f"Role {role!r} is approved for this override but the option-context "
-                        "fixture supplied no value for it, so nothing was sent."
+                        (
+                            f"Role {role!r} is confirmed for this override, but its exact "
+                            "Bloomberg value is not recorded in FIXED_ROLE_VALUES yet, so "
+                            "nothing was sent. The token must be transcribed from Bloomberg's "
+                            "own documentation -- this probe will not guess it."
+                        )
+                        if is_fixed_role
+                        else (
+                            f"Role {role!r} is approved for this override but the option-context "
+                            "fixture supplied no value for it, so nothing was sent."
+                        )
                     ),
                     metadata=metadata_by_field.get(override_field),
                 )
             )
             continue
+        source = f"{'fixed' if is_fixed_role else 'fixture'}:{role}"
         applied.append(
-            AppliedOverride(field=override_field, value=fixture[role], source=f"fixture:{role}")
+            AppliedOverride(field=override_field, value=context[role], source=source)
         )
         plan.append(
             OverridePlanEntry(
@@ -1028,14 +1098,34 @@ def plan_overrides(
                 required_by=tuple(fields),
                 status=OVERRIDE_APPLIED,
                 role=role,
-                source=f"fixture:{role}",
-                note="Applied automatically from the committed synthetic option case.",
+                source=source,
+                note=(
+                    "Applied automatically from the documented fixed value for this role."
+                    if is_fixed_role
+                    else "Applied automatically from the committed synthetic option case."
+                ),
                 metadata=metadata_by_field.get(override_field),
             )
         )
 
     for override_field, value in user_overrides:
         if override_field in required_by:
+            continue
+        if override_field in NEVER_MAPPED_OVERRIDES:
+            plan.append(
+                OverridePlanEntry(
+                    override_field=override_field,
+                    required_by=(),
+                    status=OVERRIDE_NOT_APPLICABLE,
+                    role=None,
+                    source=None,
+                    note=(
+                        NEVER_MAPPED_OVERRIDES[override_field]
+                        + " A --override for it was ignored."
+                    ),
+                    metadata=metadata_by_field.get(override_field),
+                )
+            )
             continue
         applied.append(
             AppliedOverride(field=override_field, value=value, source="user_supplied")
@@ -1797,7 +1887,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         discovery = discover_option_context_metadata()
         override_plan, applied_overrides = plan_overrides(
-            discovery, load_option_context_fixture(), overrides
+            discovery,
+            {**load_option_context_fixture(), **FIXED_ROLE_VALUES},
+            overrides,
         )
         evidence = collect_evidence(identifiers, applied_overrides)
     except ImportError as exc:
@@ -1835,6 +1927,10 @@ def main(argv: list[str] | None = None) -> int:
     print("")
     print(f"{'OVERRIDE IDS DISCOVERED':<30}{len(override_metadata['requested_fields'])}")
     print(f"{'OVERRIDE IDS DESCRIBED':<30}{len(override_metadata['fields'])}")
+    not_applicable = [
+        entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_NOT_APPLICABLE
+    ]
+    print(f"{'OVERRIDE IDS NOT APPLICABLE':<30}{len(not_applicable)}")
     print(f"{'OVERRIDES APPLIED':<30}{len(applied)}")
     print(f"{'OVERRIDE ROLES UNRESOLVED':<30}{len(unresolved_roles)}")
     for entry in applied:
@@ -1852,6 +1948,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  - {entry['override_field']} ({entry['source']}) = {shape}")
     for entry in unresolved_roles:
         print(f"  - {entry['override_field']}: role unconfirmed, not sent")
+    for entry in not_applicable:
+        print(f"  - {entry['override_field']}: not applicable to a bond option, not sent")
+    for entry in report["override_plan"]:
+        if entry["status"] == OVERRIDE_VALUE_UNCONFIRMED:
+            print(
+                f"  - {entry['override_field']} ({entry['role']}): documented value not "
+                "recorded in FIXED_ROLE_VALUES, not sent"
+            )
+
+    option_rows = [
+        row
+        for row in report["inputs"]
+        if any(
+            candidate["request_group"] == OPTION_CONTEXT_GROUP for candidate in row["candidates"]
+        )
+    ]
+    if option_rows:
+        print("")
+        print("Option-context field outcomes:")
+        for row in option_rows:
+            for candidate in row["candidates"]:
+                if candidate["request_group"] != OPTION_CONTEXT_GROUP:
+                    continue
+                for result in candidate["results"]:
+                    print(
+                        f"  - {candidate['mnemonic']} / {result['security']}: "
+                        f"{result['classification']} ({result['evidence']})"
+                    )
 
     request_errors = [
         f"{security['identifier']} / {request['request_group']}: {request['error']}"

@@ -393,10 +393,12 @@ def test_a_declared_disposition_ignores_probe_evidence():
 # --- report contract -----------------------------------------------------------
 
 
-def _default_report(overrides_by_field=None, user_overrides=(), fixture=None):
+def _default_report(overrides_by_field=None, user_overrides=(), context=None):
     probe = _fake_probe({"DAY_CNT_DES": "ACT/ACT", "OPT_UNDL_FORWARD_PX": "98.765432"})
     discovery = _discovery(overrides_by_field)
-    plan, applied = plan_overrides(discovery, fixture or {}, user_overrides)
+    if context is None:
+        context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
+    plan, applied = plan_overrides(discovery, context, user_overrides)
     evidence = collect_evidence(
         module.DEFAULT_IDENTIFIERS, applied, probe=probe, clock=_clock()
     )
@@ -744,7 +746,7 @@ def test_a_failed_override_metadata_pass_keeps_the_first_pass_and_the_probes():
                     field=field,
                     status="described",
                     mnemonic=field,
-                    overrides=("OP046",) if field == "OPT_UNDL_FORWARD_PX" else (),
+                    overrides=("OP999",) if field == "OPT_UNDL_FORWARD_PX" else (),
                 )
                 for field in fields
             ]
@@ -761,7 +763,7 @@ def test_a_failed_override_metadata_pass_keeps_the_first_pass_and_the_probes():
 
     metadata = report["field_metadata_discovery"]["override_field_metadata"]
     assert "timed out" in metadata["error"]
-    assert metadata["requested_fields"] == ["OP046"]
+    assert metadata["requested_fields"] == ["OP999"]
     assert metadata["fields"] == []
     assert report["field_metadata_discovery"]["error"] is None
     assert report["field_metadata_discovery"]["fields"]
@@ -771,7 +773,7 @@ def test_a_failed_override_metadata_pass_keeps_the_first_pass_and_the_probes():
 
 
 def test_override_metadata_is_recorded_but_never_resolves_the_role():
-    discovery = _discovery({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+    discovery = _discovery({"OPT_UNDL_FORWARD_PX": ("OP999",)})
 
     plan, applied = plan_overrides(discovery, load_option_context_fixture(), ())
 
@@ -779,17 +781,17 @@ def test_override_metadata_is_recorded_but_never_resolves_the_role():
     assert applied == ()
     assert entry.status == module.OVERRIDE_ROLE_UNRESOLVED
     assert entry.metadata is not None
-    assert entry.metadata.mnemonic == "OP046"
+    assert entry.metadata.mnemonic == "OP999"
     assert entry.metadata.datatype == "Price"
     assert "does not by itself establish which Shiori" in entry.note
 
 
 def test_an_unusable_override_metadata_status_is_reported_honestly():
     def _describe(fields):
-        if fields == ["OP046"]:
-            return [FieldDescription(field="OP046", status="field_error", detail="[BAD_FLD]")]
+        if fields == ["OP999"]:
+            return [FieldDescription(field="OP999", status="field_error", detail="[BAD_FLD]")]
         return [
-            FieldDescription(field=field, status="described", mnemonic=field, overrides=("OP046",))
+            FieldDescription(field=field, status="described", mnemonic=field, overrides=("OP999",))
             for field in fields
         ]
 
@@ -803,15 +805,151 @@ def test_an_unusable_override_metadata_status_is_reported_honestly():
 
 
 def test_override_metadata_reaches_the_json_and_markdown_redacted():
-    report = _default_report({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+    report = _default_report({"OPT_UNDL_FORWARD_PX": ("OP999",)})
 
     metadata = report["field_metadata_discovery"]["override_field_metadata"]
     assert metadata["requested_at"] and metadata["received_at"]
-    assert metadata["fields"][0]["mnemonic"] == "OP046"
+    assert metadata["fields"][0]["mnemonic"] == "OP999"
     assert metadata["fields"][0]["documentation_excerpt"].endswith("<truncated>")
-    assert report["override_plan"][0]["metadata"]["field"] == "OP046"
+    assert report["override_plan"][0]["metadata"]["field"] == "OP999"
 
     markdown = render_markdown(report)
     assert "### Override field metadata (second `FieldInfoRequest`)" in markdown
-    assert "| `OP046` | `described` | OP046 | Price |" in markdown
-    assert "`OP046` documentation:" in markdown
+    assert "| `OP999` | `described` | OP999 | Price |" in markdown
+    assert "`OP999` documentation:" in markdown
+
+
+# --- workstation-confirmed override semantics (OP046 / OP188 / OP131) -----------
+
+
+def _forward_discovery():
+    return _discovery({"OPT_UNDL_FORWARD_PX": ("OP046", "OP188", "OP131")})
+
+
+def test_op188_is_sent_automatically_as_the_shiori_valuation_date():
+    plan, applied = plan_overrides(
+        _forward_discovery(), load_option_context_fixture(), ()
+    )
+
+    entry = next(item for item in plan if item.override_field == "OP188")
+    assert entry.status == module.OVERRIDE_APPLIED
+    assert entry.role == "valuation_date"
+    assert entry.source == "fixture:valuation_date"
+    sent = {item.field: item for item in applied}
+    assert sent["OP188"].value == load_option_context_fixture()["valuation_date"]
+
+
+def test_op046_is_sent_as_the_documented_fixed_pricing_model_value(monkeypatch):
+    monkeypatch.setitem(module.FIXED_ROLE_VALUES, "pricing_model", "DOCUMENTED_TOKEN")
+    context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
+
+    plan, applied = plan_overrides(_forward_discovery(), context, ())
+
+    entry = next(item for item in plan if item.override_field == "OP046")
+    assert entry.status == module.OVERRIDE_APPLIED
+    assert entry.role == "pricing_model"
+    assert entry.source == "fixed:pricing_model"
+    assert {item.field for item in applied} == {"OP046", "OP188"}
+
+
+def test_op046_is_not_sent_while_its_documented_value_is_unrecorded():
+    plan, applied = plan_overrides(_forward_discovery(), load_option_context_fixture(), ())
+
+    entry = next(item for item in plan if item.override_field == "OP046")
+    assert entry.status == module.OVERRIDE_VALUE_UNCONFIRMED
+    assert entry.role == "pricing_model"
+    assert "will not guess" in entry.note
+    # the other confirmed override still goes out
+    assert [item.field for item in applied] == ["OP188"]
+
+
+def test_op131_is_never_mapped_and_never_sent_even_via_override():
+    plan, applied = plan_overrides(
+        _forward_discovery(), load_option_context_fixture(), (("OP131", "0.02"),)
+    )
+
+    entry = next(item for item in plan if item.override_field == "OP131")
+    assert entry.status == module.OVERRIDE_NOT_APPLICABLE
+    assert entry.role is None
+    assert "dividend yield" in entry.note
+    assert "--override for it was ignored" in entry.note
+    assert "OP131" not in {item.field for item in applied}
+
+
+def test_the_forward_probe_carries_the_confirmed_overrides_for_both_securities(monkeypatch):
+    monkeypatch.setitem(module.FIXED_ROLE_VALUES, "pricing_model", "DOCUMENTED_TOKEN")
+    probe = _fake_probe({"OPT_UNDL_FORWARD_PX": "98.765432"})
+    discovery = _forward_discovery()
+    _, applied = plan_overrides(
+        discovery, {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}, ()
+    )
+
+    evidence = collect_evidence(
+        module.DEFAULT_IDENTIFIERS, applied, probe=probe, clock=_clock()
+    )
+
+    option_calls = [call for call in probe.calls if "OPT_UNDL_FORWARD_PX" in call["fields"]]
+    assert len(option_calls) == 2
+    for call in option_calls:
+        assert [field for field, _ in call["overrides"]] == ["OP046", "OP188"]
+    forward = [
+        group.results["OPT_UNDL_FORWARD_PX"].status
+        for security in evidence
+        for group in security.groups
+        if "OPT_UNDL_FORWARD_PX" in group.results
+    ]
+    assert forward == ["returned", "returned"]
+
+
+def test_a_forward_that_still_fails_is_reported_per_security(monkeypatch):
+    monkeypatch.setitem(module.FIXED_ROLE_VALUES, "pricing_model", "DOCUMENTED_TOKEN")
+
+    def _probe(identifier, fields, overrides=None):
+        if identifier == "/isin/GB00BFX0ZL78" and "OPT_UNDL_FORWARD_PX" in fields:
+            return [
+                ProbeFieldResult(
+                    field=field,
+                    status="field_exception",
+                    detail="[BAD_FLD] not applicable",
+                )
+                for field in fields
+            ]
+        return [
+            ProbeFieldResult(field=field, status="returned", value="98.765432")
+            if field == "OPT_UNDL_FORWARD_PX"
+            else ProbeFieldResult(field=field, status="absent")
+            for field in fields
+        ]
+
+    discovery = _forward_discovery()
+    plan, applied = plan_overrides(
+        discovery, {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}, ()
+    )
+    report = build_report(
+        collect_evidence(module.DEFAULT_IDENTIFIERS, applied, probe=_probe, clock=_clock()),
+        discovery,
+        plan,
+        _GENERATED_AT,
+    )
+
+    row = next(
+        item
+        for item in report["inputs"]
+        if item["input_id"] == "pricing_inputs.forward_clean_price"
+    )
+    outcomes = {
+        result["security"]: result["classification"]
+        for candidate in row["candidates"]
+        for result in candidate["results"]
+    }
+    assert outcomes == {"US91282CLJ89": DISPLAY_ONLY, "GB00BFX0ZL78": BAD_FLD}
+
+
+def test_the_confirmed_and_excluded_overrides_reach_the_markdown():
+    report = _default_report({"OPT_UNDL_FORWARD_PX": ("OP046", "OP188", "OP131")})
+
+    markdown = render_markdown(report)
+    assert "`OP188` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_APPLIED` | valuation_date" in markdown
+    assert "`OP046` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_VALUE_UNCONFIRMED`" in markdown
+    assert "`OP131` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_NOT_APPLICABLE`" in markdown
+    assert "dividend yield" in markdown
