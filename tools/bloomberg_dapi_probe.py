@@ -101,7 +101,11 @@ class ProbeFieldResult:
     detail: str | None = None
 
 
-def probe_fields(identifier: str, fields: list[str]) -> list[ProbeFieldResult]:
+def probe_fields(
+    identifier: str,
+    fields: list[str],
+    overrides: list[tuple[str, str]] | None = None,
+) -> list[ProbeFieldResult]:
     """Send one ``ReferenceDataRequest`` for ``identifier``/``fields`` and
     report each field's raw outcome. ``identifier`` must already be a
     Bloomberg symbology-qualified string (``/isin/...`` or ``/cusip/...``);
@@ -110,6 +114,14 @@ def probe_fields(identifier: str, fields: list[str]) -> list[ProbeFieldResult]:
     ``RuntimeError`` for a connectivity/session/response-envelope failure --
     but never for an individual field being wrong, unentitled, or
     inapplicable; that is reported per-field, not raised.
+
+    ``overrides`` is an optional list of ``(fieldId, value)`` pairs sent
+    verbatim in the request's ``overrides`` element -- needed to probe a
+    field that only answers inside an option context (e.g.
+    ``OPT_UNDL_FORWARD_PX``). No override name or value is ever guessed or
+    defaulted here: the caller passes exactly what it was told to send, and
+    an empty/omitted list sends the request bare so Bloomberg's own response
+    shows what it demands.
     """
 
     import blpapi
@@ -133,6 +145,12 @@ def probe_fields(identifier: str, fields: list[str]) -> list[ProbeFieldResult]:
         request.append("securities", identifier)
         for field in fields:
             request.append("fields", field)
+        if overrides:
+            overrides_element = request.getElement("overrides")
+            for override_field, override_value in overrides:
+                override_element = overrides_element.appendElement()
+                override_element.setElement("fieldId", override_field)
+                override_element.setElement("value", override_value)
 
         session.sendRequest(request)
 

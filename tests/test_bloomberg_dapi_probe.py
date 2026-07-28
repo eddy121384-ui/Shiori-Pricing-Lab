@@ -118,10 +118,33 @@ def _response_event(security_data) -> _FakeEvent:
     return _FakeEvent(_EventType.RESPONSE, [message])
 
 
+class _FakeOverrideElement:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    def setElement(self, name, value):
+        self.values[name] = value
+
+
+class _FakeOverridesElement:
+    def __init__(self):
+        self.elements: list[_FakeOverrideElement] = []
+
+    def appendElement(self):
+        element = _FakeOverrideElement()
+        self.elements.append(element)
+        return element
+
+
 class _FakeRequest:
     def __init__(self):
         self.securities: list[str] = []
         self.fields: list[str] = []
+        self.overrides = _FakeOverridesElement()
+
+    def getElement(self, name):
+        assert name == "overrides"
+        return self.overrides
 
     def append(self, name, value):
         if name == "securities":
@@ -272,6 +295,35 @@ def test_probe_fields_sends_the_identifier_and_all_requested_fields_verbatim(mon
 
     assert holder["session"].last_request.securities == [_IDENTIFIER]
     assert holder["session"].last_request.fields == ["CPN"]
+
+
+def test_probe_fields_sends_no_overrides_by_default(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[_response_event(_security_data(fields={"CPN": "4.125"}))],
+    )
+
+    probe_fields(_IDENTIFIER, ["CPN"])
+
+    assert holder["session"].last_request.overrides.elements == []
+
+
+def test_probe_fields_sends_supplied_overrides_verbatim(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[_response_event(_security_data(fields={"OPT_UNDL_FORWARD_PX": "99.5"}))],
+    )
+
+    probe_fields(
+        _IDENTIFIER,
+        ["OPT_UNDL_FORWARD_PX"],
+        overrides=[("SOME_FIELD", "SOME_VALUE")],
+    )
+
+    sent = holder["session"].last_request.overrides.elements
+    assert [element.values for element in sent] == [
+        {"fieldId": "SOME_FIELD", "value": "SOME_VALUE"}
+    ]
 
 
 def test_probe_fields_raises_on_security_error(monkeypatch):
