@@ -963,3 +963,117 @@ def test_the_confirmed_and_excluded_overrides_reach_the_markdown():
     assert "= Black" not in markdown
     assert "`OP131` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_NOT_APPLICABLE`" in markdown
     assert "dividend yield" in markdown
+
+
+# --- Codex review follow-ups (PR #151) ------------------------------------------
+
+
+def test_an_override_value_echoed_in_a_request_error_is_scrubbed():
+    def _probe(identifier, fields, overrides=None):
+        raise RuntimeError(
+            "Bloomberg DAPI responseError: invalid override OP046 = Black for this security"
+        )
+
+    applied = (AppliedOverride(field="OP046", value="Black", source="fixed:pricing_model"),)
+
+    evidence = collect_evidence(("US91282CLJ89",), applied, probe=_probe, clock=_clock())
+
+    option_group = evidence[0].groups[1]
+    assert "Black" not in option_group.error
+    assert "<redacted override value>" in option_group.error
+    # the failure itself is still legible
+    assert "responseError" in option_group.error and "OP046" in option_group.error
+
+
+def test_an_override_value_echoed_in_a_field_exception_is_scrubbed():
+    def _probe(identifier, fields, overrides=None):
+        return [
+            ProbeFieldResult(
+                field=field,
+                status="field_exception",
+                detail=f"[BAD_FLD] override OP046=Black rejected for {field}",
+            )
+            for field in fields
+        ]
+
+    applied = (AppliedOverride(field="OP046", value="Black", source="fixed:pricing_model"),)
+
+    evidence = collect_evidence(("US91282CLJ89",), applied, probe=_probe, clock=_clock())
+
+    detail = evidence[0].groups[1].results["OPT_UNDL_FORWARD_PX"].detail
+    assert "Black" not in detail
+    assert "<redacted override value>" in detail
+
+
+def test_a_scrubbed_error_never_reaches_the_json_markdown_or_console(monkeypatch, tmp_path, capsys):
+    def _probe(identifier, fields, overrides=None):
+        if overrides:
+            raise RuntimeError("responseError: bad override value Black")
+        return [ProbeFieldResult(field=field, status="absent") for field in fields]
+
+    monkeypatch.setattr(module, "probe_fields", _probe)
+    monkeypatch.setattr(
+        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+    )
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "value Black" not in surface
+    assert "<redacted override value>" in json_text
+
+
+def test_a_cli_override_of_a_confirmed_role_is_reported_as_a_replacement():
+    context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
+
+    plan, applied = plan_overrides(_forward_discovery(), context, (("OP046", "SomethingElse"),))
+
+    entry = next(item for item in plan if item.override_field == "OP046")
+    assert entry.status == module.OVERRIDE_ROLE_OVERRIDDEN
+    # the role is still attributed, so the report cannot read as the confirmed run
+    assert entry.role == "pricing_model"
+    assert entry.source == "user_supplied"
+    assert "must not be read as one" in entry.note
+    sent = {item.field: item.value for item in applied}
+    assert sent["OP046"] == "SomethingElse"
+
+
+def test_a_cli_override_never_silently_reports_the_confirmed_status():
+    context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
+
+    plan, _ = plan_overrides(_forward_discovery(), context, (("OP188", "2020-01-01"),))
+
+    statuses = {item.override_field: item.status for item in plan}
+    assert statuses["OP188"] == module.OVERRIDE_ROLE_OVERRIDDEN
+    assert statuses["OP046"] == module.OVERRIDE_APPLIED
+    assert statuses["OP131"] == module.OVERRIDE_NOT_APPLICABLE
+
+
+def test_a_cli_override_of_an_unconfirmed_field_still_reports_applied():
+    plan, _ = plan_overrides(
+        _discovery({"OPT_UNDL_FORWARD_PX": ("OP999",)}), {}, (("OP999", "1.0"),)
+    )
+
+    entry = next(item for item in plan if item.override_field == "OP999")
+    assert entry.status == module.OVERRIDE_APPLIED
+    assert entry.role is None
+
+
+def test_the_replacement_warning_reaches_the_console_and_markdown(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(
+        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+    )
+
+    main(["--override", "OP046=SomethingElse", "--output-dir", str(tmp_path)])
+
+    console = capsys.readouterr().out
+    assert "replaces the confirmed pricing_model value" in console
+    assert "not a confirmed-semantics run" in console
+    markdown = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    assert "OVERRIDE_ROLE_OVERRIDDEN" in markdown
+    assert "SomethingElse" not in markdown

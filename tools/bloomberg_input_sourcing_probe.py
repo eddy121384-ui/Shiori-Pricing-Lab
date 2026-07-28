@@ -98,7 +98,7 @@ import argparse
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -751,6 +751,9 @@ OVERRIDE_ROLE_UNRESOLVED = "OVERRIDE_ROLE_UNRESOLVED"
 OVERRIDE_FIXTURE_MISSING = "OVERRIDE_FIXTURE_MISSING"
 OVERRIDE_VALUE_UNCONFIRMED = "OVERRIDE_VALUE_UNCONFIRMED"
 OVERRIDE_NOT_APPLICABLE = "OVERRIDE_NOT_APPLICABLE"
+OVERRIDE_ROLE_OVERRIDDEN = "OVERRIDE_ROLE_OVERRIDDEN"
+
+_SCRUBBED_OVERRIDE_VALUE = "<redacted override value>"
 
 # The option context this probe sends when a discovered override's role is
 # approved: the repo's own committed, synthetic standalone-option case. No
@@ -853,6 +856,32 @@ def load_option_context_fixture(path: Path | None = None) -> dict[str, str]:
         if value is not None and not isinstance(value, (dict, list)):
             context[role] = str(value)
     return context
+
+
+def _scrub_override_values(text: str | None, overrides: tuple[AppliedOverride, ...]) -> str | None:
+    """Remove every applied override value from external text before it is stored.
+
+    Bloomberg's own error and field-exception text can quote the request back
+    -- including an override's value. Successful values are redacted at
+    render time, so without this the no-leak guarantee would hold everywhere
+    except the error paths. Best-effort by design: it removes the exact value
+    this run sent (and its stripped form), and does not try to catch a value
+    Bloomberg reformatted.
+    """
+
+    if not text:
+        return text
+    scrubbed = str(text)
+    variants = {
+        variant
+        for item in overrides
+        for variant in (item.value, str(item.value).strip())
+        # one-character values would scrub half the message for no real gain
+        if variant and len(variant) > 1
+    }
+    for variant in sorted(variants, key=len, reverse=True):
+        scrubbed = scrubbed.replace(variant, _SCRUBBED_OVERRIDE_VALUE)
+    return scrubbed
 
 
 def _group_mnemonics(group: str) -> tuple[str, ...]:
@@ -1003,6 +1032,7 @@ def plan_overrides(
                 )
             )
             continue
+        role = APPROVED_OVERRIDE_ROLES.get(override_field)
         if override_field in user_supplied:
             applied.append(
                 AppliedOverride(
@@ -1015,15 +1045,27 @@ def plan_overrides(
                 OverridePlanEntry(
                     override_field=override_field,
                     required_by=tuple(fields),
-                    status=OVERRIDE_APPLIED,
-                    role=None,
+                    # A CLI value is Eddy's own explicit instruction, so it is
+                    # sent -- but it must never be reported as though it were
+                    # the confirmed semantics, which is what this distinct
+                    # status and the role attribution below prevent.
+                    status=OVERRIDE_ROLE_OVERRIDDEN if role else OVERRIDE_APPLIED,
+                    role=role,
                     source="user_supplied",
-                    note="Sent verbatim from --override; its value is redacted in every output.",
+                    note=(
+                        (
+                            f"--override replaced the confirmed {role!r} value for this "
+                            "override. The request no longer carries the confirmed "
+                            "semantics, so this run's evidence must not be read as one -- "
+                            "drop the --override to restore it."
+                        )
+                        if role
+                        else "Sent verbatim from --override; its value is redacted in every output."
+                    ),
                     metadata=metadata_by_field.get(override_field),
                 )
             )
             continue
-        role = APPROVED_OVERRIDE_ROLES.get(override_field)
         if role is None:
             metadata = metadata_by_field.get(override_field)
             if metadata is not None and metadata.status == "described":
@@ -1190,7 +1232,10 @@ def collect_evidence(
                         mnemonics=mnemonics,
                         overrides=group_overrides,
                         results={},
-                        error=_collapse(str(exc), _MAX_DETAIL_CHARS),
+                        error=_collapse(
+                            _scrub_override_values(str(exc), group_overrides),
+                            _MAX_DETAIL_CHARS,
+                        ),
                         requested_at=requested_at,
                         received_at=clock(),
                     )
@@ -1201,7 +1246,13 @@ def collect_evidence(
                     group=group,
                     mnemonics=mnemonics,
                     overrides=group_overrides,
-                    results={result.field: result for result in results},
+                    results={
+                        result.field: replace(
+                            result,
+                            detail=_scrub_override_values(result.detail, group_overrides),
+                        )
+                        for result in results
+                    },
                     error=None,
                     requested_at=requested_at,
                     received_at=clock(),
@@ -1921,7 +1972,14 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(f"{label:<30}{len(summary[key])}")
 
-    applied = [entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_APPLIED]
+    applied = [
+        entry
+        for entry in report["override_plan"]
+        if entry["status"] in (OVERRIDE_APPLIED, OVERRIDE_ROLE_OVERRIDDEN)
+    ]
+    overridden = [
+        entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_ROLE_OVERRIDDEN
+    ]
     unresolved_roles = [
         entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_ROLE_UNRESOLVED
     ]
@@ -1947,7 +2005,12 @@ def main(argv: list[str] | None = None) -> int:
             None,
         )
         shape = request_override["value_shape"] if request_override else "not sent"
-        print(f"  - {entry['override_field']} ({entry['source']}) = {shape}")
+        replaced = (
+            f" [replaces the confirmed {entry['role']} value]"
+            if entry["status"] == OVERRIDE_ROLE_OVERRIDDEN
+            else ""
+        )
+        print(f"  - {entry['override_field']} ({entry['source']}) = {shape}{replaced}")
     for entry in unresolved_roles:
         print(f"  - {entry['override_field']}: role unconfirmed, not sent")
     for entry in not_applicable:
@@ -1987,6 +2050,12 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if override_metadata["error"]:
         request_errors.insert(0, f"//blp/apiflds override metadata: {override_metadata['error']}")
+    if overridden:
+        print("")
+        print(
+            "WARNING: --override replaced a confirmed override value; this run's evidence "
+            "is not a confirmed-semantics run."
+        )
     if report["field_metadata_discovery"]["error"]:
         request_errors.insert(
             0, f"//blp/apiflds discovery: {report['field_metadata_discovery']['error']}"
