@@ -42,8 +42,17 @@ single run first asks ``//blp/apiflds`` (``FieldInfoRequest``) what each
 option-context field publishes, so the override field ids
 ``OPT_UNDL_FORWARD_PX`` / ``PRICE_VOL`` / ``EQUIVALENT_PRICE_VOL`` demand
 come from Bloomberg itself rather than from a human reading documentation
-and re-running with a second command. Values for the ones whose *meaning*
-is confirmed come from the repo's own committed synthetic option case
+and re-running with a second command. It then sends those override field
+ids straight back to ``//blp/apiflds`` in a second request, so the report
+also carries each override's own mnemonic, description, datatype,
+documentation excerpt and status -- e.g. what ``OP046``, ``OP188`` and
+``OP131`` actually are. That metadata is evidence, not a role: naming an
+override does not establish which Shiori option-context value it takes, so
+an override whose role Eddy has not confirmed stays
+``OVERRIDE_ROLE_UNRESOLVED`` with its metadata recorded beside it.
+
+Values for the overrides whose *meaning* is confirmed come from the repo's
+own committed synthetic option case
 (``examples/standalone_option_case.json``) via ``APPROVED_OVERRIDE_ROLES``;
 one entry there is the entire change needed to activate an override, and
 until it exists the override is reported ``OVERRIDE_ROLE_UNRESOLVED``
@@ -705,17 +714,34 @@ class OverridePlanEntry:
     role: str | None
     source: str | None
     note: str
+    # What Bloomberg publishes about this override field id itself, from
+    # discovery's second pass. Recorded as evidence; it never decides a role.
+    metadata: FieldDescription | None = None
 
 
 @dataclass(frozen=True)
 class DiscoveryEvidence:
-    """Outcome of the one ``//blp/apiflds`` field-metadata request."""
+    """Outcome of the two ``//blp/apiflds`` field-metadata requests.
+
+    First pass: what the option-context value fields publish (including the
+    override field ids they demand). Second pass: what Bloomberg publishes
+    about *those override field ids themselves* -- e.g. once
+    ``OPT_UNDL_FORWARD_PX`` reports ``OP046``/``OP188``/``OP131``, the same
+    run asks what ``OP046`` is. Both passes are metadata only: they record
+    what Bloomberg says, and never make an override's role or meaning
+    follow from it.
+    """
 
     fields: tuple[str, ...]
     descriptions: tuple[FieldDescription, ...]
     error: str | None
     requested_at: str
     received_at: str
+    override_fields: tuple[str, ...] = ()
+    override_descriptions: tuple[FieldDescription, ...] = ()
+    override_error: str | None = None
+    override_requested_at: str | None = None
+    override_received_at: str | None = None
 
 
 OVERRIDE_APPLIED = "OVERRIDE_APPLIED"
@@ -808,7 +834,19 @@ def discover_option_context_metadata(
     This is what keeps the normal flow one command: the override field ids
     an option-context field demands come from ``//blp/apiflds``, not from a
     human reading Bloomberg documentation and re-running with ``--override``.
-    A failure here is recorded and never stops the value probes.
+
+    Two passes, both inside this one call. The first asks about the
+    option-context value fields. Whatever override field ids they report --
+    e.g. ``OP046``, ``OP188``, ``OP131`` for ``OPT_UNDL_FORWARD_PX`` -- are
+    then themselves sent back to ``//blp/apiflds`` in a second request, so
+    the run also records each override's own mnemonic, description,
+    datatype, documentation and status. That is the last step a machine can
+    take honestly: recording what Bloomberg publishes about an override is
+    not the same as knowing which Shiori role it fills, so the metadata is
+    reported and the role stays ``OVERRIDE_ROLE_UNRESOLVED`` until Eddy
+    confirms it.
+
+    Either pass may fail without stopping the other or the value probes.
     """
 
     describe = describe or describe_fields
@@ -833,12 +871,49 @@ def discover_option_context_metadata(
             requested_at=requested_at,
             received_at=clock(),
         )
+    received_at = clock()
+
+    override_fields: list[str] = []
+    for description in descriptions:
+        for override_field in description.overrides:
+            if override_field not in override_fields:
+                override_fields.append(override_field)
+    if not override_fields:
+        return DiscoveryEvidence(
+            fields=fields,
+            descriptions=descriptions,
+            error=None,
+            requested_at=requested_at,
+            received_at=received_at,
+        )
+
+    override_requested_at = clock()
+    try:
+        override_descriptions = tuple(describe(list(override_fields)))
+    except RuntimeError as exc:
+        return DiscoveryEvidence(
+            fields=fields,
+            descriptions=descriptions,
+            error=None,
+            requested_at=requested_at,
+            received_at=received_at,
+            override_fields=tuple(override_fields),
+            override_descriptions=(),
+            override_error=_collapse(str(exc), _MAX_DETAIL_CHARS),
+            override_requested_at=override_requested_at,
+            override_received_at=clock(),
+        )
     return DiscoveryEvidence(
         fields=fields,
         descriptions=descriptions,
         error=None,
         requested_at=requested_at,
-        received_at=clock(),
+        received_at=received_at,
+        override_fields=tuple(override_fields),
+        override_descriptions=override_descriptions,
+        override_error=None,
+        override_requested_at=override_requested_at,
+        override_received_at=clock(),
     )
 
 
@@ -856,6 +931,9 @@ def plan_overrides(
     and simply not sent.
     """
 
+    metadata_by_field = {
+        description.field: description for description in discovery.override_descriptions
+    }
     required_by: dict[str, list[str]] = {}
     for description in discovery.descriptions:
         for override_field in description.overrides:
@@ -882,11 +960,31 @@ def plan_overrides(
                     role=None,
                     source="user_supplied",
                     note="Sent verbatim from --override; its value is redacted in every output.",
+                    metadata=metadata_by_field.get(override_field),
                 )
             )
             continue
         role = APPROVED_OVERRIDE_ROLES.get(override_field)
         if role is None:
+            metadata = metadata_by_field.get(override_field)
+            if metadata is not None and metadata.status == "described":
+                evidence_note = (
+                    "Bloomberg's own published metadata for this override id was retrieved "
+                    "and is recorded in the override field metadata table. It names and "
+                    "describes the field but does not "
+                    "by itself establish which Shiori option-context role it fills, so the "
+                    "role stays unresolved rather than being inferred from the text."
+                )
+            elif metadata is not None:
+                evidence_note = (
+                    f"The metadata request for this override id came back {metadata.status!r}, "
+                    "so Bloomberg published nothing usable about it here."
+                )
+            else:
+                evidence_note = (
+                    "No metadata was retrieved for this override id in this run "
+                    "(see the discovery error above)."
+                )
             plan.append(
                 OverridePlanEntry(
                     override_field=override_field,
@@ -896,11 +994,12 @@ def plan_overrides(
                     source=None,
                     note=(
                         "Bloomberg documents this override for the field(s) above, but its "
-                        "meaning is not confirmed, so nothing was sent. Record the role once "
-                        "in APPROVED_OVERRIDE_ROLES and the next ordinary run sends it "
-                        "automatically from the committed synthetic option case -- no manual "
-                        "mnemonic lookup and no extra command."
+                        f"meaning is not confirmed, so nothing was sent. {evidence_note} "
+                        "Record the role once in APPROVED_OVERRIDE_ROLES and the next "
+                        "ordinary run sends it automatically from the committed synthetic "
+                        "option case -- no manual mnemonic lookup and no extra command."
                     ),
+                    metadata=metadata,
                 )
             )
             continue
@@ -916,6 +1015,7 @@ def plan_overrides(
                         f"Role {role!r} is approved for this override but the option-context "
                         "fixture supplied no value for it, so nothing was sent."
                     ),
+                    metadata=metadata_by_field.get(override_field),
                 )
             )
             continue
@@ -930,6 +1030,7 @@ def plan_overrides(
                 role=role,
                 source=f"fixture:{role}",
                 note="Applied automatically from the committed synthetic option case.",
+                metadata=metadata_by_field.get(override_field),
             )
         )
 
@@ -1252,6 +1353,31 @@ def _next_delivery_issue(rows: list[dict], override_plan: tuple[OverridePlanEntr
     }
 
 
+def _described_field(description: FieldDescription) -> dict:
+    """One field's published metadata, whitespace-collapsed and length-capped."""
+
+    return {
+        "field": description.field,
+        "status": description.status,
+        "mnemonic": description.mnemonic,
+        "datatype": description.datatype,
+        "description": (
+            _collapse(description.description, _MAX_DETAIL_CHARS)
+            if description.description
+            else None
+        ),
+        "documented_overrides": list(description.overrides),
+        "documentation_excerpt": (
+            _collapse(description.documentation, _MAX_DOCUMENTATION_CHARS)
+            if description.documentation
+            else None
+        ),
+        "detail": (
+            _collapse(description.detail, _MAX_DETAIL_CHARS) if description.detail else None
+        ),
+    }
+
+
 def _discovery_result(discovery: DiscoveryEvidence) -> dict:
     return {
         "service": "//blp/apiflds",
@@ -1259,29 +1385,21 @@ def _discovery_result(discovery: DiscoveryEvidence) -> dict:
         "requested_at": discovery.requested_at,
         "received_at": discovery.received_at,
         "error": discovery.error,
-        "fields": [
-            {
-                "field": description.field,
-                "status": description.status,
-                "mnemonic": description.mnemonic,
-                "datatype": description.datatype,
-                "description": (
-                    _collapse(description.description, _MAX_DETAIL_CHARS)
-                    if description.description
-                    else None
-                ),
-                "documented_overrides": list(description.overrides),
-                "documentation_excerpt": (
-                    _collapse(description.documentation, _MAX_DOCUMENTATION_CHARS)
-                    if description.documentation
-                    else None
-                ),
-                "detail": (
-                    _collapse(description.detail, _MAX_DETAIL_CHARS) if description.detail else None
-                ),
-            }
-            for description in discovery.descriptions
-        ],
+        "fields": [_described_field(description) for description in discovery.descriptions],
+        # Second pass: what Bloomberg publishes about the override field ids
+        # the first pass reported. Evidence only -- it never decides a role.
+        "override_field_metadata": {
+            "service": "//blp/apiflds",
+            "request": "FieldInfoRequest",
+            "requested_at": discovery.override_requested_at,
+            "received_at": discovery.override_received_at,
+            "error": discovery.override_error,
+            "requested_fields": list(discovery.override_fields),
+            "fields": [
+                _described_field(description)
+                for description in discovery.override_descriptions
+            ],
+        },
     }
 
 
@@ -1312,6 +1430,9 @@ def build_report(
                 "role": entry.role,
                 "source": entry.source,
                 "note": entry.note,
+                "metadata": (
+                    _described_field(entry.metadata) if entry.metadata is not None else None
+                ),
             }
             for entry in override_plan
         ],
@@ -1450,6 +1571,41 @@ def render_markdown(report: dict) -> str:
             )
     else:
         lines.append("| _no field metadata returned_ |  |  |  |  |")
+
+    override_metadata = discovery["override_field_metadata"]
+    lines += [
+        "",
+        "### Override field metadata (second `FieldInfoRequest`)",
+        "",
+        "What Bloomberg publishes about the override field ids the pass above reported. "
+        "Recorded as evidence only — it never decides which Shiori role an override fills.",
+        "",
+        f"- Acquisition window: {override_metadata['requested_at'] or 'not requested'} → "
+        f"{override_metadata['received_at'] or 'not requested'}",
+        f"- Request error: {override_metadata['error'] or 'none'}",
+        "",
+        "| Override field | Status | Mnemonic | Datatype | Description |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    if override_metadata["fields"]:
+        for field in override_metadata["fields"]:
+            lines.append(
+                f"| `{_cell(field['field'])}` | `{field['status']}` | "
+                f"{_cell(field['mnemonic'] or 'not available')} | "
+                f"{_cell(field['datatype'] or 'not available')} | "
+                f"{_cell(field['description'] or field['detail'] or 'not available')} |"
+            )
+        documented = [
+            field for field in override_metadata["fields"] if field["documentation_excerpt"]
+        ]
+        if documented:
+            lines.append("")
+            for field in documented:
+                lines.append(
+                    f"- `{field['field']}` documentation: {field['documentation_excerpt']}"
+                )
+    else:
+        lines.append("| _no override field metadata was returned in this run_ |  |  |  |  |")
 
     lines += [
         "",
@@ -1675,7 +1831,10 @@ def main(argv: list[str] | None = None) -> int:
     unresolved_roles = [
         entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_ROLE_UNRESOLVED
     ]
+    override_metadata = report["field_metadata_discovery"]["override_field_metadata"]
     print("")
+    print(f"{'OVERRIDE IDS DISCOVERED':<30}{len(override_metadata['requested_fields'])}")
+    print(f"{'OVERRIDE IDS DESCRIBED':<30}{len(override_metadata['fields'])}")
     print(f"{'OVERRIDES APPLIED':<30}{len(applied)}")
     print(f"{'OVERRIDE ROLES UNRESOLVED':<30}{len(unresolved_roles)}")
     for entry in applied:
@@ -1700,6 +1859,8 @@ def main(argv: list[str] | None = None) -> int:
         for request in security["requests"]
         if request["error"]
     ]
+    if override_metadata["error"]:
+        request_errors.insert(0, f"//blp/apiflds override metadata: {override_metadata['error']}")
     if report["field_metadata_discovery"]["error"]:
         request_errors.insert(
             0, f"//blp/apiflds discovery: {report['field_metadata_discovery']['error']}"

@@ -98,7 +98,8 @@ def _fake_describe(overrides_by_field: dict[str, tuple[str, ...]] | None = None,
                 description=f"{field} description",
                 datatype="Price",
                 overrides=(overrides_by_field or {}).get(field, ()),
-                documentation=f"{field} documentation",
+                # long enough that the report has to cap it
+                documentation=f"{field} documentation " + "detail " * 100,
             )
             for field in fields
         ]
@@ -494,10 +495,17 @@ def test_main_runs_with_no_arguments_and_writes_both_reports(monkeypatch, tmp_pa
     assert str(markdown_path.resolve()) in out
     assert str(json_path.resolve()) in out
     # discovery ran inside the same single command, with no user argument
-    assert describe.calls == [list(module._group_mnemonics(OPTION_CONTEXT_GROUP))]
+    assert describe.calls == [
+        list(module._group_mnemonics(OPTION_CONTEXT_GROUP)),
+        ["SOME_OVERRIDE_FLD"],
+    ]
     assert written["field_metadata_discovery"]["fields"][0]["documented_overrides"] == [
         "SOME_OVERRIDE_FLD"
     ]
+    assert [
+        field["field"]
+        for field in written["field_metadata_discovery"]["override_field_metadata"]["fields"]
+    ] == ["SOME_OVERRIDE_FLD"]
 
 
 def test_main_reports_request_failures_without_failing_the_run(monkeypatch, tmp_path, capsys):
@@ -544,8 +552,11 @@ def test_discovery_runs_inside_the_run_and_records_documented_overrides():
     discovery = discover_option_context_metadata(describe=describe, clock=_clock())
 
     # No user argument decides what to describe: the catalogue's own
-    # option-context mnemonics are.
-    assert describe.calls == [list(module._group_mnemonics(OPTION_CONTEXT_GROUP))]
+    # option-context mnemonics are. The second call is the override pass.
+    assert describe.calls == [
+        list(module._group_mnemonics(OPTION_CONTEXT_GROUP)),
+        ["STRIKE_FLD", "EXPIRY_FLD"],
+    ]
     described = {item.field: item for item in discovery.descriptions}
     assert described["PRICE_VOL"].overrides == ("STRIKE_FLD", "EXPIRY_FLD")
     assert discovery.requested_at < discovery.received_at
@@ -691,3 +702,116 @@ def test_unresolved_override_roles_are_listed_in_the_next_delivery_issue():
     assert report["next_delivery_issue"]["override_roles_awaiting_owner_confirmation"] == [
         "SOME_OVERRIDE_FLD"
     ]
+
+
+# --- override field metadata: the second FieldInfoRequest -----------------------
+
+
+def test_discovered_override_ids_are_described_in_the_same_run():
+    describe = _fake_describe(
+        {"OPT_UNDL_FORWARD_PX": ("OP046", "OP188", "OP131"), "PRICE_VOL": ("OP131",)}
+    )
+
+    discovery = discover_option_context_metadata(describe=describe, clock=_clock())
+
+    # One second request, carrying every discovered override id once, in
+    # discovery order -- no user argument, no extra command.
+    assert describe.calls[1] == ["OP046", "OP188", "OP131"]
+    assert discovery.override_fields == ("OP046", "OP188", "OP131")
+    assert [item.field for item in discovery.override_descriptions] == ["OP046", "OP188", "OP131"]
+    assert discovery.override_requested_at < discovery.override_received_at
+    assert discovery.override_requested_at > discovery.received_at
+
+
+def test_no_second_request_when_no_override_is_documented():
+    describe = _fake_describe()
+
+    discovery = discover_option_context_metadata(describe=describe, clock=_clock())
+
+    assert len(describe.calls) == 1
+    assert discovery.override_fields == ()
+    assert discovery.override_requested_at is None
+
+
+def test_a_failed_override_metadata_pass_keeps_the_first_pass_and_the_probes():
+    calls: list[list[str]] = []
+
+    def _describe(fields):
+        calls.append(list(fields))
+        if len(calls) == 1:
+            return [
+                FieldDescription(
+                    field=field,
+                    status="described",
+                    mnemonic=field,
+                    overrides=("OP046",) if field == "OPT_UNDL_FORWARD_PX" else (),
+                )
+                for field in fields
+            ]
+        raise RuntimeError("Bloomberg DAPI request timed out for field metadata request")
+
+    discovery = discover_option_context_metadata(describe=_describe, clock=_clock())
+    plan, applied = plan_overrides(discovery, {}, ())
+    report = build_report(
+        collect_evidence(("US91282CLJ89",), applied, probe=_fake_probe({}), clock=_clock()),
+        discovery,
+        plan,
+        _GENERATED_AT,
+    )
+
+    metadata = report["field_metadata_discovery"]["override_field_metadata"]
+    assert "timed out" in metadata["error"]
+    assert metadata["requested_fields"] == ["OP046"]
+    assert metadata["fields"] == []
+    assert report["field_metadata_discovery"]["error"] is None
+    assert report["field_metadata_discovery"]["fields"]
+    assert report["securities"][0]["requests"][0]["error"] is None
+    assert plan[0].status == module.OVERRIDE_ROLE_UNRESOLVED
+    assert "no metadata was retrieved" in plan[0].note.lower()
+
+
+def test_override_metadata_is_recorded_but_never_resolves_the_role():
+    discovery = _discovery({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+
+    plan, applied = plan_overrides(discovery, load_option_context_fixture(), ())
+
+    entry = plan[0]
+    assert applied == ()
+    assert entry.status == module.OVERRIDE_ROLE_UNRESOLVED
+    assert entry.metadata is not None
+    assert entry.metadata.mnemonic == "OP046"
+    assert entry.metadata.datatype == "Price"
+    assert "does not by itself establish which Shiori" in entry.note
+
+
+def test_an_unusable_override_metadata_status_is_reported_honestly():
+    def _describe(fields):
+        if fields == ["OP046"]:
+            return [FieldDescription(field="OP046", status="field_error", detail="[BAD_FLD]")]
+        return [
+            FieldDescription(field=field, status="described", mnemonic=field, overrides=("OP046",))
+            for field in fields
+        ]
+
+    discovery = discover_option_context_metadata(describe=_describe, clock=_clock())
+
+    plan, _ = plan_overrides(discovery, {}, ())
+
+    assert plan[0].status == module.OVERRIDE_ROLE_UNRESOLVED
+    assert plan[0].metadata.status == "field_error"
+    assert "came back 'field_error'" in plan[0].note
+
+
+def test_override_metadata_reaches_the_json_and_markdown_redacted():
+    report = _default_report({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+
+    metadata = report["field_metadata_discovery"]["override_field_metadata"]
+    assert metadata["requested_at"] and metadata["received_at"]
+    assert metadata["fields"][0]["mnemonic"] == "OP046"
+    assert metadata["fields"][0]["documentation_excerpt"].endswith("<truncated>")
+    assert report["override_plan"][0]["metadata"]["field"] == "OP046"
+
+    markdown = render_markdown(report)
+    assert "### Override field metadata (second `FieldInfoRequest`)" in markdown
+    assert "| `OP046` | `described` | OP046 | Price |" in markdown
+    assert "`OP046` documentation:" in markdown
