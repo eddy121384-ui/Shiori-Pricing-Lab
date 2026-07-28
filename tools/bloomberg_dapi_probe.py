@@ -74,6 +74,7 @@ from shiori_pricing_lab.data.bloomberg_bond_quote import parse_bond_identifier
 _DAPI_HOST = "localhost"
 _DAPI_PORT = 8194
 _REFDATA_SERVICE = "//blp/refdata"
+_APIFLDS_SERVICE = "//blp/apiflds"
 _REQUEST_TIMEOUT_MS = 10_000
 
 # Candidate Bond Master field mnemonics -- UNCONFIRMED against any live DAPI
@@ -101,6 +102,206 @@ class ProbeFieldResult:
     detail: str | None = None
 
 
+@dataclass(frozen=True)
+class FieldDescription:
+    """One field's Bloomberg-published metadata -- never a value, never a guess.
+
+    ``overrides`` is the override field-id list *Bloomberg itself* documents
+    for the field, so a caller can record what a field demands instead of
+    asking a human to look up an override mnemonic by hand.
+    """
+
+    field: str
+    status: str  # "described" | "absent" | "field_error"
+    mnemonic: str | None = None
+    description: str | None = None
+    datatype: str | None = None
+    overrides: tuple[str, ...] = ()
+    documentation: str | None = None
+    detail: str | None = None
+
+
+def _send_request(
+    *,
+    service_uri: str,
+    request_name: str,
+    configure,
+    collect,
+    context: str,
+) -> None:
+    """Open one DAPI session, send one request, and feed each response message to ``collect``.
+
+    The single place this file starts a session, opens a service, runs the
+    one-deadline event loop and stops the session again -- shared by
+    :func:`probe_fields` and :func:`describe_fields` so neither grows a
+    second copy of that handling. ``configure`` fills the request;
+    ``collect`` receives every ``PARTIAL_RESPONSE``/``RESPONSE`` message
+    that carries no ``responseError``. Raises ``ImportError`` if ``blpapi``
+    is missing and ``RuntimeError`` for any session/connectivity/envelope
+    failure; per-field outcomes are the caller's business, not this
+    function's.
+    """
+
+    import blpapi
+
+    session_options = blpapi.SessionOptions()
+    session_options.setServerHost(_DAPI_HOST)
+    session_options.setServerPort(_DAPI_PORT)
+    session = blpapi.Session(session_options)
+
+    try:
+        if not session.start():
+            raise RuntimeError(
+                f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
+                "-- confirm a Bloomberg Terminal is running and logged in locally"
+            )
+        if not session.openService(service_uri):
+            raise RuntimeError(f"Bloomberg DAPI failed to open service {service_uri}")
+
+        service = session.getService(service_uri)
+        request = service.createRequest(request_name)
+        configure(request)
+        session.sendRequest(request)
+
+        deadline = time.monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
+        done = False
+        while not done:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise RuntimeError(f"Bloomberg DAPI request timed out for {context}")
+            remaining_ms = max(1, int(remaining_seconds * 1000))
+            event = session.nextEvent(remaining_ms)
+
+            if event.eventType() == blpapi.Event.TIMEOUT:
+                raise RuntimeError(f"Bloomberg DAPI request timed out for {context}")
+            if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
+                continue
+
+            for msg in event:
+                if msg.hasElement("responseError"):
+                    raise RuntimeError(
+                        f"Bloomberg DAPI responseError for {context}: "
+                        f"{msg.getElement('responseError')}"
+                    )
+                collect(msg)
+
+            if event.eventType() == blpapi.Event.RESPONSE:
+                done = True
+    finally:
+        session.stop()
+
+
+def describe_fields(fields: list[str]) -> list[FieldDescription]:
+    """Ask ``//blp/apiflds`` what Bloomberg publishes about each of ``fields``.
+
+    One ``FieldInfoRequest`` with ``returnFieldDocumentation`` set, reported
+    per requested mnemonic as ``described`` / ``absent`` / ``field_error``.
+    This is metadata discovery, not a value probe: it is how an override
+    field-id list is *obtained from Bloomberg* rather than guessed by this
+    repo or looked up by hand. It reads no security, prices nothing, and
+    promotes nothing -- an unknown mnemonic simply comes back
+    ``field_error``/``absent``.
+
+    Raises ``ImportError`` if ``blpapi`` is not installed and
+    ``RuntimeError`` for a session/connectivity/envelope failure; one
+    unknown field never raises.
+    """
+
+    import blpapi
+
+    def _configure(request) -> None:
+        for field in fields:
+            request.append("id", field)
+        request.set("returnFieldDocumentation", True)
+
+    records: list = []
+
+    def _collect(message) -> None:
+        if not message.hasElement("fieldData"):
+            return
+        field_data_array = message.getElement("fieldData")
+        for i in range(field_data_array.numValues()):
+            records.append(field_data_array.getValueAsElement(i))
+
+    _send_request(
+        service_uri=_APIFLDS_SERVICE,
+        request_name="FieldInfoRequest",
+        configure=_configure,
+        collect=_collect,
+        context="field metadata request",
+    )
+
+    def _string(element, name: str) -> str | None:
+        if not element.hasElement(name):
+            return None
+        try:
+            return element.getElementAsString(name)
+        except blpapi.exception.Exception:
+            return None
+
+    described: dict[str, FieldDescription] = {}
+    positional: list[FieldDescription] = []
+    for record in records:
+        record_id = _string(record, "id")
+        if record.hasElement("fieldError"):
+            description = FieldDescription(
+                field=record_id or "",
+                status="field_error",
+                detail=str(record.getElement("fieldError")),
+            )
+        elif record.hasElement("fieldInfo"):
+            info = record.getElement("fieldInfo")
+            override_ids: list[str] = []
+            if info.hasElement("overrides"):
+                overrides_element = info.getElement("overrides")
+                for i in range(overrides_element.numValues()):
+                    try:
+                        override_ids.append(overrides_element.getValueAsString(i))
+                    except blpapi.exception.Exception:
+                        continue
+            description = FieldDescription(
+                field=record_id or "",
+                status="described",
+                mnemonic=_string(info, "mnemonic"),
+                description=_string(info, "description"),
+                datatype=_string(info, "datatype"),
+                overrides=tuple(override_ids),
+                documentation=_string(info, "documentation"),
+            )
+        else:
+            continue
+        positional.append(description)
+        for key in (record_id, description.mnemonic):
+            if key:
+                described.setdefault(key, description)
+
+    results: list[FieldDescription] = []
+    for index, field in enumerate(fields):
+        match = described.get(field)
+        # Bloomberg answers a FieldInfoRequest in request order and may echo
+        # a numeric field id rather than the mnemonic that was asked for, so
+        # fall back to position only when the response is exactly as long as
+        # the request -- never a fuzzy name match.
+        if match is None and len(positional) == len(fields):
+            match = positional[index]
+        if match is None:
+            results.append(FieldDescription(field=field, status="absent"))
+            continue
+        results.append(
+            FieldDescription(
+                field=field,
+                status=match.status,
+                mnemonic=match.mnemonic,
+                description=match.description,
+                datatype=match.datatype,
+                overrides=match.overrides,
+                documentation=match.documentation,
+                detail=match.detail,
+            )
+        )
+    return results
+
+
 def probe_fields(
     identifier: str,
     fields: list[str],
@@ -126,22 +327,7 @@ def probe_fields(
 
     import blpapi
 
-    session_options = blpapi.SessionOptions()
-    session_options.setServerHost(_DAPI_HOST)
-    session_options.setServerPort(_DAPI_PORT)
-    session = blpapi.Session(session_options)
-
-    try:
-        if not session.start():
-            raise RuntimeError(
-                f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
-                "-- confirm a Bloomberg Terminal is running and logged in locally"
-            )
-        if not session.openService(_REFDATA_SERVICE):
-            raise RuntimeError(f"Bloomberg DAPI failed to open service {_REFDATA_SERVICE}")
-
-        service = session.getService(_REFDATA_SERVICE)
-        request = service.createRequest("ReferenceDataRequest")
+    def _configure(request) -> None:
         request.append("securities", identifier)
         for field in fields:
             request.append("fields", field)
@@ -152,37 +338,20 @@ def probe_fields(
                 override_element.setElement("fieldId", override_field)
                 override_element.setElement("value", override_value)
 
-        session.sendRequest(request)
+    security_data_records: list = []
 
-        security_data_records = []
-        deadline = time.monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
-        done = False
-        while not done:
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
-                raise RuntimeError(f"Bloomberg DAPI request timed out for {identifier!r}")
-            remaining_ms = max(1, int(remaining_seconds * 1000))
-            event = session.nextEvent(remaining_ms)
+    def _collect(message) -> None:
+        security_data_array = message.getElement("securityData")
+        for i in range(security_data_array.numValues()):
+            security_data_records.append(security_data_array.getValueAsElement(i))
 
-            if event.eventType() == blpapi.Event.TIMEOUT:
-                raise RuntimeError(f"Bloomberg DAPI request timed out for {identifier!r}")
-            if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
-                continue
-
-            for msg in event:
-                if msg.hasElement("responseError"):
-                    raise RuntimeError(
-                        f"Bloomberg DAPI responseError for {identifier!r}: "
-                        f"{msg.getElement('responseError')}"
-                    )
-                security_data_array = msg.getElement("securityData")
-                for i in range(security_data_array.numValues()):
-                    security_data_records.append(security_data_array.getValueAsElement(i))
-
-            if event.eventType() == blpapi.Event.RESPONSE:
-                done = True
-    finally:
-        session.stop()
+    _send_request(
+        service_uri=_REFDATA_SERVICE,
+        request_name="ReferenceDataRequest",
+        configure=_configure,
+        collect=_collect,
+        context=repr(identifier),
+    )
 
     if len(security_data_records) != 1:
         raise RuntimeError(

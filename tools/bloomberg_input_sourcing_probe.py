@@ -37,14 +37,32 @@ name this probe proposes so the run can prove or disprove it -- not
 evidence of anything until this probe answers). A ``BAD_FLD`` result for a
 ``PROBE_PROPOSED`` name is a useful, honest outcome, not a failure.
 
-**Overrides are never guessed.** ``OPT_UNDL_FORWARD_PX`` and the
-volatility candidates are sent bare by default, so the run records exactly
-what Bloomberg demands. Once Eddy has confirmed an override's name and
-meaning from Bloomberg's own documentation, re-run with repeated
-``--override FIELD=VALUE`` to record the answer; this script proposes no
-override name and attaches no default.
+**Overrides are discovered, never guessed, and never homework.** The same
+single run first asks ``//blp/apiflds`` (``FieldInfoRequest``) what each
+option-context field publishes, so the override field ids
+``OPT_UNDL_FORWARD_PX`` / ``PRICE_VOL`` / ``EQUIVALENT_PRICE_VOL`` demand
+come from Bloomberg itself rather than from a human reading documentation
+and re-running with a second command. Values for the ones whose *meaning*
+is confirmed come from the repo's own committed synthetic option case
+(``examples/standalone_option_case.json``) via ``APPROVED_OVERRIDE_ROLES``;
+one entry there is the entire change needed to activate an override, and
+until it exists the override is reported ``OVERRIDE_ROLE_UNRESOLVED``
+rather than handed back to the user. ``--override FIELD=VALUE`` stays as an
+advanced escape hatch and is never required for a normal run.
 
-**Redaction.** Market levels (forward price, volatility, discounting) are
+**Acquisition timestamps.** Every DAPI request -- the metadata discovery
+request and each per-security value request -- records its own
+``requested_at``/``received_at`` window on this probe's UTC clock, separate
+from the report's own generation time. That is probe-side acquisition
+timing; Bloomberg's own as-of timestamp for a value remains a separate,
+unconfirmed question and is reported as such.
+
+**Redaction.** Override *values* never appear anywhere -- not in the
+Markdown, the JSON, or the console: an override is recorded as its field
+id, where the value came from, and a shape descriptor of the value's nature
+(numeric shape, date format, timestamp, text length), which is what a
+reviewer needs to audit request semantics. Market levels (forward price,
+volatility, discounting) are
 recorded as a value *shape* (``<redacted numeric: positive, 3 integer
 digits, 4 decimal places>``), never the number, so a result can be pasted
 into a GitHub issue. Static/reference tokens whose exact text is the point
@@ -60,8 +78,9 @@ continues. Only a missing ``blpapi`` (nothing can be probed at all) stops
 the run.
 
 **Reuse.** All DAPI session, request and response-envelope handling is
-``tools/bloomberg_dapi_probe.probe_fields`` -- this script adds no second
-session implementation.
+``tools/bloomberg_dapi_probe`` (``probe_fields`` for values,
+``describe_fields`` for metadata, both over one shared session helper) --
+this script adds no second session implementation.
 """
 
 from __future__ import annotations
@@ -74,7 +93,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bloomberg_dapi_probe import ProbeFieldResult, probe_fields
+from bloomberg_dapi_probe import (
+    FieldDescription,
+    ProbeFieldResult,
+    describe_fields,
+    probe_fields,
+)
 
 from shiori_pricing_lab.data.bloomberg_bond_quote import parse_bond_identifier
 
@@ -134,6 +158,7 @@ OPTION_CONTEXT_GROUP = "option_context"
 
 _MAX_SEMANTIC_CHARS = 64
 _MAX_DETAIL_CHARS = 200
+_MAX_DOCUMENTATION_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -642,14 +667,25 @@ PROHIBITED_ROUTES: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class AppliedOverride:
+    """One override actually sent, and where its value came from."""
+
+    field: str
+    value: str  # never rendered -- only `redact_override_value` output is
+    source: str  # "user_supplied" | "fixture:<role>"
+
+
+@dataclass(frozen=True)
 class GroupEvidence:
     """Outcome of one DAPI request (one security, one override set)."""
 
     group: str
     mnemonics: tuple[str, ...]
-    overrides: tuple[tuple[str, str], ...]
+    overrides: tuple[AppliedOverride, ...]
     results: dict[str, ProbeFieldResult]
     error: str | None
+    requested_at: str
+    received_at: str
 
 
 @dataclass(frozen=True)
@@ -657,6 +693,99 @@ class SecurityEvidence:
     identifier: str
     qualified_identifier: str
     groups: tuple[GroupEvidence, ...]
+
+
+@dataclass(frozen=True)
+class OverridePlanEntry:
+    """One override Bloomberg documents for an option-context field, and its status."""
+
+    override_field: str
+    required_by: tuple[str, ...]
+    status: str  # OVERRIDE_APPLIED | OVERRIDE_ROLE_UNRESOLVED | OVERRIDE_FIXTURE_MISSING
+    role: str | None
+    source: str | None
+    note: str
+
+
+@dataclass(frozen=True)
+class DiscoveryEvidence:
+    """Outcome of the one ``//blp/apiflds`` field-metadata request."""
+
+    fields: tuple[str, ...]
+    descriptions: tuple[FieldDescription, ...]
+    error: str | None
+    requested_at: str
+    received_at: str
+
+
+OVERRIDE_APPLIED = "OVERRIDE_APPLIED"
+OVERRIDE_ROLE_UNRESOLVED = "OVERRIDE_ROLE_UNRESOLVED"
+OVERRIDE_FIXTURE_MISSING = "OVERRIDE_FIXTURE_MISSING"
+
+# The option context this probe sends when a discovered override's role is
+# approved: the repo's own committed, synthetic standalone-option case. No
+# real trade, position or market level is involved, and the values are
+# redacted in every output anyway.
+FIXTURE_CASE_PATH = Path(__file__).resolve().parents[1] / "examples" / "standalone_option_case.json"
+
+# Which JSON path in that case supplies each option-context role. Roles are
+# Shiori's own concepts, named here once so an approved override maps to a
+# value without anyone re-typing it.
+_FIXTURE_ROLE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("strike_price", ("bond_option", "strike_price")),
+    ("expiry_date", ("bond_option", "expiry_date")),
+    ("option_type", ("bond_option", "option_type")),
+    ("exercise_style", ("bond_option", "exercise_style")),
+    ("settlement_type", ("bond_option", "settlement_type")),
+    ("currency", ("bond_option", "currency")),
+    ("notional", ("bond_option", "notional")),
+    ("expiry_timestamp", ("expiry_timestamp",)),
+    ("forward_settlement_date", ("forward_settlement_date",)),
+    ("option_settlement_date", ("option_settlement_date",)),
+)
+
+# Bloomberg override field id -> option-context role. **Deliberately empty.**
+# The run discovers which overrides a field documents from Bloomberg itself
+# (see `describe_fields`); what an override *means* is a semantic question
+# #149 forbids guessing, so an entry appears here only after Eddy confirms
+# that meaning. Adding one entry is the whole change needed -- the next
+# ordinary run then sends that override automatically, with its value taken
+# from the fixture above. Until then the override is reported
+# OVERRIDE_ROLE_UNRESOLVED, never handed to the user as a lookup task.
+APPROVED_OVERRIDE_ROLES: dict[str, str] = {}
+
+
+def _utc_now() -> str:
+    # Milliseconds, so a fast request still shows a real acquisition window
+    # rather than one timestamp twice.
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def load_option_context_fixture(path: Path | None = None) -> dict[str, str]:
+    """Read the committed synthetic option case into ``role -> value`` strings.
+
+    A missing or unreadable fixture is not an error: it yields an empty
+    context, every approved override is reported ``OVERRIDE_FIXTURE_MISSING``
+    and the rest of the run continues.
+    """
+
+    fixture_path = path or FIXTURE_CASE_PATH
+    try:
+        case = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    context: dict[str, str] = {}
+    for role, json_path in _FIXTURE_ROLE_PATHS:
+        value = case
+        for key in json_path:
+            if not isinstance(value, dict) or key not in value:
+                value = None
+                break
+            value = value[key]
+        if value is not None and not isinstance(value, (dict, list)):
+            context[role] = str(value)
+    return context
 
 
 def _group_mnemonics(group: str) -> tuple[str, ...]:
@@ -670,19 +799,181 @@ def _group_mnemonics(group: str) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def discover_option_context_metadata(
+    describe: Callable[..., list[FieldDescription]] | None = None,
+    clock: Callable[[], str] | None = None,
+) -> DiscoveryEvidence:
+    """Ask Bloomberg what the option-context fields document, inside the same run.
+
+    This is what keeps the normal flow one command: the override field ids
+    an option-context field demands come from ``//blp/apiflds``, not from a
+    human reading Bloomberg documentation and re-running with ``--override``.
+    A failure here is recorded and never stops the value probes.
+    """
+
+    describe = describe or describe_fields
+    clock = clock or _utc_now
+    fields = _group_mnemonics(OPTION_CONTEXT_GROUP)
+    requested_at = clock()
+    if not fields:
+        return DiscoveryEvidence(
+            fields=(),
+            descriptions=(),
+            error=None,
+            requested_at=requested_at,
+            received_at=clock(),
+        )
+    try:
+        descriptions = tuple(describe(list(fields)))
+    except RuntimeError as exc:
+        return DiscoveryEvidence(
+            fields=fields,
+            descriptions=(),
+            error=_collapse(str(exc), _MAX_DETAIL_CHARS),
+            requested_at=requested_at,
+            received_at=clock(),
+        )
+    return DiscoveryEvidence(
+        fields=fields,
+        descriptions=descriptions,
+        error=None,
+        requested_at=requested_at,
+        received_at=clock(),
+    )
+
+
+def plan_overrides(
+    discovery: DiscoveryEvidence,
+    fixture: dict[str, str],
+    user_overrides: tuple[tuple[str, str], ...],
+) -> tuple[tuple[OverridePlanEntry, ...], tuple[AppliedOverride, ...]]:
+    """Turn discovered override ids plus the fixture into the overrides actually sent.
+
+    Deterministic order: discovered overrides in discovery order first, then
+    any ``--override`` the user supplied that a discovered entry did not
+    already cover. Nothing is guessed -- an override whose role is not in
+    ``APPROVED_OVERRIDE_ROLES`` is planned as ``OVERRIDE_ROLE_UNRESOLVED``
+    and simply not sent.
+    """
+
+    required_by: dict[str, list[str]] = {}
+    for description in discovery.descriptions:
+        for override_field in description.overrides:
+            required_by.setdefault(override_field, []).append(description.field)
+
+    user_supplied = dict(user_overrides)
+    plan: list[OverridePlanEntry] = []
+    applied: list[AppliedOverride] = []
+
+    for override_field, fields in required_by.items():
+        if override_field in user_supplied:
+            applied.append(
+                AppliedOverride(
+                    field=override_field,
+                    value=user_supplied[override_field],
+                    source="user_supplied",
+                )
+            )
+            plan.append(
+                OverridePlanEntry(
+                    override_field=override_field,
+                    required_by=tuple(fields),
+                    status=OVERRIDE_APPLIED,
+                    role=None,
+                    source="user_supplied",
+                    note="Sent verbatim from --override; its value is redacted in every output.",
+                )
+            )
+            continue
+        role = APPROVED_OVERRIDE_ROLES.get(override_field)
+        if role is None:
+            plan.append(
+                OverridePlanEntry(
+                    override_field=override_field,
+                    required_by=tuple(fields),
+                    status=OVERRIDE_ROLE_UNRESOLVED,
+                    role=None,
+                    source=None,
+                    note=(
+                        "Bloomberg documents this override for the field(s) above, but its "
+                        "meaning is not confirmed, so nothing was sent. Record the role once "
+                        "in APPROVED_OVERRIDE_ROLES and the next ordinary run sends it "
+                        "automatically from the committed synthetic option case -- no manual "
+                        "mnemonic lookup and no extra command."
+                    ),
+                )
+            )
+            continue
+        if role not in fixture:
+            plan.append(
+                OverridePlanEntry(
+                    override_field=override_field,
+                    required_by=tuple(fields),
+                    status=OVERRIDE_FIXTURE_MISSING,
+                    role=role,
+                    source=None,
+                    note=(
+                        f"Role {role!r} is approved for this override but the option-context "
+                        "fixture supplied no value for it, so nothing was sent."
+                    ),
+                )
+            )
+            continue
+        applied.append(
+            AppliedOverride(field=override_field, value=fixture[role], source=f"fixture:{role}")
+        )
+        plan.append(
+            OverridePlanEntry(
+                override_field=override_field,
+                required_by=tuple(fields),
+                status=OVERRIDE_APPLIED,
+                role=role,
+                source=f"fixture:{role}",
+                note="Applied automatically from the committed synthetic option case.",
+            )
+        )
+
+    for override_field, value in user_overrides:
+        if override_field in required_by:
+            continue
+        applied.append(
+            AppliedOverride(field=override_field, value=value, source="user_supplied")
+        )
+        plan.append(
+            OverridePlanEntry(
+                override_field=override_field,
+                required_by=(),
+                status=OVERRIDE_APPLIED,
+                role=None,
+                source="user_supplied",
+                note=(
+                    "Sent verbatim from --override; no probed field documented this override "
+                    "in this run."
+                ),
+            )
+        )
+
+    return tuple(plan), tuple(applied)
+
+
 def collect_evidence(
     identifiers: tuple[str, ...],
-    overrides: tuple[tuple[str, str], ...],
+    overrides: tuple[AppliedOverride, ...],
     probe: Callable[..., list[ProbeFieldResult]] | None = None,
+    clock: Callable[[], str] | None = None,
 ) -> tuple[SecurityEvidence, ...]:
     """Run one bounded DAPI request per (security, request group) and collect raw outcomes.
 
-    A ``RuntimeError`` from one request is recorded against that request
-    group only -- every other group and every other security still runs.
-    ``ImportError`` (no ``blpapi`` at all) propagates: nothing can be probed.
+    Every request records its own acquisition window (``requested_at`` /
+    ``received_at``, this probe's UTC clock -- Bloomberg's own as-of
+    timestamp is a separate, still-unconfirmed question). A ``RuntimeError``
+    from one request is recorded against that request group only -- every
+    other group and every other security still runs. ``ImportError`` (no
+    ``blpapi`` at all) propagates: nothing can be probed.
     """
 
     probe = probe or probe_fields
+    clock = clock or _utc_now
     evidence: list[SecurityEvidence] = []
     for identifier in identifiers:
         _, qualified = parse_bond_identifier(identifier)
@@ -692,8 +983,13 @@ def collect_evidence(
             group_overrides = overrides if group == OPTION_CONTEXT_GROUP else ()
             if not mnemonics:
                 continue
+            requested_at = clock()
             try:
-                results = probe(qualified, list(mnemonics), overrides=list(group_overrides))
+                results = probe(
+                    qualified,
+                    list(mnemonics),
+                    overrides=[(item.field, item.value) for item in group_overrides],
+                )
             except RuntimeError as exc:
                 groups.append(
                     GroupEvidence(
@@ -702,6 +998,8 @@ def collect_evidence(
                         overrides=group_overrides,
                         results={},
                         error=_collapse(str(exc), _MAX_DETAIL_CHARS),
+                        requested_at=requested_at,
+                        received_at=clock(),
                     )
                 )
                 continue
@@ -712,6 +1010,8 @@ def collect_evidence(
                     overrides=group_overrides,
                     results={result.field: result for result in results},
                     error=None,
+                    requested_at=requested_at,
+                    received_at=clock(),
                 )
             )
         evidence.append(
@@ -759,6 +1059,38 @@ def redact(value: str, disclosure: str) -> str:
         f"<redacted numeric: {sign}, {len(integer_part)} integer digits, "
         f"{len(decimal_part)} decimal places>"
     )
+
+
+def redact_override_value(value: str) -> str:
+    """Redact one override *value* while keeping the request auditable.
+
+    An override field id is a mnemonic and is always shown; its value can be
+    a strike, an expiry or any other request payload, so only its nature and
+    shape are recorded -- enough to review what the request meant, never the
+    value itself.
+    """
+
+    stripped = str(value).strip()
+    try:
+        number = float(stripped)
+    except ValueError:
+        number = None
+    if number is not None:
+        sign = "negative" if number < 0 else "positive" if number > 0 else "zero"
+        digits = stripped.lstrip("+-")
+        integer_part, _, decimal_part = digits.partition(".")
+        return (
+            f"<redacted numeric: {sign}, {len(integer_part)} integer digits, "
+            f"{len(decimal_part)} decimal places>"
+        )
+    # Numeric first: an all-digit value is reported by shape rather than
+    # guessed to be a compact date, which would be a semantic claim.
+    compact = "".join(stripped.split())
+    if len(compact) == 10 and compact[4] == "-" and compact[7] == "-":
+        return "<redacted date: ISO YYYY-MM-DD>"
+    if "T" in compact and compact[:4].isdigit():
+        return "<redacted timestamp: ISO 8601>"
+    return f"<redacted text: {len(compact)} chars>"
 
 
 def classify(
@@ -883,7 +1215,7 @@ def _summary(rows: list[dict]) -> dict:
     }
 
 
-def _next_delivery_issue(rows: list[dict]) -> dict:
+def _next_delivery_issue(rows: list[dict], override_plan: tuple[OverridePlanEntry, ...]) -> dict:
     """What the next coherent delivery issue should close, derived from this run's rows."""
 
     sections_needing_approval = []
@@ -905,6 +1237,11 @@ def _next_delivery_issue(rows: list[dict]) -> dict:
             "(d) stops clearly with a named message for anything still UNRESOLVED."
         ),
         "owner_decisions_gating_it": sections_needing_approval,
+        "override_roles_awaiting_owner_confirmation": [
+            entry.override_field
+            for entry in override_plan
+            if entry.status == OVERRIDE_ROLE_UNRESOLVED
+        ],
         "must_still_block_until_resolved": blocked,
         "explicitly_out_of_scope": [
             "spot/repo forward reconstruction",
@@ -915,12 +1252,50 @@ def _next_delivery_issue(rows: list[dict]) -> dict:
     }
 
 
+def _discovery_result(discovery: DiscoveryEvidence) -> dict:
+    return {
+        "service": "//blp/apiflds",
+        "request": "FieldInfoRequest",
+        "requested_at": discovery.requested_at,
+        "received_at": discovery.received_at,
+        "error": discovery.error,
+        "fields": [
+            {
+                "field": description.field,
+                "status": description.status,
+                "mnemonic": description.mnemonic,
+                "datatype": description.datatype,
+                "description": (
+                    _collapse(description.description, _MAX_DETAIL_CHARS)
+                    if description.description
+                    else None
+                ),
+                "documented_overrides": list(description.overrides),
+                "documentation_excerpt": (
+                    _collapse(description.documentation, _MAX_DOCUMENTATION_CHARS)
+                    if description.documentation
+                    else None
+                ),
+                "detail": (
+                    _collapse(description.detail, _MAX_DETAIL_CHARS) if description.detail else None
+                ),
+            }
+            for description in discovery.descriptions
+        ],
+    }
+
+
 def build_report(
     evidence: tuple[SecurityEvidence, ...],
-    overrides: tuple[tuple[str, str], ...],
+    discovery: DiscoveryEvidence,
+    override_plan: tuple[OverridePlanEntry, ...],
     generated_at: str,
 ) -> dict:
-    """Build the deterministic JSON-serializable result for one probe run."""
+    """Build the deterministic JSON-serializable result for one probe run.
+
+    Override *values* never appear: only the override field id, where the
+    value came from, and its redacted shape.
+    """
 
     rows = [_row_result(row, evidence) for row in INPUT_ROWS]
     return {
@@ -928,16 +1303,37 @@ def build_report(
         "issue": 149,
         "generated_at": generated_at,
         "read_only": True,
+        "field_metadata_discovery": _discovery_result(discovery),
+        "override_plan": [
+            {
+                "override_field": entry.override_field,
+                "required_by": list(entry.required_by),
+                "status": entry.status,
+                "role": entry.role,
+                "source": entry.source,
+                "note": entry.note,
+            }
+            for entry in override_plan
+        ],
         "securities": [
             {
                 "identifier": security.identifier,
                 "requests": [
                     {
                         "request_group": group.group,
+                        "service": "//blp/refdata",
+                        "request": "ReferenceDataRequest",
                         "fields": list(group.mnemonics),
                         "overrides": [
-                            {"field": name, "value": value} for name, value in group.overrides
+                            {
+                                "field": item.field,
+                                "source": item.source,
+                                "value_shape": redact_override_value(item.value),
+                            }
+                            for item in group.overrides
                         ],
+                        "requested_at": group.requested_at,
+                        "received_at": group.received_at,
                         "error": group.error,
                     }
                     for group in security.groups
@@ -945,11 +1341,10 @@ def build_report(
             }
             for security in evidence
         ],
-        "overrides_supplied": [{"field": name, "value": value} for name, value in overrides],
         "summary": _summary(rows),
         "inputs": rows,
         "prohibited_routes": list(PROHIBITED_ROUTES),
-        "next_delivery_issue": _next_delivery_issue(rows),
+        "next_delivery_issue": _next_delivery_issue(rows, override_plan),
     }
 
 
@@ -980,6 +1375,9 @@ def render_markdown(report: dict) -> str:
         + ", ".join(f"`{security['identifier']}`" for security in report["securities"]),
         "- Market levels are redacted to a value shape; no raw payload, credential or "
         "terminal identifier is recorded.",
+        "- Every DAPI request below records its own acquisition window on this probe's "
+        "UTC clock; Bloomberg's own as-of timestamp for a value is a separate, "
+        "unconfirmed question.",
         "- `AUTO_SOURCED_READ_ONLY` for a `SHIORI_DERIVED_CANDIDATE` or "
         "`APPROVED_PROFILE_REQUIRED` input describes the target screen **after** the "
         "owner decision named in its row is recorded — not something this run authorizes.",
@@ -1031,6 +1429,52 @@ def render_markdown(report: dict) -> str:
             f"{'yes' if row['owner_approval_required'] else 'no'} |"
         )
 
+    discovery = report["field_metadata_discovery"]
+    lines += [
+        "",
+        "## Field metadata discovery (`//blp/apiflds` FieldInfoRequest)",
+        "",
+        f"- Acquisition window: {discovery['requested_at']} → {discovery['received_at']}",
+        f"- Request error: {discovery['error'] or 'none'}",
+        "",
+        "| Field | Status | Datatype | Documented overrides | Description |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    if discovery["fields"]:
+        for field in discovery["fields"]:
+            documented = ", ".join(f"`{name}`" for name in field["documented_overrides"]) or "none"
+            lines.append(
+                f"| `{_cell(field['field'])}` | `{field['status']}` | "
+                f"{_cell(field['datatype'] or 'not available')} | {_cell(documented)} | "
+                f"{_cell(field['description'] or field['detail'] or 'not available')} |"
+            )
+    else:
+        lines.append("| _no field metadata returned_ |  |  |  |  |")
+
+    lines += [
+        "",
+        "### Override plan",
+        "",
+        "Override values are never printed — only the field id, where the value came "
+        "from, and its shape.",
+        "",
+        "| Override field | Required by | Status | Role | Source |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    if report["override_plan"]:
+        for entry in report["override_plan"]:
+            required_by = ", ".join(f"`{name}`" for name in entry["required_by"]) or "—"
+            lines.append(
+                f"| `{_cell(entry['override_field'])}` | {_cell(required_by)} | "
+                f"`{entry['status']}` | {_cell(entry['role'] or '—')} | "
+                f"{_cell(entry['source'] or '—')} |"
+            )
+        lines.append("")
+        for entry in report["override_plan"]:
+            lines.append(f"- `{entry['override_field']}`: {entry['note']}")
+    else:
+        lines.append("| _no override was documented or supplied in this run_ |  |  |  |  |")
+
     lines += ["", "## Evidence by input", ""]
     for row in report["inputs"]:
         lines += [
@@ -1068,11 +1512,15 @@ def render_markdown(report: dict) -> str:
         lines.append("")
         for request in security["requests"]:
             overrides = (
-                ", ".join(f"{item['field']}={item['value']}" for item in request["overrides"])
+                ", ".join(
+                    f"`{item['field']}` ({item['source']}) = {item['value_shape']}"
+                    for item in request["overrides"]
+                )
                 or "none"
             )
             lines += [
                 f"- Request group `{request['request_group']}`",
+                f"  - acquisition window: {request['requested_at']} → {request['received_at']}",
                 f"  - fields: {', '.join(f'`{name}`' for name in request['fields'])}",
                 f"  - overrides: {overrides}",
                 f"  - request error: {request['error'] or 'none'}",
@@ -1151,9 +1599,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         metavar="FIELD=VALUE",
         help=(
-            "Advanced: a Bloomberg request override to send with the option-context "
-            "request, repeatable. No override is guessed or defaulted -- supply one "
-            "only after confirming its name and meaning."
+            "Advanced escape hatch, never required: send this override verbatim with "
+            "the option-context request; repeatable. A normal run discovers the "
+            "overrides Bloomberg documents by itself. Values supplied here are "
+            "redacted in every output."
         ),
     )
     parser.add_argument(
@@ -1180,11 +1629,21 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Shiori Bloomberg input-sourcing probe (Issue #149) -- read-only")
     print(f"Securities: {', '.join(identifiers)}")
-    print(f"Overrides:  {', '.join(f'{k}={v}' for k, v in overrides) or 'none'}")
+    print(
+        "Overrides:  "
+        + (
+            ", ".join(f"{field} = {redact_override_value(value)}" for field, value in overrides)
+            or "none supplied (a normal run discovers what Bloomberg documents)"
+        )
+    )
     print("")
 
     try:
-        evidence = collect_evidence(identifiers, overrides)
+        discovery = discover_option_context_metadata()
+        override_plan, applied_overrides = plan_overrides(
+            discovery, load_option_context_fixture(), overrides
+        )
+        evidence = collect_evidence(identifiers, applied_overrides)
     except ImportError as exc:
         print(
             "error: blpapi is not installed -- run this on a Bloomberg-networked "
@@ -1195,7 +1654,8 @@ def main(argv: list[str] | None = None) -> int:
 
     report = build_report(
         evidence,
-        overrides,
+        discovery,
+        override_plan,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
     )
     markdown_path, json_path = write_report(report, output_dir)
@@ -1211,12 +1671,39 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(f"{label:<30}{len(summary[key])}")
 
+    applied = [entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_APPLIED]
+    unresolved_roles = [
+        entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_ROLE_UNRESOLVED
+    ]
+    print("")
+    print(f"{'OVERRIDES APPLIED':<30}{len(applied)}")
+    print(f"{'OVERRIDE ROLES UNRESOLVED':<30}{len(unresolved_roles)}")
+    for entry in applied:
+        request_override = next(
+            (
+                item
+                for security in report["securities"]
+                for request in security["requests"]
+                for item in request["overrides"]
+                if item["field"] == entry["override_field"]
+            ),
+            None,
+        )
+        shape = request_override["value_shape"] if request_override else "not sent"
+        print(f"  - {entry['override_field']} ({entry['source']}) = {shape}")
+    for entry in unresolved_roles:
+        print(f"  - {entry['override_field']}: role unconfirmed, not sent")
+
     request_errors = [
         f"{security['identifier']} / {request['request_group']}: {request['error']}"
         for security in report["securities"]
         for request in security["requests"]
         if request["error"]
     ]
+    if report["field_metadata_discovery"]["error"]:
+        request_errors.insert(
+            0, f"//blp/apiflds discovery: {report['field_metadata_discovery']['error']}"
+        )
     if request_errors:
         print("")
         print("Request-level failures (other requests still ran):")

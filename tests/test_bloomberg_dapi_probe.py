@@ -25,7 +25,13 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "tools"))
 import bloomberg_dapi_probe as module  # noqa: E402
-from bloomberg_dapi_probe import ProbeFieldResult, main, probe_fields  # noqa: E402
+from bloomberg_dapi_probe import (  # noqa: E402
+    FieldDescription,
+    ProbeFieldResult,
+    describe_fields,
+    main,
+    probe_fields,
+)
 
 _IDENTIFIER = "/isin/US91282CLJ89"
 
@@ -54,9 +60,11 @@ class _FakeElement:
     def getElementAsString(self, name):
         return self._sub[name].getValueAsString()
 
-    def getValueAsString(self):
+    def getValueAsString(self, index=None):
         if self._raise_on_value is not None:
             raise self._raise_on_value
+        if index is not None and self._values is not None:
+            return self._values[index]
         return self._string_value
 
     def numValues(self):
@@ -160,10 +168,23 @@ class _FakeService:
         self._session = session
 
     def createRequest(self, name):
-        assert name == "ReferenceDataRequest"
-        request = _FakeRequest()
+        assert name in ("ReferenceDataRequest", "FieldInfoRequest")
+        request = _FakeFieldInfoRequest() if name == "FieldInfoRequest" else _FakeRequest()
         self._session.last_request = request
         return request
+
+
+class _FakeFieldInfoRequest:
+    def __init__(self):
+        self.ids: list[str] = []
+        self.settings: dict[str, object] = {}
+
+    def append(self, name, value):
+        assert name == "id"
+        self.ids.append(value)
+
+    def set(self, name, value):
+        self.settings[name] = value
 
 
 class _FakeSession:
@@ -414,3 +435,114 @@ def test_main_reports_blpapi_not_installed(monkeypatch, capsys):
 
     assert exit_code == 2
     assert "blpapi is not installed" in capsys.readouterr().err
+
+
+# --- describe_fields (//blp/apiflds) --------------------------------------------
+
+
+def _field_info_record(field_id, *, mnemonic=None, overrides=(), field_error=None) -> _FakeElement:
+    sub = {"id": _FakeElement(string_value=field_id)}
+    if field_error is not None:
+        sub["fieldError"] = _FakeElement(string_value=field_error)
+    else:
+        info = {
+            "mnemonic": _FakeElement(string_value=mnemonic or field_id),
+            "description": _FakeElement(string_value="a description"),
+            "datatype": _FakeElement(string_value="Price"),
+            "documentation": _FakeElement(string_value="documentation text"),
+            "overrides": _FakeElement(values=list(overrides), string_value=""),
+        }
+        sub["fieldInfo"] = _FakeElement(sub_elements=info)
+    return _FakeElement(sub_elements=sub)
+
+
+def _field_info_event(records) -> _FakeEvent:
+    message = _FakeElement(sub_elements={"fieldData": _FakeElement(values=records)})
+    return _FakeEvent(_EventType.RESPONSE, [message])
+
+
+def test_describe_fields_reports_documented_overrides(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _field_info_event(
+                [_field_info_record("OPT_UNDL_FORWARD_PX", overrides=["OVR_A", "OVR_B"])]
+            )
+        ],
+    )
+
+    results = describe_fields(["OPT_UNDL_FORWARD_PX"])
+
+    assert results == [
+        FieldDescription(
+            field="OPT_UNDL_FORWARD_PX",
+            status="described",
+            mnemonic="OPT_UNDL_FORWARD_PX",
+            description="a description",
+            datatype="Price",
+            overrides=("OVR_A", "OVR_B"),
+            documentation="documentation text",
+        )
+    ]
+    assert holder["session"].last_request.ids == ["OPT_UNDL_FORWARD_PX"]
+    assert holder["session"].last_request.settings == {"returnFieldDocumentation": True}
+
+
+def test_describe_fields_reports_a_field_error_without_raising(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[_field_info_event([_field_info_record("MADE_UP_FLD", field_error="[BAD_FLD]")])],
+    )
+
+    results = describe_fields(["MADE_UP_FLD"])
+
+    assert results[0].status == "field_error"
+    assert "BAD_FLD" in results[0].detail
+
+
+def test_describe_fields_reports_a_field_absent_from_the_response(monkeypatch):
+    _install_fake_blpapi(monkeypatch, events=[_field_info_event([])])
+
+    results = describe_fields(["PRICE_VOL"])
+
+    assert results == [FieldDescription(field="PRICE_VOL", status="absent")]
+
+
+def test_describe_fields_matches_a_numeric_id_response_by_request_position(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _field_info_event(
+                [
+                    _field_info_record("PR005", mnemonic="PR005", overrides=["OVR_A"]),
+                    _field_info_record("PR006", mnemonic="PR006"),
+                ]
+            )
+        ],
+    )
+
+    results = describe_fields(["PRICE_VOL", "EQUIVALENT_PRICE_VOL"])
+
+    assert [result.field for result in results] == ["PRICE_VOL", "EQUIVALENT_PRICE_VOL"]
+    assert results[0].overrides == ("OVR_A",)
+
+
+def test_describe_fields_stops_the_session_after_a_failure(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _FakeEvent(
+                _EventType.RESPONSE,
+                [
+                    _FakeElement(
+                        sub_elements={"responseError": _FakeElement(string_value="NO_AUTH")}
+                    )
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="responseError"):
+        describe_fields(["PRICE_VOL"])
+
+    assert holder["session"].stopped is True
