@@ -944,7 +944,10 @@ def discover_option_context_metadata(
     reported and the role stays ``OVERRIDE_ROLE_UNRESOLVED`` until Eddy
     confirms it.
 
-    Either pass may fail without stopping the other or the value probes.
+    Either pass may fail without stopping the other or the value probes, and
+    either failure's text goes through :func:`sanitize_external_text` before
+    it is recorded -- no override sent in these requests, but a connection
+    failure can still carry host, path or session detail.
     """
 
     describe = describe or describe_fields
@@ -965,7 +968,7 @@ def discover_option_context_metadata(
         return DiscoveryEvidence(
             fields=fields,
             descriptions=(),
-            error=_collapse(str(exc), _MAX_DETAIL_CHARS),
+            error=_collapse(sanitize_external_text(str(exc)), _MAX_DETAIL_CHARS),
             requested_at=requested_at,
             received_at=clock(),
         )
@@ -997,7 +1000,7 @@ def discover_option_context_metadata(
             received_at=received_at,
             override_fields=tuple(override_fields),
             override_descriptions=(),
-            override_error=_collapse(str(exc), _MAX_DETAIL_CHARS),
+            override_error=_collapse(sanitize_external_text(str(exc)), _MAX_DETAIL_CHARS),
             override_requested_at=override_requested_at,
             override_received_at=clock(),
         )

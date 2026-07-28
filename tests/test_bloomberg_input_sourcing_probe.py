@@ -1181,3 +1181,71 @@ def test_connection_failures_are_sanitized_in_every_output(monkeypatch, tmp_path
         assert "87654321" not in surface
         assert "eddy\\terminal.log" not in surface
     assert "session failed to start" in json_text
+
+
+def test_a_first_pass_metadata_failure_is_sanitized_in_every_output(monkeypatch, tmp_path, capsys):
+    def _describe(fields):
+        raise RuntimeError(
+            "Bloomberg DAPI failed to open service //blp/apiflds from localhost:8194 "
+            "for uuid=13572468 (C:\\Users\\eddy\\apiflds.log)"
+        )
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "localhost:8194" not in surface
+        assert "13572468" not in surface
+        assert "eddy\\apiflds.log" not in surface
+    # the failure is still reported and still diagnosable
+    assert "failed to open service" in json_text
+    assert "<redacted host>" in json_text
+
+
+def test_a_second_pass_metadata_failure_is_sanitized_in_every_output(monkeypatch, tmp_path, capsys):
+    calls: list[list[str]] = []
+
+    def _describe(fields):
+        calls.append(list(fields))
+        if len(calls) == 1:
+            return [
+                FieldDescription(
+                    field=field,
+                    status="described",
+                    mnemonic=field,
+                    overrides=("OP999",) if field == "OPT_UNDL_FORWARD_PX" else (),
+                )
+                for field in fields
+            ]
+        raise RuntimeError(
+            "Bloomberg DAPI request timed out for field metadata request on localhost:8194 "
+            "session=ABCD1234 (/home/eddy/.blpapi/log)"
+        )
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "localhost:8194" not in surface
+        assert "ABCD1234" not in surface
+        assert "/home/eddy" not in surface
+    written = json.loads(json_text)
+    override_metadata = written["field_metadata_discovery"]["override_field_metadata"]
+    assert "timed out" in override_metadata["error"]
+    assert "<redacted host>" in override_metadata["error"]
+    # the first pass and the value probes survived the second pass failing
+    assert written["field_metadata_discovery"]["error"] is None
+    assert written["field_metadata_discovery"]["fields"]
+    assert written["securities"][0]["requests"][0]["error"] is None
