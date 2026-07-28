@@ -22,7 +22,7 @@ or Bloomberg validation.**
 from __future__ import annotations
 
 import inspect
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 
@@ -36,6 +36,10 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIVolatilityBasis,
 )
 from shiori_pricing_lab.data.bli_snapshot_fixtures import SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT
+from shiori_pricing_lab.data.bli_standalone_contract import (
+    BLIStandaloneBondOptionTerms,
+    BLIStandaloneBondReferenceData,
+)
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
@@ -45,8 +49,16 @@ from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp_standalone_option
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.pricing.result import PricingErrorCode, PricingStatus
-from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
+from shiori_pricing_lab.products.bond_option import BondOption
+from shiori_pricing_lab.products.enums import (
+    BondYieldConvention,
+    BusinessDayConvention,
+    Currency,
+    TreasuryFTPQuoteSide,
+)
 from shiori_pricing_lab.products.fixtures import SYNTHETIC_BOND_LINKED_STRUCTURED_PRODUCT
+from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
+from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 from shiori_pricing_lab.reference_data.resolution import DuplicateBondReferenceDataError
 
@@ -149,6 +161,130 @@ def _supported_kwargs(**overrides) -> dict:
 def test_successful_build_returns_standalone_request():
     request = build_bli_standalone_option_request(**_supported_kwargs())
     assert isinstance(request, BLIStandaloneBondOptionRequest)
+
+
+def test_standalone_typed_contract_omits_only_the_four_irrelevant_fields():
+    option_fields = {field.name for field in fields(BLIStandaloneBondOptionTerms)}
+    reference_fields = {
+        field.name for field in fields(BLIStandaloneBondReferenceData)
+    }
+
+    assert "settlement_lag_days" not in option_fields
+    assert {
+        "business_day_convention",
+        "redemption_amount",
+        "yield_convention",
+    }.isdisjoint(reference_fields)
+    assert {
+        "coupon",
+        "coupon_frequency",
+        "issue_date",
+        "maturity_date",
+        "day_count",
+        "ex_dividend_days",
+        "first_coupon_date",
+        "last_coupon_date",
+    } <= reference_fields
+    assert "settlement_lag_days" in {field.name for field in fields(BondOption)}
+    assert {
+        "business_day_convention",
+        "redemption_amount",
+        "yield_convention",
+    } <= {field.name for field in fields(BondReferenceData)}
+
+
+@_requires_quantlib
+def test_route_specific_contract_constructs_and_prices_without_removed_fields():
+    request = build_bli_standalone_option_request(
+        **_supported_kwargs(
+            bond_option=BLIStandaloneBondOptionTerms.from_bond_option(_BOND_OPTION),
+            bond_reference_data_universe=(
+                BLIStandaloneBondReferenceData.from_bond_reference_data(
+                    SYNTHETIC_BOND_FIXTURES[0]
+                ),
+            ),
+        )
+    )
+
+    result = price_bli_mvp_standalone_option(request)
+
+    assert result.status is PricingStatus.SUCCESS
+    assert result.pv == pytest.approx(_EXPECTED_PV, rel=0, abs=1e-12)
+
+
+@_requires_quantlib
+def test_changing_legacy_only_values_cannot_change_standalone_price():
+    baseline = build_bli_standalone_option_request(**_supported_kwargs())
+    legacy_variant = replace(
+        SYNTHETIC_BOND_FIXTURES[0],
+        business_day_convention=BusinessDayConvention.NONE,
+        redemption_amount=17.0,
+        yield_convention=BondYieldConvention.OTHER,
+    )
+    variant = build_bli_standalone_option_request(
+        **_supported_kwargs(
+            bond_option=replace(_BOND_OPTION, settlement_lag_days=99),
+            bond_reference_data_universe=(legacy_variant,),
+        )
+    )
+
+    baseline_result = price_bli_mvp_standalone_option(baseline)
+    variant_result = price_bli_mvp_standalone_option(variant)
+
+    assert baseline_result.status is PricingStatus.SUCCESS
+    assert variant_result.status is PricingStatus.SUCCESS
+    assert variant_result.pv == baseline_result.pv
+    assert variant_result.diagnostics == baseline_result.diagnostics
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "reason"),
+    [
+        ("callable_flag", True, "callable"),
+        ("sinkable_flag", True, "sinkable"),
+        ("bond_type", BondType.FLOATING_RATE_NOTE, "bond_type"),
+        ("coupon", 0.0, "zero-coupon"),
+        ("status", BondStatus.INACTIVE, "status"),
+    ],
+)
+def test_route_specific_contract_keeps_structural_safety_exclusions(
+    field_name, value, reason
+):
+    reference = BLIStandaloneBondReferenceData.from_bond_reference_data(
+        SYNTHETIC_BOND_FIXTURES[0]
+    )
+    with pytest.raises(ValueError, match=reason):
+        build_bli_standalone_option_request(
+            **_supported_kwargs(
+                bond_option=BLIStandaloneBondOptionTerms.from_bond_option(
+                    _BOND_OPTION
+                ),
+                bond_reference_data_universe=(
+                    replace(reference, **{field_name: value}),
+                ),
+            )
+        )
+
+
+@_requires_quantlib
+def test_route_specific_contract_rejects_an_irregular_schedule_during_pricing():
+    reference = BLIStandaloneBondReferenceData.from_bond_reference_data(
+        SYNTHETIC_BOND_FIXTURES[0]
+    )
+    request = build_bli_standalone_option_request(
+        **_supported_kwargs(
+            bond_option=BLIStandaloneBondOptionTerms.from_bond_option(_BOND_OPTION),
+            bond_reference_data_universe=(
+                replace(reference, first_coupon_date="2025-11-15"),
+            ),
+        )
+    )
+
+    result = price_bli_mvp_standalone_option(request)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors
+    assert "regular" in result.errors[0].message.lower()
 
 
 def test_build_preserves_provenance_quote_side_and_curve_identity():

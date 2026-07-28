@@ -351,12 +351,6 @@
               <div class="form-row"><label>Option Settlement Date</label>
                 <input class="control" id="option-settlement-date-input" type="date">
               </div>
-              <div class="form-row"><label>Delivery Delay</label>
-                <div class="split">
-                  <input class="control" id="settlement-lag-input" type="text" inputmode="numeric" placeholder="Not entered">
-                  <div class="control select dd-days">Days<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></div>
-                </div>
-              </div>
             </div>
             <div class="entry-grid entry-grid-wide derived-timing-grid">
               <div class="form-row"><label>As-Of Timestamp</label>
@@ -386,7 +380,7 @@
           </div>
         </div>
 
-        <!-- Bond reference completion: the eight fields Bloomberg does not confirm -->
+        <!-- Bond reference completion: only standalone-consumed fields -->
         <div class="card wide-card bond-ref-card">
           <div class="card-head" id="bond-ref-head">
             <div class="card-title">Advanced &mdash; Bond Reference &amp; Contract Fields</div>
@@ -398,12 +392,11 @@
           <div class="card-body" id="bond-ref-body">
             <div class="fixed-route-note">
               Bloomberg confirms coupon, frequency, issue/maturity/first-coupon dates and
-              the callable/sinkable flags. The fields below have no confirmed mnemonic
-              (<code>REDEMPTION_VALUE</code> and <code>PENULTIMATE_COUPON_DATE</code> both
-              returned <code>BAD_FLD</code>), so the trader supplies them. Where Bloomberg
+              the callable/sinkable flags. The standalone-consumed fields below still
+              need explicit trader input. Where Bloomberg
               returns a raw description it is shown beneath the field as a
               <em>hint only</em> &mdash; Shiori never maps <code>DAY_CNT_DES</code>,
-              <code>MTY_TYP</code> or <code>CALC_TYP_DES</code> into a typed enum.
+              or <code>MTY_TYP</code> into a typed enum.
             </div>
             <div class="entry-grid">
               <div class="form-row"><label>Day Count</label>
@@ -432,32 +425,6 @@
                   </select>
                   <div class="bbg-hint">Bloomberg <code>MTY_TYP</code>: <span id="hint-bond-type">Not available</span></div>
                 </div>
-              </div>
-              <div class="form-row"><label>Yield Convention</label>
-                <div>
-                  <select class="control" id="yield-convention-select">
-                    <option value="">Not entered</option>
-                    <option value="SEMI_ANNUAL_COMPOUND">SEMI_ANNUAL_COMPOUND</option>
-                    <option value="ANNUAL_COMPOUND">ANNUAL_COMPOUND</option>
-                    <option value="SIMPLE_YIELD">SIMPLE_YIELD</option>
-                    <option value="JAPANESE_COMPOUND">JAPANESE_COMPOUND</option>
-                    <option value="OTHER">OTHER</option>
-                  </select>
-                  <div class="bbg-hint">Bloomberg <code>CALC_TYP_DES</code>: <span id="hint-yield-convention">Not available</span></div>
-                </div>
-              </div>
-              <div class="form-row"><label>Business Day Convention</label>
-                <select class="control" id="business-day-convention-select">
-                  <option value="">Not entered</option>
-                  <option value="FOLLOWING">FOLLOWING</option>
-                  <option value="MODIFIED_FOLLOWING">MODIFIED_FOLLOWING</option>
-                  <option value="PRECEDING">PRECEDING</option>
-                  <option value="MODIFIED_PRECEDING">MODIFIED_PRECEDING</option>
-                  <option value="NONE">NONE</option>
-                </select>
-              </div>
-              <div class="form-row"><label>Redemption Amount (per 100)</label>
-                <input class="control" id="redemption-amount-input" type="text" inputmode="decimal" placeholder="Not entered">
               </div>
               <div class="form-row"><label>Ex-Dividend Days</label>
                 <input class="control" id="ex-dividend-days-input" type="text" inputmode="numeric" placeholder="Not entered">

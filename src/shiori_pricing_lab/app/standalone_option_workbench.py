@@ -153,6 +153,10 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIForwardCleanPriceInput,
     BLIVolatilityInput,
 )
+from shiori_pricing_lab.data.bli_standalone_contract import (
+    BLIStandaloneBondOptionTerms,
+    BLIStandaloneBondReferenceData,
+)
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
@@ -170,9 +174,7 @@ from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
 )
 from shiori_pricing_lab.pricing.bli_pricing_engine import price_bli_mvp_standalone_option
 from shiori_pricing_lab.pricing.result import PricingResult
-from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.products.enums import TreasuryFTPQuoteSide
-from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
 _REQUIRED_TOP_LEVEL_KEYS = frozenset(
     {
@@ -341,14 +343,17 @@ def build_request_from_standalone_option_case(
 
     envelope = _normalize_case_datetime_instants_to_utc(_parse_standalone_option_case(case))
 
-    bond_option = BondOption(**envelope["bond_option"])
+    bond_option = BLIStandaloneBondOptionTerms(**envelope["bond_option"])
 
     universe_raw = envelope["bond_reference_data_universe"]
     if not isinstance(universe_raw, list):
         raise ValueError(
-            "bond_reference_data_universe must be a JSON array of BondReferenceData objects"
+            "bond_reference_data_universe must be a JSON array of "
+            "BLIStandaloneBondReferenceData objects"
         )
-    bond_reference_data_universe = [BondReferenceData(**record) for record in universe_raw]
+    bond_reference_data_universe = [
+        BLIStandaloneBondReferenceData(**record) for record in universe_raw
+    ]
 
     curve_points_raw = envelope["curve_points"]
     if not isinstance(curve_points_raw, list):
@@ -845,7 +850,9 @@ def price_standalone_option_case_with_bloomberg_quote(
     if not isinstance(bloomberg_security, str) or not bloomberg_security.strip():
         raise ValueError("bloomberg_security must be a non-blank string")
 
-    expected_isin = BondOption(**envelope["bond_option"]).underlying_isin
+    expected_isin = BLIStandaloneBondOptionTerms(
+        **envelope["bond_option"]
+    ).underlying_isin
 
     live_quote = load_bloomberg_bond_quote(
         security=bloomberg_security, isin=expected_isin, quote_side=quote_side
