@@ -552,10 +552,11 @@ INPUT_ROWS: tuple[InputRow, ...] = (
                 typed_mapping_safe=False,
                 note=(
                     "The run discovers this field's own documented overrides and sends the "
-                    "ones whose meaning Eddy has confirmed (OP046 pricing model, OP188 "
-                    "valuation date); OP131 is the equity/index dividend yield and is never "
-                    "sent. A returned number still stays DISPLAY_ONLY until quote side, unit "
-                    "and Bloomberg's own as-of timestamp are separately confirmed."
+                    "ones whose meaning Eddy has confirmed: OP046 (pricing model, "
+                    "documented bond-option value) and OP188 (Shiori's valuation date). "
+                    "OP131 is the equity/index dividend yield and is never sent. A returned "
+                    "number still stays DISPLAY_ONLY until quote side, unit and Bloomberg's "
+                    "own as-of timestamp are separately confirmed."
                 ),
             ),
         ),
@@ -781,12 +782,13 @@ _FIXED_ROLE_NAMES = ("pricing_model",)
 
 # The exact override value for each fixed role, recorded verbatim from
 # Bloomberg's own documentation -- never guessed, never inferred from a
-# label. `pricing_model` is the Black bond-option model Eddy confirmed on
-# the workstation; its exact token has to be recorded here before the probe
-# will send it. While a fixed role has no recorded token, its override is
-# reported OVERRIDE_VALUE_UNCONFIRMED and simply not sent -- the rest of the
-# run, including every other override, still proceeds.
-FIXED_ROLE_VALUES: dict[str, str] = {}
+# label. `pricing_model` is `"Black"`: Bloomberg's documentation lists that
+# value for a bond option, and Eddy confirmed it on the workstation. A fixed
+# role with no recorded token here is reported OVERRIDE_VALUE_UNCONFIRMED
+# and simply not sent, while the rest of the run still proceeds.
+FIXED_ROLE_VALUES: dict[str, str] = {
+    "pricing_model": "Black",
+}
 
 # Overrides confirmed on the workstation as *not* belonging on a bond-option
 # request, with the reason. Checked before APPROVED_OVERRIDE_ROLES and before
@@ -811,8 +813,8 @@ NEVER_MAPPED_OVERRIDES: dict[str, str] = {
 # task.
 #
 # Workstation-confirmed (Issue #149):
-# - OP046 is the pricing model; Bloomberg's documentation fixes it to the
-#   Black bond-option model for this route.
+# - OP046 is the pricing model; Bloomberg's documentation lists "Black" as
+#   its bond-option value (see FIXED_ROLE_VALUES).
 # - OP188 is the valuation date, which is Shiori's own valuation date.
 APPROVED_OVERRIDE_ROLES: dict[str, str] = {
     "OP046": "pricing_model",

@@ -839,8 +839,7 @@ def test_op188_is_sent_automatically_as_the_shiori_valuation_date():
     assert sent["OP188"].value == load_option_context_fixture()["valuation_date"]
 
 
-def test_op046_is_sent_as_the_documented_fixed_pricing_model_value(monkeypatch):
-    monkeypatch.setitem(module.FIXED_ROLE_VALUES, "pricing_model", "DOCUMENTED_TOKEN")
+def test_op046_is_sent_as_the_documented_black_bond_option_model():
     context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
 
     plan, applied = plan_overrides(_forward_discovery(), context, ())
@@ -849,10 +848,16 @@ def test_op046_is_sent_as_the_documented_fixed_pricing_model_value(monkeypatch):
     assert entry.status == module.OVERRIDE_APPLIED
     assert entry.role == "pricing_model"
     assert entry.source == "fixed:pricing_model"
-    assert {item.field for item in applied} == {"OP046", "OP188"}
+    sent = {item.field: item for item in applied}
+    assert set(sent) == {"OP046", "OP188"}
+    # the value Bloomberg's documentation lists for a bond option, verbatim
+    assert module.FIXED_ROLE_VALUES["pricing_model"] == "Black"
+    assert sent["OP046"].value == "Black"
 
 
-def test_op046_is_not_sent_while_its_documented_value_is_unrecorded():
+def test_op046_is_withheld_if_its_documented_value_is_ever_unrecorded(monkeypatch):
+    monkeypatch.delitem(module.FIXED_ROLE_VALUES, "pricing_model")
+
     plan, applied = plan_overrides(_forward_discovery(), load_option_context_fixture(), ())
 
     entry = next(item for item in plan if item.override_field == "OP046")
@@ -876,8 +881,7 @@ def test_op131_is_never_mapped_and_never_sent_even_via_override():
     assert "OP131" not in {item.field for item in applied}
 
 
-def test_the_forward_probe_carries_the_confirmed_overrides_for_both_securities(monkeypatch):
-    monkeypatch.setitem(module.FIXED_ROLE_VALUES, "pricing_model", "DOCUMENTED_TOKEN")
+def test_the_forward_probe_carries_the_confirmed_overrides_for_both_securities():
     probe = _fake_probe({"OPT_UNDL_FORWARD_PX": "98.765432"})
     discovery = _forward_discovery()
     _, applied = plan_overrides(
@@ -901,9 +905,7 @@ def test_the_forward_probe_carries_the_confirmed_overrides_for_both_securities(m
     assert forward == ["returned", "returned"]
 
 
-def test_a_forward_that_still_fails_is_reported_per_security(monkeypatch):
-    monkeypatch.setitem(module.FIXED_ROLE_VALUES, "pricing_model", "DOCUMENTED_TOKEN")
-
+def test_a_forward_that_still_fails_is_reported_per_security():
     def _probe(identifier, fields, overrides=None):
         if identifier == "/isin/GB00BFX0ZL78" and "OPT_UNDL_FORWARD_PX" in fields:
             return [
@@ -950,6 +952,14 @@ def test_the_confirmed_and_excluded_overrides_reach_the_markdown():
 
     markdown = render_markdown(report)
     assert "`OP188` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_APPLIED` | valuation_date" in markdown
-    assert "`OP046` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_VALUE_UNCONFIRMED`" in markdown
+    assert (
+        "`OP046` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_APPLIED` | pricing_model | "
+        "fixed:pricing_model" in markdown
+    )
+    # the documented token itself is still redacted like every override value
+    # ("Black" also occurs legitimately in "Black-76" prose, so assert on the
+    # override rendering itself)
+    assert "(fixed:pricing_model) = <redacted text: 5 chars>" in markdown
+    assert "= Black" not in markdown
     assert "`OP131` | `OPT_UNDL_FORWARD_PX` | `OVERRIDE_NOT_APPLICABLE`" in markdown
     assert "dividend yield" in markdown
