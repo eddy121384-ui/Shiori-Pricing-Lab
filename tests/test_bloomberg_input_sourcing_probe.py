@@ -51,6 +51,7 @@ from bloomberg_input_sourcing_probe import (  # noqa: E402
     redact_override_value,
     render_json,
     render_markdown,
+    sanitize_external_text,
 )
 
 _GENERATED_AT = "2026-07-28T00:00:00+00:00"
@@ -1027,30 +1028,65 @@ def test_a_scrubbed_error_never_reaches_the_json_markdown_or_console(monkeypatch
     assert "<redacted override value>" in json_text
 
 
-def test_a_cli_override_of_a_confirmed_role_is_reported_as_a_replacement():
+def test_a_cli_override_cannot_replace_a_confirmed_role_value():
     context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
 
     plan, applied = plan_overrides(_forward_discovery(), context, (("OP046", "SomethingElse"),))
 
     entry = next(item for item in plan if item.override_field == "OP046")
-    assert entry.status == module.OVERRIDE_ROLE_OVERRIDDEN
-    # the role is still attributed, so the report cannot read as the confirmed run
+    assert entry.status == module.OVERRIDE_APPLIED
     assert entry.role == "pricing_model"
-    assert entry.source == "user_supplied"
-    assert "must not be read as one" in entry.note
+    assert entry.source == "fixed:pricing_model"
+    assert "was rejected" in entry.note
+    # the confirmed value went out, not the CLI one
     sent = {item.field: item.value for item in applied}
-    assert sent["OP046"] == "SomethingElse"
+    assert sent["OP046"] == module.FIXED_ROLE_VALUES["pricing_model"]
+    assert "SomethingElse" not in sent.values()
 
 
-def test_a_cli_override_never_silently_reports_the_confirmed_status():
+def test_a_cli_override_cannot_replace_the_confirmed_valuation_date():
     context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
 
-    plan, _ = plan_overrides(_forward_discovery(), context, (("OP188", "2020-01-01"),))
+    plan, applied = plan_overrides(_forward_discovery(), context, (("OP188", "2020-01-01"),))
 
-    statuses = {item.override_field: item.status for item in plan}
-    assert statuses["OP188"] == module.OVERRIDE_ROLE_OVERRIDDEN
-    assert statuses["OP046"] == module.OVERRIDE_APPLIED
-    assert statuses["OP131"] == module.OVERRIDE_NOT_APPLICABLE
+    entry = next(item for item in plan if item.override_field == "OP188")
+    assert entry.status == module.OVERRIDE_APPLIED
+    assert entry.source == "fixture:valuation_date"
+    sent = {item.field: item.value for item in applied}
+    assert sent["OP188"] == load_option_context_fixture()["valuation_date"]
+
+
+def test_main_rejects_a_cli_replacement_of_a_confirmed_override(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(module, "probe_fields", lambda *a, **k: calls.append((a, k)) or [])
+    monkeypatch.setattr(module, "describe_fields", lambda *a, **k: calls.append((a, k)) or [])
+
+    for field, value in (("OP046", "SomethingElse"), ("OP188", "2020-01-01")):
+        assert main([f"--override={field}={value}", "--output-dir", str(tmp_path)]) == 2
+
+    # rejected before any Bloomberg request, and the value is never echoed
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "OP046 was rejected" in err and "OP188 was rejected" in err
+    assert "SomethingElse" not in err and "2020-01-01" not in err
+
+
+def test_main_accepts_a_cli_override_that_repeats_the_approved_value(monkeypatch, tmp_path):
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(
+        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+    )
+    approved = module.FIXED_ROLE_VALUES["pricing_model"]
+
+    exit_code = main([f"--override=OP046={approved}", "--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    written = json.loads((tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8"))
+    entry = next(
+        item for item in written["override_plan"] if item["override_field"] == "OP046"
+    )
+    assert entry["status"] == module.OVERRIDE_APPLIED
+    assert entry["source"] == "fixed:pricing_model"
 
 
 def test_a_cli_override_of_an_unconfirmed_field_still_reports_applied():
@@ -1063,17 +1099,85 @@ def test_a_cli_override_of_an_unconfirmed_field_still_reports_applied():
     assert entry.role is None
 
 
-def test_the_replacement_warning_reaches_the_console_and_markdown(monkeypatch, tmp_path, capsys):
+def test_op131_is_still_only_ignored_not_rejected(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
     monkeypatch.setattr(
-        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP046",)})
+        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP131",)})
     )
 
-    main(["--override", "OP046=SomethingElse", "--output-dir", str(tmp_path)])
+    exit_code = main(["--override", "OP131=0.02", "--output-dir", str(tmp_path)])
 
+    assert exit_code == 0
     console = capsys.readouterr().out
-    assert "replaces the confirmed pricing_model value" in console
-    assert "not a confirmed-semantics run" in console
+    assert "not applicable to a bond option, not sent" in console
     markdown = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
-    assert "OVERRIDE_ROLE_OVERRIDDEN" in markdown
-    assert "SomethingElse" not in markdown
+    assert "OVERRIDE_NOT_APPLICABLE" in markdown
+    assert "0.02" not in markdown
+
+
+# --- external-text sanitization -------------------------------------------------
+
+
+def test_sanitizer_removes_host_path_and_credential_shaped_detail():
+    text = (
+        "session failed against localhost:8194 while reading "
+        "C:\\Users\\eddy\\bloomberg\\session.log for uuid=12345678 token: abcdef "
+        "(/home/eddy/.blpapi/cache)"
+    )
+
+    sanitized = sanitize_external_text(text)
+
+    assert "localhost:8194" not in sanitized
+    assert "C:\\Users\\eddy" not in sanitized
+    assert "/home/eddy" not in sanitized
+    assert "12345678" not in sanitized
+    assert "abcdef" not in sanitized
+    assert "<redacted host>" in sanitized
+    assert "<redacted path>" in sanitized
+    assert "<redacted>" in sanitized
+    # the failure itself stays legible
+    assert "session failed against" in sanitized
+
+
+def test_sanitizer_removes_applied_override_values_alongside_the_patterns():
+    applied = (AppliedOverride(field="OP046", value="Black", source="fixed:pricing_model"),)
+
+    sanitized = sanitize_external_text(
+        "responseError from host:8194 -- override OP046=Black is invalid", applied
+    )
+
+    assert "Black" not in sanitized
+    assert "<redacted override value>" in sanitized
+    assert "<redacted host>" in sanitized
+    assert "OP046" in sanitized and "responseError" in sanitized
+
+
+def test_sanitizer_passes_ordinary_bloomberg_text_through():
+    assert sanitize_external_text("[BAD_FLD] field not applicable to this security") == (
+        "[BAD_FLD] field not applicable to this security"
+    )
+    assert sanitize_external_text(None) is None
+    assert sanitize_external_text("") == ""
+
+
+def test_connection_failures_are_sanitized_in_every_output(monkeypatch, tmp_path, capsys):
+    def _probe(identifier, fields, overrides=None):
+        raise RuntimeError(
+            "Bloomberg DAPI session failed to start against localhost:8194 for "
+            "uuid=87654321 (C:\\Users\\eddy\\terminal.log)"
+        )
+
+    monkeypatch.setattr(module, "probe_fields", _probe)
+    monkeypatch.setattr(module, "describe_fields", _fake_describe())
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "localhost:8194" not in surface
+        assert "87654321" not in surface
+        assert "eddy\\terminal.log" not in surface
+    assert "session failed to start" in json_text

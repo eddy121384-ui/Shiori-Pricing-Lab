@@ -57,7 +57,10 @@ own committed synthetic option case
 one entry there is the entire change needed to activate an override, and
 until it exists the override is reported ``OVERRIDE_ROLE_UNRESOLVED``
 rather than handed back to the user. ``--override FIELD=VALUE`` stays as an
-advanced escape hatch and is never required for a normal run.
+advanced escape hatch for an override whose role is *not* confirmed, and is
+never required for a normal run. It cannot replace a confirmed override's
+value: naming ``OP046`` or ``OP188`` with anything other than the approved
+value is rejected before any request is sent.
 
 **Acquisition timestamps.** Every DAPI request -- the metadata discovery
 request and each per-security value request -- records its own
@@ -96,6 +99,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -751,9 +755,19 @@ OVERRIDE_ROLE_UNRESOLVED = "OVERRIDE_ROLE_UNRESOLVED"
 OVERRIDE_FIXTURE_MISSING = "OVERRIDE_FIXTURE_MISSING"
 OVERRIDE_VALUE_UNCONFIRMED = "OVERRIDE_VALUE_UNCONFIRMED"
 OVERRIDE_NOT_APPLICABLE = "OVERRIDE_NOT_APPLICABLE"
-OVERRIDE_ROLE_OVERRIDDEN = "OVERRIDE_ROLE_OVERRIDDEN"
-
 _SCRUBBED_OVERRIDE_VALUE = "<redacted override value>"
+
+# Structural patterns scrubbed out of any external text before it is stored.
+# Bloomberg's own error text can carry connection and session detail as well
+# as a quoted request, and none of it belongs in a committable report.
+_HOST_PORT_PATTERN = re.compile(r"\b[A-Za-z0-9_.-]+:\d{2,5}\b")
+_PATH_PATTERN = re.compile(
+    r"(?:[A-Za-z]:\\[^\s\"']+|/(?:home|Users|users|root|var|tmp|opt)/[^\s\"']+)"
+)
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?i)\b(uuid|user(?:name)?|terminal|serial|sid|session|token|password|passwd|auth|"
+    r"credential|api[_-]?key)\s*[=:]\s*\S+"
+)
 
 # The option context this probe sends when a discovered override's role is
 # approved: the repo's own committed, synthetic standalone-option case. No
@@ -858,20 +872,31 @@ def load_option_context_fixture(path: Path | None = None) -> dict[str, str]:
     return context
 
 
-def _scrub_override_values(text: str | None, overrides: tuple[AppliedOverride, ...]) -> str | None:
-    """Remove every applied override value from external text before it is stored.
+def sanitize_external_text(
+    text: str | None, overrides: tuple[AppliedOverride, ...] = ()
+) -> str | None:
+    """Sanitize Bloomberg-authored text before this run stores or prints it.
 
-    Bloomberg's own error and field-exception text can quote the request back
-    -- including an override's value. Successful values are redacted at
-    render time, so without this the no-leak guarantee would hold everywhere
-    except the error paths. Best-effort by design: it removes the exact value
-    this run sent (and its stripped form), and does not try to catch a value
-    Bloomberg reformatted.
+    Every external string that reaches the console, the Markdown or the JSON
+    goes through here first, so the no-leak guarantee holds on error paths
+    exactly as it does on success paths. Removed, in order:
+
+    1. every override value this run actually sent (Bloomberg can quote the
+       request back in a rejection);
+    2. host:port pairs;
+    3. filesystem paths;
+    4. ``key=value`` pairs whose key names a terminal, session, user,
+       serial, token or credential.
+
+    The failure itself stays legible -- field ids, error categories and
+    surrounding wording are untouched. Best-effort by design for (1): it
+    removes the exact value sent and its stripped form, and does not claim
+    to catch a value Bloomberg reformatted.
     """
 
     if not text:
         return text
-    scrubbed = str(text)
+    sanitized = str(text)
     variants = {
         variant
         for item in overrides
@@ -880,8 +905,11 @@ def _scrub_override_values(text: str | None, overrides: tuple[AppliedOverride, .
         if variant and len(variant) > 1
     }
     for variant in sorted(variants, key=len, reverse=True):
-        scrubbed = scrubbed.replace(variant, _SCRUBBED_OVERRIDE_VALUE)
-    return scrubbed
+        sanitized = sanitized.replace(variant, _SCRUBBED_OVERRIDE_VALUE)
+    sanitized = _SENSITIVE_KEY_PATTERN.sub(r"\1=<redacted>", sanitized)
+    sanitized = _PATH_PATTERN.sub("<redacted path>", sanitized)
+    sanitized = _HOST_PORT_PATTERN.sub("<redacted host>", sanitized)
+    return sanitized
 
 
 def _group_mnemonics(group: str) -> tuple[str, ...]:
@@ -1033,7 +1061,7 @@ def plan_overrides(
             )
             continue
         role = APPROVED_OVERRIDE_ROLES.get(override_field)
-        if override_field in user_supplied:
+        if override_field in user_supplied and role is None:
             applied.append(
                 AppliedOverride(
                     field=override_field,
@@ -1045,23 +1073,10 @@ def plan_overrides(
                 OverridePlanEntry(
                     override_field=override_field,
                     required_by=tuple(fields),
-                    # A CLI value is Eddy's own explicit instruction, so it is
-                    # sent -- but it must never be reported as though it were
-                    # the confirmed semantics, which is what this distinct
-                    # status and the role attribution below prevent.
-                    status=OVERRIDE_ROLE_OVERRIDDEN if role else OVERRIDE_APPLIED,
-                    role=role,
+                    status=OVERRIDE_APPLIED,
+                    role=None,
                     source="user_supplied",
-                    note=(
-                        (
-                            f"--override replaced the confirmed {role!r} value for this "
-                            "override. The request no longer carries the confirmed "
-                            "semantics, so this run's evidence must not be read as one -- "
-                            "drop the --override to restore it."
-                        )
-                        if role
-                        else "Sent verbatim from --override; its value is redacted in every output."
-                    ),
+                    note="Sent verbatim from --override; its value is redacted in every output.",
                     metadata=metadata_by_field.get(override_field),
                 )
             )
@@ -1136,6 +1151,19 @@ def plan_overrides(
         applied.append(
             AppliedOverride(field=override_field, value=context[role], source=source)
         )
+        applied_note = (
+            "Applied automatically from the documented fixed value for this role."
+            if is_fixed_role
+            else "Applied automatically from the committed synthetic option case."
+        )
+        if override_field in user_supplied:
+            # A confirmed override's value is not replaceable: `main` rejects
+            # the run outright, and a programmatic caller that gets here is
+            # still held to the confirmed value rather than the CLI one.
+            applied_note += (
+                " A --override for this field was rejected: its value is fixed by the "
+                f"confirmed {role!r} semantics."
+            )
         plan.append(
             OverridePlanEntry(
                 override_field=override_field,
@@ -1143,17 +1171,15 @@ def plan_overrides(
                 status=OVERRIDE_APPLIED,
                 role=role,
                 source=source,
-                note=(
-                    "Applied automatically from the documented fixed value for this role."
-                    if is_fixed_role
-                    else "Applied automatically from the committed synthetic option case."
-                ),
+                note=applied_note,
                 metadata=metadata_by_field.get(override_field),
             )
         )
 
     for override_field, value in user_overrides:
         if override_field in required_by:
+            continue
+        if override_field in APPROVED_OVERRIDE_ROLES:
             continue
         if override_field in NEVER_MAPPED_OVERRIDES:
             plan.append(
@@ -1233,7 +1259,7 @@ def collect_evidence(
                         overrides=group_overrides,
                         results={},
                         error=_collapse(
-                            _scrub_override_values(str(exc), group_overrides),
+                            sanitize_external_text(str(exc), group_overrides),
                             _MAX_DETAIL_CHARS,
                         ),
                         requested_at=requested_at,
@@ -1249,7 +1275,7 @@ def collect_evidence(
                     results={
                         result.field: replace(
                             result,
-                            detail=_scrub_override_values(result.detail, group_overrides),
+                            detail=sanitize_external_text(result.detail, group_overrides),
                         )
                         for result in results
                     },
@@ -1924,6 +1950,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # A confirmed override's value is not replaceable from the command line:
+    # OP046 stays the documented pricing model and OP188 stays the option
+    # case's valuation date. A --override naming one is rejected before any
+    # request is sent, unless it repeats the approved value exactly (a no-op).
+    # The rejected value is never echoed back.
+    option_context = {**load_option_context_fixture(), **FIXED_ROLE_VALUES}
+    for override_field, override_value in overrides:
+        role = APPROVED_OVERRIDE_ROLES.get(override_field)
+        if role is None:
+            continue
+        if override_value == option_context.get(role):
+            continue
+        print(
+            f"error: --override {override_field} was rejected -- its value is fixed by the "
+            f"confirmed {role!r} semantics and must not be replaced. Drop the --override to "
+            "use the confirmed value.",
+            file=sys.stderr,
+        )
+        return 2
+
     output_dir = Path(args.output_dir) if args.output_dir else Path.cwd() / DEFAULT_OUTPUT_DIRNAME
 
     print("Shiori Bloomberg input-sourcing probe (Issue #149) -- read-only")
@@ -1939,11 +1985,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         discovery = discover_option_context_metadata()
-        override_plan, applied_overrides = plan_overrides(
-            discovery,
-            {**load_option_context_fixture(), **FIXED_ROLE_VALUES},
-            overrides,
-        )
+        override_plan, applied_overrides = plan_overrides(discovery, option_context, overrides)
         evidence = collect_evidence(identifiers, applied_overrides)
     except ImportError as exc:
         print(
@@ -1972,14 +2014,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(f"{label:<30}{len(summary[key])}")
 
-    applied = [
-        entry
-        for entry in report["override_plan"]
-        if entry["status"] in (OVERRIDE_APPLIED, OVERRIDE_ROLE_OVERRIDDEN)
-    ]
-    overridden = [
-        entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_ROLE_OVERRIDDEN
-    ]
+    applied = [entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_APPLIED]
     unresolved_roles = [
         entry for entry in report["override_plan"] if entry["status"] == OVERRIDE_ROLE_UNRESOLVED
     ]
@@ -2005,12 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
             None,
         )
         shape = request_override["value_shape"] if request_override else "not sent"
-        replaced = (
-            f" [replaces the confirmed {entry['role']} value]"
-            if entry["status"] == OVERRIDE_ROLE_OVERRIDDEN
-            else ""
-        )
-        print(f"  - {entry['override_field']} ({entry['source']}) = {shape}{replaced}")
+        print(f"  - {entry['override_field']} ({entry['source']}) = {shape}")
     for entry in unresolved_roles:
         print(f"  - {entry['override_field']}: role unconfirmed, not sent")
     for entry in not_applicable:
@@ -2050,12 +2080,6 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if override_metadata["error"]:
         request_errors.insert(0, f"//blp/apiflds override metadata: {override_metadata['error']}")
-    if overridden:
-        print("")
-        print(
-            "WARNING: --override replaced a confirmed override value; this run's evidence "
-            "is not a confirmed-semantics run."
-        )
     if report["field_metadata_discovery"]["error"]:
         request_errors.insert(
             0, f"//blp/apiflds discovery: {report['field_metadata_discovery']['error']}"
