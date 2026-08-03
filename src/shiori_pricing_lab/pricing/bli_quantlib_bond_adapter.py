@@ -116,6 +116,10 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from shiori_pricing_lab.data.bli_standalone_contract import (
+    BLIStandaloneBondReferenceData,
+    StandaloneBondReferenceData,
+)
 from shiori_pricing_lab.products.enums import DayCount, Frequency
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
@@ -243,7 +247,7 @@ def _is_last_day_of_month(value: date) -> bool:
 
 
 def _check_regular_schedule(
-    bond: BondReferenceData,
+    bond: StandaloneBondReferenceData,
     *,
     issue: date,
     maturity: date,
@@ -402,7 +406,7 @@ def _day_counter(day_count: DayCount) -> ql.DayCounter:
 
 
 def coupon_flows_before(
-    bond: BondReferenceData,
+    bond: StandaloneBondReferenceData,
     *,
     after_date: str,
     on_or_before_date: str,
@@ -423,8 +427,11 @@ def coupon_flows_before(
     """
 
     _require_quantlib()
-    if not isinstance(bond, BondReferenceData):
-        raise TypeError(f"bond must be a BondReferenceData, got {type(bond).__name__}")
+    if not isinstance(bond, (BondReferenceData, BLIStandaloneBondReferenceData)):
+        raise TypeError(
+            "bond must be a BondReferenceData or BLIStandaloneBondReferenceData, "
+            f"got {type(bond).__name__}"
+        )
 
     issue = _parse_iso_date(bond.issue_date, "issue_date")
     maturity = _parse_iso_date(bond.maturity_date, "maturity_date")
@@ -470,7 +477,9 @@ def coupon_flows_before(
     )
 
 
-def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> float:
+def accrued_interest_per_100(
+    bond: StandaloneBondReferenceData, *, as_of_date: str
+) -> float:
     """Return accrued interest per 100 face at the explicit `as_of_date`.
 
     Prorates the fixed per-period coupon amount
@@ -487,8 +496,11 @@ def accrued_interest_per_100(bond: BondReferenceData, *, as_of_date: str) -> flo
     """
 
     _require_quantlib()
-    if not isinstance(bond, BondReferenceData):
-        raise TypeError(f"bond must be a BondReferenceData, got {type(bond).__name__}")
+    if not isinstance(bond, (BondReferenceData, BLIStandaloneBondReferenceData)):
+        raise TypeError(
+            "bond must be a BondReferenceData or BLIStandaloneBondReferenceData, "
+            f"got {type(bond).__name__}"
+        )
 
     issue = _parse_iso_date(bond.issue_date, "issue_date")
     maturity = _parse_iso_date(bond.maturity_date, "maturity_date")

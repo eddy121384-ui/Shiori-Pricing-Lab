@@ -61,7 +61,6 @@
     forwardSettlementNote: document.getElementById("forward-settlement-note"),
     // --- Manual completion inputs (Issue #143) ---
     expiryDate: document.getElementById("expiry-date-input"),
-    settlementLag: document.getElementById("settlement-lag-input"),
     volatilityBasis: document.getElementById("volatility-basis-select"),
     valuationDate: document.getElementById("valuation-date-input"),
     reportingDate: document.getElementById("reporting-date-input"),
@@ -76,15 +75,11 @@
     timingSnapshotId: document.getElementById("timing-snapshot-id"),
     dayCount: document.getElementById("day-count-select"),
     bondTypeSelect: document.getElementById("bond-type-select"),
-    yieldConvention: document.getElementById("yield-convention-select"),
-    businessDayConvention: document.getElementById("business-day-convention-select"),
-    redemptionAmount: document.getElementById("redemption-amount-input"),
     exDividendDays: document.getElementById("ex-dividend-days-input"),
     lastCouponDate: document.getElementById("last-coupon-date-input"),
     bondStatus: document.getElementById("bond-status-select"),
     hintDayCount: document.getElementById("hint-day-count"),
     hintBondType: document.getElementById("hint-bond-type"),
-    hintYieldConvention: document.getElementById("hint-yield-convention"),
     curveRows: document.getElementById("curve-rows"),
     curveAddRowBtn: document.getElementById("curve-add-row-btn"),
     curveCoverage: document.getElementById("curve-coverage"),
@@ -387,11 +382,6 @@
     ["bond_option.option_type", "Call / Put", CATEGORY_OPTION_TERMS],
     ["bond_option.exercise_style", "Exercise Style", CATEGORY_OPTION_TERMS],
     ["bond_option.settlement_type", "Settlement Type", CATEGORY_OPTION_TERMS],
-    [
-      "bond_option.settlement_lag_days",
-      "Settlement Lag (days)",
-      CATEGORY_VALUATION_METADATA,
-    ],
     ["bond_option.expiry_date", "Expiry Date", CATEGORY_OPTION_TERMS],
     ["bond_option.notional", "Notional", CATEGORY_OPTION_TERMS],
     ["bond_option.position", "Direction (Buy/Sell)", CATEGORY_OPTION_TERMS],
@@ -407,16 +397,6 @@
     ["bond_reference_data_universe.0.issue_date", "Issue Date", CATEGORY_BOND_REFERENCE_DATA],
     ["bond_reference_data_universe.0.day_count", "Day Count", CATEGORY_BOND_REFERENCE_DATA],
     [
-      "bond_reference_data_universe.0.business_day_convention",
-      "Business Day Convention",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    [
-      "bond_reference_data_universe.0.redemption_amount",
-      "Redemption Amount",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    [
       "bond_reference_data_universe.0.callable_flag",
       "Callable Flag",
       CATEGORY_BOND_REFERENCE_DATA,
@@ -427,11 +407,6 @@
       CATEGORY_BOND_REFERENCE_DATA,
     ],
     ["bond_reference_data_universe.0.bond_type", "Bond Type", CATEGORY_BOND_REFERENCE_DATA],
-    [
-      "bond_reference_data_universe.0.yield_convention",
-      "Yield Convention",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
     [
       "bond_reference_data_universe.0.ex_dividend_days",
       "Ex-Dividend Days",
@@ -560,7 +535,6 @@
     ["Notional", { selector: "#notional-input", bodyId: "option-terms-body" }],
     ["Expiry Date", { selector: "#expiry-date-input", bodyId: "option-terms-body" }],
     ["Expiry Timestamp", { selector: "#expiry-timestamp-input", bodyId: "option-terms-body" }],
-    ["Settlement Lag (days)", { selector: "#settlement-lag-input", bodyId: "timing-body" }],
     ["Price Vol (σ)", { selector: "#volatility-input", bodyId: "option-terms-body" }],
     ["Volatility Basis", { selector: "#volatility-basis-select", bodyId: "option-terms-body" }],
     [
@@ -568,12 +542,9 @@
       { selector: "#forward-price-input", bodyId: "forward-carry-body" },
     ],
     ["Day Count", { selector: "#day-count-select", bodyId: "bond-ref-body" }],
-    ["Business Day Convention", { selector: "#business-day-convention-select", bodyId: "bond-ref-body" }],
-    ["Redemption Amount", { selector: "#redemption-amount-input", bodyId: "bond-ref-body" }],
     ["Ex-Dividend Days", { selector: "#ex-dividend-days-input", bodyId: "bond-ref-body" }],
     ["Last Coupon Date", { selector: "#last-coupon-date-input", bodyId: "bond-ref-body" }],
     ["Bond Type", { selector: "#bond-type-select", bodyId: "bond-ref-body" }],
-    ["Yield Convention", { selector: "#yield-convention-select", bodyId: "bond-ref-body" }],
     ["Status", { selector: "#bond-status-select", bodyId: "bond-ref-body" }],
     ["Valuation Date", { selector: "#valuation-date-input", bodyId: "timing-body" }],
     ["As-Of Timestamp", { selector: "#as-of-timestamp-input", bodyId: "timing-body" }],
@@ -863,7 +834,6 @@
     return {
       underlying_isin: isin,
       expiry_date: bondOption.expiry_date,
-      settlement_lag_days: bondOption.settlement_lag_days,
       issuer: referenceData.issuer,
       currency: referenceData.currency,
       coupon: referenceData.coupon,
@@ -911,11 +881,9 @@
     els.forwardPrice,
     els.expiryDate,
     els.expiryTimestamp,
-    els.settlementLag,
     els.reportingDate,
     els.forwardSettlementDate,
     els.optionSettlementDate,
-    els.redemptionAmount,
     els.exDividendDays,
     els.lastCouponDate,
   ];
@@ -929,8 +897,6 @@
   const MANUAL_SELECTS = () => [
     els.dayCount,
     els.bondTypeSelect,
-    els.yieldConvention,
-    els.businessDayConvention,
     els.bondStatus,
   ];
 
@@ -1000,8 +966,8 @@
     return trimmed === "" ? null : trimmed;
   }
 
-  // settlement_lag_days and ex_dividend_days are `int` on their dataclasses
-  // and explicitly reject a float/bool. Only a plain integer literal counts;
+  // ex_dividend_days is `int` on its dataclass and explicitly rejects a
+  // float/bool. Only a plain integer literal counts;
   // "1.5" is not silently truncated.
   function integerOrNull(raw) {
     const trimmed = (raw || "").trim();
@@ -1026,18 +992,14 @@
     bondOption.strike_price = numberOrNull(els.strikePrice.value);
     bondOption.notional = numberOrNull(els.notional.value);
     bondOption.expiry_date = textOrNull(els.expiryDate.value);
-    bondOption.settlement_lag_days = integerOrNull(els.settlementLag.value);
 
-    // The eight fields Bloomberg has no confirmed mnemonic for. The three
-    // enum selects are the trader's own choice -- bond_master_raw's
-    // DAY_CNT_DES / MTY_TYP / CALC_TYP_DES are displayed as a hint beside
-    // them and are never read into the draft.
+    // The five standalone-consumed fields Bloomberg does not mechanically
+    // supply. The two enum selects are the trader's own choice --
+    // bond_master_raw's DAY_CNT_DES / MTY_TYP are displayed as hints and
+    // are never read into the draft.
     const referenceData = currentDraft.bond_reference_data_universe[0];
     referenceData.day_count = selectValueOrNull(els.dayCount);
     referenceData.bond_type = selectValueOrNull(els.bondTypeSelect);
-    referenceData.yield_convention = selectValueOrNull(els.yieldConvention);
-    referenceData.business_day_convention = selectValueOrNull(els.businessDayConvention);
-    referenceData.redemption_amount = numberOrNull(els.redemptionAmount.value);
     referenceData.ex_dividend_days = integerOrNull(els.exDividendDays.value);
     referenceData.last_coupon_date = textOrNull(els.lastCouponDate.value);
     referenceData.status = selectValueOrNull(els.bondStatus);
@@ -1640,7 +1602,6 @@
     const raw = (resolvedBloombergBond && resolvedBloombergBond.bond_master_raw) || {};
     setTextOrNotAvailable(els.hintDayCount, raw.day_count);
     setTextOrNotAvailable(els.hintBondType, raw.maturity_type);
-    setTextOrNotAvailable(els.hintYieldConvention, raw.calc_type);
   }
 
   // Trader-draft revision (Issue #140 second revision): builds a brand-new
@@ -1695,7 +1656,6 @@
         option_type: null,
         exercise_style: "EUROPEAN",
         settlement_type: "CASH",
-        settlement_lag_days: null,
         expiry_date: null,
         notional: null,
         position: null,
@@ -1713,12 +1673,9 @@
           maturity_date: bondMaster.maturity_date ?? null,
           issue_date: bondMaster.issue_date ?? null,
           day_count: bondMaster.day_count ?? null,
-          business_day_convention: bondMaster.business_day_convention ?? null,
-          redemption_amount: bondMaster.redemption_amount ?? null,
           callable_flag: bondMaster.callable_flag ?? null,
           sinkable_flag: bondMaster.sinkable_flag ?? null,
           bond_type: bondMaster.bond_type ?? null,
-          yield_convention: bondMaster.yield_convention ?? null,
           ex_dividend_days: null,
           first_coupon_date: bondMaster.first_coupon_date ?? null,
           last_coupon_date: bondMaster.last_coupon_date ?? null,

@@ -69,6 +69,9 @@ from dataclasses import dataclass
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle import BLIMVPInputBundle
 from shiori_pricing_lab.data.bli_snapshot import BLIMarketDataSnapshot, BLIVolatilityBasis
+from shiori_pricing_lab.data.bli_standalone_contract import (
+    BLIStandaloneBondReferenceData,
+)
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
@@ -311,8 +314,14 @@ def check_bli_mvp_standalone_option_required_inputs(
 
     # --- Bond reference data present (for accrued interest at forward
     # settlement -- defensive, re-verified at construction) ---------------
-    if not isinstance(request.resolved_bond_reference_data, BondReferenceData):
-        reasons.append("resolved_bond_reference_data must be a BondReferenceData")
+    if not isinstance(
+        request.resolved_bond_reference_data,
+        (BondReferenceData, BLIStandaloneBondReferenceData),
+    ):
+        reasons.append(
+            "resolved_bond_reference_data must be a BondReferenceData or "
+            "BLIStandaloneBondReferenceData"
+        )
 
     # --- Explicit forward clean price input required (Issue #94) ---------
     # No spot-clean-price requirement: the forward is supplied explicitly,

@@ -2,8 +2,8 @@
 
 Scope, per Issue #96's "approve one typed-builder implementation slice"
 binding decision: one small function that resolves a bond option's
-underlying bond against a supplied reference-data universe (via the existing
-``reference_data.resolution.resolve_bond_reference_data``), assembles a
+underlying bond by exact ISIN against a supplied reference-data universe,
+applies the standalone structural safety gates, and assembles a
 ``BLIMarketDataSnapshot`` from already-typed component objects and explicit
 snapshot metadata, and constructs the standalone
 ``BLIStandaloneBondOptionRequest`` that ``price_bli_mvp_standalone_option``
@@ -58,9 +58,9 @@ results -- exactly as #105 pinned.
 no raw dict/JSON parsing, no Bloomberg names/API, no UI, no persistence, no
 benchmark comparison, no calibration, no curve construction/extrapolation,
 no yield-vol conversion, no fallback/hidden default, no system clock.
-``BondOption``, ``BondReferenceData``, ``resolve_bond_reference_data``,
-``BLIMarketDataSnapshot`` (and its component classes), and
-``BLIStandaloneBondOptionRequest`` are all unmodified.
+The general ``BondOption``, ``BondReferenceData``, generic reference-data
+resolver/eligibility contract, and legacy bundle/structured-product paths
+remain unmodified.
 """
 
 from __future__ import annotations
@@ -77,21 +77,26 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIMarketDataStatus,
     BLIVolatilityInput,
 )
+from shiori_pricing_lab.data.bli_standalone_contract import (
+    BLIStandaloneBondOptionTerms,
+    BLIStandaloneBondReferenceData,
+    StandaloneBondOption,
+    StandaloneBondReferenceData,
+    is_standalone_bond_reference_data_eligible,
+)
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
 from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
-from shiori_pricing_lab.reference_data.resolution import (
-    BondResolutionStatus,
-    resolve_bond_reference_data,
-)
+from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
+from shiori_pricing_lab.reference_data.resolution import DuplicateBondReferenceDataError
 
 
 def build_bli_standalone_option_request(
     *,
-    bond_option: BondOption,
-    bond_reference_data_universe: Iterable[BondReferenceData],
+    bond_option: StandaloneBondOption,
+    bond_reference_data_universe: Iterable[StandaloneBondReferenceData],
     valuation_date: str,
     as_of_timestamp: str,
     source_system: str,
@@ -113,12 +118,10 @@ def build_bli_standalone_option_request(
     """Resolve ``bond_option``'s underlying bond and build a standalone request.
 
     Accepts only already-typed contracts and explicit snapshot metadata (see
-    the module docstring). ``bond_reference_data_universe`` is passed
-    straight through to ``resolve_bond_reference_data`` -- this function does
-    not filter, sort, normalize, or apply any fallback to it.
-    ``bond_reference_source_name`` is forwarded only as the resolver's
-    audit/source label (its ``source_fixture_name``); it never affects
-    matching.
+    the module docstring). ``bond_reference_data_universe`` is searched by
+    exact ISIN only, with duplicate detection and no normalization or
+    fallback. ``bond_reference_source_name`` is an audit/source label only;
+    it never affects matching.
 
     ``pricing_timestamp``, ``expiry_timestamp``, ``reporting_date``,
     ``forward_settlement_date``, and ``option_settlement_date`` (Issue #94
@@ -133,14 +136,12 @@ def build_bli_standalone_option_request(
     verbatim -- this builder never constructs or derives a forward from a
     spot price and a Bond Reference Curve.
 
-    Raises :class:`TypeError` if ``bond_option`` is not a ``BondOption`` --
-    checked before its ``underlying_isin`` is read, so the failure is clear
-    rather than an ``AttributeError`` from deep inside the resolver call.
+    Raises :class:`TypeError` if ``bond_option`` is neither a general
+    ``BondOption`` nor ``BLIStandaloneBondOptionTerms`` -- checked before its
+    ``underlying_isin`` is read.
 
-    Raises :class:`ValueError` if ``resolve_bond_reference_data`` does not
-    return ``BondResolutionStatus.FOUND_ELIGIBLE`` -- covering both
-    ``NOT_FOUND`` and ``FOUND_INELIGIBLE`` -- with the resolver's own status
-    and ``block_reason`` in the message.
+    Raises :class:`ValueError` with ``NOT_FOUND`` or ``FOUND_INELIGIBLE`` when
+    exact standalone resolution cannot produce one safe resolved record.
 
     Propagates :class:`reference_data.resolution.DuplicateBondReferenceDataError`
     unchanged if ``bond_reference_data_universe`` contains more than one
@@ -152,21 +153,48 @@ def build_bli_standalone_option_request(
     every other gate -- this builder duplicates none of those checks.
     """
 
-    if not isinstance(bond_option, BondOption):
-        raise TypeError("bond_option must be a BondOption")
+    if not isinstance(bond_option, (BondOption, BLIStandaloneBondOptionTerms)):
+        raise TypeError(
+            "bond_option must be a BondOption or BLIStandaloneBondOptionTerms"
+        )
 
     underlying_isin = bond_option.underlying_isin
-    resolution = resolve_bond_reference_data(
-        underlying_isin,
-        bond_reference_data_universe,
-        source_fixture_name=bond_reference_source_name,
-    )
-
-    if resolution.status is not BondResolutionStatus.FOUND_ELIGIBLE:
+    source_name = bond_reference_source_name
+    if source_name is None:
+        source_name = (
+            "SYNTHETIC_BOND_FIXTURES"
+            if bond_reference_data_universe is SYNTHETIC_BOND_FIXTURES
+            else "caller_supplied_fixtures"
+        )
+    universe = tuple(bond_reference_data_universe)
+    if not all(
+        isinstance(record, (BondReferenceData, BLIStandaloneBondReferenceData))
+        for record in universe
+    ):
+        raise TypeError(
+            "bond_reference_data_universe records must be BondReferenceData or "
+            "BLIStandaloneBondReferenceData"
+        )
+    matches = [record for record in universe if record.isin == underlying_isin]
+    if len(matches) > 1:
+        raise DuplicateBondReferenceDataError(
+            f"{len(matches)} bond reference-data records in {source_name} share isin "
+            f"{underlying_isin!r} -- duplicate ISIN is a fixture data-integrity bug"
+        )
+    if not matches:
         raise ValueError(
             f"cannot build BLIStandaloneBondOptionRequest for underlying_isin "
-            f"{underlying_isin!r}: resolve_bond_reference_data returned "
-            f"{resolution.status.value} ({resolution.block_reason})"
+            f"{underlying_isin!r}: NOT_FOUND (no bond reference data found in "
+            f"{source_name})"
+        )
+    resolved_bond_reference_data = matches[0]
+    eligibility = is_standalone_bond_reference_data_eligible(
+        resolved_bond_reference_data
+    )
+    if not eligibility.eligible:
+        raise ValueError(
+            f"cannot build BLIStandaloneBondOptionRequest for underlying_isin "
+            f"{underlying_isin!r}: FOUND_INELIGIBLE ({'; '.join(eligibility.reasons)})"
         )
 
     market_data_snapshot = BLIMarketDataSnapshot(
@@ -185,7 +213,7 @@ def build_bli_standalone_option_request(
 
     return BLIStandaloneBondOptionRequest(
         bond_option=bond_option,
-        resolved_bond_reference_data=resolution.bond_reference_data,
+        resolved_bond_reference_data=resolved_bond_reference_data,
         valuation_date=valuation_date,
         market_data_snapshot=market_data_snapshot,
         pricing_timestamp=pricing_timestamp,

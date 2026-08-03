@@ -75,7 +75,6 @@ def test_index_html_wires_timing_fields_without_duplicate_trader_entry() -> None
         "pricing-timestamp-input",
         "expiry-timestamp-input",
         "as-of-timestamp-input",
-        "settlement-lag-input",
         "expiry-date-input",
         "valuation-date-input",
         "reporting-date-input",
@@ -99,6 +98,10 @@ def test_index_html_wires_timing_fields_without_duplicate_trader_entry() -> None
         "option-terms-expiry-timestamp",
         "option-terms-settlement-lag",
         "option-terms-expiry",
+        "settlement-lag-input",
+        "business-day-convention-select",
+        "redemption-amount-input",
+        "yield-convention-select",
     ):
         assert f'id="{removed_id}"' not in text
 

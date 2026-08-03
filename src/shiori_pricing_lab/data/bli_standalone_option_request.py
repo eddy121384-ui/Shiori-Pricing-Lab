@@ -18,10 +18,13 @@ composition as the bundle path.
 
 **Field list is deliberately minimal (Issue #95 correction #2):**
 
-- ``bond_option`` -- a bare ``BondOption`` (its own ``product_id`` /
-  ``product_type`` are reused verbatim for the pricing result; no new
-  ``"STANDALONE_BOND_OPTION"`` discriminator is introduced).
-- ``resolved_bond_reference_data`` -- the resolved Bond Master record.
+- ``bond_option`` -- standalone terms without a settlement-lag field (a
+  legacy ``BondOption`` remains accepted for typed compatibility; the lag is
+  never read).
+- ``resolved_bond_reference_data`` -- the standalone resolved Bond Master
+  shape containing only safety and accrued-interest inputs (a legacy
+  ``BondReferenceData`` remains accepted without reading its route-irrelevant
+  business-day, redemption, or yield-convention fields).
 - ``valuation_date`` -- explicit ISO date; never ``date.today()``.
 - ``market_data_snapshot`` -- one ``BLIMarketDataSnapshot``. For the
   OVME-aligned standalone path (Issue #94) its
@@ -67,16 +70,15 @@ and never normalizes or rewrites the stored string.
 
 **No ``resolution_status`` / ``eligibility_reasons`` / ``request_id``**
 (Issue #95 correction #2): unlike ``BLIMVPInputBundle``, this request does
-not carry the resolver's own status fields. Instead it **re-runs**
-``is_mvp_pricing_eligible`` directly on the actual reference-data object --
-the single existing source of truth for MVP eligibility
-(``reference_data.eligibility``). Structured resolver/builder outcomes are
-#96's concern, not this pricing request's.
+not carry the resolver's own status fields. It rechecks the standalone
+structural safety gates directly on the actual resolved object. The generic
+``is_mvp_pricing_eligible`` contract remains unchanged for legacy paths,
+including its yield-convention rule.
 
 **Construction rejects cross-object incoherence only (Issue #95 correction
 #4).** ``__post_init__`` enforces the same coherence gates as
 ``BLIMVPInputBundle`` *except* the deposit-leg-specific ones and the
-resolution-status gates: invalid valuation date, ineligible reference data,
+resolution-status gates: invalid valuation date, unsafe reference data,
 ISIN mismatch, currency mismatch, valuation-date mismatch, a future as-of
 date, or a missing option-leg curve purpose. It deliberately does **not**
 narrow a valid general ``BondOption`` down to the supported *pricing* shape:
@@ -86,18 +88,16 @@ here where their own schemas allow them, and are then rejected by the
 standalone pricing guard as explicit ``FAILED`` results -- exactly the same
 supported/unsupported boundary the bundle path enforces.
 
-**Reused helpers (no duplicated validation):** ``_parse_iso_date`` and the
-mechanically-relocated ``_parse_as_of_calendar_date`` (both
-``data/_validation.py``), ``is_mvp_pricing_eligible``
-(``reference_data.eligibility``), and ``require_exact_isin_match``
-(``data/bli_snapshot.py``) -- all unmodified.
+**Reused helpers:** ``_parse_iso_date`` and the mechanically-relocated
+``_parse_as_of_calendar_date`` (both ``data/_validation.py``), plus
+``require_exact_isin_match`` (``data/bli_snapshot.py``).
 
 **Hard non-goals (Issue #95 scope cap):** no deposit-leg valuation, no full
 structured-product valuation, no curve construction/extrapolation, no
 yield-vol conversion, no Bloomberg/provider code, no UI, no persistence, no
-new pricing methodology. ``BondOption``, ``BondReferenceData``,
-``BLIMarketDataSnapshot``, ``is_mvp_pricing_eligible``, and
-``require_exact_isin_match`` are all unmodified.
+new pricing methodology. The general ``BondOption``, ``BondReferenceData``,
+legacy bundle/structured-product path, generic ``is_mvp_pricing_eligible``,
+and ``BLIMarketDataSnapshot`` are unmodified.
 """
 
 from __future__ import annotations
@@ -111,9 +111,15 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIMarketDataSnapshot,
     require_exact_isin_match,
 )
+from shiori_pricing_lab.data.bli_standalone_contract import (
+    BLIStandaloneBondOptionTerms,
+    BLIStandaloneBondReferenceData,
+    StandaloneBondOption,
+    StandaloneBondReferenceData,
+    is_standalone_bond_reference_data_eligible,
+)
 from shiori_pricing_lab.products.bond_option import BondOption
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
-from shiori_pricing_lab.reference_data.eligibility import is_mvp_pricing_eligible
 
 # Curve purposes required to price the standalone option leg. Presence
 # only, never tenor-node selection or interpolation. Narrowed for the
@@ -186,8 +192,8 @@ class BLIStandaloneBondOptionRequest:
     guard, not this constructor.
     """
 
-    bond_option: BondOption
-    resolved_bond_reference_data: BondReferenceData
+    bond_option: StandaloneBondOption
+    resolved_bond_reference_data: StandaloneBondReferenceData
     valuation_date: str
     market_data_snapshot: BLIMarketDataSnapshot
     pricing_timestamp: str
@@ -201,21 +207,32 @@ class BLIStandaloneBondOptionRequest:
         # never date.today()/datetime.now() anywhere in this module.
         valuation_date = _parse_iso_date(self.valuation_date, "valuation_date")
 
-        if not isinstance(self.bond_option, BondOption):
-            raise TypeError("bond_option must be a BondOption")
-        if not isinstance(self.resolved_bond_reference_data, BondReferenceData):
-            raise TypeError("resolved_bond_reference_data must be a BondReferenceData")
+        if not isinstance(self.bond_option, (BondOption, BLIStandaloneBondOptionTerms)):
+            raise TypeError(
+                "bond_option must be a BondOption or BLIStandaloneBondOptionTerms"
+            )
+        if not isinstance(
+            self.resolved_bond_reference_data,
+            (BondReferenceData, BLIStandaloneBondReferenceData),
+        ):
+            raise TypeError(
+                "resolved_bond_reference_data must be a BondReferenceData or "
+                "BLIStandaloneBondReferenceData"
+            )
         if not isinstance(self.market_data_snapshot, BLIMarketDataSnapshot):
             raise TypeError("market_data_snapshot must be a BLIMarketDataSnapshot")
 
-        # Reference data must be MVP-pricing eligible -- re-run the single
-        # existing source of truth (Issue #95 correction #2), never trust a
-        # separately-supplied resolver status (this request carries none).
-        actual_eligibility = is_mvp_pricing_eligible(self.resolved_bond_reference_data)
+        # Re-run the standalone structural safety gates on the actual
+        # resolved object; never trust a separately supplied resolver status
+        # (this request carries none).
+        actual_eligibility = is_standalone_bond_reference_data_eligible(
+            self.resolved_bond_reference_data
+        )
         if not actual_eligibility.eligible:
             raise ValueError(
-                "resolved_bond_reference_data is not MVP-pricing eligible "
-                f"(is_mvp_pricing_eligible reasons: {'; '.join(actual_eligibility.reasons)})"
+                "resolved_bond_reference_data is not MVP-pricing eligible for the "
+                "standalone route "
+                f"(reasons: {'; '.join(actual_eligibility.reasons)})"
             )
 
         # ISIN gates -- plain string equality only, no fuzzy/prefix/

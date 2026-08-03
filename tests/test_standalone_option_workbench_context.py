@@ -50,7 +50,6 @@ def test_context_fields_are_read_verbatim_from_the_base_case() -> None:
         "clean_price_per_100": bond_quote["clean_price_per_100"],
         "accrued_interest_per_100": bond_quote["accrued_interest_per_100"],
         "yield_value": bond_quote["yield_value"],
-        "settlement_lag_days": bond_option["settlement_lag_days"],
         "valuation_date": base_case["valuation_date"],
         "pricing_timestamp": base_case["pricing_timestamp"],
         "expiry_timestamp": base_case["expiry_timestamp"],
@@ -64,16 +63,15 @@ def test_context_fields_are_read_verbatim_from_the_base_case() -> None:
 
 def test_timing_context_fields_come_verbatim_from_the_base_case() -> None:
     # Codex review follow-up: the prototype's old "Time to Expiry" and
-    # "Delivery Delay" rows were a hardcoded fabricated countdown and a
-    # hardcoded "1" -- these three fields replace them, read verbatim, with
-    # no countdown/day-count/business-day math computed anywhere.
+    # row was a hardcoded fabricated countdown. These two fields replace it,
+    # read verbatim, with no countdown/day-count/business-day math computed
+    # anywhere.
     base_case = _base_case()
 
     context = extract_standalone_option_case_context(base_case)
 
     assert context["pricing_timestamp"] == base_case["pricing_timestamp"]
     assert context["expiry_timestamp"] == base_case["expiry_timestamp"]
-    assert context["settlement_lag_days"] == base_case["bond_option"]["settlement_lag_days"]
 
 
 def test_context_never_invents_a_field_the_case_does_not_carry() -> None:

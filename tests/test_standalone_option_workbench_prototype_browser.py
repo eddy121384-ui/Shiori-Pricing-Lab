@@ -341,7 +341,7 @@ def test_successful_lookup_shows_resolved_bond_identity_and_pricing_form(server_
     assert page.inner_text("#details-coupon") == "Not available"
 
     assert not page.eval_on_selector("#draft-incomplete-note", "el => el.hidden")
-    assert page.inner_text("#remaining-input-summary") == "28 required inputs still unresolved"
+    assert page.inner_text("#remaining-input-summary") == "24 required inputs still unresolved"
     missing = _missing_fields_text(page)
     assert any("Strike (per 100)" in item for item in missing)
     assert any("Call / Put" in item for item in missing)
@@ -423,12 +423,12 @@ def test_remaining_input_count_is_contract_aligned_and_locates_advanced_blockers
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
 
-    # PR #144 required 24 manual blockers for this Bloomberg-shaped draft.
-    # Three timing values now come from the acquisition event, leaving 21.
-    assert _remaining_input_count(page) == 21
-    assert page.inner_text("#remaining-input-summary") == "21 required inputs still unresolved"
-    assert page.inner_text("#timing-summary") == "4 required"
-    assert page.inner_text("#bond-ref-summary") == "8 required"
+    # Issue #146 removes four fields that the standalone route never
+    # consumes. The same Bloomberg-shaped draft therefore has 17 blockers.
+    assert _remaining_input_count(page) == 17
+    assert page.inner_text("#remaining-input-summary") == "17 required inputs still unresolved"
+    assert page.inner_text("#timing-summary") == "3 required"
+    assert page.inner_text("#bond-ref-summary") == "5 required"
     assert _is_actually_hidden(page, "timing-body")
     assert _is_actually_hidden(page, "bond-ref-body")
 
@@ -1203,19 +1203,15 @@ def _complete_draft(page, *, curve_nodes=(("1M", "0.0374"), ("1Y", "0.0374"))) -
     # counts remain visible while collapsed, and the trader expands them only
     # when needed.
     page.click("#bond-ref-head")
-    # The three enum selects are the trader's own choice; Bloomberg's raw
-    # DAY_CNT_DES / MTY_TYP / CALC_TYP_DES are only shown beside them.
+    # The two route-consumed enum selects are the trader's own choice;
+    # Bloomberg's raw DAY_CNT_DES / MTY_TYP are only shown beside them.
     page.select_option("#day-count-select", "ACT_ACT_ISDA")
     page.select_option("#bond-type-select", "FIXED_COUPON_BULLET")
-    page.select_option("#yield-convention-select", "SEMI_ANNUAL_COMPOUND")
-    page.select_option("#business-day-convention-select", "FOLLOWING")
-    page.fill("#redemption-amount-input", "100")
     page.fill("#ex-dividend-days-input", "0")
     page.fill("#last-coupon-date-input", "2030-07-31")
     page.select_option("#bond-status-select", "ACTIVE")
 
     page.click("#timing-head")
-    page.fill("#settlement-lag-input", "1")
     page.fill("#reporting-date-input", "2026-10-21")
     page.fill("#forward-settlement-date-input", "2026-10-21")
     page.fill("#option-settlement-date-input", "2026-10-21")
@@ -1499,21 +1495,24 @@ def test_bloomberg_raw_descriptions_are_hints_and_never_enter_the_typed_draft(
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
 
-    # Shown beside the enum the trader must pick.
+    # Route-consumed descriptions are shown beside the enum the trader must
+    # pick; the unused calculation type remains display-only provenance.
     assert page.inner_text("#hint-day-count") == "ACT/ACT"
     assert page.inner_text("#hint-bond-type") == "AT MATURITY"
-    assert page.inner_text("#hint-yield-convention") == "STREET CONVENTION"
+    assert page.inner_text("#details-bloomberg-calc-type") == "STREET CONVENTION"
 
-    # But nothing was auto-selected from them, and the draft stays null.
+    # But nothing was auto-selected from them, and no removed typed field
+    # enters the standalone request draft.
     assert page.input_value("#day-count-select") == ""
     assert page.input_value("#bond-type-select") == ""
-    assert page.input_value("#yield-convention-select") == ""
     reference = page.evaluate(
         "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0]"
     )
     assert reference["day_count"] is None
     assert reference["bond_type"] is None
-    assert reference["yield_convention"] is None
+    assert "yield_convention" not in reference
+    assert "business_day_convention" not in reference
+    assert "redemption_amount" not in reference
 
 
 @_PLAYWRIGHT_SKIP
@@ -1582,20 +1581,16 @@ def test_a_second_bond_lookup_discards_every_manual_input_from_the_first(
         "#strike-price-input",
         "#notional-input",
         "#expiry-date-input",
-        "#settlement-lag-input",
         "#volatility-input",
         "#forward-price-input",
         "#reporting-date-input",
         "#forward-settlement-date-input",
         "#option-settlement-date-input",
         "#expiry-timestamp-input",
-        "#redemption-amount-input",
         "#ex-dividend-days-input",
         "#last-coupon-date-input",
         "#day-count-select",
         "#bond-type-select",
-        "#yield-convention-select",
-        "#business-day-convention-select",
         "#bond-status-select",
     ):
         assert page.input_value(selector) == "", f"{selector} kept the prior bond's value"
@@ -1638,7 +1633,6 @@ def test_clear_removes_every_manual_input_and_restores_the_empty_state(
         "#valuation-date-input",
         "#as-of-timestamp-input",
         "#pricing-timestamp-input",
-        "#redemption-amount-input",
         "#day-count-select",
         "#bond-status-select",
     ):
