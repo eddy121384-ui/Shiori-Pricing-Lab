@@ -1894,6 +1894,59 @@ def test_an_edit_during_a_pending_refresh_discards_that_refresh(server_url, page
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_quote_side_change_during_a_pending_refresh_discards_that_refresh(
+    server_url, page
+) -> None:
+    """Codex review round 5: Quote Side is an edit like any other.
+
+    It is not a draft field -- Load and Refresh read the toggle when they build
+    their request -- so it was wired straight to ``setToggle`` and bypassed the
+    invalidation every other control goes through. Switching side while a
+    refresh was outstanding therefore changed no generation, and the old-side
+    response was adopted while the toggle displayed the newly selected side,
+    leaving the draft's spot and forward sides disagreeing with what the trader
+    could see.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    sent_case = json.loads(pending[0].request.post_data)["case"]
+    assert sent_case["forward_clean_price_input"]["quote_side"] == "MID"
+
+    # The trader switches side while that MID request is still outstanding.
+    _select_quote_side(page, "BID")
+    page.wait_for_timeout(150)
+
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _refresh_payload(case=sent_case, acquired_at="2026-07-20T11:31:00+08:00")
+        ),
+    )
+    page.wait_for_timeout(400)
+
+    # The superseded MID response is discarded outright, so no priced result
+    # and no MID-sided draft is shown under a toggle that now reads BID.
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#status-text") != "Draft priced"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["pricing_timestamp"] == "2026-07-20T11:28:00+08:00"
+
+    selected = page.get_attribute("#bond-quote-side-toggle .opt.on", "data-value")
+    assert selected == "BID"
+
+
+@_PLAYWRIGHT_SKIP
 def test_a_refresh_adopts_the_case_the_server_actually_priced(server_url, page) -> None:
     """The browser assembles no priced case of its own: it adopts the envelope
     the route returns, which is the one the pricing workflow substituted into

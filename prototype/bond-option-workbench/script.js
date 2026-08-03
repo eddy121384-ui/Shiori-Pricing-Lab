@@ -2490,6 +2490,15 @@
     const opt = event.target.closest(".opt");
     if (opt) {
       setToggle(els.bondQuoteSideToggle, opt.dataset.value);
+      // Quote Side is a sourcing input, not a draft field, so nothing here
+      // writes it into `currentDraft` -- Load and Refresh read the toggle when
+      // they build their request, and the sourced side always comes back from
+      // the response. It still has to go through the same invalidation path as
+      // every other edit: a Price or Refresh already in flight was sent on the
+      // previous side, and adopting its response would leave the draft's
+      // bond_quote / forward_clean_price_input sides disagreeing with the side
+      // the toggle now shows, until some later refresh happened to correct it.
+      applyManualInputsToDraft();
     }
   });
   MANUAL_TEXT_INPUTS().forEach((input) => {

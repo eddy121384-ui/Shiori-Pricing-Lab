@@ -804,7 +804,7 @@ def price_standalone_option_case_with_bloomberg_quote(
     *,
     bloomberg_security: str,
     quote_side: TreasuryFTPQuoteSide,
-) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, BLIBondQuote, dict]:
+) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, BLIBondQuote, dict, dict]:
     """Price ``case`` with its ``bond_quote`` replaced by one live Bloomberg quote.
 
     Bloomberg mode is one explicit action: refresh the live quote and
