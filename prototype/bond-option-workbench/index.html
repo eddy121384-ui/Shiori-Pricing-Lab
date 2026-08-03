@@ -86,15 +86,15 @@
     <!-- ===================== MAIN ===================== -->
     <main class="main">
 
-      <!-- Underlying Bond: instrument-first Bloomberg lookup -->
-      <section class="card underlying-bond">
-        <div class="card-head" id="underlying-bond-head">
-          <div class="card-title">Underlying Bond</div>
-          <span class="collapse-toggle" id="underlying-bond-indicator">Collapse</span>
+      <!-- ============ 1. Instrument ============ -->
+      <section class="card underlying-bond" data-workflow-group="instrument">
+        <div class="card-head">
+          <div class="card-title"><span class="step-no">1</span> Instrument</div>
+          <span class="card-summary" id="instrument-group-status">Enter an ISIN or CUSIP</span>
         </div>
         <div class="card-body" id="underlying-bond-body">
         <div class="underlying-bond-controls">
-          <div class="form-row"><label>Bond Identifier</label>
+          <div class="form-row"><label>Security (ISIN / CUSIP)</label>
             <input class="control" id="bond-identifier-input" type="text" placeholder="ISIN or CUSIP">
           </div>
           <div class="form-row"><label>Quote Side</label>
@@ -104,10 +104,14 @@
               <span class="opt" data-value="OFFER">Offer</span>
             </div>
           </div>
-          <span class="btn primary" id="load-bloomberg-bond-btn">Load Bloomberg Bond</span>
+          <span class="btn primary" id="load-bloomberg-bond-btn">Bloomberg Load</span>
+          <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
         </div>
 
         <div class="resolved-bond-panel" id="resolved-bond-panel" hidden>
+          <div class="sourced-banner">
+            Loaded from Bloomberg and read-only. Shiori never edits a sourced value in place.
+          </div>
           <div class="rb-grid">
             <div class="rb-item rb-name"><span class="rb-k">Security</span><span class="rb-v" id="resolved-bond-name">&mdash;</span></div>
             <div class="rb-item"><span class="rb-k">ISIN</span><span class="rb-v" id="resolved-bond-isin">&mdash;</span></div>
@@ -121,23 +125,28 @@
             <div class="rb-item"><span class="rb-k">Source</span><span class="rb-v" id="resolved-bond-source">&mdash;</span></div>
           </div>
         </div>
-
-        <div class="draft-incomplete-note" id="draft-incomplete-note" hidden>
-          <div class="remaining-input-summary" id="remaining-input-summary">
-            Complete the required pricing inputs before pricing.
-          </div>
-          <div class="missing-categories" id="missing-categories"></div>
-          <span class="collapse-toggle" id="missing-details-toggle-btn">Show details</span>
-          <ul class="missing-fields-list" id="missing-fields-list" hidden></ul>
-        </div>
-
-        <div class="underlying-bond-actions">
-          <span class="btn outline is-disabled" id="bloomberg-refresh-btn">Refresh Bloomberg &amp; Price</span>
-        </div>
         </div>
       </section>
 
-      <!-- Instrument header -->
+      <!-- ============ One unresolved dependency at a time ============ -->
+      <section class="card unresolved-dependency" id="unresolved-dependency" hidden>
+        <div class="ud-head">
+          <span class="ud-flag">Unresolved dependency</span>
+          <span class="ud-title" id="unresolved-title">&mdash;</span>
+        </div>
+        <dl class="ud-grid">
+          <dt>What is missing</dt><dd id="unresolved-missing">&mdash;</dd>
+          <dt>Why it is missing</dt><dd id="unresolved-why">&mdash;</dd>
+          <dt>Bloomberg evidence</dt><dd id="unresolved-evidence">&mdash;</dd>
+          <dt>What you can do next</dt><dd id="unresolved-next">&mdash;</dd>
+        </dl>
+        <div class="ud-actions">
+          <span class="btn outline btn-small" id="unresolved-goto-btn">Go to this input</span>
+          <span class="ud-also" id="unresolved-also"></span>
+        </div>
+      </section>
+
+      <!-- ============ Instrument header (priced runs only) ============ -->
       <section class="card instr-header" id="instrument-header-section" hidden>
         <div class="instr-left">
           <div class="instr-title-row">
@@ -153,11 +162,11 @@
 
         <div class="stats">
           <div class="stat">
-            <span class="s-lbl">Clean Price (Mid)</span>
+            <span class="s-lbl">Clean Price</span>
             <span class="s-val" id="stat-clean-price">&mdash;</span>
           </div>
           <div class="stat">
-            <span class="s-lbl">Yield (Mid)</span>
+            <span class="s-lbl">Yield</span>
             <span class="s-val" id="stat-yield-mid">&mdash;</span>
           </div>
           <div class="stat">
@@ -181,73 +190,59 @@
         </div>
       </section>
 
-      <!-- Workspace -->
+      <!-- ============ Workspace ============ -->
       <section class="workspace" id="workspace-section" hidden>
 
-        <!-- Option terms -->
+        <!-- ---- 2. Trade ---- -->
         <div class="card option-terms">
-          <div class="card-head" id="option-terms-head">
-            <div class="card-title">Option Terms</div>
-            <span class="collapse-toggle" id="option-terms-indicator">Collapse</span>
+          <div class="card-head">
+            <div class="card-title"><span class="step-no">2</span> Trade</div>
           </div>
           <div class="card-body" id="option-terms-body">
+
+          <div class="form-row" data-workflow-group="option-type"><label>Call / Put</label>
+            <div class="toggle" id="option-type-toggle"><span class="opt" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
+          </div>
+          <div class="form-row" data-workflow-group="position"><label>Buy / Sell</label>
+            <div class="toggle" id="position-toggle"><span class="opt" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
+          </div>
+          <div class="form-row" data-workflow-group="strike"><label>Strike (per 100)</label>
+            <input class="control" id="strike-price-input" type="text" inputmode="decimal" placeholder="Not entered">
+          </div>
+          <div class="form-row" data-workflow-group="notional"><label>Notional</label>
+            <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="Not entered">
+          </div>
+          <div class="form-row expiry-row" data-workflow-group="expiry"><label>Expiry</label>
+            <div>
+              <div class="expiry-controls">
+                <input class="control" id="expiry-datetime-input" type="datetime-local">
+                <input class="control expiry-offset" id="expiry-offset-input" type="text" placeholder="+08:00">
+              </div>
+              <div class="derived-source" id="expiry-derived-preview">Enter the expiry date, local time and its UTC offset.</div>
+            </div>
+          </div>
 
           <div class="fixed-route-note">
             Fixed for this route: payoff <strong>PRICE</strong> &middot;
             <strong>EUROPEAN</strong> exercise &middot; <strong>CASH</strong> settlement &middot;
             Black-76. These are the only values the reviewed pricing guard accepts, so
-            Shiori sets them; they are not trader choices.
-          </div>
-          <div class="form-row"><label>Call / Put</label>
-            <div class="toggle" id="option-type-toggle"><span class="opt" data-value="CALL">Call</span><span class="opt" data-value="PUT">Put</span></div>
-          </div>
-          <div class="form-row"><label>Direction</label>
-            <div class="toggle" id="position-toggle"><span class="opt" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
-          </div>
-          <div class="form-row"><label>Strike (per 100)</label>
-            <input class="control" id="strike-price-input" type="text" inputmode="decimal" placeholder="Not entered">
-          </div>
-          <div class="form-row"><label>Notional</label>
-            <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="Not entered">
-          </div>
-          <div class="form-row"><label>Expiry Date</label>
-            <input class="control" id="expiry-date-input" type="date">
-          </div>
-          <div class="form-row"><label>Expiry Time</label>
-            <div>
-              <input class="control" id="expiry-timestamp-input" type="text" placeholder="2026-10-20T05:20:00+08:00">
-              <div class="utc-preview" id="expiry-timestamp-utc">&mdash;</div>
-            </div>
-          </div>
-          <div class="form-row"><label>Price Vol (&sigma;, decimal)</label>
-            <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
-          </div>
-          <div class="form-row" style="margin-bottom:0;"><label>Volatility Basis</label>
-            <select class="control" id="volatility-basis-select">
-              <option value="PRICE_VOL">PRICE_VOL</option>
-              <option value="EQUIVALENT_PRICE_VOL">EQUIVALENT_PRICE_VOL</option>
-            </select>
-          </div>
-          <div class="fixed-route-note">
-            YIELD_VOL is not accepted by the pricing guard and is not offered here.
-            Bloomberg&rsquo;s normal/lognormal yield vols must not be converted &mdash;
-            that conversion is a separate, unapproved methodology.
+            Shiori sets them; they are not trader choices. Shiori never assumes a market
+            close, timezone, holiday or business-day roll, so the expiry offset stays
+            explicit.
           </div>
           </div>
         </div>
 
-        <!-- Pricing results -->
+        <!-- ---- Pricing results ---- -->
         <div class="card pricing-results">
-          <div class="card-head" id="pricing-results-head">
+          <div class="card-head">
             <div class="card-title">Pricing Results</div>
-            <span class="collapse-toggle" id="pricing-results-indicator">Collapse</span>
           </div>
           <div class="card-body" id="pricing-results-body">
           <div class="error-banner" id="pricing-error-banner" hidden></div>
           <div class="pr-row r1">
             <div class="pr-cell"><div class="p-lbl">Price (Total)</div><div class="p-val teal" id="price-total">&mdash;</div><div class="p-sub" id="price-total-ccy"></div></div>
             <div class="pr-cell"><div class="p-lbl">Price (Per 100)</div><div class="p-val teal" id="price-per-100">&mdash;</div></div>
-            <div class="pr-cell"><div class="p-lbl">Price (%)</div><div class="pending-value">Pending model support</div></div>
             <div class="pr-cell"><div class="p-lbl">Currency</div><div class="p-val" id="result-currency">&mdash;</div></div>
           </div>
           <div class="pr-row r2">
@@ -256,272 +251,288 @@
             <div class="pr-cell"><div class="p-lbl">Vega (per 100)</div><div class="p-val" id="greek-vega">&mdash;</div></div>
             <div class="pr-cell"><div class="p-lbl">Theta (per 100, per day)</div><div class="p-val" id="greek-theta">&mdash;</div></div>
           </div>
-          <div class="pr-row r3">
-            <div class="pr-cell"><div class="p-lbl">OAS Delta</div><div class="pending-value">Pending model support</div></div>
-            <div class="pr-cell"><div class="p-lbl">DV01</div><div class="pending-value">Pending model support</div></div>
-            <div class="pr-cell"><div class="p-lbl">DV01 Gamma</div><div class="pending-value">Pending model support</div></div>
-            <div class="pr-cell"><div class="p-lbl">Mod Duration</div><div class="pending-value">Pending model support</div></div>
-            <div class="pr-cell"><div class="p-lbl">Convexity</div><div class="pending-value">Pending model support</div></div>
-          </div>
           </div>
         </div>
 
-        <!-- Right bottom: forward & carry + underlying snapshot -->
-        <div class="right-bottom">
-          <div class="card forward-carry">
-            <div class="card-head" id="forward-carry-head">
-              <div class="card-title">Forward &amp; Carry</div>
-              <div class="card-head-right">
-                <span class="card-summary" id="forward-carry-summary"></span>
-                <span class="collapse-toggle" id="forward-carry-indicator">Expand</span>
+        <!-- ---- 3. Market inputs: review ---- -->
+        <div class="card wide-card market-review">
+          <div class="card-head">
+            <div class="card-title"><span class="step-no">3</span> Market inputs &mdash; review</div>
+            <span class="card-summary" id="market-review-summary"></span>
+          </div>
+          <div class="card-body">
+
+            <div class="review-row" data-workflow-group="forward-review">
+              <div class="review-head">
+                <span class="review-name">Forward</span>
+                <span class="review-status" id="forward-review-status">&mdash;</span>
               </div>
-            </div>
-            <div class="card-body" id="forward-carry-body" hidden>
-            <div class="fc-row" style="align-items:start;"><label style="margin-top:6px;">Forward Clean Price (per 100)</label>
-              <div>
+              <div class="review-control">
+                <label for="forward-price-input">Forward Clean Price (per 100)</label>
                 <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="Not entered">
-                <div class="pending-value" style="margin-top:4px;font-style:normal;" id="forward-settlement-note">&mdash;</div>
               </div>
+              <div class="review-note" id="forward-sourcing-note">&mdash;</div>
+              <div class="review-provenance" id="forward-provenance">&mdash;</div>
             </div>
-            <div class="fc-row" style="margin-bottom:0;"><label>Repo Rate</label>
-              <div class="pending-value">Pending model support</div>
-            </div>
-            </div>
-          </div>
 
-          <div class="card underlying">
-            <div class="card-head" id="underlying-snapshot-head">
-              <div class="card-title">Underlying Snapshot</div>
-              <span class="collapse-toggle" id="underlying-snapshot-indicator">Expand</span>
-            </div>
-            <div class="card-body" id="underlying-snapshot-body" hidden>
-            <div class="us-body">
-              <div class="us-list">
-                <div class="us-item"><span class="u-k">Clean Price (Mid)</span><span class="u-v" id="snapshot-clean-price">&mdash;</span></div>
-                <div class="us-item"><span class="u-k">Yield (Mid)</span><span class="u-v" id="snapshot-yield">&mdash;</span></div>
-                <div class="us-item"><span class="u-k">Accrued Interest</span><span class="u-v" id="snapshot-accrued-interest">&mdash;</span></div>
-                <div class="us-item"><span class="u-k">Modified Duration</span><span class="pending-value">Pending model support</span></div>
-                <div class="us-item"><span class="u-k">Convexity</span><span class="pending-value">Pending model support</span></div>
-                <div class="us-item"><span class="u-k">OAS (Mid)</span><span class="pending-value">Pending model support</span></div>
-                <div class="us-item"><span class="u-k">DV01 (per 1mm)</span><span class="pending-value">Pending model support</span></div>
+            <div class="review-row" data-workflow-group="vol-review">
+              <div class="review-head">
+                <span class="review-name">Volatility</span>
+                <span class="review-status" id="vol-review-status">&mdash;</span>
               </div>
-              <div class="chart-wrap">
-                <div class="chart-title">Yield (Mid) – 1Y</div>
-                <div class="chart-area chart-pending">
-                  <span class="pending-value">Pending model support</span>
-                </div>
-              </div>
-            </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Advanced valuation, timing and settlement details -->
-        <div class="card wide-card timing-card">
-          <div class="card-head" id="timing-head">
-            <div class="card-title">Advanced &mdash; Timing, Settlement &amp; Metadata</div>
-            <div class="card-head-right">
-              <span class="card-summary" id="timing-summary"></span>
-              <span class="collapse-toggle" id="timing-indicator">Collapse</span>
-            </div>
-          </div>
-          <div class="card-body" id="timing-body">
-            <div class="fixed-route-note">
-              The Bloomberg acquisition event mechanically supplies
-              <strong>Pricing Timestamp</strong>. Shiori uses its represented local
-              calendar date for <strong>Valuation Date</strong> and applies the approved
-              UTC normalization rule to <strong>As-Of Timestamp</strong>. The original
-              Pricing Timestamp spelling and offset are preserved. Expiry, reporting and
-              settlement fields remain explicit trader inputs: Shiori never infers a
-              timezone, market close, holiday, business-day adjustment, or settlement date.
-            </div>
-            <div class="entry-grid">
-              <div class="form-row"><label>Valuation Date</label>
-                <div>
-                  <input class="control derived-control" id="valuation-date-input" type="date" readonly>
-                  <div class="derived-source">Derived from Pricing Timestamp&rsquo;s represented local date</div>
-                </div>
-              </div>
-              <div class="form-row"><label>Reporting Date</label>
-                <input class="control" id="reporting-date-input" type="date">
-              </div>
-              <div class="form-row"><label>Forward Settlement Date</label>
-                <input class="control" id="forward-settlement-date-input" type="date">
-              </div>
-              <div class="form-row"><label>Option Settlement Date</label>
-                <input class="control" id="option-settlement-date-input" type="date">
-              </div>
-            </div>
-            <div class="entry-grid entry-grid-wide derived-timing-grid">
-              <div class="form-row"><label>As-Of Timestamp</label>
-                <div>
-                  <input class="control derived-control" id="as-of-timestamp-input" type="text" readonly>
-                  <div class="utc-preview" id="as-of-timestamp-utc">&mdash;</div>
-                  <div class="derived-source">Bloomberg acquisition event &middot; normalized by approved rule</div>
-                </div>
-              </div>
-              <div class="form-row"><label>Pricing Timestamp</label>
-                <div>
-                  <input class="control derived-control" id="pricing-timestamp-input" type="text" readonly>
-                  <div class="utc-preview" id="pricing-timestamp-utc">&mdash;</div>
-                  <div class="derived-source">Bloomberg acquisition event &middot; preserved exactly</div>
-                </div>
-              </div>
-            </div>
-            <div class="route-metadata-grid">
-              <div><span>Product ID</span><strong id="timing-product-id">&mdash;</strong></div>
-              <div><span>Snapshot ID</span><strong id="timing-snapshot-id">&mdash;</strong></div>
-              <div><span>Snapshot</span><strong id="timing-snapshot-metadata">&mdash;</strong></div>
-              <div><span>Bond quote</span><strong id="timing-bond-quote-metadata">&mdash;</strong></div>
-              <div><span>Forward input</span><strong id="timing-forward-metadata">&mdash;</strong></div>
-              <div><span>Volatility input</span><strong id="timing-volatility-metadata">&mdash;</strong></div>
-              <div><span>Credit spread policy</span><strong id="timing-credit-metadata">&mdash;</strong></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Bond reference completion: only standalone-consumed fields -->
-        <div class="card wide-card bond-ref-card">
-          <div class="card-head" id="bond-ref-head">
-            <div class="card-title">Advanced &mdash; Bond Reference &amp; Contract Fields</div>
-            <div class="card-head-right">
-              <span class="card-summary" id="bond-ref-summary"></span>
-              <span class="collapse-toggle" id="bond-ref-indicator">Collapse</span>
-            </div>
-          </div>
-          <div class="card-body" id="bond-ref-body">
-            <div class="fixed-route-note">
-              Bloomberg confirms coupon, frequency, issue/maturity/first-coupon dates and
-              the callable/sinkable flags. The standalone-consumed fields below still
-              need explicit trader input. Where Bloomberg
-              returns a raw description it is shown beneath the field as a
-              <em>hint only</em> &mdash; Shiori never maps <code>DAY_CNT_DES</code>,
-              or <code>MTY_TYP</code> into a typed enum.
-            </div>
-            <div class="entry-grid">
-              <div class="form-row"><label>Day Count</label>
-                <div>
-                  <select class="control" id="day-count-select">
-                    <option value="">Not entered</option>
-                    <option value="ACT_360">ACT_360</option>
-                    <option value="ACT_365_FIXED">ACT_365_FIXED</option>
-                    <option value="THIRTY_360">THIRTY_360</option>
-                    <option value="ACT_ACT_ISDA">ACT_ACT_ISDA</option>
-                  </select>
-                  <div class="bbg-hint">Bloomberg <code>DAY_CNT_DES</code>: <span id="hint-day-count">Not available</span></div>
-                </div>
-              </div>
-              <div class="form-row"><label>Bond Type</label>
-                <div>
-                  <select class="control" id="bond-type-select">
-                    <option value="">Not entered</option>
-                    <option value="FIXED_COUPON_BULLET">FIXED_COUPON_BULLET</option>
-                    <option value="FLOATING_RATE_NOTE">FLOATING_RATE_NOTE</option>
-                    <option value="AMORTIZING">AMORTIZING</option>
-                    <option value="CONVERTIBLE">CONVERTIBLE</option>
-                    <option value="INFLATION_LINKED">INFLATION_LINKED</option>
-                    <option value="PERPETUAL">PERPETUAL</option>
-                    <option value="STRUCTURED_NOTE">STRUCTURED_NOTE</option>
-                  </select>
-                  <div class="bbg-hint">Bloomberg <code>MTY_TYP</code>: <span id="hint-bond-type">Not available</span></div>
-                </div>
-              </div>
-              <div class="form-row"><label>Ex-Dividend Days</label>
-                <input class="control" id="ex-dividend-days-input" type="text" inputmode="numeric" placeholder="Not entered">
-              </div>
-              <div class="form-row"><label>Last Coupon Date</label>
-                <input class="control" id="last-coupon-date-input" type="date">
-              </div>
-              <div class="form-row"><label>Bond Status</label>
-                <select class="control" id="bond-status-select">
-                  <option value="">Not entered</option>
-                  <option value="ACTIVE">ACTIVE</option>
-                  <option value="INACTIVE">INACTIVE</option>
+              <div class="review-control">
+                <label for="volatility-input">Price Vol (&sigma;, decimal)</label>
+                <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
+                <select class="control vol-basis" id="volatility-basis-select">
+                  <option value="PRICE_VOL">PRICE_VOL</option>
+                  <option value="EQUIVALENT_PRICE_VOL">EQUIVALENT_PRICE_VOL</option>
                 </select>
               </div>
+              <div class="review-note" id="vol-sourcing-note">&mdash;</div>
+              <div class="review-provenance" id="vol-provenance">&mdash;</div>
             </div>
+
+            <div class="review-row" data-workflow-group="discounting-review">
+              <div class="review-head">
+                <span class="review-name">Discounting</span>
+                <span class="review-status" id="discounting-review-status">&mdash;</span>
+              </div>
+              <div class="review-control">
+                <span class="review-readout" id="discounting-readout">No Option Discount Curve nodes entered</span>
+                <span class="btn ghost btn-small" id="edit-curve-btn">Edit curve nodes</span>
+              </div>
+              <div class="review-note" id="discounting-sourcing-note">&mdash;</div>
+              <div class="review-provenance" id="discounting-provenance">&mdash;</div>
+            </div>
+
           </div>
         </div>
 
-        <!-- Option Discount Curve: explicit continuous-zero nodes only -->
-        <div class="card wide-card curve-card">
-          <div class="card-head" id="curve-head">
-            <div class="card-title">Option Discount Curve</div>
+        <!-- ---- Advanced (collapsed by default) ---- -->
+        <div class="card wide-card advanced-card">
+          <div class="card-head" id="advanced-head">
+            <div class="card-title">Advanced</div>
             <div class="card-head-right">
-              <span class="card-summary" id="curve-summary"></span>
-              <span class="collapse-toggle" id="curve-indicator">Collapse</span>
+              <span class="card-summary" id="advanced-summary"></span>
+              <span class="collapse-toggle" id="advanced-indicator">Expand</span>
             </div>
           </div>
-          <div class="card-body" id="curve-body">
-            <div class="fixed-route-note">
-              Nodes are recorded as
-              <strong>OPTION_DISCOUNT_CURVE</strong> /
-              <strong>CONTINUOUS_ZERO_RATE</strong> in
-              <strong id="curve-currency-label">&mdash;</strong>. Tenors use the existing
-              grammar only: <code>nD</code>, <code>nM</code>, <code>nY</code>.
-              <strong>Enter genuine continuously-compounded zero rates.</strong>
-              Bloomberg OVME&rsquo;s <code>MMkt</code> and <code>repo</code> rates, and any
-              par/swap/FTP rate, are <em>not</em> continuous zero rates and must not be
-              entered here. Shiori does not bootstrap, convert, or extrapolate a curve;
-              rates are interpolated in-range only.
-            </div>
-            <table class="curve-table">
-              <thead>
-                <tr><th>Tenor</th><th>Continuous zero rate (decimal)</th><th></th></tr>
-              </thead>
-              <tbody id="curve-rows"></tbody>
-            </table>
-            <div class="curve-actions">
-              <span class="btn ghost btn-small" id="curve-add-row-btn">Add node</span>
-            </div>
-            <div class="curve-coverage" id="curve-coverage">&mdash;</div>
-          </div>
-        </div>
-      </section>
+          <div class="card-body" id="advanced-body" hidden>
 
-      <!-- Instrument details: Bloomberg Bond Master -->
-      <section class="card instrument-details" id="instrument-details-section" hidden>
-        <div class="card-head" id="bond-master-head">
-          <div class="card-title">Instrument Details &mdash; Bloomberg Bond Master</div>
-          <div class="card-head-right">
-            <span class="card-summary" id="bond-master-summary"></span>
-            <span class="collapse-toggle" id="bond-master-toggle-btn">Expand</span>
-          </div>
-        </div>
-        <div class="id-grid" id="bond-master-body" hidden>
-          <div class="id-block">
-            <span class="i-k">Issuer / Security Description</span><span class="i-v" id="details-issuer">&mdash;</span>
-            <span class="i-k">ISIN</span><span class="i-v" id="details-isin">&mdash;</span>
-            <span class="i-k">CUSIP</span><span class="i-v" id="details-cusip">&mdash;</span>
-            <span class="i-k">Currency</span><span class="i-v" id="details-currency">&mdash;</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
-            <span class="i-k">Coupon Frequency</span><span class="i-v" id="details-coupon-frequency">&mdash;</span>
-            <span class="i-k">Issue Date</span><span class="i-v" id="details-issue-date">&mdash;</span>
-            <span class="i-k">Maturity Date</span><span class="i-v" id="details-maturity">&mdash;</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
-            <span class="i-k">First Coupon Date</span><span class="i-v" id="details-first-coupon-date">&mdash;</span>
-            <span class="i-k">Last Coupon Date</span><span class="i-v" id="details-last-coupon-date">&mdash;</span>
-            <span class="i-k">Redemption Amount</span><span class="i-v" id="details-redemption-amount">&mdash;</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Callable</span><span class="i-v" id="details-callable">&mdash;</span>
-            <span class="i-k">Sinkable</span><span class="i-v" id="details-sinkable">&mdash;</span>
-            <span class="i-k">Bond Type</span><span class="i-v" id="details-bond-type">&mdash;</span>
-            <span class="i-k">Yield Convention</span><span class="i-v" id="details-yield-convention">&mdash;</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Business Day Convention</span><span class="i-v" id="details-business-day-convention">&mdash;</span>
-            <span class="i-k">Source</span><span class="i-v" id="details-source">&mdash;</span>
-            <span class="i-k">Acquisition Time</span><span class="i-v" id="details-acquired-at">&mdash;</span>
-          </div>
-          <div class="id-block">
-            <span class="i-k">Bloomberg Day Count</span><span class="i-v" id="details-bloomberg-day-count">&mdash;</span>
-            <span class="i-k">Bloomberg Maturity Type</span><span class="i-v" id="details-bloomberg-maturity-type">&mdash;</span>
-            <span class="i-k">Bloomberg Calculation Type</span><span class="i-v" id="details-bloomberg-calc-type">&mdash;</span>
+            <!-- A. Bond reference overrides -->
+            <div class="adv-block" id="adv-bond-reference">
+              <div class="adv-title">Bond reference &mdash; trader override</div>
+              <div class="fixed-route-note">
+                No UST / conventional-Gilt convention profile is approved yet, so Shiori
+                does not set these from Bloomberg. Bloomberg&rsquo;s
+                <code>DAY_CNT_DES</code>, <code>DAY_CNT</code>, <code>MTY_TYP</code>,
+                <code>CALC_TYP_DES</code>, <code>SECURITY_TYP</code>, <code>CPN_TYP</code>
+                and <code>PREV_CPN_DT</code> are shown as <em>display-only evidence</em>
+                beneath each field &mdash; they are never coerced into a Shiori enum.
+                Ex-dividend and security-status candidates returned <code>BAD_FLD</code> on
+                the Issue #149 workstation run. Everything you set here is recorded as a
+                trader override with provenance.
+              </div>
+              <div class="entry-grid">
+                <div class="form-row"><label>Day Count</label>
+                  <div>
+                    <select class="control" id="day-count-select">
+                      <option value="">Not entered</option>
+                      <option value="ACT_360">ACT_360</option>
+                      <option value="ACT_365_FIXED">ACT_365_FIXED</option>
+                      <option value="THIRTY_360">THIRTY_360</option>
+                      <option value="ACT_ACT_ISDA">ACT_ACT_ISDA</option>
+                    </select>
+                    <div class="bbg-hint">Bloomberg <code>DAY_CNT_DES</code>: <span id="hint-day-count">Not available</span></div>
+                  </div>
+                </div>
+                <div class="form-row"><label>Bond Type</label>
+                  <div>
+                    <select class="control" id="bond-type-select">
+                      <option value="">Not entered</option>
+                      <option value="FIXED_COUPON_BULLET">FIXED_COUPON_BULLET</option>
+                      <option value="FLOATING_RATE_NOTE">FLOATING_RATE_NOTE</option>
+                      <option value="AMORTIZING">AMORTIZING</option>
+                      <option value="CONVERTIBLE">CONVERTIBLE</option>
+                      <option value="INFLATION_LINKED">INFLATION_LINKED</option>
+                      <option value="PERPETUAL">PERPETUAL</option>
+                      <option value="STRUCTURED_NOTE">STRUCTURED_NOTE</option>
+                    </select>
+                    <div class="bbg-hint">Bloomberg <code>MTY_TYP</code>: <span id="hint-bond-type">Not available</span></div>
+                  </div>
+                </div>
+                <div class="form-row"><label>Ex-Dividend Days</label>
+                  <input class="control" id="ex-dividend-days-input" type="text" inputmode="numeric" placeholder="Not entered">
+                </div>
+                <div class="form-row"><label>Last Coupon Date</label>
+                  <div>
+                    <input class="control" id="last-coupon-date-input" type="date">
+                    <div class="bbg-hint">Bloomberg <code>PREV_CPN_DT</code>: <span id="hint-last-coupon-date">Not available</span></div>
+                  </div>
+                </div>
+                <div class="form-row"><label>Bond Status</label>
+                  <select class="control" id="bond-status-select">
+                    <option value="">Not entered</option>
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="INACTIVE">INACTIVE</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- B. Timing and settlement overrides -->
+            <div class="adv-block" id="adv-timing">
+              <div class="adv-title">Timing &amp; settlement &mdash; trader override</div>
+              <div class="fixed-route-note">
+                No Bloomberg field describes an OTC option&rsquo;s own cash settlement date,
+                and <code>SETTLE_DT</code> / <code>DAYS_TO_SETTLE</code> describe the cash
+                bond&rsquo;s standard settlement &mdash; a different role that must not be
+                conflated. Fixing Reporting Date to Valuation Date is an unapproved route
+                decision, so it stays explicit. Shiori owns no market calendar and rolls no
+                date.
+              </div>
+              <div class="entry-grid">
+                <div class="form-row"><label>Reporting Date</label>
+                  <input class="control" id="reporting-date-input" type="date">
+                </div>
+                <div class="form-row"><label>Forward Settlement Date</label>
+                  <input class="control" id="forward-settlement-date-input" type="date">
+                </div>
+                <div class="form-row"><label>Option Settlement Date</label>
+                  <input class="control" id="option-settlement-date-input" type="date">
+                </div>
+              </div>
+            </div>
+
+            <!-- C. Option Discount Curve -->
+            <div class="adv-block" id="adv-curve">
+              <div class="adv-title">Option Discount Curve &mdash; trader override</div>
+              <div class="fixed-route-note">
+                Nodes are recorded as
+                <strong>OPTION_DISCOUNT_CURVE</strong> /
+                <strong>CONTINUOUS_ZERO_RATE</strong> in
+                <strong id="curve-currency-label">&mdash;</strong>. Tenors use the existing
+                grammar only: <code>nD</code>, <code>nM</code>, <code>nY</code>.
+                <strong>Enter genuine continuously-compounded zero rates.</strong>
+                Bloomberg OVME&rsquo;s <code>MMkt</code> and <code>repo</code> rates, and any
+                par/swap/FTP rate, are <em>not</em> continuous zero rates and must not be
+                entered here. Shiori does not bootstrap, convert, or extrapolate a curve;
+                rates are interpolated in-range only.
+              </div>
+              <table class="curve-table">
+                <thead>
+                  <tr><th>Tenor</th><th>Continuous zero rate (decimal)</th><th></th></tr>
+                </thead>
+                <tbody id="curve-rows"></tbody>
+              </table>
+              <div class="curve-actions">
+                <span class="btn ghost btn-small" id="curve-add-row-btn">Add node</span>
+              </div>
+              <div class="curve-coverage" id="curve-coverage">&mdash;</div>
+            </div>
+
+            <!-- D. Derived and route-fixed values, read-only -->
+            <div class="adv-block" id="adv-derived">
+              <div class="adv-title">Derived &amp; route-fixed values &mdash; read-only</div>
+              <div class="fixed-route-note">
+                The Bloomberg acquisition event mechanically supplies
+                <strong>Pricing Timestamp</strong>. Shiori uses its represented local
+                calendar date for <strong>Valuation Date</strong> and applies the approved
+                UTC normalization rule to <strong>As-Of Timestamp</strong>. The original
+                Pricing Timestamp spelling and offset are preserved.
+              </div>
+              <div class="entry-grid entry-grid-wide derived-timing-grid">
+                <div class="form-row"><label>Valuation Date</label>
+                  <div>
+                    <input class="control derived-control" id="valuation-date-input" type="date" readonly>
+                    <div class="derived-source">Derived from Pricing Timestamp&rsquo;s represented local date</div>
+                  </div>
+                </div>
+                <div class="form-row"><label>As-Of Timestamp</label>
+                  <div>
+                    <input class="control derived-control" id="as-of-timestamp-input" type="text" readonly>
+                    <div class="utc-preview" id="as-of-timestamp-utc">&mdash;</div>
+                    <div class="derived-source">Bloomberg acquisition event &middot; normalized by approved rule</div>
+                  </div>
+                </div>
+                <div class="form-row"><label>Pricing Timestamp</label>
+                  <div>
+                    <input class="control derived-control" id="pricing-timestamp-input" type="text" readonly>
+                    <div class="utc-preview" id="pricing-timestamp-utc">&mdash;</div>
+                    <div class="derived-source">Bloomberg acquisition event &middot; preserved exactly</div>
+                  </div>
+                </div>
+                <div class="form-row"><label>Expiry Timestamp</label>
+                  <div>
+                    <input class="control derived-control" id="expiry-timestamp-input" type="text" readonly>
+                    <div class="utc-preview" id="expiry-timestamp-utc">&mdash;</div>
+                    <div class="derived-source">Composed from the Expiry interaction &middot; offset preserved exactly</div>
+                  </div>
+                </div>
+              </div>
+              <div class="route-metadata-grid">
+                <div><span>Product ID</span><strong id="timing-product-id">&mdash;</strong></div>
+                <div><span>Snapshot ID</span><strong id="timing-snapshot-id">&mdash;</strong></div>
+                <div><span>Snapshot</span><strong id="timing-snapshot-metadata">&mdash;</strong></div>
+                <div><span>Bond quote</span><strong id="timing-bond-quote-metadata">&mdash;</strong></div>
+                <div><span>Forward input</span><strong id="timing-forward-metadata">&mdash;</strong></div>
+                <div><span>Volatility input</span><strong id="timing-volatility-metadata">&mdash;</strong></div>
+                <div><span>Credit spread policy</span><strong id="timing-credit-metadata">&mdash;</strong></div>
+              </div>
+            </div>
+
+            <!-- E. Bloomberg Bond Master, read-only -->
+            <div class="adv-block" id="adv-bond-master">
+              <div class="adv-title">Bloomberg Bond Master &mdash; read-only</div>
+              <div class="id-grid" id="bond-master-body">
+                <div class="id-block">
+                  <span class="i-k">Issuer / Security Description</span><span class="i-v" id="details-issuer">&mdash;</span>
+                  <span class="i-k">ISIN</span><span class="i-v" id="details-isin">&mdash;</span>
+                  <span class="i-k">CUSIP</span><span class="i-v" id="details-cusip">&mdash;</span>
+                  <span class="i-k">Currency</span><span class="i-v" id="details-currency">&mdash;</span>
+                </div>
+                <div class="id-block">
+                  <span class="i-k">Coupon</span><span class="i-v" id="details-coupon">&mdash;</span>
+                  <span class="i-k">Coupon Frequency</span><span class="i-v" id="details-coupon-frequency">&mdash;</span>
+                  <span class="i-k">Issue Date</span><span class="i-v" id="details-issue-date">&mdash;</span>
+                  <span class="i-k">Maturity Date</span><span class="i-v" id="details-maturity">&mdash;</span>
+                </div>
+                <div class="id-block">
+                  <span class="i-k">Day Count</span><span class="i-v" id="details-day-count">&mdash;</span>
+                  <span class="i-k">First Coupon Date</span><span class="i-v" id="details-first-coupon-date">&mdash;</span>
+                  <span class="i-k">Last Coupon Date</span><span class="i-v" id="details-last-coupon-date">&mdash;</span>
+                  <span class="i-k">Callable</span><span class="i-v" id="details-callable">&mdash;</span>
+                </div>
+                <div class="id-block">
+                  <span class="i-k">Sinkable</span><span class="i-v" id="details-sinkable">&mdash;</span>
+                  <span class="i-k">Bond Type</span><span class="i-v" id="details-bond-type">&mdash;</span>
+                  <span class="i-k">Source</span><span class="i-v" id="details-source">&mdash;</span>
+                  <span class="i-k">Acquisition Time</span><span class="i-v" id="details-acquired-at">&mdash;</span>
+                </div>
+                <div class="id-block">
+                  <span class="i-k">Bloomberg Day Count</span><span class="i-v" id="details-bloomberg-day-count">&mdash;</span>
+                  <span class="i-k">Bloomberg Maturity Type</span><span class="i-v" id="details-bloomberg-maturity-type">&mdash;</span>
+                  <span class="i-k">Bloomberg Calculation Type</span><span class="i-v" id="details-bloomberg-calc-type">&mdash;</span>
+                </div>
+              </div>
+              <div class="fixed-route-note">
+                The three <em>Bloomberg &hellip;</em> rows above are raw description strings.
+                They are evidence only and are never mapped into a typed Shiori enum.
+              </div>
+            </div>
+
+            <!-- F. Override provenance -->
+            <div class="adv-block" id="adv-provenance">
+              <div class="adv-title">Trader override provenance</div>
+              <div class="fixed-route-note">
+                Every value Shiori could not source is stamped here with what it is, why it
+                could not be sourced, and when you entered it. This log is exported with the
+                run.
+              </div>
+              <ul class="provenance-log" id="override-provenance-log"></ul>
+              <div class="provenance-empty" id="override-provenance-empty">No trader overrides recorded yet.</div>
+            </div>
+
           </div>
         </div>
       </section>
@@ -544,7 +555,6 @@
       <span class="btn ghost is-disabled" id="download-json-btn">Download JSON</span>
       <span class="btn ghost is-disabled" id="download-markdown-btn">Download Markdown</span>
       <span class="btn ghost" id="clear-btn">Clear</span>
-      <span class="btn outline">Save Preset</span>
       <span class="btn primary is-disabled" id="price-btn">Price
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" stroke="none"/></svg>
       </span>

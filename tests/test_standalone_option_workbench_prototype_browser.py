@@ -1,46 +1,38 @@
-"""Browser-driven regression tests for the manual workbench prototype
-(PR #136, extended by Issue #138/#140): the trader-draft revision's
-instrument-first Bloomberg lookup, missing-input gating, and Clear/lookup
-cross-action races.
+"""Browser-driven regression tests for the minimum-input trader workflow
+(Issue #143, Milestone 1/2; building on PR #136 / #138 / #140 / #144 / #147).
 
-These specifically exercise script.js's runtime behavior (request
-generation/staleness, AbortController, the missing-field gate, and the
-unified failure-cleanup path), which cannot be proven by a pure-Python test
--- they drive one real ``ThreadingHTTPServer`` (see
-``standalone_option_workbench_server``) in a background thread and one real
-headless Chromium page via Playwright. No pricing math is exercised or
-asserted here; the mocked payloads only need the few display-dict keys
-script.js reads.
+These exercise script.js's runtime behavior -- the workflow-group model, the
+single unresolved-dependency panel, the builder-backed Price gate, override
+provenance, request staleness/AbortController, and the whole-run state reset --
+which cannot be proven by a pure-Python test. They drive one real
+``ThreadingHTTPServer`` (see ``standalone_option_workbench_server``) in a
+background thread and one real headless Chromium page via Playwright.
 
-**Trader-draft revision (Issue #140 second revision).** The bundled
-synthetic case and "Load Case JSON" are no longer part of the trader
-workflow: the page starts with nothing loaded, and a Bloomberg bond lookup
-is the only way to start a run, seeding a brand-new in-memory pricing draft.
-Because no UI in this revision can supply curve points, credit-spread
-inputs, or full bond reference data, Price and Refresh Bloomberg & Price
-structurally can never be enabled through the browser alone this round --
-that is the intended, honest end state this revision delivers (a concrete
-missing-input list), not a gap. Consequently, cross-action race coverage
-below is scoped to the two actions that can actually fire a request through
-the UI (a fresh lookup and Clear); Price/Refresh's own stale-response
-guards reuse the exact same generation/AbortController pattern, exercised
-directly by the lookup races. POST /api/case and POST /api/case/bloomberg
-themselves, and the bundled synthetic fixture, remain fully covered by the
-existing Python-level server tests and are unaffected by anything here --
-this file only tests the browser's use of them.
+The Bloomberg lookup route is mocked; everything downstream of it is real. The
+headline pricing tests deliberately go all the way through ``POST /api/case``
+into the reviewed typed builder and pricing engine, so a passing premium here is
+a genuine engine result and not a fixture.
 
-**CI must not silently skip these tests.** Locally, missing Playwright is a
-skip (optional test tooling, not a declared project dependency, same
-pattern as the QuantLib skip elsewhere in this suite). In CI (detected via
-the standard ``CI=true`` environment variable GitHub Actions sets), a
-missing Playwright install is a hard collection-time error instead --
-merge protection cannot depend on a check that quietly no-ops.
+**Fixtures.** ``_treasury_lookup_response`` and ``_gilt_lookup_response`` mirror
+what the real loader returns for the two securities Issue #149 was verified
+against: the DAPI-confirmed Bond Master fields, plus the raw display-only
+description strings that must never be auto-mapped into a typed enum. Day count,
+bond type, ex-dividend days, last coupon date and status are deliberately absent
+from both -- no UST / conventional-Gilt convention profile is approved, so
+Bloomberg's own strings are evidence only.
+
+**CI must not silently skip these tests.** Locally, missing Playwright is a skip
+(optional test tooling, not a declared project dependency, same pattern as the
+QuantLib skip elsewhere in this suite). In CI (detected via the standard
+``CI=true`` environment variable GitHub Actions sets), a missing Playwright
+install is a hard collection-time error instead -- merge protection cannot
+depend on a check that quietly no-ops.
 
 The Chromium executable path is never hardcoded: by default this file lets
 Playwright's own browser discovery find the ``playwright install``-managed
 browser (what CI uses), with an optional ``PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH``
-environment variable escape hatch for a local sandbox whose pinned browser
-cache doesn't line up with a freshly-installed Playwright package version.
+environment variable escape hatch for a local sandbox whose pinned browser cache
+doesn't line up with a freshly-installed Playwright package version.
 """
 
 from __future__ import annotations
@@ -81,10 +73,9 @@ _CHROMIUM_EXECUTABLE_PATH = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
 def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> None:
     """Poll ``predicate`` from the test thread until it's true or time out.
 
-    The default timeout is generous (20s, not a tight bound) because these
-    tests assert that a condition *eventually* becomes true, not how fast --
-    a real CI runner can be meaningfully slower/more contended than a local
-    sandbox.
+    The default timeout is generous (20s, not a tight bound) because these tests
+    assert that a condition *eventually* becomes true, not how fast -- a real CI
+    runner can be meaningfully slower/more contended than a local sandbox.
     """
 
     deadline = time.monotonic() + timeout
@@ -97,6 +88,19 @@ def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> Non
 
 def _is_disabled(page, selector: str) -> bool:
     return page.eval_on_selector(selector, "el => el.classList.contains('is-disabled')")
+
+
+def _is_actually_hidden(page, element_id: str) -> bool:
+    """True only if the element is genuinely not rendered (computed
+    ``display: none``), never merely the ``hidden`` IDL property.
+
+    An element whose own CSS sets an explicit ``display`` can tie the UA
+    stylesheet's ``[hidden] { display: none }`` rule in specificity and, being an
+    author rule, win -- silently defeating ``el.hidden = true`` even though the
+    property itself reads ``true``.
+    """
+
+    return page.eval_on_selector(f"#{element_id}", "el => getComputedStyle(el).display") == "none"
 
 
 @pytest.fixture()
@@ -125,32 +129,7 @@ def page():
         browser.close()
 
 
-# --- Bloomberg bond lookup helpers -------------------------------------------
-
-
-def _select_quote_side(page, side: str) -> None:
-    page.click(f'#bond-quote-side-toggle .opt[data-value="{side}"]')
-
-
-def _resolved_bond_panel_hidden(page) -> bool:
-    return page.eval_on_selector("#resolved-bond-panel", "el => el.hidden")
-
-
-def _missing_fields_text(page) -> list[str]:
-    return page.eval_on_selector_all(
-        "#missing-fields-list li", "items => items.map(el => el.textContent)"
-    )
-
-
-def _missing_category_badges(page) -> list[str]:
-    return page.eval_on_selector_all(
-        "#missing-categories .missing-category-badge", "els => els.map(el => el.textContent)"
-    )
-
-
-def _remaining_input_count(page) -> int:
-    return len(_missing_fields_text(page))
-
+# --- Fixtures mirroring the two Issue #149 verification securities -----------
 
 _EMPTY_BOND_MASTER = {
     "coupon": None,
@@ -195,13 +174,110 @@ def _default_bloomberg_bond_lookup_response(
     return payload
 
 
+# Fixture shape, not market data. These mirror the *shape* of what the real
+# loader returns -- the Bond Master keys PR #141 confirmed, and the raw
+# display-only description strings Issue #149 recorded -- for the two ISINs #149
+# was verified against. The numbers and dates are synthetic test values chosen
+# to exercise the reviewed engine (notably a regular coupon grid, which the
+# reviewed adapter requires); they are not a claim about either security's real
+# terms and are never used as evidence for anything.
+#
+# Day count, bond type, ex-dividend days, last coupon date and status are
+# deliberately absent from both: no UST / conventional-Gilt convention profile is
+# approved, so Bloomberg's own strings stay evidence only.
+_TREASURY_BOND_MASTER = {
+    "coupon": 0.0375,
+    "coupon_frequency": "SEMI_ANNUAL",
+    "issue_date": "2024-01-31",
+    "maturity_date": "2031-01-31",
+    "first_coupon_date": "2024-07-31",
+    "callable_flag": False,
+    "sinkable_flag": False,
+}
+_TREASURY_BOND_MASTER_RAW = {
+    "day_count": "ACT/ACT",
+    "maturity_type": "AT MATURITY",
+    "calc_type": "STREET CONVENTION",
+}
+
+_GILT_BOND_MASTER = {
+    "coupon": 0.0162,
+    "coupon_frequency": "SEMI_ANNUAL",
+    # 2018-04-22 to 2028-10-22 is exactly 21 semi-annual periods. The reviewed
+    # coupon adapter rejects an irregular grid outright rather than approximating
+    # a stub, so a fixture meant to reach the engine has to be regular.
+    "issue_date": "2018-04-22",
+    "maturity_date": "2028-10-22",
+    "first_coupon_date": "2018-10-22",
+    "callable_flag": False,
+    "sinkable_flag": False,
+}
+_GILT_BOND_MASTER_RAW = {
+    "day_count": "ACT/ACT",
+    "maturity_type": "NORMAL",
+    "calc_type": "UK:BUMP/DMO METHOD",
+}
+
+
+def _treasury_lookup_response(*, bond_master: dict | None = None, **overrides) -> dict:
+    payload_overrides = {"acquired_at": "2026-07-20T11:28:00+08:00", **overrides}
+    return _default_bloomberg_bond_lookup_response(
+        bond_master=bond_master if bond_master is not None else _TREASURY_BOND_MASTER,
+        bond_master_raw=_TREASURY_BOND_MASTER_RAW,
+        **payload_overrides,
+    )
+
+
+def _gilt_lookup_response(*, bond_master: dict | None = None, **overrides) -> dict:
+    payload_overrides = {
+        "isin": "GB00BFX0ZL78",
+        "cusip": "G4527HGS7",
+        "name": "UNITED KINGDOM GILT",
+        "currency": "GBP",
+        "clean_price_per_100": 96.12,
+        "accrued_interest_per_100": 0.31,
+        "acquired_at": "2026-07-20T11:28:00+08:00",
+        **overrides,
+    }
+    return _default_bloomberg_bond_lookup_response(
+        bond_master=bond_master if bond_master is not None else _GILT_BOND_MASTER,
+        bond_master_raw=_GILT_BOND_MASTER_RAW,
+        **payload_overrides,
+    )
+
+
+# --- Driving helpers ---------------------------------------------------------
+
+
+def _select_quote_side(page, side: str) -> None:
+    page.click(f'#bond-quote-side-toggle .opt[data-value="{side}"]')
+
+
+def _resolved_bond_panel_hidden(page) -> bool:
+    return page.eval_on_selector("#resolved-bond-panel", "el => el.hidden")
+
+
+def _unresolved_group_ids(page) -> list[str]:
+    return page.evaluate("() => window.__shioriTestUnresolvedGroupIds()")
+
+
+def _override_provenance(page) -> list[dict]:
+    return page.evaluate("() => window.__shioriTestOverrideProvenance()")
+
+
+def _main_screen_group_ids(page) -> list[str]:
+    return page.eval_on_selector_all(
+        "[data-workflow-group]", "els => els.map(el => el.dataset.workflowGroup)"
+    )
+
+
 def _load_bloomberg_bond(
     page, *, identifier: str = "US91282CLJ89", side: str = "MID", response: dict | None = None
 ) -> None:
     """Mocks ``/api/bloomberg/bond`` and drives one full successful lookup
-    through the real UI controls, waiting for the resolved-bond panel to
-    show *this* lookup's own ISIN before returning (not merely "not
-    hidden", which would already be true if an earlier lookup populated it)."""
+    through the real UI controls, waiting for the resolved-bond panel to show
+    *this* lookup's own ISIN before returning (not merely "not hidden", which
+    would already be true if an earlier lookup populated it)."""
 
     payload = response if response is not None else _default_bloomberg_bond_lookup_response()
 
@@ -219,7 +295,95 @@ def _load_bloomberg_bond(
     page.unroute("**/api/bloomberg/bond", _handle)
 
 
-# --- Initial state: no synthetic instrument, no Load Case JSON control ------
+def _set_curve_nodes(page, nodes) -> None:
+    """Set the Option Discount Curve editor's rows to exactly ``nodes``."""
+
+    existing = page.query_selector_all(".curve-row")
+    while len(existing) < len(nodes):
+        page.click("#curve-add-row-btn")
+        existing = page.query_selector_all(".curve-row")
+    for row, (tenor, rate) in zip(existing, nodes, strict=False):
+        row.query_selector(".curve-tenor-input").fill(tenor)
+        row.query_selector(".curve-rate-input").fill(rate)
+    page.wait_for_timeout(120)
+
+
+def _fill_trade_group(
+    page,
+    *,
+    option_type: str = "CALL",
+    position: str = "BUY",
+    strike: str = "99.32",
+    notional: str = "1000000",
+    expiry_local: str = "2026-10-20T17:20",
+    expiry_offset: str = "+08:00",
+) -> None:
+    """Fill the five main-screen trade decisions through the real controls."""
+
+    page.click(f'#option-type-toggle .opt[data-value="{option_type}"]')
+    page.click(f'#position-toggle .opt[data-value="{position}"]')
+    page.fill("#strike-price-input", strike)
+    page.fill("#notional-input", notional)
+    page.fill("#expiry-datetime-input", expiry_local)
+    page.fill("#expiry-offset-input", expiry_offset)
+
+
+def _fill_market_review(
+    page, *, forward: str = "99.234375", volatility: str = "0.03395"
+) -> None:
+    page.fill("#forward-price-input", forward)
+    page.fill("#volatility-input", volatility)
+
+
+def _fill_advanced_overrides(
+    page,
+    *,
+    last_coupon_date: str = "2030-07-31",
+    curve_nodes=(("1M", "0.0374"), ("1Y", "0.0374")),
+    leave_open: bool = False,
+) -> None:
+    """Fill everything that lives inside the collapsed Advanced section."""
+
+    if _is_actually_hidden(page, "advanced-body"):
+        page.click("#advanced-head")
+    page.select_option("#day-count-select", "ACT_ACT_ISDA")
+    page.select_option("#bond-type-select", "FIXED_COUPON_BULLET")
+    page.fill("#ex-dividend-days-input", "0")
+    page.fill("#last-coupon-date-input", last_coupon_date)
+    page.select_option("#bond-status-select", "ACTIVE")
+    page.fill("#reporting-date-input", "2026-10-21")
+    page.fill("#forward-settlement-date-input", "2026-10-21")
+    page.fill("#option-settlement-date-input", "2026-10-21")
+    _set_curve_nodes(page, curve_nodes)
+    if not leave_open:
+        page.click("#advanced-head")
+
+
+def _complete_draft(page, **kwargs) -> None:
+    """Complete every remaining input a Bloomberg-loaded draft needs.
+
+    Deliberately writes each value through the real control the trader uses, so
+    this doubles as proof that every required input actually has a UI. Waits for
+    the server-side builder validation to settle, since Price is gated on it.
+    """
+
+    trade_keys = ("option_type", "position", "strike", "notional", "expiry_local", "expiry_offset")
+    trade_kwargs = {key: kwargs.pop(key) for key in trade_keys if key in kwargs}
+    market_kwargs = {
+        key: kwargs.pop(key) for key in ("forward", "volatility") if key in kwargs
+    }
+    _fill_trade_group(page, **trade_kwargs)
+    _fill_market_review(page, **market_kwargs)
+    _fill_advanced_overrides(page, **kwargs)
+
+
+def _wait_for_price_enabled(page) -> None:
+    page.wait_for_function(
+        "() => !document.querySelector('#price-btn').classList.contains('is-disabled')"
+    )
+
+
+# --- Initial state -----------------------------------------------------------
 
 
 @_PLAYWRIGHT_SKIP
@@ -234,9 +398,7 @@ def test_initial_page_has_no_synthetic_instrument_or_result(server_url, page) ->
     assert page.inner_text("#status-text") == "No bond loaded"
     assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
     assert page.eval_on_selector("#workspace-section", "el => el.hidden")
-    assert page.eval_on_selector("#instrument-details-section", "el => el.hidden")
     assert _resolved_bond_panel_hidden(page)
-    assert page.eval_on_selector("#draft-incomplete-note", "el => el.hidden")
 
 
 @_PLAYWRIGHT_SKIP
@@ -254,9 +416,6 @@ def test_initial_state_controls_gated_correctly(server_url, page) -> None:
     page.goto(f"{server_url}/")
     page.wait_for_timeout(150)
 
-    # No async bootstrap dependency any more -- Load Bloomberg Bond and
-    # Clear are usable immediately; Price/Refresh/export need a completed
-    # run that does not exist yet.
     assert not _is_disabled(page, "#load-bloomberg-bond-btn")
     assert not _is_disabled(page, "#clear-btn")
     assert _is_disabled(page, "#price-btn")
@@ -275,7 +434,105 @@ def test_page_has_no_unsupported_market_input_rows(server_url, page) -> None:
         assert stale_label not in body_text
 
 
-# --- Instrument-first Bloomberg bond lookup: creates a clean draft ----------
+# --- Acceptance criterion 2: the ordinary workflow is 6-9 groups -------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_ordinary_workflow_is_between_six_and_nine_groups(server_url, page) -> None:
+    """The headline product check: the normal trader flow is a short sequence of
+    real decisions and reviews, not a wall of backend contract fields."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    ordinary = page.evaluate("() => window.__shioriTestOrdinaryWorkflowGroupIds()")
+    assert 6 <= len(ordinary) <= 9
+    assert ordinary == [
+        "instrument",
+        "option-type",
+        "position",
+        "strike",
+        "notional",
+        "expiry",
+        "forward-review",
+        "vol-review",
+        "discounting-review",
+    ]
+    # Every ordinary group is actually present on the main screen, and the main
+    # screen carries nothing else that claims to be a workflow group.
+    assert _main_screen_group_ids(page) == ordinary
+
+
+@_PLAYWRIGHT_SKIP
+def test_main_screen_asks_for_no_backend_metadata(server_url, page) -> None:
+    """Requirement 2: technical metadata, schedule details and typed enums are
+    not on the main screen. Each of these controls exists, but only inside the
+    collapsed Advanced section."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    assert _is_actually_hidden(page, "advanced-body")
+    for selector in (
+        "#day-count-select",
+        "#bond-type-select",
+        "#ex-dividend-days-input",
+        "#last-coupon-date-input",
+        "#bond-status-select",
+        "#reporting-date-input",
+        "#forward-settlement-date-input",
+        "#option-settlement-date-input",
+        "#curve-rows",
+        "#valuation-date-input",
+        "#as-of-timestamp-input",
+        "#pricing-timestamp-input",
+        "#expiry-timestamp-input",
+        "#timing-product-id",
+        "#timing-snapshot-id",
+        "#bond-master-body",
+    ):
+        assert page.query_selector(selector) is not None, f"{selector} disappeared entirely"
+        assert page.eval_on_selector(
+            selector, "el => el.closest('#advanced-body') !== null"
+        ), f"{selector} is not inside the collapsed Advanced section"
+
+
+@_PLAYWRIGHT_SKIP
+def test_advanced_is_collapsed_by_default_and_toggles(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    assert page.eval_on_selector("#advanced-body", "el => el.hidden")
+    assert _is_actually_hidden(page, "advanced-body")
+    assert page.inner_text("#advanced-indicator") == "Expand"
+
+    page.click("#advanced-head")
+    assert not page.eval_on_selector("#advanced-body", "el => el.hidden")
+    assert not _is_actually_hidden(page, "advanced-body")
+    assert page.inner_text("#advanced-indicator") == "Collapse"
+
+    page.click("#advanced-head")
+    assert _is_actually_hidden(page, "advanced-body")
+
+
+@_PLAYWRIGHT_SKIP
+def test_sourced_and_derived_values_are_read_only(server_url, page) -> None:
+    """Requirement 5: sourced / derived values are read-only by default."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    page.click("#advanced-head")
+
+    for selector in (
+        "#valuation-date-input",
+        "#as-of-timestamp-input",
+        "#pricing-timestamp-input",
+        "#expiry-timestamp-input",
+    ):
+        assert page.eval_on_selector(selector, "el => el.readOnly"), selector
+
+
+# --- Bloomberg lookup: UST and Gilt both start the workflow ------------------
 
 
 @_PLAYWRIGHT_SKIP
@@ -313,7 +570,9 @@ def test_load_bloomberg_bond_requires_a_quote_side(server_url, page) -> None:
 
 
 @_PLAYWRIGHT_SKIP
-def test_successful_lookup_shows_resolved_bond_identity_and_pricing_form(server_url, page) -> None:
+def test_successful_lookup_shows_resolved_bond_identity_and_the_workflow(
+    server_url, page
+) -> None:
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page)
 
@@ -325,31 +584,11 @@ def test_successful_lookup_shows_resolved_bond_identity_and_pricing_form(server_
     assert page.inner_text("#resolved-bond-accrued") == "0.420000"
     assert page.inner_text("#resolved-bond-source") == "BLOOMBERG_DAPI"
 
-    # The pricing form (Option Terms) and Instrument Details (Bloomberg Bond
-    # Master) both show immediately -- but the old instrument header, which
-    # needs a genuinely completed price, stays hidden.
+    # The workflow shows immediately, but the instrument header (which needs a
+    # genuinely completed price) stays hidden.
     assert not page.eval_on_selector("#workspace-section", "el => el.hidden")
-    assert (
-        page.eval_on_selector("#workspace-section", "el => getComputedStyle(el).display")
-        != "none"
-    )
+    assert not _is_actually_hidden(page, "workspace-section")
     assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
-    assert not page.eval_on_selector("#instrument-details-section", "el => el.hidden")
-    assert page.inner_text("#details-issuer") == "UNITED STATES TREAS NTS"
-    assert page.inner_text("#details-isin") == "US91282CLJ89"
-    assert page.inner_text("#details-cusip") == "91282CLJ8"
-    assert page.inner_text("#details-coupon") == "Not available"
-
-    assert not page.eval_on_selector("#draft-incomplete-note", "el => el.hidden")
-    assert page.inner_text("#remaining-input-summary") == "24 required inputs still unresolved"
-    missing = _missing_fields_text(page)
-    assert any("Strike (per 100)" in item for item in missing)
-    assert any("Call / Put" in item for item in missing)
-    # One compact count and category badges show first; full actionable detail
-    # appears only after "Show details".
-    assert page.inner_text("#remaining-input-summary").endswith("required inputs still unresolved")
-    assert "Option terms incomplete" in page.inner_text("#missing-categories")
-    assert "Bond reference data incomplete" in page.inner_text("#missing-categories")
 
     assert _is_disabled(page, "#price-btn")
     assert _is_disabled(page, "#bloomberg-refresh-btn")
@@ -361,10 +600,7 @@ def test_acquisition_event_mechanically_populates_timing_without_changing_its_lo
 ) -> None:
     page.goto(f"{server_url}/")
     acquired_at = "2026-07-20T00:30:00+08:00"
-    _load_bloomberg_bond(
-        page,
-        response=_treasury_lookup_response(acquired_at=acquired_at),
-    )
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(acquired_at=acquired_at))
 
     draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
     # Pricing preserves the recorded acquisition spelling and offset exactly.
@@ -378,142 +614,97 @@ def test_acquisition_event_mechanically_populates_timing_without_changing_its_lo
     assert draft["as_of_timestamp"] == "2026-07-19T16:30:00Z"
     assert page.input_value("#as-of-timestamp-input") == "2026-07-19T16:30:00Z"
 
-    for selector in (
-        "#pricing-timestamp-input",
-        "#valuation-date-input",
-        "#as-of-timestamp-input",
-    ):
-        assert page.eval_on_selector(selector, "el => el.readOnly")
-    assert "Bloomberg acquisition event" in page.inner_text("#timing-body")
+    page.click("#advanced-head")
+    assert "Bloomberg acquisition event" in page.inner_text("#adv-derived")
 
 
 @_PLAYWRIGHT_SKIP
-def test_auto_timing_does_not_overwrite_explicit_trader_editable_fields(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    original = page.evaluate(
-        """() => {
-          const d = window.__shioriTestGetCurrentDraft();
-          return {
-            valuation_date: d.valuation_date,
-            as_of_timestamp: d.as_of_timestamp,
-            pricing_timestamp: d.pricing_timestamp,
-          };
-        }"""
-    )
-
-    page.fill("#expiry-date-input", "2026-10-20")
-    page.fill("#expiry-timestamp-input", "2026-10-20T05:20:00+08:00")
-    page.click("#timing-head")
-    page.fill("#reporting-date-input", "2026-10-21")
-    # Trigger another ordinary form sync after all values are set.
-    page.fill("#strike-price-input", "99.32")
-
-    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    assert draft["reporting_date"] == "2026-10-21"
-    assert draft["bond_option"]["expiry_date"] == "2026-10-20"
-    assert draft["expiry_timestamp"] == "2026-10-20T05:20:00+08:00"
-    assert {key: draft[key] for key in original} == original
-
-
-@_PLAYWRIGHT_SKIP
-def test_remaining_input_count_is_contract_aligned_and_locates_advanced_blockers(
+def test_deterministic_policy_fields_are_populated_without_asking_the_trader(
     server_url, page
 ) -> None:
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
 
-    # Issue #146 removes four fields that the standalone route never
-    # consumes. The same Bloomberg-shaped draft therefore has 17 blockers.
-    assert _remaining_input_count(page) == 17
-    assert page.inner_text("#remaining-input-summary") == "17 required inputs still unresolved"
-    assert page.inner_text("#timing-summary") == "3 required"
-    assert page.inner_text("#bond-ref-summary") == "5 required"
-    assert _is_actually_hidden(page, "timing-body")
-    assert _is_actually_hidden(page, "bond-ref-body")
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    # The only values the reviewed pricing guard accepts for this route.
+    assert draft["bond_option"]["payoff_basis"] == "PRICE"
+    assert draft["bond_option"]["exercise_style"] == "EUROPEAN"
+    assert draft["bond_option"]["settlement_type"] == "CASH"
+    # Shiori identifiers and truthful provenance, not market data.
+    assert draft["bond_option"]["product_id"].startswith("SHIORI-WORKBENCH-")
+    assert draft["snapshot_id"].startswith("SHIORI-SNAPSHOT-")
+    assert draft["source_system"] == "SHIORI_MANUAL_WORKBENCH"
+    assert draft["forward_clean_price_input"]["source_system"] == "MANUAL_TRADER_ENTRY"
+    assert draft["volatility_input"]["source_system"] == "MANUAL_TRADER_ENTRY"
+    # The contract requires the forward's side to equal the spot side, so it is
+    # mirrored rather than asked for twice.
+    assert draft["forward_clean_price_input"]["quote_side"] == draft["bond_quote"]["quote_side"]
+    # Direct price vol only; YIELD_VOL is not offered anywhere.
+    assert draft["volatility_input"]["volatility_basis"] == "PRICE_VOL"
+    assert page.eval_on_selector_all(
+        "#volatility-basis-select option", "els => els.map(e => e.value)"
+    ) == ["PRICE_VOL", "EQUIVALENT_PRICE_VOL"]
+    assert draft["bond_option"]["expiry_date"] is None
 
-    page.click("#missing-details-toggle-btn")
-    page.locator("#missing-fields-list .missing-field-link", has_text="Reporting Date").click()
-    assert not _is_actually_hidden(page, "timing-body")
-    assert page.evaluate("() => document.activeElement.id") == "reporting-date-input"
-    page.locator("#missing-fields-list .missing-field-link", has_text="Day Count").click()
-    assert not _is_actually_hidden(page, "bond-ref-body")
-    assert page.evaluate("() => document.activeElement.id") == "day-count-select"
 
-
-@_PLAYWRIGHT_SKIP
-def test_lookup_never_leaks_bundled_synthetic_case_values_into_the_draft(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-
-    body_text = page.inner_text("body")
-    for stale in ("Synthetic Test Issuer A", "XS0000000001", "SANITIZED_SYNTHETIC_MARKET_SOURCE"):
-        assert stale not in body_text
-
-    assert page.input_value("#strike-price-input") == ""
-    assert page.input_value("#notional-input") == ""
-    assert page.input_value("#volatility-input") == ""
-    assert page.input_value("#forward-price-input") == ""
-    assert page.query_selector("#option-type-toggle .opt.on") is None
-    assert page.query_selector("#position-toggle .opt.on") is None
+# --- Bloomberg raw descriptions stay display-only ---------------------------
 
 
 @_PLAYWRIGHT_SKIP
-def test_lookup_failure_preserves_the_prior_screen(server_url, page) -> None:
+def test_bloomberg_raw_descriptions_are_evidence_and_never_enter_the_typed_draft(
+    server_url, page
+) -> None:
     page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-    page.fill("#strike-price-input", "100")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    page.click("#advanced-head")
 
-    page.route(
-        "**/api/bloomberg/bond",
-        lambda route: route.fulfill(
-            status=400,
-            content_type="application/json",
-            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
-        ),
+    # Route-consumed descriptions are shown beside the enum the trader must
+    # pick; the unused calculation type remains display-only provenance.
+    assert page.inner_text("#hint-day-count") == "ACT/ACT"
+    assert page.inner_text("#hint-bond-type") == "AT MATURITY"
+    assert page.inner_text("#details-bloomberg-calc-type") == "STREET CONVENTION"
+
+    # Nothing was auto-selected from them, and no removed typed field enters the
+    # standalone request draft.
+    assert page.input_value("#day-count-select") == ""
+    assert page.input_value("#bond-type-select") == ""
+    reference = page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0]"
     )
-    page.fill("#bond-identifier-input", "91282CLJ8")
-    page.click("#load-bloomberg-bond-btn")
-    page.wait_for_timeout(200)
-
-    assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
-    # The previously resolved bond and its trader-entered draft stay intact.
-    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
-    assert page.input_value("#strike-price-input") == "100"
+    assert reference["day_count"] is None
+    assert reference["bond_type"] is None
+    assert reference["status"] is None
+    assert reference["ex_dividend_days"] is None
+    assert reference["last_coupon_date"] is None
+    assert "yield_convention" not in reference
+    assert "business_day_convention" not in reference
+    assert "redemption_amount" not in reference
 
 
 @_PLAYWRIGHT_SKIP
-def test_newer_lookup_replaces_the_draft_and_discards_prior_trader_input(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-    page.fill("#strike-price-input", "100")
-    page.click('#option-type-toggle .opt[data-value="CALL"]')
+def test_gilt_raw_descriptions_are_never_mapped_either(server_url, page) -> None:
+    """The Gilt's own prohibited strings -- 'NORMAL' and 'UK:BUMP/DMO METHOD' --
+    must not become FIXED_COUPON_BULLET or a yield convention."""
 
+    page.goto(f"{server_url}/")
     _load_bloomberg_bond(
-        page,
-        identifier="XS9999999999",
-        response=_default_bloomberg_bond_lookup_response(
-            isin="XS9999999999", cusip="999999999", name="SECOND RESOLVED BOND"
-        ),
+        page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response()
     )
+    page.click("#advanced-head")
 
-    assert page.inner_text("#resolved-bond-name") == "SECOND RESOLVED BOND"
-    assert page.inner_text("#resolved-bond-isin") == "XS9999999999"
-    # A fresh lookup always starts a brand-new draft -- never retaining the
-    # previous bond's trader-entered inputs.
-    assert page.input_value("#strike-price-input") == ""
-    assert page.query_selector("#option-type-toggle .opt.on") is None
-
-
-# --- Bloomberg Bond Master (Issue #140 third revision) ------------------------
+    assert page.inner_text("#hint-bond-type") == "NORMAL"
+    assert page.inner_text("#details-bloomberg-calc-type") == "UK:BUMP/DMO METHOD"
+    assert page.input_value("#bond-type-select") == ""
+    assert page.input_value("#day-count-select") == ""
+    reference = page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0]"
+    )
+    assert reference["bond_type"] is None
+    assert reference["day_count"] is None
 
 
 @_PLAYWRIGHT_SKIP
 def test_confirmed_bond_master_values_enter_the_clean_draft_and_render(server_url, page) -> None:
-    """A field the loader actually returns a value for (simulating a
-    confirmed mnemonic) shows in both the top summary and Instrument
-    Details -- never just silently dropped."""
-
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page,
@@ -522,14 +713,14 @@ def test_confirmed_bond_master_values_enter_the_clean_draft_and_render(server_ur
         ),
     )
 
-    # Stored/priced internally as a decimal fraction (0.04125), but the
-    # trader-facing UI displays it as a percentage (4.125%).
+    # Stored/priced internally as a decimal fraction (0.04125), displayed as a
+    # percentage (4.125%).
     assert page.inner_text("#resolved-bond-coupon") == "4.125%"
     assert page.inner_text("#resolved-bond-maturity") == "2031-01-31"
+    page.click("#advanced-head")
     assert page.inner_text("#details-coupon") == "4.125%"
     assert page.inner_text("#details-maturity") == "2031-01-31"
-    # A field still unconfirmed/unreturned stays honestly "Not available",
-    # never a fabricated or synthetic value.
+    # A field still unconfirmed/unreturned stays honestly "Not available".
     assert page.inner_text("#details-day-count") == "Not available"
     assert page.inner_text("#details-callable") == "Not available"
 
@@ -542,12 +733,6 @@ def test_confirmed_bond_master_values_enter_the_clean_draft_and_render(server_ur
 def test_coupon_displays_as_a_percentage_while_the_draft_keeps_the_decimal_fraction(
     server_url, page, raw_coupon, expected_percent
 ) -> None:
-    """Coupon is stored/priced internally as a decimal fraction (Bloomberg's
-    CPN percentage point divided by 100, e.g. 0.0375) -- this only changes
-    how it is *displayed* to the trader (3.750%). Checks both halves: the
-    Underlying Bond summary and Instrument Details show the percentage, and
-    the underlying draft's own coupon field is untouched."""
-
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page,
@@ -555,8 +740,6 @@ def test_coupon_displays_as_a_percentage_while_the_draft_keeps_the_decimal_fract
     )
 
     assert page.inner_text("#resolved-bond-coupon") == expected_percent
-    assert page.inner_text("#details-coupon") == expected_percent
-
     draft_coupon = page.evaluate(
         "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0].coupon"
     )
@@ -564,220 +747,267 @@ def test_coupon_displays_as_a_percentage_while_the_draft_keeps_the_decimal_fract
 
 
 @_PLAYWRIGHT_SKIP
-def test_null_coupon_still_shows_not_available_not_a_blank_percentage(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)  # default response: bond_master.coupon is None
-
-    assert page.inner_text("#resolved-bond-coupon") == "Not available"
-    assert page.inner_text("#details-coupon") == "Not available"
-
-    draft_coupon = page.evaluate(
-        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0].coupon"
-    )
-    assert draft_coupon is None
-
-
-@_PLAYWRIGHT_SKIP
-def test_missing_bond_master_fields_show_not_available_and_never_pollute_identity(
+def test_missing_bond_master_fields_show_not_available_and_block_with_an_explanation(
     server_url, page
 ) -> None:
-    """The default (all-fields-unconfirmed) lookup response must still show
-    every identity/quote field correctly -- a wholly-null bond_master must
-    never degrade the already-reliable identity/quote result."""
+    """A wholly-null Bond Master must never degrade the identity/quote result,
+    and must never be papered over with a convention default -- it blocks with
+    its own explanation instead."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page)  # default response: bond_master entirely None
 
     assert page.inner_text("#resolved-bond-name") == "UNITED STATES TREAS NTS"
-    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
     assert page.inner_text("#resolved-bond-clean-price") == "99.750000"
     assert page.inner_text("#resolved-bond-coupon") == "Not available"
-    assert page.inner_text("#resolved-bond-maturity") == "Not available"
+    assert "bloomberg-reference" in _unresolved_group_ids(page)
 
-    for details_id in (
-        "details-coupon",
-        "details-coupon-frequency",
-        "details-issue-date",
-        "details-maturity",
-        "details-day-count",
-        "details-first-coupon-date",
-        "details-last-coupon-date",
-        "details-redemption-amount",
-        "details-callable",
-        "details-sinkable",
-        "details-bond-type",
-        "details-yield-convention",
-        "details-business-day-convention",
-        "details-bloomberg-day-count",
-        "details-bloomberg-maturity-type",
-        "details-bloomberg-calc-type",
-    ):
-        assert page.inner_text(f"#{details_id}") == "Not available"
-    # Identity fields Bloomberg genuinely returned are never blanked out.
-    assert page.inner_text("#details-issuer") == "UNITED STATES TREAS NTS"
-    assert page.inner_text("#details-isin") == "US91282CLJ89"
-    assert page.inner_text("#details-cusip") == "91282CLJ8"
-    assert page.inner_text("#details-source") == "BLOOMBERG_DAPI"
-
-
-@_PLAYWRIGHT_SKIP
-def test_bond_master_raw_fields_render_display_only_and_never_enter_typed_schema(
-    server_url, page
-) -> None:
-    """Bloomberg's raw Day Count/Maturity Type/Calculation Type mnemonics are
-    confirmed to return a value but must never be coerced into the typed
-    ``details-day-count``/``details-bond-type``/``details-yield-convention``
-    fields (e.g. "ACT/ACT" must never become "ACT_ACT_ISDA") -- they render
-    only in their own "Bloomberg ..." labeled rows."""
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(
-        page,
-        response=_default_bloomberg_bond_lookup_response(
-            bond_master_raw={
-                "day_count": "ACT/ACT",
-                "maturity_type": "AT MATURITY",
-                "calc_type": "STREET CONVENTION",
-            }
-        ),
-    )
-
-    assert page.inner_text("#details-bloomberg-day-count") == "ACT/ACT"
-    assert page.inner_text("#details-bloomberg-maturity-type") == "AT MATURITY"
-    assert page.inner_text("#details-bloomberg-calc-type") == "STREET CONVENTION"
-    # The typed schema fields stay honestly "Not available" -- never
-    # auto-converted from the raw Bloomberg description strings above.
-    assert page.inner_text("#details-day-count") == "Not available"
-    assert page.inner_text("#details-bond-type") == "Not available"
-    assert page.inner_text("#details-yield-convention") == "Not available"
-
-
-@_PLAYWRIGHT_SKIP
-def test_new_lookup_fully_replaces_the_prior_bonds_bond_master(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(
-        page,
-        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": 0.04125}),
-    )
-    assert page.inner_text("#details-coupon") == "4.125%"
-
-    _load_bloomberg_bond(
-        page,
-        identifier="XS9999999999",
-        response=_default_bloomberg_bond_lookup_response(
-            isin="XS9999999999", cusip="999999999", name="SECOND RESOLVED BOND"
-        ),
-    )
-
-    # The new bond's own (entirely unconfirmed) Bond Master replaces the old
-    # one completely -- no leftover value from the first bond.
-    assert page.inner_text("#details-issuer") == "SECOND RESOLVED BOND"
-    assert page.inner_text("#details-coupon") == "Not available"
-    assert page.inner_text("#resolved-bond-coupon") == "Not available"
-
-
-@_PLAYWRIGHT_SKIP
-def test_clear_resets_bond_master_to_empty(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(
-        page,
-        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": 0.04125}),
-    )
-    assert page.inner_text("#details-coupon") == "4.125%"
-
-    page.click("#clear-btn")
-    page.wait_for_timeout(150)
-
-    assert page.eval_on_selector("#instrument-details-section", "el => el.hidden")
-    assert page.inner_text("#details-issuer") == "—"
-    assert page.inner_text("#details-coupon") == "Not available"
-
-
-@_PLAYWRIGHT_SKIP
-def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-
-    pending: list = []
-    request_count = 0
-
-    def route_lookup(route):
-        nonlocal request_count
-        request_count += 1
-        if request_count == 1:
-            pending.append(route)
-        else:
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    _default_bloomberg_bond_lookup_response(
-                        name="SECOND LOOKUP BOND", bond_master={"coupon": 0.025}
-                    )
-                ),
-            )
-
-    page.route("**/api/bloomberg/bond", route_lookup)
-    page.fill("#bond-identifier-input", "US91282CLJ89")
-    page.click('#bond-quote-side-toggle .opt[data-value="MID"]')
-    page.click("#load-bloomberg-bond-btn")
-    _wait_until(lambda: len(pending) == 1)
-
-    page.click("#load-bloomberg-bond-btn")
-    _wait_until(lambda: page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND")
-    assert page.inner_text("#details-coupon") == "2.500%"
-
-    # Only now release the first (stale) lookup's response -- it must not
-    # overwrite the newer draft's Bond Master or identity.
-    pending[0].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(
-            _default_bloomberg_bond_lookup_response(
-                name="FIRST LOOKUP BOND", bond_master={"coupon": 0.09999}
-            )
-        ),
-    )
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_advanced_overrides(page)
     page.wait_for_timeout(300)
 
-    assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
-    assert page.inner_text("#details-coupon") == "2.500%"
+    # No UI anywhere offers to type a Bond Master field by hand.
+    assert page.query_selector("#coupon-input") is None
+    assert page.query_selector("#maturity-date-input") is None
+    assert _is_disabled(page, "#price-btn")
+    assert "bloomberg-reference" in _unresolved_group_ids(page)
 
 
-# --- Missing-input gating -----------------------------------------------------
+# --- Acceptance criterion 4 + 6: one clear unresolved dependency -------------
 
 
 @_PLAYWRIGHT_SKIP
-def test_filling_option_terms_fields_shrinks_the_missing_list_live(server_url, page) -> None:
+def test_no_bond_loaded_shows_one_unresolved_dependency(server_url, page) -> None:
     page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-
-    before = _missing_fields_text(page)
-    assert any("Strike (per 100)" in item for item in before)
-    assert any("Call / Put" in item for item in before)
-
-    page.fill("#strike-price-input", "99.5")
-    page.fill("#notional-input", "50")
-    page.fill("#volatility-input", "0.18")
-    page.fill("#forward-price-input", "101.3")
-    page.click('#option-type-toggle .opt[data-value="CALL"]')
-    page.click('#position-toggle .opt[data-value="BUY"]')
     page.wait_for_timeout(150)
 
-    after = _missing_fields_text(page)
-    assert not any("Strike (per 100)" in item for item in after)
-    assert not any("Call / Put" in item for item in after)
-    assert not any("Notional" in item for item in after)
-    assert not any("Direction (Buy/Sell)" in item for item in after)
-    assert not any("Price Vol (σ)" in item for item in after)
-    assert not any("Forward Clean Price (per 100)" in item for item in after)
-    # Fields with no manual-entry UI in this revision (curve, credit spread,
-    # full bond reference data, dates) remain honestly reported as missing
-    # -- Price stays disabled rather than guessing or defaulting them.
-    assert any("Option Discount Curve" in item for item in after)
-    assert len(after) < len(before)
-    assert "Bond reference data incomplete" in page.inner_text("#missing-categories")
-    assert "Market curves unavailable" in page.inner_text("#missing-categories")
+    assert not page.eval_on_selector("#unresolved-dependency", "el => el.hidden")
+    assert page.inner_text("#unresolved-title") == "No bond is loaded"
+    assert "Nothing else is outstanding." in page.inner_text("#unresolved-also")
+
+
+@_PLAYWRIGHT_SKIP
+def test_missing_forward_states_what_why_evidence_and_next_step(server_url, page) -> None:
+    """Acceptance criterion 6, for the forward: what is missing, why, what
+    Bloomberg actually answered, and what the trader can do next."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _fill_trade_group(page)
+    page.wait_for_timeout(150)
+
+    assert page.inner_text("#unresolved-title") == (
+        "Forward clean price cannot be sourced from Bloomberg"
+    )
+    assert "forward clean price" in page.inner_text("#unresolved-missing").lower()
+    assert "OPT_UNDL_FORWARD_PX" in page.inner_text("#unresolved-why")
+    evidence = page.inner_text("#unresolved-evidence")
+    assert "BAD_FLD" in evidence
+    assert "Field not applicable to security" in evidence
+    assert "OP046" in evidence and "OP188" in evidence
+    # OP131 is named only to say it is never sent -- never defaulted to 0.
+    assert "never defaulted to 0" in evidence
+    next_step = page.inner_text("#unresolved-next")
+    assert "Enter the forward clean price" in next_step
+    assert "repo" in next_step
+
     assert _is_disabled(page, "#price-btn")
+    assert page.inner_text("#forward-review-status") == "Trader override required"
+
+
+@_PLAYWRIGHT_SKIP
+def test_missing_direct_price_vol_states_the_real_bloomberg_answer(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _fill_trade_group(page)
+    page.fill("#forward-price-input", "99.234375")
+    page.wait_for_timeout(150)
+
+    assert page.inner_text("#unresolved-title") == (
+        "Direct price volatility cannot be sourced from Bloomberg"
+    )
+    evidence = page.inner_text("#unresolved-evidence")
+    assert "PRICE_VOL returned BAD_FLD" in evidence
+    assert "EQUIVALENT_PRICE_VOL returned BAD_FLD" in evidence
+    assert "YIELD_VOL" in page.inner_text("#unresolved-next")
+    assert _is_disabled(page, "#price-btn")
+    assert page.inner_text("#vol-review-status") == "Trader override required"
+    # The forward is settled by now, so it reads as reviewed.
+    assert page.inner_text("#forward-review-status") == "Reviewed"
+
+
+@_PLAYWRIGHT_SKIP
+def test_missing_discounting_states_the_unapproved_methodology(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    page.wait_for_timeout(150)
+
+    assert page.inner_text("#unresolved-title") == (
+        "Option Discount Curve has no approved Bloomberg source"
+    )
+    evidence = page.inner_text("#unresolved-evidence")
+    assert "MMkt, repo, FTP, par and swap rates must not be relabelled" in evidence
+    assert "SWDF" in evidence
+    assert "never bootstraps, converts or extrapolates" in page.inner_text("#unresolved-next")
+    assert _is_disabled(page, "#price-btn")
+    assert page.inner_text("#discounting-review-status") == "Trader override required"
+
+
+@_PLAYWRIGHT_SKIP
+def test_only_one_unresolved_dependency_is_explained_at_a_time(server_url, page) -> None:
+    """Requirement 4: never a scattering of unexplained blank fields. Exactly one
+    blocker is explained; the rest are named compactly beneath it."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    assert page.eval_on_selector_all("#unresolved-dependency .ud-title", "els => els.length") == 1
+    also = page.inner_text("#unresolved-also")
+    assert also.startswith("Also outstanding, one at a time:")
+    # Group names, never raw contract field paths.
+    assert "bond_reference_data_universe" not in also
+    assert "Bond reference override" in also
+
+
+@_PLAYWRIGHT_SKIP
+def test_unresolved_go_to_button_opens_advanced_and_focuses_the_control(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_advanced_overrides(page, curve_nodes=())
+    page.wait_for_timeout(150)
+
+    assert _is_actually_hidden(page, "advanced-body")
+    assert page.inner_text("#unresolved-title") == (
+        "Option Discount Curve has no approved Bloomberg source"
+    )
+    page.click("#unresolved-goto-btn")
+    page.wait_for_timeout(150)
+
+    assert not _is_actually_hidden(page, "advanced-body")
+    assert page.evaluate(
+        "() => document.activeElement.classList.contains('curve-tenor-input')"
+    )
+
+
+# --- Acceptance criterion 5: real typed builder, real engine ------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_ust_prices_end_to_end_through_the_real_engine(server_url, page) -> None:
+    """The headline acceptance test: load a real-shaped UST, complete it through
+    the browser controls only, and get a genuine premium and Greeks out of the
+    existing reviewed pricing path."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    assert _is_disabled(page, "#price-btn")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    assert _unresolved_group_ids(page) == []
+    assert page.eval_on_selector("#unresolved-dependency", "el => el.hidden")
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    price_total = page.inner_text("#price-total")
+    assert price_total not in ("—", "")
+    assert float(price_total) > 0
+    assert float(page.inner_text("#price-per-100")) > 0
+    for greek in ("#greek-delta", "#greek-gamma", "#greek-vega", "#greek-theta"):
+        assert page.inner_text(greek) not in ("—", "")
+    assert page.inner_text("#result-currency") == "USD"
+    assert page.inner_text("#instr-isin") == "US91282CLJ89"
+    assert not _is_disabled(page, "#download-json-btn")
+    assert not _is_disabled(page, "#download-markdown-btn")
+
+
+@_PLAYWRIGHT_SKIP
+def test_conventional_gilt_prices_end_to_end_through_the_real_engine(server_url, page) -> None:
+    """Acceptance criterion 1: a conventional UK Gilt starts from the same
+    Bloomberg lookup and reaches the same reviewed engine."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response()
+    )
+    assert page.inner_text("#resolved-bond-name") == "UNITED KINGDOM GILT"
+    assert page.inner_text("#resolved-bond-currency") == "GBP"
+
+    _complete_draft(page, strike="95.50", forward="96.05", last_coupon_date="2028-04-22")
+    _wait_for_price_enabled(page)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    assert float(page.inner_text("#price-total")) > 0
+    assert page.inner_text("#result-currency") == "GBP"
+    assert page.inner_text("#instr-isin") == "GB00BFX0ZL78"
+    # The curve nodes the trader entered were recorded in the Gilt's own
+    # currency -- never carried over from a prior instrument.
+    nodes = page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")
+    assert {node["currency"] for node in nodes} == {"GBP"}
+
+
+@pytest.mark.parametrize("option_type", ["CALL", "PUT"])
+@pytest.mark.parametrize("position", ["BUY", "SELL"])
+@_PLAYWRIGHT_SKIP
+def test_every_call_put_buy_sell_combination_prices(
+    server_url, page, option_type, position
+) -> None:
+    """Acceptance criterion 8: Call / Put and Buy / Sell are each exercised
+    through the real engine, and the position sign reaches the position Greeks."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page, option_type=option_type, position=position)
+    _wait_for_price_enabled(page)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    assert float(page.inner_text("#price-total")) > 0
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_option"]["option_type"] == option_type
+    assert draft["bond_option"]["position"] == position
+
+
+@_PLAYWRIGHT_SKIP
+def test_price_gate_is_decided_by_the_real_typed_builder_not_by_non_blank_fields(
+    server_url, page
+) -> None:
+    """Requirement 5: Price enablement must come from real route validation.
+
+    Every field is non-blank and every workflow group is structurally resolved,
+    but the bond is callable -- which the reviewed standalone eligibility gate
+    rejects. A purely front-end "is it non-empty" check would enable Price here.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={**_TREASURY_BOND_MASTER, "callable_flag": True}
+        ),
+    )
+    _complete_draft(page)
+    page.wait_for_timeout(600)
+
+    assert _unresolved_group_ids(page) == []  # structurally complete...
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "failed"
+    assert _is_disabled(page, "#price-btn")  # ...but the real builder said no
+    assert page.inner_text("#unresolved-title") == "The typed builder rejected this draft"
+    why = page.inner_text("#unresolved-why")
+    assert "FOUND_INELIGIBLE" in why
+    assert "callable" in why
 
 
 @_PLAYWRIGHT_SKIP
@@ -810,31 +1040,540 @@ def test_refresh_does_not_run_without_a_complete_draft(server_url, page) -> None
     assert calls == []
 
 
-# --- Clear returns to a clean empty state, never the synthetic case --------
+# --- One expiry interaction --------------------------------------------------
 
 
 @_PLAYWRIGHT_SKIP
-def test_clear_returns_to_empty_state_not_the_synthetic_case(server_url, page) -> None:
+def test_one_expiry_interaction_composes_both_contract_fields(server_url, page) -> None:
     page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-    page.fill("#strike-price-input", "99.5")
-    page.click('#option-type-toggle .opt[data-value="CALL"]')
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
 
-    page.click("#clear-btn")
+    page.fill("#expiry-datetime-input", "2026-10-20T17:20")
+    page.fill("#expiry-offset-input", "+08:00")
     page.wait_for_timeout(150)
 
-    assert page.inner_text("#status-text") == "No bond loaded"
-    assert _resolved_bond_panel_hidden(page)
-    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
-    assert page.eval_on_selector("#draft-incomplete-note", "el => el.hidden")
-    assert page.input_value("#strike-price-input") == ""
-    assert page.query_selector("#option-type-toggle .opt.on") is None
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_option"]["expiry_date"] == "2026-10-20"
+    assert draft["expiry_timestamp"] == "2026-10-20T17:20:00+08:00"
+    preview = page.inner_text("#expiry-derived-preview")
+    assert "Expiry date 2026-10-20" in preview
+    assert "2026-10-20T17:20:00+08:00" in preview
+    assert "same instant in UTC: 2026-10-20T09:20:00Z" in preview
+
+
+@_PLAYWRIGHT_SKIP
+def test_expiry_without_an_offset_is_flagged_and_never_guessed(server_url, page) -> None:
+    """No default time-of-day or timezone convention is approved, so a missing
+    offset blocks rather than being filled in."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    page.fill("#expiry-datetime-input", "2026-10-20T17:20")
+    page.wait_for_timeout(150)
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["expiry_timestamp"] is None
+    assert "UTC offset" in page.inner_text("#expiry-derived-preview")
+    assert "expiry" in _unresolved_group_ids(page)
+
+    page.fill("#expiry-offset-input", "BST")
+    page.wait_for_timeout(150)
+    assert "is not a UTC offset" in page.inner_text("#expiry-derived-preview")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().expiry_timestamp") is None
+
+
+@_PLAYWRIGHT_SKIP
+def test_local_times_whose_utc_date_differs_still_match_their_explicit_dates(
+    server_url, page
+) -> None:
+    """The timing contract compares the *represented local* calendar date.
+
+    An 05:20 +08:00 expiry is the previous day in UTC, but it belongs to the
+    local expiry date the trader entered -- so it must price.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page, response=_treasury_lookup_response(acquired_at="2026-07-20T05:00:00+08:00")
+    )
+    _complete_draft(page, expiry_local="2026-10-20T05:20", expiry_offset="+08:00")
+    _wait_for_price_enabled(page)
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_option"]["expiry_date"] == "2026-10-20"
+    assert draft["expiry_timestamp"] == "2026-10-20T05:20:00+08:00"
+    assert "same instant in UTC: 2026-10-19T21:20:00Z" in page.inner_text(
+        "#expiry-derived-preview"
+    )
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    assert float(page.inner_text("#price-total")) > 0
+
+
+@_PLAYWRIGHT_SKIP
+def test_malformed_acquisition_timestamp_is_flagged_rather_than_silently_repaired(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            acquired_at="2026-07-20 11:28:00"  # no offset, space separator
+        ),
+    )
+    page.click("#advanced-head")
+    page.wait_for_timeout(120)
+
+    preview = page.inner_text("#pricing-timestamp-utc")
+    assert "explicit offset" in preview
+    assert "same instant in UTC" not in preview
+    assert page.eval_on_selector(
+        "#pricing-timestamp-utc", "el => el.classList.contains('is-invalid')"
+    )
+
+
+# --- Option Discount Curve ----------------------------------------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_curve_needs_at_least_two_valid_nodes(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    page.click("#advanced-head")
+
+    assert "At least 2 valid curve nodes are required" in page.inner_text("#curve-coverage")
+
+    _set_curve_nodes(page, [("1M", "0.0374")])
+    assert "At least 2 valid curve nodes are required; 1 entered" in page.inner_text(
+        "#curve-coverage"
+    )
     assert _is_disabled(page, "#price-btn")
-    assert _is_disabled(page, "#bloomberg-refresh-btn")
+
+
+@_PLAYWRIGHT_SKIP
+def test_curve_rejects_a_tenor_outside_the_existing_grammar(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    page.click("#advanced-head")
+
+    # "1W" and "O/N" are real Bloomberg/FTP tenor labels the reviewed parser
+    # deliberately does not accept -- they must not become nodes here either.
+    _set_curve_nodes(page, [("1W", "0.0374"), ("1Y", "0.0374")])
+
+    coverage = page.inner_text("#curve-coverage")
+    assert "invalid node row" in coverage
+    assert "nD / nM / nY" in coverage
+    nodes = page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")
+    assert [node["tenor"] for node in nodes] == ["1Y"]
+
+
+@_PLAYWRIGHT_SKIP
+def test_insufficient_curve_coverage_blocks_pricing_with_the_exact_range(
+    server_url, page
+) -> None:
+    """The reviewed interpolator rejects an out-of-range target rather than
+    flat-extrapolating, so an uncovered date is a hard stop -- and the trader is
+    told exactly which date, which coordinate, and which range."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    # 1M/2M cannot reach an option settling ~3 months out.
+    _complete_draft(page, curve_nodes=(("1M", "0.0374"), ("2M", "0.0374")), leave_open=True)
+
+    coverage = page.inner_text("#curve-coverage")
+    assert "Option Settlement Date (2026-10-21)" in coverage
+    assert "0.2548 years" in coverage
+    assert "[0.0833, 0.1667] years" in coverage
+    assert "never extrapolated" in coverage
+    assert page.eval_on_selector("#curve-coverage", "el => el.classList.contains('is-blocking')")
+
+    assert _is_disabled(page, "#price-btn")
+    assert "discounting-review" in _unresolved_group_ids(page)
+
+    # Extending the curve past the required coordinate unblocks pricing.
+    _set_curve_nodes(page, [("1M", "0.0374"), ("1Y", "0.0374")])
+    _wait_for_price_enabled(page)
+    assert page.eval_on_selector("#curve-coverage", "el => el.classList.contains('is-covered')")
+
+
+# --- Credit spread contract rules --------------------------------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_credit_spread_not_required_needs_no_spread_value_or_basis(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    credit = page.evaluate("() => window.__shioriTestGetCurrentDraft().credit_spread_input")
+    assert credit["spread_treatment"] == "NOT_REQUIRED"
+    # The contract forbids these two for NOT_REQUIRED -- no fabricated number.
+    assert credit["credit_spread"] is None
+    assert credit["credit_spread_basis"] is None
+    # ... and requires a non-blank audit explanation.
+    assert credit["override_or_fallback_audit"]
+    assert "never reads credit_spread" in credit["override_or_fallback_audit"]
+    # The trader is never asked about it anywhere on the page.
+    assert page.query_selector("#credit-spread-input") is None
+
+
+# --- Acceptance criterion 8: Advanced override provenance --------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_every_advanced_override_is_provenance_stamped(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    assert _override_provenance(page) == []
+
+    _complete_draft(page, leave_open=True)
+    page.wait_for_timeout(200)
+
+    records = _override_provenance(page)
+    stamped = {record["path"] for record in records}
+    for path in (
+        "forward_clean_price_input.forward_clean_price_per_100",
+        "volatility_input.volatility",
+        "volatility_input.volatility_basis",
+        "curve_points",
+        "bond_reference_data_universe.0.day_count",
+        "bond_reference_data_universe.0.bond_type",
+        "bond_reference_data_universe.0.ex_dividend_days",
+        "bond_reference_data_universe.0.last_coupon_date",
+        "bond_reference_data_universe.0.status",
+        "reporting_date",
+        "forward_settlement_date",
+        "option_settlement_date",
+    ):
+        assert path in stamped, f"{path} was overridden without provenance"
+
+    # Every stamp says what it is, why it could not be sourced, and which
+    # Bloomberg acquisition event the run is anchored to.
+    for record in records:
+        assert record["source_system"] == "MANUAL_TRADER_ENTRY"
+        assert record["basis"] == "TRADER_OVERRIDE"
+        assert record["reason_not_sourced"]
+        assert record["run_acquired_at"] == "2026-07-20T11:28:00+08:00"
+        assert record["value"]
+
+    # And the log is visible in Advanced, not just in memory.
+    log_text = page.inner_text("#override-provenance-log")
+    assert "Day Count = ACT_ACT_ISDA" in log_text
+    assert "BAD_FLD" in log_text
+    assert page.eval_on_selector("#override-provenance-empty", "el => el.hidden")
+
+
+@_PLAYWRIGHT_SKIP
+def test_review_rows_show_provenance_only_once_a_value_is_entered(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+
+    assert "not entered yet" in page.inner_text("#forward-provenance")
+    assert "not entered yet" in page.inner_text("#vol-provenance")
+
+    _fill_market_review(page)
+    page.wait_for_timeout(150)
+
+    assert "MANUAL_TRADER_ENTRY · TRADER_OVERRIDE" in page.inner_text("#forward-provenance")
+    assert "2026-07-20T11:28:00+08:00" in page.inner_text("#vol-provenance")
+
+
+# --- Acceptance criterion 8: exports remain functional -----------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_exports_remain_functional_and_carry_override_provenance(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    with page.expect_download() as json_download:
+        page.click("#download-json-btn")
+    json_path = json_download.value.path()
+    exported = json.loads(open(json_path, encoding="utf-8").read())
+    assert exported["status"] == "SUCCESS"
+    assert exported["total_notional_model_fair_premium"] > 0
+    overrides = {record["path"] for record in exported["trader_override_provenance"]}
+    assert "forward_clean_price_input.forward_clean_price_per_100" in overrides
+    assert "volatility_input.volatility" in overrides
+
+    with page.expect_download() as md_download:
+        page.click("#download-markdown-btn")
+    markdown = open(md_download.value.path(), encoding="utf-8").read()
+    assert "# Shiori Standalone Bond Option — Current Run Export" in markdown
+    assert "## Trader Override Provenance" in markdown
+    assert "Forward Clean Price (per 100)" in markdown
+    assert "trader overrides, never observed market data" in markdown
+
+
+@_PLAYWRIGHT_SKIP
+def test_download_buttons_disabled_without_a_completed_run(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    page.wait_for_timeout(150)
+    assert _is_disabled(page, "#download-json-btn")
+    assert _is_disabled(page, "#download-markdown-btn")
+
+    _load_bloomberg_bond(page)
+    assert _is_disabled(page, "#download-json-btn")
+    assert _is_disabled(page, "#download-markdown-btn")
+
+
+# --- Acceptance criterion 7: state isolation ---------------------------------
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_second_lookup_discards_every_input_override_and_result_from_the_first(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    first_draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert _override_provenance(page)
+
+    _load_bloomberg_bond(
+        page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response()
+    )
+
+    # trader inputs
+    for selector in (
+        "#strike-price-input",
+        "#notional-input",
+        "#expiry-datetime-input",
+        "#expiry-offset-input",
+        "#volatility-input",
+        "#forward-price-input",
+    ):
+        assert page.input_value(selector) == "", f"{selector} kept the prior bond's value"
+    assert page.query_selector("#option-type-toggle .opt.on") is None
+    assert page.query_selector("#position-toggle .opt.on") is None
+
+    # overrides
+    page.click("#advanced-head")
+    for selector in (
+        "#reporting-date-input",
+        "#forward-settlement-date-input",
+        "#option-settlement-date-input",
+        "#ex-dividend-days-input",
+        "#last-coupon-date-input",
+        "#day-count-select",
+        "#bond-type-select",
+        "#bond-status-select",
+    ):
+        assert page.input_value(selector) == "", f"{selector} kept the prior bond's override"
+
+    # curve rows
+    assert page.eval_on_selector_all(
+        ".curve-row .curve-tenor-input", "els => els.map(e => e.value)"
+    ) == ["", ""]
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points") == []
+
+    # provenance and pricing results
+    assert _override_provenance(page) == []
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#greek-delta") == "—"
+    assert _is_disabled(page, "#download-json-btn")
+
+    # status and errors
+    assert page.inner_text("#status-text") == "Bloomberg bond loaded"
+    assert page.eval_on_selector("#pricing-error-banner", "el => el.hidden")
+    assert not page.eval_on_selector("#status-indicator", "el => el.classList.contains('failed')")
+
+    # a genuinely new draft identity
+    second_draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert second_draft["bond_option"]["underlying_isin"] == "GB00BFX0ZL78"
+    assert second_draft["bond_option"]["product_id"] != first_draft["bond_option"]["product_id"]
+    assert second_draft["snapshot_id"] != first_draft["snapshot_id"]
+    assert _is_disabled(page, "#price-btn")
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_removes_every_input_override_provenance_and_result(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page, leave_open=True)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.click("#clear-btn")
+    page.wait_for_timeout(200)
+
+    assert page.inner_text("#status-text") == "No bond loaded"
+    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _override_provenance(page) == []
+    assert _resolved_bond_panel_hidden(page)
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#details-issuer") == "—"
+    assert page.inner_text("#details-coupon") == "Not available"
+    assert page.inner_text("#timing-product-id") == "—"
+    assert page.inner_text("#timing-snapshot-id") == "—"
+    for selector in (
+        "#strike-price-input",
+        "#expiry-datetime-input",
+        "#valuation-date-input",
+        "#as-of-timestamp-input",
+        "#pricing-timestamp-input",
+        "#expiry-timestamp-input",
+        "#day-count-select",
+        "#bond-status-select",
+    ):
+        assert page.input_value(selector) == ""
+    # Volatility basis returns to its default rather than to blank.
+    assert page.input_value("#volatility-basis-select") == "PRICE_VOL"
+    assert page.eval_on_selector_all(
+        ".curve-row .curve-tenor-input", "els => els.map(e => e.value)"
+    ) == ["", ""]
+    # Advanced returns to collapsed.
+    assert _is_actually_hidden(page, "advanced-body")
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#download-json-btn")
 
     body_text = page.inner_text("body")
     for stale in ("Synthetic Test Issuer A", "XS0000000001"):
         assert stale not in body_text
+
+
+@_PLAYWRIGHT_SKIP
+def test_successful_refresh_reprices_through_the_bloomberg_route(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "SUCCESS",
+                    "result_currency": "USD",
+                    "total_notional_model_fair_premium": 1234.5,
+                    "model_fair_premium_per_100": 0.12345,
+                    "forward_price_delta_per_100": 0.4,
+                    "forward_price_gamma_per_100": 0.2,
+                    "vega_per_vol_point_per_100": 0.1,
+                    "theta_per_calendar_day_per_100": -0.003,
+                    "errors": [],
+                    "live_bloomberg_quote": {
+                        "currency": "USD",
+                        "clean_price_per_100": 99.81,
+                        "accrued_interest_per_100": 0.44,
+                        "acquired_at": "2026-07-20T11:31:00+08:00",
+                    },
+                }
+            ),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    assert page.inner_text("#price-total") == "1234.500000"
+    # The refreshed quote replaces the displayed one.
+    assert page.inner_text("#resolved-bond-clean-price") == "99.810000"
+    assert page.inner_text("#resolved-bond-acquired-at") == "2026-07-20T11:31:00+08:00"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_refresh_never_falls_back_to_the_stale_quote_or_instrument(
+    server_url, page
+) -> None:
+    """Requirement 5: a failed Bloomberg refresh must not fall back to showing
+    the old quote or old instrument data. The whole run is discarded, so nothing
+    can be priced off an acquisition anchor now known to be stale."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg request failed")
+
+    assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
+    # No stale quote, instrument identity, result, draft or provenance survives.
+    assert _resolved_bond_panel_hidden(page)
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _override_provenance(page) == []
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#details-issuer") == "—"
+    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#download-json-btn")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_mistyped_identifier_reports_the_problem_without_discarding_the_run(
+    server_url, page
+) -> None:
+    """A client-side input mistake is caught before any request is made, so no
+    Bloomberg answer is in question and nothing on screen has gone stale -- it
+    must not throw away a ticket the trader has already filled in."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    page.fill("#strike-price-input", "100")
+
+    calls = []
+    page.route("**/api/bloomberg/bond", lambda route: calls.append(route) or route.abort())
+    page.fill("#bond-identifier-input", "TOOSHORT")
+    page.click("#load-bloomberg-bond-btn")
+    page.wait_for_timeout(200)
+
+    assert calls == []
+    assert page.inner_text("#status-text") == "Check the lookup inputs"
+    assert "ISIN or 9-character CUSIP" in page.inner_text("#pricing-error-banner")
+    # The already-loaded bond and the trader's own input both survive.
+    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
+    assert page.input_value("#strike-price-input") == "100"
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is not None
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_lookup_never_leaves_the_previous_instrument_on_screen(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    page.fill("#strike-price-input", "100")
+
+    page.route(
+        "**/api/bloomberg/bond",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.fill("#bond-identifier-input", "91282CLJ8")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg request failed")
+
+    assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
+    assert _resolved_bond_panel_hidden(page)
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert page.input_value("#strike-price-input") == ""
 
 
 # --- Cross-action race protection --------------------------------------------
@@ -881,7 +1620,9 @@ def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(_default_bloomberg_bond_lookup_response(name="SECOND LOOKUP BOND")),
+                body=json.dumps(
+                    _default_bloomberg_bond_lookup_response(name="SECOND LOOKUP BOND")
+                ),
             )
 
     page.route("**/api/bloomberg/bond", route_lookup)
@@ -904,745 +1645,49 @@ def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
     assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
 
 
-# --- Export controls stay disabled without a completed pricing result -------
-
-
 @_PLAYWRIGHT_SKIP
-def test_download_buttons_disabled_with_no_draft(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    page.wait_for_timeout(150)
-
-    assert _is_disabled(page, "#download-json-btn")
-    assert _is_disabled(page, "#download-markdown-btn")
-
-
-@_PLAYWRIGHT_SKIP
-def test_download_buttons_disabled_with_an_incomplete_draft(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-
-    assert _is_disabled(page, "#download-json-btn")
-    assert _is_disabled(page, "#download-markdown-btn")
-
-
-# --- Collapsible sections (PR #141 third revision) ---------------------------
-#
-# Each of the six main sections has a whole-header-row toggle that shows/
-# hides only its own body element -- no data refetch, no form clearing, no
-# draft/pricing-result mutation. `getComputedStyle(...).display` is checked
-# (not just the `hidden` IDL property) because a body element whose own CSS
-# sets an explicit `display` (e.g. `.id-grid`'s `display: grid`) can tie the
-# UA stylesheet's `[hidden] { display: none }` rule in specificity and,
-# being an author rule, win -- silently defeating `el.hidden = true` even
-# though the property itself reads `true`. This exact bug was already fixed
-# once for `.instrument-details`/`.workspace`/`.instr-header`; this section
-# proves it doesn't recur for the newly collapsible `.id-grid` (Instrument
-# Details' body) or the plain new `.card-body` wrappers.
-
-_COLLAPSIBLE_SECTIONS = {
-    "underlying-bond": (
-        "underlying-bond-head",
-        "underlying-bond-body",
-        "underlying-bond-indicator",
-    ),
-    "option-terms": ("option-terms-head", "option-terms-body", "option-terms-indicator"),
-    "pricing-results": (
-        "pricing-results-head",
-        "pricing-results-body",
-        "pricing-results-indicator",
-    ),
-    "forward-carry": ("forward-carry-head", "forward-carry-body", "forward-carry-indicator"),
-    "underlying-snapshot": (
-        "underlying-snapshot-head",
-        "underlying-snapshot-body",
-        "underlying-snapshot-indicator",
-    ),
-    "instrument-details": ("bond-master-head", "bond-master-body", "bond-master-toggle-btn"),
-    # The three manual-completion sections (Issue #143).
-    "timing": ("timing-head", "timing-body", "timing-indicator"),
-    "bond-ref": ("bond-ref-head", "bond-ref-body", "bond-ref-indicator"),
-    "curve": ("curve-head", "curve-body", "curve-indicator"),
-}
-
-
-def _is_actually_hidden(page, element_id: str) -> bool:
-    """True only if the element is genuinely not rendered (computed
-    `display: none`), never merely the `hidden` IDL property -- the whole
-    point of this check is to catch the CSS-specificity bug described above,
-    which leaves `hidden` reading `true` on an element still visibly
-    rendered on screen."""
-
-    return (
-        page.eval_on_selector(f"#{element_id}", "el => getComputedStyle(el).display") == "none"
-    )
-
-
-@_PLAYWRIGHT_SKIP
-def test_default_collapse_states_before_any_lookup(server_url, page) -> None:
+def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, page) -> None:
     page.goto(f"{server_url}/")
 
-    # Primary trader decisions are expanded by default.
-    for body_id in (
-        "underlying-bond-body",
-        "option-terms-body",
-        "pricing-results-body",
-        "forward-carry-body",
-        "curve-body",
-    ):
-        assert not _is_actually_hidden(page, body_id)
-        assert not page.eval_on_selector(f"#{body_id}", "el => el.hidden")
-
-    # Advanced/uncommon fields and detail-only sections are collapsed.
-    for body_id, indicator_id in (
-        ("underlying-snapshot-body", "underlying-snapshot-indicator"),
-        ("bond-master-body", "bond-master-toggle-btn"),
-        ("timing-body", "timing-indicator"),
-        ("bond-ref-body", "bond-ref-indicator"),
-    ):
-        assert page.eval_on_selector(f"#{body_id}", "el => el.hidden")
-        assert _is_actually_hidden(page, body_id)
-        assert page.inner_text(f"#{indicator_id}") == "Expand"
-
-    for indicator_id in (
-        "underlying-bond-indicator",
-        "option-terms-indicator",
-        "pricing-results-indicator",
-        "forward-carry-indicator",
-        "curve-indicator",
-    ):
-        assert page.inner_text(f"#{indicator_id}") == "Collapse"
-
-    assert page.inner_text("#forward-carry-summary") == ""
-
-
-@_PLAYWRIGHT_SKIP
-def test_instrument_details_collapsed_by_default_after_a_lookup(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-
-    assert page.eval_on_selector("#bond-master-body", "el => el.hidden")
-    assert _is_actually_hidden(page, "bond-master-body")
-    assert page.inner_text("#bond-master-toggle-btn") == "Expand"
-    assert page.inner_text("#bond-master-summary") == "Bloomberg DAPI"
-
-
-@pytest.mark.parametrize("section", list(_COLLAPSIBLE_SECTIONS))
-@_PLAYWRIGHT_SKIP
-def test_clicking_the_header_row_toggles_the_section(server_url, page, section) -> None:
-    head_id, body_id, indicator_id = _COLLAPSIBLE_SECTIONS[section]
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)  # so Instrument Details is present to toggle too
-
-    was_hidden = page.eval_on_selector(f"#{body_id}", "el => el.hidden")
-
-    page.click(f"#{head_id}")
-
-    assert page.eval_on_selector(f"#{body_id}", "el => el.hidden") != was_hidden
-    assert _is_actually_hidden(page, body_id) == (not was_hidden)
-    expected_indicator = "Expand" if not was_hidden else "Collapse"
-    assert page.inner_text(f"#{indicator_id}") == expected_indicator
-
-    # Toggling back restores the original state exactly.
-    page.click(f"#{head_id}")
-    assert page.eval_on_selector(f"#{body_id}", "el => el.hidden") == was_hidden
-    assert _is_actually_hidden(page, body_id) == was_hidden
-
-
-@_PLAYWRIGHT_SKIP
-def test_collapse_expand_never_triggers_a_lookup_price_or_clear(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-    page.fill("#strike-price-input", "99.5")
-
-    bloomberg_calls = []
-    case_calls = []
-    page.route("**/api/bloomberg/bond", lambda route: bloomberg_calls.append(route))
-    page.route("**/api/case", lambda route: case_calls.append(route))
-
-    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
-        page.click(f"#{head_id}")
-
-    page.wait_for_timeout(200)
-
-    assert bloomberg_calls == []
-    assert case_calls == []
-    # Neither the resolved bond nor the trader's own input was disturbed.
-    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
-    assert page.input_value("#strike-price-input") == "99.5"
-
-
-@_PLAYWRIGHT_SKIP
-def test_values_survive_a_collapse_expand_round_trip(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(
-        page,
-        response=_default_bloomberg_bond_lookup_response(bond_master={"coupon": 0.04125}),
-    )
-    page.click('#option-type-toggle .opt[data-value="PUT"]')
-    page.click('#position-toggle .opt[data-value="SELL"]')
-    page.fill("#strike-price-input", "101.25")
-    page.fill("#notional-input", "2500000")
-    page.fill("#volatility-input", "0.22")
-    page.fill("#forward-price-input", "100.75")
-
-    # Collapse every section, then expand every section again.
-    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
-        page.click(f"#{head_id}")
-    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
-        page.click(f"#{head_id}")
-
-    assert page.query_selector('#option-type-toggle .opt[data-value="PUT"].on') is not None
-    assert page.query_selector('#position-toggle .opt[data-value="SELL"].on') is not None
-    assert page.input_value("#strike-price-input") == "101.25"
-    assert page.input_value("#notional-input") == "2500000"
-    assert page.input_value("#volatility-input") == "0.22"
-    assert page.input_value("#forward-price-input") == "100.75"
-    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
-    assert page.inner_text("#details-coupon") == "4.125%"
-
-
-@_PLAYWRIGHT_SKIP
-def test_clear_restores_default_collapse_states(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page)
-
-    # Leave every section in the opposite of its default state.
-    for head_id, _body_id, _indicator_id in _COLLAPSIBLE_SECTIONS.values():
-        page.click(f"#{head_id}")
-
-    page.click("#clear-btn")
-    page.wait_for_timeout(150)
-
-    for body_id in (
-        "underlying-bond-body",
-        "option-terms-body",
-        "pricing-results-body",
-        "forward-carry-body",
-        "curve-body",
-    ):
-        assert not page.eval_on_selector(f"#{body_id}", "el => el.hidden")
-    for body_id in (
-        "underlying-snapshot-body",
-        "bond-master-body",
-        "timing-body",
-        "bond-ref-body",
-    ):
-        assert page.eval_on_selector(f"#{body_id}", "el => el.hidden")
-    assert page.inner_text("#forward-carry-summary") == ""
-
-
-# --- Manual explicit-forward completion path (Issue #143) ---------------------
-#
-# The trader completes a Bloomberg-loaded draft entirely in the browser: option
-# dates, the eight BondReferenceData fields Bloomberg has no confirmed mnemonic
-# for, the explicit forward, a direct PRICE_VOL, the timing/settlement dates,
-# and Option Discount Curve nodes. No Case JSON is involved at any point.
-
-# Eddy's real US Treasury evidence (PR #141): the seven DAPI-confirmed Bond
-# Master fields, plus the three raw display-only descriptions that must never
-# be auto-mapped into a typed enum.
-_TREASURY_BOND_MASTER = {
-    "coupon": 0.0375,
-    "coupon_frequency": "SEMI_ANNUAL",
-    "issue_date": "2024-01-31",
-    "maturity_date": "2031-01-31",
-    "first_coupon_date": "2024-07-31",
-    "callable_flag": False,
-    "sinkable_flag": False,
-}
-_TREASURY_BOND_MASTER_RAW = {
-    "day_count": "ACT/ACT",
-    "maturity_type": "AT MATURITY",
-    "calc_type": "STREET CONVENTION",
-}
-
-
-def _treasury_lookup_response(**overrides) -> dict:
-    payload_overrides = {
-        "acquired_at": "2026-07-20T11:28:00+08:00",
-        **overrides,
-    }
-    return _default_bloomberg_bond_lookup_response(
-        bond_master=_TREASURY_BOND_MASTER,
-        bond_master_raw=_TREASURY_BOND_MASTER_RAW,
-        **payload_overrides,
-    )
-
-
-def _set_curve_nodes(page, nodes) -> None:
-    """Set the Option Discount Curve editor's rows to exactly ``nodes``."""
-
-    existing = page.query_selector_all(".curve-row")
-    while len(existing) < len(nodes):
-        page.click("#curve-add-row-btn")
-        existing = page.query_selector_all(".curve-row")
-    for row, (tenor, rate) in zip(existing, nodes, strict=False):
-        row.query_selector(".curve-tenor-input").fill(tenor)
-        row.query_selector(".curve-rate-input").fill(rate)
-    page.wait_for_timeout(120)
-
-
-def _complete_draft(page, *, curve_nodes=(("1M", "0.0374"), ("1Y", "0.0374"))) -> None:
-    """Fill every remaining input a Bloomberg-loaded draft still needs.
-
-    Deliberately writes each value through the real control the trader uses,
-    so this doubles as proof that every required input actually has a UI.
-    """
-
-    page.click('#option-type-toggle .opt[data-value="CALL"]')
-    page.click('#position-toggle .opt[data-value="BUY"]')
-    page.fill("#strike-price-input", "99.32")
-    page.fill("#notional-input", "1000000")
-    page.fill("#expiry-date-input", "2026-10-20")
-    page.fill("#expiry-timestamp-input", "2026-10-20T17:20:00+08:00")
-    page.fill("#volatility-input", "0.03395")
-
-    page.fill("#forward-price-input", "99.234375")
-
-    # Uncommon contract fields stay in Advanced sections. Their live header
-    # counts remain visible while collapsed, and the trader expands them only
-    # when needed.
-    page.click("#bond-ref-head")
-    # The two route-consumed enum selects are the trader's own choice;
-    # Bloomberg's raw DAY_CNT_DES / MTY_TYP are only shown beside them.
-    page.select_option("#day-count-select", "ACT_ACT_ISDA")
-    page.select_option("#bond-type-select", "FIXED_COUPON_BULLET")
-    page.fill("#ex-dividend-days-input", "0")
-    page.fill("#last-coupon-date-input", "2030-07-31")
-    page.select_option("#bond-status-select", "ACTIVE")
-
-    page.click("#timing-head")
-    page.fill("#reporting-date-input", "2026-10-21")
-    page.fill("#forward-settlement-date-input", "2026-10-21")
-    page.fill("#option-settlement-date-input", "2026-10-21")
-
-    _set_curve_nodes(page, curve_nodes)
-
-
-@_PLAYWRIGHT_SKIP
-def test_bloomberg_loaded_bond_prices_end_to_end_without_case_json(server_url, page) -> None:
-    """The headline acceptance test: load a real-shaped Bloomberg bond,
-    complete it through the browser controls only, and get a genuine premium
-    and Greeks out of the existing reviewed pricing path."""
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    assert _is_disabled(page, "#price-btn")
-    _complete_draft(page)
-
-    # Nothing is outstanding any more: no badges, no note, Price enabled.
-    assert _missing_category_badges(page) == []
-    assert page.eval_on_selector("#draft-incomplete-note", "el => el.hidden")
-    assert not _is_disabled(page, "#price-btn")
-
-    page.click("#price-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
-
-    # A real number from the reviewed engine, not a placeholder.
-    price_total = page.inner_text("#price-total")
-    assert price_total not in ("—", "")
-    assert float(price_total) > 0
-    assert float(page.inner_text("#price-per-100")) > 0
-    for greek in ("#greek-delta", "#greek-gamma", "#greek-vega", "#greek-theta"):
-        assert page.inner_text(greek) not in ("—", "")
-    assert page.inner_text("#result-currency") == "USD"
-    # Provenance and export both become available on a real priced run.
-    assert page.inner_text("#instr-isin") == "US91282CLJ89"
-    assert not _is_disabled(page, "#download-json-btn")
-    assert not _is_disabled(page, "#download-markdown-btn")
-
-
-@_PLAYWRIGHT_SKIP
-def test_local_offset_timestamps_are_accepted_and_dates_stay_explicit(
-    server_url, page
-) -> None:
-    """`+08:00` timestamps are accepted; the preview is transparency only and
-    labels which single field is actually normalized."""
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    _complete_draft(page)
-
-    # Only as_of is respelled in UTC from the acquisition event...
-    assert page.inner_text("#as-of-timestamp-utc") == "Normalized to UTC: 2026-07-20T03:28:00Z"
-    # ...the other two are sent exactly as entered, with the UTC equivalent
-    # shown purely so the trader can see the instant.
-    assert page.inner_text("#pricing-timestamp-utc") == (
-        "Sent as entered · same instant in UTC: 2026-07-20T03:28:00Z"
-    )
-    assert page.inner_text("#expiry-timestamp-utc") == (
-        "Sent as entered · same instant in UTC: 2026-10-20T09:20:00Z"
-    )
-
-    # The acquisition event's pricing spelling is preserved verbatim; expiry
-    # remains the trader's explicit timestamp.
-    assert page.input_value("#pricing-timestamp-input") == "2026-07-20T11:28:00+08:00"
-    assert page.input_value("#expiry-timestamp-input") == "2026-10-20T17:20:00+08:00"
-    # ... and in the draft that will actually be sent. As-of is already
-    # normalized in the mechanically populated draft.
-    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    assert draft["pricing_timestamp"] == "2026-07-20T11:28:00+08:00"
-    assert draft["expiry_timestamp"] == "2026-10-20T17:20:00+08:00"
-    assert draft["as_of_timestamp"] == "2026-07-20T03:28:00Z"
-
-    # Valuation is the acquisition timestamp's local date. Other calendar
-    # dates remain independent explicit inputs.
-    assert page.input_value("#valuation-date-input") == "2026-07-20"
-    assert page.input_value("#reporting-date-input") == "2026-10-21"
-    assert page.input_value("#option-settlement-date-input") == "2026-10-21"
-
-    # And the whole thing prices, which is what the #142 D2 defect prevented:
-    # `as_of_timestamp` rejected every non-UTC offset while the other two
-    # required an explicit offset.
-    page.click("#price-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
-    assert float(page.inner_text("#price-total")) > 0
-
-
-@_PLAYWRIGHT_SKIP
-def test_local_times_whose_utc_date_differs_still_match_their_explicit_dates(
-    server_url, page
-) -> None:
-    """The timing contract compares the *represented local* calendar date.
-
-    An 05:20 +08:00 expiry is the previous day in UTC, but it belongs to the
-    local expiry date the trader entered -- so it must price. Normalizing
-    these two instants to UTC would wrongly reject this.
-    """
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(
-        page,
-        response=_treasury_lookup_response(acquired_at="2026-07-20T05:00:00+08:00"),
-    )
-    _complete_draft(page)
-
-    # Both are early-morning local times whose UTC date is the day before.
-    page.fill("#expiry-timestamp-input", "2026-10-20T05:20:00+08:00")
-    page.wait_for_timeout(150)
-
-    assert page.inner_text("#expiry-timestamp-utc") == (
-        "Sent as entered · same instant in UTC: 2026-10-19T21:20:00Z"
-    )
-    # The explicit expiry date is still the local one, and is not adjusted.
-    assert page.input_value("#expiry-date-input") == "2026-10-20"
-
-    page.click("#price-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
-    assert float(page.inner_text("#price-total")) > 0
-
-
-@_PLAYWRIGHT_SKIP
-def test_malformed_timestamp_is_flagged_rather_than_silently_repaired(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(
-        page,
-        response=_treasury_lookup_response(
-            acquired_at="2026-07-20 11:28:00"  # no offset, space separator
+    pending: list = []
+    request_count = 0
+
+    def route_lookup(route):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            pending.append(route)
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    _default_bloomberg_bond_lookup_response(
+                        name="SECOND LOOKUP BOND", bond_master={"coupon": 0.025}
+                    )
+                ),
+            )
+
+    page.route("**/api/bloomberg/bond", route_lookup)
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: len(pending) == 1)
+
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND")
+    assert page.inner_text("#resolved-bond-coupon") == "2.500%"
+
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _default_bloomberg_bond_lookup_response(
+                name="FIRST LOOKUP BOND", bond_master={"coupon": 0.09999}
+            )
         ),
     )
-    page.wait_for_timeout(120)
+    page.wait_for_timeout(300)
 
-    preview = page.inner_text("#pricing-timestamp-utc")
-    assert "explicit offset" in preview
-    assert "same instant in UTC" not in preview
-    assert page.eval_on_selector(
-        "#pricing-timestamp-utc", "el => el.classList.contains('is-invalid')"
-    )
-
-
-@_PLAYWRIGHT_SKIP
-def test_credit_spread_not_required_needs_no_spread_value_or_basis(server_url, page) -> None:
-    """#142 defect D1: the workbench demanded `credit_spread` and
-    `credit_spread_basis` unconditionally, but `BLICreditSpreadInput` forbids
-    both for NOT_REQUIRED and instead requires the audit explanation."""
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    labels = _missing_fields_text(page)
-    assert not any("Credit Spread" in item for item in labels)
-
-    credit = page.evaluate(
-        "() => window.__shioriTestGetCurrentDraft().credit_spread_input"
-    )
-    assert credit["spread_treatment"] == "NOT_REQUIRED"
-    # The contract forbids these two for NOT_REQUIRED -- no fabricated number.
-    assert credit["credit_spread"] is None
-    assert credit["credit_spread_basis"] is None
-    # ... and requires a non-blank audit explanation, which #142 found missing
-    # from the checklist entirely.
-    assert credit["override_or_fallback_audit"]
-    assert "never reads credit_spread" in credit["override_or_fallback_audit"]
-
-
-@_PLAYWRIGHT_SKIP
-def test_credit_spread_conditional_rules_track_the_treatment(server_url, page) -> None:
-    """The checklist applies the real conditional contract rules, in both
-    directions, for every treatment."""
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    def missing_credit_labels(treatment, **fields):
-        return page.evaluate(
-            """([treatment, fields]) => {
-                const draft = window.__shioriTestGetCurrentDraft();
-                draft.credit_spread_input = Object.assign(
-                    { spread_treatment: treatment, source_system: "S", status: "ACTIVE",
-                      credit_spread: null, credit_spread_basis: null,
-                      override_or_fallback_audit: null },
-                    fields
-                );
-                return window.__shioriTestComputeMissingLabels();
-            }""",
-            [treatment, fields],
-        )
-
-    # OBSERVED needs a spread value and basis, and no audit.
-    observed = missing_credit_labels("OBSERVED")
-    assert "Credit Spread" in observed
-    assert "Credit Spread Basis" in observed
-    assert "Credit Spread Audit Explanation" not in observed
-
-    # OVERRIDE needs the spread value, the basis AND the audit.
-    override = missing_credit_labels("OVERRIDE")
-    assert "Credit Spread" in override
-    assert "Credit Spread Basis" in override
-    assert "Credit Spread Audit Explanation" in override
-
-    # EMBEDDED needs only the audit -- never a spread value or basis.
-    embedded = missing_credit_labels("EMBEDDED")
-    assert "Credit Spread" not in embedded
-    assert "Credit Spread Basis" not in embedded
-    assert "Credit Spread Audit Explanation" in embedded
-
-    # A fully-supplied OBSERVED spread leaves nothing outstanding.
-    complete = missing_credit_labels(
-        "OBSERVED", credit_spread=0.0125, credit_spread_basis="BPS_OVER_CURVE"
-    )
-    assert not any(label.startswith("Credit Spread") for label in complete)
-
-
-@_PLAYWRIGHT_SKIP
-def test_curve_needs_at_least_two_valid_nodes(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    assert "At least 2 valid curve nodes are required" in page.inner_text("#curve-coverage")
-
-    _set_curve_nodes(page, [("1M", "0.0374")])
-    assert "At least 2 valid curve nodes are required; 1 entered" in page.inner_text(
-        "#curve-coverage"
-    )
-    assert _is_disabled(page, "#price-btn")
-
-
-@_PLAYWRIGHT_SKIP
-def test_curve_rejects_a_tenor_outside_the_existing_grammar(server_url, page) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    # "1W" and "O/N" are real Bloomberg/FTP tenor labels the reviewed parser
-    # deliberately does not accept -- they must not become nodes here either.
-    _set_curve_nodes(page, [("1W", "0.0374"), ("1Y", "0.0374")])
-
-    coverage = page.inner_text("#curve-coverage")
-    assert "invalid node row" in coverage
-    assert "nD / nM / nY" in coverage
-    nodes = page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")
-    assert [node["tenor"] for node in nodes] == ["1Y"]
-
-
-@_PLAYWRIGHT_SKIP
-def test_insufficient_curve_coverage_blocks_pricing_with_the_exact_range(
-    server_url, page
-) -> None:
-    """The reviewed interpolator rejects an out-of-range target rather than
-    flat-extrapolating, so an uncovered date is a hard stop -- and the trader
-    is told exactly which date, which coordinate, and which range."""
-
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    # 1M/2M cannot reach an option settling ~3 months out.
-    _complete_draft(page, curve_nodes=(("1M", "0.0374"), ("2M", "0.0374")))
-
-    coverage = page.inner_text("#curve-coverage")
-    assert "Option Settlement Date (2026-10-21)" in coverage
-    assert "0.2548 years" in coverage
-    assert "[0.0833, 0.1667] years" in coverage
-    assert "never extrapolated" in coverage
-    assert page.eval_on_selector(
-        "#curve-coverage", "el => el.classList.contains('is-blocking')"
-    )
-
-    assert _is_disabled(page, "#price-btn")
-    assert "Market curves unavailable (1)" in page.inner_text("#missing-categories")
-
-    # Extending the curve past the required coordinate unblocks pricing.
-    _set_curve_nodes(page, [("1M", "0.0374"), ("1Y", "0.0374")])
-    assert not _is_disabled(page, "#price-btn")
-    assert page.eval_on_selector(
-        "#curve-coverage", "el => el.classList.contains('is-covered')"
-    )
-
-
-@_PLAYWRIGHT_SKIP
-def test_bloomberg_raw_descriptions_are_hints_and_never_enter_the_typed_draft(
-    server_url, page
-) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    # Route-consumed descriptions are shown beside the enum the trader must
-    # pick; the unused calculation type remains display-only provenance.
-    assert page.inner_text("#hint-day-count") == "ACT/ACT"
-    assert page.inner_text("#hint-bond-type") == "AT MATURITY"
-    assert page.inner_text("#details-bloomberg-calc-type") == "STREET CONVENTION"
-
-    # But nothing was auto-selected from them, and no removed typed field
-    # enters the standalone request draft.
-    assert page.input_value("#day-count-select") == ""
-    assert page.input_value("#bond-type-select") == ""
-    reference = page.evaluate(
-        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0]"
-    )
-    assert reference["day_count"] is None
-    assert reference["bond_type"] is None
-    assert "yield_convention" not in reference
-    assert "business_day_convention" not in reference
-    assert "redemption_amount" not in reference
-
-
-@_PLAYWRIGHT_SKIP
-def test_deterministic_policy_fields_are_populated_without_asking_the_trader(
-    server_url, page
-) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-
-    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    # The only values the reviewed pricing guard accepts for this route.
-    assert draft["bond_option"]["payoff_basis"] == "PRICE"
-    assert draft["bond_option"]["exercise_style"] == "EUROPEAN"
-    assert draft["bond_option"]["settlement_type"] == "CASH"
-    # Shiori identifiers and truthful provenance, not market data.
-    assert draft["bond_option"]["product_id"].startswith("SHIORI-WORKBENCH-")
-    assert draft["snapshot_id"].startswith("SHIORI-SNAPSHOT-")
-    assert draft["source_system"] == "SHIORI_MANUAL_WORKBENCH"
-    assert draft["forward_clean_price_input"]["source_system"] == "MANUAL_TRADER_ENTRY"
-    assert draft["volatility_input"]["source_system"] == "MANUAL_TRADER_ENTRY"
-    # The contract requires the forward's side to equal the spot side, so it
-    # is mirrored rather than asked for twice.
-    assert draft["forward_clean_price_input"]["quote_side"] == draft["bond_quote"]["quote_side"]
-    # Direct price vol only; YIELD_VOL is not offered anywhere.
-    assert draft["volatility_input"]["volatility_basis"] == "PRICE_VOL"
-    assert page.eval_on_selector_all(
-        "#volatility-basis-select option", "els => els.map(e => e.value)"
-    ) == ["PRICE_VOL", "EQUIVALENT_PRICE_VOL"]
-    # Generated identifiers, provenance and statuses remain inspectable in
-    # the collapsed Advanced metadata section.
-    assert page.inner_text("#timing-product-id") == draft["bond_option"]["product_id"]
-    assert page.inner_text("#timing-snapshot-id") == draft["snapshot_id"]
-    assert page.inner_text("#timing-snapshot-metadata") == "SHIORI_MANUAL_WORKBENCH · ACTIVE"
-    assert page.inner_text("#timing-bond-quote-metadata") == "BLOOMBERG_DAPI · ACTIVE"
-    assert "NOT_REQUIRED" in page.inner_text("#timing-credit-metadata")
-    # Timing values already present in the Bloomberg acquisition event are
-    # populated mechanically; genuinely unknown expiry remains null.
-    assert draft["valuation_date"] == "2026-07-20"
-    assert draft["pricing_timestamp"] == "2026-07-20T11:28:00+08:00"
-    assert draft["as_of_timestamp"] == "2026-07-20T03:28:00Z"
-    assert draft["bond_option"]["expiry_date"] is None
-
-
-@_PLAYWRIGHT_SKIP
-def test_a_second_bond_lookup_discards_every_manual_input_from_the_first(
-    server_url, page
-) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    _complete_draft(page)
-    assert not _is_disabled(page, "#price-btn")
-    first_draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-
-    _load_bloomberg_bond(
-        page,
-        identifier="XS9999999999",
-        response=_treasury_lookup_response(
-            isin="XS9999999999",
-            cusip="999999999",
-            name="SECOND RESOLVED BOND",
-            acquired_at="2026-07-21T00:30:00+08:00",
-        ),
-    )
-
-    for selector in (
-        "#strike-price-input",
-        "#notional-input",
-        "#expiry-date-input",
-        "#volatility-input",
-        "#forward-price-input",
-        "#reporting-date-input",
-        "#forward-settlement-date-input",
-        "#option-settlement-date-input",
-        "#expiry-timestamp-input",
-        "#ex-dividend-days-input",
-        "#last-coupon-date-input",
-        "#day-count-select",
-        "#bond-type-select",
-        "#bond-status-select",
-    ):
-        assert page.input_value(selector) == "", f"{selector} kept the prior bond's value"
-    assert page.query_selector("#option-type-toggle .opt.on") is None
-    assert page.query_selector("#position-toggle .opt.on") is None
-    assert page.eval_on_selector_all(
-        ".curve-row .curve-tenor-input", "els => els.map(e => e.value)"
-    ) == ["", ""]
-    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points") == []
-    second_draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    assert second_draft["pricing_timestamp"] == "2026-07-21T00:30:00+08:00"
-    assert second_draft["valuation_date"] == "2026-07-21"
-    assert second_draft["as_of_timestamp"] == "2026-07-20T16:30:00Z"
-    assert second_draft["bond_option"]["product_id"] != first_draft["bond_option"]["product_id"]
-    assert second_draft["snapshot_id"] != first_draft["snapshot_id"]
-    assert page.input_value("#pricing-timestamp-input") == second_draft["pricing_timestamp"]
-    assert page.input_value("#valuation-date-input") == second_draft["valuation_date"]
-    assert page.input_value("#as-of-timestamp-input") == second_draft["as_of_timestamp"]
-    assert _is_disabled(page, "#price-btn")
-
-
-@_PLAYWRIGHT_SKIP
-def test_clear_removes_every_manual_input_and_restores_the_empty_state(
-    server_url, page
-) -> None:
-    page.goto(f"{server_url}/")
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    _complete_draft(page)
-    page.click("#price-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
-
-    page.click("#clear-btn")
-    page.wait_for_timeout(200)
-
-    assert page.inner_text("#status-text") == "No bond loaded"
-    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
-    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
-    for selector in (
-        "#strike-price-input",
-        "#valuation-date-input",
-        "#as-of-timestamp-input",
-        "#pricing-timestamp-input",
-        "#day-count-select",
-        "#bond-status-select",
-    ):
-        assert page.input_value(selector) == ""
-    assert page.inner_text("#timing-product-id") == "—"
-    assert page.inner_text("#timing-snapshot-id") == "—"
-    # Volatility basis returns to its default rather than to blank.
-    assert page.input_value("#volatility-basis-select") == "PRICE_VOL"
-    assert page.eval_on_selector_all(
-        ".curve-row .curve-tenor-input", "els => els.map(e => e.value)"
-    ) == ["", ""]
-    assert _is_disabled(page, "#price-btn")
-    assert _is_disabled(page, "#download-json-btn")
+    assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
+    assert page.inner_text("#resolved-bond-coupon") == "2.500%"

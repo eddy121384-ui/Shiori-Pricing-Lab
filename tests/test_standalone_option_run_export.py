@@ -874,3 +874,69 @@ def test_manual_mode_display_without_live_quote_key_export_unchanged():
 
     assert "live_bloomberg_quote" not in json.loads(json_text)
     assert "Live Bloomberg" not in md
+
+
+# --- Trader override provenance section (Issue #143) ---------------------------
+
+_OVERRIDE_RECORD = {
+    "field": "Forward Clean Price (per 100)",
+    "path": "forward_clean_price_input.forward_clean_price_per_100",
+    "value": "99.234375",
+    "source_system": "MANUAL_TRADER_ENTRY",
+    "basis": "TRADER_OVERRIDE",
+    "reason_not_sourced": (
+        "Bloomberg OPT_UNDL_FORWARD_PX returned BAD_FLD for cash bonds on this route."
+    ),
+    "run_acquired_at": "2026-07-20T11:28:00+08:00",
+}
+
+
+def test_markdown_omits_the_override_section_when_there_are_no_overrides():
+    display = _synthetic_price_only_display()
+    assert "trader_override_provenance" not in display
+    assert "## Trader Override Provenance" not in render_standalone_run_as_markdown(display)
+
+
+def test_markdown_omits_the_override_section_for_an_empty_override_list():
+    display = _synthetic_price_only_display(trader_override_provenance=[])
+    assert "## Trader Override Provenance" not in render_standalone_run_as_markdown(display)
+
+
+def test_markdown_renders_every_override_field_verbatim():
+    display = _synthetic_price_only_display(trader_override_provenance=[_OVERRIDE_RECORD])
+    markdown = render_standalone_run_as_markdown(display)
+
+    assert "## Trader Override Provenance" in markdown
+    assert "trader overrides, never observed market data" in markdown
+    assert "### Forward Clean Price (per 100)" in markdown
+    assert (
+        "- **Case path:** forward_clean_price_input.forward_clean_price_per_100" in markdown
+    )
+    assert "- **Value:** 99.234375" in markdown
+    assert "- **Source system:** MANUAL_TRADER_ENTRY" in markdown
+    assert "- **Basis:** TRADER_OVERRIDE" in markdown
+    assert "BAD_FLD" in markdown
+    assert (
+        "- **Run anchored to Bloomberg acquisition:** 2026-07-20T11:28:00+08:00" in markdown
+    )
+
+
+def test_markdown_override_section_renders_a_missing_field_as_not_available():
+    record = {**_OVERRIDE_RECORD, "run_acquired_at": None}
+    display = _synthetic_price_only_display(trader_override_provenance=[record])
+    markdown = render_standalone_run_as_markdown(display)
+    assert "- **Run anchored to Bloomberg acquisition:** not available" in markdown
+
+
+def test_json_export_carries_override_provenance_verbatim():
+    display = _synthetic_price_only_display(trader_override_provenance=[_OVERRIDE_RECORD])
+    exported = json.loads(render_standalone_run_as_json(display))
+    assert exported["trader_override_provenance"] == [_OVERRIDE_RECORD]
+
+
+def test_override_section_does_not_mutate_the_display_dict():
+    display = _synthetic_price_only_display(trader_override_provenance=[_OVERRIDE_RECORD])
+    before = json.dumps(display, sort_keys=True)
+    render_standalone_run_as_markdown(display)
+    render_standalone_run_as_json(display)
+    assert json.dumps(display, sort_keys=True) == before

@@ -59,6 +59,14 @@ the browser holds whichever case is currently active and resends it):
   ``case`` (never the bundled one) and prices it, returning the display
   dict verbatim -- the explicit-case counterpart of ``/api/price`` for a
   page that has loaded a case other than the bundled default.
+- ``POST /api/case/validate`` (Issue #143) -- body is one full case dict.
+  Runs ``build_request_from_standalone_option_case`` and nothing else, then
+  discards the request: no pricing, no engine, no clock, no Bloomberg call.
+  Returns ``{"ready": true, "error": null}`` on HTTP 200 when the reviewed
+  typed builder accepts the draft, and ``{"ready": false, "error": "..."}``
+  -- also HTTP 200 -- when it does not, carrying that exception's own
+  message verbatim. This is what decides whether the browser's Price button
+  is enabled, so a merely non-blank form can never enable it.
 - ``POST /api/export/json`` / ``POST /api/export/markdown`` -- body is
   ``{"display": <the already-computed display dict>}``. Returns
   ``{"content": <text>, "filename": ..., "mime": ...}`` where ``content`` is
@@ -135,6 +143,7 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
 from shiori_pricing_lab.app.standalone_option_workbench import (
+    build_request_from_standalone_option_case,
     price_standalone_option_case,
     price_standalone_option_case_with_bloomberg_quote,
 )
@@ -208,7 +217,13 @@ DEFAULT_PORT = 8765
 # Option Discount Curve node editor), and POST /api/case now normalizes
 # offset-aware datetime instants to UTC at the contract boundary. A stale
 # already-running process must not be reused and keep serving the old page.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v7"
+#
+# Bumped to -v8 for Issue #143's minimum-input trader workflow: POST
+# /api/case/validate is a new route (the Price gate now asks the real typed
+# builder, not the browser's own form state), and the served page was
+# restructured into nine ordinary workflow groups plus one collapsed Advanced
+# section. A stale process predating either change must not be reused.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v8"
 
 
 def load_base_case() -> dict:
@@ -292,6 +307,33 @@ def price_uploaded_case(case: dict) -> dict:
         "context": extract_standalone_option_case_context(case),
         "display": display,
     }
+
+
+def validate_case(case: dict) -> dict:
+    """Return ``{"ready": bool, "error": str | None}`` for ``case``.
+
+    Issue #143 requirement 5: whether Price is enabled must be decided by the
+    real typed builder and route validation, never by whether the browser's
+    own form fields happen to be non-empty. This route runs exactly
+    :func:`build_request_from_standalone_option_case` -- the same envelope
+    parsing, the same typed constructors, the same ISIN resolver, and the
+    same ``is_standalone_bond_reference_data_eligible`` gate the real pricing
+    call runs -- and then throws the request away. It prices nothing, calls
+    no engine, reads no clock, and makes no Bloomberg call, so it is safe to
+    call while the trader is still typing.
+
+    A successful build returns ``{"ready": True, "error": None}``. Any
+    envelope / schema / builder failure is reported as
+    ``{"ready": False, "error": <that exception's own message>}`` -- verbatim,
+    never reinterpreted or replaced with a friendlier guess, so the browser
+    shows the reviewed contract's own words.
+    """
+
+    try:
+        build_request_from_standalone_option_case(case)
+    except Exception as exc:  # noqa: BLE001
+        return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ready": True, "error": None}
 
 
 def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
@@ -502,6 +544,17 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, display)
 
+    def _handle_api_case_validate(self, raw_body: bytes) -> None:
+        try:
+            case = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        # A draft the builder rejects is a normal, expected outcome while the
+        # trader is still completing the ticket -- it is reported as
+        # ``ready: false`` on HTTP 200, never as a bridge error.
+        self._write_json(200, validate_case(case))
+
     def _handle_api_case_bloomberg(self, raw_body: bytes) -> None:
         try:
             body = json.loads(raw_body)
@@ -580,6 +633,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/price": _handle_api_price,
         "/api/case": _handle_api_case,
         "/api/case/price": _handle_api_case_price,
+        "/api/case/validate": _handle_api_case_validate,
         "/api/case/bloomberg": _handle_api_case_bloomberg,
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
         "/api/export/json": _handle_api_export_json,

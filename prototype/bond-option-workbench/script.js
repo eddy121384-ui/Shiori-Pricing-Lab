@@ -1,154 +1,58 @@
-// Manual functional prototype wiring (PR #136, extended by Issue #138, #140).
-// This file performs no pricing, discounting, accrual, scaling, or Greek
-// math of any kind -- it only reads/writes trader-editable form fields,
-// calls the local HTTP bridge (see
+// Minimum-input trader workflow (Issue #143, Milestone 1/2).
+//
+// This file performs no pricing, discounting, accrual, scaling, or Greek math
+// of any kind -- it only reads/writes trader-editable controls, calls the local
+// HTTP bridge (see
 // src/shiori_pricing_lab/app/standalone_option_workbench_server.py), and
 // renders the returned display dict verbatim. Every numeric value shown is
-// formatted with toFixed(6), the same display precision the existing
-// Streamlit workbench uses -- never rounded, rescaled, or re-signed. It also
-// performs no JSON-schema validation of its own -- that is delegated to the
-// bridge, which itself delegates to the existing, unmodified
-// pricing/export helpers.
+// formatted with toFixed(6), the same display precision the existing Streamlit
+// workbench uses -- never rounded, rescaled, or re-signed.
 //
-// Trader-draft revision (Issue #140 second revision): the bundled synthetic
-// case and its "Load Case JSON" control are no longer part of the trader
-// workflow at all -- the normal page starts with no active instrument,
-// pricing result, market data, or provenance. A trader-driven Bloomberg
-// bond lookup is the only way to start a run; it seeds a brand-new
-// in-memory pricing draft containing only the fields Bloomberg itself
-// returned, never anything copied from a prior draft or the bundled
-// fixture. Every other pricing input starts empty and stays empty until the
-// trader enters it. Price and Refresh Bloomberg & Price stay disabled, with
-// a concrete list of still-missing fields shown, until the draft can
-// actually be built and priced through the existing reviewed builder
-// (POST /api/case, reused unchanged -- the same route the developer-only
-// Case JSON workflow already used).
+// **What changed for #143.** The page no longer presents the backend contract
+// as a form. The main screen carries exactly nine ordinary workflow groups --
+// instrument, Call/Put, Buy/Sell, strike, notional, one expiry interaction, and
+// a Forward / Vol / Discounting review each -- and everything else is either
+// sourced read-only, mechanically derived, or a provenance-stamped override
+// inside one collapsed Advanced section.
+//
+// **Classification is not guessed here.** Every field's placement traces to the
+// #145 audit conclusions and the #149 Bloomberg workstation evidence, as
+// catalogued in tools/bloomberg_input_sourcing_probe.py's INPUT_ROWS:
+//
+//   - BLOOMBERG_AUTO (confirmed DAPI mnemonics, PR #141): coupon, coupon
+//     frequency, issue/maturity/first-coupon dates, callable/sinkable flags,
+//     clean price, accrued interest, ISIN/CUSIP/issuer/currency -- read-only.
+//   - SHIORI_DERIVED (already-approved acquisition-time contract): pricing
+//     timestamp, valuation date, as-of timestamp -- read-only.
+//   - Route-fixed: PRICE / EUROPEAN / CASH, the Shiori product and snapshot
+//     identifiers, the forward's quote side (contractually equal to the spot
+//     side), and the NOT_REQUIRED credit-spread policy -- never asked for.
+//   - APPROVED_PROFILE_REQUIRED, with no approved UST/Gilt profile yet: day
+//     count, bond type, ex-dividend days, status. SHIORI_DERIVED_CANDIDATE,
+//     with no approved generator/route decision yet: last coupon date,
+//     reporting date. ADVANCED_OVERRIDE_REQUIRED: forward and option
+//     settlement dates. All of these live in Advanced as trader overrides
+//     with provenance -- Shiori sets none of them from a Bloomberg string.
+//   - ADVANCED_OVERRIDE_REQUIRED / UNRESOLVED market inputs: forward clean
+//     price, direct price vol, and the Option Discount Curve. These are the
+//     three main-screen review groups, each stating the real Bloomberg
+//     evidence for why it cannot be sourced.
+//
+// **Nothing here maps a Bloomberg description into a typed enum.**
+// DAY_CNT_DES, DAY_CNT, MTY_TYP, CALC_TYP_DES, SECURITY_TYP, CPN_TYP and
+// PREV_CPN_DT are rendered as display-only evidence beside the control they
+// are evidence for, and are never read into the draft.
 
 (function () {
   "use strict";
 
   const els = {
-    optionTypeToggle: document.getElementById("option-type-toggle"),
-    positionToggle: document.getElementById("position-toggle"),
-    strikePrice: document.getElementById("strike-price-input"),
-    notional: document.getElementById("notional-input"),
-    volatility: document.getElementById("volatility-input"),
-    forwardPrice: document.getElementById("forward-price-input"),
-    priceBtn: document.getElementById("price-btn"),
-    clearBtn: document.getElementById("clear-btn"),
-    downloadJsonBtn: document.getElementById("download-json-btn"),
-    downloadMarkdownBtn: document.getElementById("download-markdown-btn"),
-    statusIndicator: document.getElementById("status-indicator"),
-    statusText: document.getElementById("status-text"),
-    errorBanner: document.getElementById("pricing-error-banner"),
-    priceTotal: document.getElementById("price-total"),
-    priceTotalCcy: document.getElementById("price-total-ccy"),
-    pricePer100: document.getElementById("price-per-100"),
-    resultCurrency: document.getElementById("result-currency"),
-    greekDelta: document.getElementById("greek-delta"),
-    greekGamma: document.getElementById("greek-gamma"),
-    greekVega: document.getElementById("greek-vega"),
-    greekTheta: document.getElementById("greek-theta"),
-    instrTitle: document.getElementById("instr-title"),
-    instrIsin: document.getElementById("instr-isin"),
-    quoteSideBadge: document.getElementById("quote-side-badge"),
-    provenancePill: document.getElementById("provenance-pill"),
-    provenanceBadge: document.getElementById("provenance-badge"),
-    statCleanPrice: document.getElementById("stat-clean-price"),
-    statYieldMid: document.getElementById("stat-yield-mid"),
-    statValuationDate: document.getElementById("stat-valuation-date"),
-    statOptionSettlement: document.getElementById("stat-option-settlement"),
-    forwardSettlementNote: document.getElementById("forward-settlement-note"),
-    // --- Manual completion inputs (Issue #143) ---
-    expiryDate: document.getElementById("expiry-date-input"),
-    volatilityBasis: document.getElementById("volatility-basis-select"),
-    valuationDate: document.getElementById("valuation-date-input"),
-    reportingDate: document.getElementById("reporting-date-input"),
-    forwardSettlementDate: document.getElementById("forward-settlement-date-input"),
-    optionSettlementDate: document.getElementById("option-settlement-date-input"),
-    asOfTimestamp: document.getElementById("as-of-timestamp-input"),
-    asOfTimestampUtc: document.getElementById("as-of-timestamp-utc"),
-    pricingTimestamp: document.getElementById("pricing-timestamp-input"),
-    pricingTimestampUtc: document.getElementById("pricing-timestamp-utc"),
-    expiryTimestamp: document.getElementById("expiry-timestamp-input"),
-    expiryTimestampUtc: document.getElementById("expiry-timestamp-utc"),
-    timingSnapshotId: document.getElementById("timing-snapshot-id"),
-    dayCount: document.getElementById("day-count-select"),
-    bondTypeSelect: document.getElementById("bond-type-select"),
-    exDividendDays: document.getElementById("ex-dividend-days-input"),
-    lastCouponDate: document.getElementById("last-coupon-date-input"),
-    bondStatus: document.getElementById("bond-status-select"),
-    hintDayCount: document.getElementById("hint-day-count"),
-    hintBondType: document.getElementById("hint-bond-type"),
-    curveRows: document.getElementById("curve-rows"),
-    curveAddRowBtn: document.getElementById("curve-add-row-btn"),
-    curveCoverage: document.getElementById("curve-coverage"),
-    curveCurrencyLabel: document.getElementById("curve-currency-label"),
-    timingHead: document.getElementById("timing-head"),
-    timingBody: document.getElementById("timing-body"),
-    timingIndicator: document.getElementById("timing-indicator"),
-    timingSummary: document.getElementById("timing-summary"),
-    bondRefHead: document.getElementById("bond-ref-head"),
-    bondRefBody: document.getElementById("bond-ref-body"),
-    bondRefIndicator: document.getElementById("bond-ref-indicator"),
-    bondRefSummary: document.getElementById("bond-ref-summary"),
-    curveHead: document.getElementById("curve-head"),
-    curveBody: document.getElementById("curve-body"),
-    curveIndicator: document.getElementById("curve-indicator"),
-    curveSummary: document.getElementById("curve-summary"),
-    snapshotCleanPrice: document.getElementById("snapshot-clean-price"),
-    snapshotYield: document.getElementById("snapshot-yield"),
-    snapshotAccruedInterest: document.getElementById("snapshot-accrued-interest"),
-    detailsIssuer: document.getElementById("details-issuer"),
-    detailsIsin: document.getElementById("details-isin"),
-    detailsCusip: document.getElementById("details-cusip"),
-    detailsCoupon: document.getElementById("details-coupon"),
-    detailsCouponFrequency: document.getElementById("details-coupon-frequency"),
-    detailsIssueDate: document.getElementById("details-issue-date"),
-    detailsMaturity: document.getElementById("details-maturity"),
-    detailsDayCount: document.getElementById("details-day-count"),
-    detailsFirstCouponDate: document.getElementById("details-first-coupon-date"),
-    detailsLastCouponDate: document.getElementById("details-last-coupon-date"),
-    detailsRedemptionAmount: document.getElementById("details-redemption-amount"),
-    detailsCallable: document.getElementById("details-callable"),
-    detailsSinkable: document.getElementById("details-sinkable"),
-    detailsBondType: document.getElementById("details-bond-type"),
-    detailsYieldConvention: document.getElementById("details-yield-convention"),
-    detailsBusinessDayConvention: document.getElementById("details-business-day-convention"),
-    detailsBloombergDayCount: document.getElementById("details-bloomberg-day-count"),
-    detailsBloombergMaturityType: document.getElementById("details-bloomberg-maturity-type"),
-    detailsBloombergCalcType: document.getElementById("details-bloomberg-calc-type"),
-    detailsSource: document.getElementById("details-source"),
-    detailsAcquiredAt: document.getElementById("details-acquired-at"),
-    detailsCurrency: document.getElementById("details-currency"),
-    bondMasterHead: document.getElementById("bond-master-head"),
-    bondMasterToggleBtn: document.getElementById("bond-master-toggle-btn"),
-    bondMasterSummary: document.getElementById("bond-master-summary"),
-    bondMasterBody: document.getElementById("bond-master-body"),
-    underlyingBondHead: document.getElementById("underlying-bond-head"),
-    underlyingBondIndicator: document.getElementById("underlying-bond-indicator"),
-    underlyingBondBody: document.getElementById("underlying-bond-body"),
-    optionTermsHead: document.getElementById("option-terms-head"),
-    optionTermsIndicator: document.getElementById("option-terms-indicator"),
-    optionTermsBody: document.getElementById("option-terms-body"),
-    pricingResultsHead: document.getElementById("pricing-results-head"),
-    pricingResultsIndicator: document.getElementById("pricing-results-indicator"),
-    pricingResultsBody: document.getElementById("pricing-results-body"),
-    forwardCarryHead: document.getElementById("forward-carry-head"),
-    forwardCarryIndicator: document.getElementById("forward-carry-indicator"),
-    forwardCarrySummary: document.getElementById("forward-carry-summary"),
-    forwardCarryBody: document.getElementById("forward-carry-body"),
-    underlyingSnapshotHead: document.getElementById("underlying-snapshot-head"),
-    underlyingSnapshotIndicator: document.getElementById("underlying-snapshot-indicator"),
-    underlyingSnapshotBody: document.getElementById("underlying-snapshot-body"),
-    sidebarLiveRow: document.getElementById("sidebar-live-row"),
-    sidebarSourceSystem: document.getElementById("sidebar-source-system"),
-    sidebarAsofRow: document.getElementById("sidebar-asof-row"),
-    sidebarAsOf: document.getElementById("sidebar-as-of-timestamp"),
-    bloombergRefreshBtn: document.getElementById("bloomberg-refresh-btn"),
+    // Instrument group
     bondIdentifierInput: document.getElementById("bond-identifier-input"),
     bondQuoteSideToggle: document.getElementById("bond-quote-side-toggle"),
     loadBloombergBondBtn: document.getElementById("load-bloomberg-bond-btn"),
+    bloombergRefreshBtn: document.getElementById("bloomberg-refresh-btn"),
+    instrumentGroupStatus: document.getElementById("instrument-group-status"),
     resolvedBondPanel: document.getElementById("resolved-bond-panel"),
     resolvedBondName: document.getElementById("resolved-bond-name"),
     resolvedBondIsin: document.getElementById("resolved-bond-isin"),
@@ -160,197 +64,492 @@
     resolvedBondMaturity: document.getElementById("resolved-bond-maturity"),
     resolvedBondAcquiredAt: document.getElementById("resolved-bond-acquired-at"),
     resolvedBondSource: document.getElementById("resolved-bond-source"),
-    draftIncompleteNote: document.getElementById("draft-incomplete-note"),
-    missingCategories: document.getElementById("missing-categories"),
-    remainingInputSummary: document.getElementById("remaining-input-summary"),
-    missingDetailsToggleBtn: document.getElementById("missing-details-toggle-btn"),
-    missingFieldsList: document.getElementById("missing-fields-list"),
+
+    // Unresolved dependency panel
+    unresolvedPanel: document.getElementById("unresolved-dependency"),
+    unresolvedTitle: document.getElementById("unresolved-title"),
+    unresolvedMissing: document.getElementById("unresolved-missing"),
+    unresolvedWhy: document.getElementById("unresolved-why"),
+    unresolvedEvidence: document.getElementById("unresolved-evidence"),
+    unresolvedNext: document.getElementById("unresolved-next"),
+    unresolvedGotoBtn: document.getElementById("unresolved-goto-btn"),
+    unresolvedAlso: document.getElementById("unresolved-also"),
+
+    // Trade group
+    optionTypeToggle: document.getElementById("option-type-toggle"),
+    positionToggle: document.getElementById("position-toggle"),
+    strikePrice: document.getElementById("strike-price-input"),
+    notional: document.getElementById("notional-input"),
+    expiryDatetime: document.getElementById("expiry-datetime-input"),
+    expiryOffset: document.getElementById("expiry-offset-input"),
+    expiryDerivedPreview: document.getElementById("expiry-derived-preview"),
+
+    // Market review groups
+    marketReviewSummary: document.getElementById("market-review-summary"),
+    forwardPrice: document.getElementById("forward-price-input"),
+    forwardReviewStatus: document.getElementById("forward-review-status"),
+    forwardSourcingNote: document.getElementById("forward-sourcing-note"),
+    forwardProvenance: document.getElementById("forward-provenance"),
+    volatility: document.getElementById("volatility-input"),
+    volatilityBasis: document.getElementById("volatility-basis-select"),
+    volReviewStatus: document.getElementById("vol-review-status"),
+    volSourcingNote: document.getElementById("vol-sourcing-note"),
+    volProvenance: document.getElementById("vol-provenance"),
+    discountingReviewStatus: document.getElementById("discounting-review-status"),
+    discountingReadout: document.getElementById("discounting-readout"),
+    discountingSourcingNote: document.getElementById("discounting-sourcing-note"),
+    discountingProvenance: document.getElementById("discounting-provenance"),
+    editCurveBtn: document.getElementById("edit-curve-btn"),
+
+    // Results
+    errorBanner: document.getElementById("pricing-error-banner"),
+    priceTotal: document.getElementById("price-total"),
+    priceTotalCcy: document.getElementById("price-total-ccy"),
+    pricePer100: document.getElementById("price-per-100"),
+    resultCurrency: document.getElementById("result-currency"),
+    greekDelta: document.getElementById("greek-delta"),
+    greekGamma: document.getElementById("greek-gamma"),
+    greekVega: document.getElementById("greek-vega"),
+    greekTheta: document.getElementById("greek-theta"),
+
+    // Advanced
+    advancedHead: document.getElementById("advanced-head"),
+    advancedBody: document.getElementById("advanced-body"),
+    advancedIndicator: document.getElementById("advanced-indicator"),
+    advancedSummary: document.getElementById("advanced-summary"),
+    dayCount: document.getElementById("day-count-select"),
+    bondTypeSelect: document.getElementById("bond-type-select"),
+    exDividendDays: document.getElementById("ex-dividend-days-input"),
+    lastCouponDate: document.getElementById("last-coupon-date-input"),
+    bondStatus: document.getElementById("bond-status-select"),
+    hintDayCount: document.getElementById("hint-day-count"),
+    hintBondType: document.getElementById("hint-bond-type"),
+    hintLastCouponDate: document.getElementById("hint-last-coupon-date"),
+    reportingDate: document.getElementById("reporting-date-input"),
+    forwardSettlementDate: document.getElementById("forward-settlement-date-input"),
+    optionSettlementDate: document.getElementById("option-settlement-date-input"),
+    curveRows: document.getElementById("curve-rows"),
+    curveAddRowBtn: document.getElementById("curve-add-row-btn"),
+    curveCoverage: document.getElementById("curve-coverage"),
+    curveCurrencyLabel: document.getElementById("curve-currency-label"),
+    valuationDate: document.getElementById("valuation-date-input"),
+    asOfTimestamp: document.getElementById("as-of-timestamp-input"),
+    asOfTimestampUtc: document.getElementById("as-of-timestamp-utc"),
+    pricingTimestamp: document.getElementById("pricing-timestamp-input"),
+    pricingTimestampUtc: document.getElementById("pricing-timestamp-utc"),
+    expiryTimestamp: document.getElementById("expiry-timestamp-input"),
+    expiryTimestampUtc: document.getElementById("expiry-timestamp-utc"),
     timingProductId: document.getElementById("timing-product-id"),
+    timingSnapshotId: document.getElementById("timing-snapshot-id"),
     timingSnapshotMetadata: document.getElementById("timing-snapshot-metadata"),
     timingBondQuoteMetadata: document.getElementById("timing-bond-quote-metadata"),
     timingForwardMetadata: document.getElementById("timing-forward-metadata"),
     timingVolatilityMetadata: document.getElementById("timing-volatility-metadata"),
     timingCreditMetadata: document.getElementById("timing-credit-metadata"),
+    provenanceLog: document.getElementById("override-provenance-log"),
+    provenanceEmpty: document.getElementById("override-provenance-empty"),
+
+    // Bond master (read-only)
+    detailsIssuer: document.getElementById("details-issuer"),
+    detailsIsin: document.getElementById("details-isin"),
+    detailsCusip: document.getElementById("details-cusip"),
+    detailsCurrency: document.getElementById("details-currency"),
+    detailsCoupon: document.getElementById("details-coupon"),
+    detailsCouponFrequency: document.getElementById("details-coupon-frequency"),
+    detailsIssueDate: document.getElementById("details-issue-date"),
+    detailsMaturity: document.getElementById("details-maturity"),
+    detailsDayCount: document.getElementById("details-day-count"),
+    detailsFirstCouponDate: document.getElementById("details-first-coupon-date"),
+    detailsLastCouponDate: document.getElementById("details-last-coupon-date"),
+    detailsCallable: document.getElementById("details-callable"),
+    detailsSinkable: document.getElementById("details-sinkable"),
+    detailsBondType: document.getElementById("details-bond-type"),
+    detailsBloombergDayCount: document.getElementById("details-bloomberg-day-count"),
+    detailsBloombergMaturityType: document.getElementById("details-bloomberg-maturity-type"),
+    detailsBloombergCalcType: document.getElementById("details-bloomberg-calc-type"),
+    detailsSource: document.getElementById("details-source"),
+    detailsAcquiredAt: document.getElementById("details-acquired-at"),
+
+    // Header / chrome
+    instrTitle: document.getElementById("instr-title"),
+    instrIsin: document.getElementById("instr-isin"),
+    quoteSideBadge: document.getElementById("quote-side-badge"),
+    provenancePill: document.getElementById("provenance-pill"),
+    provenanceBadge: document.getElementById("provenance-badge"),
+    statCleanPrice: document.getElementById("stat-clean-price"),
+    statYieldMid: document.getElementById("stat-yield-mid"),
+    statValuationDate: document.getElementById("stat-valuation-date"),
+    statOptionSettlement: document.getElementById("stat-option-settlement"),
+    sidebarLiveRow: document.getElementById("sidebar-live-row"),
+    sidebarSourceSystem: document.getElementById("sidebar-source-system"),
+    sidebarAsofRow: document.getElementById("sidebar-asof-row"),
+    sidebarAsOf: document.getElementById("sidebar-as-of-timestamp"),
+    statusIndicator: document.getElementById("status-indicator"),
+    statusText: document.getElementById("status-text"),
+    priceBtn: document.getElementById("price-btn"),
+    clearBtn: document.getElementById("clear-btn"),
+    downloadJsonBtn: document.getElementById("download-json-btn"),
+    downloadMarkdownBtn: document.getElementById("download-markdown-btn"),
+
+    // Sections
     instrumentHeaderSection: document.getElementById("instrument-header-section"),
     workspaceSection: document.getElementById("workspace-section"),
-    instrumentDetailsSection: document.getElementById("instrument-details-section"),
   };
 
-  const CATEGORY_OPTION_TERMS = "Option terms incomplete";
-  const CATEGORY_BOND_REFERENCE_DATA = "Bond reference data incomplete";
-  const CATEGORY_MARKET_CURVES = "Market curves unavailable";
-  const CATEGORY_FORWARD_CLEAN_PRICE = "Forward clean price unavailable";
-  const CATEGORY_PRICE_VOLATILITY = "Price volatility required";
-  const CATEGORY_VALUATION_METADATA = "Valuation & snapshot metadata incomplete";
+  // --- Truthful provenance labels ------------------------------------------
+  //
+  // None of these claims a market source Shiori does not have: the forward,
+  // the volatility and the curve nodes are transcribed by the trader, and the
+  // credit-spread state is a route policy statement, not observed data.
+  const MANUAL_SOURCE_SYSTEM = "MANUAL_TRADER_ENTRY";
+  const SNAPSHOT_SOURCE_SYSTEM = "SHIORI_MANUAL_WORKBENCH";
+  const ROUTE_POLICY_SOURCE_SYSTEM = "SHIORI_ROUTE_POLICY";
+  const CREDIT_SPREAD_NOT_REQUIRED_AUDIT =
+    "Explicit-forward OVME-aligned standalone route: the reviewed pricing path " +
+    "discounts the option payoff on the Option Discount Curve and never reads " +
+    "credit_spread, so no spread is applied and none is fabricated.";
 
-  // The resolved Bloomberg bond identity from the instrument-first lookup --
-  // null until a lookup succeeds, and reset to null only by Clear or a
-  // newer successful lookup.
-  let resolvedBloombergBond = null;
+  // --- Bloomberg sourcing evidence -----------------------------------------
+  //
+  // Verbatim conclusions from the Issue #149 Bloomberg workstation run and the
+  // #145 audit. These strings are the only thing standing between a trader and
+  // an unexplained blank field, so they name the actual mnemonic and the actual
+  // response rather than saying "unavailable".
+  const EVIDENCE_FORWARD =
+    "Issue #149 workstation run: OPT_UNDL_FORWARD_PX was sent with the two " +
+    "confirmed overrides (OP046 = pricing model, bond-option token 'Black'; " +
+    "OP188 = Shiori's valuation date). Both US91282CLJ89 and GB00BFX0ZL78 " +
+    "returned BAD_FLD, 'Field not applicable to security'. OP131 is the " +
+    "equity/index dividend yield and is never sent, never defaulted to 0.";
+  const EVIDENCE_VOL =
+    "Issue #149 workstation run: PRICE_VOL returned BAD_FLD and " +
+    "EQUIVALENT_PRICE_VOL returned BAD_FLD. There is no confirmed " +
+    "ReferenceData route for a direct price volatility on these securities.";
+  const EVIDENCE_DISCOUNTING =
+    "Issue #149 / docs/bloomberg_ovme_source_mapping.md: no approved Bloomberg " +
+    "sourcing or curve-construction methodology exists. MMkt, repo, FTP, par and " +
+    "swap rates must not be relabelled as continuous zero rates, and the SWDF " +
+    "S490 stripped-zero route is only PARTIALLY_CONFIRMED, with compounding, " +
+    "interpolation and date treatment unverified.";
+  const EVIDENCE_BOND_REFERENCE =
+    "Issue #149 workstation run: DAY_CNT_DES = ACT/ACT, DAY_CNT = 1, " +
+    "SECURITY_TYP distinguishes US GOVERNMENT / UK GILT STOCK, CPN_TYP = FIXED " +
+    "and PREV_CPN_DT returns a value -- but all of these are display-only " +
+    "evidence. Ex-dividend and security-status candidates returned BAD_FLD. " +
+    "No UST / conventional-Gilt convention profile is approved, so Shiori maps " +
+    "none of these strings into a typed enum.";
+  const EVIDENCE_TIMING =
+    "Issue #149: no Bloomberg reference field describes an OTC option's own cash " +
+    "settlement date. SETTLE_DT and DAYS_TO_SETTLE describe the cash bond's " +
+    "standard settlement -- a different role that must not be conflated. Fixing " +
+    "Reporting Date to Valuation Date is an unapproved route decision.";
+  const EVIDENCE_BOND_MASTER =
+    "Bond Master values are read verbatim from the DAPI mnemonics confirmed in " +
+    "PR #141. The fields above came back empty for this security.";
 
-  // The in-memory pricing draft (trader-draft revision): a full standalone-
-  // option-case-shaped object, created fresh by buildInitialDraftFromBloomberg
-  // on every successful lookup -- never derived from, or merged with, a
-  // prior draft or the bundled synthetic fixture. Only values supplied by
-  // Bloomberg or fixed mechanically by the existing route/contract are
-  // seeded; every genuine trader decision starts null. null until a bond has
-  // been resolved.
-  let currentDraft = null;
+  // --- Workflow groups -----------------------------------------------------
+  //
+  // The ordinary trader workflow is exactly the groups whose `advanced` flag is
+  // false: instrument, Call/Put, Buy/Sell, strike, notional, expiry, and the
+  // three market reviews. Advanced groups are still blocking (Shiori never
+  // prices without them) but never appear on the main screen.
+  //
+  // `resolved(draft)` is a structural presence check only -- never a financial
+  // judgment about whether a present value is itself valid. That stays the
+  // existing typed constructors' job, and the Price gate below additionally
+  // requires the real typed builder to accept the draft.
 
-  // Collapsible sections (PR #141 third revision): purely a display toggle
-  // on each section's own body element, entirely independent of the
-  // draft/pricing/Bloomberg state machines below -- collapsing a section
-  // never refetches data, clears a form, or mutates currentDraft/
-  // currentDisplay. One click listener per section head (never a second one
-  // on the indicator/summary spans nested inside it) toggles that section's
-  // body `hidden` state, so clicking anywhere in the header row never
-  // double-toggles. Registration order doubles as each section's default
-  // (collapsed vs expanded) state, restored verbatim by resetCollapseStates
-  // on Clear.
-  function registerCollapsibleSection({
-    head,
-    body,
-    indicator,
-    summary,
-    defaultCollapsed,
-    summaryText,
-    alwaysShowSummary,
-  }) {
-    function refreshSummary() {
-      if (!summary || !summaryText) return;
-      // A count of what a section still needs stays useful while the section
-      // is open, so the manual-completion sections show it either way.
-      summary.textContent = alwaysShowSummary || body.hidden ? summaryText() : "";
-    }
-    function applyState(collapsed) {
-      body.hidden = collapsed;
-      head.setAttribute("aria-expanded", String(!collapsed));
-      indicator.textContent = collapsed ? "Expand" : "Collapse";
-      refreshSummary();
-    }
-    head.addEventListener("click", () => {
-      applyState(!body.hidden);
-    });
-    applyState(defaultCollapsed);
-    return {
-      body,
-      expand: () => applyState(false),
-      reset: () => applyState(defaultCollapsed),
-      refreshSummary,
-    };
+  function present(value) {
+    return value !== null && value !== undefined && value !== "";
   }
 
-  // Live count of what one manual-completion section still needs. Reads the
-  // same computeMissingDraftFields the Price gate uses, so the header count,
-  // the category badges and the enabled/disabled Price button can never
-  // disagree.
-  function missingCountSummary(category) {
-    return () => {
-      if (!currentDraft) return "";
-      const count = computeMissingDraftFields(currentDraft).filter(
-        (item) => item.category === category
-      ).length;
-      return count === 0 ? "Complete" : `${count} required`;
-    };
+  function referenceRecord(draft) {
+    return (draft.bond_reference_data_universe || [])[0] || {};
   }
 
-  const collapsibleSections = [
-    registerCollapsibleSection({
-      head: els.underlyingBondHead,
-      body: els.underlyingBondBody,
-      indicator: els.underlyingBondIndicator,
-      defaultCollapsed: false,
-    }),
-    registerCollapsibleSection({
-      head: els.optionTermsHead,
-      body: els.optionTermsBody,
-      indicator: els.optionTermsIndicator,
-      defaultCollapsed: false,
-    }),
-    registerCollapsibleSection({
-      head: els.pricingResultsHead,
-      body: els.pricingResultsBody,
-      indicator: els.pricingResultsIndicator,
-      defaultCollapsed: false,
-    }),
-    registerCollapsibleSection({
-      head: els.forwardCarryHead,
-      body: els.forwardCarryBody,
-      indicator: els.forwardCarryIndicator,
-      summary: els.forwardCarrySummary,
-      defaultCollapsed: false,
-      alwaysShowSummary: true,
-      summaryText: missingCountSummary(CATEGORY_FORWARD_CLEAN_PRICE),
-    }),
-    registerCollapsibleSection({
-      head: els.underlyingSnapshotHead,
-      body: els.underlyingSnapshotBody,
-      indicator: els.underlyingSnapshotIndicator,
-      defaultCollapsed: true,
-    }),
-    // Advanced timing and bond-reference fields default collapsed, but their
-    // live required counts stay visible in the header. The Option Discount
-    // Curve is a primary trader decision and remains expanded.
-    registerCollapsibleSection({
-      head: els.timingHead,
-      body: els.timingBody,
-      indicator: els.timingIndicator,
-      summary: els.timingSummary,
-      defaultCollapsed: true,
-      alwaysShowSummary: true,
-      summaryText: missingCountSummary(CATEGORY_VALUATION_METADATA),
-    }),
-    registerCollapsibleSection({
-      head: els.bondRefHead,
-      body: els.bondRefBody,
-      indicator: els.bondRefIndicator,
-      summary: els.bondRefSummary,
-      defaultCollapsed: true,
-      alwaysShowSummary: true,
-      summaryText: missingCountSummary(CATEGORY_BOND_REFERENCE_DATA),
-    }),
-    registerCollapsibleSection({
-      head: els.curveHead,
-      body: els.curveBody,
-      indicator: els.curveIndicator,
-      summary: els.curveSummary,
-      defaultCollapsed: false,
-      alwaysShowSummary: true,
-      summaryText: missingCountSummary(CATEGORY_MARKET_CURVES),
-    }),
-    registerCollapsibleSection({
-      head: els.bondMasterHead,
-      body: els.bondMasterBody,
-      indicator: els.bondMasterToggleBtn,
-      summary: els.bondMasterSummary,
-      defaultCollapsed: true,
-      // Instrument Details is only ever shown once a bond has been resolved
-      // via Bloomberg (see syncDraftGating's hasDraft gate), so its source
-      // is always Bloomberg DAPI whenever this summary is visible at all.
-      summaryText: () => "Bloomberg DAPI",
-    }),
+  const WORKFLOW_GROUPS = [
+    {
+      id: "instrument",
+      label: "Instrument",
+      advanced: false,
+      resolved: (draft) => draft !== null,
+      locator: "#bond-identifier-input",
+      unresolved: {
+        title: "No bond is loaded",
+        missing: "A Bloomberg-loaded bond.",
+        why:
+          "Every pricing input on this route is anchored to one Bloomberg " +
+          "acquisition event, so nothing can be entered before a bond is resolved.",
+        evidence: "No Bloomberg request has been made yet in this run.",
+        next:
+          "Type a 12-character ISIN or a 9-character CUSIP, pick a quote side, " +
+          "then press Bloomberg Load.",
+      },
+    },
+    {
+      id: "option-type",
+      label: "Call / Put",
+      advanced: false,
+      resolved: (draft) => present(draft.bond_option.option_type),
+      locator: "#option-type-toggle",
+      unresolved: {
+        title: "Call or Put has not been chosen",
+        missing: "The option type.",
+        why: "This is a genuine trade decision. Shiori never assumes a direction.",
+        evidence: "Not applicable — this is a trader input, not a sourced value.",
+        next: "Choose Call or Put in the Trade group.",
+      },
+    },
+    {
+      id: "position",
+      label: "Buy / Sell",
+      advanced: false,
+      resolved: (draft) => present(draft.bond_option.position),
+      locator: "#position-toggle",
+      unresolved: {
+        title: "Buy or Sell has not been chosen",
+        missing: "The position direction.",
+        why:
+          "This is a genuine trade decision. It sets the sign of the position " +
+          "Greeks, so Shiori never assumes it.",
+        evidence: "Not applicable — this is a trader input, not a sourced value.",
+        next: "Choose Buy or Sell in the Trade group.",
+      },
+    },
+    {
+      id: "strike",
+      label: "Strike",
+      advanced: false,
+      resolved: (draft) => present(draft.bond_option.strike_price),
+      locator: "#strike-price-input",
+      unresolved: {
+        title: "Strike has not been entered",
+        missing: "The strike clean price, per 100.",
+        why: "This is a genuine trade decision on a PRICE payoff basis.",
+        evidence: "Not applicable — this is a trader input, not a sourced value.",
+        next: "Enter the strike per 100 in the Trade group.",
+      },
+    },
+    {
+      id: "notional",
+      label: "Notional",
+      advanced: false,
+      resolved: (draft) => present(draft.bond_option.notional),
+      locator: "#notional-input",
+      unresolved: {
+        title: "Notional has not been entered",
+        missing: "The trade notional.",
+        why: "This is a genuine trade decision and scales the total premium.",
+        evidence: "Not applicable — this is a trader input, not a sourced value.",
+        next: "Enter the notional in the Trade group.",
+      },
+    },
+    {
+      id: "expiry",
+      label: "Expiry",
+      advanced: false,
+      resolved: (draft) =>
+        present(draft.bond_option.expiry_date) && present(draft.expiry_timestamp),
+      locator: "#expiry-datetime-input",
+      unresolved: {
+        title: "Expiry is incomplete",
+        missing: "The expiry date, local time of day, and its UTC offset.",
+        why:
+          "Expiry is a genuine trade decision, and no default expiry time or " +
+          "timezone convention is approved. Bloomberg reference data does not " +
+          "carry this option's expiry timestamp.",
+        evidence:
+          "Issue #149 recorded expiry timing as UNRESOLVED and kept it a trade " +
+          "input: no market-close, timezone or holiday convention is approved, " +
+          "so Shiori will not invent one.",
+        next:
+          "Set the expiry date and time, then enter the UTC offset it is quoted " +
+          "in (for example +08:00 or Z). Shiori keeps that offset exactly.",
+      },
+    },
+    {
+      id: "forward-review",
+      label: "Forward",
+      advanced: false,
+      resolved: (draft) =>
+        present(draft.forward_clean_price_input.forward_clean_price_per_100),
+      locator: "#forward-price-input",
+      unresolved: {
+        title: "Forward clean price cannot be sourced from Bloomberg",
+        missing: "The forward clean price, per 100, at forward settlement.",
+        why:
+          "OPT_UNDL_FORWARD_PX is the only candidate route and it is not " +
+          "applicable to a cash bond on the current DAPI route.",
+        evidence: EVIDENCE_FORWARD,
+        next:
+          "Enter the forward clean price you are pricing against. It is recorded " +
+          "as a trader override with provenance. Shiori will not reconstruct a " +
+          "forward from spot price, repo, FTP, MMkt or any par rate.",
+      },
+    },
+    {
+      id: "vol-review",
+      label: "Volatility",
+      advanced: false,
+      resolved: (draft) => present(draft.volatility_input.volatility),
+      locator: "#volatility-input",
+      unresolved: {
+        title: "Direct price volatility cannot be sourced from Bloomberg",
+        missing: "A direct PRICE_VOL or EQUIVALENT_PRICE_VOL, as a decimal.",
+        why:
+          "No confirmed ReferenceData route supplies a direct price volatility " +
+          "for these securities.",
+        evidence: EVIDENCE_VOL,
+        next:
+          "Enter a direct price volatility and its basis. YIELD_VOL is not a " +
+          "substitute and no yield-to-price volatility conversion is approved, so " +
+          "neither is offered anywhere on this page.",
+      },
+    },
+    {
+      id: "discounting-review",
+      label: "Discounting",
+      advanced: false,
+      resolved: (draft) => computeCurveCoverage(draft).state === "covered",
+      locator: "#curve-rows .curve-tenor-input",
+      revealAdvanced: true,
+      unresolved: {
+        title: "Option Discount Curve has no approved Bloomberg source",
+        missing:
+          "Continuous-zero-rate nodes covering the Reporting Date and the Option " +
+          "Settlement Date.",
+        why:
+          "No approved Bloomberg sourcing or curve-construction methodology " +
+          "exists for the Option Discount Curve.",
+        evidence: EVIDENCE_DISCOUNTING,
+        next:
+          "Open Advanced and enter genuine continuously-compounded zero rates. " +
+          "Shiori interpolates in range only and never bootstraps, converts or " +
+          "extrapolates a curve.",
+      },
+    },
+    {
+      id: "bloomberg-reference",
+      label: "Bloomberg Bond Master",
+      advanced: true,
+      resolved: (draft) => {
+        const record = referenceRecord(draft);
+        return (
+          present(record.coupon) &&
+          present(record.coupon_frequency) &&
+          present(record.maturity_date) &&
+          present(record.issue_date) &&
+          present(record.first_coupon_date) &&
+          present(record.callable_flag) &&
+          present(record.sinkable_flag)
+        );
+      },
+      locator: "#details-coupon",
+      revealAdvanced: true,
+      unresolved: {
+        title: "Bloomberg did not return every confirmed Bond Master field",
+        missing:
+          "One or more of coupon, coupon frequency, issue date, maturity date, " +
+          "first coupon date, and the callable / sinkable flags.",
+        why:
+          "These are the fields Bloomberg is confirmed to supply, so Shiori will " +
+          "not accept a substitute for them from anywhere else.",
+        evidence: EVIDENCE_BOND_MASTER,
+        next:
+          "Run Bloomberg Load again for this security. Shiori will not fill a " +
+          "Bond Master field with a convention default.",
+      },
+    },
+    {
+      id: "advanced-bond-reference",
+      label: "Bond reference override",
+      advanced: true,
+      resolved: (draft) => {
+        const record = referenceRecord(draft);
+        return (
+          present(record.day_count) &&
+          present(record.bond_type) &&
+          present(record.ex_dividend_days) &&
+          present(record.last_coupon_date) &&
+          present(record.status)
+        );
+      },
+      locator: "#day-count-select",
+      revealAdvanced: true,
+      unresolved: {
+        title: "Bond reference fields have no approved UST / Gilt profile",
+        missing:
+          "Day count, bond type, ex-dividend days, last coupon date and bond " +
+          "status.",
+        why:
+          "These are profile-owned or derivation-owned decisions and neither a " +
+          "UST / conventional-Gilt convention profile nor a reviewed " +
+          "regular-schedule generator is approved yet.",
+        evidence: EVIDENCE_BOND_REFERENCE,
+        next:
+          "Open Advanced → Bond reference and set them. Each entry is recorded " +
+          "as a trader override with provenance, beside the Bloomberg text that " +
+          "is evidence for it.",
+      },
+    },
+    {
+      id: "advanced-timing",
+      label: "Timing & settlement override",
+      advanced: true,
+      resolved: (draft) =>
+        present(draft.reporting_date) &&
+        present(draft.forward_settlement_date) &&
+        present(draft.option_settlement_date),
+      locator: "#reporting-date-input",
+      revealAdvanced: true,
+      unresolved: {
+        title: "Settlement and reporting dates have no approved calendar source",
+        missing:
+          "The reporting date, the forward settlement date and the option " +
+          "settlement date.",
+        why:
+          "Shiori owns no market calendar and rolls no date, and no Bloomberg " +
+          "field carries an OTC option's own cash settlement date.",
+        evidence: EVIDENCE_TIMING,
+        next:
+          "Open Advanced → Timing & settlement and set the three dates. Each is " +
+          "recorded as a trader override with provenance.",
+      },
+    },
   ];
 
-  function resetCollapseStates() {
-    collapsibleSections.forEach((section) => section.reset());
-  }
+  const ORDINARY_WORKFLOW_GROUP_IDS = WORKFLOW_GROUPS.filter(
+    (group) => !group.advanced
+  ).map((group) => group.id);
 
-  // The currently displayed, exportable run -- set to a display dict only
-  // once a genuine POST /api/case or POST /api/case/bloomberg call against
-  // the current draft succeeds (HTTP 200), whether that outcome is SUCCESS
-  // or a structured FAILED PricingResult. Cleared (and export disabled) by
-  // a fresh Bloomberg lookup, by Clear, and by a Price/Refresh transport-
-  // level failure that leaves nothing valid on screen.
+  // --- State ---------------------------------------------------------------
+
+  // The resolved Bloomberg bond identity from the instrument-first lookup --
+  // null until a lookup succeeds, and reset to null by Clear, a newer
+  // successful lookup, or any failed Bloomberg call.
+  let resolvedBloombergBond = null;
+
+  // The in-memory pricing draft: a full standalone-option-case-shaped object,
+  // created fresh by buildInitialDraftFromBloomberg on every successful lookup
+  // -- never derived from, or merged with, a prior draft or any bundled
+  // fixture. Only values supplied by Bloomberg or fixed mechanically by the
+  // existing route/contract are seeded; every genuine trader decision starts
+  // null.
+  let currentDraft = null;
+
+  // Provenance for every value the trader had to supply because Shiori could
+  // not source it. Keyed by draft path so re-entering a value replaces its
+  // stamp rather than accumulating duplicates. Cleared with the draft.
+  let overrideProvenance = new Map();
+
+  // The currently displayed, exportable run.
   let currentDisplay = null;
-
-  // Codex review (PR #139): a pending export request captures the display
-  // it was asked to export; if a later action changes currentDisplay before
-  // that export's response arrives, the download must not happen at all.
-  // displayGeneration is bumped every time currentDisplay changes (via
-  // setCurrentDisplay, the only place that ever assigns it), and
-  // downloadCurrentRun checks it after the response arrives, before ever
-  // building the Blob/download.
   let displayGeneration = 0;
+
+  // Whether the real typed builder has accepted the current draft. The Price
+  // button is enabled only when this is true -- a non-empty form is never
+  // sufficient on its own (Issue #143 requirement 5).
+  let builderValidation = { state: "unknown", error: null };
 
   function setCurrentDisplay(display) {
     displayGeneration++;
@@ -363,355 +562,19 @@
     els.downloadMarkdownBtn.classList.toggle("is-disabled", !enabled);
   }
 
-  // Reused exactly, mirroring standalone_option_workbench.build_request_from_
-  // standalone_option_case's own required-field shape (products/bond_option.py,
-  // data/bli_snapshot.py, reference_data/bond_reference_data.py) -- not a new
-  // financial rule, just this workbench's own record of which leaves those
-  // existing typed constructors require non-null. Anything not listed here
-  // either has a real default on the dataclass itself (e.g. strike_yield,
-  // exercise_start_date, product_type) or is always populated verbatim from
-  // Bloomberg the moment a draft exists (isin/currency/issuer/quote_side/
-  // clean_price_per_100/accrued_interest_per_100/source_system), so it can
-  // never appear in this workbench's own missing-input list.
-  // Category labels shown to the trader as an actionable summary (Issue
-  // #140 third revision) -- grouping this workbench's own established
-  // required-field list, never a new financial rule.
-  const REQUIRED_DRAFT_FIELD_CHECKS = [
-    ["bond_option.product_id", "Product ID", CATEGORY_OPTION_TERMS],
-    ["bond_option.payoff_basis", "Payoff Basis", CATEGORY_OPTION_TERMS],
-    ["bond_option.option_type", "Call / Put", CATEGORY_OPTION_TERMS],
-    ["bond_option.exercise_style", "Exercise Style", CATEGORY_OPTION_TERMS],
-    ["bond_option.settlement_type", "Settlement Type", CATEGORY_OPTION_TERMS],
-    ["bond_option.expiry_date", "Expiry Date", CATEGORY_OPTION_TERMS],
-    ["bond_option.notional", "Notional", CATEGORY_OPTION_TERMS],
-    ["bond_option.position", "Direction (Buy/Sell)", CATEGORY_OPTION_TERMS],
-    ["bond_option.strike_price", "Strike (per 100)", CATEGORY_OPTION_TERMS],
+  // --- Advanced section (collapsed by default) ------------------------------
 
-    ["bond_reference_data_universe.0.coupon", "Coupon", CATEGORY_BOND_REFERENCE_DATA],
-    [
-      "bond_reference_data_universe.0.coupon_frequency",
-      "Coupon Frequency",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    ["bond_reference_data_universe.0.maturity_date", "Maturity Date", CATEGORY_BOND_REFERENCE_DATA],
-    ["bond_reference_data_universe.0.issue_date", "Issue Date", CATEGORY_BOND_REFERENCE_DATA],
-    ["bond_reference_data_universe.0.day_count", "Day Count", CATEGORY_BOND_REFERENCE_DATA],
-    [
-      "bond_reference_data_universe.0.callable_flag",
-      "Callable Flag",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    [
-      "bond_reference_data_universe.0.sinkable_flag",
-      "Sinkable Flag",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    ["bond_reference_data_universe.0.bond_type", "Bond Type", CATEGORY_BOND_REFERENCE_DATA],
-    [
-      "bond_reference_data_universe.0.ex_dividend_days",
-      "Ex-Dividend Days",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    [
-      "bond_reference_data_universe.0.first_coupon_date",
-      "First Coupon Date",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    [
-      "bond_reference_data_universe.0.last_coupon_date",
-      "Last Coupon Date",
-      CATEGORY_BOND_REFERENCE_DATA,
-    ],
-    ["bond_reference_data_universe.0.status", "Status", CATEGORY_BOND_REFERENCE_DATA],
-
-    ["valuation_date", "Valuation Date", CATEGORY_VALUATION_METADATA],
-    ["as_of_timestamp", "As-Of Timestamp", CATEGORY_VALUATION_METADATA],
-    ["pricing_timestamp", "Pricing Timestamp", CATEGORY_VALUATION_METADATA],
-    ["expiry_timestamp", "Expiry Timestamp", CATEGORY_OPTION_TERMS],
-    ["reporting_date", "Reporting Date", CATEGORY_VALUATION_METADATA],
-    ["forward_settlement_date", "Forward Settlement Date", CATEGORY_VALUATION_METADATA],
-    ["option_settlement_date", "Option Settlement Date", CATEGORY_VALUATION_METADATA],
-    ["source_system", "Source System", CATEGORY_VALUATION_METADATA],
-    ["snapshot_id", "Snapshot ID", CATEGORY_VALUATION_METADATA],
-    ["snapshot_status", "Snapshot Status", CATEGORY_VALUATION_METADATA],
-    ["bond_quote.price_type", "Bond Quote Price Type", CATEGORY_VALUATION_METADATA],
-    ["bond_quote.status", "Bond Quote Status", CATEGORY_VALUATION_METADATA],
-
-    [
-      "forward_clean_price_input.forward_clean_price_per_100",
-      "Forward Clean Price (per 100)",
-      CATEGORY_FORWARD_CLEAN_PRICE,
-    ],
-    [
-      "forward_clean_price_input.quote_side",
-      "Forward Clean Price Quote Side",
-      CATEGORY_FORWARD_CLEAN_PRICE,
-    ],
-    [
-      "forward_clean_price_input.source_system",
-      "Forward Clean Price Source System",
-      CATEGORY_FORWARD_CLEAN_PRICE,
-    ],
-    ["forward_clean_price_input.status", "Forward Clean Price Status", CATEGORY_FORWARD_CLEAN_PRICE],
-
-    ["volatility_input.volatility", "Price Vol (σ)", CATEGORY_PRICE_VOLATILITY],
-    ["volatility_input.volatility_basis", "Volatility Basis", CATEGORY_PRICE_VOLATILITY],
-    ["volatility_input.source_system", "Volatility Source System", CATEGORY_PRICE_VOLATILITY],
-    ["volatility_input.status", "Volatility Status", CATEGORY_PRICE_VOLATILITY],
-
-    ["credit_spread_input.spread_treatment", "Credit Spread Treatment", CATEGORY_MARKET_CURVES],
-    ["credit_spread_input.source_system", "Credit Spread Source System", CATEGORY_MARKET_CURVES],
-    ["credit_spread_input.status", "Credit Spread Status", CATEGORY_MARKET_CURVES],
-  ];
-
-  // BLICreditSpreadInput's requirements are conditional on the treatment
-  // (data/bli_snapshot.py). #142 found this workbench demanding
-  // credit_spread / credit_spread_basis unconditionally -- fields the
-  // contract actually forbids for EMBEDDED / NOT_REQUIRED -- while never
-  // demanding override_or_fallback_audit, which the contract does require
-  // for every treatment except OBSERVED. These are the real rules:
-  //
-  //   OBSERVED               -> spread + basis required; audit must be absent
-  //   OVERRIDE / FALLBACK    -> spread + basis required; audit required
-  //   EMBEDDED / NOT_REQUIRED-> spread + basis must be absent; audit required
-  const CREDIT_TREATMENTS_REQUIRING_SPREAD_VALUE = ["OBSERVED", "OVERRIDE", "FALLBACK"];
-  const CREDIT_TREATMENTS_REQUIRING_AUDIT = [
-    "OVERRIDE",
-    "FALLBACK",
-    "EMBEDDED",
-    "NOT_REQUIRED",
-  ];
-
-  function computeMissingCreditSpreadFields(creditSpreadInput) {
-    const missing = [];
-    const input = creditSpreadInput || {};
-    const treatment = input.spread_treatment;
-    if (!isPresent(treatment)) {
-      // The treatment itself is already reported by the flat checklist
-      // above; without it no conditional rule can be evaluated.
-      return missing;
-    }
-    if (CREDIT_TREATMENTS_REQUIRING_SPREAD_VALUE.includes(treatment)) {
-      if (!isPresent(input.credit_spread)) {
-        missing.push({ label: "Credit Spread", category: CATEGORY_MARKET_CURVES });
-      }
-      if (!isPresent(input.credit_spread_basis)) {
-        missing.push({ label: "Credit Spread Basis", category: CATEGORY_MARKET_CURVES });
-      }
-    }
-    if (
-      CREDIT_TREATMENTS_REQUIRING_AUDIT.includes(treatment) &&
-      !isPresent(input.override_or_fallback_audit)
-    ) {
-      missing.push({
-        label: "Credit Spread Audit Explanation",
-        category: CATEGORY_MARKET_CURVES,
-      });
-    }
-    return missing;
+  function setAdvancedCollapsed(collapsed) {
+    els.advancedBody.hidden = collapsed;
+    els.advancedHead.setAttribute("aria-expanded", String(!collapsed));
+    els.advancedIndicator.textContent = collapsed ? "Expand" : "Collapse";
   }
 
-  // Fixed display order: the trader-facing categories in a stable,
-  // intentional sequence, independent of REQUIRED_DRAFT_FIELD_CHECKS'
-  // own declaration order.
-  const MISSING_CATEGORY_ORDER = [
-    CATEGORY_OPTION_TERMS,
-    CATEGORY_BOND_REFERENCE_DATA,
-    CATEGORY_MARKET_CURVES,
-    CATEGORY_FORWARD_CLEAN_PRICE,
-    CATEGORY_PRICE_VOLATILITY,
-    CATEGORY_VALUATION_METADATA,
-  ];
+  els.advancedHead.addEventListener("click", () => {
+    setAdvancedCollapsed(!els.advancedBody.hidden);
+  });
 
-  // Every unresolved item can take the trader to the control or source detail
-  // that owns it. The mapping changes no completion rule: labels still come
-  // exclusively from computeMissingDraftFields, and the target is navigation
-  // only. Bloomberg-owned fields that unexpectedly arrive null point to their
-  // Bond Master detail rather than pretending there is a safe manual default.
-  const MISSING_FIELD_LOCATORS = new Map([
-    ["Call / Put", { selector: "#option-type-toggle", bodyId: "option-terms-body" }],
-    ["Direction (Buy/Sell)", { selector: "#position-toggle", bodyId: "option-terms-body" }],
-    ["Strike (per 100)", { selector: "#strike-price-input", bodyId: "option-terms-body" }],
-    ["Notional", { selector: "#notional-input", bodyId: "option-terms-body" }],
-    ["Expiry Date", { selector: "#expiry-date-input", bodyId: "option-terms-body" }],
-    ["Expiry Timestamp", { selector: "#expiry-timestamp-input", bodyId: "option-terms-body" }],
-    ["Price Vol (σ)", { selector: "#volatility-input", bodyId: "option-terms-body" }],
-    ["Volatility Basis", { selector: "#volatility-basis-select", bodyId: "option-terms-body" }],
-    [
-      "Forward Clean Price (per 100)",
-      { selector: "#forward-price-input", bodyId: "forward-carry-body" },
-    ],
-    ["Day Count", { selector: "#day-count-select", bodyId: "bond-ref-body" }],
-    ["Ex-Dividend Days", { selector: "#ex-dividend-days-input", bodyId: "bond-ref-body" }],
-    ["Last Coupon Date", { selector: "#last-coupon-date-input", bodyId: "bond-ref-body" }],
-    ["Bond Type", { selector: "#bond-type-select", bodyId: "bond-ref-body" }],
-    ["Status", { selector: "#bond-status-select", bodyId: "bond-ref-body" }],
-    ["Valuation Date", { selector: "#valuation-date-input", bodyId: "timing-body" }],
-    ["As-Of Timestamp", { selector: "#as-of-timestamp-input", bodyId: "timing-body" }],
-    ["Pricing Timestamp", { selector: "#pricing-timestamp-input", bodyId: "timing-body" }],
-    ["Reporting Date", { selector: "#reporting-date-input", bodyId: "timing-body" }],
-    [
-      "Forward Settlement Date",
-      { selector: "#forward-settlement-date-input", bodyId: "timing-body" },
-    ],
-    [
-      "Option Settlement Date",
-      { selector: "#option-settlement-date-input", bodyId: "timing-body" },
-    ],
-    [
-      "Option Discount Curve",
-      { selector: "#curve-rows .curve-tenor-input", bodyId: "curve-body" },
-    ],
-    ["Coupon", { selector: "#details-coupon", bodyId: "bond-master-body" }],
-    ["Coupon Frequency", { selector: "#details-coupon-frequency", bodyId: "bond-master-body" }],
-    ["Maturity Date", { selector: "#details-maturity", bodyId: "bond-master-body" }],
-    ["Issue Date", { selector: "#details-issue-date", bodyId: "bond-master-body" }],
-    ["Callable Flag", { selector: "#details-callable", bodyId: "bond-master-body" }],
-    ["Sinkable Flag", { selector: "#details-sinkable", bodyId: "bond-master-body" }],
-    ["First Coupon Date", { selector: "#details-first-coupon-date", bodyId: "bond-master-body" }],
-  ]);
-
-  const MISSING_CATEGORY_FALLBACKS = new Map([
-    [CATEGORY_OPTION_TERMS, { selector: "#option-terms-head", bodyId: "option-terms-body" }],
-    [
-      CATEGORY_BOND_REFERENCE_DATA,
-      { selector: "#bond-ref-head", bodyId: "bond-ref-body" },
-    ],
-    [CATEGORY_MARKET_CURVES, { selector: "#curve-head", bodyId: "curve-body" }],
-    [
-      CATEGORY_FORWARD_CLEAN_PRICE,
-      { selector: "#forward-carry-head", bodyId: "forward-carry-body" },
-    ],
-    [CATEGORY_PRICE_VOLATILITY, { selector: "#volatility-input", bodyId: "option-terms-body" }],
-    [
-      CATEGORY_VALUATION_METADATA,
-      { selector: "#timing-head", bodyId: "timing-body" },
-    ],
-  ]);
-
-  function revealMissingField(label, category) {
-    const locator = MISSING_FIELD_LOCATORS.get(label) || MISSING_CATEGORY_FALLBACKS.get(category);
-    if (!locator) return;
-    const section = collapsibleSections.find((candidate) => candidate.body.id === locator.bodyId);
-    if (section) section.expand();
-    const target = document.querySelector(locator.selector);
-    if (!target) return;
-    if (!target.matches("input, select, button, textarea, [tabindex]")) {
-      target.setAttribute("tabindex", "-1");
-    }
-    target.focus({ preventScroll: true });
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-  }
-
-  function readDottedPath(root, path) {
-    return path.split(".").reduce((node, key) => (node == null ? undefined : node[key]), root);
-  }
-
-  // Structural presence only -- never a financial judgment about whether a
-  // present value is itself valid (that stays the existing typed
-  // constructors' job, applied when Price/Refresh actually call the real
-  // builder). `0` and `false` are real values, never treated as missing.
-  // Returns a flat list of {label, category} -- grouping into the
-  // trader-facing category summary is renderMissingFieldsSummary's job.
-  function isPresent(value) {
-    return value !== null && value !== undefined && value !== "";
-  }
-
-  function computeMissingDraftFields(draft) {
-    const missing = REQUIRED_DRAFT_FIELD_CHECKS.filter(
-      ([path]) => !isPresent(readDottedPath(draft, path))
-    ).map(([, label, category]) => ({ label, category }));
-
-    missing.push(...computeMissingCreditSpreadFields(draft.credit_spread_input));
-
-    // The Option Discount Curve is not a single field: it needs at least two
-    // valid continuous-zero nodes that actually cover every date the request
-    // discounts to. An uncovered date is a hard stop -- the reviewed
-    // interpolator rejects an out-of-range target rather than extrapolating.
-    const coverage = computeCurveCoverage(draft);
-    if (coverage.state !== "covered") {
-      missing.push({ label: "Option Discount Curve", category: CATEGORY_MARKET_CURVES });
-    }
-    return missing;
-  }
-
-  // Bond-lookup-only request generation/abort tracking.
-  let bondLookupGeneration = 0;
-  let inFlightBondLookupController = null;
-
-  function beginBondLookupRequest() {
-    return ++bondLookupGeneration;
-  }
-
-  function isStaleBondLookupRequest(generation) {
-    return generation !== bondLookupGeneration;
-  }
-
-  function invalidatePendingBondLookupRequest() {
-    beginBondLookupRequest();
-    if (inFlightBondLookupController) {
-      inFlightBondLookupController.abort();
-      inFlightBondLookupController = null;
-    }
-  }
-
-  // Pricing-only request generation/abort tracking.
-  let currentGeneration = 0;
-  let inFlightPriceController = null;
-
-  function beginRequest() {
-    return ++currentGeneration;
-  }
-
-  function isStaleRequest(generation) {
-    return generation !== currentGeneration;
-  }
-
-  function invalidatePendingPriceRequest() {
-    beginRequest();
-    if (inFlightPriceController) {
-      inFlightPriceController.abort();
-      inFlightPriceController = null;
-    }
-  }
-
-  // Bloomberg-refresh-only request generation/abort tracking.
-  let bloombergGeneration = 0;
-  let inFlightBloombergController = null;
-
-  function beginBloombergRequest() {
-    return ++bloombergGeneration;
-  }
-
-  function isStaleBloombergRequest(generation) {
-    return generation !== bloombergGeneration;
-  }
-
-  function invalidatePendingBloombergRequest() {
-    beginBloombergRequest();
-    if (inFlightBloombergController) {
-      inFlightBloombergController.abort();
-      inFlightBloombergController = null;
-    }
-  }
-
-  // Mirrors parse_bond_identifier in
-  // src/shiori_pricing_lab/data/bloomberg_bond_quote.py -- client-side only
-  // for immediate UX feedback and to build the Bloomberg symbology-qualified
-  // identifier for the existing quote-refresh-and-price path below; the
-  // server independently re-parses and is the actual authority. Never
-  // guesses a format and never appends a yellow-key suffix.
-  function parseBondIdentifier(raw) {
-    if (typeof raw !== "string") return null;
-    const normalized = raw.trim().toUpperCase();
-    if (/^[A-Z0-9]{12}$/.test(normalized)) {
-      return { kind: "ISIN", identifier: normalized, qualified: "/isin/" + normalized };
-    }
-    if (/^[A-Z0-9]{9}$/.test(normalized)) {
-      return { kind: "CUSIP", identifier: normalized, qualified: "/cusip/" + normalized };
-    }
-    return null;
-  }
+  // --- Small formatters -----------------------------------------------------
 
   function fmt(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -727,6 +590,23 @@
     if (trimmed === "") return null;
     const value = Number(trimmed);
     return Number.isFinite(value) ? value : null;
+  }
+
+  function textOrNull(raw) {
+    const trimmed = (raw || "").trim();
+    return trimmed === "" ? null : trimmed;
+  }
+
+  // ex_dividend_days is `int` on its dataclass and explicitly rejects a
+  // float/bool. Only a plain integer literal counts; "1.5" is not truncated.
+  function integerOrNull(raw) {
+    const trimmed = (raw || "").trim();
+    if (!/^-?\d+$/.test(trimmed)) return null;
+    return Number.parseInt(trimmed, 10);
+  }
+
+  function selectValueOrNull(select) {
+    return select.value === "" ? null : select.value;
   }
 
   // Displays a raw, dimensionless coupon fraction (e.g. 0.0325) as a
@@ -750,285 +630,39 @@
     el.classList.toggle("pending-value", text === "Not available");
   }
 
-  // Coupon is stored/priced as a decimal fraction (e.g. 0.0375) throughout
-  // the draft, API response, and Bloomberg conversion -- this only changes
-  // how it's *displayed* to the trader (as a percentage), via the same
-  // fmtCouponPercent already used for the priced case's own coupon in
-  // renderContext.
   function setCouponPercentOrNotAvailable(el, value) {
     const text = fmtCouponPercent(value);
     el.textContent = text;
     el.classList.toggle("pending-value", text === "Not available");
   }
 
-  // Codex review (PR #139): shows the case's own declared source_system
-  // field verbatim -- never a guess at whether it is synthetic or real.
   function describeProvenance(context) {
     const sourceSystem = context && context.source_system;
     return sourceSystem ? String(sourceSystem) : "Source not declared";
   }
 
-  // Renders the bounded, read-only context dict verbatim (see
-  // standalone_option_workbench_context.py) -- called only once a real
-  // Price or Refresh Bloomberg & Price call has actually succeeded against
-  // the current draft, since only then does every field this reads
-  // genuinely exist.
-  function renderContext(context) {
-    els.instrTitle.textContent = context.issuer;
-    els.instrIsin.textContent = context.underlying_isin;
-    els.provenancePill.hidden = false;
-    els.provenanceBadge.textContent = describeProvenance(context);
-    els.quoteSideBadge.hidden = false;
-    els.quoteSideBadge.textContent = context.quote_side;
-
-    setTextOrNotAvailable(els.statCleanPrice, context.clean_price_per_100);
-    setTextOrNotAvailable(els.statYieldMid, context.yield_value);
-    els.statValuationDate.textContent = context.valuation_date;
-    els.statOptionSettlement.textContent = context.option_settlement_date;
-
-    els.forwardSettlementNote.textContent =
-      "Forward settlement: " + context.forward_settlement_date;
-
-    setTextOrNotAvailable(els.snapshotCleanPrice, context.clean_price_per_100);
-    setTextOrNotAvailable(els.snapshotYield, context.yield_value);
-    setTextOrNotAvailable(els.snapshotAccruedInterest, context.accrued_interest_per_100);
-
-    els.detailsIssuer.textContent = context.issuer;
-    els.detailsCoupon.textContent = fmtCouponPercent(context.coupon);
-    els.detailsMaturity.textContent = context.maturity_date;
-    els.detailsDayCount.textContent = context.day_count;
-    els.detailsCouponFrequency.textContent = context.coupon_frequency;
-    els.detailsCurrency.textContent = context.currency;
-
-    els.sidebarLiveRow.hidden = false;
-    els.sidebarSourceSystem.textContent = describeProvenance(context);
-    els.sidebarAsofRow.hidden = false;
-    els.sidebarAsOf.textContent = context.as_of_timestamp;
-
+  // Mirrors parse_bond_identifier in
+  // src/shiori_pricing_lab/data/bloomberg_bond_quote.py -- client-side only for
+  // immediate feedback and to build the symbology-qualified identifier the
+  // existing quote-refresh path needs; the server independently re-parses and
+  // is the actual authority. Never guesses a format, never appends a yellow-key
+  // suffix.
+  function parseBondIdentifier(raw) {
+    if (typeof raw !== "string") return null;
+    const normalized = raw.trim().toUpperCase();
+    if (/^[A-Z0-9]{12}$/.test(normalized)) {
+      return { kind: "ISIN", identifier: normalized, qualified: "/isin/" + normalized };
+    }
+    if (/^[A-Z0-9]{9}$/.test(normalized)) {
+      return { kind: "CUSIP", identifier: normalized, qualified: "/cusip/" + normalized };
+    }
+    return null;
   }
 
-  // The inverse of renderContext: hides every context-driven display back
-  // to its untouched default. Called by a fresh Bloomberg lookup (a new
-  // draft has no priced context yet) and by Clear.
-  function hideContext() {
-    els.provenancePill.hidden = true;
-    els.quoteSideBadge.hidden = true;
-    els.sidebarLiveRow.hidden = true;
-    els.sidebarAsofRow.hidden = true;
-  }
-
-  // Client-side mirror of extract_standalone_option_case_context
-  // (standalone_option_workbench_context.py), field-for-field -- used only
-  // for the Bloomberg refresh-and-price path, whose response
-  // (price_case_with_bloomberg_quote) carries a display dict but no
-  // separate context section, unlike POST /api/case. Every value is a
-  // direct read off the already-complete draft (Price/Refresh are disabled
-  // until it is complete) -- no computation, no inference.
-  function extractContextFromDraft(draft) {
-    const bondOption = draft.bond_option;
-    const isin = bondOption.underlying_isin;
-    const referenceData = (draft.bond_reference_data_universe || []).find(
-      (record) => record.isin === isin
-    );
-    const bondQuote = draft.bond_quote;
-    return {
-      underlying_isin: isin,
-      expiry_date: bondOption.expiry_date,
-      issuer: referenceData.issuer,
-      currency: referenceData.currency,
-      coupon: referenceData.coupon,
-      maturity_date: referenceData.maturity_date,
-      coupon_frequency: referenceData.coupon_frequency,
-      day_count: referenceData.day_count,
-      bond_type: referenceData.bond_type,
-      quote_side: bondQuote.quote_side,
-      clean_price_per_100: bondQuote.clean_price_per_100,
-      accrued_interest_per_100: bondQuote.accrued_interest_per_100,
-      yield_value: bondQuote.yield_value,
-      valuation_date: draft.valuation_date,
-      pricing_timestamp: draft.pricing_timestamp,
-      expiry_timestamp: draft.expiry_timestamp,
-      forward_settlement_date: draft.forward_settlement_date,
-      option_settlement_date: draft.option_settlement_date,
-      source_system: draft.source_system,
-      as_of_timestamp: draft.as_of_timestamp,
-      snapshot_id: draft.snapshot_id,
-    };
-  }
-
-  function setToggle(toggleEl, value) {
-    toggleEl.querySelectorAll(".opt").forEach((opt) => {
-      opt.classList.toggle("on", opt.dataset.value === value);
-    });
-  }
-
-  // No option ever starts pre-selected in this revision (Call/Put and
-  // Buy/Sell included, alongside the Quote Side toggles) -- this returns
-  // null rather than throwing until the trader has explicitly clicked one.
-  function getOptionalToggleValue(toggleEl) {
-    const selected = toggleEl.querySelector(".opt.on");
-    return selected ? selected.dataset.value : null;
-  }
-
-  // Every trader-editable input on the page, cleared as one set. A fresh
-  // Bloomberg lookup and Clear both call this: a manual value entered for
-  // one bond (its dates, its bond-reference terms, its curve, its forward
-  // and vol) must never survive into a different bond's draft (Issue #143).
-  const MANUAL_TEXT_INPUTS = () => [
-    els.strikePrice,
-    els.notional,
-    els.volatility,
-    els.forwardPrice,
-    els.expiryDate,
-    els.expiryTimestamp,
-    els.reportingDate,
-    els.forwardSettlementDate,
-    els.optionSettlementDate,
-    els.exDividendDays,
-    els.lastCouponDate,
-  ];
-
-  const DERIVED_TIMING_INPUTS = () => [
-    els.valuationDate,
-    els.asOfTimestamp,
-    els.pricingTimestamp,
-  ];
-
-  const MANUAL_SELECTS = () => [
-    els.dayCount,
-    els.bondTypeSelect,
-    els.bondStatus,
-  ];
-
-  function clearOptionTermsForm() {
-    setToggle(els.optionTypeToggle, null);
-    setToggle(els.positionToggle, null);
-    MANUAL_TEXT_INPUTS().forEach((input) => {
-      input.value = "";
-    });
-    DERIVED_TIMING_INPUTS().forEach((input) => {
-      input.value = "";
-    });
-    MANUAL_SELECTS().forEach((select) => {
-      select.value = "";
-    });
-    // Volatility basis is the one select with a real default: PRICE_VOL is
-    // the direct, no-conversion basis the guard accepts.
-    els.volatilityBasis.value = "PRICE_VOL";
-    // Two blank rows: the minimum the curve contract needs, offered ready to
-    // fill. They are structure only -- a blank row is never a node.
-    clearCurveRows();
-    addCurveRow("", "");
-    addCurveRow("", "");
-    renderTimestampUtcPreviews();
-    renderCurveCoverage();
-  }
-
-  function setDerivedTimingFormFromDraft() {
-    els.valuationDate.value = currentDraft ? currentDraft.valuation_date || "" : "";
-    els.asOfTimestamp.value = currentDraft ? currentDraft.as_of_timestamp || "" : "";
-    els.pricingTimestamp.value = currentDraft ? currentDraft.pricing_timestamp || "" : "";
-    renderTimestampUtcPreviews();
-  }
-
-  function setFormFromOverlay(overlay) {
-    setToggle(els.optionTypeToggle, overlay.option_type);
-    setToggle(els.positionToggle, overlay.position);
-    els.strikePrice.value = overlay.strike_price ?? "";
-    els.notional.value = overlay.notional ?? "";
-    els.volatility.value = overlay.volatility ?? "";
-    els.forwardPrice.value = overlay.forward_clean_price_per_100 ?? "";
-  }
-
-  // The six trader-editable fields, read directly off the current draft
-  // (kept in sync by applyManualInputsToDraft on every input change) rather
-  // than re-reading the DOM -- the single source of truth for both what the
-  // form shows and what gets sent to the existing overlay-shaped Bloomberg
-  // refresh-and-price route.
-  function extractOverlayFromDraft(draft) {
-    return {
-      option_type: draft.bond_option.option_type,
-      position: draft.bond_option.position,
-      strike_price: draft.bond_option.strike_price,
-      notional: draft.bond_option.notional,
-      volatility: draft.volatility_input.volatility,
-      forward_clean_price_per_100: draft.forward_clean_price_input.forward_clean_price_per_100,
-    };
-  }
-
-  // Writes the six Option Terms form controls into the current draft and
-  // re-syncs gating. A no-op if there is no draft yet (nothing to write
-  // into). Called on every relevant input's change/input event.
-  // A blank field is "not entered", never an empty string the typed
-  // constructors would reject with a confusing message.
-  function textOrNull(raw) {
-    const trimmed = (raw || "").trim();
-    return trimmed === "" ? null : trimmed;
-  }
-
-  // ex_dividend_days is `int` on its dataclass and explicitly rejects a
-  // float/bool. Only a plain integer literal counts;
-  // "1.5" is not silently truncated.
-  function integerOrNull(raw) {
-    const trimmed = (raw || "").trim();
-    if (!/^-?\d+$/.test(trimmed)) return null;
-    return Number.parseInt(trimmed, 10);
-  }
-
-  function selectValueOrNull(select) {
-    return select.value === "" ? null : select.value;
-  }
-
-  // Reads every trader-entered value off the form into the current draft.
-  // Performs no financial computation, no unit conversion, and no enum
-  // inference: each value goes to the field the trader typed it into, and
-  // the existing typed constructors remain the only validator.
-  function applyManualInputsToDraft() {
-    if (!currentDraft) return;
-
-    const bondOption = currentDraft.bond_option;
-    bondOption.option_type = getOptionalToggleValue(els.optionTypeToggle);
-    bondOption.position = getOptionalToggleValue(els.positionToggle);
-    bondOption.strike_price = numberOrNull(els.strikePrice.value);
-    bondOption.notional = numberOrNull(els.notional.value);
-    bondOption.expiry_date = textOrNull(els.expiryDate.value);
-
-    // The five standalone-consumed fields Bloomberg does not mechanically
-    // supply. The two enum selects are the trader's own choice --
-    // bond_master_raw's DAY_CNT_DES / MTY_TYP are displayed as hints and
-    // are never read into the draft.
-    const referenceData = currentDraft.bond_reference_data_universe[0];
-    referenceData.day_count = selectValueOrNull(els.dayCount);
-    referenceData.bond_type = selectValueOrNull(els.bondTypeSelect);
-    referenceData.ex_dividend_days = integerOrNull(els.exDividendDays.value);
-    referenceData.last_coupon_date = textOrNull(els.lastCouponDate.value);
-    referenceData.status = selectValueOrNull(els.bondStatus);
-
-    // The three acquisition-derived values are deliberately not read back
-    // from the DOM: their source is the recorded Bloomberg event, and editing
-    // any unrelated trader control must never overwrite that provenance.
-    currentDraft.reporting_date = textOrNull(els.reportingDate.value);
-    currentDraft.forward_settlement_date = textOrNull(els.forwardSettlementDate.value);
-    currentDraft.option_settlement_date = textOrNull(els.optionSettlementDate.value);
-    currentDraft.expiry_timestamp = textOrNull(els.expiryTimestamp.value);
-
-    currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
-    currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
-    currentDraft.forward_clean_price_input.forward_clean_price_per_100 = numberOrNull(
-      els.forwardPrice.value
-    );
-
-    currentDraft.curve_points = readCurveNodesFromRows();
-
-    renderTimestampUtcPreviews();
-    renderCurveCoverage();
-    syncDraftGating();
-  }
-
-  // --- Datetime instant preview (Issue #143) ---------------------------------
+  // --- Datetime instants ----------------------------------------------------
   //
   // Transparency only. This preview never replaces or mutates what is sent:
-  // every timestamp goes to the server exactly as typed. Only
+  // every timestamp goes to the server exactly as composed. Only
   // `as_of_timestamp` is respelled in UTC at the contract boundary (its own
   // no-look-ahead check is documented as needing the UTC calendar date);
   // `pricing_timestamp` and `expiry_timestamp` keep their offset, because the
@@ -1038,9 +672,6 @@
   function utcInstantPreview(raw) {
     const text = (raw || "").trim();
     if (text === "") return { text: "—", instant: null, invalid: false };
-    // Mirrors the server's own acceptance shape: canonical uppercase "T"
-    // separator plus an explicit offset. Anything else is left to the
-    // server's validator, and flagged here rather than silently "fixed".
     const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(:\d{2}(\.\d+)?)?)(Z|[+-]\d{2}:\d{2})$/.exec(
       text
     );
@@ -1088,8 +719,8 @@
     const text = (raw || "").trim();
     const match = ACQUISITION_TIMESTAMP_PATTERN.exec(text);
     if (!match || utcInstantPreview(text).invalid) return null;
-    // This is intentionally the date written in the timestamp, not the UTC
-    // date produced by JavaScript's Date object.
+    // Intentionally the date written in the timestamp, not the UTC date
+    // JavaScript's Date object would produce.
     return match[1];
   }
 
@@ -1097,20 +728,74 @@
     const text = (raw || "").trim();
     const match = ACQUISITION_TIMESTAMP_PATTERN.exec(text);
     if (!match) return textOrNull(text);
-    // Match the approved Python boundary exactly for acquisition timestamps:
-    // already-UTC spellings are preserved, while a genuinely non-zero offset
-    // is respelled as the same instant in UTC.
+    // Match the approved Python boundary exactly: already-UTC spellings are
+    // preserved, a genuinely non-zero offset is respelled as the same instant.
     if (match[4] === "Z" || /^[+-]00:00$/.test(match[4])) return text;
     const preview = utcInstantPreview(text);
     return preview.instant === null ? text : preview.instant;
   }
 
-  // --- Option Discount Curve editor (Issue #143) -----------------------------
+  // --- The one Expiry interaction ------------------------------------------
+  //
+  // #145 asked for expiry date and expiry timestamp to become one interaction
+  // while preserving the offset-aware contract. A `datetime-local` value plus an
+  // explicitly typed UTC offset compose both: the date half becomes
+  // `bond_option.expiry_date`, and the whole thing becomes `expiry_timestamp`
+  // with the trader's own offset kept verbatim. No time of day, timezone,
+  // market close or business-day roll is ever inferred -- an incomplete or
+  // malformed entry simply yields nulls and the group stays unresolved.
+
+  const EXPIRY_OFFSET_PATTERN = /^(Z|[+-]\d{2}:\d{2})$/;
+  const EXPIRY_LOCAL_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2})?$/;
+
+  function composeExpiry() {
+    const localMatch = EXPIRY_LOCAL_PATTERN.exec((els.expiryDatetime.value || "").trim());
+    const offset = (els.expiryOffset.value || "").trim();
+    if (!localMatch) {
+      return { date: null, timestamp: null, note: null };
+    }
+    const date = localMatch[1];
+    const time = localMatch[2];
+    const seconds = localMatch[3] || ":00";
+    if (!EXPIRY_OFFSET_PATTERN.test(offset)) {
+      return {
+        date,
+        timestamp: null,
+        note:
+          offset === ""
+            ? "Enter the UTC offset this expiry time is quoted in (for example +08:00, or Z for UTC)."
+            : `“${offset}” is not a UTC offset. Use +HH:MM, -HH:MM, or Z.`,
+      };
+    }
+    return {
+      date,
+      timestamp: `${date}T${time}${seconds}${offset}`,
+      note: null,
+    };
+  }
+
+  function renderExpiryPreview() {
+    const expiry = composeExpiry();
+    if (expiry.timestamp === null) {
+      els.expiryDerivedPreview.textContent =
+        expiry.note ||
+        "Enter the expiry date, local time and its UTC offset.";
+      els.expiryDerivedPreview.classList.toggle("is-invalid", expiry.note !== null);
+      return;
+    }
+    const preview = utcInstantPreview(expiry.timestamp);
+    els.expiryDerivedPreview.classList.remove("is-invalid");
+    els.expiryDerivedPreview.textContent =
+      `Expiry date ${expiry.date} · timestamp ${expiry.timestamp}` +
+      (preview.instant ? ` · same instant in UTC: ${preview.instant}` : "");
+  }
+
+  // --- Option Discount Curve editor ----------------------------------------
   //
   // Builds the existing BLICurvePoint contract only: OPTION_DISCOUNT_CURVE
-  // purpose, CONTINUOUS_ZERO_RATE basis, existing nD/nM/nY tenor grammar.
-  // No curve is constructed, bootstrapped, converted, or extrapolated here,
-  // and no OVME MMkt/repo rate is relabelled as a continuous zero rate.
+  // purpose, CONTINUOUS_ZERO_RATE basis, existing nD/nM/nY tenor grammar. No
+  // curve is constructed, bootstrapped, converted, or extrapolated here, and no
+  // OVME MMkt/repo rate is relabelled as a continuous zero rate.
 
   const CURVE_ID = "SHIORI_MANUAL_OPTION_DISCOUNT_CURVE";
   // Mirrors pricing/bli_curve_tenor.py's _TENOR_SHAPE exactly.
@@ -1177,9 +862,9 @@
     }));
   }
 
-  // Only fully-valid rows become curve points. A half-typed row is simply
-  // not yet a node -- it is never guessed at, and never silently dropped
-  // without the coverage line below saying so.
+  // Only fully-valid rows become curve points. A half-typed row is simply not
+  // yet a node -- never guessed at, and never silently dropped without the
+  // coverage line below saying so.
   function readCurveNodesFromRows() {
     const currency = currentDraft ? currentDraft.bond_option.currency : null;
     return readCurveRowInputs()
@@ -1207,8 +892,8 @@
   }
 
   // Mirrors _option_discount_factor_to_date's own curve coordinate exactly:
-  // (target - valuation).days / 365.0, with a same-day target needing no
-  // node at all (its discount factor is 1.0 by definition).
+  // (target - valuation).days / 365.0, with a same-day target needing no node
+  // at all (its discount factor is 1.0 by definition).
   function curveCoordinateForDate(valuationDate, targetDate) {
     const days = isoDateDaysBetween(valuationDate, targetDate);
     if (days === null) return null;
@@ -1220,9 +905,9 @@
   }
 
   // The exact blocking coverage state. Pricing is gated on this because the
-  // reviewed interpolator rejects an out-of-range target outright rather
-  // than flat-extrapolating -- so an uncovered date is a hard stop, never a
-  // soft warning that still lets a fabricated discount factor through.
+  // reviewed interpolator rejects an out-of-range target outright rather than
+  // flat-extrapolating -- so an uncovered date is a hard stop, never a soft
+  // warning that still lets a fabricated discount factor through.
   function computeCurveCoverage(draft) {
     const rows = readCurveRowInputs();
     const invalidRows = rows.filter(
@@ -1314,68 +999,507 @@
     if (!currentDraft) {
       els.curveCoverage.textContent = "—";
       els.curveCoverage.classList.remove("is-blocking", "is-covered");
+      els.discountingReadout.textContent = "No Option Discount Curve nodes entered";
       return;
     }
     const coverage = computeCurveCoverage(currentDraft);
     els.curveCoverage.textContent = coverage.message;
     els.curveCoverage.classList.toggle("is-blocking", coverage.state === "blocking");
     els.curveCoverage.classList.toggle("is-covered", coverage.state === "covered");
+    els.discountingReadout.textContent = coverage.message;
   }
 
-  function clearResultFields() {
-    els.priceTotal.textContent = "—";
-    els.priceTotalCcy.textContent = "";
-    els.pricePer100.textContent = "—";
-    els.resultCurrency.textContent = "—";
-    els.greekDelta.textContent = "—";
-    els.greekGamma.textContent = "—";
-    els.greekVega.textContent = "—";
-    els.greekTheta.textContent = "—";
+  // --- Override provenance --------------------------------------------------
+  //
+  // Every value Shiori could not source carries a stamp saying what it is, what
+  // it is worth, why it had to be entered, and which Bloomberg acquisition
+  // event the run is anchored to. No clock is read here: the run's own
+  // acquisition timestamp is the anchor, so a stamp never invents a new
+  // timestamp semantic of its own.
+
+  const OVERRIDE_FIELDS = [
+    {
+      path: "forward_clean_price_input.forward_clean_price_per_100",
+      label: "Forward Clean Price (per 100)",
+      reason: "Bloomberg OPT_UNDL_FORWARD_PX returned BAD_FLD for cash bonds on this route.",
+      read: (draft) => draft.forward_clean_price_input.forward_clean_price_per_100,
+    },
+    {
+      path: "volatility_input.volatility",
+      label: "Price Vol (σ)",
+      reason: "Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned BAD_FLD.",
+      read: (draft) => draft.volatility_input.volatility,
+    },
+    {
+      path: "volatility_input.volatility_basis",
+      label: "Volatility Basis",
+      reason: "Chosen by the trader; no sourced basis exists to confirm it against.",
+      read: (draft) => draft.volatility_input.volatility_basis,
+    },
+    {
+      path: "curve_points",
+      label: "Option Discount Curve nodes",
+      reason: "No approved Bloomberg sourcing or curve-construction methodology exists.",
+      read: (draft) =>
+        (draft.curve_points || []).length === 0
+          ? null
+          : draft.curve_points.map((point) => `${point.tenor}=${point.rate}`).join(", "),
+    },
+    {
+      path: "bond_reference_data_universe.0.day_count",
+      label: "Day Count",
+      reason: "No approved UST / Gilt profile; DAY_CNT_DES is display-only evidence.",
+      read: (draft) => referenceRecord(draft).day_count,
+    },
+    {
+      path: "bond_reference_data_universe.0.bond_type",
+      label: "Bond Type",
+      reason: "No approved UST / Gilt profile; MTY_TYP is display-only evidence.",
+      read: (draft) => referenceRecord(draft).bond_type,
+    },
+    {
+      path: "bond_reference_data_universe.0.ex_dividend_days",
+      label: "Ex-Dividend Days",
+      reason: "Ex-dividend candidates returned BAD_FLD; no profile rule is approved.",
+      read: (draft) => referenceRecord(draft).ex_dividend_days,
+    },
+    {
+      path: "bond_reference_data_universe.0.last_coupon_date",
+      label: "Last Coupon Date",
+      reason:
+        "No reviewed regular-schedule generator is approved and PREV_CPN_DT's role is unconfirmed.",
+      read: (draft) => referenceRecord(draft).last_coupon_date,
+    },
+    {
+      path: "bond_reference_data_universe.0.status",
+      label: "Bond Status",
+      reason: "Security-status candidates returned BAD_FLD; no status policy is approved.",
+      read: (draft) => referenceRecord(draft).status,
+    },
+    {
+      path: "reporting_date",
+      label: "Reporting Date",
+      reason: "Fixing Reporting Date to Valuation Date is an unapproved route decision.",
+      read: (draft) => draft.reporting_date,
+    },
+    {
+      path: "forward_settlement_date",
+      label: "Forward Settlement Date",
+      reason: "Shiori owns no market calendar; SETTLE_DT describes a different role.",
+      read: (draft) => draft.forward_settlement_date,
+    },
+    {
+      path: "option_settlement_date",
+      label: "Option Settlement Date",
+      reason: "No Bloomberg field carries an OTC option's own cash settlement date.",
+      read: (draft) => draft.option_settlement_date,
+    },
+  ];
+
+  function refreshOverrideProvenance() {
+    overrideProvenance = new Map();
+    if (!currentDraft) return;
+    const anchor = currentDraft.pricing_timestamp || null;
+    OVERRIDE_FIELDS.forEach((field) => {
+      const value = field.read(currentDraft);
+      if (!present(value)) return;
+      overrideProvenance.set(field.path, {
+        field: field.label,
+        path: field.path,
+        value: String(value),
+        source_system: MANUAL_SOURCE_SYSTEM,
+        basis: "TRADER_OVERRIDE",
+        reason_not_sourced: field.reason,
+        run_acquired_at: anchor,
+      });
+    });
   }
 
-  // The single, unified failure path: used for a FAILED PricingResult, an
-  // HTTP 400/non-2xx bridge response, a network-level fetch rejection, and
-  // a non-JSON response body alike. Never leaves a prior successful result
-  // or its green "loaded" status on screen; never touches currentDraft, so
-  // the trader can fix the form and retry.
-  function renderFailure(message) {
-    clearResultFields();
-    els.errorBanner.textContent = message;
-    els.errorBanner.hidden = false;
-    els.statusIndicator.classList.add("failed");
-    els.statusText.textContent = "Pricing failed";
+  function overrideProvenanceRecords() {
+    return Array.from(overrideProvenance.values());
   }
 
-  // A Bloomberg failure -- whether an instrument-first bond lookup or the
-  // existing quote-refresh-and-price path -- must preserve the previously
-  // resolved bond, draft, and completed display exactly as they were; only
-  // the banner communicates that this particular attempt failed.
-  function renderBloombergError(message) {
-    els.errorBanner.textContent = message;
-    els.errorBanner.hidden = false;
-    els.statusIndicator.classList.add("failed");
-    els.statusText.textContent = "Bloomberg request failed";
+  function renderOverrideProvenance() {
+    const records = overrideProvenanceRecords();
+    els.provenanceLog.innerHTML = "";
+    els.provenanceEmpty.hidden = records.length > 0;
+    records.forEach((record) => {
+      const item = document.createElement("li");
+      item.className = "provenance-entry";
+      const head = document.createElement("div");
+      head.className = "provenance-entry-head";
+      head.textContent = `${record.field} = ${record.value}`;
+      const meta = document.createElement("div");
+      meta.className = "provenance-entry-meta";
+      meta.textContent =
+        `${record.source_system} · ${record.basis} · anchored to Bloomberg acquisition ` +
+        `${record.run_acquired_at || "not available"} — ${record.reason_not_sourced}`;
+      item.appendChild(head);
+      item.appendChild(meta);
+      els.provenanceLog.appendChild(item);
+    });
+
+    const stamp = (path) => {
+      const record = overrideProvenance.get(path);
+      return record
+        ? `Provenance: ${record.source_system} · ${record.basis} · anchored to ` +
+            `Bloomberg acquisition ${record.run_acquired_at || "not available"}`
+        : "Provenance: not entered yet — nothing is recorded until you enter a value.";
+    };
+    els.forwardProvenance.textContent = stamp(
+      "forward_clean_price_input.forward_clean_price_per_100"
+    );
+    els.volProvenance.textContent = stamp("volatility_input.volatility");
+    els.discountingProvenance.textContent = stamp("curve_points");
   }
 
-  function renderSuccess(display) {
-    els.errorBanner.hidden = true;
-    els.errorBanner.textContent = "";
-    els.statusIndicator.classList.remove("failed");
-    els.statusText.textContent = "Draft priced";
+  // --- Draft <-> form -------------------------------------------------------
 
-    els.priceTotal.textContent = fmt(display.total_notional_model_fair_premium);
-    els.priceTotalCcy.textContent = display.result_currency || "";
-    els.pricePer100.textContent = fmt(display.model_fair_premium_per_100);
-    els.resultCurrency.textContent = display.result_currency || "—";
-    els.greekDelta.textContent = fmt(display.forward_price_delta_per_100);
-    els.greekGamma.textContent = fmt(display.forward_price_gamma_per_100);
-    els.greekVega.textContent = fmt(display.vega_per_vol_point_per_100);
-    els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
+  const MANUAL_TEXT_INPUTS = () => [
+    els.strikePrice,
+    els.notional,
+    els.volatility,
+    els.forwardPrice,
+    els.expiryDatetime,
+    els.expiryOffset,
+    els.reportingDate,
+    els.forwardSettlementDate,
+    els.optionSettlementDate,
+    els.exDividendDays,
+    els.lastCouponDate,
+  ];
+
+  const DERIVED_READONLY_INPUTS = () => [
+    els.valuationDate,
+    els.asOfTimestamp,
+    els.pricingTimestamp,
+    els.expiryTimestamp,
+  ];
+
+  const MANUAL_SELECTS = () => [els.dayCount, els.bondTypeSelect, els.bondStatus];
+
+  function setToggle(toggleEl, value) {
+    toggleEl.querySelectorAll(".opt").forEach((opt) => {
+      opt.classList.toggle("on", opt.dataset.value === value);
+    });
   }
 
-  // Renders the resolved Bloomberg bond identity -- the instrument-first
-  // lookup's own result. Passing null (only ever done by Clear) hides the
-  // panel entirely.
+  // No option ever starts pre-selected (Call/Put and Buy/Sell included,
+  // alongside the Quote Side toggles) -- this returns null rather than throwing
+  // until the trader has explicitly clicked one.
+  function getOptionalToggleValue(toggleEl) {
+    const selected = toggleEl.querySelector(".opt.on");
+    return selected ? selected.dataset.value : null;
+  }
+
+  // Every trader-editable control on the page, cleared as one set. A fresh
+  // Bloomberg lookup, a failed Bloomberg call, and Clear all call this: a
+  // manual value entered for one bond (its dates, its bond-reference terms, its
+  // curve, its forward and vol) must never survive into a different bond's
+  // draft.
+  function clearTraderForm() {
+    setToggle(els.optionTypeToggle, null);
+    setToggle(els.positionToggle, null);
+    MANUAL_TEXT_INPUTS().forEach((input) => {
+      input.value = "";
+    });
+    DERIVED_READONLY_INPUTS().forEach((input) => {
+      input.value = "";
+    });
+    MANUAL_SELECTS().forEach((select) => {
+      select.value = "";
+    });
+    // Volatility basis is the one select with a real default: PRICE_VOL is the
+    // direct, no-conversion basis the guard accepts.
+    els.volatilityBasis.value = "PRICE_VOL";
+    // Two blank rows: the minimum the curve contract needs, offered ready to
+    // fill. They are structure only -- a blank row is never a node.
+    clearCurveRows();
+    addCurveRow("", "");
+    addCurveRow("", "");
+    renderExpiryPreview();
+    renderTimestampUtcPreviews();
+    renderCurveCoverage();
+  }
+
+  function setDerivedFormFromDraft() {
+    els.valuationDate.value = currentDraft ? currentDraft.valuation_date || "" : "";
+    els.asOfTimestamp.value = currentDraft ? currentDraft.as_of_timestamp || "" : "";
+    els.pricingTimestamp.value = currentDraft ? currentDraft.pricing_timestamp || "" : "";
+    els.expiryTimestamp.value = currentDraft ? currentDraft.expiry_timestamp || "" : "";
+    renderTimestampUtcPreviews();
+  }
+
+  function setTradeFormFromDraft(draft) {
+    setToggle(els.optionTypeToggle, draft.bond_option.option_type);
+    setToggle(els.positionToggle, draft.bond_option.position);
+    els.strikePrice.value = draft.bond_option.strike_price ?? "";
+    els.notional.value = draft.bond_option.notional ?? "";
+    els.volatility.value = draft.volatility_input.volatility ?? "";
+    els.forwardPrice.value =
+      draft.forward_clean_price_input.forward_clean_price_per_100 ?? "";
+  }
+
+  // The six overlay-shaped fields, read directly off the current draft rather
+  // than re-reading the DOM -- the single source of truth for what gets sent to
+  // the existing overlay-shaped Bloomberg refresh-and-price route.
+  function extractOverlayFromDraft(draft) {
+    return {
+      option_type: draft.bond_option.option_type,
+      position: draft.bond_option.position,
+      strike_price: draft.bond_option.strike_price,
+      notional: draft.bond_option.notional,
+      volatility: draft.volatility_input.volatility,
+      forward_clean_price_per_100: draft.forward_clean_price_input.forward_clean_price_per_100,
+    };
+  }
+
+  // Reads every trader-entered value off the form into the current draft.
+  // Performs no financial computation, no unit conversion, and no enum
+  // inference: each value goes to the field the trader entered it into, and the
+  // existing typed constructors remain the only validator.
+  function applyManualInputsToDraft() {
+    if (!currentDraft) return;
+
+    const bondOption = currentDraft.bond_option;
+    bondOption.option_type = getOptionalToggleValue(els.optionTypeToggle);
+    bondOption.position = getOptionalToggleValue(els.positionToggle);
+    bondOption.strike_price = numberOrNull(els.strikePrice.value);
+    bondOption.notional = numberOrNull(els.notional.value);
+
+    // One expiry interaction produces both contract fields; neither is ever
+    // guessed from the other.
+    const expiry = composeExpiry();
+    bondOption.expiry_date = expiry.date;
+    currentDraft.expiry_timestamp = expiry.timestamp;
+    els.expiryTimestamp.value = expiry.timestamp || "";
+
+    // The five profile/derivation-owned bond-reference fields. The two enum
+    // selects are the trader's own choice -- bond_master_raw's DAY_CNT_DES /
+    // MTY_TYP are displayed as evidence and are never read into the draft.
+    const referenceData = currentDraft.bond_reference_data_universe[0];
+    referenceData.day_count = selectValueOrNull(els.dayCount);
+    referenceData.bond_type = selectValueOrNull(els.bondTypeSelect);
+    referenceData.ex_dividend_days = integerOrNull(els.exDividendDays.value);
+    referenceData.last_coupon_date = textOrNull(els.lastCouponDate.value);
+    referenceData.status = selectValueOrNull(els.bondStatus);
+
+    // The acquisition-derived values are deliberately not read back from the
+    // DOM: their source is the recorded Bloomberg event, and editing any
+    // unrelated trader control must never overwrite that provenance.
+    currentDraft.reporting_date = textOrNull(els.reportingDate.value);
+    currentDraft.forward_settlement_date = textOrNull(els.forwardSettlementDate.value);
+    currentDraft.option_settlement_date = textOrNull(els.optionSettlementDate.value);
+
+    currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
+    currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
+    currentDraft.forward_clean_price_input.forward_clean_price_per_100 = numberOrNull(
+      els.forwardPrice.value
+    );
+
+    currentDraft.curve_points = readCurveNodesFromRows();
+
+    renderExpiryPreview();
+    renderTimestampUtcPreviews();
+    refreshOverrideProvenance();
+    renderOverrideProvenance();
+    invalidateBuilderValidation();
+    syncDraftGating();
+  }
+
+  function shioriIdentifierSuffix(bond) {
+    return `${bond.isin}-${(bond.acquired_at || "").replace(/[^0-9A-Za-z]/g, "")}`;
+  }
+
+  // Builds a brand-new draft containing only the fields Bloomberg itself
+  // returned for this bond -- every other required field starts null. Never
+  // reads from, or is seeded by, any prior draft or any bundled fixture.
+  function buildInitialDraftFromBloomberg(bond) {
+    // Populated from bond.bond_master only -- never bond.bond_master_raw, which
+    // is display-only and must never enter the typed schema. Every destination
+    // key is always present, null unless that field's Bloomberg mnemonic is
+    // confirmed (see
+    // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP).
+    // ex_dividend_days, status, day_count, bond_type and last_coupon_date have
+    // no approved profile or mapping and stay null here regardless.
+    const bondMaster = bond.bond_master || {};
+    const identifierSuffix = shioriIdentifierSuffix(bond);
+    const pricingTimestamp = textOrNull(bond.acquired_at);
+    return {
+      bond_option: {
+        // payoff_basis / exercise_style / settlement_type are the only values
+        // the reviewed pricing guard accepts for this route, so they are set
+        // rather than asked for. product_id is a Shiori identifier, not market
+        // data.
+        product_id: `SHIORI-WORKBENCH-${identifierSuffix}`,
+        underlying_isin: bond.isin,
+        currency: bond.currency,
+        payoff_basis: "PRICE",
+        option_type: null,
+        exercise_style: "EUROPEAN",
+        settlement_type: "CASH",
+        expiry_date: null,
+        notional: null,
+        position: null,
+        strike_price: null,
+        strike_yield: null,
+        exercise_start_date: null,
+      },
+      bond_reference_data_universe: [
+        {
+          isin: bond.isin,
+          issuer: bond.name,
+          currency: bond.currency,
+          coupon: bondMaster.coupon ?? null,
+          coupon_frequency: bondMaster.coupon_frequency ?? null,
+          maturity_date: bondMaster.maturity_date ?? null,
+          issue_date: bondMaster.issue_date ?? null,
+          day_count: null,
+          callable_flag: bondMaster.callable_flag ?? null,
+          sinkable_flag: bondMaster.sinkable_flag ?? null,
+          bond_type: null,
+          ex_dividend_days: null,
+          first_coupon_date: bondMaster.first_coupon_date ?? null,
+          last_coupon_date: null,
+          status: null,
+        },
+      ],
+      // The acquisition event is already the source for these three values. Its
+      // timestamp is preserved exactly for pricing, its represented local date
+      // supplies valuation_date, and only as_of_timestamp is respelled under
+      // the approved UTC normalization rule. No settlement or expiry date is
+      // inferred.
+      valuation_date: representedLocalCalendarDate(pricingTimestamp),
+      as_of_timestamp: normalizeAsOfFromAcquisition(pricingTimestamp),
+      pricing_timestamp: pricingTimestamp,
+      expiry_timestamp: null,
+      reporting_date: null,
+      forward_settlement_date: null,
+      option_settlement_date: null,
+      source_system: SNAPSHOT_SOURCE_SYSTEM,
+      snapshot_id: `SHIORI-SNAPSHOT-${identifierSuffix}`,
+      // ACTIVE is the only status the snapshot contract accepts at
+      // construction; MANUAL_VERIFIED needs an audit policy that does not exist
+      // yet.
+      snapshot_status: "ACTIVE",
+      bond_quote: {
+        isin: bond.isin,
+        currency: bond.currency,
+        // Bloomberg returned a clean price, so the quote's primary basis is
+        // PRICE -- a label for what was actually loaded, not a conversion.
+        price_type: "PRICE",
+        quote_side: bond.quote_side,
+        source_system: bond.source_system,
+        status: "ACTIVE",
+        clean_price_per_100: bond.clean_price_per_100,
+        yield_value: null,
+        accrued_interest_per_100: bond.accrued_interest_per_100,
+      },
+      forward_clean_price_input: {
+        forward_clean_price_per_100: null,
+        // The contract requires the forward's side to equal the spot side, so
+        // it is mirrored mechanically rather than asked for twice.
+        quote_side: bond.quote_side,
+        source_system: MANUAL_SOURCE_SYSTEM,
+        status: "ACTIVE",
+      },
+      curve_points: [],
+      volatility_input: {
+        volatility: null,
+        volatility_basis: "PRICE_VOL",
+        source_system: MANUAL_SOURCE_SYSTEM,
+        status: "ACTIVE",
+        override_or_fallback_audit: null,
+      },
+      credit_spread_input: {
+        // The standalone pricing path never reads credit_spread, so
+        // NOT_REQUIRED is the truthful state. The contract demands
+        // credit_spread/credit_spread_basis stay null for this treatment and
+        // requires the audit text below.
+        spread_treatment: "NOT_REQUIRED",
+        source_system: ROUTE_POLICY_SOURCE_SYSTEM,
+        status: "ACTIVE",
+        credit_spread: null,
+        credit_spread_basis: null,
+        override_or_fallback_audit: CREDIT_SPREAD_NOT_REQUIRED_AUDIT,
+      },
+      deposit_rate_observation: null,
+      bond_reference_source_name: null,
+    };
+  }
+
+  // --- Rendering ------------------------------------------------------------
+
+  function renderContext(context) {
+    els.instrTitle.textContent = context.issuer;
+    els.instrIsin.textContent = context.underlying_isin;
+    els.provenancePill.hidden = false;
+    els.provenanceBadge.textContent = describeProvenance(context);
+    els.quoteSideBadge.hidden = false;
+    els.quoteSideBadge.textContent = context.quote_side;
+
+    setTextOrNotAvailable(els.statCleanPrice, context.clean_price_per_100);
+    setTextOrNotAvailable(els.statYieldMid, context.yield_value);
+    els.statValuationDate.textContent = context.valuation_date;
+    els.statOptionSettlement.textContent = context.option_settlement_date;
+
+    els.detailsIssuer.textContent = context.issuer;
+    els.detailsCoupon.textContent = fmtCouponPercent(context.coupon);
+    els.detailsMaturity.textContent = context.maturity_date;
+    els.detailsDayCount.textContent = context.day_count;
+    els.detailsCouponFrequency.textContent = context.coupon_frequency;
+    els.detailsCurrency.textContent = context.currency;
+
+    els.sidebarLiveRow.hidden = false;
+    els.sidebarSourceSystem.textContent = describeProvenance(context);
+    els.sidebarAsofRow.hidden = false;
+    els.sidebarAsOf.textContent = context.as_of_timestamp;
+  }
+
+  function hideContext() {
+    els.provenancePill.hidden = true;
+    els.quoteSideBadge.hidden = true;
+    els.sidebarLiveRow.hidden = true;
+    els.sidebarAsofRow.hidden = true;
+  }
+
+  // Client-side mirror of extract_standalone_option_case_context
+  // (standalone_option_workbench_context.py), field-for-field -- used only for
+  // the Bloomberg refresh-and-price path, whose response carries a display dict
+  // but no separate context section, unlike POST /api/case. Every value is a
+  // direct read off the already-complete draft -- no computation, no inference.
+  function extractContextFromDraft(draft) {
+    const bondOption = draft.bond_option;
+    const isin = bondOption.underlying_isin;
+    const referenceData = (draft.bond_reference_data_universe || []).find(
+      (record) => record.isin === isin
+    );
+    const bondQuote = draft.bond_quote;
+    return {
+      underlying_isin: isin,
+      expiry_date: bondOption.expiry_date,
+      issuer: referenceData.issuer,
+      currency: referenceData.currency,
+      coupon: referenceData.coupon,
+      maturity_date: referenceData.maturity_date,
+      coupon_frequency: referenceData.coupon_frequency,
+      day_count: referenceData.day_count,
+      bond_type: referenceData.bond_type,
+      quote_side: bondQuote.quote_side,
+      clean_price_per_100: bondQuote.clean_price_per_100,
+      accrued_interest_per_100: bondQuote.accrued_interest_per_100,
+      yield_value: bondQuote.yield_value,
+      valuation_date: draft.valuation_date,
+      pricing_timestamp: draft.pricing_timestamp,
+      expiry_timestamp: draft.expiry_timestamp,
+      forward_settlement_date: draft.forward_settlement_date,
+      option_settlement_date: draft.option_settlement_date,
+      source_system: draft.source_system,
+      as_of_timestamp: draft.as_of_timestamp,
+      snapshot_id: draft.snapshot_id,
+    };
+  }
+
   function renderResolvedBondPanel() {
     if (!resolvedBloombergBond) {
       els.resolvedBondPanel.hidden = true;
@@ -1388,23 +1512,25 @@
     els.resolvedBondCurrency.textContent = resolvedBloombergBond.currency;
     els.resolvedBondCleanPrice.textContent = fmt(resolvedBloombergBond.clean_price_per_100);
     els.resolvedBondAccrued.textContent = fmt(resolvedBloombergBond.accrued_interest_per_100);
-    setCouponPercentOrNotAvailable(els.resolvedBondCoupon, resolvedBloombergBond.bond_master.coupon);
-    setTextOrNotAvailable(els.resolvedBondMaturity, resolvedBloombergBond.bond_master.maturity_date);
+    setCouponPercentOrNotAvailable(
+      els.resolvedBondCoupon,
+      resolvedBloombergBond.bond_master.coupon
+    );
+    setTextOrNotAvailable(
+      els.resolvedBondMaturity,
+      resolvedBloombergBond.bond_master.maturity_date
+    );
     els.resolvedBondAcquiredAt.textContent = resolvedBloombergBond.acquired_at;
     els.resolvedBondSource.textContent = resolvedBloombergBond.source_system;
   }
 
-  // Renders the Instrument Details card as the Bloomberg Bond Master
-  // display (PR #141 third revision) -- every field not yet confirmed via
+  // Renders the Bloomberg Bond Master -- every field not confirmed via
   // tools/bloomberg_dapi_probe.py (see
-  // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP)
-  // shows "Not available", never a fabricated or synthetic value.
-  // bond.bond_master_raw carries three further Bloomberg mnemonics
-  // (day count / maturity type / calculation type) that are confirmed to
-  // return a value but are display-only -- shown in their own "Bloomberg
-  // ..." labeled rows, never written into the typed schema fields above.
-  // Shown immediately once a bond is resolved (see syncDraftGating),
-  // independent of whether the draft can yet be priced.
+  // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP) shows
+  // "Not available", never a fabricated value. bond.bond_master_raw carries the
+  // Bloomberg mnemonics that are confirmed to return a value but are
+  // display-only -- shown in their own "Bloomberg ..." labeled rows, never
+  // written into the typed schema fields above.
   function renderBondMaster(bond) {
     const bondMaster = bond.bond_master || {};
     const bondMasterRaw = bond.bond_master_raw || {};
@@ -1419,12 +1545,9 @@
     setTextOrNotAvailable(els.detailsDayCount, bondMaster.day_count);
     setTextOrNotAvailable(els.detailsFirstCouponDate, bondMaster.first_coupon_date);
     setTextOrNotAvailable(els.detailsLastCouponDate, bondMaster.last_coupon_date);
-    setTextOrNotAvailable(els.detailsRedemptionAmount, bondMaster.redemption_amount);
     setTextOrNotAvailable(els.detailsCallable, bondMaster.callable_flag);
     setTextOrNotAvailable(els.detailsSinkable, bondMaster.sinkable_flag);
     setTextOrNotAvailable(els.detailsBondType, bondMaster.bond_type);
-    setTextOrNotAvailable(els.detailsYieldConvention, bondMaster.yield_convention);
-    setTextOrNotAvailable(els.detailsBusinessDayConvention, bondMaster.business_day_convention);
     setTextOrNotAvailable(els.detailsBloombergDayCount, bondMasterRaw.day_count);
     setTextOrNotAvailable(els.detailsBloombergMaturityType, bondMasterRaw.maturity_type);
     setTextOrNotAvailable(els.detailsBloombergCalcType, bondMasterRaw.calc_type);
@@ -1451,127 +1574,20 @@
       els.detailsDayCount,
       els.detailsFirstCouponDate,
       els.detailsLastCouponDate,
-      els.detailsRedemptionAmount,
       els.detailsCallable,
       els.detailsSinkable,
       els.detailsBondType,
-      els.detailsYieldConvention,
-      els.detailsBusinessDayConvention,
       els.detailsBloombergDayCount,
       els.detailsBloombergMaturityType,
       els.detailsBloombergCalcType,
     ].forEach((el) => setTextOrNotAvailable(el, null));
   }
 
-  // Renders the bounded, verbatim live_bloomberg_quote section (see
-  // prepare_live_bloomberg_quote_display in standalone_option_workbench.py)
-  // -- present only on a display produced by the existing Bloomberg
-  // refresh-and-price path. Folds its currency/price/accrued/acquisition
-  // fields into the same Underlying Bond panel the instrument-first lookup
-  // populates, since both describe the one Bloomberg bond currently
-  // selected.
-  function applyLiveBloombergQuote(quote) {
-    if (!quote || !resolvedBloombergBond) {
-      return;
-    }
-    els.resolvedBondCurrency.textContent = quote.currency;
-    els.resolvedBondCleanPrice.textContent = fmt(quote.clean_price_per_100);
-    els.resolvedBondAccrued.textContent = fmt(quote.accrued_interest_per_100);
-    els.resolvedBondAcquiredAt.textContent = quote.acquired_at;
-  }
-
-  function renderDisplay(display) {
-    if (display.status === "FAILED") {
-      const messages = (display.errors || [])
-        .map((e) => `${e.code}: ${e.message}`)
-        .join(" | ");
-      renderFailure(messages || "Pricing failed.");
-      applyLiveBloombergQuote(display.live_bloomberg_quote || null);
-      return;
-    }
-    renderSuccess(display);
-    applyLiveBloombergQuote(display.live_bloomberg_quote || null);
-  }
-
-  // Renders the actionable category summary (always visible once
-  // incomplete) plus the full per-field detail list (collapsed by default
-  // -- "Show details" reveals it). `missing` is computeMissingDraftFields's
-  // flat {label, category} list.
-  function resetMissingDetails() {
-    els.missingFieldsList.hidden = true;
-    els.missingDetailsToggleBtn.textContent = "Show details";
-  }
-
-  function renderMissingFieldsSummary(missing) {
-    const count = missing.length;
-    els.remainingInputSummary.textContent =
-      count === 1
-        ? "1 required input still unresolved"
-        : `${count} required inputs still unresolved`;
-    const byCategory = new Map();
-    missing.forEach(({ label, category }) => {
-      if (!byCategory.has(category)) byCategory.set(category, []);
-      byCategory.get(category).push(label);
-    });
-
-    els.missingCategories.innerHTML = "";
-    MISSING_CATEGORY_ORDER.filter((category) => byCategory.has(category)).forEach((category) => {
-      const labels = byCategory.get(category);
-      const badge = document.createElement("span");
-      badge.className = "missing-category-badge";
-      badge.textContent = `${category} (${labels.length})`;
-      els.missingCategories.appendChild(badge);
-    });
-
-    els.missingFieldsList.innerHTML = "";
-    missing.forEach(({ label, category }) => {
-      const item = document.createElement("li");
-      const link = document.createElement("button");
-      link.type = "button";
-      link.className = "missing-field-link";
-      link.textContent = `${category}: ${label}`;
-      link.addEventListener("click", () => revealMissingField(label, category));
-      item.appendChild(link);
-      els.missingFieldsList.appendChild(item);
-    });
-  }
-
-  // Recomputes every visual/logic consequence of the current draft: whether
-  // the pricing form is shown at all (as soon as a draft exists, so the
-  // trader can start filling it in), whether the instrument header/details
-  // (which need a genuinely completed price) are shown, the concrete
-  // missing-input list, and whether Price/Refresh Bloomberg & Price are
-  // enabled. Called after every lookup, form edit, Price/Refresh outcome,
-  // and Clear.
-  function syncDraftGating() {
-    const hasDraft = !!currentDraft;
-    const missing = hasDraft ? computeMissingDraftFields(currentDraft) : [];
-    const incomplete = hasDraft && missing.length > 0;
-    const hasResult = currentDisplay !== null;
-
-    els.workspaceSection.hidden = !hasDraft;
-    els.instrumentHeaderSection.hidden = !hasResult;
-    // Instrument Details shows Bloomberg's own Bond Master data (PR #141
-    // third revision) -- available the moment a bond is resolved, well
-    // before a complete/priced request exists, unlike the instrument
-    // header above (which shows the priced case's own context).
-    els.instrumentDetailsSection.hidden = !hasDraft;
-
-    els.draftIncompleteNote.hidden = !incomplete;
-    renderMissingFieldsSummary(missing);
-    // The manual-completion section headers read the same missing list, so
-    // their counts can never disagree with the badges or the Price gate.
-    collapsibleSections.forEach((section) => section.refreshSummary());
-
-    els.priceBtn.classList.toggle("is-disabled", !hasDraft || incomplete);
-    els.bloombergRefreshBtn.classList.toggle("is-disabled", !hasDraft || incomplete);
-  }
-
-  // Auto-populated provenance and the Bloomberg raw descriptions, shown so
-  // the trader can see exactly what Shiori set and what Bloomberg actually
-  // returned. The raw descriptions are hints beside the enum selects and are
+  // Auto-populated provenance and the Bloomberg raw descriptions, shown so the
+  // trader can see exactly what Shiori set and what Bloomberg actually
+  // returned. The raw descriptions are evidence beside the enum selects and are
   // never written into the typed draft.
-  function renderManualCompletionContext() {
+  function renderRouteMetadata() {
     const metadata = (source, status) => (source && status ? `${source} · ${status}` : "—");
     els.timingProductId.textContent = currentDraft ? currentDraft.bond_option.product_id : "—";
     els.timingSnapshotId.textContent = currentDraft ? currentDraft.snapshot_id : "—";
@@ -1596,167 +1612,404 @@
           currentDraft.credit_spread_input.status
         )}`
       : "—";
-    els.curveCurrencyLabel.textContent = currentDraft
-      ? currentDraft.bond_option.currency
-      : "—";
+    els.curveCurrencyLabel.textContent = currentDraft ? currentDraft.bond_option.currency : "—";
     const raw = (resolvedBloombergBond && resolvedBloombergBond.bond_master_raw) || {};
+    const master = (resolvedBloombergBond && resolvedBloombergBond.bond_master) || {};
     setTextOrNotAvailable(els.hintDayCount, raw.day_count);
     setTextOrNotAvailable(els.hintBondType, raw.maturity_type);
+    setTextOrNotAvailable(els.hintLastCouponDate, master.last_coupon_date);
   }
 
-  // Trader-draft revision (Issue #140 second revision): builds a brand-new
-  // draft containing only the fields Bloomberg itself returned for this
-  // bond -- every other required field starts null. Never reads from, or
-  // is seeded by, any prior draft or the bundled synthetic fixture (never
-  // loaded by this file at all any more).
-  // --- Truthful provenance labels (Issue #143) -------------------------------
-  //
-  // Every auto-populated value is labelled for what it actually is. None of
-  // these claims a market source Shiori does not have: the forward, the
-  // volatility and the curve nodes are transcribed by the trader, and the
-  // credit-spread state is a route policy statement, not observed data.
-  const MANUAL_SOURCE_SYSTEM = "MANUAL_TRADER_ENTRY";
-  const SNAPSHOT_SOURCE_SYSTEM = "SHIORI_MANUAL_WORKBENCH";
-  const ROUTE_POLICY_SOURCE_SYSTEM = "SHIORI_ROUTE_POLICY";
-  // BLICreditSpreadInput requires a non-blank audit explanation whenever the
-  // treatment is NOT_REQUIRED -- "not required" is an audited decision, never
-  // a silent assumption. This states the verified fact: the standalone
-  // explicit-forward pricing path never reads credit_spread.
-  const CREDIT_SPREAD_NOT_REQUIRED_AUDIT =
-    "Explicit-forward OVME-aligned standalone route: the reviewed pricing path " +
-    "discounts the option payoff on the Option Discount Curve and never reads " +
-    "credit_spread, so no spread is applied and none is fabricated.";
-
-  function shioriIdentifierSuffix(bond) {
-    return `${bond.isin}-${(bond.acquired_at || "").replace(/[^0-9A-Za-z]/g, "")}`;
+  function clearResultFields() {
+    els.priceTotal.textContent = "—";
+    els.priceTotalCcy.textContent = "";
+    els.pricePer100.textContent = "—";
+    els.resultCurrency.textContent = "—";
+    els.greekDelta.textContent = "—";
+    els.greekGamma.textContent = "—";
+    els.greekVega.textContent = "—";
+    els.greekTheta.textContent = "—";
   }
 
-  function buildInitialDraftFromBloomberg(bond) {
-    // Bond Master (PR #141 third revision): populated from bond.bond_master
-    // only -- never bond.bond_master_raw, which is display-only and must
-    // never enter the typed schema. Every destination key is always
-    // present, null unless Eddy has confirmed that field's Bloomberg
-    // mnemonic (see
-    // shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_FIELD_MAP).
-    // ex_dividend_days and status have no Bloomberg mnemonic candidate yet
-    // and stay null here regardless.
-    const bondMaster = bond.bond_master || {};
-    const identifierSuffix = shioriIdentifierSuffix(bond);
-    const pricingTimestamp = textOrNull(bond.acquired_at);
-    return {
-      bond_option: {
-        // payoff_basis / exercise_style / settlement_type are the only
-        // values the reviewed pricing guard accepts for this route, so they
-        // are set rather than asked for. product_id is a Shiori identifier,
-        // not market data.
-        product_id: `SHIORI-WORKBENCH-${identifierSuffix}`,
-        underlying_isin: bond.isin,
-        currency: bond.currency,
-        payoff_basis: "PRICE",
-        option_type: null,
-        exercise_style: "EUROPEAN",
-        settlement_type: "CASH",
-        expiry_date: null,
-        notional: null,
-        position: null,
-        strike_price: null,
-        strike_yield: null,
-        exercise_start_date: null,
-      },
-      bond_reference_data_universe: [
-        {
-          isin: bond.isin,
-          issuer: bond.name,
-          currency: bond.currency,
-          coupon: bondMaster.coupon ?? null,
-          coupon_frequency: bondMaster.coupon_frequency ?? null,
-          maturity_date: bondMaster.maturity_date ?? null,
-          issue_date: bondMaster.issue_date ?? null,
-          day_count: bondMaster.day_count ?? null,
-          callable_flag: bondMaster.callable_flag ?? null,
-          sinkable_flag: bondMaster.sinkable_flag ?? null,
-          bond_type: bondMaster.bond_type ?? null,
-          ex_dividend_days: null,
-          first_coupon_date: bondMaster.first_coupon_date ?? null,
-          last_coupon_date: bondMaster.last_coupon_date ?? null,
-          status: null,
-        },
+  // The single, unified failure path: used for a FAILED PricingResult, an HTTP
+  // 400/non-2xx bridge response, a network-level fetch rejection, and a
+  // non-JSON response body alike. Never leaves a prior successful result or its
+  // "loaded" status on screen; never touches currentDraft, so the trader can
+  // fix the form and retry.
+  function renderFailure(message) {
+    clearResultFields();
+    els.errorBanner.textContent = message;
+    els.errorBanner.hidden = false;
+    els.statusIndicator.classList.add("failed");
+    els.statusText.textContent = "Pricing failed";
+  }
+
+  function renderSuccess(display) {
+    els.errorBanner.hidden = true;
+    els.errorBanner.textContent = "";
+    els.statusIndicator.classList.remove("failed");
+    els.statusText.textContent = "Draft priced";
+
+    els.priceTotal.textContent = fmt(display.total_notional_model_fair_premium);
+    els.priceTotalCcy.textContent = display.result_currency || "";
+    els.pricePer100.textContent = fmt(display.model_fair_premium_per_100);
+    els.resultCurrency.textContent = display.result_currency || "—";
+    els.greekDelta.textContent = fmt(display.forward_price_delta_per_100);
+    els.greekGamma.textContent = fmt(display.forward_price_gamma_per_100);
+    els.greekVega.textContent = fmt(display.vega_per_vol_point_per_100);
+    els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
+  }
+
+  // Folds the bounded, verbatim live_bloomberg_quote section (see
+  // prepare_live_bloomberg_quote_display in standalone_option_workbench.py)
+  // into the same Instrument panel the lookup populates, since both describe
+  // the one Bloomberg bond currently selected.
+  function applyLiveBloombergQuote(quote) {
+    if (!quote || !resolvedBloombergBond) return;
+    els.resolvedBondCurrency.textContent = quote.currency;
+    els.resolvedBondCleanPrice.textContent = fmt(quote.clean_price_per_100);
+    els.resolvedBondAccrued.textContent = fmt(quote.accrued_interest_per_100);
+    els.resolvedBondAcquiredAt.textContent = quote.acquired_at;
+  }
+
+  function renderDisplay(display) {
+    if (display.status === "FAILED") {
+      const messages = (display.errors || [])
+        .map((e) => `${e.code}: ${e.message}`)
+        .join(" | ");
+      renderFailure(messages || "Pricing failed.");
+      applyLiveBloombergQuote(display.live_bloomberg_quote || null);
+      return;
+    }
+    renderSuccess(display);
+    applyLiveBloombergQuote(display.live_bloomberg_quote || null);
+  }
+
+  // --- Market review rows ---------------------------------------------------
+
+  const REVIEW_SOURCING_NOTES = {
+    forward:
+      "Not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a cash bond " +
+      "on this DAPI route (BAD_FLD for both the UST and the Gilt test securities, " +
+      "with the confirmed OP046 / OP188 overrides applied). Shiori does not " +
+      "reconstruct a forward from spot, repo, FTP, MMkt or a par rate.",
+    vol:
+      "Not sourced. Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned " +
+      "BAD_FLD. YIELD_VOL is not a substitute and no yield-to-price conversion is " +
+      "approved, so neither is offered here.",
+    discounting:
+      "Not sourced. No approved Bloomberg sourcing or curve-construction " +
+      "methodology exists for the Option Discount Curve. MMkt, repo, FTP, par and " +
+      "swap rates must not be entered as continuous zero rates.",
+  };
+
+  function renderMarketReview(unresolvedIds) {
+    const rows = [
+      ["forward-review", els.forwardReviewStatus, els.forwardSourcingNote, REVIEW_SOURCING_NOTES.forward],
+      ["vol-review", els.volReviewStatus, els.volSourcingNote, REVIEW_SOURCING_NOTES.vol],
+      [
+        "discounting-review",
+        els.discountingReviewStatus,
+        els.discountingSourcingNote,
+        REVIEW_SOURCING_NOTES.discounting,
       ],
-      // The acquisition event is already the source for these three values.
-      // Its timestamp is preserved exactly for pricing, its represented local
-      // date supplies valuation_date, and only as_of_timestamp is respelled
-      // under the approved UTC normalization rule. No settlement or expiry
-      // date is inferred.
-      valuation_date: representedLocalCalendarDate(pricingTimestamp),
-      as_of_timestamp: normalizeAsOfFromAcquisition(pricingTimestamp),
-      pricing_timestamp: pricingTimestamp,
-      expiry_timestamp: null,
-      reporting_date: null,
-      forward_settlement_date: null,
-      option_settlement_date: null,
-      source_system: SNAPSHOT_SOURCE_SYSTEM,
-      snapshot_id: `SHIORI-SNAPSHOT-${identifierSuffix}`,
-      // ACTIVE is the only status the snapshot contract accepts at
-      // construction; MANUAL_VERIFIED needs an audit policy that does not
-      // exist yet (see the note in the timing section).
-      snapshot_status: "ACTIVE",
-      bond_quote: {
-        isin: bond.isin,
-        currency: bond.currency,
-        // Bloomberg returned a clean price, so the quote's primary basis is
-        // PRICE -- a label for what was actually loaded, not a conversion.
-        price_type: "PRICE",
-        quote_side: bond.quote_side,
-        source_system: bond.source_system,
-        status: "ACTIVE",
-        clean_price_per_100: bond.clean_price_per_100,
-        yield_value: null,
-        accrued_interest_per_100: bond.accrued_interest_per_100,
-      },
-      forward_clean_price_input: {
-        forward_clean_price_per_100: null,
-        // The contract requires the forward's side to equal the spot side,
-        // so it is mirrored mechanically rather than asked for twice.
-        quote_side: bond.quote_side,
-        source_system: MANUAL_SOURCE_SYSTEM,
-        status: "ACTIVE",
-      },
-      curve_points: [],
-      volatility_input: {
-        volatility: null,
-        volatility_basis: "PRICE_VOL",
-        source_system: MANUAL_SOURCE_SYSTEM,
-        status: "ACTIVE",
-        override_or_fallback_audit: null,
-      },
-      credit_spread_input: {
-        // Verified in #142: the standalone pricing path never reads
-        // credit_spread, so NOT_REQUIRED is the truthful state. The contract
-        // demands credit_spread/credit_spread_basis stay null for this
-        // treatment and requires the audit text below.
-        spread_treatment: "NOT_REQUIRED",
-        source_system: ROUTE_POLICY_SOURCE_SYSTEM,
-        status: "ACTIVE",
-        credit_spread: null,
-        credit_spread_basis: null,
-        override_or_fallback_audit: CREDIT_SPREAD_NOT_REQUIRED_AUDIT,
-      },
-      deposit_rate_observation: null,
-      bond_reference_source_name: null,
-    };
+    ];
+    let outstanding = 0;
+    rows.forEach(([id, statusEl, noteEl, note]) => {
+      const unresolved = unresolvedIds.includes(id);
+      if (unresolved) outstanding += 1;
+      statusEl.textContent = unresolved ? "Trader override required" : "Reviewed";
+      statusEl.classList.toggle("is-outstanding", unresolved);
+      statusEl.classList.toggle("is-reviewed", !unresolved);
+      noteEl.textContent = note;
+    });
+    els.marketReviewSummary.textContent =
+      outstanding === 0 ? "All reviewed" : `${outstanding} awaiting review`;
   }
 
-  // Instrument-first Bloomberg bond lookup: resolves one bond's own
-  // identity and one quote side's price via /api/bloomberg/bond -- no
-  // active case involved, no expected-ISIN check. On success this always
-  // starts a brand-new draft (never retaining any prior draft's inputs) and
-  // shows the pricing form immediately.
+  // --- The one unresolved dependency ---------------------------------------
+  //
+  // Requirement 4: when a genuinely required input is missing, the trader sees
+  // one clear unresolved dependency -- what is missing, why, what Bloomberg
+  // actually answered, and the next step -- not a scattering of unexplained
+  // blank fields. Remaining outstanding groups are named compactly beneath it
+  // so nothing is hidden, but only one is explained at a time.
+
+  let unresolvedFocusGroup = null;
+
+  function unresolvedGroups(draft) {
+    if (draft === null) {
+      return [WORKFLOW_GROUPS[0]];
+    }
+    return WORKFLOW_GROUPS.filter((group) => !group.resolved(draft));
+  }
+
+  function renderUnresolvedDependency(groups) {
+    if (groups.length === 0) {
+      els.unresolvedPanel.hidden = true;
+      unresolvedFocusGroup = null;
+      return;
+    }
+    const primary = groups[0];
+    unresolvedFocusGroup = primary;
+    els.unresolvedPanel.hidden = false;
+    els.unresolvedTitle.textContent = primary.unresolved.title;
+    els.unresolvedMissing.textContent = primary.unresolved.missing;
+    els.unresolvedWhy.textContent = primary.unresolved.why;
+    els.unresolvedEvidence.textContent = primary.unresolved.evidence;
+    els.unresolvedNext.textContent = primary.unresolved.next;
+
+    const rest = groups.slice(1).map((group) => group.label);
+    els.unresolvedAlso.textContent =
+      rest.length === 0
+        ? "Nothing else is outstanding."
+        : `Also outstanding, one at a time: ${rest.join(" · ")}`;
+  }
+
+  function revealUnresolvedFocus() {
+    const group = unresolvedFocusGroup;
+    if (!group) return;
+    if (group.revealAdvanced) setAdvancedCollapsed(false);
+    const target = document.querySelector(group.locator);
+    if (!target) return;
+    if (!target.matches("input, select, button, textarea, [tabindex]")) {
+      target.setAttribute("tabindex", "-1");
+    }
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  // --- Price gate: the real typed builder decides ---------------------------
+  //
+  // Requirement 5: a non-empty form is never sufficient. Once every workflow
+  // group is structurally resolved, the draft is sent to POST /api/case/validate,
+  // which runs the existing build_request_from_standalone_option_case -- the
+  // same typed builder, resolver and eligibility gates the real pricing call
+  // uses, and no pricing at all. Price stays disabled until that returns ready.
+
+  let validationGeneration = 0;
+  let validationTimer = null;
+
+  function invalidateBuilderValidation() {
+    builderValidation = { state: "unknown", error: null };
+    validationGeneration++;
+    if (validationTimer !== null) {
+      clearTimeout(validationTimer);
+      validationTimer = null;
+    }
+  }
+
+  function scheduleBuilderValidation() {
+    if (validationTimer !== null) clearTimeout(validationTimer);
+    validationTimer = setTimeout(runBuilderValidation, 60);
+  }
+
+  async function runBuilderValidation() {
+    validationTimer = null;
+    if (!currentDraft) return;
+    const generation = ++validationGeneration;
+    const draftAtRequestTime = currentDraft;
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/case/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draftAtRequestTime),
+      });
+      payload = await response.json();
+    } catch (err) {
+      if (generation !== validationGeneration) return;
+      builderValidation = { state: "failed", error: "Validation request failed: " + err.message };
+      syncDraftGating();
+      return;
+    }
+    if (generation !== validationGeneration) return;
+    builderValidation = payload && payload.ready
+      ? { state: "ready", error: null }
+      : { state: "failed", error: (payload && payload.error) || "The typed builder rejected this draft." };
+    syncDraftGating();
+  }
+
+  // --- Gating ---------------------------------------------------------------
+
+  function syncDraftGating() {
+    const hasDraft = currentDraft !== null;
+    const groups = unresolvedGroups(currentDraft);
+    const unresolvedIds = groups.map((group) => group.id);
+    const hasResult = currentDisplay !== null;
+
+    els.workspaceSection.hidden = !hasDraft;
+    els.instrumentHeaderSection.hidden = !hasResult;
+
+    els.instrumentGroupStatus.textContent = hasDraft
+      ? "Loaded from Bloomberg"
+      : "Enter an ISIN or CUSIP";
+
+    // Rendered here rather than only on a form edit, so a freshly-loaded draft
+    // shows its real (blocking) coverage state immediately instead of an
+    // uninformative em dash.
+    renderCurveCoverage();
+    renderMarketReview(unresolvedIds);
+    renderUnresolvedDependency(groups);
+
+    const advancedOutstanding = groups.filter((group) => group.advanced).length;
+    els.advancedSummary.textContent =
+      !hasDraft || advancedOutstanding === 0
+        ? "Overrides, derived values and provenance"
+        : `${advancedOutstanding} override group(s) outstanding`;
+
+    // Structurally complete is necessary but not sufficient: the real typed
+    // builder must also accept the draft before Price is enabled.
+    const structurallyComplete = hasDraft && groups.length === 0;
+    if (structurallyComplete && builderValidation.state === "unknown") {
+      scheduleBuilderValidation();
+    }
+    const ready = structurallyComplete && builderValidation.state === "ready";
+    els.priceBtn.classList.toggle("is-disabled", !ready);
+    els.bloombergRefreshBtn.classList.toggle("is-disabled", !ready);
+
+    if (structurallyComplete && builderValidation.state === "failed") {
+      els.unresolvedPanel.hidden = false;
+      unresolvedFocusGroup = null;
+      els.unresolvedTitle.textContent = "The typed builder rejected this draft";
+      els.unresolvedMissing.textContent =
+        "Every input is present, but the reviewed standalone builder does not accept " +
+        "them together.";
+      els.unresolvedWhy.textContent = builderValidation.error || "";
+      els.unresolvedEvidence.textContent =
+        "This message comes from the existing typed contracts, resolver and " +
+        "standalone eligibility gates — the same code the real pricing call runs. " +
+        "Shiori shows it verbatim rather than reinterpreting it.";
+      els.unresolvedNext.textContent =
+        "Correct the value the message names. Price stays disabled until the real " +
+        "builder accepts the draft.";
+      els.unresolvedAlso.textContent = "Nothing else is outstanding.";
+    }
+  }
+
+  // --- Request generation / abort tracking ---------------------------------
+
+  let bondLookupGeneration = 0;
+  let inFlightBondLookupController = null;
+
+  function beginBondLookupRequest() {
+    return ++bondLookupGeneration;
+  }
+
+  function isStaleBondLookupRequest(generation) {
+    return generation !== bondLookupGeneration;
+  }
+
+  function invalidatePendingBondLookupRequest() {
+    beginBondLookupRequest();
+    if (inFlightBondLookupController) {
+      inFlightBondLookupController.abort();
+      inFlightBondLookupController = null;
+    }
+  }
+
+  let currentGeneration = 0;
+  let inFlightPriceController = null;
+
+  function beginRequest() {
+    return ++currentGeneration;
+  }
+
+  function isStaleRequest(generation) {
+    return generation !== currentGeneration;
+  }
+
+  function invalidatePendingPriceRequest() {
+    beginRequest();
+    if (inFlightPriceController) {
+      inFlightPriceController.abort();
+      inFlightPriceController = null;
+    }
+  }
+
+  let bloombergGeneration = 0;
+  let inFlightBloombergController = null;
+
+  function beginBloombergRequest() {
+    return ++bloombergGeneration;
+  }
+
+  function isStaleBloombergRequest(generation) {
+    return generation !== bloombergGeneration;
+  }
+
+  function invalidatePendingBloombergRequest() {
+    beginBloombergRequest();
+    if (inFlightBloombergController) {
+      inFlightBloombergController.abort();
+      inFlightBloombergController = null;
+    }
+  }
+
+  // --- Whole-run state reset ------------------------------------------------
+  //
+  // Requirement: Refresh Bloomberg, Clear and a second lookup must each fully
+  // discard the previous bond's trader inputs, overrides, curve rows, status,
+  // errors, provenance and pricing results. One function owns that, so no
+  // caller can reset "most" of it.
+
+  function resetRunState() {
+    invalidatePendingPriceRequest();
+    invalidatePendingBloombergRequest();
+    invalidateBuilderValidation();
+
+    resolvedBloombergBond = null;
+    currentDraft = null;
+    overrideProvenance = new Map();
+    setCurrentDisplay(null);
+
+    renderResolvedBondPanel();
+    clearBondMaster();
+    hideContext();
+    clearResultFields();
+    clearTraderForm();
+    renderRouteMetadata();
+    renderOverrideProvenance();
+    setAdvancedCollapsed(true);
+
+    els.errorBanner.hidden = true;
+    els.errorBanner.textContent = "";
+    els.statusIndicator.classList.remove("failed");
+  }
+
+  // A Bloomberg *call* failure -- an instrument lookup or the refresh-and-price
+  // path alike -- discards the whole run. A failed Bloomberg call must never
+  // leave a previous bond's quote or instrument data on screen, and must never
+  // leave a draft anchored to an acquisition event now known to be stale.
+  function renderBloombergFailure(message) {
+    resetRunState();
+    els.errorBanner.textContent = message;
+    els.errorBanner.hidden = false;
+    els.statusIndicator.classList.add("failed");
+    els.statusText.textContent = "Bloomberg request failed";
+    syncDraftGating();
+  }
+
+  // A malformed identifier or unselected quote side is caught here, before any
+  // request is made, so no Bloomberg answer is in question and nothing on
+  // screen has gone stale. It reports the problem without discarding a run the
+  // trader may have already completed -- unlike renderBloombergFailure above.
+  function renderLookupInputError(message) {
+    els.errorBanner.textContent = message;
+    els.errorBanner.hidden = false;
+    els.statusIndicator.classList.add("failed");
+    els.statusText.textContent = "Check the lookup inputs";
+  }
+
+  // --- Actions --------------------------------------------------------------
+
   async function loadBloombergBond() {
     const rawIdentifier = els.bondIdentifierInput.value;
     const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
     const parsed = parseBondIdentifier(rawIdentifier);
     if (!parsed || !quoteSide) {
-      renderBloombergError(
+      renderLookupInputError(
         "Enter a 12-character ISIN or 9-character CUSIP and select a Quote Side before loading."
       );
       return;
@@ -1783,19 +2036,21 @@
       });
       payload = await response.json();
     } catch (err) {
-      // Either a genuine network/JSON failure, or this request was
-      // superseded -- either way, a failed lookup must preserve the
-      // previously resolved bond, draft, and completed screen exactly as
-      // they were.
+      // Either a genuine network/JSON failure, or this request was superseded.
       if (isStaleBondLookupRequest(generation)) return;
-      renderBloombergError("Bloomberg bond lookup failed: " + err.message);
+      renderBloombergFailure("Bloomberg bond lookup failed: " + err.message);
       return;
     }
     if (isStaleBondLookupRequest(generation)) return;
     if (!response.ok) {
-      renderBloombergError(payload.error || "Bloomberg bond lookup failed.");
+      renderBloombergFailure(payload.error || "Bloomberg bond lookup failed.");
       return;
     }
+
+    // A fresh lookup always starts from a completely reset run: it belongs to
+    // another bond, and never inherits an input, override, curve row,
+    // provenance stamp or result from the previous one.
+    resetRunState();
 
     resolvedBloombergBond = {
       qualifiedIdentifier: parsed.qualified,
@@ -1808,50 +2063,32 @@
       accrued_interest_per_100: payload.accrued_interest_per_100,
       acquired_at: payload.acquired_at,
       source_system: payload.source_system,
-      // Bond Master (PR #141 third revision): every field here is either a
-      // confirmed Bloomberg mnemonic's real value or null pending Eddy's own
-      // real-DAPI confirmation (see tools/bloomberg_dapi_probe.py) -- never
-      // guessed or filled from the synthetic fixture. `payload.bond_master`
-      // always carries every destination key regardless of how many are
-      // currently confirmed. `payload.bond_master_raw` carries the three
-      // confirmed-but-display-only Bloomberg mnemonics (day count/maturity
-      // type/calc type) -- these must never be read into currentDraft's
-      // typed schema, only shown verbatim in Instrument Details.
+      // Every field here is either a confirmed Bloomberg mnemonic's real value
+      // or null pending real-DAPI confirmation -- never guessed.
+      // `bond_master_raw` carries the confirmed-but-display-only mnemonics,
+      // which must never be read into currentDraft's typed schema.
       bond_master: payload.bond_master || {},
       bond_master_raw: payload.bond_master_raw || {},
     };
 
-    // A fresh lookup intentionally invalidates any prior draft/result -- it
-    // belongs to another bond -- and never copies a bond-specific or market
-    // input from it.
     currentDraft = buildInitialDraftFromBloomberg(resolvedBloombergBond);
-    setCurrentDisplay(null);
-    hideContext();
-    clearResultFields();
-    clearOptionTermsForm();
-    setDerivedTimingFormFromDraft();
-    resetMissingDetails();
-    renderManualCompletionContext();
+    setDerivedFormFromDraft();
+    renderRouteMetadata();
+    renderOverrideProvenance();
 
-    els.errorBanner.hidden = true;
-    els.errorBanner.textContent = "";
-    els.statusIndicator.classList.remove("failed");
     els.statusText.textContent = "Bloomberg bond loaded";
     renderResolvedBondPanel();
     renderBondMaster(resolvedBloombergBond);
     syncDraftGating();
   }
 
-  // Prices the current draft through the existing reviewed builder --
-  // reuses POST /api/case unchanged (the same route the developer-only
-  // Case JSON workflow already used) rather than adding any new pricing
-  // route or logic: a full case dict in, {case, overlay, context, display}
-  // out. Disabled (see syncDraftGating) until the draft has no missing
-  // required field; this direct guard is defense-in-depth against a forced
-  // click bypassing the CSS state.
+  // Prices the current draft through the existing reviewed builder -- reuses
+  // POST /api/case unchanged rather than adding any new pricing route or logic:
+  // a full case dict in, {case, overlay, context, display} out.
   async function priceCurrentDraft() {
     if (!currentDraft) return;
-    if (computeMissingDraftFields(currentDraft).length > 0) return;
+    if (unresolvedGroups(currentDraft).length > 0) return;
+    if (builderValidation.state !== "ready") return;
 
     const generation = beginRequest();
     invalidatePendingBondLookupRequest();
@@ -1888,61 +2125,31 @@
 
     currentDraft = payload.case;
     renderContext(payload.context);
-    setFormFromOverlay(extractOverlayFromDraft(currentDraft));
-    setCurrentDisplay(payload.display);
+    setTradeFormFromDraft(currentDraft);
+    refreshOverrideProvenance();
+    renderOverrideProvenance();
+    setCurrentDisplay(withOverrideProvenance(payload.display));
     renderDisplay(payload.display);
     syncDraftGating();
   }
 
-  function clearDraft() {
-    invalidatePendingPriceRequest();
-    invalidatePendingBloombergRequest();
-    invalidatePendingBondLookupRequest();
-
-    // Clear removes the selected Bloomberg bond and the current draft
-    // entirely -- it must never restore or display the bundled synthetic
-    // case, which this file no longer loads at all.
-    resolvedBloombergBond = null;
-    currentDraft = null;
-    setCurrentDisplay(null);
-    renderResolvedBondPanel();
-    clearBondMaster();
-    hideContext();
-    clearResultFields();
-    clearOptionTermsForm();
-    resetMissingDetails();
-
-    els.errorBanner.hidden = true;
-    els.errorBanner.textContent = "";
-    els.statusIndicator.classList.remove("failed");
-    els.statusText.textContent = "No bond loaded";
-    renderManualCompletionContext();
-    syncDraftGating();
-    resetCollapseStates();
-  }
-
-  // Bloomberg quote refresh: prices the current draft with one fresh
-  // Bloomberg bond quote in place of its own -- exactly like Price, except
-  // the bridge substitutes one live quote before pricing. Reuses the
-  // existing POST /api/case/bloomberg route unchanged: the resolved bond's
-  // qualified identifier is sent as `bloomberg_security` (Bloomberg DAPI
-  // accepts it natively) and the six trader-editable fields are read
-  // straight off the draft as the route's existing `overlay` shape. Only
-  // runs once the draft is complete (see syncDraftGating), same gate as
-  // Price. Its response carries no separate context section (unlike
-  // POST /api/case), so context is derived client-side from the
-  // already-complete draft via extractContextFromDraft.
+  // Bloomberg quote refresh: prices the current draft with one fresh Bloomberg
+  // bond quote in place of its own -- exactly like Price, except the bridge
+  // substitutes one live quote before pricing. Reuses the existing POST
+  // /api/case/bloomberg route unchanged.
   async function refreshBloombergAndPrice() {
     if (!currentDraft || !resolvedBloombergBond) return;
-    if (computeMissingDraftFields(currentDraft).length > 0) return;
+    if (unresolvedGroups(currentDraft).length > 0) return;
+    if (builderValidation.state !== "ready") return;
 
     const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
     if (!quoteSide) {
-      renderBloombergError("Select a Quote Side before refreshing.");
+      renderLookupInputError("Select a Quote Side before refreshing.");
       return;
     }
 
     const overlay = extractOverlayFromDraft(currentDraft);
+    const draftAtRequestTime = currentDraft;
     const generation = beginBloombergRequest();
     invalidatePendingPriceRequest();
     invalidatePendingBondLookupRequest();
@@ -1960,7 +2167,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          case: currentDraft,
+          case: draftAtRequestTime,
           overlay,
           bloomberg_security: resolvedBloombergBond.qualifiedIdentifier,
           quote_side: quoteSide,
@@ -1970,29 +2177,45 @@
       payload = await response.json();
     } catch (err) {
       if (isStaleBloombergRequest(generation)) return;
-      renderBloombergError("Bloomberg refresh failed: " + err.message);
+      renderBloombergFailure("Bloomberg refresh failed: " + err.message);
       return;
     }
     if (isStaleBloombergRequest(generation)) return;
     if (!response.ok) {
-      renderBloombergError(payload.error || "Bloomberg refresh failed.");
+      renderBloombergFailure(payload.error || "Bloomberg refresh failed.");
       return;
     }
 
-    renderContext(extractContextFromDraft(currentDraft));
-    setCurrentDisplay(payload);
+    renderContext(extractContextFromDraft(draftAtRequestTime));
+    setCurrentDisplay(withOverrideProvenance(payload));
     renderDisplay(payload);
     syncDraftGating();
   }
 
-  // Download the current run as JSON/Markdown, reusing only the existing
-  // pure export helpers server-side. Sends exactly the display dict active
-  // at click time. Codex review (PR #139): a Price/Refresh/Clear/lookup
-  // action can change currentDisplay while this request is still in
-  // flight, so the response is checked against displayGeneration before it
-  // is ever turned into a download.
+  // The exported run carries the same override provenance the Advanced section
+  // shows, so an exported artifact can always be traced back to what Shiori
+  // sourced and what the trader had to supply. The pricing display dict itself
+  // is never otherwise touched.
+  function withOverrideProvenance(display) {
+    const records = overrideProvenanceRecords();
+    if (records.length === 0) return display;
+    return { ...display, trader_override_provenance: records };
+  }
+
+  function clearDraft() {
+    invalidatePendingBondLookupRequest();
+    resetRunState();
+    els.statusText.textContent = "No bond loaded";
+    syncDraftGating();
+  }
+
+  // Download the current run as JSON/Markdown, reusing only the existing pure
+  // export helpers server-side. Sends exactly the display dict active at click
+  // time; a Price/Refresh/Clear/lookup action can change currentDisplay while
+  // this request is in flight, so the response is checked against
+  // displayGeneration before it is ever turned into a download.
   async function downloadCurrentRun(format) {
-    if (!currentDisplay) return; // mirrors the is-disabled state; never fabricate a download
+    if (!currentDisplay) return; // mirrors the is-disabled state
 
     const generation = displayGeneration;
     const displayAtRequestTime = currentDisplay;
@@ -2009,10 +2232,8 @@
     } catch (err) {
       return; // no display change results from a failed export attempt
     }
-    if (generation !== displayGeneration) return; // stale: the displayed run changed while this was in flight
-    if (!response.ok) {
-      return;
-    }
+    if (generation !== displayGeneration) return; // the displayed run changed
+    if (!response.ok) return;
 
     const blob = new Blob([payload.content], { type: payload.mime });
     const url = URL.createObjectURL(blob);
@@ -2024,6 +2245,8 @@
     document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
   }
+
+  // --- Wiring ---------------------------------------------------------------
 
   els.optionTypeToggle.addEventListener("click", (event) => {
     const opt = event.target.closest(".opt");
@@ -2056,6 +2279,15 @@
     addCurveRow("", "");
     applyManualInputsToDraft();
   });
+  els.editCurveBtn.addEventListener("click", () => {
+    setAdvancedCollapsed(false);
+    const target = document.querySelector("#curve-rows .curve-tenor-input");
+    if (target) {
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  });
+  els.unresolvedGotoBtn.addEventListener("click", revealUnresolvedFocus);
 
   els.priceBtn.addEventListener("click", priceCurrentDraft);
   els.clearBtn.addEventListener("click", clearDraft);
@@ -2063,29 +2295,20 @@
   els.downloadMarkdownBtn.addEventListener("click", () => downloadCurrentRun("markdown"));
   els.bloombergRefreshBtn.addEventListener("click", refreshBloombergAndPrice);
   els.loadBloombergBondBtn.addEventListener("click", loadBloombergBond);
-  // Full per-field missing-input detail is collapsed by default -- only the
-  // category summary shows until the trader asks for more.
-  els.missingDetailsToggleBtn.addEventListener("click", () => {
-    const expanded = els.missingFieldsList.hidden;
-    els.missingFieldsList.hidden = !expanded;
-    els.missingDetailsToggleBtn.textContent = expanded ? "Hide details" : "Show details";
-  });
 
-  // No bootstrap: the trader-draft revision starts with nothing loaded at
-  // all (Issue #140 second revision, requirement 1) -- syncDraftGating()
-  // establishes the correct all-hidden/all-disabled initial state without
-  // any network call.
+  // No bootstrap: the page starts with nothing loaded at all. Advanced starts
+  // collapsed, and syncDraftGating establishes the correct all-hidden/
+  // all-disabled initial state without any network call.
+  setAdvancedCollapsed(true);
+  clearTraderForm();
   syncDraftGating();
 
-  // Test-only, read-only accessor: changes no stored value, API response,
-  // conversion, or pricing behavior -- it only lets a browser test confirm
-  // that currentDraft's own coupon stays a decimal fraction (e.g. 0.0375)
-  // even though the UI now displays it as a percentage.
+  // Test-only, read-only accessors: they change no stored value, API response,
+  // conversion, or pricing behavior.
   window.__shioriTestGetCurrentDraft = () => currentDraft;
-  // Read-only too: lets a browser test assert the checklist's own conditional
-  // rules directly (notably BLICreditSpreadInput's treatment-dependent
-  // requirements) without having to drive a UI that deliberately never
-  // offers a credit-spread control on this route.
-  window.__shioriTestComputeMissingLabels = () =>
-    currentDraft ? computeMissingDraftFields(currentDraft).map((item) => item.label) : [];
+  window.__shioriTestUnresolvedGroupIds = () =>
+    unresolvedGroups(currentDraft).map((group) => group.id);
+  window.__shioriTestOrdinaryWorkflowGroupIds = () => ORDINARY_WORKFLOW_GROUP_IDS.slice();
+  window.__shioriTestOverrideProvenance = () => overrideProvenanceRecords();
+  window.__shioriTestBuilderValidationState = () => builderValidation.state;
 })();
