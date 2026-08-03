@@ -2599,8 +2599,11 @@ def test_a_quote_side_mismatch_never_claims_a_bloomberg_request_failed(
     _wait_until(lambda: "Quote Side does not match" in page.inner_text("#unresolved-title"))
 
     evidence = page.inner_text("#unresolved-evidence")
-    assert "No Bloomberg request was made or failed" in evidence
+    assert "only valid for the side it was sourced on" in evidence
     assert "request for this run failed" not in evidence
+    # Round 9: and no claim about request history in either direction -- see
+    # test_a_quote_side_mismatch_claims_nothing_about_request_history.
+    assert "request" not in evidence.replace("requests", "")
 
     # And the converse: a genuine refresh failure still says a request failed,
     # so distinguishing the two did not weaken the real failure explanation.
@@ -2619,6 +2622,45 @@ def test_a_quote_side_mismatch_never_claims_a_bloomberg_request_failed(
         lambda: "The Bloomberg request for this run failed"
         in page.inner_text("#unresolved-evidence")
     )
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_quote_side_mismatch_claims_nothing_about_request_history(
+    server_url, page
+) -> None:
+    """Codex review round 9: the round-8 evidence swapped one false history for
+    another.
+
+    It asserted "No Bloomberg request was made or failed". That holds when the
+    trader simply clicks the toggle on a settled ticket, but changing the side
+    while a refresh is outstanding *aborts a request that had already been
+    sent* -- so the sentence is false exactly when a request did happen.
+
+    The panel must therefore claim nothing about request history at all. This
+    drives the aborting case specifically, which is the one the round-8 wording
+    got wrong.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    # Hold a refresh open so the side change aborts a genuinely sent request.
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    _select_quote_side(page, "BID")
+    _wait_until(lambda: "Quote Side does not match" in page.inner_text("#unresolved-title"))
+
+    evidence = page.inner_text("#unresolved-evidence")
+    assert "only valid for the side it was sourced on" in evidence
+    # Neither the invalidated-state failure claim nor round 8's denial: a
+    # request *was* sent here, so both would be untrue.
+    assert "request for this run failed" not in evidence
+    assert "No Bloomberg request was made" not in evidence
 
 
 @_PLAYWRIGHT_SKIP

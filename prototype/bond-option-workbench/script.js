@@ -250,15 +250,21 @@
     "The Bloomberg request for this run failed, so the previously sourced quote " +
     "and instrument data can no longer be shown or priced against -- Shiori will " +
     "not fall back to them. Your own trade inputs are untouched.";
-  // Deliberately its own text rather than the invalidated-state evidence above:
-  // nothing was requested and nothing failed here. The trader simply selected a
-  // side the sourced quote was not sourced on, and saying otherwise would put a
-  // Bloomberg failure on screen that never happened.
+  // Deliberately its own text rather than the invalidated-state evidence above,
+  // which asserts a Bloomberg failure that did not happen on this path.
+  //
+  // It states the mismatch and nothing about request history, because no claim
+  // about request history is true in every case this panel appears: usually no
+  // request was made at all, but changing the side while a refresh or lookup is
+  // outstanding aborts one that had already been sent. Saying "no request was
+  // made or failed" would simply swap one false history for another, so it says
+  // neither -- the mismatch itself is what the trader has to act on, and it is
+  // true either way.
   const EVIDENCE_QUOTE_SIDE_MISMATCH =
-    "No Bloomberg request was made or failed. The quote backing this run was " +
-    "sourced on one side and Quote Side now reads another, and a quote is only " +
-    "valid for the side it was sourced on -- Shiori neither prices an unselected " +
-    "side nor relabels this quote as the selected one.";
+    "A quote is only valid for the side it was sourced on. The quote backing " +
+    "this run was sourced on one side and Quote Side now reads another, so " +
+    "Shiori neither prices the unselected side nor relabels this quote as the " +
+    "selected one. The sourced quote itself is unchanged.";
 
   // --- Workflow groups -----------------------------------------------------
   //
