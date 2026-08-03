@@ -2322,6 +2322,62 @@ def test_clear_invalidates_a_pending_bond_lookup(server_url, page) -> None:
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_quote_side_change_during_a_pending_lookup_discards_that_lookup(
+    server_url, page
+) -> None:
+    """Codex review round 6: routing Quote Side through ``applyManualInputsToDraft``
+    covered Price and Refresh but not Load.
+
+    While the first lookup is outstanding there is no draft yet, so that
+    function returns at its own ``!currentDraft`` guard before reaching any
+    invalidation -- and it never invalidated bond lookups in any case. The
+    old-side response was therefore accepted and used to build an old-sided
+    draft while the toggle showed the newly selected side, and an ordinary
+    Price could then price that draft on a side the trader had not chosen.
+    """
+
+    page.goto(f"{server_url}/")
+
+    pending: list = []
+    page.route("**/api/bloomberg/bond", lambda route: pending.append(route))
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    assert json.loads(pending[0].request.post_data)["quote_side"] == "MID"
+
+    # The trader switches side while that MID lookup is still outstanding.
+    _select_quote_side(page, "BID")
+    page.wait_for_timeout(150)
+
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_treasury_lookup_response(quote_side="MID")),
+    )
+    page.wait_for_timeout(400)
+
+    # The superseded MID lookup is discarded outright: no MID-sided draft is
+    # built behind a toggle that now reads BID, and nothing is left on screen
+    # claiming an instrument was resolved.
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _resolved_bond_panel_hidden(page)
+    assert page.get_attribute("#bond-quote-side-toggle .opt.on", "data-value") == "BID"
+
+    # The trader is told why nothing loaded, rather than left with a dead
+    # button and no explanation.
+    assert not page.eval_on_selector("#pricing-error-banner", "el => el.hidden")
+    assert "Quote Side changed" in page.inner_text("#pricing-error-banner")
+
+    # Pressing Load again on the new side resolves normally.
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="BID"), side="BID")
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_quote"]["quote_side"] == "BID"
+    assert draft["forward_clean_price_input"]["quote_side"] == "BID"
+
+
+@_PLAYWRIGHT_SKIP
 def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
     page.goto(f"{server_url}/")
 

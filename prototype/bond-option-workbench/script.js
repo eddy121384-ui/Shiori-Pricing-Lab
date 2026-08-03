@@ -2002,6 +2002,12 @@
 
   let bondLookupGeneration = 0;
   let inFlightBondLookupController = null;
+  // Whether a lookup is genuinely outstanding right now. The controller alone
+  // cannot answer that -- it stays set after a lookup settles -- and the Quote
+  // Side handler needs the difference: a side change during a pending lookup
+  // has to void it and say so, while a side change with nothing in flight must
+  // stay silent.
+  let bondLookupInFlight = false;
 
   function beginBondLookupRequest() {
     return ++bondLookupGeneration;
@@ -2013,6 +2019,7 @@
 
   function invalidatePendingBondLookupRequest() {
     beginBondLookupRequest();
+    bondLookupInFlight = false;
     if (inFlightBondLookupController) {
       inFlightBondLookupController.abort();
       inFlightBondLookupController = null;
@@ -2174,6 +2181,7 @@
     }
 
     const generation = beginBondLookupRequest();
+    bondLookupInFlight = true;
     invalidatePendingPriceRequest();
     invalidatePendingBloombergRequest();
 
@@ -2195,11 +2203,15 @@
       payload = await response.json();
     } catch (err) {
       // Either a genuine network/JSON failure, or this request was superseded.
+      // A superseded request was already marked settled by whichever action
+      // invalidated it, so only the genuine failure clears the flag here.
       if (isStaleBondLookupRequest(generation)) return;
+      bondLookupInFlight = false;
       renderLookupFailure("Bloomberg bond lookup failed: " + err.message);
       return;
     }
     if (isStaleBondLookupRequest(generation)) return;
+    bondLookupInFlight = false;
     if (!response.ok) {
       renderLookupFailure(payload.error || "Bloomberg bond lookup failed.");
       return;
@@ -2488,18 +2500,36 @@
   });
   els.bondQuoteSideToggle.addEventListener("click", (event) => {
     const opt = event.target.closest(".opt");
-    if (opt) {
-      setToggle(els.bondQuoteSideToggle, opt.dataset.value);
-      // Quote Side is a sourcing input, not a draft field, so nothing here
-      // writes it into `currentDraft` -- Load and Refresh read the toggle when
-      // they build their request, and the sourced side always comes back from
-      // the response. It still has to go through the same invalidation path as
-      // every other edit: a Price or Refresh already in flight was sent on the
-      // previous side, and adopting its response would leave the draft's
-      // bond_quote / forward_clean_price_input sides disagreeing with the side
-      // the toggle now shows, until some later refresh happened to correct it.
-      applyManualInputsToDraft();
+    if (!opt) return;
+    setToggle(els.bondQuoteSideToggle, opt.dataset.value);
+
+    // Quote Side is a sourcing input, not a draft field, so nothing here writes
+    // it into `currentDraft` -- Load and Refresh read the toggle when they
+    // build their request, and the sourced side always comes back from the
+    // response. That is not a reason to leave it outside invalidation, though:
+    // invalidation is about a response describing a case the trader has moved
+    // away from, and all three requests this toggle feeds can be in flight.
+    //
+    // A pending lookup has to be handled here rather than in
+    // applyManualInputsToDraft(): there is no draft yet while the first lookup
+    // is outstanding, so that function returns at its own guard, and it does
+    // not invalidate lookups in any case. Voiding it silently would leave the
+    // trader watching a Load that never resolves, and re-issuing it
+    // automatically would be an implicit second Bloomberg call this workflow
+    // does not make -- so it is voided and explained.
+    if (bondLookupInFlight) {
+      invalidatePendingBondLookupRequest();
+      renderLookupInputError(
+        "Quote Side changed while the Bloomberg lookup was still running, so that " +
+          "lookup was discarded. Press Load to source this bond on the new side."
+      );
     }
+
+    // A Price or Refresh already in flight was sent on the previous side, and
+    // adopting its response would leave the draft's bond_quote and
+    // forward_clean_price_input sides disagreeing with the side the toggle now
+    // shows, until some later refresh happened to correct it.
+    applyManualInputsToDraft();
   });
   MANUAL_TEXT_INPUTS().forEach((input) => {
     input.addEventListener("input", applyManualInputsToDraft);
