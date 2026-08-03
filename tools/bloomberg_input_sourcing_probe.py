@@ -901,11 +901,15 @@ def sanitize_external_text(
         variant
         for item in overrides
         for variant in (item.value, str(item.value).strip())
-        # one-character values would scrub half the message for no real gain
-        if variant and len(variant) > 1
+        if variant
     }
+    # Token-boundary matching, so a value of any length -- including a
+    # one-character one such as `--override OP999=1` -- is removed where
+    # Bloomberg quotes it back, without mangling an unrelated substring
+    # (a "1" inside "8194", a "Black" inside "Blackrock").
     for variant in sorted(variants, key=len, reverse=True):
-        sanitized = sanitized.replace(variant, _SCRUBBED_OVERRIDE_VALUE)
+        pattern = re.compile(rf"(?<![\w.-]){re.escape(variant)}(?![\w.-])")
+        sanitized = pattern.sub(_SCRUBBED_OVERRIDE_VALUE, sanitized)
     sanitized = _SENSITIVE_KEY_PATTERN.sub(r"\1=<redacted>", sanitized)
     sanitized = _PATH_PATTERN.sub("<redacted path>", sanitized)
     sanitized = _HOST_PORT_PATTERN.sub("<redacted host>", sanitized)
@@ -921,6 +925,24 @@ def _group_mnemonics(group: str) -> tuple[str, ...]:
             if candidate.group == group and candidate.mnemonic not in ordered:
                 ordered.append(candidate.mnemonic)
     return tuple(ordered)
+
+
+def _sanitized_description(description: FieldDescription) -> FieldDescription:
+    """Sanitize the Bloomberg-authored text on one field description.
+
+    ``//blp/apiflds`` can answer with a per-field ``fieldError`` rather than
+    raising, so this path carries external text just like the two exception
+    handlers do -- and its description/documentation are Bloomberg-authored
+    as well. All three go through :func:`sanitize_external_text` here, at the
+    boundary, so nothing downstream has to remember to.
+    """
+
+    return replace(
+        description,
+        description=sanitize_external_text(description.description),
+        documentation=sanitize_external_text(description.documentation),
+        detail=sanitize_external_text(description.detail),
+    )
 
 
 def discover_option_context_metadata(
@@ -963,7 +985,7 @@ def discover_option_context_metadata(
             received_at=clock(),
         )
     try:
-        descriptions = tuple(describe(list(fields)))
+        descriptions = tuple(_sanitized_description(item) for item in describe(list(fields)))
     except RuntimeError as exc:
         return DiscoveryEvidence(
             fields=fields,
@@ -990,7 +1012,9 @@ def discover_option_context_metadata(
 
     override_requested_at = clock()
     try:
-        override_descriptions = tuple(describe(list(override_fields)))
+        override_descriptions = tuple(
+            _sanitized_description(item) for item in describe(list(override_fields))
+        )
     except RuntimeError as exc:
         return DiscoveryEvidence(
             fields=fields,
@@ -1228,6 +1252,10 @@ def collect_evidence(
 ) -> tuple[SecurityEvidence, ...]:
     """Run one bounded DAPI request per (security, request group) and collect raw outcomes.
 
+    External text from any request is sanitized against *every* override this
+    run applied, not only the ones that request carried -- a value is
+    sensitive wherever it is echoed.
+
     Every request records its own acquisition window (``requested_at`` /
     ``received_at``, this probe's UTC clock -- Bloomberg's own as-of
     timestamp is a separate, still-unconfirmed question). A ``RuntimeError``
@@ -1262,7 +1290,7 @@ def collect_evidence(
                         overrides=group_overrides,
                         results={},
                         error=_collapse(
-                            sanitize_external_text(str(exc), group_overrides),
+                            sanitize_external_text(str(exc), overrides),
                             _MAX_DETAIL_CHARS,
                         ),
                         requested_at=requested_at,
@@ -1278,7 +1306,7 @@ def collect_evidence(
                     results={
                         result.field: replace(
                             result,
-                            detail=sanitize_external_text(result.detail, group_overrides),
+                            detail=sanitize_external_text(result.detail, overrides),
                         )
                         for result in results
                     },

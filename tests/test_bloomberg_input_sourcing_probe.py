@@ -1249,3 +1249,109 @@ def test_a_second_pass_metadata_failure_is_sanitized_in_every_output(monkeypatch
     assert written["field_metadata_discovery"]["error"] is None
     assert written["field_metadata_discovery"]["fields"]
     assert written["securities"][0]["requests"][0]["error"] is None
+
+
+def test_a_one_character_override_value_is_scrubbed_on_error_paths():
+    applied = (AppliedOverride(field="OP999", value="1", source="user_supplied"),)
+
+    sanitized = sanitize_external_text("responseError: OP999=1", applied)
+
+    assert sanitized == "responseError: OP999=<redacted override value>"
+
+
+def test_scrubbing_matches_whole_tokens_only():
+    one_char = (AppliedOverride(field="OP999", value="1", source="user_supplied"),)
+    word = (AppliedOverride(field="OP046", value="Black", source="fixed:pricing_model"),)
+
+    # an unrelated substring must survive
+    assert sanitize_external_text("codes 10 and 21 unaffected", one_char) == (
+        "codes 10 and 21 unaffected"
+    )
+    assert sanitize_external_text("Blackrock unaffected", word) == "Blackrock unaffected"
+    # the delimited value itself is still removed
+    assert "<redacted override value>" in sanitize_external_text("value = 1 rejected", one_char)
+
+
+def test_a_one_character_override_never_reaches_any_output(monkeypatch, tmp_path, capsys):
+    def _probe(identifier, fields, overrides=None):
+        return [
+            ProbeFieldResult(
+                field=field,
+                status="field_exception",
+                detail=f"[BAD_FLD] override OP999=1 rejected for {field}",
+            )
+            for field in fields
+        ]
+
+    monkeypatch.setattr(module, "probe_fields", _probe)
+    monkeypatch.setattr(
+        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP999",)})
+    )
+
+    exit_code = main(["--override", "OP999=1", "--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "OP999=1" not in surface
+    assert "<redacted override value>" in json_text
+
+
+def test_a_per_field_metadata_error_is_sanitized(monkeypatch, tmp_path, capsys):
+    def _describe(fields):
+        return [
+            FieldDescription(
+                field=field,
+                status="field_error",
+                detail=(
+                    f"[BAD_FLD] {field} unavailable from localhost:8194 session=ZZZZ9999 "
+                    "(/home/eddy/.blpapi/log)"
+                ),
+            )
+            for field in fields
+        ]
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "localhost:8194" not in surface
+        assert "ZZZZ9999" not in surface
+        assert "/home/eddy" not in surface
+    written = json.loads(json_text)
+    detail = written["field_metadata_discovery"]["fields"][0]["detail"]
+    assert "[BAD_FLD]" in detail and "<redacted host>" in detail
+
+
+def test_metadata_description_and_documentation_are_sanitized_too(monkeypatch, tmp_path):
+    def _describe(fields):
+        return [
+            FieldDescription(
+                field=field,
+                status="described",
+                mnemonic=field,
+                description="served from localhost:8194",
+                datatype="Price",
+                documentation="see /home/eddy/docs for uuid=24681357",
+            )
+            for field in fields
+        ]
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    main(["--output-dir", str(tmp_path)])
+
+    written = json.loads((tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8"))
+    field = written["field_metadata_discovery"]["fields"][0]
+    assert field["description"] == "served from <redacted host>"
+    assert "24681357" not in field["documentation_excerpt"]
+    assert "/home/eddy" not in field["documentation_excerpt"]
