@@ -42,3 +42,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local Bloomberg probe evidence (tools/bloomberg_input_sourcing_probe.py)
+/shiori_probe_output/
