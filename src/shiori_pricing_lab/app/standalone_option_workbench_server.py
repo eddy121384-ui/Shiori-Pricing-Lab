@@ -200,7 +200,15 @@ DEFAULT_PORT = 8765
 # substantially again (every main workbench section is now individually
 # collapsible/expandable) -- a stale process predating either change must
 # not be reused.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v6"
+#
+# Bumped to -v7 for Issue #143's manual explicit-forward completion path: no
+# route signature changed, but the served index.html/script.js/styles.css
+# changed substantially (trader inputs for the option dates, the eight
+# still-missing BondReferenceData fields, the timing/settlement dates, and an
+# Option Discount Curve node editor), and POST /api/case now normalizes
+# offset-aware datetime instants to UTC at the contract boundary. A stale
+# already-running process must not be reused and keep serving the old page.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v7"
 
 
 def load_base_case() -> dict:

@@ -1445,3 +1445,170 @@ def test_manual_mode_never_calls_bloomberg_or_the_live_clock(monkeypatch):
     price_standalone_option_case_with_benchmark(
         envelope, _synthetic_benchmark_text(), active_quote_side="MID"
     )
+
+
+# --- 21. UTC normalization, scoped to as_of_timestamp (Issue #143) ---------------
+#
+# A trader may enter a datetime instant carrying an explicit local offset
+# (e.g. `+08:00`). Exactly one envelope key is respelled in UTC at this
+# boundary -- `as_of_timestamp` -- because that is what its own no-look-ahead
+# check already wants (documented as needing the UTC calendar date, and
+# rejecting non-UTC offsets precisely to avoid being handed a local one).
+# That resolves the #142 defect where one consistently-entered `+08:00` set
+# failed on exactly that field.
+#
+# `pricing_timestamp` and `expiry_timestamp` keep their explicit offset
+# untouched: the existing timing contract compares their represented **local**
+# calendar date against `valuation_date` / `bond_option.expiry_date`, so
+# rewriting them to UTC first would silently move that comparison and reject a
+# perfectly valid local-time entry across a UTC date boundary.
+
+
+@pytest.mark.parametrize(
+    ("supplied", "expected"),
+    [
+        ("2026-07-20T11:28:00+08:00", "2026-07-20T03:28:00Z"),
+        ("2026-07-20T00:30:00+08:00", "2026-07-19T16:30:00Z"),  # UTC date shifts back
+        ("2026-07-19T20:30:00-05:00", "2026-07-20T01:30:00Z"),  # and forward
+        ("2026-07-20T11:28:00.500000+08:00", "2026-07-20T03:28:00.500000Z"),
+    ],
+)
+def test_offset_aware_instants_normalize_to_utc(supplied, expected):
+    assert workbench_module._normalize_datetime_instant_to_utc(supplied) == expected
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        "2026-07-20T03:28:00Z",  # already UTC -- already normalized
+        "2026-07-20T03:28:00+00:00",  # already UTC, other spelling
+        "2026-07-20",  # bare calendar date
+        "2026-07-20T11:28:00",  # naive datetime
+        "2026-07-20x11:28:00+08:00",  # non-canonical separator
+        "not-a-timestamp",
+        "",
+        None,
+        123,
+    ],
+)
+def test_values_needing_no_normalization_pass_through_completely_unchanged(supplied):
+    # Already-UTC values are already normalized; re-spelling them would
+    # gratuitously change existing observable behavior. A malformed value is
+    # never repaired, defaulted, or swallowed -- it is still reported by the
+    # field-level validator that owns it.
+    assert workbench_module._normalize_datetime_instant_to_utc(supplied) is supplied
+
+
+def test_only_as_of_timestamp_is_rewritten():
+    envelope = _example_envelope()
+    envelope["as_of_timestamp"] = "2026-07-01T16:00:00+08:00"
+    envelope["pricing_timestamp"] = "2026-07-01T16:00:00+08:00"
+    envelope["expiry_timestamp"] = "2026-09-29T16:00:00+08:00"
+
+    normalized = workbench_module._normalize_case_datetime_instants_to_utc(envelope)
+
+    assert normalized["as_of_timestamp"] == "2026-07-01T08:00:00Z"
+    # Preserved byte-for-byte, offset and all -- their local calendar date is
+    # what the timing contract compares.
+    assert normalized["pricing_timestamp"] == "2026-07-01T16:00:00+08:00"
+    assert normalized["expiry_timestamp"] == "2026-09-29T16:00:00+08:00"
+    # Every explicit calendar date is an independent input, untouched.
+    for date_key in (
+        "valuation_date",
+        "reporting_date",
+        "forward_settlement_date",
+        "option_settlement_date",
+    ):
+        assert normalized[date_key] == envelope[date_key]
+    assert normalized["bond_option"] is envelope["bond_option"]
+
+
+def test_normalization_never_mutates_the_callers_envelope():
+    envelope = _example_envelope()
+    envelope["pricing_timestamp"] = "2026-07-01T16:00:00+08:00"
+
+    workbench_module._normalize_case_datetime_instants_to_utc(envelope)
+
+    assert envelope["pricing_timestamp"] == "2026-07-01T16:00:00+08:00"
+
+
+@_requires_quantlib
+def test_as_of_timestamp_with_a_local_offset_is_accepted_and_normalized():
+    """#142 defect D2 regression: `as_of_timestamp` rejected every non-UTC
+    offset while the other two instants require an explicit offset, so one
+    consistently-entered `+08:00` set failed on exactly that field."""
+
+    envelope = _example_envelope()
+    envelope["as_of_timestamp"] = "2026-07-02T00:00:00+08:00"
+
+    request = build_request_from_standalone_option_case(envelope)
+
+    assert request.market_data_snapshot.as_of_timestamp == "2026-07-01T16:00:00Z"
+    assert request.valuation_date == envelope["valuation_date"]
+
+
+@_requires_quantlib
+def test_pricing_and_expiry_timestamps_keep_their_offset_through_the_builder():
+    envelope = _example_envelope()
+    # Local times on the contract's own valuation/expiry calendar dates.
+    envelope["pricing_timestamp"] = "2026-07-01T16:00:00+08:00"
+    envelope["expiry_timestamp"] = "2026-09-29T16:00:00+08:00"
+
+    request = build_request_from_standalone_option_case(envelope)
+
+    assert request.pricing_timestamp == "2026-07-01T16:00:00+08:00"
+    assert request.expiry_timestamp == "2026-09-29T16:00:00+08:00"
+
+
+@_requires_quantlib
+def test_local_calendar_dates_are_compared_across_a_utc_date_boundary():
+    """The timing contract compares the *represented local* calendar date.
+
+    `2026-07-01T08:00:00+08:00` is `2026-06-30T24:00Z` -- i.e. the previous
+    day in UTC -- yet it is a valid pricing timestamp for a `valuation_date`
+    of `2026-07-01`, and the same holds for expiry. Normalizing these two to
+    UTC first would wrongly reject both.
+    """
+
+    envelope = _example_envelope()
+    assert envelope["valuation_date"] == "2026-07-01"
+    assert envelope["bond_option"]["expiry_date"] == "2026-09-29"
+    # Both are early-morning local times whose UTC date is the day before.
+    envelope["pricing_timestamp"] = "2026-07-01T08:00:00+08:00"
+    envelope["expiry_timestamp"] = "2026-09-29T05:20:00+08:00"
+
+    request = build_request_from_standalone_option_case(envelope)
+
+    assert request.pricing_timestamp == "2026-07-01T08:00:00+08:00"
+    assert request.expiry_timestamp == "2026-09-29T05:20:00+08:00"
+    # And it prices -- the local dates match, so the contract is satisfied.
+    _, result, _ = price_standalone_option_case(envelope)
+    assert result.status.value == "SUCCESS"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    [
+        ("pricing_timestamp", "2026-07-01T16:00:00", "explicit UTC offset"),
+        ("expiry_timestamp", "2026-09-29T16:00:00", "explicit UTC offset"),
+        ("pricing_timestamp", "2026-07-01", "uppercase 'T' separator"),
+        ("pricing_timestamp", "2026-07-01x16:00:00Z", "uppercase 'T' separator"),
+        ("as_of_timestamp", "not-a-timestamp", "ISO-8601 date"),
+    ],
+)
+def test_malformed_and_naive_timestamps_are_still_rejected(field, value, expected_message):
+    envelope = _example_envelope()
+    envelope[field] = value
+
+    with pytest.raises(ValueError, match=expected_message):
+        build_request_from_standalone_option_case(envelope)
+
+
+def test_a_local_offset_pricing_timestamp_still_fails_a_genuine_date_mismatch():
+    # Normalization must not paper over a real incoherence: this local date is
+    # genuinely a different day from valuation_date.
+    envelope = _example_envelope()
+    envelope["pricing_timestamp"] = "2026-07-02T08:00:00+08:00"
+
+    with pytest.raises(ValueError, match="must fall on valuation_date"):
+        build_request_from_standalone_option_case(envelope)
