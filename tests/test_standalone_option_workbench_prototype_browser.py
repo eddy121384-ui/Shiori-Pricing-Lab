@@ -2508,6 +2508,120 @@ def test_a_superseded_failed_lookup_never_discards_the_prior_ticket(server_url, 
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_superseded_non_json_failure_never_discards_the_prior_ticket(
+    server_url, page
+) -> None:
+    """Codex review round 8: the round-7 guard sat after ``await response.json()``.
+
+    A non-JSON error body (or a rejected fetch) transfers control to the
+    ``catch`` before any adoption check runs, and an identifier edit advances no
+    generation -- so the superseded answer reached ``renderLookupFailure()`` and
+    its ``resetRunState()`` deleted a completed ticket belonging to the bond the
+    trader was still naming.
+
+    The round-7 regression missed this because it fulfilled a 502 with a *valid
+    JSON* body, which takes the ``!response.ok`` branch after the guard. This one
+    returns HTML, so it goes through the ``catch``.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    pending: list = []
+    page.route("**/api/bloomberg/bond", lambda route: pending.append(route))
+    page.fill("#bond-identifier-input", "GB00BFX0ZL78")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    page.wait_for_timeout(150)
+
+    # Not JSON: `await response.json()` throws, landing in the catch path.
+    pending[0].fulfill(
+        status=502,
+        content_type="text/html",
+        body="<html><body>502 Bad Gateway</body></html>",
+    )
+    page.wait_for_timeout(400)
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft is not None
+    assert draft["bond_option"]["underlying_isin"] == "US91282CLJ89"
+    assert "lookup inputs changed" in page.inner_text("#pricing-error-banner")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_genuine_non_json_failure_still_reports_and_resets(server_url, page) -> None:
+    """The other half of the same guard: when the inputs have *not* moved on, a
+    real transport failure must still be reported and still reset the run.
+
+    Guarding the catch path must not swallow the failure the trader needs to see
+    for the bond they are still naming.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    page.route(
+        "**/api/bloomberg/bond",
+        lambda route: route.fulfill(
+            status=502, content_type="text/html", body="<html>502</html>"
+        ),
+    )
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg lookup failed")
+
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _resolved_bond_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_quote_side_mismatch_never_claims_a_bloomberg_request_failed(
+    server_url, page
+) -> None:
+    """Codex review round 8: the mismatch panel reused the invalidated-state
+    evidence, which asserts "The Bloomberg request for this run failed".
+
+    Nothing was requested and nothing failed -- the trader changed a toggle. The
+    evidence line must not put a Bloomberg failure on screen that never happened.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    _select_quote_side(page, "BID")
+    _wait_until(lambda: "Quote Side does not match" in page.inner_text("#unresolved-title"))
+
+    evidence = page.inner_text("#unresolved-evidence")
+    assert "No Bloomberg request was made or failed" in evidence
+    assert "request for this run failed" not in evidence
+
+    # And the converse: a genuine refresh failure still says a request failed,
+    # so distinguishing the two did not weaken the real failure explanation.
+    _select_quote_side(page, "MID")
+    _wait_for_price_enabled(page)
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(
+        lambda: "The Bloomberg request for this run failed"
+        in page.inner_text("#unresolved-evidence")
+    )
+
+
+@_PLAYWRIGHT_SKIP
 def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
     page.goto(f"{server_url}/")
 

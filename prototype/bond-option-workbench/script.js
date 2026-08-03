@@ -250,6 +250,15 @@
     "The Bloomberg request for this run failed, so the previously sourced quote " +
     "and instrument data can no longer be shown or priced against -- Shiori will " +
     "not fall back to them. Your own trade inputs are untouched.";
+  // Deliberately its own text rather than the invalidated-state evidence above:
+  // nothing was requested and nothing failed here. The trader simply selected a
+  // side the sourced quote was not sourced on, and saying otherwise would put a
+  // Bloomberg failure on screen that never happened.
+  const EVIDENCE_QUOTE_SIDE_MISMATCH =
+    "No Bloomberg request was made or failed. The quote backing this run was " +
+    "sourced on one side and Quote Side now reads another, and a quote is only " +
+    "valid for the side it was sourced on -- Shiori neither prices an unselected " +
+    "side nor relabels this quote as the selected one.";
 
   // --- Workflow groups -----------------------------------------------------
   //
@@ -317,7 +326,7 @@
                 `${getOptionalToggleValue(els.bondQuoteSideToggle)}. Shiori will not ` +
                 "price a side the trader did not select, and will not relabel a " +
                 "quote it did not source on that side.",
-              evidence: EVIDENCE_SOURCED_STATE_INVALIDATED,
+              evidence: EVIDENCE_QUOTE_SIDE_MISMATCH,
               next:
                 "Press Refresh Bloomberg & Price to re-source this bond on the " +
                 "selected side, or select the original side back. Nothing has been " +
@@ -2211,6 +2220,32 @@
     els.statusText.textContent = "Check the lookup inputs";
   }
 
+  // Adopt-time sourcing-input check. A response describes the identifier and
+  // side it was requested with; if either sourcing input has since changed,
+  // acting on it -- adopting it *or* letting its failure reset the run -- would
+  // speak for a bond or side the trader is no longer naming.
+  //
+  // Written as an invariant applied at every point a lookup answer is acted on,
+  // rather than as another per-control listener: the controls that feed a
+  // lookup can grow, and one rule covering "the inputs must still be what this
+  // response was requested with" does not have to be extended each time one
+  // does.
+  function sourcingInputsStillMatch(requestedIdentifier, requestedSide) {
+    const currentIdentifier = parseBondIdentifier(els.bondIdentifierInput.value);
+    return (
+      currentIdentifier !== null &&
+      currentIdentifier.identifier === requestedIdentifier &&
+      getOptionalToggleValue(els.bondQuoteSideToggle) === requestedSide
+    );
+  }
+
+  function renderSupersededLookupInputs() {
+    renderLookupInputError(
+      "The lookup inputs changed while Bloomberg was still answering, so that " +
+        "response was discarded. Press Load to source the bond named above."
+    );
+  }
+
   // --- Actions --------------------------------------------------------------
 
   async function loadBloombergBond() {
@@ -2251,35 +2286,26 @@
       // invalidated it, so only the genuine failure clears the flag here.
       if (isStaleBondLookupRequest(generation)) return;
       bondLookupInFlight = false;
+      // The guard belongs here too, not only on the parsed-response path. A
+      // non-JSON error body or a rejected fetch lands in this catch *before*
+      // any adoption check runs, and an identifier edit advances no generation,
+      // so this superseded answer would otherwise reach `renderLookupFailure`
+      // and reset a run that belongs to a bond the trader is still naming.
+      if (!sourcingInputsStillMatch(parsed.identifier, quoteSide)) {
+        renderSupersededLookupInputs();
+        return;
+      }
       renderLookupFailure("Bloomberg bond lookup failed: " + err.message);
       return;
     }
     if (isStaleBondLookupRequest(generation)) return;
     bondLookupInFlight = false;
 
-    // Adopt-time sourcing-input check. A response describes the identifier and
-    // side it was requested with; if either sourcing input has since changed,
-    // adopting it would build a resolved panel and draft for a bond or side the
-    // trader is no longer naming. This is checked before the `response.ok`
-    // branch on purpose: `renderLookupFailure` resets the whole run, so a
-    // failed answer for a superseded identifier would otherwise discard a prior
-    // completed ticket on that bond's behalf.
-    //
-    // Written as an invariant at the point of adoption rather than as another
-    // per-control listener: the controls that feed a lookup can grow, and one
-    // rule covering "the inputs must still be what this response was requested
-    // with" does not have to be extended each time one does.
-    const currentIdentifier = parseBondIdentifier(els.bondIdentifierInput.value);
-    const currentSide = getOptionalToggleValue(els.bondQuoteSideToggle);
-    if (
-      !currentIdentifier ||
-      currentIdentifier.identifier !== parsed.identifier ||
-      currentSide !== quoteSide
-    ) {
-      renderLookupInputError(
-        "The lookup inputs changed while Bloomberg was still answering, so that " +
-          "response was discarded. Press Load to source the bond named above."
-      );
+    // Checked before the `response.ok` branch on purpose: `renderLookupFailure`
+    // resets the whole run, so a failed answer for a superseded identifier
+    // would otherwise discard a prior completed ticket on that bond's behalf.
+    if (!sourcingInputsStillMatch(parsed.identifier, quoteSide)) {
+      renderSupersededLookupInputs();
       return;
     }
 
