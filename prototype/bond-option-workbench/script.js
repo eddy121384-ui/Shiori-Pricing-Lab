@@ -246,6 +246,10 @@
   const EVIDENCE_BOND_MASTER =
     "Bond Master values are read verbatim from the DAPI mnemonics confirmed in " +
     "PR #141. The fields above came back empty for this security.";
+  const EVIDENCE_SOURCED_STATE_INVALIDATED =
+    "The Bloomberg request for this run failed, so the previously sourced quote " +
+    "and instrument data can no longer be shown or priced against -- Shiori will " +
+    "not fall back to them. Your own trade inputs are untouched.";
 
   // --- Workflow groups -----------------------------------------------------
   //
@@ -270,21 +274,41 @@
   const WORKFLOW_GROUPS = [
     {
       id: "instrument",
+      // Resolved only while live Bloomberg sourced state backs the draft. A
+      // failed refresh sets `sourcedQuoteInvalidated` and therefore reopens
+      // this group, which is what keeps Price disabled and stops the run being
+      // priced against sourced data Shiori has just disowned.
       label: "Instrument",
       advanced: false,
-      resolved: (draft) => draft !== null,
+      resolved: (draft) =>
+        draft !== null && resolvedBloombergBond !== null && !sourcedQuoteInvalidated,
       locator: "#bond-identifier-input",
-      unresolved: {
-        title: "No bond is loaded",
-        missing: "A Bloomberg-loaded bond.",
-        why:
-          "Every pricing input on this route is anchored to one Bloomberg " +
-          "acquisition event, so nothing can be entered before a bond is resolved.",
-        evidence: "No Bloomberg request has been made yet in this run.",
-        next:
-          "Type a 12-character ISIN or a 9-character CUSIP, pick a quote side, " +
-          "then press Bloomberg Load.",
-      },
+      unresolved: () =>
+        sourcedQuoteInvalidated
+          ? {
+              title: "The sourced quote for this run has been invalidated",
+              missing: "A current Bloomberg quote for the loaded bond.",
+              why:
+                "The Bloomberg refresh failed, so the quote and instrument data " +
+                "this run was anchored to are no longer current, and Shiori will " +
+                "not price against them or show them as if they were.",
+              evidence: EVIDENCE_SOURCED_STATE_INVALIDATED,
+              next:
+                "Press Refresh Bloomberg & Price to re-source this bond. Your " +
+                "trade inputs, overrides and curve nodes are all still here.",
+            }
+          : {
+              title: "No bond is loaded",
+              missing: "A Bloomberg-loaded bond.",
+              why:
+                "Every pricing input on this route is anchored to one Bloomberg " +
+                "acquisition event, so nothing can be entered before a bond is " +
+                "resolved.",
+              evidence: "No Bloomberg request has been made yet in this run.",
+              next:
+                "Type a 12-character ISIN or a 9-character CUSIP, pick a quote " +
+                "side, then press Bloomberg Load.",
+            },
     },
     {
       id: "option-type",
@@ -541,6 +565,14 @@
   // not source it. Keyed by draft path so re-entering a value replaces its
   // stamp rather than accumulating duplicates. Cleared with the draft.
   let overrideProvenance = new Map();
+
+  // True once a Bloomberg *refresh* for the currently loaded bond has failed.
+  // The bond stays loaded (so the trader can retry the refresh) and the whole
+  // trader-authored ticket stays intact, but everything Shiori sourced is
+  // disowned: the displayed quote/instrument state, the priced result, and the
+  // right to price at all. Cleared only by a successful refresh, a successful
+  // lookup, or Clear.
+  let sourcedQuoteInvalidated = false;
 
   // The currently displayed, exportable run.
   let currentDisplay = null;
@@ -1500,9 +1532,33 @@
     };
   }
 
+  const RESOLVED_BOND_FIELDS = () => [
+    els.resolvedBondName,
+    els.resolvedBondIsin,
+    els.resolvedBondCusip,
+    els.resolvedBondCurrency,
+    els.resolvedBondCleanPrice,
+    els.resolvedBondAccrued,
+    els.resolvedBondCoupon,
+    els.resolvedBondMaturity,
+    els.resolvedBondAcquiredAt,
+    els.resolvedBondSource,
+  ];
+
   function renderResolvedBondPanel() {
-    if (!resolvedBloombergBond) {
+    // `sourcedQuoteInvalidated` blanks the panel even though the bond object is
+    // still held: after a failed refresh that object exists only as the retry
+    // target, and none of its now-disowned quote or instrument values may be
+    // displayed as if they were current.
+    if (!resolvedBloombergBond || sourcedQuoteInvalidated) {
+      // Blanked, not merely hidden. A hidden element still holds its text, and
+      // a disowned bond's identity must not be one CSS change away from being
+      // shown again -- or be readable as if it were still the current bond.
       els.resolvedBondPanel.hidden = true;
+      RESOLVED_BOND_FIELDS().forEach((el) => {
+        el.textContent = "—";
+        el.classList.remove("pending-value");
+      });
       return;
     }
     els.resolvedBondPanel.hidden = false;
@@ -1660,29 +1716,15 @@
     els.greekTheta.textContent = fmt(display.theta_per_calendar_day_per_100);
   }
 
-  // Folds the bounded, verbatim live_bloomberg_quote section (see
-  // prepare_live_bloomberg_quote_display in standalone_option_workbench.py)
-  // into the same Instrument panel the lookup populates, since both describe
-  // the one Bloomberg bond currently selected.
-  function applyLiveBloombergQuote(quote) {
-    if (!quote || !resolvedBloombergBond) return;
-    els.resolvedBondCurrency.textContent = quote.currency;
-    els.resolvedBondCleanPrice.textContent = fmt(quote.clean_price_per_100);
-    els.resolvedBondAccrued.textContent = fmt(quote.accrued_interest_per_100);
-    els.resolvedBondAcquiredAt.textContent = quote.acquired_at;
-  }
-
   function renderDisplay(display) {
     if (display.status === "FAILED") {
       const messages = (display.errors || [])
         .map((e) => `${e.code}: ${e.message}`)
         .join(" | ");
       renderFailure(messages || "Pricing failed.");
-      applyLiveBloombergQuote(display.live_bloomberg_quote || null);
       return;
     }
     renderSuccess(display);
-    applyLiveBloombergQuote(display.live_bloomberg_quote || null);
   }
 
   // --- Market review rows ---------------------------------------------------
@@ -1751,13 +1793,18 @@
       return;
     }
     const primary = groups[0];
+    // A group's explanation may be a fixed object or a function of current
+    // state (the instrument group reads differently before a first lookup than
+    // after a Bloomberg failure has invalidated an existing run).
+    const detail =
+      typeof primary.unresolved === "function" ? primary.unresolved() : primary.unresolved;
     unresolvedFocusGroup = primary;
     els.unresolvedPanel.hidden = false;
-    els.unresolvedTitle.textContent = primary.unresolved.title;
-    els.unresolvedMissing.textContent = primary.unresolved.missing;
-    els.unresolvedWhy.textContent = primary.unresolved.why;
-    els.unresolvedEvidence.textContent = primary.unresolved.evidence;
-    els.unresolvedNext.textContent = primary.unresolved.next;
+    els.unresolvedTitle.textContent = detail.title;
+    els.unresolvedMissing.textContent = detail.missing;
+    els.unresolvedWhy.textContent = detail.why;
+    els.unresolvedEvidence.textContent = detail.evidence;
+    els.unresolvedNext.textContent = detail.next;
 
     const rest = groups.slice(1).map((group) => group.label);
     els.unresolvedAlso.textContent =
@@ -1842,9 +1889,11 @@
     els.workspaceSection.hidden = !hasDraft;
     els.instrumentHeaderSection.hidden = !hasResult;
 
-    els.instrumentGroupStatus.textContent = hasDraft
-      ? "Loaded from Bloomberg"
-      : "Enter an ISIN or CUSIP";
+    els.instrumentGroupStatus.textContent = !hasDraft
+      ? "Enter an ISIN or CUSIP"
+      : sourcedQuoteInvalidated
+        ? "Sourced quote invalidated — refresh to re-source"
+        : "Loaded from Bloomberg";
 
     // Rendered here rather than only on a form edit, so a freshly-loaded draft
     // shows its real (blocking) coverage state immediately instead of an
@@ -1859,17 +1908,27 @@
         ? "Overrides, derived values and provenance"
         : `${advancedOutstanding} override group(s) outstanding`;
 
-    // Structurally complete is necessary but not sufficient: the real typed
-    // builder must also accept the draft before Price is enabled.
-    const structurallyComplete = hasDraft && groups.length === 0;
-    if (structurallyComplete && builderValidation.state === "unknown") {
+    // Price and Refresh are gated separately, because a failed refresh has to
+    // leave the trader a way back.
+    //
+    // Both need a complete draft the real typed builder accepts. Only Price
+    // additionally needs live sourced state: after a failed refresh the
+    // instrument group is reopened, so Price is off, while Refresh stays
+    // available to re-source the very quote that failed. Builder validation
+    // depends on the draft alone, so it is still scheduled while the sourced
+    // quote is invalidated -- otherwise Refresh could never re-enable.
+    const draftGroupsUnresolved = groups.filter((group) => group.id !== "instrument");
+    const draftComplete = hasDraft && draftGroupsUnresolved.length === 0;
+    if (draftComplete && builderValidation.state === "unknown") {
       scheduleBuilderValidation();
     }
-    const ready = structurallyComplete && builderValidation.state === "ready";
-    els.priceBtn.classList.toggle("is-disabled", !ready);
-    els.bloombergRefreshBtn.classList.toggle("is-disabled", !ready);
+    const builderReady = draftComplete && builderValidation.state === "ready";
+    const canRefresh = builderReady && resolvedBloombergBond !== null;
+    const canPrice = canRefresh && !sourcedQuoteInvalidated;
+    els.priceBtn.classList.toggle("is-disabled", !canPrice);
+    els.bloombergRefreshBtn.classList.toggle("is-disabled", !canRefresh);
 
-    if (structurallyComplete && builderValidation.state === "failed") {
+    if (draftComplete && builderValidation.state === "failed") {
       els.unresolvedPanel.hidden = false;
       unresolvedFocusGroup = null;
       els.unresolvedTitle.textContent = "The typed builder rejected this draft";
@@ -1962,6 +2021,7 @@
     resolvedBloombergBond = null;
     currentDraft = null;
     overrideProvenance = new Map();
+    sourcedQuoteInvalidated = false;
     setCurrentDisplay(null);
 
     renderResolvedBondPanel();
@@ -1978,23 +2038,66 @@
     els.statusIndicator.classList.remove("failed");
   }
 
-  // A Bloomberg *call* failure -- an instrument lookup or the refresh-and-price
-  // path alike -- discards the whole run. A failed Bloomberg call must never
-  // leave a previous bond's quote or instrument data on screen, and must never
-  // leave a draft anchored to an acquisition event now known to be stale.
-  function renderBloombergFailure(message) {
+  // --- The two Bloomberg failure policies ----------------------------------
+  //
+  // These are deliberately *not* one shared reset. A refresh failure and a
+  // lookup failure mean different things, and collapsing them either destroys
+  // work needlessly or leaks one bond's ticket onto another.
+
+  // (1) Refresh failure, same already-loaded bond.
+  //
+  // Disowned: the displayed Bloomberg quote and instrument state, the priced
+  // context/result, the exportable run, the builder validation, and the right
+  // to price -- `sourcedQuoteInvalidated` reopens the instrument workflow
+  // group, so Price stays disabled until a refresh actually succeeds.
+  //
+  // Kept: Call/Put, Buy/Sell, strike, notional, expiry, the manual forward and
+  // volatility, the curve rows and every Advanced override -- all of it belongs
+  // to this same ticket on this same bond. `resolvedBloombergBond` is also kept
+  // (never displayed while invalidated) purely so Refresh can be retried
+  // against the same symbology-qualified identifier. A transient DAPI hiccup
+  // must not make a trader retype a completed ticket.
+  function renderRefreshFailure(message) {
+    invalidatePendingPriceRequest();
+    invalidateBuilderValidation();
+
+    sourcedQuoteInvalidated = true;
+    setCurrentDisplay(null);
+
+    renderResolvedBondPanel();
+    clearBondMaster();
+    hideContext();
+    clearResultFields();
+    refreshOverrideProvenance();
+    renderOverrideProvenance();
+
+    els.errorBanner.textContent = message;
+    els.errorBanner.hidden = false;
+    els.statusIndicator.classList.add("failed");
+    els.statusText.textContent = "Bloomberg refresh failed";
+    syncDraftGating();
+  }
+
+  // (2) Lookup failure -- the trader was resolving an instrument, so there is
+  // no ticket this failure can safely belong to.
+  //
+  // The whole run goes, exactly like Clear: a previous bond's quote, instrument
+  // data, result and provenance must not survive, and its trader draft must
+  // never be carried onto a different bond. This is the same second-lookup
+  // isolation a *successful* lookup enforces.
+  function renderLookupFailure(message) {
     resetRunState();
     els.errorBanner.textContent = message;
     els.errorBanner.hidden = false;
     els.statusIndicator.classList.add("failed");
-    els.statusText.textContent = "Bloomberg request failed";
+    els.statusText.textContent = "Bloomberg lookup failed";
     syncDraftGating();
   }
 
   // A malformed identifier or unselected quote side is caught here, before any
   // request is made, so no Bloomberg answer is in question and nothing on
   // screen has gone stale. It reports the problem without discarding a run the
-  // trader may have already completed -- unlike renderBloombergFailure above.
+  // trader may have already completed -- unlike the two failure policies above.
   function renderLookupInputError(message) {
     els.errorBanner.textContent = message;
     els.errorBanner.hidden = false;
@@ -2038,12 +2141,12 @@
     } catch (err) {
       // Either a genuine network/JSON failure, or this request was superseded.
       if (isStaleBondLookupRequest(generation)) return;
-      renderBloombergFailure("Bloomberg bond lookup failed: " + err.message);
+      renderLookupFailure("Bloomberg bond lookup failed: " + err.message);
       return;
     }
     if (isStaleBondLookupRequest(generation)) return;
     if (!response.ok) {
-      renderBloombergFailure(payload.error || "Bloomberg bond lookup failed.");
+      renderLookupFailure(payload.error || "Bloomberg bond lookup failed.");
       return;
     }
 
@@ -2086,7 +2189,8 @@
   // POST /api/case unchanged rather than adding any new pricing route or logic:
   // a full case dict in, {case, overlay, context, display} out.
   async function priceCurrentDraft() {
-    if (!currentDraft) return;
+    if (!currentDraft || !resolvedBloombergBond) return;
+    if (sourcedQuoteInvalidated) return;
     if (unresolvedGroups(currentDraft).length > 0) return;
     if (builderValidation.state !== "ready") return;
 
@@ -2139,7 +2243,12 @@
   // /api/case/bloomberg route unchanged.
   async function refreshBloombergAndPrice() {
     if (!currentDraft || !resolvedBloombergBond) return;
-    if (unresolvedGroups(currentDraft).length > 0) return;
+    // Deliberately ignores the instrument group: re-sourcing an invalidated
+    // quote is exactly what this action is for.
+    const outstanding = unresolvedGroups(currentDraft).filter(
+      (group) => group.id !== "instrument"
+    );
+    if (outstanding.length > 0) return;
     if (builderValidation.state !== "ready") return;
 
     const quoteSide = getOptionalToggleValue(els.bondQuoteSideToggle);
@@ -2177,16 +2286,51 @@
       payload = await response.json();
     } catch (err) {
       if (isStaleBloombergRequest(generation)) return;
-      renderBloombergFailure("Bloomberg refresh failed: " + err.message);
+      renderRefreshFailure("Bloomberg refresh failed: " + err.message);
       return;
     }
     if (isStaleBloombergRequest(generation)) return;
     if (!response.ok) {
-      renderBloombergFailure(payload.error || "Bloomberg refresh failed.");
+      renderRefreshFailure(payload.error || "Bloomberg refresh failed.");
       return;
     }
 
-    renderContext(extractContextFromDraft(draftAtRequestTime));
+    // Adopt the refreshed acquisition event as this run's own anchor.
+    //
+    // The route priced against a copied envelope whose `pricing_timestamp` is
+    // the refresh's acquisition timestamp (T2), returned verbatim as
+    // `live_bloomberg_quote.acquired_at` -- so that value, not the T1 lookup
+    // that seeded the draft, is what this run was actually priced at. Adopting
+    // it here keeps the draft, the read-only timing display, every provenance
+    // stamp and the export all pointing at the same event, instead of relabeling
+    // one of them at the boundary.
+    //
+    // `valuation_date` is deliberately left alone: the reviewed builder's own
+    // `pricing_timestamp.date() != valuation_date` invariant already had to
+    // hold for this refresh to price at all, so T2's represented local date is
+    // that same date. `as_of_timestamp` is likewise untouched -- it is the
+    // source-observation as-of, which this route carries through unchanged and
+    // never relabels as current. No clock is read here.
+    const liveQuote = payload.live_bloomberg_quote || null;
+    const refreshedAcquiredAt = liveQuote && liveQuote.acquired_at;
+    if (refreshedAcquiredAt) {
+      currentDraft.pricing_timestamp = refreshedAcquiredAt;
+      if (resolvedBloombergBond) {
+        resolvedBloombergBond.acquired_at = refreshedAcquiredAt;
+        if (liveQuote.currency) resolvedBloombergBond.currency = liveQuote.currency;
+        resolvedBloombergBond.clean_price_per_100 = liveQuote.clean_price_per_100;
+        resolvedBloombergBond.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
+      }
+    }
+    // The refresh succeeded, so the sourced state is trustworthy again.
+    sourcedQuoteInvalidated = false;
+    setDerivedFormFromDraft();
+    renderResolvedBondPanel();
+    if (resolvedBloombergBond) renderBondMaster(resolvedBloombergBond);
+    refreshOverrideProvenance();
+    renderOverrideProvenance();
+
+    renderContext(extractContextFromDraft(currentDraft));
     setCurrentDisplay(withOverrideProvenance(payload));
     renderDisplay(payload);
     syncDraftGating();
@@ -2311,4 +2455,5 @@
   window.__shioriTestOrdinaryWorkflowGroupIds = () => ORDINARY_WORKFLOW_GROUP_IDS.slice();
   window.__shioriTestOverrideProvenance = () => overrideProvenanceRecords();
   window.__shioriTestBuilderValidationState = () => builderValidation.state;
+  window.__shioriTestSourcedQuoteInvalidated = () => sourcedQuoteInvalidated;
 })();

@@ -200,18 +200,31 @@ _TREASURY_BOND_MASTER_RAW = {
     "calc_type": "STREET CONVENTION",
 }
 
+# A GBP, Gilt-*shaped* bond with a deliberately REGULAR coupon grid: 2018-04-22
+# to 2028-10-22 is exactly 21 semi-annual periods. The reviewed coupon adapter
+# rejects an irregular grid outright rather than approximating a stub, so a
+# fixture meant to reach the engine has to be regular.
+#
+# This does NOT represent the real GB00BFX0ZL78, whose issue/first-coupon
+# structure carries a stub. That structure is covered separately by
+# _GILT_STUB_BOND_MASTER below, which documents the current rejection rather
+# than pretending it prices.
 _GILT_BOND_MASTER = {
     "coupon": 0.0162,
     "coupon_frequency": "SEMI_ANNUAL",
-    # 2018-04-22 to 2028-10-22 is exactly 21 semi-annual periods. The reviewed
-    # coupon adapter rejects an irregular grid outright rather than approximating
-    # a stub, so a fixture meant to reach the engine has to be regular.
     "issue_date": "2018-04-22",
     "maturity_date": "2028-10-22",
     "first_coupon_date": "2018-10-22",
     "callable_flag": False,
     "sinkable_flag": False,
 }
+
+# The same bond with a stub between issue and first coupon -- the shape a real
+# conventional Gilt commonly has. Used only to pin the current, honest
+# behaviour: the typed builder accepts it and the reviewed engine then returns a
+# truthful FAILED result naming the irregular grid. No stub methodology is
+# invented anywhere to make it price.
+_GILT_STUB_BOND_MASTER = {**_GILT_BOND_MASTER, "issue_date": "2018-06-05"}
 _GILT_BOND_MASTER_RAW = {
     "day_count": "ACT/ACT",
     "maturity_type": "NORMAL",
@@ -293,6 +306,36 @@ def _load_bloomberg_bond(
         arg=payload["isin"],
     )
     page.unroute("**/api/bloomberg/bond", _handle)
+
+
+def _refresh_display(*, acquired_at: str, clean_price: float = 99.81) -> dict:
+    """A ``POST /api/case/bloomberg`` success payload.
+
+    Mirrors the real route's shape: the display dict verbatim plus the bounded
+    ``live_bloomberg_quote`` section, whose ``acquired_at`` is the very
+    timestamp the route substituted as that run's ``pricing_timestamp``.
+    """
+
+    return {
+        "status": "SUCCESS",
+        "result_currency": "USD",
+        "total_notional_model_fair_premium": 1234.5,
+        "model_fair_premium_per_100": 0.12345,
+        "forward_price_delta_per_100": 0.4,
+        "forward_price_gamma_per_100": 0.2,
+        "vega_per_vol_point_per_100": 0.1,
+        "theta_per_calendar_day_per_100": -0.003,
+        "errors": [],
+        "live_bloomberg_quote": {
+            "security": "/isin/US91282CLJ89",
+            "verified_isin": "US91282CLJ89",
+            "currency": "USD",
+            "clean_price_per_100": clean_price,
+            "accrued_interest_per_100": 0.44,
+            "acquired_at": acquired_at,
+            "timestamp_basis": "SHIORI_ACQUISITION_TIME",
+        },
+    }
 
 
 def _set_curve_nodes(page, nodes) -> None:
@@ -380,6 +423,16 @@ def _complete_draft(page, **kwargs) -> None:
 def _wait_for_price_enabled(page) -> None:
     page.wait_for_function(
         "() => !document.querySelector('#price-btn').classList.contains('is-disabled')"
+    )
+
+
+def _wait_for_refresh_enabled(page) -> None:
+    """A failed refresh invalidates the builder validation too, so Refresh comes
+    back only once the real builder has re-confirmed the (unchanged) draft."""
+
+    page.wait_for_function(
+        "() => !document.querySelector('#bloomberg-refresh-btn')"
+        ".classList.contains('is-disabled')"
     )
 
 
@@ -931,9 +984,20 @@ def test_ust_prices_end_to_end_through_the_real_engine(server_url, page) -> None
 
 
 @_PLAYWRIGHT_SKIP
-def test_conventional_gilt_prices_end_to_end_through_the_real_engine(server_url, page) -> None:
-    """Acceptance criterion 1: a conventional UK Gilt starts from the same
-    Bloomberg lookup and reaches the same reviewed engine."""
+def test_gilt_shaped_regular_grid_bond_prices_end_to_end_through_the_real_engine(
+    server_url, page
+) -> None:
+    """A GBP, Gilt-shaped bond with a **regular** coupon grid starts from the
+    same Bloomberg lookup and reaches the same reviewed engine.
+
+    This proves the workflow is not USD/UST-specific -- currency, identifiers
+    and curve nodes all follow the loaded instrument. It deliberately does *not*
+    claim that every real conventional Gilt prices: a Gilt whose issue/
+    first-coupon structure carries a stub is still rejected by the reviewed
+    adapter, which
+    ``test_a_gilt_with_a_real_world_stub_schedule_fails_truthfully_rather_than_pricing``
+    below pins.
+    """
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -955,6 +1019,47 @@ def test_conventional_gilt_prices_end_to_end_through_the_real_engine(server_url,
     # currency -- never carried over from a prior instrument.
     nodes = page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")
     assert {node["currency"] for node in nodes} == {"GBP"}
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_gilt_with_a_real_world_stub_schedule_fails_truthfully_rather_than_pricing(
+    server_url, page
+) -> None:
+    """Pins the current conventional-Gilt limitation honestly.
+
+    A real conventional Gilt's issue/first-coupon structure commonly carries a
+    stub. The typed builder accepts such a bond -- nothing about it is
+    structurally ineligible -- and the reviewed coupon adapter then refuses to
+    approximate the irregular grid, so the run comes back as a truthful FAILED
+    result naming the exact problem.
+
+    This is an existing adapter limitation, not a regression from the
+    minimum-input workflow, and it is the reason #143 cannot be called complete
+    for conventional Gilts. No stub-schedule methodology is invented here to
+    make it price.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        identifier="GB00BFX0ZL78",
+        response=_gilt_lookup_response(bond_master=_GILT_STUB_BOND_MASTER),
+    )
+    _complete_draft(page, strike="95.50", forward="96.05", last_coupon_date="2028-04-22")
+
+    # The typed builder raises no objection -- the bond is structurally eligible.
+    _wait_for_price_enabled(page)
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Pricing failed")
+
+    banner = page.inner_text("#pricing-error-banner")
+    assert "irregular coupon grid" in banner
+    assert "no stub approximation is computed" in banner
+    # No fabricated premium or Greek is left on screen.
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#greek-delta") == "—"
 
 
 @pytest.mark.parametrize("option_type", ["CALL", "PUT"])
@@ -1454,25 +1559,7 @@ def test_successful_refresh_reprices_through_the_bloomberg_route(server_url, pag
         lambda route: route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps(
-                {
-                    "status": "SUCCESS",
-                    "result_currency": "USD",
-                    "total_notional_model_fair_premium": 1234.5,
-                    "model_fair_premium_per_100": 0.12345,
-                    "forward_price_delta_per_100": 0.4,
-                    "forward_price_gamma_per_100": 0.2,
-                    "vega_per_vol_point_per_100": 0.1,
-                    "theta_per_calendar_day_per_100": -0.003,
-                    "errors": [],
-                    "live_bloomberg_quote": {
-                        "currency": "USD",
-                        "clean_price_per_100": 99.81,
-                        "accrued_interest_per_100": 0.44,
-                        "acquired_at": "2026-07-20T11:31:00+08:00",
-                    },
-                }
-            ),
+            body=json.dumps(_refresh_display(acquired_at="2026-07-20T11:31:00+08:00")),
         ),
     )
     page.click("#bloomberg-refresh-btn")
@@ -1485,12 +1572,141 @@ def test_successful_refresh_reprices_through_the_bloomberg_route(server_url, pag
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_refresh_adopts_the_new_acquisition_event_everywhere(server_url, page) -> None:
+    """T1 -> T2 regression (Codex review of PR #152).
+
+    A refresh reprices against a newer acquisition (T2) than the lookup that
+    seeded the draft (T1): the route substitutes T2 as that run's
+    ``pricing_timestamp`` and returns it verbatim as
+    ``live_bloomberg_quote.acquired_at``. Every surface describing the run must
+    therefore adopt T2 -- the draft's own anchor, the read-only timing display,
+    the displayed quote, every override provenance stamp, and both exports. T1
+    must not survive anywhere that describes this run.
+    """
+
+    t1 = "2026-07-20T11:28:00+08:00"
+    t2 = "2026-07-20T11:31:00+08:00"
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(acquired_at=t1))
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    # Before any refresh, everything is anchored to the original lookup (T1).
+    assert {record["run_acquired_at"] for record in _override_provenance(page)} == {t1}
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().pricing_timestamp") == t1
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_refresh_display(acquired_at=t2)),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    # 1. The run's own acquisition anchor, and the acquisition-derived timing
+    #    state shown read-only beside it.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["pricing_timestamp"] == t2
+    assert page.input_value("#pricing-timestamp-input") == t2
+    # The builder's own pricing_timestamp/valuation_date invariant had to hold
+    # for this refresh to price at all, so the valuation date is unchanged --
+    # and as_of stays the source-observation value this route never relabels.
+    assert draft["valuation_date"] == "2026-07-20"
+    assert draft["as_of_timestamp"] == "2026-07-20T03:28:00Z"
+
+    # 2. The displayed quote.
+    assert page.inner_text("#resolved-bond-acquired-at") == t2
+    assert page.inner_text("#resolved-bond-clean-price") == "99.810000"
+
+    # 3. Every override provenance stamp, in memory and on screen.
+    assert {record["run_acquired_at"] for record in _override_provenance(page)} == {t2}
+    assert t2 in page.inner_text("#override-provenance-log")
+    assert t1 not in page.inner_text("#override-provenance-log")
+    assert t2 in page.inner_text("#forward-provenance")
+
+    # 4. Both exports, consistent with the live quote in the same artifact.
+    with page.expect_download() as json_download:
+        page.click("#download-json-btn")
+    exported_text = open(json_download.value.path(), encoding="utf-8").read()
+    exported = json.loads(exported_text)
+    assert exported["live_bloomberg_quote"]["acquired_at"] == t2
+    assert {r["run_acquired_at"] for r in exported["trader_override_provenance"]} == {t2}
+    assert t1 not in exported_text
+
+    with page.expect_download() as md_download:
+        page.click("#download-markdown-btn")
+    markdown = open(md_download.value.path(), encoding="utf-8").read()
+    assert t2 in markdown
+    assert t1 not in markdown
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_successful_retry_after_a_failed_refresh_restores_a_priceable_run(
+    server_url, page
+) -> None:
+    """The recovery path the preserved trader inputs exist for: retry the very
+    refresh that failed, and the untouched ticket prices immediately."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    attempts = {"n": 0}
+    retried_acquisition = "2026-07-20T11:45:00+08:00"
+
+    def route_refresh(route):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            route.fulfill(
+                status=400,
+                content_type="application/json",
+                body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_refresh_display(acquired_at=retried_acquisition)),
+            )
+
+    page.route("**/api/case/bloomberg", route_refresh)
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
+    assert _is_disabled(page, "#price-btn")
+    _wait_for_refresh_enabled(page)
+
+    # Retrying the same action re-sources the quote -- no re-typing, no new
+    # lookup, and no loss of the ticket.
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    assert page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()") is False
+    assert not _resolved_bond_panel_hidden(page)
+    assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
+    assert page.inner_text("#resolved-bond-acquired-at") == retried_acquisition
+    assert "instrument" not in _unresolved_group_ids(page)
+    assert not _is_disabled(page, "#price-btn")
+    assert page.input_value("#strike-price-input") == "99.32"
+    assert float(page.inner_text("#price-total")) > 0
+
+
+@_PLAYWRIGHT_SKIP
 def test_a_failed_refresh_never_falls_back_to_the_stale_quote_or_instrument(
     server_url, page
 ) -> None:
     """Requirement 5: a failed Bloomberg refresh must not fall back to showing
-    the old quote or old instrument data. The whole run is discarded, so nothing
-    can be priced off an acquisition anchor now known to be stale."""
+    the old quote or old instrument data.
+
+    Everything Shiori sourced is invalidated -- and, per the Codex review of
+    PR #152, nothing the trader authored is. A transient DAPI hiccup must not
+    make a trader retype a completed ticket.
+    """
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
@@ -1508,19 +1724,53 @@ def test_a_failed_refresh_never_falls_back_to_the_stale_quote_or_instrument(
         ),
     )
     page.click("#bloomberg-refresh-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg request failed")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
 
     assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
-    # No stale quote, instrument identity, result, draft or provenance survives.
+
+    # Sourced state is gone: no stale quote, instrument identity, Bond Master,
+    # priced header or exportable run survives.
     assert _resolved_bond_panel_hidden(page)
-    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
-    assert _override_provenance(page) == []
     assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#greek-delta") == "—"
     assert page.inner_text("#details-issuer") == "—"
-    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert page.inner_text("#details-coupon") == "Not available"
     assert page.eval_on_selector("#instrument-header-section", "el => el.hidden")
-    assert _is_disabled(page, "#price-btn")
     assert _is_disabled(page, "#download-json-btn")
+
+    # Nothing can be priced against the data Shiori just disowned -- but Refresh
+    # stays available, because re-sourcing is the way back.
+    assert page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()") is True
+    assert _is_disabled(page, "#price-btn")
+    _wait_for_refresh_enabled(page)
+    # Price is still off even once the builder re-confirms the draft: the
+    # sourced quote, not the draft, is what went missing.
+    assert _is_disabled(page, "#price-btn")
+    assert "instrument" in _unresolved_group_ids(page)
+    assert page.inner_text("#unresolved-title") == (
+        "The sourced quote for this run has been invalidated"
+    )
+    assert "will not price against them" in page.inner_text("#unresolved-why")
+    assert "Press Refresh Bloomberg & Price" in page.inner_text("#unresolved-next")
+    assert page.inner_text("#instrument-group-status") == (
+        "Sourced quote invalidated — refresh to re-source"
+    )
+
+    # The trader's own ticket is untouched.
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is not None
+    assert page.input_value("#strike-price-input") == "99.32"
+    assert page.input_value("#notional-input") == "1000000"
+    assert page.input_value("#forward-price-input") == "99.234375"
+    assert page.input_value("#volatility-input") == "0.03395"
+    assert page.input_value("#expiry-offset-input") == "+08:00"
+    assert page.query_selector('#option-type-toggle .opt[data-value="CALL"].on') is not None
+    assert page.query_selector('#position-toggle .opt[data-value="BUY"].on') is not None
+    page.click("#advanced-head")
+    assert page.input_value("#day-count-select") == "ACT_ACT_ISDA"
+    assert page.input_value("#reporting-date-input") == "2026-10-21"
+    assert page.eval_on_selector_all(
+        ".curve-row .curve-tenor-input", "els => els.map(e => e.value)"
+    ) == ["1M", "1Y"]
 
 
 @_PLAYWRIGHT_SKIP
@@ -1568,12 +1818,23 @@ def test_a_failed_lookup_never_leaves_the_previous_instrument_on_screen(
     )
     page.fill("#bond-identifier-input", "91282CLJ8")
     page.click("#load-bloomberg-bond-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg request failed")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg lookup failed")
 
     assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
+    # A lookup failure means the trader was resolving an instrument, so there is
+    # no ticket this failure can safely belong to: the whole run goes, exactly
+    # like Clear. Nothing from the previous bond may survive to be applied to a
+    # different one.
     assert _resolved_bond_panel_hidden(page)
+    assert page.inner_text("#resolved-bond-isin") == "—"
+    assert page.inner_text("#details-issuer") == "—"
     assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _override_provenance(page) == []
     assert page.input_value("#strike-price-input") == ""
+    assert page.eval_on_selector("#workspace-section", "el => el.hidden")
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
+    assert _is_disabled(page, "#download-json-btn")
 
 
 # --- Cross-action race protection --------------------------------------------
