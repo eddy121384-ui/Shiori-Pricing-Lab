@@ -327,7 +327,7 @@ def _load_bloomberg_bond(
 def _refresh_display(
     *, acquired_at: str, clean_price: float = 99.81, quote_side: str = "MID"
 ) -> dict:
-    """A ``POST /api/case/bloomberg`` success payload.
+    """The ``display`` half of a ``POST /api/case/bloomberg`` success payload.
 
     Mirrors the real route's shape: the display dict verbatim plus the bounded
     ``live_bloomberg_quote`` section, whose ``acquired_at`` is the very
@@ -356,6 +356,72 @@ def _refresh_display(
             "timestamp_basis": "SHIORI_ACQUISITION_TIME",
         },
     }
+
+
+def _refresh_payload(
+    *,
+    case: dict,
+    acquired_at: str,
+    clean_price: float = 99.81,
+    quote_side: str = "MID",
+) -> dict:
+    """A full ``POST /api/case/bloomberg`` success payload: ``{case, display}``.
+
+    The route returns the envelope it actually priced -- the sent case with the
+    live quote and the acquisition timestamp already substituted -- so this
+    fixture performs the same two substitutions on the case it was given. The
+    browser adopts this ``case`` verbatim and assembles nothing itself.
+    """
+
+    display = _refresh_display(
+        acquired_at=acquired_at, clean_price=clean_price, quote_side=quote_side
+    )
+    priced_case = json.loads(json.dumps(case))
+    priced_case["pricing_timestamp"] = acquired_at
+    priced_case["bond_quote"] = {
+        **priced_case["bond_quote"],
+        "quote_side": quote_side,
+        "clean_price_per_100": clean_price,
+        "accrued_interest_per_100": display["live_bloomberg_quote"][
+            "accrued_interest_per_100"
+        ],
+    }
+    return {"case": priced_case, "display": display}
+
+
+def _refresh_route(
+    *,
+    acquired_at: str,
+    clean_price: float = 99.81,
+    quote_side: str = "MID",
+    sent: list | None = None,
+):
+    """Return a ``/api/case/bloomberg`` handler that answers like the real route.
+
+    It reads the case the browser actually sent and echoes it back with the two
+    substitutions the route makes, so a test can never accidentally prove the
+    browser assembled a correct case for itself. Pass ``sent`` to capture the
+    request bodies.
+    """
+
+    def handler(route):
+        body = json.loads(route.request.post_data)
+        if sent is not None:
+            sent.append(body)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _refresh_payload(
+                    case=body["case"],
+                    acquired_at=acquired_at,
+                    clean_price=clean_price,
+                    quote_side=quote_side,
+                )
+            ),
+        )
+
+    return handler
 
 
 def _set_curve_nodes(page, nodes) -> None:
@@ -1576,11 +1642,7 @@ def test_successful_refresh_reprices_through_the_bloomberg_route(server_url, pag
 
     page.route(
         "**/api/case/bloomberg",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(_refresh_display(acquired_at="2026-07-20T11:31:00+08:00")),
-        ),
+        _refresh_route(acquired_at="2026-07-20T11:31:00+08:00"),
     )
     page.click("#bloomberg-refresh-btn")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
@@ -1616,14 +1678,7 @@ def test_a_refresh_adopts_the_new_acquisition_event_everywhere(server_url, page)
     assert {record["run_acquired_at"] for record in _override_provenance(page)} == {t1}
     assert page.evaluate("() => window.__shioriTestGetCurrentDraft().pricing_timestamp") == t1
 
-    page.route(
-        "**/api/case/bloomberg",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(_refresh_display(acquired_at=t2)),
-        ),
-    )
+    page.route("**/api/case/bloomberg", _refresh_route(acquired_at=t2))
     page.click("#bloomberg-refresh-btn")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
 
@@ -1691,8 +1746,10 @@ def test_a_refresh_adopts_the_new_quote_into_the_draft_that_becomes_the_run(
             status=200,
             content_type="application/json",
             body=json.dumps(
-                _refresh_display(
-                    acquired_at="2026-07-20T11:31:00+08:00", clean_price=refreshed_clean_price
+                _refresh_payload(
+                    case=json.loads(route.request.post_data)["case"],
+                    acquired_at="2026-07-20T11:31:00+08:00",
+                    clean_price=refreshed_clean_price,
                 )
             ),
         ),
@@ -1765,20 +1822,12 @@ def test_changing_quote_side_then_refreshing_sends_a_matching_forward_side(
     _select_quote_side(page, "OFFER")
 
     sent: list = []
-
-    def route_refresh(route):
-        sent.append(json.loads(route.request.post_data))
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                _refresh_display(
-                    acquired_at="2026-07-20T11:31:00+08:00", quote_side="OFFER"
-                )
-            ),
-        )
-
-    page.route("**/api/case/bloomberg", route_refresh)
+    page.route(
+        "**/api/case/bloomberg",
+        _refresh_route(
+            acquired_at="2026-07-20T11:31:00+08:00", quote_side="OFFER", sent=sent
+        ),
+    )
     page.click("#bloomberg-refresh-btn")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
 
@@ -1792,6 +1841,88 @@ def test_changing_quote_side_then_refreshing_sends_a_matching_forward_side(
     draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
     assert draft["forward_clean_price_input"]["quote_side"] == "OFFER"
     assert draft["bond_quote"]["quote_side"] == "OFFER"
+
+
+@_PLAYWRIGHT_SKIP
+def test_an_edit_during_a_pending_refresh_discards_that_refresh(server_url, page) -> None:
+    """Codex review round 4: an in-flight refresh describes the case that was
+    sent, which is no longer the ticket on screen once the trader edits it.
+
+    Adopting that response would either silently discard the edit or show a
+    result computed from inputs the trader has already changed. The edit
+    invalidates the request instead, so the ticket on screen and the draft
+    behind it never disagree.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    # The trader keeps working while the request is still outstanding.
+    page.fill("#forward-price-input", "97.5")
+    page.wait_for_timeout(150)
+
+    sent_case = json.loads(pending[0].request.post_data)["case"]
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _refresh_payload(case=sent_case, acquired_at="2026-07-20T11:31:00+08:00")
+        ),
+    )
+    page.wait_for_timeout(400)
+
+    # The superseded response is discarded outright: no result is shown, and
+    # the edit survives in both the form and the draft behind it.
+    assert page.input_value("#forward-price-input") == "97.5"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] == 97.5
+    assert draft["pricing_timestamp"] == "2026-07-20T11:28:00+08:00"
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#status-text") != "Draft priced"
+
+    # The case that was sent was a genuine deep copy: the mid-flight edit never
+    # reached through into it.
+    assert sent_case["forward_clean_price_input"]["forward_clean_price_per_100"] == 99.234375
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_refresh_adopts_the_case_the_server_actually_priced(server_url, page) -> None:
+    """The browser assembles no priced case of its own: it adopts the envelope
+    the route returns, which is the one the pricing workflow substituted into
+    and priced."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    # A marker the browser could not have produced itself: if the adopted draft
+    # carries it, the draft came from the response rather than being rebuilt.
+    def route_refresh(route):
+        body = json.loads(route.request.post_data)
+        payload = _refresh_payload(
+            case=body["case"], acquired_at="2026-07-20T11:31:00+08:00"
+        )
+        payload["case"]["snapshot_id"] = "SERVER-PRICED-CASE-MARKER"
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(payload)
+        )
+
+    page.route("**/api/case/bloomberg", route_refresh)
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["snapshot_id"] == "SERVER-PRICED-CASE-MARKER"
+    assert draft["pricing_timestamp"] == "2026-07-20T11:31:00+08:00"
 
 
 @_PLAYWRIGHT_SKIP
@@ -1818,14 +1949,7 @@ def test_a_refresh_never_restamps_the_bond_master_acquisition_time(
     assert page.inner_text("#details-acquired-at") == t1
     page.click("#advanced-head")
 
-    page.route(
-        "**/api/case/bloomberg",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(_refresh_display(acquired_at=t2)),
-        ),
-    )
+    page.route("**/api/case/bloomberg", _refresh_route(acquired_at=t2))
     page.click("#bloomberg-refresh-btn")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
 
@@ -1931,7 +2055,12 @@ def test_a_successful_retry_after_a_failed_refresh_restores_a_priceable_run(
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(_refresh_display(acquired_at=retried_acquisition)),
+                body=json.dumps(
+                    _refresh_payload(
+                        case=json.loads(route.request.post_data)["case"],
+                        acquired_at=retried_acquisition,
+                    )
+                ),
             )
 
     page.route("**/api/case/bloomberg", route_refresh)

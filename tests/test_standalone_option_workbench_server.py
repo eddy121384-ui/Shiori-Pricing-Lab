@@ -396,14 +396,36 @@ def test_api_case_bloomberg_matches_direct_call_to_the_existing_bloomberg_workfl
     assert status == 200
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
-    _, _, _, expected_display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        _,
+        _,
+        _,
+        expected_display,
+        expected_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case,
         bloomberg_security=_BLOOMBERG_SECURITY,
         quote_side=TreasuryFTPQuoteSide.MID,
     )
-    assert payload == expected_display
-    assert payload["live_bloomberg_quote"]["refreshed_scope"] == "BOND_QUOTE_ONLY"
-    assert payload["live_bloomberg_quote"]["other_market_inputs"] == "CASE_JSON_UNCHANGED"
+    # The route returns the envelope it actually priced alongside the display,
+    # so a client adopts a priced case instead of assembling one (Issue #143).
+    assert payload == {"case": expected_case, "display": expected_display}
+    display = payload["display"]
+    assert display["live_bloomberg_quote"]["refreshed_scope"] == "BOND_QUOTE_ONLY"
+    assert display["live_bloomberg_quote"]["other_market_inputs"] == "CASE_JSON_UNCHANGED"
+
+    # The returned case is the overlaid case with exactly the two documented
+    # substitutions -- nothing else moved, and nothing was invented.
+    priced_case = payload["case"]
+    assert priced_case["pricing_timestamp"] == display["live_bloomberg_quote"]["acquired_at"]
+    assert (
+        priced_case["bond_quote"]["clean_price_per_100"]
+        == display["live_bloomberg_quote"]["clean_price_per_100"]
+    )
+    unchanged = {k: v for k, v in priced_case.items()
+                 if k not in ("bond_quote", "pricing_timestamp")}
+    assert unchanged == {k: v for k, v in overlaid_case.items()
+                         if k not in ("bond_quote", "pricing_timestamp")}
 
 
 @_QUANTLIB_SKIP

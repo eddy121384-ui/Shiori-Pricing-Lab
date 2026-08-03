@@ -84,8 +84,10 @@ the browser holds whichever case is currently active and resends it):
   ``price_standalone_option_case_with_bloomberg_quote`` exactly once -- the
   expected ISIN always comes from the (overlaid) case's own
   ``bond_option.underlying_isin``, never from a separately supplied value.
-  Returns the display dict verbatim, including its ``live_bloomberg_quote``
-  section, on HTTP 200. Any validation, date, Bloomberg DAPI, or builder
+  Returns ``{"case": <the envelope that was actually priced>, "display":
+  <the display dict, including its ``live_bloomberg_quote`` section>}`` on
+  HTTP 200 -- mirroring ``POST /api/case``, so a client adopts a priced case
+  instead of assembling one. Any validation, date, Bloomberg DAPI, or builder
   failure returns HTTP 400 with ``{"error": "..."}`` -- the case's own
   previous bond quote is never used as a fallback, and this route reprices
   fresh from Bloomberg every call (no cache, no polling).
@@ -223,7 +225,12 @@ DEFAULT_PORT = 8765
 # builder, not the browser's own form state), and the served page was
 # restructured into nine ordinary workflow groups plus one collapsed Advanced
 # section. A stale process predating either change must not be reused.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v8"
+#
+# Bumped to -v9: POST /api/case/bloomberg now returns {"case", "display"}
+# rather than the bare display dict, so the browser adopts the envelope that
+# was actually priced instead of reassembling it. A stale process would still
+# return the old shape, and the page would read `payload.display` as undefined.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v9"
 
 
 def load_base_case() -> dict:
@@ -365,8 +372,18 @@ def price_case_with_bloomberg_quote(
     ever substituted here. The expected ISIN the loader verifies against
     always comes from the (overlaid) case's own
     ``bond_option.underlying_isin``; this function accepts no separate
-    expected-ISIN input. Returns the display dict verbatim, including its
-    ``live_bloomberg_quote`` section. Raises whatever
+    expected-ISIN input.
+
+    Returns ``{"case": <the envelope that was actually priced>, "display":
+    <the display dict, including its ``live_bloomberg_quote`` section>}``.
+    The case is the one the pricing workflow itself built and priced -- the
+    only place the live quote and the acquisition timestamp are substituted --
+    and is never reassembled here or by the browser (Issue #143, Codex review
+    round 4). A client that adopts it cannot end up holding a case that
+    differs from the one behind the result it is showing. This mirrors
+    ``POST /api/case``, which already returns the case beside its display.
+
+    Raises whatever
     ``price_standalone_option_case_with_bloomberg_quote`` itself raises for
     a blank security, invalid quote side, envelope/date problem, or
     Bloomberg DAPI failure -- never caught or remapped here, and the case's
@@ -374,10 +391,10 @@ def price_case_with_bloomberg_quote(
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
-    _, _, _, display = price_standalone_option_case_with_bloomberg_quote(
+    _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case, bloomberg_security=bloomberg_security, quote_side=quote_side
     )
-    return display
+    return {"case": priced_case, "display": display}
 
 
 def _shiori_acquisition_now() -> datetime:

@@ -835,9 +835,18 @@ def price_standalone_option_case_with_bloomberg_quote(
     with no fallback to the case's original ``bond_quote``.
 
     Returns the existing ``request``/``PricingResult``, the live
-    ``BLIBondQuote``, and the price-only display dict with one added
+    ``BLIBondQuote``, the price-only display dict with one added
     ``"live_bloomberg_quote"`` section (see
-    :func:`prepare_live_bloomberg_quote_display`). Raises ``ValueError`` for
+    :func:`prepare_live_bloomberg_quote_display`), and finally **the copied
+    envelope that was actually priced** -- the caller's own case with exactly
+    ``bond_quote`` and ``pricing_timestamp`` replaced.
+
+    That last value exists so a caller never has to reassemble the priced case
+    for itself. Reconstructing it elsewhere means duplicating this function's
+    two substitutions, and a copy that drifts from what was priced is exactly
+    the class of defect that produces a displayed or exported run describing
+    inputs the engine never saw. It is the same dict this function passed to
+    :func:`price_standalone_option_case`, not a rebuild of it. Raises ``ValueError`` for
     envelope/input/date problems, propagates ``BLIBloombergDapiError``
     unchanged on any Bloomberg failure (the original ``bond_quote`` is
     never used as a fallback), and propagates every nested schema/builder
@@ -873,7 +882,7 @@ def price_standalone_option_case_with_bloomberg_quote(
         bloomberg_security, live_quote, acquired_at, envelope["as_of_timestamp"]
     )
     merged_display = {**display, "live_bloomberg_quote": live_quote_display}
-    return request, result, live_quote, merged_display
+    return request, result, live_quote, merged_display, bloomberg_case
 
 
 def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
@@ -907,7 +916,13 @@ def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
     additional returned value.
     """
 
-    request, result, live_quote, display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        request,
+        result,
+        live_quote,
+        display,
+        _priced_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         case,
         bloomberg_security=bloomberg_security,
         quote_side=quote_side,

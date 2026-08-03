@@ -1293,6 +1293,13 @@
   function applyManualInputsToDraft() {
     if (!currentDraft) return;
 
+    // Any edit invalidates an in-flight Price or Refresh: their responses
+    // describe the case that was sent, which is no longer the ticket on
+    // screen. Adopting one would silently discard this edit, or show a result
+    // computed from inputs the trader has already changed.
+    invalidatePendingPriceRequest();
+    invalidatePendingBloombergRequest();
+
     const bondOption = currentDraft.bond_option;
     bondOption.option_type = getOptionalToggleValue(els.optionTypeToggle);
     bondOption.position = getOptionalToggleValue(els.positionToggle);
@@ -2320,13 +2327,11 @@
     // never run, because the builder rejects the mismatch first and the whole
     // refresh 400s. That is why this function constructs the request case
     // up front instead of mutating `currentDraft` piecemeal after the fact.
-    const requestCase = {
-      ...currentDraft,
-      forward_clean_price_input: {
-        ...currentDraft.forward_clean_price_input,
-        quote_side: quoteSide,
-      },
-    };
+    // A deep copy, not a spread: a shallow copy still aliases every nested
+    // object, so an edit made while the request is in flight would reach
+    // through into the case already serialized and sent.
+    const requestCase = JSON.parse(JSON.stringify(currentDraft));
+    requestCase.forward_clean_price_input.quote_side = quoteSide;
     const overlay = extractOverlayFromDraft(requestCase);
     const generation = beginBloombergRequest();
     invalidatePendingPriceRequest();
@@ -2364,56 +2369,31 @@
       return;
     }
 
-    // Adopt the case that was actually priced.
+    // Adopt the case the server actually priced -- never one assembled here.
     //
-    // The route priced `requestCase` with two substitutions of its own: the
-    // live quote replacing `bond_quote`, and that quote's acquisition
-    // timestamp (T2) replacing `pricing_timestamp`, returned verbatim as
-    // `live_bloomberg_quote.acquired_at`. Rebuilding the same object here --
-    // rather than mutating whatever `currentDraft` happens to be -- keeps the
-    // draft, the read-only timing display, every provenance stamp and the
-    // export all describing one run.
+    // The route returns `{case, display}`, where `case` is the very envelope
+    // it priced: the sent case with the live quote and the acquisition
+    // timestamp (T2) already substituted by the one function that performs
+    // those substitutions. The browser adopts it verbatim.
     //
-    // `valuation_date` is deliberately left alone: the reviewed builder's own
-    // `pricing_timestamp.date() != valuation_date` invariant already had to
-    // hold for this refresh to price at all, so T2's represented local date is
-    // that same date. `as_of_timestamp` is likewise untouched -- it is the
-    // source-observation as-of, which this route carries through unchanged and
-    // never relabels as current. No clock is read here.
-    const liveQuote = payload.live_bloomberg_quote || null;
-    const refreshedAcquiredAt = (liveQuote && liveQuote.acquired_at) || null;
-    const refreshedQuote = { ...requestCase.bond_quote };
-    if (liveQuote) {
-      // Only the fields the bounded `live_bloomberg_quote` section actually
-      // carries. `price_type`, `status` and `yield_value` are not copied
-      // because the loader constructs them identically on every call
-      // (PRICE / ACTIVE / None), so the values already here are the ones the
-      // route priced; nothing is invented for a field the response omits.
-      if (liveQuote.verified_isin) refreshedQuote.isin = liveQuote.verified_isin;
-      if (liveQuote.currency) refreshedQuote.currency = liveQuote.currency;
-      if (liveQuote.source_system) refreshedQuote.source_system = liveQuote.source_system;
-      if (liveQuote.quote_side) refreshedQuote.quote_side = liveQuote.quote_side;
-      if (liveQuote.clean_price_per_100 !== undefined) {
-        refreshedQuote.clean_price_per_100 = liveQuote.clean_price_per_100;
-      }
-      if (liveQuote.accrued_interest_per_100 !== undefined) {
-        refreshedQuote.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
-      }
-    }
-    currentDraft = {
-      ...requestCase,
-      bond_quote: refreshedQuote,
-      pricing_timestamp: refreshedAcquiredAt || requestCase.pricing_timestamp,
-    };
+    // This is deliberately the whole of the state transition. Reconstructing
+    // the priced case client-side is what produced four consecutive rounds of
+    // review findings on this function -- an incomplete adoption, a stale
+    // quote, a restamped provenance timestamp, an aliased shallow copy. None
+    // of those are possible when the browser does not build the object at all.
+    const pricedCase = payload.case;
+    const display = payload.display;
+    currentDraft = pricedCase;
 
     // Only the *quote* was re-acquired. The Bond Master fields and the raw
     // display-only descriptions still come from the lookup that fetched them,
-    // so their acquisition time stays where it was -- claiming T1 coupon and
-    // schedule evidence was acquired at T2 would be a false provenance
-    // statement about data this refresh never touched.
-    resolvedBloombergBond.quote_acquired_at =
-      refreshedAcquiredAt || resolvedBloombergBond.quote_acquired_at;
+    // so `bond_master_acquired_at` is deliberately left where it was: claiming
+    // that evidence was acquired at T2 would be a false provenance statement
+    // about data this refresh never touched.
+    const liveQuote = display.live_bloomberg_quote || null;
     if (liveQuote) {
+      resolvedBloombergBond.quote_acquired_at =
+        liveQuote.acquired_at || resolvedBloombergBond.quote_acquired_at;
       if (liveQuote.currency) resolvedBloombergBond.currency = liveQuote.currency;
       if (liveQuote.quote_side) resolvedBloombergBond.quote_side = liveQuote.quote_side;
       resolvedBloombergBond.clean_price_per_100 = liveQuote.clean_price_per_100;
@@ -2423,6 +2403,7 @@
     // The refresh succeeded, so the sourced state is trustworthy again.
     sourcedQuoteInvalidated = false;
     setDerivedFormFromDraft();
+    setTradeFormFromDraft(currentDraft);
     renderResolvedBondPanel();
     renderBondMaster(resolvedBloombergBond);
     renderRouteMetadata();
@@ -2430,8 +2411,8 @@
     renderOverrideProvenance();
 
     renderContext(extractContextFromDraft(currentDraft));
-    setCurrentDisplay(withOverrideProvenance(payload));
-    renderDisplay(payload);
+    setCurrentDisplay(withOverrideProvenance(display));
+    renderDisplay(display);
     syncDraftGating();
   }
 
