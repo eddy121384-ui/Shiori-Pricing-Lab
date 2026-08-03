@@ -1259,17 +1259,31 @@ def test_a_one_character_override_value_is_scrubbed_on_error_paths():
     assert sanitized == "responseError: OP999=<redacted override value>"
 
 
-def test_scrubbing_matches_whole_tokens_only():
+def test_a_one_character_override_value_is_scrubbed_from_a_colon_form_too():
+    applied = (AppliedOverride(field="OP999", value="1", source="user_supplied"),)
+
+    sanitized = sanitize_external_text("[BAD_FLD] override OP999: 1 rejected", applied)
+
+    assert sanitized == "[BAD_FLD] override OP999=<redacted override value> rejected"
+
+
+def test_a_one_character_value_is_masked_structurally_never_globally():
     one_char = (AppliedOverride(field="OP999", value="1", source="user_supplied"),)
+
+    # a bare "1" with no field beside it is left alone -- masking every one
+    # would destroy the message
+    assert sanitize_external_text("codes 10 and 21 and 1 retry", one_char) == (
+        "codes 10 and 21 and 1 retry"
+    )
+
+
+def test_a_longer_value_keeps_the_bare_token_defence():
     word = (AppliedOverride(field="OP046", value="Black", source="fixed:pricing_model"),)
 
-    # an unrelated substring must survive
-    assert sanitize_external_text("codes 10 and 21 unaffected", one_char) == (
-        "codes 10 and 21 unaffected"
-    )
-    assert sanitize_external_text("Blackrock unaffected", word) == "Blackrock unaffected"
-    # the delimited value itself is still removed
-    assert "<redacted override value>" in sanitize_external_text("value = 1 rejected", one_char)
+    sanitized = sanitize_external_text("Blackrock unaffected; bare Black removed", word)
+
+    assert "Blackrock unaffected" in sanitized
+    assert "bare <redacted override value> removed" in sanitized
 
 
 def test_a_one_character_override_never_reaches_any_output(monkeypatch, tmp_path, capsys):
@@ -1355,3 +1369,63 @@ def test_metadata_description_and_documentation_are_sanitized_too(monkeypatch, t
     assert field["description"] == "served from <redacted host>"
     assert "24681357" not in field["documentation_excerpt"]
     assert "/home/eddy" not in field["documentation_excerpt"]
+
+
+def test_a_one_character_override_never_leaks_from_a_request_error(monkeypatch, tmp_path, capsys):
+    def _probe(identifier, fields, overrides=None):
+        raise RuntimeError("Bloomberg DAPI responseError: override OP999=1 is invalid")
+
+    monkeypatch.setattr(module, "probe_fields", _probe)
+    monkeypatch.setattr(
+        module, "describe_fields", _fake_describe({"OPT_UNDL_FORWARD_PX": ("OP999",)})
+    )
+
+    exit_code = main(["--override", "OP999=1", "--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "OP999=1" not in surface
+    assert "<redacted override value>" in json_text
+    assert "responseError" in json_text
+
+
+def test_a_per_field_metadata_error_hides_windows_paths_and_credentials(
+    monkeypatch, tmp_path, capsys
+):
+    def _describe(fields):
+        return [
+            FieldDescription(
+                field=field,
+                status="field_error",
+                detail=(
+                    f"[BAD_FLD] {field} unavailable from bbg-host.local:8194 "
+                    "token=SECRETTOKEN99 password: hunter2 "
+                    "(C:\\Users\\eddy\\AppData\\blpapi.log and /var/log/blpapi/session.log)"
+                ),
+            )
+            for field in fields
+        ]
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "bbg-host.local:8194" not in surface
+        assert "SECRETTOKEN99" not in surface
+        assert "hunter2" not in surface
+        assert "C:\\Users\\eddy" not in surface
+        assert "/var/log/blpapi" not in surface
+    # still diagnosable
+    written = json.loads(json_text)
+    detail = written["field_metadata_discovery"]["fields"][0]["detail"]
+    assert "[BAD_FLD]" in detail
+    assert "<redacted host>" in detail and "<redacted path>" in detail

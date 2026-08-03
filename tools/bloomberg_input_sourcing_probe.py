@@ -881,8 +881,11 @@ def sanitize_external_text(
     goes through here first, so the no-leak guarantee holds on error paths
     exactly as it does on success paths. Removed, in order:
 
-    1. every override value this run actually sent (Bloomberg can quote the
-       request back in a rejection);
+    1. every override value this run actually sent -- first where Bloomberg
+       quotes the request back structurally (``FIELD=VALUE`` / ``FIELD: VALUE``,
+       anchored to the override's own field id, so even a one-character value
+       is removed precisely), then, for values longer than one character, any
+       remaining bare token-boundary occurrence;
     2. host:port pairs;
     3. filesystem paths;
     4. ``key=value`` pairs whose key names a terminal, session, user,
@@ -897,19 +900,37 @@ def sanitize_external_text(
     if not text:
         return text
     sanitized = str(text)
+    # Pass 1 -- structural. Mask the value where Bloomberg quotes the request
+    # back as `FIELD=VALUE` / `FIELD: VALUE`, keyed on the override's own
+    # field id. This is what makes a one-character value (e.g.
+    # `--override OP999=1`) safe to remove: the match is anchored to its
+    # field, so nothing else in the message is touched.
+    for item in overrides:
+        field = str(item.field).strip()
+        if not field:
+            continue
+        for value in {item.value, str(item.value).strip()}:
+            if not value:
+                continue
+            structural = re.compile(
+                rf"(?<![\w.-])({re.escape(field)})\s*[=:]\s*[\"']?{re.escape(value)}[\"']?"
+                r"(?![\w.-])"
+            )
+            sanitized = structural.sub(rf"\1={_SCRUBBED_OVERRIDE_VALUE}", sanitized)
+
+    # Pass 2 -- extra defence for a bare occurrence with no field beside it.
+    # Only for values longer than one character, where a token-boundary match
+    # is unambiguous; masking every bare "1" would destroy the message for no
+    # real gain.
     variants = {
         variant
         for item in overrides
         for variant in (item.value, str(item.value).strip())
-        if variant
+        if variant and len(variant) > 1
     }
-    # Token-boundary matching, so a value of any length -- including a
-    # one-character one such as `--override OP999=1` -- is removed where
-    # Bloomberg quotes it back, without mangling an unrelated substring
-    # (a "1" inside "8194", a "Black" inside "Blackrock").
     for variant in sorted(variants, key=len, reverse=True):
-        pattern = re.compile(rf"(?<![\w.-]){re.escape(variant)}(?![\w.-])")
-        sanitized = pattern.sub(_SCRUBBED_OVERRIDE_VALUE, sanitized)
+        bare = re.compile(rf"(?<![\w.-]){re.escape(variant)}(?![\w.-])")
+        sanitized = bare.sub(_SCRUBBED_OVERRIDE_VALUE, sanitized)
     sanitized = _SENSITIVE_KEY_PATTERN.sub(r"\1=<redacted>", sanitized)
     sanitized = _PATH_PATTERN.sub("<redacted path>", sanitized)
     sanitized = _HOST_PORT_PATTERN.sub("<redacted host>", sanitized)
