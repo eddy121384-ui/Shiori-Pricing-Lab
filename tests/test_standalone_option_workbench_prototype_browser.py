@@ -2644,6 +2644,64 @@ def test_a_pending_lookup_blocks_price_and_refresh_on_the_previous_bond(
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_pending_refresh_blocks_price_on_the_previous_quote(server_url, page) -> None:
+    """Second merge-gate finding: Price stayed live during a pending refresh.
+
+    ``priceCurrentDraft`` opens by calling ``invalidatePendingBloombergRequest()``,
+    so clicking Price while a refresh was outstanding aborted that refresh and
+    priced the draft with the quote the trader was in the middle of replacing --
+    producing a priced and exportable run on stale market data *because* they
+    had asked for fresh data.
+
+    Price is the lowest-authority action and now waits for the refresh to
+    settle. The reverse direction stays allowed: Refresh superseding a pending
+    Price still yields a priced run, on fresher data.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    assert page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+
+    # Driven past the CSS, Price must still refuse: no /api/case request, and
+    # the refresh the trader asked for is still outstanding rather than aborted.
+    priced: list = []
+    page.route("**/api/case", lambda route: priced.append(route))
+    page.dispatch_event("#price-btn", "click")
+    page.wait_for_timeout(300)
+
+    assert priced == []
+    assert page.inner_text("#price-total") == "—"
+
+    # Letting the refresh land prices the run on the refreshed quote, not the
+    # one Price would have used.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _refresh_payload(
+                case=json.loads(pending[0].request.post_data)["case"],
+                acquired_at="2026-07-20T11:31:00+08:00",
+                clean_price=101.5,
+            )
+        ),
+    )
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_quote"]["clean_price_per_100"] == 101.5
+    assert draft["pricing_timestamp"] == "2026-07-20T11:31:00+08:00"
+    _wait_for_price_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
 def test_an_identifier_edit_during_a_pending_lookup_discards_that_response(
     server_url, page
 ) -> None:
