@@ -2027,7 +2027,12 @@
       scheduleBuilderValidation();
     }
     const builderReady = draftComplete && builderValidation.state === "ready";
-    const canRefresh = builderReady && resolvedBloombergBond !== null;
+    // A pending lookup names a *different* bond than the one backing this
+    // draft. Both actions begin by invalidating that lookup, so leaving them
+    // live would let a click silently cancel the trader's Load and then price
+    // or refresh the previous bond while the security input names the new one.
+    const canRefresh =
+      builderReady && resolvedBloombergBond !== null && !bondLookupInFlight;
     // Price additionally requires that the sourced quote is live *and* on the
     // side currently selected -- a Price started after a side change cannot be
     // caught by request invalidation, so it has to be gated here.
@@ -2267,6 +2272,10 @@
       "The lookup inputs changed while Bloomberg was still answering, so that " +
         "response was discarded. Press Load to source the bond named above."
     );
+    // The lookup has settled, so whatever run is still on screen becomes
+    // actionable again. The other settle paths re-render through their own
+    // renderers; this one has to do it itself.
+    syncDraftGating();
   }
 
   // --- Actions --------------------------------------------------------------
@@ -2284,6 +2293,9 @@
 
     const generation = beginBondLookupRequest();
     bondLookupInFlight = true;
+    // Both Price and Refresh are gated on this flag, so the buttons have to be
+    // re-rendered as soon as it is raised rather than at the next form edit.
+    syncDraftGating();
     invalidatePendingPriceRequest();
     invalidatePendingBloombergRequest();
 
@@ -2383,6 +2395,8 @@
   async function priceCurrentDraft() {
     if (!currentDraft || !resolvedBloombergBond) return;
     if (sourcedQuoteInvalidated) return;
+    // A lookup for another bond is outstanding; this action would cancel it.
+    if (bondLookupInFlight) return;
     // Never price a draft whose quote was sourced on a side other than the one
     // on screen. The gating above already disables the button; this is the
     // same rule at the action itself, so it cannot be reached another way.
@@ -2439,6 +2453,7 @@
   // /api/case/bloomberg route unchanged.
   async function refreshBloombergAndPrice() {
     if (!currentDraft || !resolvedBloombergBond) return;
+    if (bondLookupInFlight) return;
     // Deliberately ignores the instrument group: re-sourcing an invalidated
     // quote is exactly what this action is for.
     const outstanding = unresolvedGroups(currentDraft).filter(

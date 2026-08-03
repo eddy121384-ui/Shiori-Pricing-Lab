@@ -2581,6 +2581,69 @@ def test_reselecting_the_sourced_side_does_not_price_while_the_quote_is_invalida
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_pending_lookup_blocks_price_and_refresh_on_the_previous_bond(
+    server_url, page
+) -> None:
+    """Merge-gate review: Price and Refresh stayed live during a pending lookup.
+
+    With a completed ticket for bond A, typing bond B and pressing Load left
+    both controls enabled from A. Either one begins by calling
+    ``invalidatePendingBondLookupRequest()``, so a click silently cancelled the
+    trader's Load and then priced or refreshed A while the security input named
+    B -- the Load simply appeared to do nothing.
+
+    Both are now gated on the lookup being settled, at the button and at the
+    action, and both come back once it settles.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    # A lookup for a different bond is now outstanding.
+    pending: list = []
+    page.route("**/api/bloomberg/bond", lambda route: pending.append(route))
+    page.fill("#bond-identifier-input", "GB00BFX0ZL78")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    assert page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+    assert page.eval_on_selector(
+        "#bloomberg-refresh-btn", "el => el.classList.contains('is-disabled')"
+    )
+
+    # Even driven directly, neither action may cancel the Load and act on the
+    # previous bond.
+    priced: list = []
+    refreshed: list = []
+    page.route("**/api/case", lambda route: priced.append(route))
+    page.route("**/api/case/bloomberg", lambda route: refreshed.append(route))
+    # dispatch_event, not click: `.is-disabled` sets pointer-events: none, so an
+    # ordinary click cannot reach the handler at all. Dispatching directly
+    # bypasses the CSS and proves the guard inside the action, not just the
+    # styling that usually stops the trader reaching it.
+    page.dispatch_event("#price-btn", "click")
+    page.dispatch_event("#bloomberg-refresh-btn", "click")
+    page.wait_for_timeout(300)
+
+    assert priced == []
+    assert refreshed == []
+    assert len(pending) == 1  # the Load is still outstanding, not cancelled
+
+    # Letting the Load land restores a normal, actionable run for the new bond.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_gilt_lookup_response(quote_side="MID")),
+    )
+    _wait_until(lambda: page.inner_text("#resolved-bond-isin") == "GB00BFX0ZL78")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+        "underlying_isin"
+    ] == "GB00BFX0ZL78"
+
+
+@_PLAYWRIGHT_SKIP
 def test_an_identifier_edit_during_a_pending_lookup_discards_that_response(
     server_url, page
 ) -> None:
