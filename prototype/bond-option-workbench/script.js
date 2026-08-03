@@ -243,9 +243,14 @@
     "settlement date. SETTLE_DT and DAYS_TO_SETTLE describe the cash bond's " +
     "standard settlement -- a different role that must not be conflated. Fixing " +
     "Reporting Date to Valuation Date is an unapproved route decision.";
+  // "At least one", not "the fields above": the loader permits independent
+  // partial misses, so an unknown CPN_FREQ leaves coupon_frequency null while
+  // coupon, the dates and the flags all came back populated. Calling those
+  // empty would misreport fields Bloomberg actually returned.
   const EVIDENCE_BOND_MASTER =
     "Bond Master values are read verbatim from the DAPI mnemonics confirmed in " +
-    "PR #141. The fields above came back empty for this security.";
+    "PR #141. At least one of them came back empty for this security -- each " +
+    "field shown as Not available is one this security's response did not return.";
   const EVIDENCE_SOURCED_STATE_INVALIDATED =
     "The Bloomberg request for this run failed, so the previously sourced quote " +
     "and instrument data can no longer be shown or priced against -- Shiori will " +
@@ -333,10 +338,15 @@
                 "price a side the trader did not select, and will not relabel a " +
                 "quote it did not source on that side.",
               evidence: EVIDENCE_QUOTE_SIDE_MISMATCH,
+              // States what is retained, not what did or did not happen: a side
+              // change on a settled ticket discards nothing, but the same click
+              // aborts a refresh or lookup that was already in flight. The
+              // retained state below is true either way.
               next:
                 "Press Refresh Bloomberg & Price to re-source this bond on the " +
-                "selected side, or select the original side back. Nothing has been " +
-                "discarded either way.",
+                "selected side, or select the original side back. Your trade " +
+                "inputs, overrides and curve nodes are untouched, and so is the " +
+                "quote already sourced for this run.",
             }
           : sourcedQuoteInvalidated
           ? {
@@ -358,7 +368,14 @@
                 "Every pricing input on this route is anchored to one Bloomberg " +
                 "acquisition event, so nothing can be entered before a bond is " +
                 "resolved.",
-              evidence: "No Bloomberg request has been made yet in this run.",
+              // This branch renders both before the first lookup and after a
+              // failed one has reset the run, so it cannot say whether a request
+              // has been made. A failed lookup reports its own outcome in the
+              // error banner; this states only what is missing and why.
+              evidence:
+                "Every instrument fact on this route comes from one Bloomberg " +
+                "lookup, so until one has resolved successfully there is nothing " +
+                "for a run to be anchored to.",
               next:
                 "Type a 12-character ISIN or a 9-character CUSIP, pick a quote " +
                 "side, then press Bloomberg Load.",

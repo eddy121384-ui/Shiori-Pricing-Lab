@@ -2664,6 +2664,68 @@ def test_a_quote_side_mismatch_claims_nothing_about_request_history(
 
 
 @_PLAYWRIGHT_SKIP
+def test_the_mismatch_next_step_claims_nothing_about_discarded_work(
+    server_url, page
+) -> None:
+    """Codex review round 10: round 9 fixed the evidence line and left the same
+    false history claim in the ``next`` field beside it.
+
+    "Nothing has been discarded either way" is true when the toggle is clicked
+    on a settled ticket, and false when the same click aborts a refresh that was
+    already in flight. The panel now states what is *retained*, which holds on
+    both paths.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    _select_quote_side(page, "BID")
+    _wait_until(lambda: "Quote Side does not match" in page.inner_text("#unresolved-title"))
+
+    next_step = page.inner_text("#unresolved-next")
+    assert "Nothing has been discarded" not in next_step
+    assert "inputs, overrides and curve nodes are untouched" in next_step
+
+
+@_PLAYWRIGHT_SKIP
+def test_the_no_bond_panel_never_denies_a_lookup_that_failed(server_url, page) -> None:
+    """Codex review round 10: the no-bond branch said "No Bloomberg request has
+    been made yet in this run".
+
+    ``renderLookupFailure()`` resets the draft and re-syncs gating, so this same
+    branch renders after a genuine failed lookup -- denying a request on the very
+    screen whose banner reports that request failing.
+    """
+
+    page.goto(f"{server_url}/")
+    page.route(
+        "**/api/bloomberg/bond",
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg lookup failed")
+
+    evidence = page.inner_text("#unresolved-evidence")
+    assert "No Bloomberg request has been made" not in evidence
+    assert "until one has resolved successfully" in evidence
+    # The failure itself is still reported, in the place that owns it.
+    assert "Bloomberg DAPI session failed to start" in page.inner_text("#pricing-error-banner")
+
+
+@_PLAYWRIGHT_SKIP
 def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
     page.goto(f"{server_url}/")
 
