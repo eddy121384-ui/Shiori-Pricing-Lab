@@ -271,6 +271,24 @@
     return (draft.bond_reference_data_universe || [])[0] || {};
   }
 
+  // True when the Quote Side on screen is not the side the draft's quote was
+  // actually sourced on.
+  //
+  // Quote Side and the sourced draft are independent state, so they can
+  // diverge with no request in flight at all -- select a different side on a
+  // completed ticket and nothing about the draft changes. Invalidating pending
+  // requests cannot reach that case, because the Price request is started
+  // *after* the change. This is computed rather than latched: selecting the
+  // original side back restores the run exactly as it was, with no Bloomberg
+  // call and nothing discarded.
+  function sourcedQuoteSideMismatch() {
+    if (currentDraft === null || resolvedBloombergBond === null) return false;
+    if (sourcedQuoteInvalidated) return false;
+    const selected = getOptionalToggleValue(els.bondQuoteSideToggle);
+    if (!selected) return false;
+    return selected !== currentDraft.bond_quote.quote_side;
+  }
+
   const WORKFLOW_GROUPS = [
     {
       id: "instrument",
@@ -281,10 +299,31 @@
       label: "Instrument",
       advanced: false,
       resolved: (draft) =>
-        draft !== null && resolvedBloombergBond !== null && !sourcedQuoteInvalidated,
+        draft !== null &&
+        resolvedBloombergBond !== null &&
+        !sourcedQuoteInvalidated &&
+        !sourcedQuoteSideMismatch(),
       locator: "#bond-identifier-input",
       unresolved: () =>
-        sourcedQuoteInvalidated
+        sourcedQuoteSideMismatch()
+          ? {
+              title: "Quote Side does not match the sourced quote",
+              missing: `A Bloomberg quote sourced on ${getOptionalToggleValue(
+                els.bondQuoteSideToggle
+              )}.`,
+              why:
+                "This run's quote was sourced on " +
+                `${currentDraft.bond_quote.quote_side}, and Quote Side now reads ` +
+                `${getOptionalToggleValue(els.bondQuoteSideToggle)}. Shiori will not ` +
+                "price a side the trader did not select, and will not relabel a " +
+                "quote it did not source on that side.",
+              evidence: EVIDENCE_SOURCED_STATE_INVALIDATED,
+              next:
+                "Press Refresh Bloomberg & Price to re-source this bond on the " +
+                "selected side, or select the original side back. Nothing has been " +
+                "discarded either way.",
+            }
+          : sourcedQuoteInvalidated
           ? {
               title: "The sourced quote for this run has been invalidated",
               missing: "A current Bloomberg quote for the loaded bond.",
@@ -1924,7 +1963,9 @@
       ? "Enter an ISIN or CUSIP"
       : sourcedQuoteInvalidated
         ? "Sourced quote invalidated — refresh to re-source"
-        : "Loaded from Bloomberg";
+        : sourcedQuoteSideMismatch()
+          ? "Quote Side changed — refresh to re-source on that side"
+          : "Loaded from Bloomberg";
 
     // Rendered here rather than only on a form edit, so a freshly-loaded draft
     // shows its real (blocking) coverage state immediately instead of an
@@ -1955,7 +1996,10 @@
     }
     const builderReady = draftComplete && builderValidation.state === "ready";
     const canRefresh = builderReady && resolvedBloombergBond !== null;
-    const canPrice = canRefresh && !sourcedQuoteInvalidated;
+    // Price additionally requires that the sourced quote is live *and* on the
+    // side currently selected -- a Price started after a side change cannot be
+    // caught by request invalidation, so it has to be gated here.
+    const canPrice = canRefresh && !sourcedQuoteInvalidated && !sourcedQuoteSideMismatch();
     els.priceBtn.classList.toggle("is-disabled", !canPrice);
     els.bloombergRefreshBtn.classList.toggle("is-disabled", !canRefresh);
 
@@ -2212,6 +2256,33 @@
     }
     if (isStaleBondLookupRequest(generation)) return;
     bondLookupInFlight = false;
+
+    // Adopt-time sourcing-input check. A response describes the identifier and
+    // side it was requested with; if either sourcing input has since changed,
+    // adopting it would build a resolved panel and draft for a bond or side the
+    // trader is no longer naming. This is checked before the `response.ok`
+    // branch on purpose: `renderLookupFailure` resets the whole run, so a
+    // failed answer for a superseded identifier would otherwise discard a prior
+    // completed ticket on that bond's behalf.
+    //
+    // Written as an invariant at the point of adoption rather than as another
+    // per-control listener: the controls that feed a lookup can grow, and one
+    // rule covering "the inputs must still be what this response was requested
+    // with" does not have to be extended each time one does.
+    const currentIdentifier = parseBondIdentifier(els.bondIdentifierInput.value);
+    const currentSide = getOptionalToggleValue(els.bondQuoteSideToggle);
+    if (
+      !currentIdentifier ||
+      currentIdentifier.identifier !== parsed.identifier ||
+      currentSide !== quoteSide
+    ) {
+      renderLookupInputError(
+        "The lookup inputs changed while Bloomberg was still answering, so that " +
+          "response was discarded. Press Load to source the bond named above."
+      );
+      return;
+    }
+
     if (!response.ok) {
       renderLookupFailure(payload.error || "Bloomberg bond lookup failed.");
       return;
@@ -2263,6 +2334,10 @@
   async function priceCurrentDraft() {
     if (!currentDraft || !resolvedBloombergBond) return;
     if (sourcedQuoteInvalidated) return;
+    // Never price a draft whose quote was sourced on a side other than the one
+    // on screen. The gating above already disables the button; this is the
+    // same rule at the action itself, so it cannot be reached another way.
+    if (sourcedQuoteSideMismatch()) return;
     if (unresolvedGroups(currentDraft).length > 0) return;
     if (builderValidation.state !== "ready") return;
 

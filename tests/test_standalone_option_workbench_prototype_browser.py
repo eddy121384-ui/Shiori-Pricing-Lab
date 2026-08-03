@@ -2378,6 +2378,136 @@ def test_a_quote_side_change_during_a_pending_lookup_discards_that_lookup(
 
 
 @_PLAYWRIGHT_SKIP
+def test_price_is_blocked_while_quote_side_differs_from_the_sourced_side(
+    server_url, page
+) -> None:
+    """Codex review round 7: the case no request invalidation can reach.
+
+    With a completed ticket and nothing in flight, selecting a different side
+    leaves the draft's quote on the side it was actually sourced on. A Price
+    started *after* that change is a brand-new request, so invalidating pending
+    ones cannot help: Shiori would price MID while the trader reads BID.
+
+    Gated rather than latched -- selecting the original side back restores the
+    run untouched, with no Bloomberg call and nothing discarded.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    _select_quote_side(page, "BID")
+    _wait_until(lambda: page.eval_on_selector("#price-btn", "el => el.disabled") is not False)
+
+    # The draft is untouched -- Shiori does not relabel a quote it did not
+    # source on that side -- but it can no longer be priced.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_quote"]["quote_side"] == "MID"
+    assert draft["forward_clean_price_input"]["quote_side"] == "MID"
+    assert "instrument" in page.evaluate("() => window.__shioriTestUnresolvedGroupIds()")
+    assert "Quote Side does not match" in page.inner_text("#unresolved-title")
+
+    # Refresh stays available once validation has re-run, so the trader can
+    # re-source on the selected side. (Price does not come back with it.)
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+    )
+    assert not page.eval_on_selector(
+        "#bloomberg-refresh-btn", "el => el.classList.contains('is-disabled')"
+    )
+    assert page.eval_on_selector("#price-btn", "el => el.disabled") is not False
+
+    # Nothing was destroyed: selecting the original side back restores the run.
+    _select_quote_side(page, "MID")
+    _wait_for_price_enabled(page)
+    restored = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert restored["bond_quote"]["quote_side"] == "MID"
+
+
+@_PLAYWRIGHT_SKIP
+def test_an_identifier_edit_during_a_pending_lookup_discards_that_response(
+    server_url, page
+) -> None:
+    """Codex review round 7: only the Load button was wired to the lookup, so
+    editing the identifier while one was outstanding invalidated nothing.
+
+    The stale response was adopted and built the resolved panel and draft for
+    identifier A while the input read B -- and on a second lookup it also ran
+    ``resetRunState()``, discarding a completed ticket on behalf of a bond the
+    trader was no longer naming. Checked at adoption rather than with another
+    per-control listener.
+    """
+
+    page.goto(f"{server_url}/")
+
+    pending: list = []
+    page.route("**/api/bloomberg/bond", lambda route: pending.append(route))
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    _select_quote_side(page, "MID")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    # The trader retypes the identifier while that lookup is outstanding.
+    page.fill("#bond-identifier-input", "GB00BFX0ZL78")
+    page.wait_for_timeout(150)
+
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_treasury_lookup_response(quote_side="MID")),
+    )
+    page.wait_for_timeout(400)
+
+    # The superseded answer is discarded: no draft or panel for the Treasury the
+    # input no longer names.
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _resolved_bond_panel_hidden(page)
+    assert page.input_value("#bond-identifier-input") == "GB00BFX0ZL78"
+    assert "lookup inputs changed" in page.inner_text("#pricing-error-banner")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_superseded_failed_lookup_never_discards_the_prior_ticket(server_url, page) -> None:
+    """The sharper half of the same finding: a *failed* answer for a superseded
+    identifier must not run the whole-run reset either.
+
+    ``renderLookupFailure`` resets everything by design, so adopting a failure
+    that belongs to an identifier the trader has moved away from would destroy a
+    completed ticket on that bond's behalf.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    pending: list = []
+    page.route("**/api/bloomberg/bond", lambda route: pending.append(route))
+    page.fill("#bond-identifier-input", "GB00BFX0ZL78")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    # The trader changes their mind about which bond to look up.
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    page.wait_for_timeout(150)
+
+    pending[0].fulfill(
+        status=502,
+        content_type="application/json",
+        body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+    )
+    page.wait_for_timeout(400)
+
+    # The completed Treasury ticket is still there, unharmed.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft is not None
+    assert draft["bond_option"]["underlying_isin"] == "US91282CLJ89"
+    assert draft["bond_quote"]["quote_side"] == "MID"
+    assert "lookup inputs changed" in page.inner_text("#pricing-error-banner")
+
+
+@_PLAYWRIGHT_SKIP
 def test_newer_bond_lookup_beats_an_older_one(server_url, page) -> None:
     page.goto(f"{server_url}/")
 
