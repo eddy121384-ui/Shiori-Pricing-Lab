@@ -2031,19 +2031,18 @@
     // draft. Both actions begin by invalidating that lookup, so leaving them
     // live would let a click silently cancel the trader's Load and then price
     // or refresh the previous bond while the security input names the new one.
+    // One invariant for both actions: neither is available while a run-state-
+    // changing request is outstanding, nor while a lookup names another bond.
     const canRefresh =
-      builderReady && resolvedBloombergBond !== null && !bondLookupInFlight;
+      builderReady &&
+      resolvedBloombergBond !== null &&
+      !bondLookupInFlight &&
+      inFlightRunRequest === null;
     // Price additionally requires that the sourced quote is live *and* on the
     // side currently selected -- a Price started after a side change cannot be
     // caught by request invalidation, so it has to be gated here.
-    // Price is the lowest-authority action, so it additionally waits for a
-    // pending refresh: pricing now would abort that refresh and answer with the
-    // quote the trader is in the middle of replacing.
     const canPrice =
-      canRefresh &&
-      !sourcedQuoteInvalidated &&
-      !sourcedQuoteSideMismatch() &&
-      !bloombergRefreshInFlight;
+      canRefresh && !sourcedQuoteInvalidated && !sourcedQuoteSideMismatch();
     els.priceBtn.classList.toggle("is-disabled", !canPrice);
     els.bloombergRefreshBtn.classList.toggle("is-disabled", !canRefresh);
 
@@ -2097,21 +2096,29 @@
   // stay silent.
   let bondLookupInFlight = false;
 
-  // Whether a Bloomberg refresh is outstanding. Same role as the flag above,
-  // and both exist to enforce one rule rather than a growing set of pairs:
+  // --- The single run-request lifecycle ------------------------------------
   //
-  //   The three actions are ordered by how authoritative their data is --
-  //   Load (a different bond) > Refresh (a fresher quote) > Price (the draft
-  //   as it stands). Each one begins by invalidating the others' in-flight
-  //   requests, so a lower-authority action must never be available while a
-  //   higher-authority request is outstanding: it would silently cancel what
-  //   the trader just asked for and answer with staler or other data instead.
+  // Owner decision: at most one run-state-changing request -- Price or
+  // Bloomberg Refresh -- may be in flight at a time. `null` when idle,
+  // otherwise "PRICE" or "REFRESH".
   //
-  //   The reverse direction is deliberately allowed. Refresh superseding a
-  //   pending Price still produces a priced run, on fresher data, so nothing
-  //   the trader asked for is lost; the same holds for Load superseding
-  //   either, since the trader has explicitly moved to another bond.
-  let bloombergRefreshInFlight = false;
+  // This replaces an earlier supersession ordering, which let a refresh abort a
+  // pending Price on the reasoning that a priced run still resulted, on fresher
+  // data. That holds only when the refresh *succeeds*: when it fails, the
+  // aborted Price is gone, no result exists, and the invalidated quote leaves
+  // Price disabled -- the trader loses both outcomes and the way back is behind
+  // the action that just failed. Neither action can cancel the other now, so
+  // the question does not arise and no precedence rule is needed.
+  //
+  // A form edit, Clear and a new instrument lookup remain cancel-and-reset
+  // boundaries: they release this state and *permanently* invalidate the
+  // outstanding response through the generation counters, so a late answer can
+  // never overwrite an edited draft.
+  let inFlightRunRequest = null;
+
+  function releaseRunRequest() {
+    inFlightRunRequest = null;
+  }
 
   function beginBondLookupRequest() {
     return ++bondLookupGeneration;
@@ -2143,6 +2150,7 @@
 
   function invalidatePendingPriceRequest() {
     beginRequest();
+    if (inFlightRunRequest === "PRICE") releaseRunRequest();
     if (inFlightPriceController) {
       inFlightPriceController.abort();
       inFlightPriceController = null;
@@ -2162,7 +2170,7 @@
 
   function invalidatePendingBloombergRequest() {
     beginBloombergRequest();
-    bloombergRefreshInFlight = false;
+    if (inFlightRunRequest === "REFRESH") releaseRunRequest();
     if (inFlightBloombergController) {
       inFlightBloombergController.abort();
       inFlightBloombergController = null;
@@ -2419,8 +2427,11 @@
   async function priceCurrentDraft() {
     if (!currentDraft || !resolvedBloombergBond) return;
     if (sourcedQuoteInvalidated) return;
-    // A higher-authority request is outstanding; this action would cancel it.
-    if (bondLookupInFlight || bloombergRefreshInFlight) return;
+    // One run-state-changing request at a time, and never while a lookup names
+    // another bond. The gating above already disables the button; this is the
+    // same rule at the action, so it cannot be reached another way.
+    if (inFlightRunRequest !== null) return;
+    if (bondLookupInFlight) return;
     // Never price a draft whose quote was sourced on a side other than the one
     // on screen. The gating above already disables the button; this is the
     // same rule at the action itself, so it cannot be reached another way.
@@ -2429,8 +2440,8 @@
     if (builderValidation.state !== "ready") return;
 
     const generation = beginRequest();
-    invalidatePendingBondLookupRequest();
-    invalidatePendingBloombergRequest();
+    inFlightRunRequest = "PRICE";
+    syncDraftGating();
 
     if (inFlightPriceController) {
       inFlightPriceController.abort();
@@ -2449,15 +2460,21 @@
       });
       payload = await response.json();
     } catch (err) {
+      // A stale request was already released by whichever boundary invalidated
+      // it, so only a live one releases here.
       if (isStaleRequest(generation)) return;
+      releaseRunRequest();
       setCurrentDisplay(null);
       renderFailure("Pricing request failed: " + err.message);
+      syncDraftGating();
       return;
     }
     if (isStaleRequest(generation)) return;
+    releaseRunRequest();
     if (!response.ok) {
       setCurrentDisplay(null);
       renderFailure(payload.error || "Pricing request failed.");
+      syncDraftGating();
       return;
     }
 
@@ -2477,6 +2494,7 @@
   // /api/case/bloomberg route unchanged.
   async function refreshBloombergAndPrice() {
     if (!currentDraft || !resolvedBloombergBond) return;
+    if (inFlightRunRequest !== null) return;
     if (bondLookupInFlight) return;
     // Deliberately ignores the instrument group: re-sourcing an invalidated
     // quote is exactly what this action is for.
@@ -2509,10 +2527,8 @@
     requestCase.forward_clean_price_input.quote_side = quoteSide;
     const overlay = extractOverlayFromDraft(requestCase);
     const generation = beginBloombergRequest();
-    bloombergRefreshInFlight = true;
+    inFlightRunRequest = "REFRESH";
     syncDraftGating();
-    invalidatePendingPriceRequest();
-    invalidatePendingBondLookupRequest();
 
     if (inFlightBloombergController) {
       inFlightBloombergController.abort();
@@ -2537,12 +2553,12 @@
       payload = await response.json();
     } catch (err) {
       if (isStaleBloombergRequest(generation)) return;
-      bloombergRefreshInFlight = false;
+      releaseRunRequest();
       renderRefreshFailure("Bloomberg refresh failed: " + err.message);
       return;
     }
     if (isStaleBloombergRequest(generation)) return;
-    bloombergRefreshInFlight = false;
+    releaseRunRequest();
     if (!response.ok) {
       renderRefreshFailure(payload.error || "Bloomberg refresh failed.");
       return;

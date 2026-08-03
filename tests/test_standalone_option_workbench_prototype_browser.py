@@ -3088,3 +3088,392 @@ def test_stale_lookup_cannot_overwrite_a_newer_drafts_bond_master(server_url, pa
 
     assert page.inner_text("#resolved-bond-name") == "SECOND LOOKUP BOND"
     assert page.inner_text("#resolved-bond-coupon") == "2.500%"
+
+
+# --- Single run-request lifecycle (owner decision) ----------------------------
+#
+# One invariant, replacing the earlier supersession ordering: at most one
+# run-state-changing request -- Price or Bloomberg Refresh -- may be in flight
+# at a time. Neither may cancel the other, so no precedence rule is needed for
+# the case where the superseding request fails.
+
+
+def _both_actions_disabled(page) -> bool:
+    return page.eval_on_selector(
+        "#price-btn", "el => el.classList.contains('is-disabled')"
+    ) and page.eval_on_selector(
+        "#bloomberg-refresh-btn", "el => el.classList.contains('is-disabled')"
+    )
+
+
+def _ready_ticket(page, server_url, *, quote_side: str = "MID") -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page, response=_treasury_lookup_response(quote_side=quote_side), side=quote_side
+    )
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_price_in_flight_disables_refresh_and_then_prices_normally(
+    server_url, page
+) -> None:
+    _ready_ticket(page, server_url)
+
+    pending: list = []
+    page.route("**/api/case", lambda route: pending.append(route))
+    page.click("#price-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    assert _both_actions_disabled(page)
+
+    # Refresh may not abort or supersede the outstanding Price.
+    refreshed: list = []
+    page.route("**/api/case/bloomberg", lambda route: refreshed.append(route))
+    page.dispatch_event("#bloomberg-refresh-btn", "click")
+    page.wait_for_timeout(300)
+    assert refreshed == []
+
+    sent_case = json.loads(pending[0].request.post_data)
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "case": sent_case,
+                "context": {},
+                "display": _refresh_display(acquired_at="2026-07-20T11:28:00+08:00"),
+            }
+        ),
+    )
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    # Availability is recomputed from state once the request settles.
+    _wait_for_price_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_an_edit_during_a_pending_price_stops_that_price_committing(
+    server_url, page
+) -> None:
+    _ready_ticket(page, server_url)
+
+    pending: list = []
+    page.route("**/api/case", lambda route: pending.append(route))
+    page.click("#price-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    page.fill("#forward-price-input", "97.5")
+    page.wait_for_timeout(150)
+
+    sent_case = json.loads(pending[0].request.post_data)
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "case": sent_case,
+                "context": {},
+                "display": _refresh_display(acquired_at="2026-07-20T11:28:00+08:00"),
+            }
+        ),
+    )
+    page.wait_for_timeout(400)
+
+    # The stale answer cannot overwrite the edited draft, and no result is shown.
+    assert page.input_value("#forward-price-input") == "97.5"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] == 97.5
+    assert page.inner_text("#price-total") == "—"
+    # The single in-flight state was released cleanly by the edit.
+    _wait_for_price_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_refresh_in_flight_disables_price_and_then_refreshes_normally(
+    server_url, page
+) -> None:
+    _ready_ticket(page, server_url)
+
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    assert _both_actions_disabled(page)
+
+    priced: list = []
+    page.route("**/api/case", lambda route: priced.append(route))
+    page.dispatch_event("#price-btn", "click")
+    page.wait_for_timeout(300)
+    assert priced == []
+
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _refresh_payload(
+                case=json.loads(pending[0].request.post_data)["case"],
+                acquired_at="2026-07-20T11:31:00+08:00",
+                clean_price=101.5,
+            )
+        ),
+    )
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_quote"]["clean_price_per_100"] == 101.5
+    _wait_for_price_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_refresh_releases_the_busy_state_and_allows_retry(
+    server_url, page
+) -> None:
+    _ready_ticket(page, server_url)
+
+    attempts: list = []
+
+    def route_refresh(route):
+        attempts.append(route)
+        if len(attempts) == 1:
+            route.fulfill(
+                status=502,
+                content_type="application/json",
+                body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    _refresh_payload(
+                        case=json.loads(route.request.post_data)["case"],
+                        acquired_at="2026-07-20T11:31:00+08:00",
+                    )
+                ),
+            )
+
+    page.route("**/api/case/bloomberg", route_refresh)
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()"))
+
+    # Ticket preserved; Price stays off because the sourced quote is disowned;
+    # Refresh comes back for a retry, so the busy state was released.
+    assert page.input_value("#strike-price-input") == "99.32"
+    assert page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+    _wait_for_refresh_enabled(page)
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    assert len(attempts) == 2
+    _wait_for_price_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_refresh_after_a_completed_price_leaves_no_stranded_state(
+    server_url, page
+) -> None:
+    """The sequence that produced the stranded ticket under the old ordering,
+    now run one request at a time: Price completes, then Refresh fails."""
+
+    _ready_ticket(page, server_url)
+
+    page.route(
+        "**/api/case",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "case": json.loads(route.request.post_data),
+                    "context": {},
+                    "display": _refresh_display(acquired_at="2026-07-20T11:28:00+08:00"),
+                }
+            ),
+        ),
+    )
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()"))
+
+    # Not stranded: the ticket survives and Refresh is available to retry.
+    assert page.input_value("#strike-price-input") == "99.32"
+    assert page.input_value("#notional-input") == "1000000"
+    _wait_for_refresh_enabled(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_price_after_a_completed_refresh_prices_the_refreshed_case(
+    server_url, page
+) -> None:
+    _ready_ticket(page, server_url)
+
+    page.route(
+        "**/api/case/bloomberg",
+        _refresh_route(acquired_at="2026-07-20T11:31:00+08:00", clean_price=101.5),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    _wait_for_price_enabled(page)
+
+    sent: list = []
+
+    def route_price(route):
+        sent.append(json.loads(route.request.post_data))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "case": sent[-1],
+                    "context": {},
+                    "display": _refresh_display(acquired_at="2026-07-20T11:31:00+08:00"),
+                }
+            ),
+        )
+
+    page.route("**/api/case", route_price)
+    page.click("#price-btn")
+    _wait_until(lambda: len(sent) == 1)
+
+    # The authoritative refreshed case is what gets priced.
+    assert sent[0]["bond_quote"]["clean_price_per_100"] == 101.5
+    assert sent[0]["pricing_timestamp"] == "2026-07-20T11:31:00+08:00"
+
+
+@_PLAYWRIGHT_SKIP
+def test_clear_during_a_pending_price_leaks_no_stale_result(server_url, page) -> None:
+    _ready_ticket(page, server_url)
+
+    pending: list = []
+    page.route("**/api/case", lambda route: pending.append(route))
+    page.click("#price-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    page.click("#clear-btn")
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "case": json.loads(pending[0].request.post_data),
+                "context": {},
+                "display": _refresh_display(acquired_at="2026-07-20T11:28:00+08:00"),
+            }
+        ),
+    )
+    page.wait_for_timeout(400)
+
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert page.inner_text("#price-total") == "—"
+    assert _resolved_bond_panel_hidden(page)
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_second_lookup_during_a_pending_refresh_leaks_no_stale_result(
+    server_url, page
+) -> None:
+    _ready_ticket(page, server_url)
+
+    pending: list = []
+    page.route("**/api/case/bloomberg", lambda route: pending.append(route))
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    # A new instrument lookup is a cancel-and-reset boundary.
+    _load_bloomberg_bond(page, response=_gilt_lookup_response(quote_side="MID"), side="MID")
+
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _refresh_payload(
+                case=json.loads(pending[0].request.post_data)["case"],
+                acquired_at="2026-07-20T11:31:00+08:00",
+            )
+        ),
+    )
+    page.wait_for_timeout(400)
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_option"]["underlying_isin"] == "GB00BFX0ZL78"
+    assert page.inner_text("#price-total") == "—"
+
+
+@_PLAYWRIGHT_SKIP
+def test_price_and_refresh_posts_are_never_simultaneously_in_flight(
+    server_url, page
+) -> None:
+    """The invariant itself, observed at the network boundary.
+
+    Deliberately *attempts* the overlap from both directions -- holding one
+    request open and driving the other past its disabled styling -- so the test
+    fails if the invariant is removed, rather than merely never exercising it.
+    """
+
+    _ready_ticket(page, server_url)
+
+    inflight: list = []
+    peak = {"value": 0}
+
+    def hold(route, kind):
+        inflight.append(kind)
+        peak["value"] = max(peak["value"], len(inflight))
+
+    held: list = []
+    page.route("**/api/case/bloomberg", lambda r: (hold(r, "refresh"), held.append(r)))
+    page.route("**/api/case", lambda r: (hold(r, "price"), held.append(r)))
+
+    # Refresh outstanding -> try to start a Price.
+    page.click("#bloomberg-refresh-btn")
+    _wait_until_pumping(page, lambda: len(held) == 1)
+    page.dispatch_event("#price-btn", "click")
+    page.wait_for_timeout(300)
+    assert peak["value"] == 1, f"a Price overlapped a Refresh (peak={peak['value']})"
+
+    held[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            _refresh_payload(
+                case=json.loads(held[0].request.post_data)["case"],
+                acquired_at="2026-07-20T11:31:00+08:00",
+            )
+        ),
+    )
+    inflight.remove("refresh")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    _wait_for_price_enabled(page)
+
+    # Price outstanding -> try to start a Refresh.
+    page.click("#price-btn")
+    _wait_until_pumping(page, lambda: len(held) == 2)
+    page.dispatch_event("#bloomberg-refresh-btn", "click")
+    page.wait_for_timeout(300)
+    assert peak["value"] == 1, f"a Refresh overlapped a Price (peak={peak['value']})"
+
+    held[1].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "case": json.loads(held[1].request.post_data),
+                "context": {},
+                "display": _refresh_display(acquired_at="2026-07-20T11:31:00+08:00"),
+            }
+        ),
+    )
+    inflight.remove("price")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    assert peak["value"] == 1
