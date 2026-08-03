@@ -1669,8 +1669,15 @@
         )}`
       : "—";
     els.curveCurrencyLabel.textContent = currentDraft ? currentDraft.bond_option.currency : "—";
-    const raw = (resolvedBloombergBond && resolvedBloombergBond.bond_master_raw) || {};
-    const master = (resolvedBloombergBond && resolvedBloombergBond.bond_master) || {};
+    // The Advanced hints are Bloomberg-derived instrument evidence, so they are
+    // read only while the sourced state is live. While `sourcedQuoteInvalidated`
+    // the retained bond exists purely as a refresh retry target and must not be
+    // read here -- otherwise a disowned bond's day-count/maturity-type strings
+    // would stay on screen, and its last-coupon hint could steer the trader's
+    // preserved override.
+    const sourcedBond = sourcedQuoteInvalidated ? null : resolvedBloombergBond;
+    const raw = (sourcedBond && sourcedBond.bond_master_raw) || {};
+    const master = (sourcedBond && sourcedBond.bond_master) || {};
     setTextOrNotAvailable(els.hintDayCount, raw.day_count);
     setTextOrNotAvailable(els.hintBondType, raw.maturity_type);
     setTextOrNotAvailable(els.hintLastCouponDate, master.last_coupon_date);
@@ -2066,6 +2073,10 @@
 
     renderResolvedBondPanel();
     clearBondMaster();
+    // Re-rendered *after* the flag is set, so the Advanced Bloomberg hints go
+    // back to "Not available" alongside the Bond Master panel rather than
+    // lingering as evidence from a bond this run has disowned.
+    renderRouteMetadata();
     hideContext();
     clearResultFields();
     refreshOverrideProvenance();
@@ -2315,9 +2326,37 @@
     const refreshedAcquiredAt = liveQuote && liveQuote.acquired_at;
     if (refreshedAcquiredAt) {
       currentDraft.pricing_timestamp = refreshedAcquiredAt;
+
+      // The refreshed quote is what this run was actually priced against -- the
+      // route substituted it for the case's own `bond_quote` before pricing --
+      // so the draft has to adopt it too. Leaving the T1 quote in place would
+      // show a stale clean price in the instrument header and, worse, let a
+      // subsequent Price silently re-price the T1 quote through /api/case and
+      // replace the refreshed result. Only the fields the bounded
+      // `live_bloomberg_quote` section actually carries are copied; `price_type`
+      // and `status` are route-fixed and unchanged, and no value is invented for
+      // a field the response does not expose.
+      const quote = currentDraft.bond_quote;
+      if (liveQuote.verified_isin) quote.isin = liveQuote.verified_isin;
+      if (liveQuote.currency) quote.currency = liveQuote.currency;
+      if (liveQuote.source_system) quote.source_system = liveQuote.source_system;
+      if (liveQuote.quote_side) {
+        quote.quote_side = liveQuote.quote_side;
+        // The contract requires the forward's side to equal the spot side, so
+        // it is mirrored here exactly as it is when the draft is first seeded.
+        currentDraft.forward_clean_price_input.quote_side = liveQuote.quote_side;
+      }
+      if (liveQuote.clean_price_per_100 !== undefined) {
+        quote.clean_price_per_100 = liveQuote.clean_price_per_100;
+      }
+      if (liveQuote.accrued_interest_per_100 !== undefined) {
+        quote.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
+      }
+
       if (resolvedBloombergBond) {
         resolvedBloombergBond.acquired_at = refreshedAcquiredAt;
         if (liveQuote.currency) resolvedBloombergBond.currency = liveQuote.currency;
+        if (liveQuote.quote_side) resolvedBloombergBond.quote_side = liveQuote.quote_side;
         resolvedBloombergBond.clean_price_per_100 = liveQuote.clean_price_per_100;
         resolvedBloombergBond.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
       }
@@ -2327,6 +2366,7 @@
     setDerivedFormFromDraft();
     renderResolvedBondPanel();
     if (resolvedBloombergBond) renderBondMaster(resolvedBloombergBond);
+    renderRouteMetadata();
     refreshOverrideProvenance();
     renderOverrideProvenance();
 

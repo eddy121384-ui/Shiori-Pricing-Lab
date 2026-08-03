@@ -1645,6 +1645,77 @@ def test_a_refresh_adopts_the_new_acquisition_event_everywhere(server_url, page)
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_refresh_adopts_the_new_quote_into_the_draft_that_becomes_the_run(
+    server_url, page
+) -> None:
+    """Codex review round 2: the refreshed quote is what the route priced
+    against, so the draft must adopt it -- not just the display-side bond.
+
+    Otherwise the instrument header shows a stale clean price, and pressing
+    Price next would silently re-price the T1 quote through ``/api/case`` and
+    replace the refreshed result.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    before = page.evaluate("() => window.__shioriTestGetCurrentDraft().bond_quote")
+    assert before["clean_price_per_100"] == 99.75
+
+    refreshed_clean_price = 101.5
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _refresh_display(
+                    acquired_at="2026-07-20T11:31:00+08:00", clean_price=refreshed_clean_price
+                )
+            ),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    # The draft that is now the active run carries the refreshed quote.
+    quote = page.evaluate("() => window.__shioriTestGetCurrentDraft().bond_quote")
+    assert quote["clean_price_per_100"] == refreshed_clean_price
+    assert quote["accrued_interest_per_100"] == 0.44
+    assert quote["isin"] == "US91282CLJ89"
+    assert quote["source_system"] == "BLOOMBERG_DAPI"
+    # Route-fixed fields are untouched, not invented.
+    assert quote["price_type"] == "PRICE"
+    assert quote["status"] == "ACTIVE"
+    # The contract's forward-side-equals-spot-side invariant still holds.
+    assert (
+        page.evaluate(
+            "() => window.__shioriTestGetCurrentDraft().forward_clean_price_input.quote_side"
+        )
+        == quote["quote_side"]
+    )
+
+    # The header context shows the refreshed quote, not the T1 one.
+    assert page.inner_text("#stat-clean-price") == str(refreshed_clean_price)
+    assert page.inner_text("#resolved-bond-clean-price") == "101.500000"
+
+    # And pressing Price now re-prices the refreshed quote, not the stale one.
+    priced_bodies: list = []
+
+    def capture_case(route):
+        priced_bodies.append(json.loads(route.request.post_data))
+        route.continue_()
+
+    page.route("**/api/case", capture_case)
+    page.click("#price-btn")
+    _wait_until(lambda: len(priced_bodies) == 1)
+    assert priced_bodies[0]["bond_quote"]["clean_price_per_100"] == refreshed_clean_price
+    assert priced_bodies[0]["pricing_timestamp"] == "2026-07-20T11:31:00+08:00"
+
+
+@_PLAYWRIGHT_SKIP
 def test_a_successful_retry_after_a_failed_refresh_restores_a_priceable_run(
     server_url, page
 ) -> None:
@@ -1691,6 +1762,11 @@ def test_a_successful_retry_after_a_failed_refresh_restores_a_priceable_run(
     assert page.inner_text("#resolved-bond-isin") == "US91282CLJ89"
     assert page.inner_text("#resolved-bond-acquired-at") == retried_acquisition
     assert "instrument" not in _unresolved_group_ids(page)
+    # The Bloomberg hints come back with the rest of the re-sourced state.
+    page.click("#advanced-head")
+    assert page.inner_text("#hint-day-count") == "ACT/ACT"
+    assert page.inner_text("#hint-bond-type") == "AT MATURITY"
+    page.click("#advanced-head")
     assert not _is_disabled(page, "#price-btn")
     assert page.input_value("#strike-price-input") == "99.32"
     assert float(page.inner_text("#price-total")) > 0
@@ -1771,6 +1847,15 @@ def test_a_failed_refresh_never_falls_back_to_the_stale_quote_or_instrument(
     assert page.eval_on_selector_all(
         ".curve-row .curve-tenor-input", "els => els.map(e => e.value)"
     ) == ["1M", "1Y"]
+
+    # Codex review round 2: the Advanced Bloomberg hints are instrument evidence
+    # from the retained bond, and must go with the rest of the disowned sourced
+    # state -- especially the last-coupon hint, which sits beside a preserved
+    # trader override it could otherwise steer.
+    assert page.inner_text("#hint-day-count") == "Not available"
+    assert page.inner_text("#hint-bond-type") == "Not available"
+    assert page.inner_text("#hint-last-coupon-date") == "Not available"
+    assert page.inner_text("#details-bloomberg-day-count") == "Not available"
 
 
 @_PLAYWRIGHT_SKIP
