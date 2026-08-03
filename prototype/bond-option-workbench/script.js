@@ -1340,7 +1340,7 @@
   }
 
   function shioriIdentifierSuffix(bond) {
-    return `${bond.isin}-${(bond.acquired_at || "").replace(/[^0-9A-Za-z]/g, "")}`;
+    return `${bond.isin}-${(bond.bond_master_acquired_at || "").replace(/[^0-9A-Za-z]/g, "")}`;
   }
 
   // Builds a brand-new draft containing only the fields Bloomberg itself
@@ -1356,7 +1356,7 @@
     // no approved profile or mapping and stay null here regardless.
     const bondMaster = bond.bond_master || {};
     const identifierSuffix = shioriIdentifierSuffix(bond);
-    const pricingTimestamp = textOrNull(bond.acquired_at);
+    const pricingTimestamp = textOrNull(bond.quote_acquired_at);
     return {
       bond_option: {
         // payoff_basis / exercise_style / settlement_type are the only values
@@ -1576,7 +1576,7 @@
       els.resolvedBondMaturity,
       resolvedBloombergBond.bond_master.maturity_date
     );
-    els.resolvedBondAcquiredAt.textContent = resolvedBloombergBond.acquired_at;
+    els.resolvedBondAcquiredAt.textContent = resolvedBloombergBond.quote_acquired_at;
     els.resolvedBondSource.textContent = resolvedBloombergBond.source_system;
   }
 
@@ -1608,7 +1608,7 @@
     setTextOrNotAvailable(els.detailsBloombergMaturityType, bondMasterRaw.maturity_type);
     setTextOrNotAvailable(els.detailsBloombergCalcType, bondMasterRaw.calc_type);
     els.detailsSource.textContent = bond.source_system;
-    els.detailsAcquiredAt.textContent = bond.acquired_at;
+    els.detailsAcquiredAt.textContent = bond.bond_master_acquired_at;
   }
 
   function clearBondMaster() {
@@ -1843,9 +1843,17 @@
 
   let validationGeneration = 0;
   let validationTimer = null;
+  // Set only when the local bridge could not be reached or did not answer with
+  // JSON. That is emphatically *not* the builder rejecting the draft, so it is
+  // tracked separately and never rendered as one.
+  let validationTransportError = null;
+
+  const _VALIDATION_DEBOUNCE_MS = 60;
+  const _VALIDATION_RETRY_MS = 1500;
 
   function invalidateBuilderValidation() {
     builderValidation = { state: "unknown", error: null };
+    validationTransportError = null;
     validationGeneration++;
     if (validationTimer !== null) {
       clearTimeout(validationTimer);
@@ -1853,9 +1861,9 @@
     }
   }
 
-  function scheduleBuilderValidation() {
+  function scheduleBuilderValidation(delayMs) {
     if (validationTimer !== null) clearTimeout(validationTimer);
-    validationTimer = setTimeout(runBuilderValidation, 60);
+    validationTimer = setTimeout(runBuilderValidation, delayMs || _VALIDATION_DEBOUNCE_MS);
   }
 
   async function runBuilderValidation() {
@@ -1874,11 +1882,20 @@
       payload = await response.json();
     } catch (err) {
       if (generation !== validationGeneration) return;
-      builderValidation = { state: "failed", error: "Validation request failed: " + err.message };
+      // A transport failure means Shiori does not *know* whether the builder
+      // accepts this draft -- it does not mean the builder said no. Reporting
+      // it as a rejection would be a false statement about the contract, and
+      // latching it would strand a complete ticket with Price and Refresh both
+      // disabled and nothing the trader could do but retype it. So the state
+      // stays `unknown` and the check retries itself.
+      builderValidation = { state: "unknown", error: null };
+      validationTransportError = err.message;
+      scheduleBuilderValidation(_VALIDATION_RETRY_MS);
       syncDraftGating();
       return;
     }
     if (generation !== validationGeneration) return;
+    validationTransportError = null;
     builderValidation = payload && payload.ready
       ? { state: "ready", error: null }
       : { state: "failed", error: (payload && payload.error) || "The typed builder rejected this draft." };
@@ -1926,7 +1943,7 @@
     // quote is invalidated -- otherwise Refresh could never re-enable.
     const draftGroupsUnresolved = groups.filter((group) => group.id !== "instrument");
     const draftComplete = hasDraft && draftGroupsUnresolved.length === 0;
-    if (draftComplete && builderValidation.state === "unknown") {
+    if (draftComplete && builderValidation.state === "unknown" && validationTimer === null) {
       scheduleBuilderValidation();
     }
     const builderReady = draftComplete && builderValidation.state === "ready";
@@ -1935,7 +1952,27 @@
     els.priceBtn.classList.toggle("is-disabled", !canPrice);
     els.bloombergRefreshBtn.classList.toggle("is-disabled", !canRefresh);
 
-    if (draftComplete && builderValidation.state === "failed") {
+    if (draftComplete && validationTransportError !== null) {
+      // Honest about which of the two it is: Shiori cannot reach its own local
+      // validator, so it does not know whether the draft is acceptable.
+      els.unresolvedPanel.hidden = false;
+      unresolvedFocusGroup = null;
+      els.unresolvedTitle.textContent = "Shiori cannot reach its own validator";
+      els.unresolvedMissing.textContent =
+        "Confirmation that the reviewed typed builder accepts this draft.";
+      els.unresolvedWhy.textContent =
+        "The local bridge did not answer the validation request: " +
+        validationTransportError;
+      els.unresolvedEvidence.textContent =
+        "This is a transport failure, not a rejection — the builder has said " +
+        "nothing about this draft either way, so Shiori will not claim it is " +
+        "either valid or invalid.";
+      els.unresolvedNext.textContent =
+        "Your inputs are untouched and the check retries automatically. If it " +
+        "keeps failing, the local Shiori workbench process is probably not " +
+        "running.";
+      els.unresolvedAlso.textContent = "Nothing else is outstanding.";
+    } else if (draftComplete && builderValidation.state === "failed") {
       els.unresolvedPanel.hidden = false;
       unresolvedFocusGroup = null;
       els.unresolvedTitle.textContent = "The typed builder rejected this draft";
@@ -2175,7 +2212,12 @@
       quote_side: payload.quote_side,
       clean_price_per_100: payload.clean_price_per_100,
       accrued_interest_per_100: payload.accrued_interest_per_100,
-      acquired_at: payload.acquired_at,
+      // Two acquisition times with genuinely different lifetimes. At lookup
+      // they are the same event, but a refresh re-acquires only the quote --
+      // the Bond Master fields and raw descriptions keep the timestamp of the
+      // lookup that actually fetched them.
+      quote_acquired_at: payload.acquired_at,
+      bond_master_acquired_at: payload.acquired_at,
       source_system: payload.source_system,
       // Every field here is either a confirmed Bloomberg mnemonic's real value
       // or null pending real-DAPI confirmation -- never guessed.
@@ -2268,8 +2310,24 @@
       return;
     }
 
-    const overlay = extractOverlayFromDraft(currentDraft);
-    const draftAtRequestTime = currentDraft;
+    // Build the exact case being sent, then adopt that same object on success.
+    //
+    // The route is about to source a spot quote on `quoteSide` and substitute
+    // it into this case before pricing, and the reviewed request contract
+    // requires `forward_clean_price_input.quote_side` to equal
+    // `bond_quote.quote_side` (bli_standalone_option_request.py). So the side
+    // has to be mirrored *before* the request -- mirroring it afterwards can
+    // never run, because the builder rejects the mismatch first and the whole
+    // refresh 400s. That is why this function constructs the request case
+    // up front instead of mutating `currentDraft` piecemeal after the fact.
+    const requestCase = {
+      ...currentDraft,
+      forward_clean_price_input: {
+        ...currentDraft.forward_clean_price_input,
+        quote_side: quoteSide,
+      },
+    };
+    const overlay = extractOverlayFromDraft(requestCase);
     const generation = beginBloombergRequest();
     invalidatePendingPriceRequest();
     invalidatePendingBondLookupRequest();
@@ -2287,7 +2345,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          case: draftAtRequestTime,
+          case: requestCase,
           overlay,
           bloomberg_security: resolvedBloombergBond.qualifiedIdentifier,
           quote_side: quoteSide,
@@ -2306,15 +2364,15 @@
       return;
     }
 
-    // Adopt the refreshed acquisition event as this run's own anchor.
+    // Adopt the case that was actually priced.
     //
-    // The route priced against a copied envelope whose `pricing_timestamp` is
-    // the refresh's acquisition timestamp (T2), returned verbatim as
-    // `live_bloomberg_quote.acquired_at` -- so that value, not the T1 lookup
-    // that seeded the draft, is what this run was actually priced at. Adopting
-    // it here keeps the draft, the read-only timing display, every provenance
-    // stamp and the export all pointing at the same event, instead of relabeling
-    // one of them at the boundary.
+    // The route priced `requestCase` with two substitutions of its own: the
+    // live quote replacing `bond_quote`, and that quote's acquisition
+    // timestamp (T2) replacing `pricing_timestamp`, returned verbatim as
+    // `live_bloomberg_quote.acquired_at`. Rebuilding the same object here --
+    // rather than mutating whatever `currentDraft` happens to be -- keeps the
+    // draft, the read-only timing display, every provenance stamp and the
+    // export all describing one run.
     //
     // `valuation_date` is deliberately left alone: the reviewed builder's own
     // `pricing_timestamp.date() != valuation_date` invariant already had to
@@ -2323,49 +2381,50 @@
     // source-observation as-of, which this route carries through unchanged and
     // never relabels as current. No clock is read here.
     const liveQuote = payload.live_bloomberg_quote || null;
-    const refreshedAcquiredAt = liveQuote && liveQuote.acquired_at;
-    if (refreshedAcquiredAt) {
-      currentDraft.pricing_timestamp = refreshedAcquiredAt;
-
-      // The refreshed quote is what this run was actually priced against -- the
-      // route substituted it for the case's own `bond_quote` before pricing --
-      // so the draft has to adopt it too. Leaving the T1 quote in place would
-      // show a stale clean price in the instrument header and, worse, let a
-      // subsequent Price silently re-price the T1 quote through /api/case and
-      // replace the refreshed result. Only the fields the bounded
-      // `live_bloomberg_quote` section actually carries are copied; `price_type`
-      // and `status` are route-fixed and unchanged, and no value is invented for
-      // a field the response does not expose.
-      const quote = currentDraft.bond_quote;
-      if (liveQuote.verified_isin) quote.isin = liveQuote.verified_isin;
-      if (liveQuote.currency) quote.currency = liveQuote.currency;
-      if (liveQuote.source_system) quote.source_system = liveQuote.source_system;
-      if (liveQuote.quote_side) {
-        quote.quote_side = liveQuote.quote_side;
-        // The contract requires the forward's side to equal the spot side, so
-        // it is mirrored here exactly as it is when the draft is first seeded.
-        currentDraft.forward_clean_price_input.quote_side = liveQuote.quote_side;
-      }
+    const refreshedAcquiredAt = (liveQuote && liveQuote.acquired_at) || null;
+    const refreshedQuote = { ...requestCase.bond_quote };
+    if (liveQuote) {
+      // Only the fields the bounded `live_bloomberg_quote` section actually
+      // carries. `price_type`, `status` and `yield_value` are not copied
+      // because the loader constructs them identically on every call
+      // (PRICE / ACTIVE / None), so the values already here are the ones the
+      // route priced; nothing is invented for a field the response omits.
+      if (liveQuote.verified_isin) refreshedQuote.isin = liveQuote.verified_isin;
+      if (liveQuote.currency) refreshedQuote.currency = liveQuote.currency;
+      if (liveQuote.source_system) refreshedQuote.source_system = liveQuote.source_system;
+      if (liveQuote.quote_side) refreshedQuote.quote_side = liveQuote.quote_side;
       if (liveQuote.clean_price_per_100 !== undefined) {
-        quote.clean_price_per_100 = liveQuote.clean_price_per_100;
+        refreshedQuote.clean_price_per_100 = liveQuote.clean_price_per_100;
       }
       if (liveQuote.accrued_interest_per_100 !== undefined) {
-        quote.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
-      }
-
-      if (resolvedBloombergBond) {
-        resolvedBloombergBond.acquired_at = refreshedAcquiredAt;
-        if (liveQuote.currency) resolvedBloombergBond.currency = liveQuote.currency;
-        if (liveQuote.quote_side) resolvedBloombergBond.quote_side = liveQuote.quote_side;
-        resolvedBloombergBond.clean_price_per_100 = liveQuote.clean_price_per_100;
-        resolvedBloombergBond.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
+        refreshedQuote.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
       }
     }
+    currentDraft = {
+      ...requestCase,
+      bond_quote: refreshedQuote,
+      pricing_timestamp: refreshedAcquiredAt || requestCase.pricing_timestamp,
+    };
+
+    // Only the *quote* was re-acquired. The Bond Master fields and the raw
+    // display-only descriptions still come from the lookup that fetched them,
+    // so their acquisition time stays where it was -- claiming T1 coupon and
+    // schedule evidence was acquired at T2 would be a false provenance
+    // statement about data this refresh never touched.
+    resolvedBloombergBond.quote_acquired_at =
+      refreshedAcquiredAt || resolvedBloombergBond.quote_acquired_at;
+    if (liveQuote) {
+      if (liveQuote.currency) resolvedBloombergBond.currency = liveQuote.currency;
+      if (liveQuote.quote_side) resolvedBloombergBond.quote_side = liveQuote.quote_side;
+      resolvedBloombergBond.clean_price_per_100 = liveQuote.clean_price_per_100;
+      resolvedBloombergBond.accrued_interest_per_100 = liveQuote.accrued_interest_per_100;
+    }
+
     // The refresh succeeded, so the sourced state is trustworthy again.
     sourcedQuoteInvalidated = false;
     setDerivedFormFromDraft();
     renderResolvedBondPanel();
-    if (resolvedBloombergBond) renderBondMaster(resolvedBloombergBond);
+    renderBondMaster(resolvedBloombergBond);
     renderRouteMetadata();
     refreshOverrideProvenance();
     renderOverrideProvenance();

@@ -86,6 +86,22 @@ def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> Non
     raise AssertionError(f"condition not met within {timeout}s")
 
 
+def _wait_until_pumping(page, predicate, timeout: float = 20.0) -> None:
+    """Like :func:`_wait_until`, but pumps the Playwright connection each tick.
+
+    Playwright's sync API only dispatches route handlers while a page call is in
+    flight, so a predicate that reads Python-side state a handler populates
+    (e.g. a request counter) would never become true under a bare sleep loop.
+    """
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
 def _is_disabled(page, selector: str) -> bool:
     return page.eval_on_selector(selector, "el => el.classList.contains('is-disabled')")
 
@@ -308,7 +324,9 @@ def _load_bloomberg_bond(
     page.unroute("**/api/bloomberg/bond", _handle)
 
 
-def _refresh_display(*, acquired_at: str, clean_price: float = 99.81) -> dict:
+def _refresh_display(
+    *, acquired_at: str, clean_price: float = 99.81, quote_side: str = "MID"
+) -> dict:
     """A ``POST /api/case/bloomberg`` success payload.
 
     Mirrors the real route's shape: the display dict verbatim plus the bounded
@@ -329,6 +347,8 @@ def _refresh_display(*, acquired_at: str, clean_price: float = 99.81) -> dict:
         "live_bloomberg_quote": {
             "security": "/isin/US91282CLJ89",
             "verified_isin": "US91282CLJ89",
+            "source_system": "BLOOMBERG_DAPI",
+            "quote_side": quote_side,
             "currency": "USD",
             "clean_price_per_100": clean_price,
             "accrued_interest_per_100": 0.44,
@@ -1713,6 +1733,175 @@ def test_a_refresh_adopts_the_new_quote_into_the_draft_that_becomes_the_run(
     _wait_until(lambda: len(priced_bodies) == 1)
     assert priced_bodies[0]["bond_quote"]["clean_price_per_100"] == refreshed_clean_price
     assert priced_bodies[0]["pricing_timestamp"] == "2026-07-20T11:31:00+08:00"
+
+
+@_PLAYWRIGHT_SKIP
+def test_changing_quote_side_then_refreshing_sends_a_matching_forward_side(
+    server_url, page
+) -> None:
+    """Codex review round 3: the forward's side must be mirrored *before* the
+    request, not after it.
+
+    The route sources a spot quote on the newly selected side and substitutes it
+    into the case before pricing, and the reviewed request contract requires
+    ``forward_clean_price_input.quote_side`` to equal ``bond_quote.quote_side``.
+    Mirroring after the response can never run, because the builder rejects the
+    mismatch first -- so changing BID/MID/OFFER used to make every refresh fail
+    and (since round 1) invalidate an otherwise usable run.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, side="MID", response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+    assert (
+        page.evaluate(
+            "() => window.__shioriTestGetCurrentDraft().forward_clean_price_input.quote_side"
+        )
+        == "MID"
+    )
+
+    # The trader switches side, then refreshes.
+    _select_quote_side(page, "OFFER")
+
+    sent: list = []
+
+    def route_refresh(route):
+        sent.append(json.loads(route.request.post_data))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _refresh_display(
+                    acquired_at="2026-07-20T11:31:00+08:00", quote_side="OFFER"
+                )
+            ),
+        )
+
+    page.route("**/api/case/bloomberg", route_refresh)
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    # The request itself already carried the new side on both the quote side
+    # parameter and the forward input, so the builder has no mismatch to reject.
+    assert len(sent) == 1
+    assert sent[0]["quote_side"] == "OFFER"
+    assert sent[0]["case"]["forward_clean_price_input"]["quote_side"] == "OFFER"
+
+    # And the adopted draft is the case that was actually priced.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["quote_side"] == "OFFER"
+    assert draft["bond_quote"]["quote_side"] == "OFFER"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_refresh_never_restamps_the_bond_master_acquisition_time(
+    server_url, page
+) -> None:
+    """Codex review round 3: a refresh re-acquires only the quote.
+
+    The Bond Master fields and the raw display-only descriptions still come from
+    the lookup that fetched them, so their acquisition time must stay there --
+    restamping it to T2 would claim Shiori re-acquired coupon and schedule
+    evidence it never touched.
+    """
+
+    t1 = "2026-07-20T11:28:00+08:00"
+    t2 = "2026-07-20T11:31:00+08:00"
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(acquired_at=t1))
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    page.click("#advanced-head")
+    assert page.inner_text("#details-acquired-at") == t1
+    page.click("#advanced-head")
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_refresh_display(acquired_at=t2)),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    # The quote moved to T2 ...
+    assert page.inner_text("#resolved-bond-acquired-at") == t2
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().pricing_timestamp") == t2
+    # ... while the Bond Master evidence still says when it was actually fetched.
+    page.click("#advanced-head")
+    assert page.inner_text("#details-acquired-at") == t1
+    assert page.inner_text("#details-coupon") == "3.750%"
+    assert page.inner_text("#details-bloomberg-day-count") == "ACT/ACT"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_validation_transport_failure_is_not_reported_as_a_builder_rejection(
+    server_url, page
+) -> None:
+    """Codex review round 3: a transport failure must not strand the ticket.
+
+    A refresh failure invalidates the builder validation, which then depends on
+    a fresh ``/api/case/validate`` call. If that call fails at the transport
+    level, the draft is unchanged and the builder has said nothing -- so Shiori
+    must neither claim a rejection nor latch a state that leaves Price and
+    Refresh both dead with no way back.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+
+    # Every validation attempt fails at the transport level from here on.
+    validate_attempts: list = []
+
+    def fail_validate(route):
+        validate_attempts.append(1)
+        route.abort()
+
+    page.route("**/api/case/validate", fail_validate)
+
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
+    # Waited on via page-observable state rather than the Python-side counter:
+    # Playwright's sync API only dispatches route handlers while a page call is
+    # pumping its connection, so a bare sleep loop would never see the request.
+    page.wait_for_function(
+        "() => document.querySelector('#unresolved-title').textContent"
+        " === 'Shiori cannot reach its own validator'"
+    )
+    # It keeps retrying on its own rather than latching -- proven by a second
+    # intercepted attempt with no trader action in between.
+    _wait_until_pumping(page, lambda: len(validate_attempts) >= 2)
+
+    # Never described as a rejection, and never latched as one.
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
+    assert page.inner_text("#unresolved-title") == "Shiori cannot reach its own validator"
+    assert "transport failure, not a rejection" in page.inner_text("#unresolved-evidence")
+    assert "retries automatically" in page.inner_text("#unresolved-next")
+    # The trader's ticket is still intact.
+    assert page.input_value("#strike-price-input") == "99.32"
+
+    # And it recovers on its own as soon as the bridge answers again -- no form
+    # edit, no draft-wiping lookup, no dead end.
+    page.unroute("**/api/case/validate", fail_validate)
+    _wait_for_refresh_enabled(page)
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+    assert page.input_value("#strike-price-input") == "99.32"
 
 
 @_PLAYWRIGHT_SKIP
