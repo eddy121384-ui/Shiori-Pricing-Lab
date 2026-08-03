@@ -2398,7 +2398,9 @@ def test_price_is_blocked_while_quote_side_differs_from_the_sourced_side(
     _wait_for_price_enabled(page)
 
     _select_quote_side(page, "BID")
-    _wait_until(lambda: page.eval_on_selector("#price-btn", "el => el.disabled") is not False)
+    _wait_until(
+        lambda: page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+    )
 
     # The draft is untouched -- Shiori does not relabel a quote it did not
     # source on that side -- but it can no longer be priced.
@@ -2416,13 +2418,166 @@ def test_price_is_blocked_while_quote_side_differs_from_the_sourced_side(
     assert not page.eval_on_selector(
         "#bloomberg-refresh-btn", "el => el.classList.contains('is-disabled')"
     )
-    assert page.eval_on_selector("#price-btn", "el => el.disabled") is not False
+    assert page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
 
     # Nothing was destroyed: selecting the original side back restores the run.
     _select_quote_side(page, "MID")
     _wait_for_price_enabled(page)
     restored = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
     assert restored["bond_quote"]["quote_side"] == "MID"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_successful_refresh_on_the_selected_side_restores_pricing_with_that_side(
+    server_url, page
+) -> None:
+    """Owner decision on §10 item 9, case 2: block Price until Refresh, never
+    snap the toggle back.
+
+    A refresh after a side change must source on the side the trader selected,
+    adopt the authoritative server-returned case, clear the mismatch, and
+    re-enable Price -- with BID on the request, on the adopted draft, and on the
+    toggle throughout. The trader's selection is never mutated to restore
+    consistency; the *quote* is re-sourced to match it.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    _select_quote_side(page, "BID")
+    _wait_until(
+        lambda: page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+    )
+
+    sent: list = []
+    page.route(
+        "**/api/case/bloomberg",
+        _refresh_route(acquired_at="2026-07-20T11:31:00+08:00", quote_side="BID", sent=sent),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    # The request was sourced on the selected side, with the contract's
+    # forward-side-equals-spot-side invariant already satisfied.
+    assert sent[0]["quote_side"] == "BID"
+    assert sent[0]["case"]["forward_clean_price_input"]["quote_side"] == "BID"
+
+    # The adopted draft is the server's, quoted on the selected side.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_quote"]["quote_side"] == "BID"
+    assert draft["forward_clean_price_input"]["quote_side"] == "BID"
+    assert draft["pricing_timestamp"] == "2026-07-20T11:31:00+08:00"
+
+    # Mismatch cleared, Price back, and the toggle still reads what the trader
+    # chose -- it was never snapped back to MID at any point.
+    assert "instrument" not in page.evaluate("() => window.__shioriTestUnresolvedGroupIds()")
+    assert not page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+    assert page.get_attribute("#bond-quote-side-toggle .opt.on", "data-value") == "BID"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_refresh_after_a_side_change_preserves_the_selection_and_never_falls_back(
+    server_url, page
+) -> None:
+    """Owner decision on §10 item 9, case 3.
+
+    A refresh that fails on the selected side must keep that selection and the
+    trader-authored ticket, keep Price disabled with Refresh available, and
+    never fall back to the previously sourced side's quote -- neither by
+    pricing against it nor by showing it as though it were current.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    _select_quote_side(page, "BID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()"))
+
+    # The selection survives the failure -- it is not reverted to the side that
+    # happens to still back the draft.
+    assert page.get_attribute("#bond-quote-side-toggle .opt.on", "data-value") == "BID"
+
+    # The trader-authored ticket survives intact.
+    assert page.input_value("#strike-price-input") == "99.32"
+    assert page.input_value("#notional-input") == "1000000"
+    assert page.input_value("#forward-price-input") == "99.234375"
+    assert page.input_value("#volatility-input") == "0.03395"
+
+    # No fallback to the MID quote: nothing priced, and the disowned quote is
+    # not on screen as though it were current.
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#status-text") != "Draft priced"
+    assert _resolved_bond_panel_hidden(page)
+
+    # Price stays off; Refresh stays available to retry the very call that failed.
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+    )
+    assert page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
+    assert not page.eval_on_selector(
+        "#bloomberg-refresh-btn", "el => el.classList.contains('is-disabled')"
+    )
+
+
+@_PLAYWRIGHT_SKIP
+def test_reselecting_the_sourced_side_does_not_price_while_the_quote_is_invalidated(
+    server_url, page
+) -> None:
+    """Owner decision on §10 item 9, case 4, negative half.
+
+    Reselecting the originally sourced side clears the *mismatch*, but that must
+    only restore pricing when that side still has valid sourced quote state. If
+    a refresh has since failed, the quote is disowned and Price stays off --
+    otherwise clicking back to MID would silently price against a quote Shiori
+    has already said it will not stand behind.
+
+    The positive half -- reselecting with the sourced state still live restores
+    the run untouched -- is pinned by
+    ``test_price_is_blocked_while_quote_side_differs_from_the_sourced_side``.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(quote_side="MID"), side="MID")
+    _complete_draft(page)
+    _wait_for_price_enabled(page)
+
+    _select_quote_side(page, "BID")
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()"))
+
+    # Back to the side the draft's quote was actually sourced on.
+    _select_quote_side(page, "MID")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+    )
+
+    # The mismatch is gone, but the sourced quote is still disowned, so the
+    # instrument group stays open and Price stays off.
+    assert page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()") is True
+    assert "instrument" in page.evaluate("() => window.__shioriTestUnresolvedGroupIds()")
+    assert "invalidated" in page.inner_text("#unresolved-title")
+    assert page.eval_on_selector("#price-btn", "el => el.classList.contains('is-disabled')")
 
 
 @_PLAYWRIGHT_SKIP
