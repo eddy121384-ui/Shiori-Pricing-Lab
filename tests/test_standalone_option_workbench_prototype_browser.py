@@ -3831,6 +3831,166 @@ def test_clearing_the_expiry_withdraws_the_settlement_dates_it_derived(
     assert "advanced-timing" in _unresolved_group_ids(page)
 
 
+# --- Codex P1-2: no stale settlement window during an expiry-triggered
+# profile refresh --------------------------------------------------------
+#
+# The exact race the review flagged: applyManualInputsToDraft used to leave
+# the *previous* expiry's settlement dates sitting in the draft until the
+# async /api/ust/profile refresh happened to overwrite them, during which a
+# structurally-complete-looking draft could pass typed-builder validation and
+# enable Price against a settlement date that no longer matches the expiry on
+# screen. These tests hold that request open with page.route to prove the
+# withdrawal is synchronous, not merely eventual.
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_expiry_change_blocks_price_until_the_new_profile_settles(server_url, page) -> None:
+    """Covers five of the six required scenarios in one flow: a later-to-
+    earlier expiry change, Price disabled while the response is outstanding,
+    old dates not restored after a failed refresh, the trader override
+    surviving untouched throughout, and Price re-enabling only once a
+    genuinely new derived date has actually landed in the typed builder."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _fill_trade_group(page, expiry_local="2026-10-20T17:20", expiry_offset="+08:00")
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
+    _wait_for_price_enabled(page)
+
+    # Override option_settlement_date so this run proves it survives
+    # untouched through every step below.
+    page.click("#advanced-head")
+    page.fill("#option-settlement-date-input", "2026-10-30")
+    page.wait_for_timeout(150)
+    page.click("#advanced-head")
+    _wait_for_price_enabled(page)
+    assert (
+        _field_provenance(page)["option_settlement_date"] == "TRADER_OVERRIDE"
+    )
+
+    pending: list = []
+    page.route("**/api/ust/profile", lambda route: pending.append(route))
+
+    # A later-to-earlier expiry change: 2026-10-20 -> 2026-09-10.
+    _set_expiry(page, local="2026-09-10T17:20", offset="+08:00")
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    # While the new request is outstanding: the withdrawn (non-overridden)
+    # forward date is gone immediately -- not merely stale-but-present -- the
+    # override is untouched, and Price/builder validation must not have
+    # raced ahead on the old settlement dates.
+    assert page.input_value("#forward-settlement-date-input") == ""
+    assert page.input_value("#option-settlement-date-input") == "2026-10-30"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] is None
+    assert draft["option_settlement_date"] == "2026-10-30"
+    assert _is_disabled(page, "#price-btn")
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") != "ready"
+    assert "advanced-timing" in _unresolved_group_ids(page)
+
+    # A failed response must not restore the withdrawn date, or leave Price
+    # enabled, or recover any prior state.
+    pending[0].fulfill(
+        status=400,
+        content_type="application/json",
+        body=json.dumps({"error": "profile request failed"}),
+    )
+    page.wait_for_timeout(200)
+    assert page.input_value("#forward-settlement-date-input") == ""
+    assert page.input_value("#option-settlement-date-input") == "2026-10-30"
+    assert _is_disabled(page, "#price-btn")
+    assert "advanced-timing" in _unresolved_group_ids(page)
+
+    # Retrying (an unrelated edit re-fires the request, since the failed
+    # attempt released its key) succeeds, and only *then* does the new
+    # derived date reach the typed builder and enable Price.
+    page.unroute("**/api/ust/profile")
+    page.fill("#strike-price-input", "99.50")
+    _wait_for_price_enabled(page)
+    assert page.input_value("#forward-settlement-date-input") == "2026-09-11"
+    assert page.input_value("#option-settlement-date-input") == "2026-10-30"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] == "2026-09-11"
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_stale_profile_response_during_an_expiry_change_is_never_applied(
+    server_url, page
+) -> None:
+    """The sixth required scenario: a first request (for an expiry the
+    trader has already moved away from) answers after a second request (for
+    the current expiry) has already been sent and applied -- the stale
+    answer must never overwrite what the current one already wrote."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+
+    pending: list = []
+    request_count = 0
+
+    def route_profile(route):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/ust/profile", route_profile)
+
+    _set_expiry(page, local="2026-10-16T17:20")  # Friday
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+
+    # Move to a different expiry before the first request has answered --
+    # the second request is allowed through by route_profile above.
+    _set_expiry(page, local="2026-10-20T17:20")  # Tuesday
+    page.wait_for_function(
+        "() => document.querySelector('#forward-settlement-date-input').value === '2026-10-21'"
+    )
+
+    # The stale first request finally answers, describing the Friday
+    # expiry's own dates -- it must not be applied over the current,
+    # already-correct Tuesday-derived state.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "supported": True,
+                "rejection_reasons": [],
+                "pending_field_paths": [],
+                "fields": [
+                    {
+                        "path": "forward_settlement_date",
+                        "value": "2026-10-19",
+                        "provenance": "SHIORI_DERIVED",
+                    },
+                    {
+                        "path": "option_settlement_date",
+                        "value": "2026-10-19",
+                        "provenance": "SHIORI_DERIVED",
+                    },
+                ],
+            }
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert page.input_value("#forward-settlement-date-input") == "2026-10-21"
+    assert page.input_value("#option-settlement-date-input") == "2026-10-21"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] == "2026-10-21"
+    assert draft["option_settlement_date"] == "2026-10-21"
+
+    page.unroute("**/api/ust/profile", route_profile)
+
+
 # --- Acceptance criterion 6: unsupported bonds are refused, with reasons -----
 
 

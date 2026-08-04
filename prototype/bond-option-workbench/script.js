@@ -368,6 +368,15 @@
 
   const PROFILE_FIELD_BY_PATH = new Map(PROFILE_FIELDS.map((field) => [field.path, field]));
 
+  // The two fields the resolver recomputes on every expiry change (mirrors
+  // the server's own EXPIRY_DEPENDENT_FIELD_PATHS). Used to withdraw a stale
+  // settlement date the instant expiry (or any other profile-key input)
+  // changes, rather than leaving it in the draft until the next profile
+  // response happens to overwrite it (Issue #157 P1-2 correction).
+  const EXPIRY_DEPENDENT_PROFILE_FIELDS = PROFILE_FIELDS.filter(
+    (field) => field.path === "forward_settlement_date" || field.path === "option_settlement_date"
+  );
+
   // --- Workflow groups -----------------------------------------------------
   //
   // The ordinary trader workflow is exactly the groups whose `advanced` flag is
@@ -1392,12 +1401,16 @@
       if (generation !== ustProfileGeneration) return;
       // Shiori does not know whether a profile applies, which is not the same
       // as knowing it does not. Nothing is filled, the state says so, and the
-      // key is released so the next edit retries.
+      // key is released so the next edit retries. The expiry-dependent
+      // settlement dates were already withdrawn synchronously in
+      // applyManualInputsToDraft when this key changed -- this failure must
+      // not restore them or leave a stale one behind (Issue #157 P1-2).
       lastUstProfileKey = null;
       ustProfile = null;
       ustProfileTransportError = err.message;
       renderUstProfileStatus();
       renderFieldProvenance();
+      syncDraftGating();
       return;
     }
     // Two independent staleness checks. The generation catches a reset or a
@@ -1408,11 +1421,15 @@
     if (generation !== ustProfileGeneration) return;
     if (ustProfileKey() !== key) return;
     if (!response.ok) {
+      // Same guarantee as the transport-failure branch above: the withdrawn
+      // settlement dates stay withdrawn, never restored from a failed
+      // request (Issue #157 P1-2).
       lastUstProfileKey = null;
       ustProfile = null;
       ustProfileTransportError = (payload && payload.error) || "profile request failed";
       renderUstProfileStatus();
       renderFieldProvenance();
+      syncDraftGating();
       return;
     }
     ustProfileTransportError = null;
@@ -1725,6 +1742,33 @@
     referenceData.ex_dividend_days = integerOrNull(els.exDividendDays.value);
     referenceData.last_coupon_date = textOrNull(els.lastCouponDate.value);
     referenceData.status = selectValueOrNull(els.bondStatus);
+
+    // Issue #157 P1-2 correction: the instant any input the UST profile
+    // answer depends on changes (expiry above all, but also currency or
+    // valuation date), the forward/option settlement dates that answer last
+    // derived belong to the *previous* key and are no longer trustworthy --
+    // withdraw them right here, synchronously, before they are ever read
+    // back into the draft below. Without this, the stale dates would still
+    // read as "present" for one render/validation cycle (the profile refresh
+    // below is async), during which the typed-builder validation this
+    // function schedules could see a structurally complete draft and enable
+    // Price against a settlement date derived for an expiry that is no
+    // longer on screen. A trader-overridden path is never touched here --
+    // it survives untouched and is still validated by the real typed builder
+    // like any other field.
+    const profileKeyBeforeThisEdit = lastUstProfileKey;
+    if (ustProfileKey() !== profileKeyBeforeThisEdit) {
+      EXPIRY_DEPENDENT_PROFILE_FIELDS.forEach((field) => {
+        if (traderOverriddenPaths.has(field.path)) return;
+        field.control().value = "";
+        fieldProvenance.delete(field.path);
+      });
+      // The last profile answer describes the key that is about to change --
+      // it must not keep being shown (or trusted) as if it still applied to
+      // the new one while the fresh request below is outstanding.
+      ustProfile = null;
+      ustProfileTransportError = null;
+    }
 
     // The acquisition-derived values are deliberately not read back from the
     // DOM: their source is the recorded Bloomberg event, and editing any
