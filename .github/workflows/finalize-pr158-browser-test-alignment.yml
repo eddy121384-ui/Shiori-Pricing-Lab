@@ -40,27 +40,6 @@ jobs:
           lines = source.splitlines(keepends=True)
           lines[start:end] = ['@_PLAYWRIGHT_SKIP\n@_QUANTLIB_SKIP\ndef test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(\n    server_url, page\n) -> None:\n    """The refusal is visible before manual entry, and manual completion\n    cannot bypass it afterward."""\n\n    page.goto(f"{server_url}/")\n    _load_bloomberg_bond(\n        page,\n        response=_treasury_lookup_response(\n            bond_master={**_TREASURY_BOND_MASTER, "issue_date": "2024-03-05"}\n        ),\n    )\n    _wait_for_ust_profile(page)\n\n    profile = _ust_profile(page)\n    assert profile["supported"] is False\n    assert profile["fields"] == []\n    assert profile["unresolved_fields"] == []\n\n    page.click("#advanced-head")\n    status_before = page.inner_text("#ust-profile-status").lower()\n    assert "unsupported by the current pricing path" in status_before\n    assert "editing last_coupon_date cannot repair" in status_before\n    assert "changing advanced fields cannot make this ticket price" in status_before\n    assert "manually fill last_coupon_date" not in status_before\n\n    _fill_trade_group(page)\n    _fill_market_review(page)\n    _fill_advanced_overrides(page)\n    page.wait_for_timeout(250)\n\n    assert _is_disabled(page, "#price-btn")\n    assert _is_disabled(page, "#bloomberg-refresh-btn")\n    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"\n\n    page.click("#advanced-head")\n    status_after = page.inner_text("#ust-profile-status").lower()\n    assert "changing advanced fields cannot make this ticket price" in status_after\n    assert "manually fill last_coupon_date" not in status_after\n']
           updated = "".join(lines)
-
-          route_replacements = {
-              'page.route("**/api/case", lambda route: priced.append(route))':
-                  'page.route("**/api/case", lambda route: priced.append(route) or route.abort())',
-              'page.route("**/api/case/bloomberg", lambda route: refreshed.append(route))':
-                  'page.route(\n'
-                  '        "**/api/case/bloomberg",\n'
-                  '        lambda route: refreshed.append(route) or route.abort(),\n'
-                  '    )',
-              'page.route("**/api/case/validate", lambda route: validation_calls.append(route))':
-                  'page.route(\n'
-                  '        "**/api/case/validate",\n'
-                  '        lambda route: validation_calls.append(route) or route.abort(),\n'
-                  '    )',
-          }
-          for old, new in route_replacements.items():
-              count = updated.count(old)
-              if count != 1:
-                  raise SystemExit(f"expected one occurrence of {old!r}, found {count}")
-              updated = updated.replace(old, new)
-
           ast.parse(updated)
           target.write_text(updated, encoding="utf-8")
           PY
