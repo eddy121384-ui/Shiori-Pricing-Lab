@@ -1,0 +1,126 @@
+{
+  "schema": "issue-153-phase-1-redacted-evidence-v1",
+  "notice": "Template only. Null means unavailable; never infer Bloomberg semantics. No raw payload, credential, terminal ID, or unredacted identifier.",
+  "case": {
+    "case_id": null,
+    "case_shape": "NO_COUPON_BEFORE_EXPIRY_OR_COUPON_BEFORE_EXPIRY",
+    "redacted_underlying_key": null,
+    "scope_confirmed": {
+      "market": "UST",
+      "bond_type": "FIXED_COUPON_BULLET",
+      "exercise_style": "EUROPEAN",
+      "payoff_basis": "PRICE"
+    }
+  },
+  "provenance": {
+    "ovme_observation_timestamp": null,
+    "ovme_observation_timezone": null,
+    "shiori_acquired_at": null,
+    "evidence_reference_redacted": null,
+    "raw_material_committed": false
+  },
+  "shiori_run_binding": {
+    "pricing_status": null,
+    "product_id": null,
+    "snapshot_id": null,
+    "valuation_date": null,
+    "pricing_timestamp": null,
+    "market_data_source_system": null,
+    "market_data_source_as_of": null,
+    "retrieved_at": null,
+    "pricing_engine_name": null,
+    "pricing_engine_version": null,
+    "pricing_method": null,
+    "request_contract_name": "BLIStandaloneBondOptionRequest",
+    "contract_code_git_commit_sha": null,
+    "normalized_request_sha256": null,
+    "current_run_export_sha256": null
+  },
+  "terms_and_dates": {
+    "valuation_date": null,
+    "expiry_timestamp": null,
+    "reporting_date": null,
+    "forward_settlement_date": null,
+    "option_settlement_date": null,
+    "delivery_delay_display": null,
+    "coupon_rate_decimal": null,
+    "coupon_frequency": null,
+    "issue_date": null,
+    "maturity_date": null,
+    "first_coupon_date": null,
+    "last_coupon_date": null,
+    "day_count": null,
+    "option_type": null,
+    "strike_clean_price_per_100": null,
+    "notional_or_position_display": null
+  },
+  "underlying": {
+    "clean_price_per_100": null,
+    "quote_side": null,
+    "quote_observation_timestamp": null,
+    "accrued_interest_at_valuation_per_100_shiori": null,
+    "coupons_through_expiry_shiori": []
+  },
+  "forward": {
+    "ovme_forward_clean_price_per_100": null,
+    "displayed_forward_date_role": null,
+    "repo_label_verbatim": null,
+    "repo_value_verbatim": null,
+    "repo_unit_basis_side": "UNRESOLVED",
+    "repo_source_label_verbatim": null,
+    "bond_override_or_specialness_indicator": null,
+    "shiori_annex_forward_components": {
+      "spot_dirty_price_per_100": null,
+      "coupon_pv_per_100": null,
+      "bond_reference_expiry_discount_factor": null,
+      "expiry_accrued_interest_per_100": null,
+      "forward_clean_price_per_100": null
+    },
+    "comparison_status": "UNRESOLVED"
+  },
+  "volatility": {
+    "active_ovme_label_verbatim": null,
+    "display_value_verbatim": null,
+    "normalized_price_vol_decimal": null,
+    "basis": null,
+    "side": null,
+    "proxy_tenor_strike_moneyness": null,
+    "conversion_mode": null,
+    "conversion_inputs": null,
+    "comparison_status": "UNRESOLVED"
+  },
+  "premium": {
+    "price_unit_per_100_decimal": null,
+    "price_unit_display_verbatim": null,
+    "price_total_decimal": null,
+    "currency": "USD",
+    "quote_side": null,
+    "shiori_model_fair_premium_per_100": null,
+    "shiori_total_notional_model_fair_premium": null,
+    "position_sign_applied_to_shiori_model_premium": false,
+    "implied_price_vol_decimal_shiori": null,
+    "comparison_status": "UNRESOLVED"
+  },
+  "discounting": {
+    "ovme_usd_rate_or_mmkt_label_verbatim": null,
+    "curve_source_label_verbatim": null,
+    "curve_side": null,
+    "curve_settle_date": null,
+    "compounding": "UNRESOLVED",
+    "interpolation_label_verbatim": null,
+    "bracketing_nodes_redacted": [],
+    "displayed_discount_factors": [],
+    "shiori_pricing_to_reporting_df": null,
+    "shiori_pricing_to_option_settlement_df": null,
+    "shiori_effective_reporting_date_df": null,
+    "comparison_status": "UNRESOLVED"
+  },
+  "missing_fields": [],
+  "owner_decisions_required": [],
+  "redaction_check": {
+    "contains_raw_bloomberg_payload": false,
+    "contains_credentials": false,
+    "contains_terminal_identifier": false,
+    "contains_unredacted_screenshot": false
+  }
+}
