@@ -165,7 +165,7 @@ def test_a_confirmed_typed_bloomberg_value_outranks_the_profile_default():
             **_TREASURY_BOND_MASTER,
             "day_count": "ACT_365_FIXED",
             "bond_type": "AMORTIZING",
-            "last_coupon_date": "2030-01-31",
+            "last_coupon_date": "2030-07-31",
         }
     )
     values = _values(profile)
@@ -173,7 +173,7 @@ def test_a_confirmed_typed_bloomberg_value_outranks_the_profile_default():
 
     assert values[PATH_DAY_COUNT] == "ACT_365_FIXED"
     assert values[PATH_BOND_TYPE] == "AMORTIZING"
-    assert values[PATH_LAST_COUPON_DATE] == "2030-01-31"
+    assert values[PATH_LAST_COUPON_DATE] == "2030-07-31"
     for path in (PATH_DAY_COUNT, PATH_BOND_TYPE, PATH_LAST_COUPON_DATE):
         assert provenance[path] == PROVENANCE_BLOOMBERG_AUTO
     # Fields that are not Bond Master destination fields have no Bloomberg
@@ -182,13 +182,23 @@ def test_a_confirmed_typed_bloomberg_value_outranks_the_profile_default():
     assert provenance[PATH_STATUS] == PROVENANCE_UST_PROFILE_DEFAULT
 
 
+def test_a_mismatched_confirmed_last_coupon_date_rejects_the_whole_profile():
+    profile = _resolve(
+        bond_master={**_TREASURY_BOND_MASTER, "last_coupon_date": "2030-01-31"}
+    )
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    assert profile.unresolved_fields == ()
+    assert "regular coupon schedules only" in profile.rejection_reasons[0]
+    assert "editing last_coupon_date cannot repair" in profile.rejection_reasons[0]
+
+
 def test_a_bloomberg_description_string_never_becomes_a_typed_value():
     """`bond_master_raw` gates admission and nothing else: 'ACT/ACT' does not
     produce the day count, the approved profile constant does."""
 
-    profile = _resolve(
-        bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": "ACT/ACT"}
-    )
+    profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": "ACT/ACT"})
     day_count = next(f for f in profile.fields if f.path == PATH_DAY_COUNT)
     assert day_count.provenance == PROVENANCE_UST_PROFILE_DEFAULT
     assert day_count.value != "ACT/ACT"
@@ -499,14 +509,10 @@ def _assert_refused(profile, *, expected_fragment: str) -> None:
     )
 
 
-# --- 6. Field-level resolution: irregular schedule blocks only
-# last_coupon_date (Issue #157 P1-1 correction) ------------------------------
+# --- 6. Irregular schedules fail closed ------------------------------------
 
 
-def test_an_irregular_schedule_leaves_only_last_coupon_date_unresolved():
-    """The other seven fields must still resolve normally -- an irregular
-    coupon grid is no longer a whole-profile blocker."""
-
+def test_an_irregular_schedule_rejects_the_whole_profile():
     profile = _resolve(
         bond_master={
             **_TREASURY_BOND_MASTER,
@@ -516,18 +522,16 @@ def test_an_irregular_schedule_leaves_only_last_coupon_date_unresolved():
         }
     )
 
-    assert profile.supported is True
-    assert profile.rejection_reasons == ()
-    resolved_paths = {field.path for field in profile.fields}
-    assert PATH_LAST_COUPON_DATE not in resolved_paths
-    assert resolved_paths == set(UST_ADVANCED_FIELD_PATHS) - {PATH_LAST_COUPON_DATE}
-    assert len(profile.unresolved_fields) == 1
-    unresolved = profile.unresolved_fields[0]
-    assert unresolved.path == PATH_LAST_COUPON_DATE
-    assert "regular" in unresolved.reason
+    assert profile.supported is False
+    assert profile.fields == ()
+    assert profile.unresolved_fields == ()
+    assert profile.rejection_reasons == (
+        "current pricing adapter supports regular coupon schedules only; "
+        "editing last_coupon_date cannot repair the underlying schedule",
+    )
 
 
-def test_an_irregular_schedule_still_yields_the_ust_profile_default_values():
+def test_an_irregular_schedule_applies_none_of_the_eight_fields():
     profile = _resolve(
         bond_master={
             **_TREASURY_BOND_MASTER,
@@ -536,10 +540,7 @@ def test_an_irregular_schedule_still_yields_the_ust_profile_default_values():
             "first_coupon_date": "2024-07-31",
         }
     )
-    values = _values(profile)
-    assert values[PATH_DAY_COUNT] == "ACT_ACT_BOND"
-    assert values[PATH_BOND_TYPE] == "FIXED_COUPON_BULLET"
-    assert values[PATH_STATUS] == "ACTIVE"
+    assert profile.fields == ()
 
 
 # --- 7. Environment and module boundaries -----------------------------------

@@ -111,18 +111,11 @@ deliberately conservative -- a Bloomberg miss on one of those three
 description fields leaves the trader exactly where they are today, filling
 Advanced by hand.
 
-**Irregular schedule blocks only ``last_coupon_date`` (Issue #157 P1-1
-correction, field-level resolution).** The first revision folded coupon-grid
-irregularity into the whole-profile product-shape gate: any bond whose grid
-``derive_last_coupon_date`` could not accept as regular got *no* field at
-all. That was broader than necessary -- ``day_count``, ``bond_type``,
-``ex_dividend_days``, ``status``, ``reporting_date``, and the two settlement
-dates need nothing from the coupon grid, only ``last_coupon_date`` does. A
-bond that otherwise passes the product-shape gate but has an irregular or
-internally inconsistent coupon grid now still resolves the other seven
-fields normally; ``last_coupon_date`` alone is reported in
-:attr:`BLIUstAdvancedFieldProfile.unresolved_fields` with its own reason,
-never guessed or approximated.
+**Irregular schedules fail closed.** The current typed pricing adapter accepts
+only one internally consistent regular coupon grid. An irregular or stubbed
+grid therefore rejects the whole profile: editing ``last_coupon_date`` cannot
+repair the underlying issue/maturity/first-coupon grid that the adapter also
+validates.
 
 **Day count correction (post-review, superseding the PR's first revision).**
 The first revision of this module used ``DayCount.ACT_ACT_ISDA`` for
@@ -278,7 +271,7 @@ class BLIUstUnresolvedField:
     Distinct from ``pending_field_paths`` (waiting on an input that simply
     has not been supplied yet, e.g. expiry): this is for a field whose
     inputs are all present but which a real per-field check refused to
-    guess -- today, only ``last_coupon_date`` on an irregular coupon grid.
+    guess. No current condition uses this future-facing interface.
     """
 
     path: str
@@ -301,10 +294,8 @@ class BLIUstAdvancedFieldProfile:
 
     ``pending_field_paths`` names fields that are in scope but cannot be
     resolved yet because the run has no expiry date, so they are absent
-    rather than guessed. ``unresolved_fields`` names fields that could not
-    be resolved for a different, field-specific reason (currently only an
-    irregular coupon grid blocking ``last_coupon_date``) even though
-    ``supported`` is ``True`` and every other field resolved normally.
+    rather than guessed. ``unresolved_fields`` remains available for a future
+    genuinely field-specific refusal; no current condition uses it.
     """
 
     supported: bool
@@ -349,9 +340,7 @@ def advance_ust_government_bond_business_days(value: date, business_days: int) -
     if business_days <= 0:
         raise ValueError(f"business_days must be a positive integer, got {business_days}")
     calendar = ust_government_bond_calendar()
-    advanced = calendar.advance(
-        ql.Date(value.day, value.month, value.year), business_days, ql.Days
-    )
+    advanced = calendar.advance(ql.Date(value.day, value.month, value.year), business_days, ql.Days)
     return date(advanced.year(), advanced.month(), advanced.dayOfMonth())
 
 
@@ -508,9 +497,9 @@ def resolve_ust_advanced_field_profile(
     *shape* does not fit the selected profile (see
     :func:`_ust_fixed_coupon_bullet_rejection_reasons`) -- no partial
     profile is ever returned at that stage, and no field is filled for a
-    bond the profile's shape does not cover. Once shape-admitted, an
-    irregular coupon grid blocks only ``last_coupon_date`` (reported in
-    ``unresolved_fields``); the other seven fields still resolve normally.
+    bond the profile's shape does not cover. An irregular coupon grid rejects
+    the whole profile because the typed pricing adapter fails closed on the
+    underlying schedule.
 
     ``expiry_date`` is optional because the trader may not have entered the
     expiry yet. Without it, the two settlement dates are reported in
@@ -544,21 +533,41 @@ def resolve_ust_advanced_field_profile(
             unresolved_fields=(),
         )
 
+    try:
+        derived_last_coupon = derive_last_coupon_date(
+            issue_date=bond_master["issue_date"],
+            maturity_date=bond_master["maturity_date"],
+            first_coupon_date=bond_master["first_coupon_date"],
+            coupon_frequency=UST_PROFILE_COUPON_FREQUENCY,
+        )
+    except BLIBondScheduleError:
+        derived_last_coupon = None
+    confirmed_last_coupon = bond_master.get("last_coupon_date")
+    if derived_last_coupon is None or (
+        confirmed_last_coupon is not None and confirmed_last_coupon != derived_last_coupon
+    ):
+        return BLIUstAdvancedFieldProfile(
+            supported=False,
+            convention_profile=convention_profile,
+            rejection_reasons=(
+                "current pricing adapter supports regular coupon schedules only; "
+                "editing last_coupon_date cannot repair the underlying schedule",
+            ),
+            fields=(),
+            pending_field_paths=(),
+            unresolved_fields=(),
+        )
+
     fields: list[BLIUstProfileField] = []
-    unresolved: list[BLIUstUnresolvedField] = []
 
     def _confirmed_typed_value(path: str) -> object | None:
         return bond_master.get(_BLOOMBERG_TYPED_FIELD_BY_PATH[path])
 
     def _add(path: str, value: object, provenance: str) -> None:
-        confirmed = (
-            _confirmed_typed_value(path) if path in _BLOOMBERG_TYPED_FIELD_BY_PATH else None
-        )
+        confirmed = _confirmed_typed_value(path) if path in _BLOOMBERG_TYPED_FIELD_BY_PATH else None
         if confirmed is not None:
             fields.append(
-                BLIUstProfileField(
-                    path=path, value=confirmed, provenance=PROVENANCE_BLOOMBERG_AUTO
-                )
+                BLIUstProfileField(path=path, value=confirmed, provenance=PROVENANCE_BLOOMBERG_AUTO)
             )
             return
         fields.append(BLIUstProfileField(path=path, value=value, provenance=provenance))
@@ -567,11 +576,8 @@ def resolve_ust_advanced_field_profile(
     _add(PATH_BOND_TYPE, UST_PROFILE_BOND_TYPE.value, PROVENANCE_UST_PROFILE_DEFAULT)
     _add(PATH_EX_DIVIDEND_DAYS, UST_PROFILE_EX_DIVIDEND_DAYS, PROVENANCE_UST_PROFILE_DEFAULT)
 
-    # last_coupon_date: resolved independently of the other fields (Issue
-    # #157 P1-1 field-level correction) -- an irregular/inconsistent coupon
-    # grid blocks only this one field, never the other seven. The three
-    # schedule dates it needs are already known present and parseable: the
-    # product-shape gate above required them.
+    # Whole-profile admission above has already proved the underlying coupon
+    # grid regular before either a confirmed or derived value is applied.
     confirmed_last_coupon = _confirmed_typed_value(PATH_LAST_COUPON_DATE)
     if confirmed_last_coupon is not None:
         fields.append(
@@ -582,31 +588,13 @@ def resolve_ust_advanced_field_profile(
             )
         )
     else:
-        try:
-            derived_last_coupon = derive_last_coupon_date(
-                issue_date=bond_master["issue_date"],
-                maturity_date=bond_master["maturity_date"],
-                first_coupon_date=bond_master["first_coupon_date"],
-                coupon_frequency=UST_PROFILE_COUPON_FREQUENCY,
+        fields.append(
+            BLIUstProfileField(
+                path=PATH_LAST_COUPON_DATE,
+                value=derived_last_coupon,
+                provenance=PROVENANCE_SHIORI_DERIVED,
             )
-        except BLIBondScheduleError as exc:
-            unresolved.append(
-                BLIUstUnresolvedField(
-                    path=PATH_LAST_COUPON_DATE,
-                    reason=(
-                        "the reviewed coupon-schedule adapter does not accept this bond's "
-                        f"grid as regular, so no coupon date is derived: {exc}"
-                    ),
-                )
-            )
-        else:
-            fields.append(
-                BLIUstProfileField(
-                    path=PATH_LAST_COUPON_DATE,
-                    value=derived_last_coupon,
-                    provenance=PROVENANCE_SHIORI_DERIVED,
-                )
-            )
+        )
 
     _add(PATH_STATUS, UST_PROFILE_STATUS.value, PROVENANCE_UST_PROFILE_DEFAULT)
     # The reporting date is the run's own valuation date, carried across
@@ -634,5 +622,5 @@ def resolve_ust_advanced_field_profile(
         rejection_reasons=(),
         fields=tuple(fields),
         pending_field_paths=tuple(pending),
-        unresolved_fields=tuple(unresolved),
+        unresolved_fields=(),
     )

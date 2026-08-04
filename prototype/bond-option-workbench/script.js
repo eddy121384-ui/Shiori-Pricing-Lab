@@ -417,12 +417,20 @@
   function ustProfileRefusalWhy(fallback) {
     if (ustProfile && ustProfile.supported === false) {
       return (
-        "This bond is outside the approved UST fixed-coupon bullet profile, so Shiori " +
-        "fills none of these fields: " +
+        "The current pricing path does not support this bond schedule/shape, so Shiori " +
+        "fills none of these fields. Changing Advanced fields cannot make this ticket " +
+        "price: " +
         (ustProfile.rejection_reasons || []).join(" · ")
       );
     }
     return fallback;
+  }
+
+  function ustProfileRefusalNext(fallback) {
+    return ustProfile && ustProfile.supported === false
+      ? "This ticket cannot be completed on the current pricing path. Changing Advanced " +
+          "fields cannot make it price."
+      : fallback;
   }
 
   // True when the Quote Side on screen is not the side the draft's quote was
@@ -715,10 +723,11 @@
             "approved profile is the narrow UST fixed-coupon bullet one."
         ),
         evidence: EVIDENCE_BOND_REFERENCE,
-        next:
+        next: ustProfileRefusalNext(
           "Open Advanced → Bond reference and set them yourself. Each entry is " +
-          "recorded as a trader override with provenance, beside the Bloomberg " +
-          "text that is evidence for it.",
+            "recorded as a trader override with provenance, beside the Bloomberg " +
+            "text that is evidence for it."
+        ),
       }),
     },
     {
@@ -743,10 +752,11 @@
             "calendar."
         ),
         evidence: EVIDENCE_TIMING,
-        next:
+        next: ustProfileRefusalNext(
           "Enter the expiry, or open Advanced → Timing & settlement and set the " +
-          "three dates yourself. Each is recorded as a trader override with " +
-          "provenance.",
+            "three dates yourself. Each is recorded as a trader override with " +
+            "provenance."
+        ),
       }),
     },
   ];
@@ -1373,8 +1383,10 @@
     const profileName = ustProfile.convention_profile || SELECTED_CONVENTION_PROFILE;
     if (!ustProfile.supported) {
       target.textContent =
-        `This bond's shape does not fit the selected ${profileName} convention profile, ` +
-        "so Shiori pre-fills none of these fields (this says nothing about who issued the " +
+        `This bond schedule or shape is unsupported by the current pricing path and ` +
+        `does not fit the selected ${profileName} convention profile, ` +
+        "so Shiori pre-fills none of these fields. Changing Advanced fields cannot make " +
+        "this ticket price (this says nothing about who issued the " +
         "bond -- only that its own terms don't match this profile's shape): " +
         (ustProfile.rejection_reasons || []).join(" · ");
       target.classList.add("is-unsupported");
@@ -2294,6 +2306,8 @@
       typeof primary.unresolved === "function" ? primary.unresolved() : primary.unresolved;
     unresolvedFocusGroup = primary;
     els.unresolvedPanel.hidden = false;
+    els.unresolvedGotoBtn.hidden =
+      primary.advanced && ustProfile && ustProfile.supported === false;
     els.unresolvedTitle.textContent = detail.title;
     els.unresolvedMissing.textContent = detail.missing;
     els.unresolvedWhy.textContent = detail.why;
@@ -2355,7 +2369,7 @@
 
   async function runBuilderValidation() {
     validationTimer = null;
-    if (!currentDraft) return;
+    if (!currentDraft || !ustProfile || ustProfile.supported !== true) return;
     const generation = ++validationGeneration;
     const draftAtRequestTime = currentDraft;
     let response;
@@ -2432,10 +2446,21 @@
     // quote is invalidated -- otherwise Refresh could never re-enable.
     const draftGroupsUnresolved = groups.filter((group) => group.id !== "instrument");
     const draftComplete = hasDraft && draftGroupsUnresolved.length === 0;
-    if (draftComplete && builderValidation.state === "unknown" && validationTimer === null) {
+    const profileReady =
+      hasDraft &&
+      resolvedBloombergBond !== null &&
+      ustProfileTransportError === null &&
+      ustProfile !== null &&
+      ustProfile.supported === true;
+    if (
+      draftComplete &&
+      profileReady &&
+      builderValidation.state === "unknown" &&
+      validationTimer === null
+    ) {
       scheduleBuilderValidation();
     }
-    const builderReady = draftComplete && builderValidation.state === "ready";
+    const builderReady = draftComplete && profileReady && builderValidation.state === "ready";
     // A pending lookup names a *different* bond than the one backing this
     // draft. Both actions begin by invalidating that lookup, so leaving them
     // live would let a click silently cancel the trader's Load and then price

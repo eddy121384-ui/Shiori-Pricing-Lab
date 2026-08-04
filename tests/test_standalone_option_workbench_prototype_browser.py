@@ -3887,6 +3887,7 @@ def test_expiry_change_blocks_price_until_the_new_profile_settles(server_url, pa
     assert draft["forward_settlement_date"] is None
     assert draft["option_settlement_date"] == "2026-10-30"
     assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
     assert page.evaluate("() => window.__shioriTestBuilderValidationState()") != "ready"
     assert "advanced-timing" in _unresolved_group_ids(page)
 
@@ -3901,6 +3902,7 @@ def test_expiry_change_blocks_price_until_the_new_profile_settles(server_url, pa
     assert page.input_value("#forward-settlement-date-input") == ""
     assert page.input_value("#option-settlement-date-input") == "2026-10-30"
     assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
     assert "advanced-timing" in _unresolved_group_ids(page)
 
     # Retrying (an unrelated edit re-fires the request, since the failed
@@ -4070,11 +4072,7 @@ def test_a_matured_ust_is_never_pre_filled_as_active(server_url, page) -> None:
 def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     server_url, page
 ) -> None:
-    """Field-level correction (Issue #157 P1-1): an irregular coupon grid
-    blocks only last_coupon_date -- the profile as a whole is still
-    supported, and the other seven fields still resolve (see
-    test_an_irregular_schedule_still_fills_the_other_seven_fields for the
-    fuller check)."""
+    """An irregular grid rejects all profile fields and cannot enable Price."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -4086,11 +4084,16 @@ def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     _wait_for_ust_profile(page)
 
     profile = _ust_profile(page)
-    assert profile["supported"] is True
-    assert len(profile["unresolved_fields"]) == 1
-    assert _draft_reference(page)["last_coupon_date"] is None
-    assert page.input_value("#last-coupon-date-input") == ""
-    assert _draft_reference(page)["day_count"] == "ACT_ACT_BOND"
+    assert profile["supported"] is False
+    assert profile["fields"] == []
+    assert profile["unresolved_fields"] == []
+    assert all(value is None for value in _draft_reference(page).values())
+    page.click("#advanced-head")
+    status = page.inner_text("#ust-profile-status")
+    assert "unsupported by the current pricing path" in status
+    assert "editing last_coupon_date" in status
+    assert "not resolved" not in status
+    assert _is_disabled(page, "#price-btn")
 
 
 @_PLAYWRIGHT_SKIP
@@ -4236,9 +4239,8 @@ def test_no_page_text_claims_a_verified_treasury_identity(server_url, page) -> N
 
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
-def test_an_irregular_schedule_still_fills_the_other_seven_fields(server_url, page) -> None:
-    """Field-level correction: an irregular coupon grid blocks only
-    last_coupon_date -- the other seven Advanced fields still resolve."""
+def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(server_url, page) -> None:
+    """Manual completion cannot bypass a whole-profile pricing-path refusal."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -4248,28 +4250,20 @@ def test_an_irregular_schedule_still_fills_the_other_seven_fields(server_url, pa
         ),
     )
     _wait_for_ust_profile(page)
-    _set_expiry(page)
-    page.wait_for_function(
-        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
-    )
 
     profile = _ust_profile(page)
-    assert profile["supported"] is True
-    assert len(profile["unresolved_fields"]) == 1
-    assert profile["unresolved_fields"][0]["path"] == (
-        "bond_reference_data_universe.0.last_coupon_date"
-    )
+    assert profile["supported"] is False
+    assert len(profile["fields"]) == 0
+    assert profile["unresolved_fields"] == []
+    _complete_draft(page)
+    page.wait_for_timeout(200)
 
-    reference = _draft_reference(page)
-    assert reference["last_coupon_date"] is None
-    assert reference["day_count"] == "ACT_ACT_BOND"
-    assert reference["bond_type"] == "FIXED_COUPON_BULLET"
-    assert reference["status"] == "ACTIVE"
-    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    assert draft["reporting_date"] is not None
-    assert draft["option_settlement_date"] is not None
-    page.click("#advanced-head")
-    assert "not resolved" in page.inner_text("#ust-profile-status")
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") != "ready"
+    body = page.locator("body").inner_text().lower()
+    assert "changing advanced fields cannot make this ticket price" in body
+    assert "manually fill last_coupon_date" not in body
 
 
 # --- Acceptance criterion 8: nothing survives a reset or a stale answer ------
