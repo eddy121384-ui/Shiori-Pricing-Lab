@@ -1093,60 +1093,49 @@ def test_ust_prices_end_to_end_through_the_real_engine(server_url, page) -> None
 
 
 @_PLAYWRIGHT_SKIP
-def test_gilt_shaped_regular_grid_bond_prices_end_to_end_through_the_real_engine(
+@_QUANTLIB_SKIP
+def test_gilt_shaped_regular_grid_bond_is_refused_by_the_selected_ust_profile(
     server_url, page
 ) -> None:
-    """A GBP, Gilt-shaped bond with a **regular** coupon grid starts from the
-    same Bloomberg lookup and reaches the same reviewed engine.
+    """A Gilt can still be resolved and displayed, but the browser's explicitly
+    selected UST convention profile must refuse it before builder validation.
 
-    This proves the workflow is not USD/UST-specific -- currency, identifiers
-    and curve nodes all follow the loaded instrument. It deliberately does *not*
-    claim that every real conventional Gilt prices: a Gilt whose issue/
-    first-coupon structure carries a stub is still rejected by the reviewed
-    adapter, which
-    ``test_a_gilt_with_a_real_world_stub_schedule_fails_truthfully_rather_than_pricing``
-    below pins.
+    Manually completing the ticket cannot turn that profile refusal into a
+    priceable run.
     """
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response()
     )
+    _wait_for_ust_profile(page)
+
     assert page.inner_text("#resolved-bond-name") == "UNITED KINGDOM GILT"
     assert page.inner_text("#resolved-bond-currency") == "GBP"
+    profile = _ust_profile(page)
+    assert profile["supported"] is False
+    assert any("is not USD" in reason for reason in profile["rejection_reasons"])
 
     _complete_draft(page, strike="95.50", forward="96.05", last_coupon_date="2028-04-22")
-    _wait_for_price_enabled(page)
+    page.wait_for_timeout(250)
 
-    page.click("#price-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
+    page.click("#advanced-head")
+    status = page.inner_text("#ust-profile-status").lower()
+    assert "does not fit the selected ust convention profile" in status
+    assert "changing advanced fields cannot make this ticket price" in status
 
-    assert float(page.inner_text("#price-total")) > 0
-    assert page.inner_text("#result-currency") == "GBP"
-    assert page.inner_text("#instr-isin") == "GB00BFX0ZL78"
-    # The curve nodes the trader entered were recorded in the Gilt's own
-    # currency -- never carried over from a prior instrument.
-    nodes = page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")
-    assert {node["currency"] for node in nodes} == {"GBP"}
 
 
 @_PLAYWRIGHT_SKIP
-def test_a_gilt_with_a_real_world_stub_schedule_fails_truthfully_rather_than_pricing(
+@_QUANTLIB_SKIP
+def test_a_gilt_stub_schedule_cannot_bypass_the_selected_ust_profile(
     server_url, page
 ) -> None:
-    """Pins the current conventional-Gilt limitation honestly.
-
-    A real conventional Gilt's issue/first-coupon structure commonly carries a
-    stub. The typed builder accepts such a bond -- nothing about it is
-    structurally ineligible -- and the reviewed coupon adapter then refuses to
-    approximate the irregular grid, so the run comes back as a truthful FAILED
-    result naming the exact problem.
-
-    This is an existing adapter limitation, not a regression from the
-    minimum-input workflow, and it is the reason #143 cannot be called complete
-    for conventional Gilts. No stub-schedule methodology is invented here to
-    make it price.
-    """
+    """A non-UST ticket never reaches either pricing route merely because the
+    trader manually fills every Advanced field."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -1154,21 +1143,26 @@ def test_a_gilt_with_a_real_world_stub_schedule_fails_truthfully_rather_than_pri
         identifier="GB00BFX0ZL78",
         response=_gilt_lookup_response(bond_master=_GILT_STUB_BOND_MASTER),
     )
+    _wait_for_ust_profile(page)
     _complete_draft(page, strike="95.50", forward="96.05", last_coupon_date="2028-04-22")
+    page.wait_for_timeout(250)
 
-    # The typed builder raises no objection -- the bond is structurally eligible.
-    _wait_for_price_enabled(page)
-    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "ready"
+    priced: list = []
+    refreshed: list = []
+    page.route("**/api/case", lambda route: priced.append(route))
+    page.route("**/api/case/bloomberg", lambda route: refreshed.append(route))
+    page.dispatch_event("#price-btn", "click")
+    page.dispatch_event("#bloomberg-refresh-btn", "click")
+    page.wait_for_timeout(250)
 
-    page.click("#price-btn")
-    _wait_until(lambda: page.inner_text("#status-text") == "Pricing failed")
-
-    banner = page.inner_text("#pricing-error-banner")
-    assert "irregular coupon grid" in banner
-    assert "no stub approximation is computed" in banner
-    # No fabricated premium or Greek is left on screen.
+    assert priced == []
+    assert refreshed == []
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
     assert page.inner_text("#price-total") == "—"
     assert page.inner_text("#greek-delta") == "—"
+
 
 
 @pytest.mark.parametrize("option_type", ["CALL", "PUT"])
@@ -1195,33 +1189,42 @@ def test_every_call_put_buy_sell_combination_prices(
 
 
 @_PLAYWRIGHT_SKIP
-def test_price_gate_is_decided_by_the_real_typed_builder_not_by_non_blank_fields(
+@_QUANTLIB_SKIP
+def test_callable_ust_is_stopped_by_the_profile_before_builder_validation(
     server_url, page
 ) -> None:
-    """Requirement 5: Price enablement must come from real route validation.
+    """The selected UST profile rejects a callable bond before the typed builder.
 
-    Every field is non-blank and every workflow group is structurally resolved,
-    but the bond is callable -- which the reviewed standalone eligibility gate
-    rejects. A purely front-end "is it non-empty" check would enable Price here.
+    Even a structurally complete-looking form must not schedule validation or
+    enable either pricing action after that refusal.
     """
 
     page.goto(f"{server_url}/")
+    validation_calls: list = []
+    page.route("**/api/case/validate", lambda route: validation_calls.append(route))
     _load_bloomberg_bond(
         page,
         response=_treasury_lookup_response(
             bond_master={**_TREASURY_BOND_MASTER, "callable_flag": True}
         ),
     )
+    _wait_for_ust_profile(page)
     _complete_draft(page)
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(300)
 
-    assert _unresolved_group_ids(page) == []  # structurally complete...
-    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "failed"
-    assert _is_disabled(page, "#price-btn")  # ...but the real builder said no
-    assert page.inner_text("#unresolved-title") == "The typed builder rejected this draft"
-    why = page.inner_text("#unresolved-why")
-    assert "FOUND_INELIGIBLE" in why
-    assert "callable" in why
+    profile = _ust_profile(page)
+    assert profile["supported"] is False
+    assert any("callable" in reason.lower() for reason in profile["rejection_reasons"])
+    assert _unresolved_group_ids(page) == []
+    assert validation_calls == []
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
+    assert _is_disabled(page, "#price-btn")
+    assert _is_disabled(page, "#bloomberg-refresh-btn")
+    page.click("#advanced-head")
+    status = page.inner_text("#ust-profile-status").lower()
+    assert "unsupported by the current pricing path" in status
+    assert "callable" in status
+
 
 
 @_PLAYWRIGHT_SKIP
@@ -4072,7 +4075,8 @@ def test_a_matured_ust_is_never_pre_filled_as_active(server_url, page) -> None:
 def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     server_url, page
 ) -> None:
-    """An irregular grid rejects all profile fields and cannot enable Price."""
+    """An irregular grid rejects all eight profile fields without erasing the
+    Bloomberg Bond Master evidence that caused the refusal."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -4087,13 +4091,27 @@ def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     assert profile["supported"] is False
     assert profile["fields"] == []
     assert profile["unresolved_fields"] == []
-    assert all(value is None for value in _draft_reference(page).values())
+
+    reference = _draft_reference(page)
+    for field in ("day_count", "bond_type", "ex_dividend_days", "last_coupon_date", "status"):
+        assert reference[field] is None
+    assert reference["coupon"] == 0.0375
+    assert reference["issue_date"] == "2024-03-05"
+    assert reference["maturity_date"] == "2031-01-31"
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["reporting_date"] is None
+    assert draft["forward_settlement_date"] is None
+    assert draft["option_settlement_date"] is None
+    assert _field_provenance(page) == {}
+
     page.click("#advanced-head")
     status = page.inner_text("#ust-profile-status")
     assert "unsupported by the current pricing path" in status
     assert "editing last_coupon_date" in status
     assert "not resolved" not in status
     assert _is_disabled(page, "#price-btn")
+
 
 
 @_PLAYWRIGHT_SKIP
@@ -4239,8 +4257,11 @@ def test_no_page_text_claims_a_verified_treasury_identity(server_url, page) -> N
 
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
-def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(server_url, page) -> None:
-    """Manual completion cannot bypass a whole-profile pricing-path refusal."""
+def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(
+    server_url, page
+) -> None:
+    """The refusal is actionable before manual entry, and manual completion
+    cannot bypass it afterward."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -4253,17 +4274,33 @@ def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(server_url,
 
     profile = _ust_profile(page)
     assert profile["supported"] is False
-    assert len(profile["fields"]) == 0
+    assert profile["fields"] == []
     assert profile["unresolved_fields"] == []
-    _complete_draft(page)
+
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
     page.wait_for_timeout(200)
+
+    assert page.inner_text("#unresolved-title") == "Bond reference fields are not filled for this bond"
+    next_step = page.inner_text("#unresolved-next").lower()
+    assert "cannot be completed on the current pricing path" in next_step
+    assert "changing advanced fields cannot make it price" in next_step
+    assert page.eval_on_selector("#unresolved-goto-btn", "el => el.hidden")
+    assert "manually fill last_coupon_date" not in page.locator("body").inner_text().lower()
+
+    _fill_advanced_overrides(page)
+    page.wait_for_timeout(250)
 
     assert _is_disabled(page, "#price-btn")
     assert _is_disabled(page, "#bloomberg-refresh-btn")
-    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") != "ready"
-    body = page.locator("body").inner_text().lower()
-    assert "changing advanced fields cannot make this ticket price" in body
-    assert "manually fill last_coupon_date" not in body
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
+
+    page.click("#advanced-head")
+    status = page.inner_text("#ust-profile-status").lower()
+    assert "changing advanced fields cannot make this ticket price" in status
+    assert "manually fill last_coupon_date" not in status
+
 
 
 # --- Acceptance criterion 8: nothing survives a reset or a stale answer ------
