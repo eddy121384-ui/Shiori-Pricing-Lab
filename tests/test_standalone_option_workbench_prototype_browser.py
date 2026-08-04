@@ -4093,7 +4093,7 @@ def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     assert "unsupported by the current pricing path" in status
     assert "editing last_coupon_date" in status
     assert "not resolved" not in status
-    assert page.locator("#price-btn").is_disabled()
+    assert _is_disabled(page, "#price-btn")
 
 
 @_PLAYWRIGHT_SKIP
