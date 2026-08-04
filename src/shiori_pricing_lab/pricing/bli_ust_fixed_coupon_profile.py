@@ -397,9 +397,11 @@ def _ust_fixed_coupon_bullet_rejection_reasons(
     it (see the module docstring's "Product-shape gate" section; the
     withdrawn ISIN/CUSIP issuer-identity checks are not here).
 
-    Coupon-grid *regularity* is deliberately not checked here: an
-    irregular grid blocks only ``last_coupon_date``, resolved independently
-    in :func:`resolve_ust_advanced_field_profile`, not the whole profile.
+    Coupon-grid *regularity* is checked separately, immediately after this
+    function's reasons come back empty, by :func:`resolve_ust_advanced_field_profile`
+    itself: an irregular, stubbed, or Bloomberg-confirmed-mismatched grid
+    rejects the whole profile there (see the module docstring's "Irregular
+    schedules fail closed" section), not just ``last_coupon_date``.
     """
 
     reasons: list[str] = []
