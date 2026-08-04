@@ -1373,7 +1373,8 @@
     const profileName = ustProfile.convention_profile || SELECTED_CONVENTION_PROFILE;
     if (!ustProfile.supported) {
       target.textContent =
-        `This bond's shape does not fit the selected ${profileName} convention profile, ` +
+        `This bond schedule or shape is unsupported by the current pricing path and ` +
+        `does not fit the selected ${profileName} convention profile, ` +
         "so Shiori pre-fills none of these fields (this says nothing about who issued the " +
         "bond -- only that its own terms don't match this profile's shape): " +
         (ustProfile.rejection_reasons || []).join(" · ");
