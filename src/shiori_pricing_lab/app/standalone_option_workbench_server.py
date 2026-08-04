@@ -127,6 +127,22 @@ dict exactly like this one.
   distinct concern from ``/api/case/bloomberg`` above, which still requires
   and reprices an active case; this route never touches or requires one.
 
+**UST Advanced-field profile (Issue #157).** One more stateless route:
+
+- ``POST /api/ust/profile`` -- body is ``{"isin", "currency", "bond_master",
+  "bond_master_raw", "valuation_date", "expiry_date"}``, where the first four
+  come verbatim from one already-completed ``POST /api/bloomberg/bond``
+  response and the last two from the run itself (``expiry_date`` may be
+  omitted or ``null`` while the trader has not entered the expiry yet).
+  Calls ``resolve_ust_advanced_field_profile`` exactly once and returns its
+  result as ``{"supported", "rejection_reasons", "fields",
+  "pending_field_paths"}``. This route makes no Bloomberg call, reads no
+  clock, prices nothing, and stores nothing: it is a pure function of the
+  body, so the browser can call it again whenever expiry changes. A bond
+  outside the narrow profile is a normal HTTP 200 answer with
+  ``supported: false`` and its reasons -- not an error -- while a malformed
+  body or a missing QuantLib install returns HTTP 400.
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -159,6 +175,9 @@ from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
 from shiori_pricing_lab.data.bloomberg_bond_quote import (
     load_bloomberg_bond_identity_and_quote,
     parse_bond_identifier,
+)
+from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
+    resolve_ust_advanced_field_profile,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -230,7 +249,14 @@ DEFAULT_PORT = 8765
 # rather than the bare display dict, so the browser adopts the envelope that
 # was actually priced instead of reassembling it. A stale process would still
 # return the old shape, and the page would read `payload.display` as undefined.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v9"
+#
+# Bumped to -v10 for Issue #157's UST Advanced-field profile: POST
+# /api/ust/profile is a new route the served page now calls after every
+# Bloomberg Load and on every expiry change, and index.html/script.js changed
+# to auto-fill the eight Advanced technical fields with provenance. A stale
+# process predating the route would 404 it and silently leave the trader back
+# on the field-by-field form.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v10"
 
 
 def load_base_case() -> dict:
@@ -442,6 +468,59 @@ def lookup_bloomberg_bond(bond_identifier: str, quote_side: str) -> dict:
     return {**result, "acquired_at": acquired_at, "source_system": _BLOOMBERG_SOURCE_SYSTEM}
 
 
+_UST_PROFILE_REQUIRED_KEYS = (
+    "isin",
+    "currency",
+    "bond_master",
+    "bond_master_raw",
+    "valuation_date",
+)
+
+
+def resolve_ust_profile(body: dict) -> dict:
+    """Return the UST Advanced-field profile for one Bloomberg-loaded bond.
+
+    Calls the existing ``resolve_ust_advanced_field_profile`` exactly once and
+    serializes its result -- this function decides nothing about conventions,
+    calendars, schedules or eligibility itself. ``expiry_date`` is optional
+    (absent or ``null`` while the trader has not entered an expiry yet); the
+    two settlement dates then come back under ``pending_field_paths`` instead
+    of being guessed.
+
+    A bond outside the narrow profile is *not* an error: it returns
+    ``supported: false`` with the profile's own reasons, verbatim. Raises
+    ``ValueError`` for a body that is not a JSON object with the five required
+    keys, and propagates ``BLIQuantLibNotAvailableError`` unchanged when the
+    optional QuantLib dependency is missing -- the coupon schedule and the
+    U.S. government-bond calendar both come from it and neither is
+    approximated.
+    """
+
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    missing = [key for key in _UST_PROFILE_REQUIRED_KEYS if key not in body]
+    if missing:
+        raise ValueError(f"request body is missing required key(s): {missing}")
+
+    profile = resolve_ust_advanced_field_profile(
+        isin=body["isin"],
+        currency=body["currency"],
+        bond_master=body["bond_master"],
+        bond_master_raw=body["bond_master_raw"],
+        valuation_date=body["valuation_date"],
+        expiry_date=body.get("expiry_date"),
+    )
+    return {
+        "supported": profile.supported,
+        "rejection_reasons": list(profile.rejection_reasons),
+        "fields": [
+            {"path": field.path, "value": field.value, "provenance": field.provenance}
+            for field in profile.fields
+        ],
+        "pending_field_paths": list(profile.pending_field_paths),
+    }
+
+
 _EXPORT_JSON_FILENAME = "shiori_standalone_option_run.json"
 _EXPORT_MARKDOWN_FILENAME = "shiori_standalone_option_run.md"
 
@@ -624,6 +703,20 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, result)
 
+    def _handle_api_ust_profile(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        try:
+            payload = resolve_ust_profile(body)
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        # A bond outside the profile is a normal answer, not a bridge error.
+        self._write_json(200, payload)
+
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
         try:
             body = json.loads(raw_body)
@@ -653,6 +746,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/case/validate": _handle_api_case_validate,
         "/api/case/bloomberg": _handle_api_case_bloomberg,
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
+        "/api/ust/profile": _handle_api_ust_profile,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

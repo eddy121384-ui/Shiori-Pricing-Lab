@@ -120,7 +120,7 @@ from shiori_pricing_lab.data.bli_standalone_contract import (
     BLIStandaloneBondReferenceData,
     StandaloneBondReferenceData,
 )
-from shiori_pricing_lab.products.enums import DayCount, Frequency
+from shiori_pricing_lab.products.enums import DayCount, Frequency, coerce_enum
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
 try:
@@ -403,6 +403,91 @@ def _day_counter(day_count: DayCount) -> ql.DayCounter:
     if day_count is DayCount.ACT_ACT_ISDA:
         return ql.ActualActual(ql.ActualActual.ISDA)
     raise ValueError(f"unsupported day_count for QuantLib mapping: {day_count!r}")
+
+
+def derive_last_coupon_date(
+    *,
+    issue_date: str,
+    maturity_date: str,
+    first_coupon_date: str,
+    coupon_frequency: Frequency | str,
+) -> str:
+    """Return this bond's final scheduled coupon date before `maturity_date`.
+
+    The same regular-grid rules `_check_regular_schedule` already enforces,
+    run one step earlier: a caller that does not yet *have* a
+    `last_coupon_date` (because nothing has supplied one) cannot construct a
+    `BondReferenceData` to ask that function, yet the grid is fully
+    determined by `issue_date`, `maturity_date`, `first_coupon_date` and
+    `coupon_frequency` alone. Both candidate grids are considered exactly as
+    there -- the day-of-month-preserving `_add_months` arithmetic (non-EOM),
+    and QuantLib's own `endOfMonth=True` schedule (EOM), the latter only when
+    both endpoints are themselves calendar month-end -- with the declared
+    `first_coupon_date` resolving which one is in effect and non-EOM
+    preferred when both match.
+
+    This is deliberately the grid's **second-to-last** date, which is what
+    `last_coupon_date` means to every other function in this module (the
+    final coupon-at-maturity event combines with principal redemption and is
+    out of scope for this adapter slice). It is not a "previous coupon date
+    relative to some as-of date", and it never depends on a valuation date,
+    a settlement date, or the system clock.
+
+    Raises `BLIBondScheduleError` when no consistent regular grid exists --
+    including a bond with only one coupon period, whose grid has no coupon
+    date strictly before maturity at all -- so an irregular or stubbed bond
+    is refused rather than approximated. No stub methodology is introduced.
+    """
+
+    _require_quantlib()
+
+    issue = _parse_iso_date(issue_date, "issue_date")
+    maturity = _parse_iso_date(maturity_date, "maturity_date")
+    first_coupon = _parse_iso_date(first_coupon_date, "first_coupon_date")
+    frequency = coerce_enum(coupon_frequency, Frequency, "coupon_frequency")
+    months = _coupon_period_months(frequency)
+
+    total_months = (maturity.year - issue.year) * 12 + (maturity.month - issue.month)
+    if total_months <= 0 or total_months % months != 0:
+        raise BLIBondScheduleError(
+            f"issue_date ({issue_date!r}) to maturity_date ({maturity_date!r}) is not an "
+            f"exact multiple of the {months}-month coupon period, so no consistent regular "
+            "schedule exists (no stub approximation is computed)"
+        )
+    periods = total_months // months
+    if periods < 2:
+        raise BLIBondScheduleError(
+            f"issue_date ({issue_date!r}) to maturity_date ({maturity_date!r}) spans a "
+            "single coupon period, so there is no coupon date strictly before maturity to "
+            "derive -- the final coupon-at-maturity event is out of scope for this adapter"
+        )
+
+    # Non-EOM candidate: the existing, unchanged `_add_months` arithmetic. It
+    # raises for a day-of-month that does not exist in a stepped-to month,
+    # which only makes this candidate inapplicable (a legitimate EOM-only
+    # bond), never the bond irregular.
+    try:
+        if (
+            _add_months(issue, months) == first_coupon
+            and _add_months(issue, periods * months) == maturity
+        ):
+            return _add_months(issue, (periods - 1) * months).isoformat()
+    except ValueError:
+        pass
+
+    # EOM candidate: considered only when both endpoints are themselves
+    # calendar month-end, exactly as in `_check_regular_schedule`.
+    if _is_last_day_of_month(issue) and _is_last_day_of_month(maturity):
+        schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=True)
+        if schedule_dates[-1] == maturity and schedule_dates[1] == first_coupon:
+            return schedule_dates[-2].isoformat()
+
+    raise BLIBondScheduleError(
+        f"no regular coupon grid runs from issue_date ({issue_date!r}) through "
+        f"maturity_date ({maturity_date!r}) with first_coupon_date "
+        f"({first_coupon_date!r}) at a {months}-month period, so this bond's first/last "
+        "coupon period is irregular and no last coupon date is derived"
+    )
 
 
 def coupon_flows_before(

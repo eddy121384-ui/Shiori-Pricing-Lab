@@ -27,12 +27,14 @@
 //   - Route-fixed: PRICE / EUROPEAN / CASH, the Shiori product and snapshot
 //     identifiers, the forward's quote side (contractually equal to the spot
 //     side), and the NOT_REQUIRED credit-spread policy -- never asked for.
-//   - APPROVED_PROFILE_REQUIRED, with no approved UST/Gilt profile yet: day
-//     count, bond type, ex-dividend days, status. SHIORI_DERIVED_CANDIDATE,
-//     with no approved generator/route decision yet: last coupon date,
-//     reporting date. ADVANCED_OVERRIDE_REQUIRED: forward and option
-//     settlement dates. All of these live in Advanced as trader overrides
-//     with provenance -- Shiori sets none of them from a Bloomberg string.
+//   - The eight non-market Advanced technical fields (day count, bond type,
+//     ex-dividend days, last coupon date, status, reporting date, and the two
+//     settlement dates) are, since Issue #157, pre-filled for a supported UST
+//     fixed-coupon bullet by the server-side resolver, each stamped with the
+//     tier it came from -- BLOOMBERG_AUTO, SHIORI_DERIVED, UST_PROFILE_DEFAULT
+//     or TRADER_OVERRIDE. They stay in Advanced and stay editable; a bond
+//     outside that profile is still filled with nothing at all and says why.
+//     Shiori still sets none of them from a Bloomberg description string.
 //   - ADVANCED_OVERRIDE_REQUIRED / UNRESOLVED market inputs: forward clean
 //     price, direct price vol, and the Option Discount Curve. These are the
 //     three main-screen review groups, each stating the real Bloomberg
@@ -128,6 +130,15 @@
     reportingDate: document.getElementById("reporting-date-input"),
     forwardSettlementDate: document.getElementById("forward-settlement-date-input"),
     optionSettlementDate: document.getElementById("option-settlement-date-input"),
+    ustProfileStatus: document.getElementById("ust-profile-status"),
+    provDayCount: document.getElementById("prov-day-count"),
+    provBondType: document.getElementById("prov-bond-type"),
+    provExDividendDays: document.getElementById("prov-ex-dividend-days"),
+    provLastCouponDate: document.getElementById("prov-last-coupon-date"),
+    provBondStatus: document.getElementById("prov-bond-status"),
+    provReportingDate: document.getElementById("prov-reporting-date"),
+    provForwardSettlementDate: document.getElementById("prov-forward-settlement-date"),
+    provOptionSettlementDate: document.getElementById("prov-option-settlement-date"),
     curveRows: document.getElementById("curve-rows"),
     curveAddRowBtn: document.getElementById("curve-add-row-btn"),
     curveCoverage: document.getElementById("curve-coverage"),
@@ -236,13 +247,18 @@
     "SECURITY_TYP distinguishes US GOVERNMENT / UK GILT STOCK, CPN_TYP = FIXED " +
     "and PREV_CPN_DT returns a value -- but all of these are display-only " +
     "evidence. Ex-dividend and security-status candidates returned BAD_FLD. " +
-    "No UST / conventional-Gilt convention profile is approved, so Shiori maps " +
-    "none of these strings into a typed enum.";
+    "Issue #157 approves one narrow UST fixed-coupon bullet profile to own " +
+    "these fields; outside it Shiori still fills nothing, and inside it the " +
+    "value comes from the profile or a reviewed derivation -- never from " +
+    "mapping one of these strings into a typed enum.";
   const EVIDENCE_TIMING =
     "Issue #149: no Bloomberg reference field describes an OTC option's own cash " +
     "settlement date. SETTLE_DT and DAYS_TO_SETTLE describe the cash bond's " +
-    "standard settlement -- a different role that must not be conflated. Fixing " +
-    "Reporting Date to Valuation Date is an unapproved route decision.";
+    "standard settlement -- a different role that must not be conflated. Issue " +
+    "#157 approves, for supported USTs only, Reporting Date = Valuation Date and " +
+    "settlement one U.S. government-bond business day after expiry on the " +
+    "existing QuantLib U.S. government-bond calendar. Shiori still writes no " +
+    "holiday table of its own and rolls nothing outside that profile.";
   // "At least one", not "the fields above": the loader permits independent
   // partial misses, so an unknown CPN_FREQ leaves coupon_frequency null while
   // coupon, the dates and the flags all came back populated. Calling those
@@ -271,6 +287,87 @@
     "Shiori neither prices the unselected side nor relabels this quote as the " +
     "selected one. The sourced quote itself is unchanged.";
 
+  // --- UST Advanced-field profile (Issue #157) -----------------------------
+  //
+  // The eight non-market Advanced technical fields are no longer typed one by
+  // one. After a Bloomberg Load -- and again whenever the expiry changes --
+  // the page asks POST /api/ust/profile, whose whole answer is computed
+  // server-side by the reviewed deterministic resolver
+  // (pricing/bli_ust_fixed_coupon_profile.py). This file decides *nothing*
+  // about conventions: it never contains a day-count, bond-type or status
+  // literal, never derives a coupon date, and owns no calendar. It writes the
+  // returned values into the same controls the trader uses, records which of
+  // the four provenance tiers each one came from, and stops re-deriving any
+  // field the trader has taken over.
+
+  const UST_PROFILE_SOURCE_SYSTEM = "SHIORI_UST_FIXED_COUPON_PROFILE";
+  const TRADER_OVERRIDE_BASIS = "TRADER_OVERRIDE";
+
+  // What each provenance tier means, in the trader's own terms. The tier
+  // string itself always comes from the server.
+  const PROVENANCE_DESCRIPTIONS = {
+    BLOOMBERG_AUTO:
+      "a typed value Bloomberg itself returned for this bond, mapped by a confirmed " +
+      "mnemonic — never read off a description string",
+    SHIORI_DERIVED:
+      "derived mechanically by Shiori from this run's own loaded bond terms, valuation " +
+      "date and expiry, using existing reviewed logic",
+    UST_PROFILE_DEFAULT:
+      "the approved narrow UST fixed-coupon bullet profile's own value for this field",
+    TRADER_OVERRIDE:
+      "you set this value yourself; Shiori will not re-derive or reset it for this bond",
+  };
+
+  // path -> the control that holds it and the readout that explains it. The
+  // paths are spelled exactly as the resolver's own
+  // ``UST_ADVANCED_FIELD_PATHS``, and the browser regression tests assert each
+  // one actually lands in its control -- a drift between the two sides is a
+  // failing test, not a field that quietly stays blank.
+  const PROFILE_FIELDS = [
+    {
+      path: "bond_reference_data_universe.0.day_count",
+      control: () => els.dayCount,
+      provenanceEl: () => els.provDayCount,
+    },
+    {
+      path: "bond_reference_data_universe.0.bond_type",
+      control: () => els.bondTypeSelect,
+      provenanceEl: () => els.provBondType,
+    },
+    {
+      path: "bond_reference_data_universe.0.ex_dividend_days",
+      control: () => els.exDividendDays,
+      provenanceEl: () => els.provExDividendDays,
+    },
+    {
+      path: "bond_reference_data_universe.0.last_coupon_date",
+      control: () => els.lastCouponDate,
+      provenanceEl: () => els.provLastCouponDate,
+    },
+    {
+      path: "bond_reference_data_universe.0.status",
+      control: () => els.bondStatus,
+      provenanceEl: () => els.provBondStatus,
+    },
+    {
+      path: "reporting_date",
+      control: () => els.reportingDate,
+      provenanceEl: () => els.provReportingDate,
+    },
+    {
+      path: "forward_settlement_date",
+      control: () => els.forwardSettlementDate,
+      provenanceEl: () => els.provForwardSettlementDate,
+    },
+    {
+      path: "option_settlement_date",
+      control: () => els.optionSettlementDate,
+      provenanceEl: () => els.provOptionSettlementDate,
+    },
+  ];
+
+  const PROFILE_FIELD_BY_PATH = new Map(PROFILE_FIELDS.map((field) => [field.path, field]));
+
   // --- Workflow groups -----------------------------------------------------
   //
   // The ordinary trader workflow is exactly the groups whose `advanced` flag is
@@ -289,6 +386,22 @@
 
   function referenceRecord(draft) {
     return (draft.bond_reference_data_universe || [])[0] || {};
+  }
+
+  // Why an Advanced group is still open. When the resolver has actually
+  // refused this bond, its own reasons are the answer -- the trader sees the
+  // real rejection rather than a generic "no profile is approved" line that
+  // stopped being true. Declared here because the workflow-group table below
+  // reads it.
+  function ustProfileRefusalWhy(fallback) {
+    if (ustProfile && ustProfile.supported === false) {
+      return (
+        "This bond is outside the approved UST fixed-coupon bullet profile, so Shiori " +
+        "fills none of these fields: " +
+        (ustProfile.rejection_reasons || []).join(" · ")
+      );
+    }
+    return fallback;
   }
 
   // True when the Quote Side on screen is not the side the draft's quote was
@@ -571,21 +684,21 @@
       },
       locator: "#day-count-select",
       revealAdvanced: true,
-      unresolved: {
-        title: "Bond reference fields have no approved UST / Gilt profile",
+      unresolved: () => ({
+        title: "Bond reference fields are not filled for this bond",
         missing:
           "Day count, bond type, ex-dividend days, last coupon date and bond " +
           "status.",
-        why:
-          "These are profile-owned or derivation-owned decisions and neither a " +
-          "UST / conventional-Gilt convention profile nor a reviewed " +
-          "regular-schedule generator is approved yet.",
+        why: ustProfileRefusalWhy(
+          "These are profile-owned or derivation-owned decisions, and the only " +
+            "approved profile is the narrow UST fixed-coupon bullet one."
+        ),
         evidence: EVIDENCE_BOND_REFERENCE,
         next:
-          "Open Advanced → Bond reference and set them. Each entry is recorded " +
-          "as a trader override with provenance, beside the Bloomberg text that " +
-          "is evidence for it.",
-      },
+          "Open Advanced → Bond reference and set them yourself. Each entry is " +
+          "recorded as a trader override with provenance, beside the Bloomberg " +
+          "text that is evidence for it.",
+      }),
     },
     {
       id: "advanced-timing",
@@ -597,19 +710,23 @@
         present(draft.option_settlement_date),
       locator: "#reporting-date-input",
       revealAdvanced: true,
-      unresolved: {
-        title: "Settlement and reporting dates have no approved calendar source",
+      unresolved: () => ({
+        title: "Settlement and reporting dates are not filled for this bond",
         missing:
           "The reporting date, the forward settlement date and the option " +
           "settlement date.",
-        why:
-          "Shiori owns no market calendar and rolls no date, and no Bloomberg " +
-          "field carries an OTC option's own cash settlement date.",
+        why: ustProfileRefusalWhy(
+          "No Bloomberg field carries an OTC option's own cash settlement date, " +
+            "and the only approved calendar rule is the narrow UST fixed-coupon " +
+            "bullet profile's one-business-day roll on the U.S. government-bond " +
+            "calendar."
+        ),
         evidence: EVIDENCE_TIMING,
         next:
-          "Open Advanced → Timing & settlement and set the three dates. Each is " +
-          "recorded as a trader override with provenance.",
-      },
+          "Enter the expiry, or open Advanced → Timing & settlement and set the " +
+          "three dates yourself. Each is recorded as a trader override with " +
+          "provenance.",
+      }),
     },
   ];
 
@@ -636,6 +753,20 @@
   // not source it. Keyed by draft path so re-entering a value replaces its
   // stamp rather than accumulating duplicates. Cleared with the draft.
   let overrideProvenance = new Map();
+
+  // The last UST profile answer for the currently loaded bond -- null until one
+  // arrives, and cleared with the draft. Holds the server's own
+  // {supported, rejection_reasons, fields, pending_field_paths}.
+  let ustProfile = null;
+
+  // path -> provenance tier, for the eight Advanced technical fields only.
+  // Cleared with the draft, so one bond's tiers can never describe another's.
+  let fieldProvenance = new Map();
+
+  // The subset of those paths the trader has taken over. Once a path is here,
+  // no profile answer -- not a re-derivation on an expiry change, not a later
+  // response, not a re-render -- writes to it again for this bond.
+  let traderOverriddenPaths = new Set();
 
   // True once a Bloomberg *refresh* for the currently loaded bond has failed.
   // The bond stays loaded (so the trader can retry the refresh) and the whole
@@ -1112,6 +1243,186 @@
     els.discountingReadout.textContent = coverage.message;
   }
 
+  // --- UST profile: fetch, apply, provenance --------------------------------
+
+  let ustProfileGeneration = 0;
+  let lastUstProfileKey = null;
+  let ustProfileTransportError = null;
+
+  // The complete set of inputs the server's answer depends on. A profile
+  // response is adopted only while this key still reads the same, which is
+  // what makes a late answer for a previous bond -- or for a previous expiry
+  // -- impossible to apply.
+  function ustProfileKey() {
+    if (!currentDraft || !resolvedBloombergBond) return null;
+    return JSON.stringify({
+      isin: resolvedBloombergBond.isin,
+      currency: currentDraft.bond_option.currency,
+      valuation_date: currentDraft.valuation_date,
+      expiry_date: currentDraft.bond_option.expiry_date,
+    });
+  }
+
+  function markTraderOverride(path) {
+    if (!currentDraft) return;
+    traderOverriddenPaths.add(path);
+    fieldProvenance.set(path, TRADER_OVERRIDE_BASIS);
+    renderFieldProvenance();
+  }
+
+  // Writes the server's values into the trader's own controls. Deliberately
+  // the only place anything writes to these eight controls outside a full
+  // reset, and it never touches a path the trader has taken over.
+  function applyUstProfileFields(profile) {
+    if (!currentDraft) return;
+    const supplied = new Map(
+      (profile.fields || []).map((field) => [field.path, field])
+    );
+    let changed = false;
+    PROFILE_FIELDS.forEach((field) => {
+      if (traderOverriddenPaths.has(field.path)) return;
+      const control = field.control();
+      const suppliedField = supplied.get(field.path);
+      // Not supplied and not overridden: either this bond has no profile at
+      // all, or the value depends on an expiry that is not entered (or no
+      // longer is). Blanking it is the honest state -- a settlement date
+      // derived from an expiry the trader has since changed away from is not
+      // a value Shiori still stands behind.
+      const value = suppliedField
+        ? suppliedField.value === null || suppliedField.value === undefined
+          ? ""
+          : String(suppliedField.value)
+        : "";
+      if (control.value !== value) {
+        control.value = value;
+        changed = true;
+      }
+      if (suppliedField) {
+        fieldProvenance.set(field.path, suppliedField.provenance);
+      } else {
+        fieldProvenance.delete(field.path);
+      }
+    });
+    // Only when a control actually moved: re-reading the whole form invalidates
+    // any in-flight Price or Refresh, so an answer that changes nothing must
+    // not cancel one.
+    if (changed) applyManualInputsToDraft();
+  }
+
+  function renderFieldProvenance() {
+    PROFILE_FIELDS.forEach((field) => {
+      const target = field.provenanceEl();
+      const tier = fieldProvenance.get(field.path) || null;
+      const isOverride = tier === TRADER_OVERRIDE_BASIS;
+      target.classList.toggle("is-auto", tier !== null && !isOverride);
+      target.classList.toggle("is-override", isOverride);
+      if (tier === null) {
+        target.textContent = currentDraft
+          ? "Source: not set — Shiori has filled nothing here, so this value is yours to enter."
+          : "—";
+        return;
+      }
+      target.textContent = `Source: ${tier} — ${PROVENANCE_DESCRIPTIONS[tier] || ""}`;
+    });
+  }
+
+  function renderUstProfileStatus() {
+    const target = els.ustProfileStatus;
+    target.classList.remove("is-supported", "is-unsupported");
+    if (!currentDraft) {
+      target.textContent = "—";
+      return;
+    }
+    if (ustProfileTransportError !== null) {
+      target.textContent =
+        "Shiori could not reach its own profile resolver, so nothing here has been " +
+        "pre-filled: " + ustProfileTransportError;
+      target.classList.add("is-unsupported");
+      return;
+    }
+    if (ustProfile === null) {
+      target.textContent = "Checking this bond against the approved UST profile…";
+      return;
+    }
+    if (!ustProfile.supported) {
+      target.textContent =
+        "This bond is outside the approved UST fixed-coupon bullet profile, so Shiori " +
+        "pre-fills none of these fields: " +
+        (ustProfile.rejection_reasons || []).join(" · ");
+      target.classList.add("is-unsupported");
+      return;
+    }
+    const pending = ustProfile.pending_field_paths || [];
+    target.textContent =
+      "This bond is inside the approved UST fixed-coupon bullet profile, so Shiori has " +
+      "filled these fields and shown where each value came from." +
+      (pending.length === 0
+        ? ""
+        : ` Waiting on the expiry before deriving: ${pending.join(", ")}.`);
+    target.classList.add("is-supported");
+  }
+
+  // One request per genuine change of the inputs the answer depends on -- not
+  // one per keystroke. The server route is a pure function of its body, so
+  // re-asking with an unchanged key could only return the same answer.
+  async function refreshUstProfile() {
+    const key = ustProfileKey();
+    if (key === null || key === lastUstProfileKey) return;
+    lastUstProfileKey = key;
+    const generation = ++ustProfileGeneration;
+    const requestBody = {
+      isin: resolvedBloombergBond.isin,
+      currency: currentDraft.bond_option.currency,
+      bond_master: resolvedBloombergBond.bond_master || {},
+      bond_master_raw: resolvedBloombergBond.bond_master_raw || {},
+      valuation_date: currentDraft.valuation_date,
+      expiry_date: currentDraft.bond_option.expiry_date,
+    };
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/ust/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+      payload = await response.json();
+    } catch (err) {
+      if (generation !== ustProfileGeneration) return;
+      // Shiori does not know whether a profile applies, which is not the same
+      // as knowing it does not. Nothing is filled, the state says so, and the
+      // key is released so the next edit retries.
+      lastUstProfileKey = null;
+      ustProfile = null;
+      ustProfileTransportError = err.message;
+      renderUstProfileStatus();
+      renderFieldProvenance();
+      return;
+    }
+    // Two independent staleness checks. The generation catches a reset or a
+    // newer request; the key catches a draft that has moved on to another bond
+    // or another expiry while this answer was outstanding, which is exactly
+    // the case where applying it would fill a field from data the trader has
+    // left behind.
+    if (generation !== ustProfileGeneration) return;
+    if (ustProfileKey() !== key) return;
+    if (!response.ok) {
+      lastUstProfileKey = null;
+      ustProfile = null;
+      ustProfileTransportError = (payload && payload.error) || "profile request failed";
+      renderUstProfileStatus();
+      renderFieldProvenance();
+      return;
+    }
+    ustProfileTransportError = null;
+    ustProfile = payload;
+    applyUstProfileFields(payload);
+    renderUstProfileStatus();
+    renderFieldProvenance();
+    syncDraftGating();
+  }
+
   // --- Override provenance --------------------------------------------------
   //
   // Every value Shiori could not source carries a stamp saying what it is, what
@@ -1151,44 +1462,52 @@
     {
       path: "bond_reference_data_universe.0.day_count",
       label: "Day Count",
-      reason: "No approved UST / Gilt profile; DAY_CNT_DES is display-only evidence.",
+      reason:
+        "No confirmed Bloomberg mnemonic maps to a typed day count; DAY_CNT_DES stays " +
+        "display-only evidence.",
       read: (draft) => referenceRecord(draft).day_count,
     },
     {
       path: "bond_reference_data_universe.0.bond_type",
       label: "Bond Type",
-      reason: "No approved UST / Gilt profile; MTY_TYP is display-only evidence.",
+      reason:
+        "No confirmed Bloomberg mnemonic maps to a typed bond type; MTY_TYP stays " +
+        "display-only evidence.",
       read: (draft) => referenceRecord(draft).bond_type,
     },
     {
       path: "bond_reference_data_universe.0.ex_dividend_days",
       label: "Ex-Dividend Days",
-      reason: "Ex-dividend candidates returned BAD_FLD; no profile rule is approved.",
+      reason: "Ex-dividend candidates returned BAD_FLD, so Bloomberg supplies no value here.",
       read: (draft) => referenceRecord(draft).ex_dividend_days,
     },
     {
       path: "bond_reference_data_universe.0.last_coupon_date",
       label: "Last Coupon Date",
       reason:
-        "No reviewed regular-schedule generator is approved and PREV_CPN_DT's role is unconfirmed.",
+        "PREV_CPN_DT's role against this field is unconfirmed, so Bloomberg supplies no " +
+        "value here.",
       read: (draft) => referenceRecord(draft).last_coupon_date,
     },
     {
       path: "bond_reference_data_universe.0.status",
       label: "Bond Status",
-      reason: "Security-status candidates returned BAD_FLD; no status policy is approved.",
+      reason:
+        "Security-status candidates returned BAD_FLD, so Bloomberg supplies no value here.",
       read: (draft) => referenceRecord(draft).status,
     },
     {
       path: "reporting_date",
       label: "Reporting Date",
-      reason: "Fixing Reporting Date to Valuation Date is an unapproved route decision.",
+      reason: "No Bloomberg field carries this run's own reporting date.",
       read: (draft) => draft.reporting_date,
     },
     {
       path: "forward_settlement_date",
       label: "Forward Settlement Date",
-      reason: "Shiori owns no market calendar; SETTLE_DT describes a different role.",
+      reason:
+        "No Bloomberg field carries an OTC option's forward settlement date; SETTLE_DT " +
+        "describes the cash bond's own settlement, a different role.",
       read: (draft) => draft.forward_settlement_date,
     },
     {
@@ -1199,6 +1518,12 @@
     },
   ];
 
+  // Every recorded value states which of the four Issue #157 tiers it came
+  // from -- not a blanket "trader override" claim. A profile-filled or
+  // Shiori-derived field says so, and only a value the trader actually took
+  // over is stamped TRADER_OVERRIDE against MANUAL_TRADER_ENTRY. Fields with
+  // no profile tier at all (the forward, the vol and the curve) are trader
+  // entries by construction and keep their existing stamp.
   function refreshOverrideProvenance() {
     overrideProvenance = new Map();
     if (!currentDraft) return;
@@ -1206,13 +1531,20 @@
     OVERRIDE_FIELDS.forEach((field) => {
       const value = field.read(currentDraft);
       if (!present(value)) return;
+      const basis = PROFILE_FIELD_BY_PATH.has(field.path)
+        ? fieldProvenance.get(field.path) || TRADER_OVERRIDE_BASIS
+        : TRADER_OVERRIDE_BASIS;
       overrideProvenance.set(field.path, {
         field: field.label,
         path: field.path,
         value: String(value),
-        source_system: MANUAL_SOURCE_SYSTEM,
-        basis: "TRADER_OVERRIDE",
-        reason_not_sourced: field.reason,
+        source_system:
+          basis === TRADER_OVERRIDE_BASIS ? MANUAL_SOURCE_SYSTEM : UST_PROFILE_SOURCE_SYSTEM,
+        basis: basis,
+        reason_not_sourced:
+          basis === TRADER_OVERRIDE_BASIS
+            ? field.reason
+            : `${field.reason} ${PROVENANCE_DESCRIPTIONS[basis] || ""}`.trim(),
         run_acquired_at: anchor,
       });
     });
@@ -1413,8 +1745,14 @@
     renderTimestampUtcPreviews();
     refreshOverrideProvenance();
     renderOverrideProvenance();
+    renderFieldProvenance();
+    renderUstProfileStatus();
     invalidateBuilderValidation();
     syncDraftGating();
+    // Cheap unless the expiry (or the loaded bond) actually changed: the
+    // profile request is keyed on its own inputs, so an unrelated edit --
+    // strike, notional, a curve node -- asks nothing and re-derives nothing.
+    refreshUstProfile();
   }
 
   function shioriIdentifierSuffix(bond) {
@@ -2195,6 +2533,17 @@
     sourcedQuoteInvalidated = false;
     setCurrentDisplay(null);
 
+    // The whole profile lifecycle goes with the draft. Bumping the generation
+    // and releasing the key permanently voids any answer still outstanding, so
+    // a late response for the previous bond can never fill the next one's
+    // fields -- and no override, tier or rejection reason survives either.
+    ustProfileGeneration++;
+    ustProfile = null;
+    fieldProvenance = new Map();
+    traderOverriddenPaths = new Set();
+    lastUstProfileKey = null;
+    ustProfileTransportError = null;
+
     renderResolvedBondPanel();
     clearBondMaster();
     hideContext();
@@ -2202,6 +2551,8 @@
     clearTraderForm();
     renderRouteMetadata();
     renderOverrideProvenance();
+    renderFieldProvenance();
+    renderUstProfileStatus();
     setAdvancedCollapsed(true);
 
     els.errorBanner.hidden = true;
@@ -2414,11 +2765,16 @@
     setDerivedFormFromDraft();
     renderRouteMetadata();
     renderOverrideProvenance();
+    renderFieldProvenance();
+    renderUstProfileStatus();
 
     els.statusText.textContent = "Bloomberg bond loaded";
     renderResolvedBondPanel();
     renderBondMaster(resolvedBloombergBond);
     syncDraftGating();
+    // A fresh bond, a fresh profile: resetRunState above already discarded the
+    // previous one's tiers and overrides, so nothing here is inherited.
+    refreshUstProfile();
   }
 
   // Prices the current draft through the existing reviewed builder -- reuses
@@ -2604,6 +2960,11 @@
     renderRouteMetadata();
     refreshOverrideProvenance();
     renderOverrideProvenance();
+    renderFieldProvenance();
+    renderUstProfileStatus();
+    // Only re-asks if the re-acquisition actually moved one of the profile's
+    // own inputs; the trader's overrides survive this untouched either way.
+    refreshUstProfile();
 
     renderContext(extractContextFromDraft(currentDraft));
     setCurrentDisplay(withOverrideProvenance(display));
@@ -2714,6 +3075,16 @@
     // shows, until some later refresh happened to correct it.
     applyManualInputsToDraft();
   });
+  // Registered before the generic handlers below, so by the time the draft is
+  // re-read the path is already marked as the trader's. Both event types are
+  // listened for because these eight controls are a mix of selects, date
+  // inputs and a text input.
+  PROFILE_FIELDS.forEach((field) => {
+    const control = field.control();
+    const mark = () => markTraderOverride(field.path);
+    control.addEventListener("input", mark);
+    control.addEventListener("change", mark);
+  });
   MANUAL_TEXT_INPUTS().forEach((input) => {
     input.addEventListener("input", applyManualInputsToDraft);
   });
@@ -2758,4 +3129,7 @@
   window.__shioriTestOverrideProvenance = () => overrideProvenanceRecords();
   window.__shioriTestBuilderValidationState = () => builderValidation.state;
   window.__shioriTestSourcedQuoteInvalidated = () => sourcedQuoteInvalidated;
+  window.__shioriTestFieldProvenance = () => Object.fromEntries(fieldProvenance);
+  window.__shioriTestTraderOverriddenPaths = () => Array.from(traderOverriddenPaths);
+  window.__shioriTestUstProfile = () => ustProfile;
 })();

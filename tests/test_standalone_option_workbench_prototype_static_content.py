@@ -234,3 +234,69 @@ def test_price_gate_is_wired_to_the_real_builder_validation_route() -> None:
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
     assert "/api/case/validate" in text
     assert 'builderValidation.state === "ready"' in text
+
+
+# --- Issue #157: the eight Advanced technical fields --------------------------
+
+
+def test_index_html_shows_a_provenance_readout_for_every_pre_filled_field() -> None:
+    """No unlabelled silent default: every one of the eight fields has its own
+    visible source line, and the section says whether the profile applied."""
+
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "prov-day-count",
+        "prov-bond-type",
+        "prov-ex-dividend-days",
+        "prov-last-coupon-date",
+        "prov-bond-status",
+        "prov-reporting-date",
+        "prov-forward-settlement-date",
+        "prov-option-settlement-date",
+        "ust-profile-status",
+    ):
+        assert f'id="{element_id}"' in text
+
+
+def test_index_html_keeps_every_pre_filled_field_editable() -> None:
+    """Pre-filled is not read-only: unlike the derived timing values, none of
+    these eight controls is marked readonly."""
+
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "day-count-select",
+        "bond-type-select",
+        "ex-dividend-days-input",
+        "last-coupon-date-input",
+        "bond-status-select",
+        "reporting-date-input",
+        "forward-settlement-date-input",
+        "option-settlement-date-input",
+    ):
+        start = text.index(f'id="{element_id}"')
+        assert "readonly" not in text[start : start + 120]
+
+
+def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself() -> None:
+    """The browser holds no convention, calendar or schedule knowledge: it calls
+    the reviewed resolver and renders what comes back.
+
+    ``test_script_never_maps_a_bloomberg_description_into_a_typed_enum`` above
+    already asserts the two profile enum literals appear nowhere in this file;
+    together they mean an auto-filled value can only have come from the server.
+    """
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "/api/ust/profile" in text
+    for tier in (
+        "BLOOMBERG_AUTO",
+        "SHIORI_DERIVED",
+        "UST_PROFILE_DEFAULT",
+        "TRADER_OVERRIDE",
+    ):
+        assert tier in text
+    # No calendar, holiday table or coupon-date arithmetic on this side.
+    # Identifier-shaped names only: the prose above legitimately explains that
+    # Shiori writes no holiday table.
+    for forbidden in ("isBusinessDay", "businessDay", "addMonths", "HOLIDAYS"):
+        assert forbidden not in text

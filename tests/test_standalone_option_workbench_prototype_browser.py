@@ -47,6 +47,16 @@ from collections.abc import Iterator
 import pytest
 
 from shiori_pricing_lab.app.standalone_option_workbench_server import create_server
+from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
+
+# Issue #157: the UST Advanced-field profile derives its coupon date and its
+# settlement roll from QuantLib, so tests that assert an auto-filled value need
+# it installed. Locally that is a skip, exactly like the QuantLib skips
+# elsewhere in this suite; CI installs the optional 'quant' group.
+_QUANTLIB_SKIP = pytest.mark.skipif(
+    not is_quantlib_available(),
+    reason="QuantLib is not installed in this environment",
+)
 
 _PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
 _RUNNING_IN_CI = os.environ.get("CI") == "true"
@@ -790,31 +800,39 @@ def test_deterministic_policy_fields_are_populated_without_asking_the_trader(
 
 
 @_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
 def test_bloomberg_raw_descriptions_are_evidence_and_never_enter_the_typed_draft(
     server_url, page
 ) -> None:
+    """Issue #157 fills these fields, but not from these strings.
+
+    The confirmed descriptions are still display-only evidence: they are shown
+    beside the control, and they can only *gate* the profile (a bond whose
+    strings do not match it is refused outright). What actually lands in the
+    control is the approved profile's own value, which says so.
+    """
+
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
     page.click("#advanced-head")
 
-    # Route-consumed descriptions are shown beside the enum the trader must
-    # pick; the unused calculation type remains display-only provenance.
     assert page.inner_text("#hint-day-count") == "ACT/ACT"
     assert page.inner_text("#hint-bond-type") == "AT MATURITY"
     assert page.inner_text("#details-bloomberg-calc-type") == "STREET CONVENTION"
 
-    # Nothing was auto-selected from them, and no removed typed field enters the
-    # standalone request draft.
-    assert page.input_value("#day-count-select") == ""
-    assert page.input_value("#bond-type-select") == ""
+    # Neither description string became the value, and neither value claims
+    # Bloomberg as its source.
+    assert page.input_value("#day-count-select") != "ACT/ACT"
+    assert page.input_value("#bond-type-select") != "AT MATURITY"
+    provenance = _field_provenance(page)
+    assert provenance["bond_reference_data_universe.0.day_count"] == "UST_PROFILE_DEFAULT"
+    assert provenance["bond_reference_data_universe.0.bond_type"] == "UST_PROFILE_DEFAULT"
+
+    # And no removed typed field enters the standalone request draft.
     reference = page.evaluate(
         "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0]"
     )
-    assert reference["day_count"] is None
-    assert reference["bond_type"] is None
-    assert reference["status"] is None
-    assert reference["ex_dividend_days"] is None
-    assert reference["last_coupon_date"] is None
     assert "yield_convention" not in reference
     assert "business_day_convention" not in reference
     assert "redemption_amount" not in reference
@@ -1008,7 +1026,12 @@ def test_only_one_unresolved_dependency_is_explained_at_a_time(server_url, page)
     assert also.startswith("Also outstanding, one at a time:")
     # Group names, never raw contract field paths.
     assert "bond_reference_data_universe" not in also
-    assert "Bond reference override" in also
+    assert "option_settlement_date" not in also
+    # The settlement dates are still outstanding at this point: the profile
+    # derives them from an expiry the trader has not entered yet, and Shiori
+    # does not guess one (Issue #157's bond-reference group, by contrast, no
+    # longer appears here at all -- it is filled on load).
+    assert "Timing & settlement override" in also
 
 
 @_PLAYWRIGHT_SKIP
@@ -1413,10 +1436,20 @@ def test_credit_spread_not_required_needs_no_spread_value_or_basis(server_url, p
 
 
 @_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
 def test_every_advanced_override_is_provenance_stamped(server_url, page) -> None:
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    assert _override_provenance(page) == []
+    _wait_for_ust_profile(page)
+    # Issue #157: the eight technical fields arrive pre-filled and already
+    # stamped -- with their own tier, not a trader-override claim. Nothing the
+    # trader is actually responsible for is stamped yet.
+    stamped_on_load = {record["path"]: record for record in _override_provenance(page)}
+    assert "bond_reference_data_universe.0.day_count" in stamped_on_load
+    assert stamped_on_load["bond_reference_data_universe.0.day_count"]["basis"] == (
+        "UST_PROFILE_DEFAULT"
+    )
+    assert "forward_clean_price_input.forward_clean_price_per_100" not in stamped_on_load
 
     _complete_draft(page, leave_open=True)
     page.wait_for_timeout(200)
@@ -1440,7 +1473,9 @@ def test_every_advanced_override_is_provenance_stamped(server_url, page) -> None
         assert path in stamped, f"{path} was overridden without provenance"
 
     # Every stamp says what it is, why it could not be sourced, and which
-    # Bloomberg acquisition event the run is anchored to.
+    # Bloomberg acquisition event the run is anchored to. ``_complete_draft``
+    # types all eight technical fields through the real controls, so on this
+    # path every one of them is genuinely the trader's.
     for record in records:
         assert record["source_system"] == "MANUAL_TRADER_ENTRY"
         assert record["basis"] == "TRADER_OVERRIDE"
@@ -3477,3 +3512,626 @@ def test_price_and_refresh_posts_are_never_simultaneously_in_flight(
     inflight.remove("price")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
     assert peak["value"] == 1
+
+
+# --- Issue #157: the eight Advanced technical fields are pre-filled ----------
+#
+# These prove the browser half of the UST profile: that a supported UST is
+# auto-filled after Bloomberg Load, that every value shows which of the four
+# provenance tiers it came from, that a trader override survives every
+# ordinary re-render and re-derivation, that an expiry change recomputes only
+# what the trader has not taken over, and that no profile state, override or
+# late response survives Clear, a second load, a refresh failure or a
+# superseded request.
+#
+# The profile answers come from the real ``POST /api/ust/profile`` route and
+# the reviewed resolver behind it -- only the Bloomberg lookup is mocked --
+# so a passing value here is a genuine deterministic derivation, not a fixture.
+
+_PROFILE_PATHS = (
+    "bond_reference_data_universe.0.day_count",
+    "bond_reference_data_universe.0.bond_type",
+    "bond_reference_data_universe.0.ex_dividend_days",
+    "bond_reference_data_universe.0.last_coupon_date",
+    "bond_reference_data_universe.0.status",
+    "reporting_date",
+    "forward_settlement_date",
+    "option_settlement_date",
+)
+
+
+def _field_provenance(page) -> dict:
+    return page.evaluate("() => window.__shioriTestFieldProvenance()")
+
+
+def _trader_overridden_paths(page) -> list[str]:
+    return page.evaluate("() => window.__shioriTestTraderOverriddenPaths()")
+
+
+def _ust_profile(page):
+    return page.evaluate("() => window.__shioriTestUstProfile()")
+
+
+def _wait_for_ust_profile(page) -> None:
+    page.wait_for_function("() => window.__shioriTestUstProfile() !== null")
+
+
+def _set_expiry(page, *, local: str = "2026-10-20T17:20", offset: str = "+08:00") -> None:
+    page.fill("#expiry-datetime-input", local)
+    page.fill("#expiry-offset-input", offset)
+
+
+def _draft_reference(page) -> dict:
+    return page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_reference_data_universe[0]"
+    )
+
+
+def _fill_curve_nodes_only(page, nodes=(("1M", "0.0374"), ("1Y", "0.0374"))) -> None:
+    """Open Advanced only for the Option Discount Curve, which #157 leaves
+    exactly where it was, and close it again."""
+
+    if _is_actually_hidden(page, "advanced-body"):
+        page.click("#advanced-head")
+    _set_curve_nodes(page, nodes)
+    page.click("#advanced-head")
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_supported_ust_load_auto_fills_every_advanced_technical_field(server_url, page) -> None:
+    """Acceptance criterion 1: after one Bloomberg Load and the expiry the
+    trader was going to enter anyway, all eight fields carry a value."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    reference = _draft_reference(page)
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert reference["day_count"] == "ACT_ACT_ISDA"
+    assert reference["bond_type"] == "FIXED_COUPON_BULLET"
+    assert reference["ex_dividend_days"] == 0
+    assert reference["last_coupon_date"] == "2030-07-31"
+    assert reference["status"] == "ACTIVE"
+    assert draft["reporting_date"] == "2026-07-20"
+    assert draft["forward_settlement_date"] == "2026-10-21"
+    assert draft["option_settlement_date"] == "2026-10-21"
+
+    # The controls themselves hold the same values, so the trader edits exactly
+    # what the draft carries.
+    assert page.input_value("#day-count-select") == "ACT_ACT_ISDA"
+    assert page.input_value("#bond-type-select") == "FIXED_COUPON_BULLET"
+    assert page.input_value("#ex-dividend-days-input") == "0"
+    assert page.input_value("#last-coupon-date-input") == "2030-07-31"
+    assert page.input_value("#bond-status-select") == "ACTIVE"
+    assert page.input_value("#reporting-date-input") == "2026-07-20"
+    assert page.input_value("#forward-settlement-date-input") == "2026-10-21"
+    assert page.input_value("#option-settlement-date-input") == "2026-10-21"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_every_auto_filled_value_shows_its_provenance(server_url, page) -> None:
+    """Acceptance criterion 3: no unlabelled silent default anywhere."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    provenance = _field_provenance(page)
+    assert set(provenance) == set(_PROFILE_PATHS)
+    assert provenance["bond_reference_data_universe.0.day_count"] == "UST_PROFILE_DEFAULT"
+    assert provenance["bond_reference_data_universe.0.bond_type"] == "UST_PROFILE_DEFAULT"
+    assert provenance["bond_reference_data_universe.0.ex_dividend_days"] == "UST_PROFILE_DEFAULT"
+    assert provenance["bond_reference_data_universe.0.status"] == "UST_PROFILE_DEFAULT"
+    assert provenance["bond_reference_data_universe.0.last_coupon_date"] == "SHIORI_DERIVED"
+    assert provenance["reporting_date"] == "SHIORI_DERIVED"
+    assert provenance["forward_settlement_date"] == "SHIORI_DERIVED"
+    assert provenance["option_settlement_date"] == "SHIORI_DERIVED"
+
+    # And it is visible, not merely in memory.
+    page.click("#advanced-head")
+    assert "UST_PROFILE_DEFAULT" in page.inner_text("#prov-day-count")
+    assert "SHIORI_DERIVED" in page.inner_text("#prov-option-settlement-date")
+    assert "inside the approved UST fixed-coupon bullet profile" in page.inner_text(
+        "#ust-profile-status"
+    )
+    # The exported run carries the same tiers rather than claiming everything
+    # was a trader override.
+    stamped = {record["path"]: record for record in _override_provenance(page)}
+    assert stamped["reporting_date"]["basis"] == "SHIORI_DERIVED"
+    assert stamped["reporting_date"]["source_system"] == "SHIORI_UST_FIXED_COUPON_PROFILE"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_the_eight_fields_no_longer_block_a_trader_who_never_opens_advanced(
+    server_url, page
+) -> None:
+    """Acceptance criterion 2, the headline product check: the two Advanced
+    technical groups resolve themselves, so what is left outstanding is only
+    the genuinely unresolved market input this PR is forbidden to fabricate."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    assert _is_actually_hidden(page, "advanced-body")  # never opened
+    outstanding = _unresolved_group_ids(page)
+    assert "advanced-bond-reference" not in outstanding
+    assert "advanced-timing" not in outstanding
+    # Only the Option Discount Curve is left, which #157 explicitly does not
+    # fill: it is the one remaining market input, not a technical field.
+    assert outstanding == ["discounting-review"]
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_forward_vol_and_discounting_are_never_given_a_fabricated_default(
+    server_url, page
+) -> None:
+    """Acceptance criterion 9: this PR fills technical fields only."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] is None
+    assert draft["volatility_input"]["volatility"] is None
+    assert draft["curve_points"] == []
+    outstanding = _unresolved_group_ids(page)
+    for group in ("forward-review", "vol-review", "discounting-review"):
+        assert group in outstanding
+    assert page.input_value("#forward-price-input") == ""
+    assert page.input_value("#volatility-input") == ""
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_an_advanced_override_really_reaches_the_typed_builder(server_url, page) -> None:
+    """Acceptance criterion 4: the override is not a cosmetic form value -- the
+    reviewed builder sees it and refuses the draft on its own terms."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
+    _wait_for_price_enabled(page)
+
+    page.click("#advanced-head")
+    page.select_option("#bond-status-select", "INACTIVE")
+    page.wait_for_function(
+        "() => window.__shioriTestBuilderValidationState() === 'failed'"
+    )
+
+    assert _draft_reference(page)["status"] == "INACTIVE"
+    assert _is_disabled(page, "#price-btn")
+    why = page.inner_text("#unresolved-why")
+    assert "INACTIVE" in why
+    assert _field_provenance(page)["bond_reference_data_universe.0.status"] == "TRADER_OVERRIDE"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_an_override_is_never_silently_reset_by_an_unrelated_edit(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    page.click("#advanced-head")
+    page.select_option("#day-count-select", "ACT_360")
+    page.fill("#last-coupon-date-input", "2029-07-31")
+    page.click("#advanced-head")
+
+    # Ordinary trade edits, market review entry, a validation round trip and a
+    # profile re-derivation triggered by the expiry all follow.
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
+    page.wait_for_timeout(400)
+
+    reference = _draft_reference(page)
+    assert reference["day_count"] == "ACT_360"
+    assert reference["last_coupon_date"] == "2029-07-31"
+    assert page.input_value("#day-count-select") == "ACT_360"
+    provenance = _field_provenance(page)
+    assert provenance["bond_reference_data_universe.0.day_count"] == "TRADER_OVERRIDE"
+    assert provenance["bond_reference_data_universe.0.last_coupon_date"] == "TRADER_OVERRIDE"
+    # Everything the trader did not touch still says where it came from.
+    assert provenance["bond_reference_data_universe.0.bond_type"] == "UST_PROFILE_DEFAULT"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_changing_expiry_recomputes_only_the_settlement_dates_not_overridden(
+    server_url, page
+) -> None:
+    """Acceptance criterion 7, both halves in one run: the untouched date moves
+    with the expiry, the overridden one does not."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+
+    # A Friday expiry: one U.S. government-bond business day later is Monday.
+    _set_expiry(page, local="2026-10-16T17:20")
+    page.wait_for_function(
+        "() => document.querySelector('#forward-settlement-date-input').value === '2026-10-19'"
+    )
+    assert page.input_value("#option-settlement-date-input") == "2026-10-19"
+
+    page.click("#advanced-head")
+    page.fill("#option-settlement-date-input", "2026-10-30")
+    page.wait_for_timeout(150)
+
+    _set_expiry(page, local="2026-10-20T17:20")
+    page.wait_for_function(
+        "() => document.querySelector('#forward-settlement-date-input').value === '2026-10-21'"
+    )
+
+    assert page.input_value("#option-settlement-date-input") == "2026-10-30"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] == "2026-10-21"
+    assert draft["option_settlement_date"] == "2026-10-30"
+    provenance = _field_provenance(page)
+    assert provenance["forward_settlement_date"] == "SHIORI_DERIVED"
+    assert provenance["option_settlement_date"] == "TRADER_OVERRIDE"
+    assert _trader_overridden_paths(page) == ["option_settlement_date"]
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_clearing_the_expiry_withdraws_the_settlement_dates_it_derived(
+    server_url, page
+) -> None:
+    """A settlement date derived from an expiry the trader has moved away from
+    is not a value Shiori still stands behind, so it is withdrawn rather than
+    left behind as a stale-looking entry."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_function(
+        "() => document.querySelector('#option-settlement-date-input').value === '2026-10-21'"
+    )
+
+    page.fill("#expiry-datetime-input", "")
+    page.wait_for_function(
+        "() => document.querySelector('#option-settlement-date-input').value === ''"
+    )
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] is None
+    assert draft["option_settlement_date"] is None
+    # The reporting date does not depend on expiry and is untouched.
+    assert draft["reporting_date"] == "2026-07-20"
+    assert "advanced-timing" in _unresolved_group_ids(page)
+
+
+# --- Acceptance criterion 6: unsupported bonds are refused, with reasons -----
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_gilt_is_never_given_the_ust_profile(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_timeout(250)
+
+    assert _ust_profile(page)["supported"] is False
+    reference = _draft_reference(page)
+    for field in ("day_count", "bond_type", "ex_dividend_days", "last_coupon_date", "status"):
+        assert reference[field] is None
+    assert _field_provenance(page) == {}
+    assert page.input_value("#day-count-select") == ""
+    page.click("#advanced-head")
+    status = page.inner_text("#ust-profile-status")
+    assert "outside the approved UST fixed-coupon bullet profile" in status
+    assert "is not USD" in status
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_callable_ust_is_never_given_the_ust_profile(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={**_TREASURY_BOND_MASTER, "callable_flag": True}
+        ),
+    )
+    _wait_for_ust_profile(page)
+
+    assert _ust_profile(page)["supported"] is False
+    assert _draft_reference(page)["bond_type"] is None
+    assert "advanced-bond-reference" in _unresolved_group_ids(page)
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_sinkable_ust_is_never_given_the_ust_profile(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={**_TREASURY_BOND_MASTER, "sinkable_flag": True}
+        ),
+    )
+    _wait_for_ust_profile(page)
+
+    assert _ust_profile(page)["supported"] is False
+    assert _field_provenance(page) == {}
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_matured_ust_is_never_pre_filled_as_active(server_url, page) -> None:
+    """The acquisition timestamp puts the valuation date past this bond's own
+    maturity, so nothing about it may be described as ACTIVE."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page, response=_treasury_lookup_response(acquired_at="2031-06-20T11:28:00+08:00")
+    )
+    _wait_for_ust_profile(page)
+
+    profile = _ust_profile(page)
+    assert profile["supported"] is False
+    assert any("is not after valuation_date" in reason for reason in profile["rejection_reasons"])
+    assert _draft_reference(page)["status"] is None
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={**_TREASURY_BOND_MASTER, "issue_date": "2024-03-05"}
+        ),
+    )
+    _wait_for_ust_profile(page)
+
+    assert _ust_profile(page)["supported"] is False
+    assert _draft_reference(page)["last_coupon_date"] is None
+    assert page.input_value("#last-coupon-date-input") == ""
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_bond_whose_bloomberg_evidence_does_not_match_is_refused(server_url, page) -> None:
+    """The confirmed description strings can only block the profile, never
+    produce a typed value -- a US bond that is not a street-convention bullet
+    gets nothing."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(
+            bond_master=_TREASURY_BOND_MASTER,
+            bond_master_raw={
+                "day_count": "ISMA-30/360",
+                "maturity_type": "AT MATURITY",
+                "calc_type": "STREET CONVENTION",
+            },
+            acquired_at="2026-07-20T11:28:00+08:00",
+        ),
+    )
+    _wait_for_ust_profile(page)
+
+    assert _ust_profile(page)["supported"] is False
+    assert page.input_value("#day-count-select") == ""
+
+
+# --- Acceptance criterion 8: nothing survives a reset or a stale answer ------
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_clear_discards_every_profile_value_override_and_tier(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.click("#advanced-head")
+    page.select_option("#day-count-select", "ACT_360")
+    page.wait_for_timeout(200)
+    assert _trader_overridden_paths(page) == ["bond_reference_data_universe.0.day_count"]
+
+    page.click("#clear-btn")
+    page.wait_for_timeout(200)
+
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _ust_profile(page) is None
+    assert _field_provenance(page) == {}
+    assert _trader_overridden_paths(page) == []
+    assert _override_provenance(page) == []
+    for selector in (
+        "#day-count-select",
+        "#bond-type-select",
+        "#ex-dividend-days-input",
+        "#last-coupon-date-input",
+        "#bond-status-select",
+        "#reporting-date-input",
+        "#forward-settlement-date-input",
+        "#option-settlement-date-input",
+    ):
+        assert page.input_value(selector) == ""
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_second_load_never_inherits_the_previous_bonds_profile_or_override(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.click("#advanced-head")
+    page.select_option("#day-count-select", "ACT_360")
+    page.wait_for_timeout(200)
+
+    _load_bloomberg_bond(page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response())
+    _wait_for_ust_profile(page)
+    page.wait_for_timeout(200)
+
+    assert _ust_profile(page)["supported"] is False
+    assert _trader_overridden_paths(page) == []
+    assert _field_provenance(page) == {}
+    reference = _draft_reference(page)
+    assert reference["day_count"] is None
+    assert reference["last_coupon_date"] is None
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().reporting_date") is None
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_failed_lookup_leaves_no_profile_state_behind(server_url, page) -> None:
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_timeout(200)
+
+    def route_failed_lookup(route):
+        route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        )
+
+    page.route("**/api/bloomberg/bond", route_failed_lookup)
+    page.fill("#bond-identifier-input", "US91282CLJ89")
+    page.click("#load-bloomberg-bond-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg lookup failed")
+
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()") is None
+    assert _ust_profile(page) is None
+    assert _field_provenance(page) == {}
+    assert _trader_overridden_paths(page) == []
+    assert page.input_value("#reporting-date-input") == ""
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_failed_refresh_keeps_this_bonds_own_profile_values(server_url, page) -> None:
+    """A refresh failure disowns what Bloomberg sourced, not the ticket. These
+    eight fields belong to the same bond and the same ticket, so they stay --
+    exactly like the trader's own overrides already do."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
+    _wait_for_price_enabled(page)
+
+    def route_failed_refresh(route):
+        route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        )
+
+    page.route("**/api/case/bloomberg", route_failed_refresh)
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
+
+    reference = _draft_reference(page)
+    assert reference["day_count"] == "ACT_ACT_ISDA"
+    assert reference["last_coupon_date"] == "2030-07-31"
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().option_settlement_date") == (
+        "2026-10-21"
+    )
+    assert _field_provenance(page)["reporting_date"] == "SHIORI_DERIVED"
+    # And the run itself is still disowned: no result, no right to price.
+    assert _is_disabled(page, "#price-btn")
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_stale_profile_response_never_fills_the_next_bonds_fields(server_url, page) -> None:
+    """The decisive staleness case: a profile answer for the first bond arrives
+    after a different bond has been loaded. Applying it would fill one bond's
+    Advanced fields from another's terms."""
+
+    page.goto(f"{server_url}/")
+
+    pending: list = []
+    profile_requests = 0
+
+    def route_profile(route):
+        nonlocal profile_requests
+        profile_requests += 1
+        if profile_requests == 1:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/ust/profile", route_profile)
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_until_pumping(page, lambda: len(pending) == 1)
+    assert _field_provenance(page) == {}  # nothing filled while it is outstanding
+
+    _load_bloomberg_bond(page, identifier="GB00BFX0ZL78", response=_gilt_lookup_response())
+    _wait_for_ust_profile(page)
+
+    # The first bond's answer finally arrives, describing a supported UST.
+    pending[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "supported": True,
+                "rejection_reasons": [],
+                "pending_field_paths": [],
+                "fields": [
+                    {
+                        "path": "bond_reference_data_universe.0.day_count",
+                        "value": "ACT_ACT_ISDA",
+                        "provenance": "UST_PROFILE_DEFAULT",
+                    },
+                    {
+                        "path": "reporting_date",
+                        "value": "2026-07-20",
+                        "provenance": "SHIORI_DERIVED",
+                    },
+                ],
+            }
+        ),
+    )
+    page.wait_for_timeout(300)
+
+    assert _ust_profile(page)["supported"] is False
+    assert _field_provenance(page) == {}
+    assert _draft_reference(page)["day_count"] is None
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().reporting_date") is None
+    assert page.input_value("#day-count-select") == ""

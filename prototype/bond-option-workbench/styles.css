@@ -480,6 +480,26 @@ select.control:focus { border-color: var(--blue); }
 
 /* Bloomberg's raw description string, shown only as a hint next to the enum
    the trader must choose. Never written into the typed draft. */
+/* Per-field provenance: which of the four Issue #157 tiers a pre-filled
+   Advanced value came from. Always rendered, never hidden -- an unlabelled
+   value is exactly what this section exists to prevent. */
+.field-provenance {
+  font-size: 11.5px;
+  color: var(--muted-2);
+  margin-top: 3px;
+  line-height: 1.35;
+}
+.field-provenance.is-auto { color: #2f6f5e; }
+.field-provenance.is-override { color: #7a5a12; }
+.ust-profile-status {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted-2);
+  margin-bottom: 8px;
+}
+.ust-profile-status.is-supported { color: #2f6f5e; }
+.ust-profile-status.is-unsupported { color: #b3401f; }
+
 .bbg-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; }
 .bbg-hint code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
