@@ -19,6 +19,23 @@
     "evidence_reference_redacted": null,
     "raw_material_committed": false
   },
+  "shiori_run_binding": {
+    "pricing_status": null,
+    "product_id": null,
+    "snapshot_id": null,
+    "valuation_date": null,
+    "pricing_timestamp": null,
+    "market_data_source_system": null,
+    "market_data_source_as_of": null,
+    "retrieved_at": null,
+    "pricing_engine_name": null,
+    "pricing_engine_version": null,
+    "pricing_method": null,
+    "request_contract_name": "BLIStandaloneBondOptionRequest",
+    "contract_code_git_commit_sha": null,
+    "normalized_request_sha256": null,
+    "current_run_export_sha256": null
+  },
   "terms_and_dates": {
     "valuation_date": null,
     "expiry_timestamp": null,
@@ -28,6 +45,7 @@
     "delivery_delay_display": null,
     "coupon_rate_decimal": null,
     "coupon_frequency": null,
+    "issue_date": null,
     "maturity_date": null,
     "first_coupon_date": null,
     "last_coupon_date": null,
@@ -77,6 +95,9 @@
     "price_total_decimal": null,
     "currency": "USD",
     "quote_side": null,
+    "shiori_model_fair_premium_per_100": null,
+    "shiori_total_notional_model_fair_premium": null,
+    "position_sign_applied_to_shiori_model_premium": false,
     "implied_price_vol_decimal_shiori": null,
     "comparison_status": "UNRESOLVED"
   },
