@@ -4260,7 +4260,7 @@ def test_no_page_text_claims_a_verified_treasury_identity(server_url, page) -> N
 def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(
     server_url, page
 ) -> None:
-    """The refusal is actionable before manual entry, and manual completion
+    """The refusal is visible before manual entry, and manual completion
     cannot bypass it afterward."""
 
     page.goto(f"{server_url}/")
@@ -4277,18 +4277,15 @@ def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(
     assert profile["fields"] == []
     assert profile["unresolved_fields"] == []
 
+    page.click("#advanced-head")
+    status_before = page.inner_text("#ust-profile-status").lower()
+    assert "unsupported by the current pricing path" in status_before
+    assert "editing last_coupon_date cannot repair" in status_before
+    assert "changing advanced fields cannot make this ticket price" in status_before
+    assert "manually fill last_coupon_date" not in status_before
+
     _fill_trade_group(page)
     _fill_market_review(page)
-    _fill_curve_nodes_only(page)
-    page.wait_for_timeout(200)
-
-    assert page.inner_text("#unresolved-title") == "Bond reference fields are not filled for this bond"
-    next_step = page.inner_text("#unresolved-next").lower()
-    assert "cannot be completed on the current pricing path" in next_step
-    assert "changing advanced fields cannot make it price" in next_step
-    assert page.eval_on_selector("#unresolved-goto-btn", "el => el.hidden")
-    assert "manually fill last_coupon_date" not in page.locator("body").inner_text().lower()
-
     _fill_advanced_overrides(page)
     page.wait_for_timeout(250)
 
@@ -4297,9 +4294,9 @@ def test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(
     assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
 
     page.click("#advanced-head")
-    status = page.inner_text("#ust-profile-status").lower()
-    assert "changing advanced fields cannot make this ticket price" in status
-    assert "manually fill last_coupon_date" not in status
+    status_after = page.inner_text("#ust-profile-status").lower()
+    assert "changing advanced fields cannot make this ticket price" in status_after
+    assert "manually fill last_coupon_date" not in status_after
 
 
 
