@@ -129,19 +129,28 @@ dict exactly like this one.
 
 **UST Advanced-field profile (Issue #157).** One more stateless route:
 
-- ``POST /api/ust/profile`` -- body is ``{"isin", "currency", "bond_master",
-  "bond_master_raw", "valuation_date", "expiry_date"}``, where the first four
-  come verbatim from one already-completed ``POST /api/bloomberg/bond``
-  response and the last two from the run itself (``expiry_date`` may be
-  omitted or ``null`` while the trader has not entered the expiry yet).
-  Calls ``resolve_ust_advanced_field_profile`` exactly once and returns its
-  result as ``{"supported", "rejection_reasons", "fields",
-  "pending_field_paths"}``. This route makes no Bloomberg call, reads no
+- ``POST /api/ust/profile`` -- body is ``{"convention_profile", "isin",
+  "currency", "bond_master", "bond_master_raw", "valuation_date",
+  "expiry_date"}``. ``convention_profile`` (Issue #157 P1-1 correction) is
+  required **browser state**, not a server-computed value -- it names which
+  convention profile the browser currently has selected (this PR's scope
+  accepts only ``"UST"``); the server never defaults or infers it, and never
+  falls back to ``"UST"`` for a missing/blank/unknown value. ``isin``,
+  ``currency``, ``bond_master`` and ``bond_master_raw`` come verbatim from
+  one already-completed ``POST /api/bloomberg/bond`` response;
+  ``valuation_date``/``expiry_date`` from the run itself (``expiry_date``
+  may be omitted or ``null`` while the trader has not entered the expiry
+  yet). Calls ``resolve_ust_advanced_field_profile`` exactly once and
+  returns its result as ``{"supported", "convention_profile",
+  "rejection_reasons", "fields", "pending_field_paths",
+  "unresolved_fields"}``. This route makes no Bloomberg call, reads no
   clock, prices nothing, and stores nothing: it is a pure function of the
   body, so the browser can call it again whenever expiry changes. A bond
-  outside the narrow profile is a normal HTTP 200 answer with
-  ``supported: false`` and its reasons -- not an error -- while a malformed
-  body or a missing QuantLib install returns HTTP 400.
+  whose *shape* does not fit the selected profile is a normal HTTP 200
+  answer with ``supported: false`` and its reasons -- not an error, and
+  never a claim about who issued the bond -- while a malformed body,
+  unrecognized ``convention_profile``, or a missing QuantLib install
+  returns HTTP 400.
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -256,7 +265,14 @@ DEFAULT_PORT = 8765
 # to auto-fill the eight Advanced technical fields with provenance. A stale
 # process predating the route would 404 it and silently leave the trader back
 # on the field-by-field form.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v10"
+#
+# Bumped to -v11 for Issue #157 P1-1's correction: POST /api/ust/profile now
+# requires a "convention_profile" request key (browser state, never
+# defaulted server-side) and its response gained "convention_profile" and
+# "unresolved_fields" keys. A stale process predating this would 400 every
+# request the current page sends (missing key) or omit fields the current
+# page reads.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v11"
 
 
 def load_base_case() -> dict:
@@ -469,6 +485,7 @@ def lookup_bloomberg_bond(bond_identifier: str, quote_side: str) -> dict:
 
 
 _UST_PROFILE_REQUIRED_KEYS = (
+    "convention_profile",
     "isin",
     "currency",
     "bond_master",
@@ -482,18 +499,22 @@ def resolve_ust_profile(body: dict) -> dict:
 
     Calls the existing ``resolve_ust_advanced_field_profile`` exactly once and
     serializes its result -- this function decides nothing about conventions,
-    calendars, schedules or eligibility itself. ``expiry_date`` is optional
-    (absent or ``null`` while the trader has not entered an expiry yet); the
-    two settlement dates then come back under ``pending_field_paths`` instead
-    of being guessed.
+    calendars, schedules or eligibility itself, and adds no fallback for
+    ``convention_profile`` that resolver does not already have (Issue #157
+    P1-1 correction: it is required browser state, never inferred or
+    defaulted here or in the resolver). ``expiry_date`` is optional (absent
+    or ``null`` while the trader has not entered an expiry yet); the two
+    settlement dates then come back under ``pending_field_paths`` instead of
+    being guessed.
 
-    A bond outside the narrow profile is *not* an error: it returns
-    ``supported: false`` with the profile's own reasons, verbatim. Raises
-    ``ValueError`` for a body that is not a JSON object with the five required
-    keys, and propagates ``BLIQuantLibNotAvailableError`` unchanged when the
-    optional QuantLib dependency is missing -- the coupon schedule and the
-    U.S. government-bond calendar both come from it and neither is
-    approximated.
+    A bond whose shape does not fit the selected profile is *not* an error:
+    it returns ``supported: false`` with the profile's own reasons,
+    verbatim. Raises ``ValueError`` for a body that is not a JSON object
+    with the six required keys, or whose ``convention_profile`` the
+    resolver does not recognize, and propagates
+    ``BLIQuantLibNotAvailableError`` unchanged when the optional QuantLib
+    dependency is missing -- the coupon schedule and the U.S. government-bond
+    calendar both come from it and neither is approximated.
     """
 
     if not isinstance(body, dict):
@@ -503,6 +524,7 @@ def resolve_ust_profile(body: dict) -> dict:
         raise ValueError(f"request body is missing required key(s): {missing}")
 
     profile = resolve_ust_advanced_field_profile(
+        convention_profile=body["convention_profile"],
         isin=body["isin"],
         currency=body["currency"],
         bond_master=body["bond_master"],
@@ -512,12 +534,16 @@ def resolve_ust_profile(body: dict) -> dict:
     )
     return {
         "supported": profile.supported,
+        "convention_profile": profile.convention_profile,
         "rejection_reasons": list(profile.rejection_reasons),
         "fields": [
             {"path": field.path, "value": field.value, "provenance": field.provenance}
             for field in profile.fields
         ],
         "pending_field_paths": list(profile.pending_field_paths),
+        "unresolved_fields": [
+            {"path": item.path, "reason": item.reason} for item in profile.unresolved_fields
+        ],
     }
 
 

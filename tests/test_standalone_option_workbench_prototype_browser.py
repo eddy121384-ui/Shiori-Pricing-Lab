@@ -3644,9 +3644,8 @@ def test_every_auto_filled_value_shows_its_provenance(server_url, page) -> None:
     page.click("#advanced-head")
     assert "UST_PROFILE_DEFAULT" in page.inner_text("#prov-day-count")
     assert "SHIORI_DERIVED" in page.inner_text("#prov-option-settlement-date")
-    assert "inside the approved UST fixed-coupon bullet profile" in page.inner_text(
-        "#ust-profile-status"
-    )
+    assert "Convention Profile: UST" in page.inner_text("#ust-profile-status")
+    assert "shape fits it" in page.inner_text("#ust-profile-status")
     # The exported run carries the same tiers rather than claiming everything
     # was a trader override.
     stamped = {record["path"]: record for record in _override_provenance(page)}
@@ -4011,7 +4010,7 @@ def test_a_gilt_is_never_given_the_ust_profile(server_url, page) -> None:
     assert page.input_value("#day-count-select") == ""
     page.click("#advanced-head")
     status = page.inner_text("#ust-profile-status")
-    assert "outside the approved UST fixed-coupon bullet profile" in status
+    assert "does not fit the selected UST convention profile" in status
     assert "is not USD" in status
 
 
@@ -4071,6 +4070,12 @@ def test_a_matured_ust_is_never_pre_filled_as_active(server_url, page) -> None:
 def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     server_url, page
 ) -> None:
+    """Field-level correction (Issue #157 P1-1): an irregular coupon grid
+    blocks only last_coupon_date -- the profile as a whole is still
+    supported, and the other seven fields still resolve (see
+    test_an_irregular_schedule_still_fills_the_other_seven_fields for the
+    fuller check)."""
+
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
         page,
@@ -4080,9 +4085,12 @@ def test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(
     )
     _wait_for_ust_profile(page)
 
-    assert _ust_profile(page)["supported"] is False
+    profile = _ust_profile(page)
+    assert profile["supported"] is True
+    assert len(profile["unresolved_fields"]) == 1
     assert _draft_reference(page)["last_coupon_date"] is None
     assert page.input_value("#last-coupon-date-input") == ""
+    assert _draft_reference(page)["day_count"] == "ACT_ACT_BOND"
 
 
 @_PLAYWRIGHT_SKIP
@@ -4109,6 +4117,159 @@ def test_a_bond_whose_bloomberg_evidence_does_not_match_is_refused(server_url, p
 
     assert _ust_profile(page)["supported"] is False
     assert page.input_value("#day-count-select") == ""
+
+
+# --- Codex P1-1 (second revision): Convention Profile is browser state, not
+# an issuer-identity claim ----------------------------------------------------
+#
+# The resolver's admission gate is shape-only now (currency, coupon shape,
+# callable/sinkable, maturity, confirmed evidence strings): it makes no claim
+# about who issued the bond, and "UST" is applied because the browser
+# explicitly selected it, never because Shiori believes it has verified a
+# Treasury issuer. These tests prove the browser actually sends that
+# selection as an explicit request input, that a shape-compatible bond is
+# admitted regardless of its ISIN, and that no "verified as Treasury" claim
+# appears anywhere on the page.
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_convention_profile_is_sent_as_an_explicit_request_input(server_url, page) -> None:
+    """The decisive wiring proof: the real request body actually carries
+    convention_profile -- it is not a value the server invents on its own."""
+
+    page.goto(f"{server_url}/")
+
+    sent_bodies: list = []
+
+    def capture(route):
+        sent_bodies.append(json.loads(route.request.post_data))
+        route.continue_()
+
+    page.route("**/api/ust/profile", capture)
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    page.unroute("**/api/ust/profile", capture)
+
+    assert len(sent_bodies) >= 1
+    assert all(body.get("convention_profile") == "UST" for body in sent_bodies)
+    assert page.evaluate("() => window.__shioriTestSelectedConventionProfile()") == "UST"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_convention_profile_badge_is_visible_even_with_advanced_collapsed(
+    server_url, page
+) -> None:
+    page.goto(f"{server_url}/")
+
+    assert not _is_actually_hidden(page, "convention-profile-badge")
+    assert page.inner_text("#convention-profile-badge") == "Convention Profile: UST"
+
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+
+    assert _is_actually_hidden(page, "advanced-body")  # still collapsed
+    assert not _is_actually_hidden(page, "convention-profile-badge")
+    assert page.inner_text("#convention-profile-badge") == "Convention Profile: UST"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_shape_compatible_non_us_isin_bond_is_admitted_to_the_ust_profile(
+    server_url, page
+) -> None:
+    """The positive regression the correction asked for: a bond whose ISIN
+    carries no US country prefix at all -- and is not any real Treasury's
+    identifier -- still gets every field filled, because its shape fits and
+    "UST" is the selected profile. Admission is shape-only."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_default_bloomberg_bond_lookup_response(
+            isin="XS0999999999",
+            cusip="XS0999999",
+            name="SYNTHETIC NON-TREASURY USD BOND",
+            bond_master=_TREASURY_BOND_MASTER,
+            bond_master_raw=_TREASURY_BOND_MASTER_RAW,
+            acquired_at="2026-07-20T11:28:00+08:00",
+        ),
+    )
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    profile = _ust_profile(page)
+    assert profile["supported"] is True
+    assert profile["rejection_reasons"] == []
+    reference = _draft_reference(page)
+    assert reference["day_count"] == "ACT_ACT_BOND"
+    assert reference["bond_type"] == "FIXED_COUPON_BULLET"
+    assert reference["status"] == "ACTIVE"
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_no_page_text_claims_a_verified_treasury_identity(server_url, page) -> None:
+    """Structural proof the withdrawn identity claim is gone, not merely
+    relabeled: no rendered text anywhere on the page asserts that Shiori has
+    verified the bond's issuer."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _wait_for_ust_profile(page)
+    page.click("#advanced-head")
+
+    body_text = page.inner_text("body").lower()
+    for forbidden in (
+        "verified as treasury",
+        "confirmed treasury",
+        "treasury issuer",
+        "issuer verified",
+        "identity verified",
+    ):
+        assert forbidden not in body_text
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_an_irregular_schedule_still_fills_the_other_seven_fields(server_url, page) -> None:
+    """Field-level correction: an irregular coupon grid blocks only
+    last_coupon_date -- the other seven Advanced fields still resolve."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={**_TREASURY_BOND_MASTER, "issue_date": "2024-03-05"}
+        ),
+    )
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    profile = _ust_profile(page)
+    assert profile["supported"] is True
+    assert len(profile["unresolved_fields"]) == 1
+    assert profile["unresolved_fields"][0]["path"] == (
+        "bond_reference_data_universe.0.last_coupon_date"
+    )
+
+    reference = _draft_reference(page)
+    assert reference["last_coupon_date"] is None
+    assert reference["day_count"] == "ACT_ACT_BOND"
+    assert reference["bond_type"] == "FIXED_COUPON_BULLET"
+    assert reference["status"] == "ACTIVE"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["reporting_date"] is not None
+    assert draft["option_settlement_date"] is not None
+    page.click("#advanced-head")
+    assert "not resolved" in page.inner_text("#ust-profile-status")
 
 
 # --- Acceptance criterion 8: nothing survives a reset or a stale answer ------

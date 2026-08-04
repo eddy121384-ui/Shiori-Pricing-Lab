@@ -1,9 +1,15 @@
 """Tests for `pricing/bli_ust_fixed_coupon_profile.py` (Issue #157).
 
 Covers the four-tier provenance contract, the eight resolved field values,
-the fail-closed admission gate (currency, ISIN country, the confirmed
-display-only Bloomberg evidence, callable/sinkable, zero coupon, coupon
-frequency, maturity, and an irregular coupon grid), the expiry-dependent
+the required `convention_profile` browser-state input (Issue #157 P1-1
+correction: never inferred, defaulted, or fabricated -- missing/blank/unknown
+is a clear `ValueError`, never a silent fallback to "UST"), the fail-closed
+product-shape gate (currency, the confirmed display-only Bloomberg evidence,
+callable/sinkable, zero coupon, coupon frequency, maturity, and missing
+schedule dates -- deliberately *not* an issuer-identity check; a
+non-Treasury-looking bond is admitted when its shape fits and "UST" is
+selected), the field-level handling of an irregular coupon grid (blocks only
+`last_coupon_date`, not the other seven fields), the expiry-dependent
 settlement dates and their U.S. government-bond business-day roll, and the
 module boundaries that keep this resolver out of every pricing, curve,
 discounting, volatility and Greek path.
@@ -17,6 +23,7 @@ a wrong one.
 from __future__ import annotations
 
 import inspect
+from dataclasses import fields as dataclass_fields
 from datetime import date
 
 import pytest
@@ -30,6 +37,7 @@ from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
     derive_last_coupon_date,
 )
 from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
+    CONVENTION_PROFILE_UST,
     EXPIRY_DEPENDENT_FIELD_PATHS,
     PATH_BOND_TYPE,
     PATH_DAY_COUNT,
@@ -43,6 +51,7 @@ from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
     PROVENANCE_SHIORI_DERIVED,
     PROVENANCE_UST_PROFILE_DEFAULT,
     UST_ADVANCED_FIELD_PATHS,
+    BLIUstAdvancedFieldProfile,
     advance_ust_government_bond_business_days,
     resolve_ust_advanced_field_profile,
     ust_government_bond_calendar,
@@ -79,6 +88,7 @@ _EXPIRY_DATE = "2026-10-20"  # a Tuesday
 
 def _resolve(**overrides):
     kwargs = {
+        "convention_profile": CONVENTION_PROFILE_UST,
         "isin": _ISIN,
         "currency": "USD",
         "bond_master": dict(_TREASURY_BOND_MASTER),
@@ -105,8 +115,10 @@ def test_supported_ust_resolves_every_advanced_field():
     profile = _resolve()
 
     assert profile.supported is True
+    assert profile.convention_profile == "UST"
     assert profile.rejection_reasons == ()
     assert profile.pending_field_paths == ()
+    assert profile.unresolved_fields == ()
     assert tuple(field.path for field in profile.fields) == UST_ADVANCED_FIELD_PATHS
 
 
@@ -144,7 +156,9 @@ def test_every_field_declares_which_tier_it_came_from():
 
 def test_a_confirmed_typed_bloomberg_value_outranks_the_profile_default():
     """The BLOOMBERG_AUTO tier is real, not decorative: if a Bond Master
-    *destination* field ever carries a typed value, it wins."""
+    *destination* field ever carries a typed value, it wins -- and it does so
+    regardless of convention_profile, since a confirmed external fact is not
+    a profile-owned default (see the module docstring)."""
 
     profile = _resolve(
         bond_master={
@@ -253,6 +267,7 @@ def test_settlement_dates_are_pending_until_an_expiry_exists():
 
     assert profile.supported is True
     assert profile.pending_field_paths == EXPIRY_DEPENDENT_FIELD_PATHS
+    assert profile.unresolved_fields == ()
     # Six of eight are still resolved, so the ordinary workflow is unblocked
     # immediately after the Bloomberg load.
     assert len(profile.fields) == 6
@@ -286,26 +301,96 @@ def test_advancing_requires_a_positive_business_day_count():
             advance_ust_government_bond_business_days(date(2026, 10, 20), bad)
 
 
-# --- 4. The fail-closed admission gate --------------------------------------
+# --- 4. convention_profile: required browser-state input (Issue #157 P1-1) --
+#
+# convention_profile is never inferred, defaulted, or fabricated by this
+# module -- a missing, blank, or unrecognized selection is a clear ValueError,
+# never a silent fallback to "UST".
 
 
-def _assert_refused(profile, *, expected_fragment: str) -> None:
-    assert profile.supported is False
-    assert profile.fields == ()
-    assert profile.pending_field_paths == ()
-    assert any(expected_fragment in reason for reason in profile.rejection_reasons), (
-        f"{expected_fragment!r} not in {profile.rejection_reasons}"
+def test_missing_convention_profile_raises_clearly():
+    with pytest.raises(ValueError, match="convention_profile"):
+        _resolve(convention_profile=None)
+
+
+def test_blank_convention_profile_raises_clearly():
+    with pytest.raises(ValueError, match="convention_profile"):
+        _resolve(convention_profile="")
+
+
+def test_unknown_convention_profile_raises_clearly_rather_than_falling_back_to_ust():
+    with pytest.raises(ValueError, match="convention_profile") as exc_info:
+        _resolve(convention_profile="GILT")
+    # The rejection names the actual unsupported value, and never silently
+    # substitutes "UST" for it anywhere in the message or the outcome.
+    assert "GILT" in str(exc_info.value)
+
+
+def test_convention_profile_is_echoed_back_on_every_outcome():
+    """The response always confirms which profile it was actually resolved
+    against -- both on a supported and an unsupported outcome."""
+
+    assert _resolve().convention_profile == "UST"
+    assert _resolve(currency="GBP").convention_profile == "UST"
+
+
+def test_no_treasury_identity_claim_exists_anywhere_in_the_result_shape():
+    """Issue #157 P1-1, second correction: this module must never assert
+    that it has verified an issuer's identity. Structural proof: no field on
+    the result dataclass even names such a concept."""
+
+    field_names = {f.name for f in dataclass_fields(BLIUstAdvancedFieldProfile)}
+    for forbidden in ("identity", "issuer_classification", "treasury_verified", "is_treasury"):
+        assert forbidden not in field_names
+    assert field_names == {
+        "supported",
+        "convention_profile",
+        "rejection_reasons",
+        "fields",
+        "pending_field_paths",
+        "unresolved_fields",
+    }
+
+
+# --- 5. Product-shape gate: never an issuer-identity check ------------------
+#
+# A USD, non-callable, non-sinkable, positive semi-annual fixed-coupon bond
+# is admitted whenever "UST" is the selected profile, regardless of whether
+# it actually is a Treasury -- that is the accepted design (see the module
+# docstring), not an oversight. These tests prove the gate is shape-only.
+
+
+def test_a_shape_compatible_bond_is_admitted_even_when_not_a_treasury_issuer():
+    """The positive regression the correction asked for: nothing about ISIN
+    or CUSIP is checked at all -- a bond whose ISIN carries no US country
+    prefix, and which is not any real Treasury's identifier, still gets the
+    UST profile because its shape fits and "UST" was explicitly selected."""
+
+    profile = _resolve(isin="XS0999999999")  # not a US-prefixed ISIN at all
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert len(profile.fields) == 8
+
+
+def test_rejection_reasons_never_mention_isin_country_or_cusip():
+    """Every remaining product-shape rejection reason is about the bond's own
+    terms, never about the ISIN's country prefix or a CUSIP issuer block --
+    the withdrawn identity checks are gone, not merely relabeled."""
+
+    profile = _resolve(
+        isin="XS0999999999",
+        currency="GBP",
+        bond_master={**_TREASURY_BOND_MASTER, "callable_flag": True},
     )
+    assert profile.supported is False
+    for reason in profile.rejection_reasons:
+        assert "isin" not in reason.lower()
+        assert "cusip" not in reason.lower()
+        assert "issuer" not in reason.lower()
 
 
 def test_a_non_usd_bond_is_refused():
     _assert_refused(_resolve(currency="GBP"), expected_fragment="is not USD")
-
-
-def test_a_non_us_isin_is_refused():
-    _assert_refused(
-        _resolve(isin="GB00BFX0ZL78"), expected_fragment="does not carry the 'US'"
-    )
 
 
 def test_a_callable_bond_is_refused():
@@ -355,20 +440,6 @@ def test_a_bond_maturing_on_the_valuation_date_is_refused_too():
     )
 
 
-def test_an_irregular_schedule_is_refused():
-    _assert_refused(
-        _resolve(
-            bond_master={
-                **_TREASURY_BOND_MASTER,
-                "issue_date": "2024-03-05",
-                "maturity_date": "2031-01-31",
-                "first_coupon_date": "2024-07-31",
-            }
-        ),
-        expected_fragment="regular",
-    )
-
-
 @pytest.mark.parametrize(
     ("evidence_key", "value"),
     [
@@ -387,6 +458,7 @@ def test_bloomberg_evidence_that_does_not_match_the_profile_blocks_it(evidence_k
 
 def test_a_gilt_shaped_bond_collects_every_reason_at_once():
     profile = resolve_ust_advanced_field_profile(
+        convention_profile=CONVENTION_PROFILE_UST,
         isin="GB00BFX0ZL78",
         currency="GBP",
         bond_master={
@@ -407,7 +479,7 @@ def test_a_gilt_shaped_bond_collects_every_reason_at_once():
     assert profile.supported is False
     assert profile.fields == ()
     # Every failing condition is reported together, not one at a time.
-    assert len(profile.rejection_reasons) >= 4
+    assert len(profile.rejection_reasons) >= 3
 
 
 def test_missing_schedule_dates_are_refused_rather_than_guessed():
@@ -417,7 +489,60 @@ def test_missing_schedule_dates_are_refused_rather_than_guessed():
     )
 
 
-# --- 5. Environment and module boundaries -----------------------------------
+def _assert_refused(profile, *, expected_fragment: str) -> None:
+    assert profile.supported is False
+    assert profile.fields == ()
+    assert profile.pending_field_paths == ()
+    assert profile.unresolved_fields == ()
+    assert any(expected_fragment in reason for reason in profile.rejection_reasons), (
+        f"{expected_fragment!r} not in {profile.rejection_reasons}"
+    )
+
+
+# --- 6. Field-level resolution: irregular schedule blocks only
+# last_coupon_date (Issue #157 P1-1 correction) ------------------------------
+
+
+def test_an_irregular_schedule_leaves_only_last_coupon_date_unresolved():
+    """The other seven fields must still resolve normally -- an irregular
+    coupon grid is no longer a whole-profile blocker."""
+
+    profile = _resolve(
+        bond_master={
+            **_TREASURY_BOND_MASTER,
+            "issue_date": "2024-03-05",
+            "maturity_date": "2031-01-31",
+            "first_coupon_date": "2024-07-31",
+        }
+    )
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    resolved_paths = {field.path for field in profile.fields}
+    assert PATH_LAST_COUPON_DATE not in resolved_paths
+    assert resolved_paths == set(UST_ADVANCED_FIELD_PATHS) - {PATH_LAST_COUPON_DATE}
+    assert len(profile.unresolved_fields) == 1
+    unresolved = profile.unresolved_fields[0]
+    assert unresolved.path == PATH_LAST_COUPON_DATE
+    assert "regular" in unresolved.reason
+
+
+def test_an_irregular_schedule_still_yields_the_ust_profile_default_values():
+    profile = _resolve(
+        bond_master={
+            **_TREASURY_BOND_MASTER,
+            "issue_date": "2024-03-05",
+            "maturity_date": "2031-01-31",
+            "first_coupon_date": "2024-07-31",
+        }
+    )
+    values = _values(profile)
+    assert values[PATH_DAY_COUNT] == "ACT_ACT_BOND"
+    assert values[PATH_BOND_TYPE] == "FIXED_COUPON_BULLET"
+    assert values[PATH_STATUS] == "ACTIVE"
+
+
+# --- 7. Environment and module boundaries -----------------------------------
 
 
 def test_missing_quantlib_raises_the_existing_clear_error(monkeypatch):

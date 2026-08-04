@@ -22,32 +22,83 @@ from, and there is no unlabelled silent default:
    returned. Only the three fields that are genuine ``BondReferenceData``
    destination fields in the Bloomberg bond-quote loader's own
    ``_BOND_MASTER_FIELD_MAP`` (``day_count``, ``bond_type``,
-   ``last_coupon_date``) are ever read this
-   way, and today none of them is mapped, so this tier yields nothing until
-   Eddy confirms a mnemonic for one of them. The display-only description
-   strings (``DAY_CNT_DES`` / ``MTY_TYP`` / ``CALC_TYP_DES``, carried as
-   ``bond_master_raw``) are **never** coerced into a typed value here -- see
-   the admission gate below for the only, strictly-narrowing use they have.
+   ``last_coupon_date``) are ever read this way, and today none of them is
+   mapped, so this tier yields nothing until Eddy confirms a mnemonic for
+   one of them. The display-only description strings (``DAY_CNT_DES`` /
+   ``MTY_TYP`` / ``CALC_TYP_DES``, carried as ``bond_master_raw``) are
+   **never** coerced into a typed value here -- see the product-shape gate
+   below for the only, strictly-narrowing use they have. This tier does not
+   depend on ``convention_profile`` at all: a confirmed Bloomberg value is
+   used regardless of which profile is selected.
 2. ``SHIORI_DERIVED`` -- mechanically derived from already-loaded bond terms,
    the valuation date, the expiry date and existing reviewed logic:
    ``last_coupon_date`` (the reviewed coupon-schedule adapter),
    ``reporting_date`` (the run's own valuation date) and the two settlement
-   dates (the QuantLib U.S. government-bond calendar).
+   dates (the QuantLib U.S. government-bond calendar). These derivations are
+   mechanical, not a profile-owned constant -- but they only run once the
+   product-shape gate below has passed for the selected profile.
 3. ``UST_PROFILE_DEFAULT`` -- the narrow profile constants this issue
    approves: ACT/ACT day count, fixed-coupon bullet bond type, zero
-   ex-dividend days, and the ACTIVE status.
+   ex-dividend days, and the ACTIVE status. **This is the one tier that is
+   actually owned by, and named after, the selected convention profile** --
+   see "Convention Profile" below.
 4. ``TRADER_OVERRIDE`` -- owned by the caller, not by this module. Nothing
    here ever overwrites a value the trader has taken over; the browser keeps
    the override set and simply does not re-apply an overridden path.
 
-**Admission gate: fail-closed, and never a mapping.** The profile is applied
-only to a bond that passes *every* condition in
-:func:`_ust_fixed_coupon_bullet_rejection_reasons`. Anything that fails --
-non-USD, a non-US ISIN, callable, sinkable, zero-coupon, not semi-annual,
-already matured, an irregular or internally inconsistent coupon grid, or
-Bloomberg evidence that does not match the profile's shape exactly -- gets no
-profile at all and is reported with its reasons, so an unsupported instrument
-stops clearly instead of being silently given UST conventions.
+**Convention Profile: a browser-state input, never a server-computed
+identity claim (Issue #157 P1-1 correction, second revision).** This
+module's first revision tried to gate admission on *proving* the bond is
+issued by the U.S. Treasury (first via the ISIN's ``US`` country prefix,
+then via the CUSIP's ``912`` issuer-number block). Both were withdrawn on
+Eddy's explicit product-direction correction: Shiori's long-term direction
+is not Treasury-only, and this module must never claim to have verified an
+issuer's identity -- there is no ``identity_verified`` field, no issuer
+classification, and no such claim anywhere in this module's output.
+
+Instead, ``convention_profile`` is a **required, explicit parameter** of
+:func:`resolve_ust_advanced_field_profile` -- it must be supplied by the
+caller (ultimately, browser state) on every call, and it names *which
+convention profile is currently selected*, not what Shiori has deduced
+about the bond. This PR's scope supports exactly one value,
+``"UST"`` (:data:`CONVENTION_PROFILE_UST`), reserved in
+:data:`_SUPPORTED_CONVENTION_PROFILES` as the interface point a future
+``US_CORPORATE`` / ``GILT`` / ``CUSTOM`` selector will extend without
+changing this contract shape. A missing, blank, or unrecognized
+``convention_profile`` raises ``ValueError`` immediately -- Shiori never
+silently falls back to ``"UST"`` for an unspecified or unknown selection.
+The resolved profile's own :attr:`BLIUstAdvancedFieldProfile.convention_profile`
+echoes the validated selection back, so the browser can render
+``Convention Profile: UST`` from the response it just received rather than
+from a value it independently assumes.
+
+Only the ``UST_PROFILE_DEFAULT`` tier is owned by the selected profile: its
+four constants (day count, bond type, ex-dividend days, status) are this
+profile's own conventions, and a different selected profile would supply
+different constants for them. ``BLOOMBERG_AUTO`` and ``SHIORI_DERIVED``
+values are not profile ownership claims -- they are, respectively, a
+confirmed external fact and a mechanical derivation from the bond's own
+already-loaded terms -- but both still only run once the product-shape gate
+below has passed for whichever profile was selected, since resolving them
+against a bond the profile does not fit at all would mean inventing values
+for something outside scope.
+
+**Product-shape gate: fail-closed, and never an identity claim.** The
+profile is applied only to a bond that passes *every* condition in
+:func:`_ust_fixed_coupon_bullet_rejection_reasons`: non-USD, callable,
+sinkable, zero/non-numeric coupon, not semi-annual, already matured,
+missing or malformed schedule dates, or Bloomberg evidence that does not
+match the profile's shape exactly. Anything that fails gets no profile at
+all and is reported with its reasons, so an unsupported instrument stops
+clearly instead of being silently given UST conventions. None of these
+conditions is, or was ever intended as, proof of who issued the bond --
+they test only whether this bond's own terms fit the shape UST conventions
+assume (a fixed, positive, semi-annual coupon on a bond that has not yet
+matured). A USD, non-callable, non-sinkable, semi-annual fixed-coupon bond
+that is not actually a Treasury still passes this gate when ``"UST"`` is
+the selected profile -- that is the explicit, accepted design (Issue #157
+review discussion), not an oversight: the profile is applied because it is
+selected, not because Shiori believes it has identified the issuer.
 
 The three confirmed display-only description strings are used **only** as an
 additional *necessary* condition: a bond whose ``DAY_CNT_DES`` is not exactly
@@ -59,6 +110,19 @@ constant), and a non-matching or missing string can only block. This is
 deliberately conservative -- a Bloomberg miss on one of those three
 description fields leaves the trader exactly where they are today, filling
 Advanced by hand.
+
+**Irregular schedule blocks only ``last_coupon_date`` (Issue #157 P1-1
+correction, field-level resolution).** The first revision folded coupon-grid
+irregularity into the whole-profile product-shape gate: any bond whose grid
+``derive_last_coupon_date`` could not accept as regular got *no* field at
+all. That was broader than necessary -- ``day_count``, ``bond_type``,
+``ex_dividend_days``, ``status``, ``reporting_date``, and the two settlement
+dates need nothing from the coupon grid, only ``last_coupon_date`` does. A
+bond that otherwise passes the product-shape gate but has an irregular or
+internally inconsistent coupon grid now still resolves the other seven
+fields normally; ``last_coupon_date`` alone is reported in
+:attr:`BLIUstAdvancedFieldProfile.unresolved_fields` with its own reason,
+never guessed or approximated.
 
 **Day count correction (post-review, superseding the PR's first revision).**
 The first revision of this module used ``DayCount.ACT_ACT_ISDA`` for
@@ -129,6 +193,15 @@ PROVENANCE_TIERS = (
     PROVENANCE_TRADER_OVERRIDE,
 )
 
+# --- Convention profile selection (Issue #157 P1-1 correction) ---------------
+#
+# The browser-state input naming which convention profile is selected -- see
+# the module docstring's "Convention Profile" section. This PR's scope
+# supports exactly one value; the tuple is the reserved extension point for a
+# future profile selector, not a switch statement built ahead of need.
+CONVENTION_PROFILE_UST = "UST"
+_SUPPORTED_CONVENTION_PROFILES = (CONVENTION_PROFILE_UST,)
+
 # --- The eight field paths, spelled exactly as they sit on a standalone case --
 
 PATH_DAY_COUNT = "bond_reference_data_universe.0.day_count"
@@ -158,6 +231,9 @@ EXPIRY_DEPENDENT_FIELD_PATHS = (PATH_FORWARD_SETTLEMENT_DATE, PATH_OPTION_SETTLE
 # --- The approved narrow profile ----------------------------------------------
 #
 # Existing typed members only -- this module adds no enum value anywhere.
+# Owned by the "UST" convention profile specifically (see the module
+# docstring): a future profile would supply its own constants here, not
+# these ones.
 UST_PROFILE_DAY_COUNT = DayCount.ACT_ACT_BOND
 UST_PROFILE_BOND_TYPE = BondType.FIXED_COUPON_BULLET
 UST_PROFILE_EX_DIVIDEND_DAYS = 0
@@ -185,9 +261,6 @@ _BLOOMBERG_TYPED_FIELD_BY_PATH = {
     PATH_LAST_COUPON_DATE: "last_coupon_date",
 }
 
-_ISIN_LENGTH = 12
-_UST_ISIN_COUNTRY_PREFIX = "US"
-
 
 @dataclass(frozen=True)
 class BLIUstProfileField:
@@ -199,21 +272,47 @@ class BLIUstProfileField:
 
 
 @dataclass(frozen=True)
+class BLIUstUnresolvedField:
+    """One in-scope Advanced field this run could not resolve, and why.
+
+    Distinct from ``pending_field_paths`` (waiting on an input that simply
+    has not been supplied yet, e.g. expiry): this is for a field whose
+    inputs are all present but which a real per-field check refused to
+    guess -- today, only ``last_coupon_date`` on an irregular coupon grid.
+    """
+
+    path: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class BLIUstAdvancedFieldProfile:
     """The full result of one profile resolution.
 
-    ``supported`` is the admission decision. When it is ``False``, ``fields``
-    is empty and ``rejection_reasons`` says exactly why -- never a partial
-    profile, and never a UST convention applied to something that is not one.
+    ``convention_profile`` echoes the validated, caller-selected profile
+    this result was resolved against (see the module docstring) -- never a
+    value this module invented or deduced.
+
+    ``supported`` is the product-shape admission decision. When it is
+    ``False``, ``fields`` is empty and ``rejection_reasons`` says exactly
+    why -- never a partial profile. It is a claim about whether this bond's
+    *shape* fits the selected profile's conventions, never a claim about who
+    issued it.
+
     ``pending_field_paths`` names fields that are in scope but cannot be
-    resolved yet because the run has no expiry date, so they are absent rather
-    than guessed.
+    resolved yet because the run has no expiry date, so they are absent
+    rather than guessed. ``unresolved_fields`` names fields that could not
+    be resolved for a different, field-specific reason (currently only an
+    irregular coupon grid blocking ``last_coupon_date``) even though
+    ``supported`` is ``True`` and every other field resolved normally.
     """
 
     supported: bool
+    convention_profile: str
     rejection_reasons: tuple[str, ...]
     fields: tuple[BLIUstProfileField, ...]
     pending_field_paths: tuple[str, ...]
+    unresolved_fields: tuple[BLIUstUnresolvedField, ...]
 
 
 def _require_quantlib() -> None:
@@ -265,38 +364,61 @@ def _optional_iso_date(value: object, field_name: str) -> date | None:
         return None
 
 
+def _require_supported_convention_profile(convention_profile: object) -> str:
+    """Validate the caller-selected convention profile, or raise ``ValueError``.
+
+    ``convention_profile`` is required browser-state input, never a value
+    this module defaults or infers (see the module docstring's "Convention
+    Profile" section). A missing, blank, or unrecognized selection is a
+    caller-contract violation -- reported the same way the server route
+    already reports a malformed request body -- and is never silently
+    treated as ``"UST"``.
+    """
+
+    if not isinstance(convention_profile, str) or not convention_profile.strip():
+        raise ValueError(
+            "convention_profile is required and must name the selected convention "
+            f"profile (one of {_SUPPORTED_CONVENTION_PROFILES!r}); got "
+            f"{convention_profile!r} -- Shiori never silently falls back to a default "
+            "profile for a missing or blank selection"
+        )
+    if convention_profile not in _SUPPORTED_CONVENTION_PROFILES:
+        raise ValueError(
+            f"convention_profile {convention_profile!r} is not one of the profiles this "
+            f"route supports ({_SUPPORTED_CONVENTION_PROFILES!r}); Shiori never silently "
+            "falls back to a default profile for an unrecognized selection"
+        )
+    return convention_profile
+
+
 def _ust_fixed_coupon_bullet_rejection_reasons(
     *,
-    isin: object,
     currency: object,
     bond_master: dict,
     bond_master_raw: dict,
     valuation_date: object,
 ) -> tuple[str, ...]:
-    """Return every reason this bond is outside the narrow UST profile.
+    """Return every reason this bond's *shape* does not fit the UST profile.
 
     An empty tuple means admitted. Every reason is collected rather than
     short-circuited, so a trader sees the whole picture at once instead of
-    fixing one blocker only to meet the next.
+    fixing one blocker only to meet the next. This checks the bond's own
+    terms only -- currency, coupon shape, callable/sinkable flags, maturity,
+    and confirmed evidence strings -- and makes no claim about who issued
+    it (see the module docstring's "Product-shape gate" section; the
+    withdrawn ISIN/CUSIP issuer-identity checks are not here).
+
+    Coupon-grid *regularity* is deliberately not checked here: an
+    irregular grid blocks only ``last_coupon_date``, resolved independently
+    in :func:`resolve_ust_advanced_field_profile`, not the whole profile.
     """
 
     reasons: list[str] = []
 
-    if not isinstance(isin, str) or len(isin) != _ISIN_LENGTH:
-        reasons.append(
-            f"isin must be a {_ISIN_LENGTH}-character ISIN to be matched against the "
-            f"UST profile, got {isin!r}"
-        )
-    elif not isin.startswith(_UST_ISIN_COUNTRY_PREFIX):
-        reasons.append(
-            f"isin {isin!r} does not carry the {_UST_ISIN_COUNTRY_PREFIX!r} country "
-            "prefix, so it is not a US-issued security"
-        )
-
     if currency != UST_PROFILE_CURRENCY.value:
         reasons.append(
             f"currency {currency!r} is not {UST_PROFILE_CURRENCY.value} -- the UST "
-            "fixed-coupon bullet profile covers USD Treasuries only"
+            "fixed-coupon bullet profile covers USD-denominated bonds only"
         )
 
     for evidence_key, expected in UST_PROFILE_REQUIRED_BLOOMBERG_EVIDENCE.items():
@@ -359,25 +481,12 @@ def _ust_fixed_coupon_bullet_rejection_reasons(
             f"({valuation.isoformat()}); a matured bond is never pre-filled as ACTIVE"
         )
 
-    if issue is not None and maturity is not None and first_coupon is not None:
-        try:
-            derive_last_coupon_date(
-                issue_date=issue.isoformat(),
-                maturity_date=maturity.isoformat(),
-                first_coupon_date=first_coupon.isoformat(),
-                coupon_frequency=UST_PROFILE_COUPON_FREQUENCY,
-            )
-        except BLIBondScheduleError as exc:
-            reasons.append(
-                "the reviewed coupon-schedule adapter does not accept this bond's grid as "
-                f"regular, so no coupon date is derived: {exc}"
-            )
-
     return tuple(reasons)
 
 
 def resolve_ust_advanced_field_profile(
     *,
+    convention_profile: object,
     isin: object,
     currency: object,
     bond_master: dict | None,
@@ -387,15 +496,25 @@ def resolve_ust_advanced_field_profile(
 ) -> BLIUstAdvancedFieldProfile:
     """Resolve the eight Advanced technical fields for one Bloomberg-loaded bond.
 
-    Returns an unsupported profile with explicit reasons for anything outside
-    the narrow UST fixed-coupon bullet universe (see
-    :func:`_ust_fixed_coupon_bullet_rejection_reasons`) -- no partial profile
-    is ever returned, and no field is filled for a bond the profile does not
-    cover.
+    ``convention_profile`` is required, caller-selected browser state naming
+    which convention profile to apply -- see the module docstring's
+    "Convention Profile" section. Raises ``ValueError`` for a missing,
+    blank, or unrecognized selection; this PR's scope accepts only
+    ``"UST"``. ``isin`` is carried through for identification only and is
+    not used to gate anything (the withdrawn ISIN-country-prefix check is
+    not here).
+
+    Returns an unsupported profile with explicit reasons for anything whose
+    *shape* does not fit the selected profile (see
+    :func:`_ust_fixed_coupon_bullet_rejection_reasons`) -- no partial
+    profile is ever returned at that stage, and no field is filled for a
+    bond the profile's shape does not cover. Once shape-admitted, an
+    irregular coupon grid blocks only ``last_coupon_date`` (reported in
+    ``unresolved_fields``); the other seven fields still resolve normally.
 
     ``expiry_date`` is optional because the trader may not have entered the
     expiry yet. Without it, the two settlement dates are reported in
-    ``pending_field_paths`` instead of being guessed; the other six fields are
+    ``pending_field_paths`` instead of being guessed; the other fields are
     still resolved, so the ordinary workflow is unblocked immediately after
     Bloomberg Load.
 
@@ -405,11 +524,11 @@ def resolve_ust_advanced_field_profile(
     """
 
     _require_quantlib()
+    convention_profile = _require_supported_convention_profile(convention_profile)
     bond_master = dict(bond_master or {})
     bond_master_raw = dict(bond_master_raw or {})
 
     reasons = _ust_fixed_coupon_bullet_rejection_reasons(
-        isin=isin,
         currency=currency,
         bond_master=bond_master,
         bond_master_raw=bond_master_raw,
@@ -417,10 +536,16 @@ def resolve_ust_advanced_field_profile(
     )
     if reasons:
         return BLIUstAdvancedFieldProfile(
-            supported=False, rejection_reasons=reasons, fields=(), pending_field_paths=()
+            supported=False,
+            convention_profile=convention_profile,
+            rejection_reasons=reasons,
+            fields=(),
+            pending_field_paths=(),
+            unresolved_fields=(),
         )
 
     fields: list[BLIUstProfileField] = []
+    unresolved: list[BLIUstUnresolvedField] = []
 
     def _confirmed_typed_value(path: str) -> object | None:
         return bond_master.get(_BLOOMBERG_TYPED_FIELD_BY_PATH[path])
@@ -441,16 +566,48 @@ def resolve_ust_advanced_field_profile(
     _add(PATH_DAY_COUNT, UST_PROFILE_DAY_COUNT.value, PROVENANCE_UST_PROFILE_DEFAULT)
     _add(PATH_BOND_TYPE, UST_PROFILE_BOND_TYPE.value, PROVENANCE_UST_PROFILE_DEFAULT)
     _add(PATH_EX_DIVIDEND_DAYS, UST_PROFILE_EX_DIVIDEND_DAYS, PROVENANCE_UST_PROFILE_DEFAULT)
-    _add(
-        PATH_LAST_COUPON_DATE,
-        derive_last_coupon_date(
-            issue_date=bond_master["issue_date"],
-            maturity_date=bond_master["maturity_date"],
-            first_coupon_date=bond_master["first_coupon_date"],
-            coupon_frequency=UST_PROFILE_COUPON_FREQUENCY,
-        ),
-        PROVENANCE_SHIORI_DERIVED,
-    )
+
+    # last_coupon_date: resolved independently of the other fields (Issue
+    # #157 P1-1 field-level correction) -- an irregular/inconsistent coupon
+    # grid blocks only this one field, never the other seven. The three
+    # schedule dates it needs are already known present and parseable: the
+    # product-shape gate above required them.
+    confirmed_last_coupon = _confirmed_typed_value(PATH_LAST_COUPON_DATE)
+    if confirmed_last_coupon is not None:
+        fields.append(
+            BLIUstProfileField(
+                path=PATH_LAST_COUPON_DATE,
+                value=confirmed_last_coupon,
+                provenance=PROVENANCE_BLOOMBERG_AUTO,
+            )
+        )
+    else:
+        try:
+            derived_last_coupon = derive_last_coupon_date(
+                issue_date=bond_master["issue_date"],
+                maturity_date=bond_master["maturity_date"],
+                first_coupon_date=bond_master["first_coupon_date"],
+                coupon_frequency=UST_PROFILE_COUPON_FREQUENCY,
+            )
+        except BLIBondScheduleError as exc:
+            unresolved.append(
+                BLIUstUnresolvedField(
+                    path=PATH_LAST_COUPON_DATE,
+                    reason=(
+                        "the reviewed coupon-schedule adapter does not accept this bond's "
+                        f"grid as regular, so no coupon date is derived: {exc}"
+                    ),
+                )
+            )
+        else:
+            fields.append(
+                BLIUstProfileField(
+                    path=PATH_LAST_COUPON_DATE,
+                    value=derived_last_coupon,
+                    provenance=PROVENANCE_SHIORI_DERIVED,
+                )
+            )
+
     _add(PATH_STATUS, UST_PROFILE_STATUS.value, PROVENANCE_UST_PROFILE_DEFAULT)
     # The reporting date is the run's own valuation date, carried across
     # mechanically -- not a market convention and not a profile constant.
@@ -473,7 +630,9 @@ def resolve_ust_advanced_field_profile(
 
     return BLIUstAdvancedFieldProfile(
         supported=True,
+        convention_profile=convention_profile,
         rejection_reasons=(),
         fields=tuple(fields),
         pending_field_paths=tuple(pending),
+        unresolved_fields=tuple(unresolved),
     )

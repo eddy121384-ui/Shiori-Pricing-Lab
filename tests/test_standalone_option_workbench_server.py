@@ -1053,6 +1053,7 @@ def test_api_case_validate_rejects_a_malformed_body(server_url: str) -> None:
 # --- Issue #157: POST /api/ust/profile ----------------------------------------
 
 _UST_PROFILE_BODY = {
+    "convention_profile": "UST",
     "isin": "US91282CLJ89",
     "currency": "USD",
     "bond_master": {
@@ -1083,8 +1084,10 @@ def test_api_ust_profile_returns_every_field_with_its_provenance(server_url: str
 
     assert status == 200
     assert payload["supported"] is True
+    assert payload["convention_profile"] == "UST"
     assert payload["rejection_reasons"] == []
     assert payload["pending_field_paths"] == []
+    assert payload["unresolved_fields"] == []
     by_path = {field["path"]: field for field in payload["fields"]}
     assert set(by_path) == {
         "bond_reference_data_universe.0.day_count",
@@ -1144,6 +1147,72 @@ def test_api_ust_profile_rejects_a_body_missing_required_keys(server_url: str) -
 
     assert status == 400
     assert "bond_master" in payload["error"]
+
+
+def test_api_ust_profile_rejects_a_body_missing_convention_profile(server_url: str) -> None:
+    """Issue #157 P1-1 correction: convention_profile is required browser
+    state, never inferred or defaulted server-side."""
+
+    body = {key: value for key, value in _UST_PROFILE_BODY.items() if key != "convention_profile"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 400
+    assert "convention_profile" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_rejects_an_unknown_convention_profile_rather_than_defaulting(
+    server_url: str,
+) -> None:
+    body = {**_UST_PROFILE_BODY, "convention_profile": "GILT"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 400
+    assert "convention_profile" in payload["error"]
+    assert "GILT" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_admits_a_shape_compatible_non_us_isin_bond(server_url: str) -> None:
+    """Positive regression for the P1-1 correction: admission is shape-only.
+    A bond whose ISIN carries no US country prefix at all is still admitted
+    because its terms fit and "UST" was explicitly selected -- this makes no
+    claim about who issued it."""
+
+    body = {**_UST_PROFILE_BODY, "isin": "XS0999999999"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["rejection_reasons"] == []
+    assert len(payload["fields"]) == 8
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_reports_an_irregular_schedule_as_one_unresolved_field(
+    server_url: str,
+) -> None:
+    """Field-level correction: an irregular coupon grid blocks only
+    last_coupon_date, not the whole profile."""
+
+    body = {
+        **_UST_PROFILE_BODY,
+        "bond_master": {
+            **_UST_PROFILE_BODY["bond_master"],
+            "issue_date": "2024-03-05",
+        },
+    }
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    resolved_paths = {field["path"] for field in payload["fields"]}
+    assert "bond_reference_data_universe.0.last_coupon_date" not in resolved_paths
+    assert len(payload["fields"]) == 7
+    assert len(payload["unresolved_fields"]) == 1
+    unresolved = payload["unresolved_fields"][0]
+    assert unresolved["path"] == "bond_reference_data_universe.0.last_coupon_date"
+    assert "regular" in unresolved["reason"]
 
 
 def test_api_ust_profile_rejects_a_malformed_body(server_url: str) -> None:

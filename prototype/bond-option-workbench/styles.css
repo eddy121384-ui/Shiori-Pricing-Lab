@@ -190,6 +190,19 @@ html, body {
   color: var(--muted-2);
   font-style: italic;
 }
+/* Always visible in the Advanced header, whether or not the section is
+   expanded (Issue #157 P1-1 correction): the selected Convention Profile is
+   browser state, not a claim about the bond's identity, and must never be
+   hidden behind a collapsed section. */
+.convention-profile-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #2f6f5e;
+  border: 1px solid #2f6f5e;
+  border-radius: 999px;
+  padding: 2px 9px;
+}
 .card-summary:empty {
   display: none;
 }

@@ -119,6 +119,7 @@
     advancedBody: document.getElementById("advanced-body"),
     advancedIndicator: document.getElementById("advanced-indicator"),
     advancedSummary: document.getElementById("advanced-summary"),
+    conventionProfileBadge: document.getElementById("convention-profile-badge"),
     dayCount: document.getElementById("day-count-select"),
     bondTypeSelect: document.getElementById("bond-type-select"),
     exDividendDays: document.getElementById("ex-dividend-days-input"),
@@ -302,6 +303,17 @@
 
   const UST_PROFILE_SOURCE_SYSTEM = "SHIORI_UST_FIXED_COUPON_PROFILE";
   const TRADER_OVERRIDE_BASIS = "TRADER_OVERRIDE";
+
+  // The currently selected Convention Profile -- browser-owned state, sent
+  // as an explicit input on every /api/ust/profile request (Issue #157
+  // P1-1 correction). The server never infers, defaults, or fabricates
+  // this value; it only validates the selection this file sends and echoes
+  // it back. This PR's scope offers no profile-selector control, so this
+  // is fixed to "UST" -- but it is still real state flowing browser ->
+  // server, not a value the server invents on its own, and a future
+  // selector control would only need to change this one binding, not the
+  // request/response contract around it.
+  const SELECTED_CONVENTION_PROFILE = "UST";
 
   // What each provenance tier means, in the trader's own terms. The tier
   // string itself always comes from the server.
@@ -1265,6 +1277,7 @@
   function ustProfileKey() {
     if (!currentDraft || !resolvedBloombergBond) return null;
     return JSON.stringify({
+      convention_profile: SELECTED_CONVENTION_PROFILE,
       isin: resolvedBloombergBond.isin,
       currency: currentDraft.bond_option.currency,
       valuation_date: currentDraft.valuation_date,
@@ -1344,30 +1357,43 @@
     }
     if (ustProfileTransportError !== null) {
       target.textContent =
-        "Shiori could not reach its own profile resolver, so nothing here has been " +
-        "pre-filled: " + ustProfileTransportError;
+        `Shiori could not reach its own ${SELECTED_CONVENTION_PROFILE} profile resolver, ` +
+        "so nothing here has been pre-filled: " + ustProfileTransportError;
       target.classList.add("is-unsupported");
       return;
     }
     if (ustProfile === null) {
-      target.textContent = "Checking this bond against the approved UST profile…";
+      target.textContent =
+        `Checking this bond's shape against the selected ${SELECTED_CONVENTION_PROFILE} ` +
+        "convention profile…";
       return;
     }
+    // Echo the server's own confirmation of which profile it actually
+    // resolved against -- never assume it matches what was sent.
+    const profileName = ustProfile.convention_profile || SELECTED_CONVENTION_PROFILE;
     if (!ustProfile.supported) {
       target.textContent =
-        "This bond is outside the approved UST fixed-coupon bullet profile, so Shiori " +
-        "pre-fills none of these fields: " +
+        `This bond's shape does not fit the selected ${profileName} convention profile, ` +
+        "so Shiori pre-fills none of these fields (this says nothing about who issued the " +
+        "bond -- only that its own terms don't match this profile's shape): " +
         (ustProfile.rejection_reasons || []).join(" · ");
       target.classList.add("is-unsupported");
       return;
     }
     const pending = ustProfile.pending_field_paths || [];
-    target.textContent =
-      "This bond is inside the approved UST fixed-coupon bullet profile, so Shiori has " +
-      "filled these fields and shown where each value came from." +
-      (pending.length === 0
-        ? ""
-        : ` Waiting on the expiry before deriving: ${pending.join(", ")}.`);
+    const unresolved = ustProfile.unresolved_fields || [];
+    let text =
+      `Convention Profile: ${profileName}. This bond's shape fits it, so Shiori has ` +
+      "filled these fields and shown where each value came from.";
+    if (pending.length > 0) {
+      text += ` Waiting on the expiry before deriving: ${pending.join(", ")}.`;
+    }
+    if (unresolved.length > 0) {
+      text +=
+        " " +
+        unresolved.map((item) => `${item.path} is not resolved: ${item.reason}`).join(" ");
+    }
+    target.textContent = text;
     target.classList.add("is-supported");
   }
 
@@ -1380,6 +1406,7 @@
     lastUstProfileKey = key;
     const generation = ++ustProfileGeneration;
     const requestBody = {
+      convention_profile: SELECTED_CONVENTION_PROFILE,
       isin: resolvedBloombergBond.isin,
       currency: currentDraft.bond_option.currency,
       bond_master: resolvedBloombergBond.bond_master || {},
@@ -3163,6 +3190,11 @@
   setAdvancedCollapsed(true);
   clearTraderForm();
   syncDraftGating();
+  // Always visible, whether or not Advanced is expanded, and whether or not
+  // a bond is loaded yet -- sourced from the one browser-state constant this
+  // file sends as convention_profile on every profile request, never a
+  // second, independently-typed copy of the same string.
+  els.conventionProfileBadge.textContent = `Convention Profile: ${SELECTED_CONVENTION_PROFILE}`;
 
   // Test-only, read-only accessors: they change no stored value, API response,
   // conversion, or pricing behavior.
@@ -3176,4 +3208,5 @@
   window.__shioriTestFieldProvenance = () => Object.fromEntries(fieldProvenance);
   window.__shioriTestTraderOverriddenPaths = () => Array.from(traderOverriddenPaths);
   window.__shioriTestUstProfile = () => ustProfile;
+  window.__shioriTestSelectedConventionProfile = () => SELECTED_CONVENTION_PROFILE;
 })();

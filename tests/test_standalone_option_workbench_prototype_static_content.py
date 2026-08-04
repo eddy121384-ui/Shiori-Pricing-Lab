@@ -301,3 +301,42 @@ def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself
     # Shiori writes no holiday table.
     for forbidden in ("isBusinessDay", "businessDay", "addMonths", "HOLIDAYS"):
         assert forbidden not in text
+
+
+def test_convention_profile_is_a_browser_state_input_not_a_hardcoded_server_default() -> None:
+    """Issue #157 P1-1 correction: convention_profile must be explicit
+    request input, and the badge that displays it must be sourced from that
+    same browser-state constant, not a second, independently-typed string."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "SELECTED_CONVENTION_PROFILE" in text
+    assert "convention_profile: SELECTED_CONVENTION_PROFILE" in text
+    assert "convention-profile-badge" in text
+
+    html_text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="convention-profile-badge"' in html_text
+    # Visible inside the always-rendered card-head row, not inside the
+    # collapsible advanced-body -- see the element's position relative to
+    # the "Advanced" card-head/card-body boundary.
+    head_start = html_text.index('id="advanced-head"')
+    body_start = html_text.index('id="advanced-body"')
+    badge_pos = html_text.index('id="convention-profile-badge"')
+    assert head_start < badge_pos < body_start
+
+
+def test_no_identity_verification_claim_anywhere_in_the_served_page() -> None:
+    """Structural proof the withdrawn Treasury-identity gate left no trace in
+    the served page's own text -- neither markup nor script content."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(
+        encoding="utf-8"
+    ) + (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    lowered = text.lower()
+    for forbidden in (
+        "identity_verified",
+        "treasury_verified",
+        "is_treasury",
+        "issuer_classification",
+        "verified as treasury",
+    ):
+        assert forbidden not in lowered
