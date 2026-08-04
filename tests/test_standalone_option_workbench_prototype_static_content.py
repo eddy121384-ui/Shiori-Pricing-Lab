@@ -12,6 +12,7 @@ against the bundled synthetic bond (which has no country field at all).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 PROTOTYPE_DIR = Path(__file__).resolve().parents[1] / "prototype" / "bond-option-workbench"
@@ -69,13 +70,16 @@ def test_index_html_wires_timing_fields_without_duplicate_trader_entry() -> None
     # The old hardcoded "Time to Expiry" (090 18:25) and "Delivery Delay"
     # ("1") controls are long gone. Fields still owned by the trader remain
     # real inputs. Pricing/as-of/valuation are read-only because the Bloomberg
-    # acquisition event now supplies them mechanically.
+    # acquisition event now supplies them mechanically, and (Issue #143) the
+    # expiry timestamp is read-only too because the one Expiry interaction
+    # composes it.
     text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
     for element_id in (
         "pricing-timestamp-input",
         "expiry-timestamp-input",
         "as-of-timestamp-input",
-        "expiry-date-input",
+        "expiry-datetime-input",
+        "expiry-offset-input",
         "valuation-date-input",
         "reporting-date-input",
         "forward-settlement-date-input",
@@ -86,13 +90,16 @@ def test_index_html_wires_timing_fields_without_duplicate_trader_entry() -> None
         "pricing-timestamp-input",
         "as-of-timestamp-input",
         "valuation-date-input",
+        "expiry-timestamp-input",
     ):
         assert f'id="{element_id}"' in text
         start = text.index(f'id="{element_id}"')
         assert "readonly" in text[start : start + 180]
     # The superseded display-only elements must not linger alongside the
     # inputs that replaced them -- two places showing the same field is
-    # exactly the ambiguity this replacement removes.
+    # exactly the ambiguity this replacement removes. `expiry-date-input` and
+    # the free-text `expiry-timestamp` entry are gone as separate controls:
+    # Issue #143 folds them into one Expiry interaction.
     for removed_id in (
         "option-terms-pricing-timestamp",
         "option-terms-expiry-timestamp",
@@ -102,6 +109,7 @@ def test_index_html_wires_timing_fields_without_duplicate_trader_entry() -> None
         "business-day-convention-select",
         "redemption-amount-input",
         "yield-convention-select",
+        "expiry-date-input",
     ):
         assert f'id="{removed_id}"' not in text
 
@@ -125,3 +133,104 @@ def test_curve_editor_locks_the_rate_basis_and_warns_against_relabeling() -> Non
     assert "MMkt" in text and "repo" in text
     # No Bond Reference Curve is offered on this route.
     assert "BOND_REFERENCE_CURVE" not in text
+
+
+# --- Minimum-input trader workflow (Issue #143) -------------------------------
+
+
+def test_main_screen_declares_between_six_and_nine_workflow_groups() -> None:
+    """Acceptance criterion 2, checked on the static markup as well as in the
+    browser: the ordinary trader flow is a short sequence of real decisions and
+    reviews, not a backend metadata wall."""
+
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    groups = re.findall(r'data-workflow-group="([a-z-]+)"', text)
+    assert 6 <= len(groups) <= 9
+    assert groups == [
+        "instrument",
+        "option-type",
+        "position",
+        "strike",
+        "notional",
+        "expiry",
+        "forward-review",
+        "vol-review",
+        "discounting-review",
+    ]
+
+
+def test_advanced_section_starts_collapsed_in_the_markup() -> None:
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    start = text.index('id="advanced-body"')
+    assert "hidden" in text[start : start + 60]
+    assert '>Expand<' in text[text.index('id="advanced-indicator"') :][:60]
+
+
+def test_unresolved_dependency_panel_states_what_why_evidence_and_next_step() -> None:
+    """Acceptance criterion 6: the blocker explanation is a fixed four-part
+    structure, not a bare 'unavailable'."""
+
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    for label in (
+        "What is missing",
+        "Why it is missing",
+        "Bloomberg evidence",
+        "What you can do next",
+    ):
+        assert label in text
+    for element_id in (
+        "unresolved-title",
+        "unresolved-missing",
+        "unresolved-why",
+        "unresolved-evidence",
+        "unresolved-next",
+    ):
+        assert f'id="{element_id}"' in text
+
+
+def test_script_records_the_real_bloomberg_evidence_for_each_unresolved_input() -> None:
+    """The evidence strings must name the actual mnemonic and the actual
+    response, so an unexplained blank field can never reappear."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    # Forward: the confirmed overrides and the real BAD_FLD answer.
+    assert "OPT_UNDL_FORWARD_PX" in text
+    assert "Field not applicable to security" in text
+    assert "OP046" in text and "OP188" in text
+    # OP131 appears only to say it is never sent and never defaulted to zero.
+    assert "never defaulted to 0" in text
+    # Volatility: both candidates came back BAD_FLD, and YIELD_VOL is refused.
+    assert "PRICE_VOL returned BAD_FLD" in text
+    assert "EQUIVALENT_PRICE_VOL returned BAD_FLD" in text
+    assert "YIELD_VOL is not a substitute" in text
+    # Discounting: the prohibited relabelling is named explicitly.
+    assert "MMkt, repo, FTP, par and" in text
+
+
+def test_script_never_maps_a_bloomberg_description_into_a_typed_enum() -> None:
+    """The five profile/derivation-owned reference fields must be seeded null
+    from a Bloomberg lookup, never from bond_master_raw's description strings."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    seeded = text[text.index("bond_reference_data_universe: [") :]
+    seeded = seeded[: seeded.index("],")]
+    for field in (
+        "day_count",
+        "bond_type",
+        "ex_dividend_days",
+        "last_coupon_date",
+        "status",
+    ):
+        assert f"{field}: null," in seeded, f"{field} is not seeded null from a lookup"
+    # And the prohibited coercions appear nowhere at all.
+    assert "ACT_ACT_ISDA" not in text
+    assert "FIXED_COUPON_BULLET" not in text
+
+
+def test_price_gate_is_wired_to_the_real_builder_validation_route() -> None:
+    """Requirement 5: Price enablement asks the server's typed builder, and a
+    structurally complete form alone never enables it."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "/api/case/validate" in text
+    assert 'builderValidation.state === "ready"' in text

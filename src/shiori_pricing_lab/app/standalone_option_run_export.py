@@ -81,6 +81,17 @@ alongside. Nothing here rescales, rounds, re-signs, or re-derives a Greek;
 a ``FAILED`` run's Greeks are all ``None`` and render as ``not available``,
 exactly like its premium fields already do.
 
+**Trader override provenance (Issue #143).** JSON export needs no change --
+``json.dumps(display, ...)`` already serializes a
+``"trader_override_provenance"`` key verbatim if the display dict carries
+one. Markdown export adds one conditional ``## Trader Override Provenance``
+section, included only when that key is present and non-empty, listing each
+override's field, case path, value, source system, basis, the reason Shiori
+could not source it, and the Bloomberg acquisition event the run is anchored
+to. The browser attaches this key to the display dict it sends to the export
+routes; no pricing function produces it, and a run without overrides exports
+exactly as before.
+
 **No system clock, no quote ID, no version, no hidden metadata.** Neither
 function reads the clock or generates an identifier; the only content is
 what ``display`` already carries.
@@ -271,6 +282,23 @@ _LIVE_BLOOMBERG_QUOTE_DISCLAIMER = (
     "refreshed -- curve, forward, volatility, credit-spread, and other market "
     "inputs remain from the case JSON. This is a current-run mixed-provenance "
     "calculation, not a historical replay."
+)
+
+_TRADER_OVERRIDE_PROVENANCE_FIELDS = (
+    ("Field", "field"),
+    ("Case path", "path"),
+    ("Value", "value"),
+    ("Source system", "source_system"),
+    ("Basis", "basis"),
+    ("Reason it could not be sourced", "reason_not_sourced"),
+    ("Run anchored to Bloomberg acquisition", "run_acquired_at"),
+)
+
+_TRADER_OVERRIDE_PROVENANCE_DISCLAIMER = (
+    "Every value below was entered by the trader because Shiori has no approved "
+    "source for it. Each entry records the reason it could not be sourced and the "
+    "Bloomberg acquisition event this run is anchored to. These are trader "
+    "overrides, never observed market data."
 )
 
 _SOLVER_DIAGNOSTICS_FIELDS = (
@@ -519,6 +547,19 @@ def render_standalone_run_as_markdown(display: dict) -> str:
         for label, key in _LIVE_BLOOMBERG_QUOTE_FIELDS:
             lines.append(f"- **{label}:** {_fmt(display['live_bloomberg_quote'].get(key))}")
         lines.append("")
+
+    overrides = display.get("trader_override_provenance")
+    if overrides:
+        lines.append("## Trader Override Provenance")
+        lines.append("")
+        lines.append(f"> {_TRADER_OVERRIDE_PROVENANCE_DISCLAIMER}")
+        lines.append("")
+        for record in overrides:
+            lines.append(f"### {_fmt(record.get('field'))}")
+            lines.append("")
+            for label, key in _TRADER_OVERRIDE_PROVENANCE_FIELDS:
+                lines.append(f"- **{label}:** {_fmt(record.get(key))}")
+            lines.append("")
 
     if "benchmark" in display:
         lines.extend(_section("Benchmark", display["benchmark"], _BENCHMARK_FIELDS))

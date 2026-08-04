@@ -396,14 +396,36 @@ def test_api_case_bloomberg_matches_direct_call_to_the_existing_bloomberg_workfl
     assert status == 200
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
-    _, _, _, expected_display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        _,
+        _,
+        _,
+        expected_display,
+        expected_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case,
         bloomberg_security=_BLOOMBERG_SECURITY,
         quote_side=TreasuryFTPQuoteSide.MID,
     )
-    assert payload == expected_display
-    assert payload["live_bloomberg_quote"]["refreshed_scope"] == "BOND_QUOTE_ONLY"
-    assert payload["live_bloomberg_quote"]["other_market_inputs"] == "CASE_JSON_UNCHANGED"
+    # The route returns the envelope it actually priced alongside the display,
+    # so a client adopts a priced case instead of assembling one (Issue #143).
+    assert payload == {"case": expected_case, "display": expected_display}
+    display = payload["display"]
+    assert display["live_bloomberg_quote"]["refreshed_scope"] == "BOND_QUOTE_ONLY"
+    assert display["live_bloomberg_quote"]["other_market_inputs"] == "CASE_JSON_UNCHANGED"
+
+    # The returned case is the overlaid case with exactly the two documented
+    # substitutions -- nothing else moved, and nothing was invented.
+    priced_case = payload["case"]
+    assert priced_case["pricing_timestamp"] == display["live_bloomberg_quote"]["acquired_at"]
+    assert (
+        priced_case["bond_quote"]["clean_price_per_100"]
+        == display["live_bloomberg_quote"]["clean_price_per_100"]
+    )
+    unchanged = {k: v for k, v in priced_case.items()
+                 if k not in ("bond_quote", "pricing_timestamp")}
+    assert unchanged == {k: v for k, v in overlaid_case.items()
+                         if k not in ("bond_quote", "pricing_timestamp")}
 
 
 @_QUANTLIB_SKIP
@@ -939,3 +961,90 @@ def test_export_helpers_write_no_files(monkeypatch) -> None:
 
     assert json_result["content"] == render_standalone_run_as_json(display)
     assert markdown_result["content"] == render_standalone_run_as_markdown(display)
+
+
+# --- POST /api/case/validate: the real typed builder decides (Issue #143) -----
+
+
+def test_validate_case_accepts_the_bundled_base_case() -> None:
+    assert server_module.validate_case(load_base_case()) == {"ready": True, "error": None}
+
+
+def test_validate_case_runs_the_real_builder_and_prices_nothing(monkeypatch) -> None:
+    """Requirement 5/6: validation must be the *same* typed builder the pricing
+    call uses, and must not reach the engine."""
+
+    calls: list[object] = []
+    real_builder = server_module.build_request_from_standalone_option_case
+
+    def _spy(case):
+        calls.append(case)
+        return real_builder(case)
+
+    monkeypatch.setattr(server_module, "build_request_from_standalone_option_case", _spy)
+
+    def _explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("validation must not price")
+
+    monkeypatch.setattr(server_module, "price_standalone_option_case", _explode)
+
+    base_case = load_base_case()
+    assert server_module.validate_case(base_case)["ready"] is True
+    assert calls == [base_case]
+
+
+def test_validate_case_reports_an_unknown_top_level_key_verbatim() -> None:
+    case = {**load_base_case(), "surprise_key": 1}
+    result = server_module.validate_case(case)
+    assert result["ready"] is False
+    assert "unknown top-level key" in result["error"]
+    assert "surprise_key" in result["error"]
+
+
+def test_validate_case_reports_a_missing_required_value_verbatim() -> None:
+    case = load_base_case()
+    case["bond_option"] = {**case["bond_option"], "strike_price": None}
+    result = server_module.validate_case(case)
+    assert result["ready"] is False
+    assert "strike_price is required" in result["error"]
+
+
+def test_validate_case_reports_standalone_eligibility_rejection() -> None:
+    """A structurally complete but route-ineligible bond is exactly the case a
+    front-end 'is every field non-blank' check would wave through."""
+
+    case = load_base_case()
+    universe = [dict(record) for record in case["bond_reference_data_universe"]]
+    universe[0]["callable_flag"] = True
+    case["bond_reference_data_universe"] = universe
+
+    result = server_module.validate_case(case)
+    assert result["ready"] is False
+    assert "FOUND_INELIGIBLE" in result["error"]
+    assert "callable" in result["error"]
+
+
+def test_api_case_validate_returns_ready_for_a_valid_case(server_url: str) -> None:
+    status, payload = _post_json(f"{server_url}/api/case/validate", load_base_case())
+    assert status == 200
+    assert payload == {"ready": True, "error": None}
+
+
+def test_api_case_validate_returns_http_200_with_ready_false_for_a_bad_case(
+    server_url: str,
+) -> None:
+    """A draft the builder rejects is a normal outcome while the trader is still
+    completing the ticket -- never a bridge error."""
+
+    case = load_base_case()
+    case["bond_option"] = {**case["bond_option"], "notional": -5.0}
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+    assert status == 200
+    assert payload["ready"] is False
+    assert "notional must be positive" in payload["error"]
+
+
+def test_api_case_validate_rejects_a_malformed_body(server_url: str) -> None:
+    status, payload = _post_bytes(f"{server_url}/api/case/validate", b"{not json")
+    assert status == 400
+    assert "invalid JSON body" in payload["error"]

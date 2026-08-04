@@ -700,6 +700,7 @@ def render_standalone_option_workbench_page() -> None:
                 _result,
                 _live_quote,
                 display,
+                _bloomberg_case,
             ) = price_standalone_option_case_with_bloomberg_quote(
                 case_text,
                 bloomberg_security=bloomberg_security_text,

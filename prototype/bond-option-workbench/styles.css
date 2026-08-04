@@ -153,7 +153,7 @@ html, body {
    first Bloomberg mismatch gating (script.js syncBondGating) hides. */
 .instr-header[hidden],
 .workspace[hidden],
-.instrument-details[hidden] {
+.unresolved-dependency[hidden] {
   display: none;
 }
 
@@ -240,15 +240,10 @@ html, body {
 .workspace {
   display: grid;
   grid-template-columns: 470px 1fr;
-  grid-template-rows: auto auto;
   gap: 12px;
 }
-.option-terms { grid-column: 1; grid-row: 1 / span 2; padding: 12px 18px; }
-.pricing-results { grid-column: 2; grid-row: 1; padding: 14px 20px; }
-.right-bottom {
-  grid-column: 2; grid-row: 2;
-  display: grid; grid-template-columns: 330px 1fr; gap: 12px;
-}
+.option-terms { grid-column: 1; grid-row: 1; padding: 12px 18px; }
+.pricing-results { grid-column: 2; grid-row: 1; padding: 14px 20px; align-self: start; }
 
 /* ---------- Option terms form ---------- */
 .option-terms .card-head { margin-bottom: 9px; }
@@ -280,47 +275,15 @@ html, body {
 /* ---------- Pricing results ---------- */
 .pricing-results .card-head { margin-bottom: 12px; }
 .pr-row { display: grid; padding: 12px 0; }
-.pr-row.r1 { grid-template-columns: repeat(4, 1fr); padding-top: 0; }
-.pr-row.r2 { grid-template-columns: repeat(4, 1fr); border-top: 1px solid #eef0f4; }
-.pr-row.r3 { grid-template-columns: repeat(5, 1fr); border-top: 1px solid #eef0f4; padding-bottom: 0; }
+.pr-row.r1 { grid-template-columns: repeat(3, 1fr); padding-top: 0; }
+.pr-row.r2 { grid-template-columns: repeat(4, 1fr); border-top: 1px solid #eef0f4; padding-bottom: 0; }
 .pr-cell .p-lbl { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
 .pr-cell .p-val { font-size: 25px; font-weight: 700; color: var(--text-strong); line-height: 1.05; letter-spacing: -0.4px; }
 .pr-cell .p-val.teal { color: var(--teal); }
 .pr-cell .p-sub { font-size: 12.5px; color: var(--muted-2); margin-top: 3px; }
 .pr-row.r2 .p-val { font-size: 20px; }
 .pr-row.r2 .p-val.warn { color: var(--orange); }
-.pr-row.r3 .p-lbl { font-size: 12.5px; }
-.pr-row.r3 .p-val { font-size: 18px; }
-
-/* ---------- Forward & carry ---------- */
-.forward-carry { padding: 13px 18px; }
-.forward-carry .card-head { margin-bottom: 13px; }
-.fc-row { display: grid; grid-template-columns: 118px 1fr; align-items: center; gap: 10px; margin-bottom: 12px; }
-.fc-row > label { font-size: 14px; color: #4b5563; }
-.fc-carry { display: grid; grid-template-columns: 96px 1fr; gap: 8px; }
-.value-box {
-  border: 1px solid var(--field-border); border-radius: 7px; background: #fff;
-  padding: 6px 10px; display: flex; flex-direction: column; line-height: 1.2;
-}
-.value-box .vb-main { font-size: 15px; font-weight: 600; color: var(--text-strong); }
-.value-box .vb-sub { font-size: 11.5px; color: var(--muted-2); }
-.fc-rate { display: grid; grid-template-columns: 70px 1fr auto; gap: 8px; align-items: center; }
-
-/* ---------- Underlying snapshot ---------- */
-.underlying { padding: 13px 18px; display: flex; flex-direction: column; }
-.underlying .card-head { margin-bottom: 11px; }
-.us-body { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
-.us-list { display: flex; flex-direction: column; gap: 8px; }
-.us-item { display: flex; justify-content: space-between; font-size: 13px; }
-.us-item .u-k { color: var(--muted); }
-.us-item .u-v { color: var(--text-strong); font-weight: 600; }
-.us-item .u-v .u-extra { color: var(--muted-2); font-weight: 400; margin-left: 6px; }
-.chart-wrap { display: flex; flex-direction: column; }
-.chart-title { font-size: 12.5px; color: var(--muted); text-align: center; margin-bottom: 6px; }
-.chart-area { display: flex; }
-
-/* ---------- Instrument details: Bloomberg Bond Master ---------- */
-.instrument-details { padding: 10px 22px; }
+/* ---------- Bloomberg Bond Master (Advanced, read-only) ---------- */
 .collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
 /* auto-fit rather than a fixed column count: this grid holds five blocks
    (Bloomberg Bond Master has more line items than the old placeholder
@@ -375,18 +338,12 @@ html, body {
    placeholder would render with the real-value styling it is standing in
    for (large/bold/dark), which defeats the point of a placeholder. */
 .stat .s-val.pending-value,
-.us-item .u-v.pending-value,
 .id-block .i-v.pending-value {
   font-size: 12.5px;
   font-weight: 500;
   font-style: italic;
   color: var(--muted-2);
   letter-spacing: normal;
-}
-.chart-pending {
-  align-items: center;
-  justify-content: center;
-  height: 132px;
 }
 input.control {
   font-family: inherit;
@@ -409,12 +366,17 @@ input.control:focus {
 /* ---------- Underlying Bond: instrument-first Bloomberg lookup ---------- */
 .underlying-bond { padding: 12px 18px; }
 .underlying-bond .card-head { margin-bottom: 9px; }
+/* Flex rather than a fixed grid: the two lookup actions sit at their natural
+   width beside the two sized controls, instead of a trailing `auto` track
+   stretching "Bloomberg Load" across the whole card. */
 .underlying-bond-controls {
-  display: grid;
-  grid-template-columns: 320px 260px auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
 }
+.underlying-bond-controls .form-row:first-child { width: 320px; }
+.underlying-bond-controls .form-row:nth-child(2) { width: 260px; }
 /* Overrides the base .form-row's fixed 146px label column -- "Quote Side"
    and "Bond Identifier" are shorter labels than the Option Terms panel's,
    and the 3-way toggle needs the room a fixed 146px label would otherwise
@@ -437,71 +399,6 @@ input.control:focus {
 .rb-item .rb-v { font-size: 13.5px; color: var(--text-strong); font-weight: 600; }
 .rb-item.rb-name { grid-column: 1 / -1; }
 
-.draft-incomplete-note {
-  margin-top: 12px;
-  background: #fff4e5;
-  border: 1px solid #f3d9ae;
-  color: #8a5a00;
-  font-size: 12.5px;
-  border-radius: 7px;
-  padding: 8px 12px;
-}
-.remaining-input-summary {
-  font-size: 14px;
-  font-weight: 700;
-}
-.missing-categories {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 8px 0;
-}
-.missing-category-badge {
-  display: inline-flex;
-  align-items: center;
-  background: #fce9c9;
-  border: 1px solid #eec97a;
-  color: #7a5300;
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: 999px;
-  padding: 3px 10px;
-}
-.draft-incomplete-note .collapse-toggle { color: #8a5a00; }
-.missing-fields-list {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  columns: 2;
-  column-gap: 24px;
-  max-height: 180px;
-  overflow-y: auto;
-}
-.missing-fields-list li {
-  font-size: 12px;
-  line-height: 1.6;
-}
-.missing-field-link {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: #765000;
-  cursor: pointer;
-  font: inherit;
-  line-height: inherit;
-  padding: 0;
-  text-align: left;
-  text-decoration: underline;
-  text-decoration-color: #d3a84f;
-  text-underline-offset: 2px;
-}
-.missing-field-link:hover,
-.missing-field-link:focus {
-  color: var(--blue);
-  outline: none;
-  text-decoration-color: var(--blue);
-}
-
-.underlying-bond-actions { margin-top: 12px; }
 
 /* ---------- Manual completion sections (Issue #143) ---------- */
 /* Full-width rows inside the two-column workspace grid: the trader-entry
@@ -618,3 +515,153 @@ select.control:focus { border-color: var(--blue); }
 .curve-coverage { font-size: 12px; line-height: 1.5; color: var(--muted); }
 .curve-coverage.is-blocking { color: #b3401f; font-weight: 500; }
 .curve-coverage.is-covered { color: var(--green); font-weight: 500; }
+
+/* ---------- Minimum-input trader workflow (Issue #143) ---------- */
+
+/* Step numbers on the three main-screen stages, so the ordinary workflow
+   reads as a short sequence rather than a form to be filled top to bottom. */
+.step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--blue-soft-bg);
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+/* Sourced values are read-only by default; this says so once, where the
+   sourced block starts, instead of repeating it on every row. */
+.sourced-banner {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 9px;
+}
+
+/* ---------- The one unresolved dependency ---------- */
+/* Requirement 4: exactly one blocker is explained at a time -- what is
+   missing, why, what Bloomberg actually answered, and the next step -- so a
+   trader never faces a screen of unexplained blank fields. Remaining
+   outstanding groups are named compactly beneath it, never hidden. */
+.unresolved-dependency {
+  padding: 12px 18px;
+  background: #fff8ec;
+  border-color: #f0d6a4;
+}
+.ud-head { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.ud-flag {
+  display: inline-flex;
+  align-items: center;
+  background: #f6e0b4;
+  color: #7a5300;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.ud-title { font-size: 15px; font-weight: 700; color: #6d4a00; }
+.ud-grid {
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  gap: 5px 16px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.ud-grid dt { color: #8a5a00; font-weight: 600; }
+.ud-grid dd { color: #4a3a1c; }
+.ud-actions { display: flex; align-items: center; gap: 14px; margin-top: 11px; }
+.ud-also { font-size: 12px; color: #8a5a00; }
+
+/* ---------- One expiry interaction ---------- */
+/* Date, local time of day and the explicit UTC offset compose both
+   bond_option.expiry_date and expiry_timestamp. Nothing about a market
+   close, timezone, holiday or business-day roll is ever inferred. */
+.expiry-row { align-items: start; }
+.expiry-row > label { margin-top: 7px; }
+.expiry-controls { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
+.expiry-offset { text-align: center; }
+.derived-source.is-invalid { color: #b3401f; }
+
+/* ---------- Market inputs review ---------- */
+/* Forward, Vol and Discounting each get one review row stating its real
+   sourcing status, the Bloomberg evidence behind it, and the provenance of
+   whatever the trader supplied. */
+.market-review .card-body { display: flex; flex-direction: column; gap: 10px; }
+.review-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: #fcfcfd;
+}
+.review-head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+.review-name { font-size: 13.5px; font-weight: 700; color: var(--text-strong); }
+.review-status {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.review-status.is-outstanding { background: #fce9c9; border: 1px solid #eec97a; color: #7a5300; }
+.review-status.is-reviewed { background: #e4f6ed; border: 1px solid #a9dcc4; color: #14724a; }
+.review-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.review-control > label { font-size: 13px; color: #4b5563; min-width: 190px; }
+.review-control .control { width: 190px; }
+.review-control .vol-basis { width: 220px; }
+.review-readout { font-size: 12.5px; color: #4b5563; flex: 1 1 auto; }
+.review-note { font-size: 11.5px; line-height: 1.5; color: var(--muted); }
+.review-provenance { font-size: 11.5px; line-height: 1.5; color: var(--muted-2); margin-top: 3px; }
+
+/* ---------- Advanced ---------- */
+/* Collapsed by default. Everything the reviewed contract needs but a trader
+   should not be asked for on the main screen lives here: profile-owned and
+   derivation-owned overrides, the curve editor, read-only derived values,
+   the Bloomberg Bond Master, and the override provenance log. */
+.advanced-card .card-body { display: flex; flex-direction: column; gap: 16px; }
+/* Both bodies above set an explicit `display`, which ties the UA stylesheet's
+   `[hidden] { display: none }` rule in specificity and (as the later, author
+   rule) wins -- silently defeating `el.hidden = true`. Same class of bug the
+   .instr-header/.workspace/.id-grid overrides earlier in this file fix. */
+.market-review .card-body[hidden],
+.advanced-card .card-body[hidden] { display: none; }
+.adv-block { border-top: 1px solid #eef0f4; padding-top: 12px; }
+.adv-block:first-child { border-top: 0; padding-top: 0; }
+.adv-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #55607a;
+  margin-bottom: 8px;
+}
+
+/* ---------- Override provenance log ---------- */
+.provenance-log { list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.provenance-entry {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: #f7f8fa;
+}
+.provenance-entry-head { font-size: 12.5px; font-weight: 600; color: var(--text-strong); }
+.provenance-entry-meta {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.provenance-empty { font-size: 12px; color: var(--muted-2); font-style: italic; }
+.provenance-empty[hidden] { display: none; }

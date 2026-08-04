@@ -1165,7 +1165,13 @@ def test_only_bond_quote_and_pricing_timestamp_are_replaced_everything_else_equa
     envelope = _example_envelope()
     reference_request = build_request_from_standalone_option_case(envelope)
 
-    request, _result, live_quote, _display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        request,
+        _result,
+        live_quote,
+        _display,
+        _priced_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         envelope,
         bloomberg_security=_BLOOMBERG_SECURITY,
         quote_side=TreasuryFTPQuoteSide.MID,
@@ -1198,7 +1204,13 @@ def test_live_pricing_timestamp_equals_acquired_at(monkeypatch):
     _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
-    request, _result, _live_quote, display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        request,
+        _result,
+        _live_quote,
+        display,
+        _priced_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
     )
 
@@ -1213,7 +1225,13 @@ def test_case_as_of_timestamp_stays_unchanged(monkeypatch):
     _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
-    request, _result, _live_quote, display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        request,
+        _result,
+        _live_quote,
+        display,
+        _priced_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
     )
 
@@ -1327,7 +1345,13 @@ def test_price_only_mode_result_matches_manually_swapped_reference(monkeypatch):
     _install_fixed_clock(monkeypatch)
     envelope = _example_envelope()
 
-    request, result, returned_quote, display = price_standalone_option_case_with_bloomberg_quote(
+    (
+        request,
+        result,
+        returned_quote,
+        display,
+        priced_case,
+    ) = price_standalone_option_case_with_bloomberg_quote(
         envelope, bloomberg_security=_BLOOMBERG_SECURITY, quote_side=TreasuryFTPQuoteSide.MID
     )
 

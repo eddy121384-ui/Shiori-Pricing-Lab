@@ -59,6 +59,14 @@ the browser holds whichever case is currently active and resends it):
   ``case`` (never the bundled one) and prices it, returning the display
   dict verbatim -- the explicit-case counterpart of ``/api/price`` for a
   page that has loaded a case other than the bundled default.
+- ``POST /api/case/validate`` (Issue #143) -- body is one full case dict.
+  Runs ``build_request_from_standalone_option_case`` and nothing else, then
+  discards the request: no pricing, no engine, no clock, no Bloomberg call.
+  Returns ``{"ready": true, "error": null}`` on HTTP 200 when the reviewed
+  typed builder accepts the draft, and ``{"ready": false, "error": "..."}``
+  -- also HTTP 200 -- when it does not, carrying that exception's own
+  message verbatim. This is what decides whether the browser's Price button
+  is enabled, so a merely non-blank form can never enable it.
 - ``POST /api/export/json`` / ``POST /api/export/markdown`` -- body is
   ``{"display": <the already-computed display dict>}``. Returns
   ``{"content": <text>, "filename": ..., "mime": ...}`` where ``content`` is
@@ -76,8 +84,10 @@ the browser holds whichever case is currently active and resends it):
   ``price_standalone_option_case_with_bloomberg_quote`` exactly once -- the
   expected ISIN always comes from the (overlaid) case's own
   ``bond_option.underlying_isin``, never from a separately supplied value.
-  Returns the display dict verbatim, including its ``live_bloomberg_quote``
-  section, on HTTP 200. Any validation, date, Bloomberg DAPI, or builder
+  Returns ``{"case": <the envelope that was actually priced>, "display":
+  <the display dict, including its ``live_bloomberg_quote`` section>}`` on
+  HTTP 200 -- mirroring ``POST /api/case``, so a client adopts a priced case
+  instead of assembling one. Any validation, date, Bloomberg DAPI, or builder
   failure returns HTTP 400 with ``{"error": "..."}`` -- the case's own
   previous bond quote is never used as a fallback, and this route reprices
   fresh from Bloomberg every call (no cache, no polling).
@@ -135,6 +145,7 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
 from shiori_pricing_lab.app.standalone_option_workbench import (
+    build_request_from_standalone_option_case,
     price_standalone_option_case,
     price_standalone_option_case_with_bloomberg_quote,
 )
@@ -208,7 +219,18 @@ DEFAULT_PORT = 8765
 # Option Discount Curve node editor), and POST /api/case now normalizes
 # offset-aware datetime instants to UTC at the contract boundary. A stale
 # already-running process must not be reused and keep serving the old page.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v7"
+#
+# Bumped to -v8 for Issue #143's minimum-input trader workflow: POST
+# /api/case/validate is a new route (the Price gate now asks the real typed
+# builder, not the browser's own form state), and the served page was
+# restructured into nine ordinary workflow groups plus one collapsed Advanced
+# section. A stale process predating either change must not be reused.
+#
+# Bumped to -v9: POST /api/case/bloomberg now returns {"case", "display"}
+# rather than the bare display dict, so the browser adopts the envelope that
+# was actually priced instead of reassembling it. A stale process would still
+# return the old shape, and the page would read `payload.display` as undefined.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v9"
 
 
 def load_base_case() -> dict:
@@ -294,6 +316,33 @@ def price_uploaded_case(case: dict) -> dict:
     }
 
 
+def validate_case(case: dict) -> dict:
+    """Return ``{"ready": bool, "error": str | None}`` for ``case``.
+
+    Issue #143 requirement 5: whether Price is enabled must be decided by the
+    real typed builder and route validation, never by whether the browser's
+    own form fields happen to be non-empty. This route runs exactly
+    :func:`build_request_from_standalone_option_case` -- the same envelope
+    parsing, the same typed constructors, the same ISIN resolver, and the
+    same ``is_standalone_bond_reference_data_eligible`` gate the real pricing
+    call runs -- and then throws the request away. It prices nothing, calls
+    no engine, reads no clock, and makes no Bloomberg call, so it is safe to
+    call while the trader is still typing.
+
+    A successful build returns ``{"ready": True, "error": None}``. Any
+    envelope / schema / builder failure is reported as
+    ``{"ready": False, "error": <that exception's own message>}`` -- verbatim,
+    never reinterpreted or replaced with a friendlier guess, so the browser
+    shows the reviewed contract's own words.
+    """
+
+    try:
+        build_request_from_standalone_option_case(case)
+    except Exception as exc:  # noqa: BLE001
+        return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ready": True, "error": None}
+
+
 def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     """Apply ``overlay`` to a fresh copy of ``case`` (not the bundled one) and price it.
 
@@ -323,8 +372,18 @@ def price_case_with_bloomberg_quote(
     ever substituted here. The expected ISIN the loader verifies against
     always comes from the (overlaid) case's own
     ``bond_option.underlying_isin``; this function accepts no separate
-    expected-ISIN input. Returns the display dict verbatim, including its
-    ``live_bloomberg_quote`` section. Raises whatever
+    expected-ISIN input.
+
+    Returns ``{"case": <the envelope that was actually priced>, "display":
+    <the display dict, including its ``live_bloomberg_quote`` section>}``.
+    The case is the one the pricing workflow itself built and priced -- the
+    only place the live quote and the acquisition timestamp are substituted --
+    and is never reassembled here or by the browser (Issue #143, Codex review
+    round 4). A client that adopts it cannot end up holding a case that
+    differs from the one behind the result it is showing. This mirrors
+    ``POST /api/case``, which already returns the case beside its display.
+
+    Raises whatever
     ``price_standalone_option_case_with_bloomberg_quote`` itself raises for
     a blank security, invalid quote side, envelope/date problem, or
     Bloomberg DAPI failure -- never caught or remapped here, and the case's
@@ -332,10 +391,10 @@ def price_case_with_bloomberg_quote(
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
-    _, _, _, display = price_standalone_option_case_with_bloomberg_quote(
+    _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case, bloomberg_security=bloomberg_security, quote_side=quote_side
     )
-    return display
+    return {"case": priced_case, "display": display}
 
 
 def _shiori_acquisition_now() -> datetime:
@@ -502,6 +561,17 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, display)
 
+    def _handle_api_case_validate(self, raw_body: bytes) -> None:
+        try:
+            case = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        # A draft the builder rejects is a normal, expected outcome while the
+        # trader is still completing the ticket -- it is reported as
+        # ``ready: false`` on HTTP 200, never as a bridge error.
+        self._write_json(200, validate_case(case))
+
     def _handle_api_case_bloomberg(self, raw_body: bytes) -> None:
         try:
             body = json.loads(raw_body)
@@ -580,6 +650,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/price": _handle_api_price,
         "/api/case": _handle_api_case,
         "/api/case/price": _handle_api_case_price,
+        "/api/case/validate": _handle_api_case_validate,
         "/api/case/bloomberg": _handle_api_case_bloomberg,
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
         "/api/export/json": _handle_api_export_json,

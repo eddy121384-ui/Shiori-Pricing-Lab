@@ -30,14 +30,17 @@ schema concern, reported separately; nothing here modifies it.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
+import typing
 from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from shiori_pricing_lab.app import standalone_option_ui as ui_module
+from shiori_pricing_lab.app import standalone_option_workbench as workbench_module
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_json,
     render_standalone_run_as_markdown,
@@ -1101,7 +1104,7 @@ def _bloomberg_price_only_stub_script(calls: list, display: dict) -> None:
                 "quote_side": quote_side,
             }
         )
-        return None, None, None, display
+        return None, None, None, display, None
 
     def _fail_benchmark(*args, **kwargs):
         raise AssertionError("benchmark workflow must not be called in price-only mode")
@@ -1244,3 +1247,47 @@ def test_ui_source_has_no_source_as_of_or_live_retrieved_at_bloomberg_controls()
     source = inspect.getsource(ui_module)
     assert "source_as_of (must equal" not in source
     assert "bloomberg_source_as_of_text" not in source
+
+
+# --- 28. UI unpack sites match the headless workflow return contracts -------------
+
+
+_HEADLESS_WORKFLOW_NAMES = (
+    "price_standalone_option_case",
+    "price_standalone_option_case_with_benchmark",
+    "price_standalone_option_case_with_bloomberg_quote",
+    "price_standalone_option_case_with_bloomberg_quote_and_benchmark",
+)
+
+
+def _ui_unpack_arities() -> dict[str, list[int]]:
+    """Target counts of every ``... = <headless workflow>(...)`` assignment in the UI."""
+
+    tree = ast.parse(inspect.getsource(ui_module))
+    arities: dict[str, list[int]] = {name: [] for name in _HEADLESS_WORKFLOW_NAMES}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        called = node.value.func
+        if not isinstance(called, ast.Name) or called.id not in arities:
+            continue
+        (target,) = node.targets
+        arities[called.id].append(len(target.elts) if isinstance(target, ast.Tuple) else 1)
+    return arities
+
+
+def test_ui_unpacks_every_headless_workflow_with_its_declared_return_arity():
+    # The mode-combination stubs above return whatever this file's author
+    # typed, so they cannot catch a workflow whose returned tuple grew or
+    # shrank -- the UI would raise "too many values to unpack" only in a real
+    # run. Bind the UI's unpack sites to the real functions' declared return
+    # contracts instead. This is static (no pricing, no BLI construction), so
+    # it stays inside the isolation strategy described in the module docstring.
+    arities = _ui_unpack_arities()
+    for name in _HEADLESS_WORKFLOW_NAMES:
+        workflow = getattr(workbench_module, name)
+        declared = len(typing.get_args(typing.get_type_hints(workflow)["return"]))
+        assert arities[name], f"the UI never calls {name}"
+        assert arities[name] == [declared] * len(arities[name]), (
+            f"{name} returns {declared} values but the UI unpacks {arities[name]}"
+        )
