@@ -1,0 +1,62 @@
+name: Align PR 158 browser regressions
+
+on:
+  push:
+    branches:
+      - "claude/ust-bloomberg-auto-fields-ljkqsk"
+
+permissions:
+  contents: write
+
+jobs:
+  align:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "claude/ust-bloomberg-auto-fields-ljkqsk"
+          fetch-depth: 0
+
+      - name: Align the five stale browser expectations
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+          import ast
+          import json
+          from pathlib import Path
+
+          target = Path('tests/test_standalone_option_workbench_prototype_browser.py')
+          source = target.read_text(encoding="utf-8")
+          replacements = json.loads('{"test_gilt_shaped_regular_grid_bond_prices_end_to_end_through_the_real_engine": "@_PLAYWRIGHT_SKIP\\n@_QUANTLIB_SKIP\\ndef test_gilt_shaped_regular_grid_bond_is_refused_by_the_selected_ust_profile(\\n    server_url, page\\n) -> None:\\n    \\\"\\\"\\\"A Gilt can still be resolved and displayed, but the browser\'s explicitly\\n    selected UST convention profile must refuse it before builder validation.\\n\\n    Manually completing the ticket cannot turn that profile refusal into a\\n    priceable run.\\n    \\\"\\\"\\\"\\n\\n    page.goto(f\\\"{server_url}/\\\")\\n    _load_bloomberg_bond(\\n        page, identifier=\\\"GB00BFX0ZL78\\\", response=_gilt_lookup_response()\\n    )\\n    _wait_for_ust_profile(page)\\n\\n    assert page.inner_text(\\\"#resolved-bond-name\\\") == \\\"UNITED KINGDOM GILT\\\"\\n    assert page.inner_text(\\\"#resolved-bond-currency\\\") == \\\"GBP\\\"\\n    profile = _ust_profile(page)\\n    assert profile[\\\"supported\\\"] is False\\n    assert any(\\\"is not USD\\\" in reason for reason in profile[\\\"rejection_reasons\\\"])\\n\\n    _complete_draft(page, strike=\\\"95.50\\\", forward=\\\"96.05\\\", last_coupon_date=\\\"2028-04-22\\\")\\n    page.wait_for_timeout(250)\\n\\n    assert page.evaluate(\\\"() => window.__shioriTestBuilderValidationState()\\\") == \\\"unknown\\\"\\n    assert _is_disabled(page, \\\"#price-btn\\\")\\n    assert _is_disabled(page, \\\"#bloomberg-refresh-btn\\\")\\n    page.click(\\\"#advanced-head\\\")\\n    status = page.inner_text(\\\"#ust-profile-status\\\").lower()\\n    assert \\\"does not fit the selected ust convention profile\\\" in status\\n    assert \\\"changing advanced fields cannot make this ticket price\\\" in status\\n", "test_a_gilt_with_a_real_world_stub_schedule_fails_truthfully_rather_than_pricing": "@_PLAYWRIGHT_SKIP\\n@_QUANTLIB_SKIP\\ndef test_a_gilt_stub_schedule_cannot_bypass_the_selected_ust_profile(\\n    server_url, page\\n) -> None:\\n    \\\"\\\"\\\"A non-UST ticket never reaches either pricing route merely because the\\n    trader manually fills every Advanced field.\\\"\\\"\\\"\\n\\n    page.goto(f\\\"{server_url}/\\\")\\n    _load_bloomberg_bond(\\n        page,\\n        identifier=\\\"GB00BFX0ZL78\\\",\\n        response=_gilt_lookup_response(bond_master=_GILT_STUB_BOND_MASTER),\\n    )\\n    _wait_for_ust_profile(page)\\n    _complete_draft(page, strike=\\\"95.50\\\", forward=\\\"96.05\\\", last_coupon_date=\\\"2028-04-22\\\")\\n    page.wait_for_timeout(250)\\n\\n    priced: list = []\\n    refreshed: list = []\\n    page.route(\\\"**/api/case\\\", lambda route: priced.append(route))\\n    page.route(\\\"**/api/case/bloomberg\\\", lambda route: refreshed.append(route))\\n    page.dispatch_event(\\\"#price-btn\\\", \\\"click\\\")\\n    page.dispatch_event(\\\"#bloomberg-refresh-btn\\\", \\\"click\\\")\\n    page.wait_for_timeout(250)\\n\\n    assert priced == []\\n    assert refreshed == []\\n    assert page.evaluate(\\\"() => window.__shioriTestBuilderValidationState()\\\") == \\\"unknown\\\"\\n    assert _is_disabled(page, \\\"#price-btn\\\")\\n    assert _is_disabled(page, \\\"#bloomberg-refresh-btn\\\")\\n    assert page.inner_text(\\\"#price-total\\\") == \\\"—\\\"\\n    assert page.inner_text(\\\"#greek-delta\\\") == \\\"—\\\"\\n", "test_price_gate_is_decided_by_the_real_typed_builder_not_by_non_blank_fields": "@_PLAYWRIGHT_SKIP\\n@_QUANTLIB_SKIP\\ndef test_callable_ust_is_stopped_by_the_profile_before_builder_validation(\\n    server_url, page\\n) -> None:\\n    \\\"\\\"\\\"The selected UST profile rejects a callable bond before the typed builder.\\n\\n    Even a structurally complete-looking form must not schedule validation or\\n    enable either pricing action after that refusal.\\n    \\\"\\\"\\\"\\n\\n    page.goto(f\\\"{server_url}/\\\")\\n    validation_calls: list = []\\n    page.route(\\\"**/api/case/validate\\\", lambda route: validation_calls.append(route))\\n    _load_bloomberg_bond(\\n        page,\\n        response=_treasury_lookup_response(\\n            bond_master={**_TREASURY_BOND_MASTER, \\\"callable_flag\\\": True}\\n        ),\\n    )\\n    _wait_for_ust_profile(page)\\n    _complete_draft(page)\\n    page.wait_for_timeout(300)\\n\\n    profile = _ust_profile(page)\\n    assert profile[\\\"supported\\\"] is False\\n    assert any(\\\"callable\\\" in reason.lower() for reason in profile[\\\"rejection_reasons\\\"])\\n    assert _unresolved_group_ids(page) == []\\n    assert validation_calls == []\\n    assert page.evaluate(\\\"() => window.__shioriTestBuilderValidationState()\\\") == \\\"unknown\\\"\\n    assert _is_disabled(page, \\\"#price-btn\\\")\\n    assert _is_disabled(page, \\\"#bloomberg-refresh-btn\\\")\\n    page.click(\\\"#advanced-head\\\")\\n    status = page.inner_text(\\\"#ust-profile-status\\\").lower()\\n    assert \\\"unsupported by the current pricing path\\\" in status\\n    assert \\\"callable\\\" in status\\n", "test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date": "@_PLAYWRIGHT_SKIP\\n@_QUANTLIB_SKIP\\ndef test_an_irregular_schedule_is_never_given_a_derived_last_coupon_date(\\n    server_url, page\\n) -> None:\\n    \\\"\\\"\\\"An irregular grid rejects all eight profile fields without erasing the\\n    Bloomberg Bond Master evidence that caused the refusal.\\\"\\\"\\\"\\n\\n    page.goto(f\\\"{server_url}/\\\")\\n    _load_bloomberg_bond(\\n        page,\\n        response=_treasury_lookup_response(\\n            bond_master={**_TREASURY_BOND_MASTER, \\\"issue_date\\\": \\\"2024-03-05\\\"}\\n        ),\\n    )\\n    _wait_for_ust_profile(page)\\n\\n    profile = _ust_profile(page)\\n    assert profile[\\\"supported\\\"] is False\\n    assert profile[\\\"fields\\\"] == []\\n    assert profile[\\\"unresolved_fields\\\"] == []\\n\\n    reference = _draft_reference(page)\\n    for field in (\\\"day_count\\\", \\\"bond_type\\\", \\\"ex_dividend_days\\\", \\\"last_coupon_date\\\", \\\"status\\\"):\\n        assert reference[field] is None\\n    assert reference[\\\"coupon\\\"] == 0.0375\\n    assert reference[\\\"issue_date\\\"] == \\\"2024-03-05\\\"\\n    assert reference[\\\"maturity_date\\\"] == \\\"2031-01-31\\\"\\n\\n    draft = page.evaluate(\\\"() => window.__shioriTestGetCurrentDraft()\\\")\\n    assert draft[\\\"reporting_date\\\"] is None\\n    assert draft[\\\"forward_settlement_date\\\"] is None\\n    assert draft[\\\"option_settlement_date\\\"] is None\\n    assert _field_provenance(page) == {}\\n\\n    page.click(\\\"#advanced-head\\\")\\n    status = page.inner_text(\\\"#ust-profile-status\\\")\\n    assert \\\"unsupported by the current pricing path\\\" in status\\n    assert \\\"editing last_coupon_date\\\" in status\\n    assert \\\"not resolved\\\" not in status\\n    assert _is_disabled(page, \\\"#price-btn\\\")\\n", "test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix": "@_PLAYWRIGHT_SKIP\\n@_QUANTLIB_SKIP\\ndef test_an_irregular_schedule_never_suggests_a_last_coupon_date_fix(\\n    server_url, page\\n) -> None:\\n    \\\"\\\"\\\"The refusal is actionable before manual entry, and manual completion\\n    cannot bypass it afterward.\\\"\\\"\\\"\\n\\n    page.goto(f\\\"{server_url}/\\\")\\n    _load_bloomberg_bond(\\n        page,\\n        response=_treasury_lookup_response(\\n            bond_master={**_TREASURY_BOND_MASTER, \\\"issue_date\\\": \\\"2024-03-05\\\"}\\n        ),\\n    )\\n    _wait_for_ust_profile(page)\\n\\n    profile = _ust_profile(page)\\n    assert profile[\\\"supported\\\"] is False\\n    assert profile[\\\"fields\\\"] == []\\n    assert profile[\\\"unresolved_fields\\\"] == []\\n\\n    _fill_trade_group(page)\\n    _fill_market_review(page)\\n    _fill_curve_nodes_only(page)\\n    page.wait_for_timeout(200)\\n\\n    assert page.inner_text(\\\"#unresolved-title\\\") == \\\"Bond reference fields are not filled for this bond\\\"\\n    next_step = page.inner_text(\\\"#unresolved-next\\\").lower()\\n    assert \\\"cannot be completed on the current pricing path\\\" in next_step\\n    assert \\\"changing advanced fields cannot make it price\\\" in next_step\\n    assert page.eval_on_selector(\\\"#unresolved-goto-btn\\\", \\\"el => el.hidden\\\")\\n    assert \\\"manually fill last_coupon_date\\\" not in page.locator(\\\"body\\\").inner_text().lower()\\n\\n    _fill_advanced_overrides(page)\\n    page.wait_for_timeout(250)\\n\\n    assert _is_disabled(page, \\\"#price-btn\\\")\\n    assert _is_disabled(page, \\\"#bloomberg-refresh-btn\\\")\\n    assert page.evaluate(\\\"() => window.__shioriTestBuilderValidationState()\\\") == \\\"unknown\\\"\\n\\n    page.click(\\\"#advanced-head\\\")\\n    status = page.inner_text(\\\"#ust-profile-status\\\").lower()\\n    assert \\\"changing advanced fields cannot make this ticket price\\\" in status\\n    assert \\\"manually fill last_coupon_date\\\" not in status\\n"}')
+          tree = ast.parse(source)
+          functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+          lines = source.splitlines(keepends=True)
+          edits = []
+          for old_name, replacement in replacements.items():
+              node = functions.get(old_name)
+              if node is None:
+                  raise SystemExit(f"missing target function: {old_name}")
+              start = min([node.lineno, *[decorator.lineno for decorator in node.decorator_list]]) - 1
+              end = node.end_lineno
+              edits.append((start, end, replacement.rstrip() + "\n\n"))
+          for start, end, replacement in sorted(edits, reverse=True):
+              lines[start:end] = [replacement]
+          updated = "".join(lines)
+          ast.parse(updated)
+          target.write_text(updated, encoding="utf-8")
+          PY
+          python -m py_compile tests/test_standalone_option_workbench_prototype_browser.py
+          git diff --check
+
+      - name: Commit only the aligned browser tests
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/align-pr158-browser-regressions.yml
+          git add tests/test_standalone_option_workbench_prototype_browser.py
+          git diff --cached --check
+          git commit -m "tests: align browser expectations with profile gate"
+          git push origin HEAD:"claude/ust-bloomberg-auto-fields-ljkqsk"
