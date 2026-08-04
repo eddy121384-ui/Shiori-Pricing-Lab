@@ -283,9 +283,7 @@ def test_api_case_price_matches_direct_call_to_price_standalone_option_case(
     overlay["option_type"] = "PUT"
     overlay["strike_price"] = 100.0
 
-    status, payload = _post_json(
-        f"{server_url}/api/case/price", {"case": case, "overlay": overlay}
-    )
+    status, payload = _post_json(f"{server_url}/api/case/price", {"case": case, "overlay": overlay})
     assert status == 200
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
@@ -323,9 +321,7 @@ def test_api_case_price_uses_the_given_case_not_the_bundled_one(server_url: str)
     }
     overlay = extract_standalone_option_case_overlay(case)
 
-    status, payload = _post_json(
-        f"{server_url}/api/case/price", {"case": case, "overlay": overlay}
-    )
+    status, payload = _post_json(f"{server_url}/api/case/price", {"case": case, "overlay": overlay})
     assert status == 200
 
     _, _, expected_display = price_standalone_option_case(case)
@@ -422,10 +418,12 @@ def test_api_case_bloomberg_matches_direct_call_to_the_existing_bloomberg_workfl
         priced_case["bond_quote"]["clean_price_per_100"]
         == display["live_bloomberg_quote"]["clean_price_per_100"]
     )
-    unchanged = {k: v for k, v in priced_case.items()
-                 if k not in ("bond_quote", "pricing_timestamp")}
-    assert unchanged == {k: v for k, v in overlaid_case.items()
-                         if k not in ("bond_quote", "pricing_timestamp")}
+    unchanged = {
+        k: v for k, v in priced_case.items() if k not in ("bond_quote", "pricing_timestamp")
+    }
+    assert unchanged == {
+        k: v for k, v in overlaid_case.items() if k not in ("bond_quote", "pricing_timestamp")
+    }
 
 
 @_QUANTLIB_SKIP
@@ -1189,12 +1187,9 @@ def test_api_ust_profile_admits_a_shape_compatible_non_us_isin_bond(server_url: 
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_reports_an_irregular_schedule_as_one_unresolved_field(
+def test_api_ust_profile_rejects_an_irregular_schedule(
     server_url: str,
 ) -> None:
-    """Field-level correction: an irregular coupon grid blocks only
-    last_coupon_date, not the whole profile."""
-
     body = {
         **_UST_PROFILE_BODY,
         "bond_master": {
@@ -1205,14 +1200,11 @@ def test_api_ust_profile_reports_an_irregular_schedule_as_one_unresolved_field(
     status, payload = _post_json(f"{server_url}/api/ust/profile", body)
 
     assert status == 200
-    assert payload["supported"] is True
-    resolved_paths = {field["path"] for field in payload["fields"]}
-    assert "bond_reference_data_universe.0.last_coupon_date" not in resolved_paths
-    assert len(payload["fields"]) == 7
-    assert len(payload["unresolved_fields"]) == 1
-    unresolved = payload["unresolved_fields"][0]
-    assert unresolved["path"] == "bond_reference_data_universe.0.last_coupon_date"
-    assert "regular" in unresolved["reason"]
+    assert payload["supported"] is False
+    assert payload["fields"] == []
+    assert payload["unresolved_fields"] == []
+    assert "regular coupon schedules only" in payload["rejection_reasons"][0]
+    assert "editing last_coupon_date cannot repair" in payload["rejection_reasons"][0]
 
 
 def test_api_ust_profile_rejects_a_malformed_body(server_url: str) -> None:
