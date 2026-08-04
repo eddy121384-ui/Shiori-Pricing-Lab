@@ -224,6 +224,7 @@ def test_script_never_maps_a_bloomberg_description_into_a_typed_enum() -> None:
         assert f"{field}: null," in seeded, f"{field} is not seeded null from a lookup"
     # And the prohibited coercions appear nowhere at all.
     assert "ACT_ACT_ISDA" not in text
+    assert "ACT_ACT_BOND" not in text
     assert "FIXED_COUPON_BULLET" not in text
 
 

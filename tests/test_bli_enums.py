@@ -96,13 +96,25 @@ def test_unknown_enum_string_rejected_through_coerce_enum(enum_cls, field_name):
 
 
 def test_act_365_variants_are_not_added_to_day_count():
-    # Deliberately deferred (see PR body "day-count naming decision"): ACT_365,
-    # ACT_365F, ACT_ACT, and ACT_ACT_ICMA are not added by this PR. Asserting
-    # their absence here keeps the deferral honest against silent drift.
+    # Deliberately deferred (see PR body "day-count naming decision"): ACT_365
+    # and ACT_365F are not added by this PR. Asserting their absence here
+    # keeps the deferral honest against silent drift.
+    #
+    # ACT_ACT_BOND (Issue #157 correction) *is* deliberately added: it is a
+    # genuinely distinct convention from ACT_ACT_ISDA (QuantLib's
+    # ActualActual::Bond/ISMA vs. ActualActual::ISDA), not a naming variant of
+    # it, and not something a "no new members" deferral was ever meant to
+    # block -- see pricing/bli_ust_fixed_coupon_profile.py's module docstring.
     from shiori_pricing_lab.products import DayCount
 
     existing = {member.value for member in DayCount}
-    assert existing == {"ACT_360", "ACT_365_FIXED", "THIRTY_360", "ACT_ACT_ISDA"}
+    assert existing == {
+        "ACT_360",
+        "ACT_365_FIXED",
+        "THIRTY_360",
+        "ACT_ACT_ISDA",
+        "ACT_ACT_BOND",
+    }
 
 
 # --- PricingErrorCode.MISSING_REFERENCE_DATA (docs/14 §3.2, F-08/F-16) -------

@@ -115,12 +115,22 @@ class DayCount(StrEnum):
     A representative set of the conventions seen on vanilla rates legs. The
     schema only records the choice; the accrual maths belongs to a future
     pricing engine, not here.
+
+    ``ACT_ACT_ISDA`` and ``ACT_ACT_BOND`` are deliberately two distinct
+    members, not aliases of each other (Issue #157 correction). ISDA's
+    Actual/Actual computes a calendar-year-fraction split around Feb 29;
+    Bond/ISMA (the US Treasury coupon-accrual convention) instead prorates
+    strictly within the bracketing coupon period, so a semi-annual full
+    period is always exactly 0.5 regardless of its actual day count. The two
+    give different accrued-interest results over the same period -- see
+    ``pricing/bli_quantlib_bond_adapter.py``'s ``_day_counter`` mapping.
     """
 
     ACT_360 = "ACT_360"
     ACT_365_FIXED = "ACT_365_FIXED"
     THIRTY_360 = "THIRTY_360"
     ACT_ACT_ISDA = "ACT_ACT_ISDA"
+    ACT_ACT_BOND = "ACT_ACT_BOND"
 
 
 class BusinessDayConvention(StrEnum):

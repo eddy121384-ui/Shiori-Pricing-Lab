@@ -3593,7 +3593,9 @@ def test_supported_ust_load_auto_fills_every_advanced_technical_field(server_url
 
     reference = _draft_reference(page)
     draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    assert reference["day_count"] == "ACT_ACT_ISDA"
+    # The US Treasury bond-basis convention, not ISDA's Actual/Actual (Issue
+    # #157 correction).
+    assert reference["day_count"] == "ACT_ACT_BOND"
     assert reference["bond_type"] == "FIXED_COUPON_BULLET"
     assert reference["ex_dividend_days"] == 0
     assert reference["last_coupon_date"] == "2030-07-31"
@@ -3604,7 +3606,7 @@ def test_supported_ust_load_auto_fills_every_advanced_technical_field(server_url
 
     # The controls themselves hold the same values, so the trader edits exactly
     # what the draft carries.
-    assert page.input_value("#day-count-select") == "ACT_ACT_ISDA"
+    assert page.input_value("#day-count-select") == "ACT_ACT_BOND"
     assert page.input_value("#bond-type-select") == "FIXED_COUPON_BULLET"
     assert page.input_value("#ex-dividend-days-input") == "0"
     assert page.input_value("#last-coupon-date-input") == "2030-07-31"
@@ -4066,7 +4068,7 @@ def test_a_failed_refresh_keeps_this_bonds_own_profile_values(server_url, page) 
     _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
 
     reference = _draft_reference(page)
-    assert reference["day_count"] == "ACT_ACT_ISDA"
+    assert reference["day_count"] == "ACT_ACT_BOND"
     assert reference["last_coupon_date"] == "2030-07-31"
     assert page.evaluate("() => window.__shioriTestGetCurrentDraft().option_settlement_date") == (
         "2026-10-21"
@@ -4116,7 +4118,7 @@ def test_a_stale_profile_response_never_fills_the_next_bonds_fields(server_url, 
                 "fields": [
                     {
                         "path": "bond_reference_data_universe.0.day_count",
-                        "value": "ACT_ACT_ISDA",
+                        "value": "ACT_ACT_BOND",
                         "provenance": "UST_PROFILE_DEFAULT",
                     },
                     {

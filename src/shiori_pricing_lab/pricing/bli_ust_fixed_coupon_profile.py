@@ -60,12 +60,30 @@ deliberately conservative -- a Bloomberg miss on one of those three
 description fields leaves the trader exactly where they are today, filling
 Advanced by hand.
 
+**Day count correction (post-review, superseding the PR's first revision).**
+The first revision of this module used ``DayCount.ACT_ACT_ISDA`` for
+"ACT/ACT", reasoning that it was the enum's only ACT/ACT member. That was
+wrong and has been withdrawn: QuantLib's own ``ActualActual::ISDA`` and
+``ActualActual::Bond`` (the ISMA/bond-basis convention) are genuinely
+different day-count rules, not a naming difference -- ISDA prorates against
+the calendar year(s) a period spans, while Bond/ISMA (the actual US
+Treasury coupon-accrual convention) prorates strictly within the
+bracketing coupon period, so the two produce different accrued-interest
+results over the same period. Using ISDA here would have silently
+mispriced accrued interest, and therefore dirty price and everything
+downstream of it, for every UST this profile applies to.
+
+The correction: a new, genuinely distinct ``DayCount.ACT_ACT_BOND`` member
+(``products/enums.py``) is what this profile now uses, mapped by the
+reviewed adapter to ``ql.ActualActual(ql.ActualActual.Bond)`` with the
+bracketing coupon period passed as QuantLib's explicit reference period
+(see ``bli_quantlib_bond_adapter.py``'s ``_day_counter`` and
+``accrued_interest_per_100``). ``ACT_ACT_ISDA``'s own mapping and every
+existing caller of it are completely unchanged -- this adds a member, it
+does not alias, rename, or repurpose the existing one.
+
 **Names that differ from Issue #157's prose (reported deliberately).**
 
-- *Day count.* The issue says "ACT/ACT". This repo's ``DayCount`` enum has
-  exactly one ACT/ACT member, ``ACT_ACT_ISDA``, which the reviewed adapter
-  maps to ``ql.ActualActual(ql.ActualActual.ISDA)``. That existing member is
-  used; no new enum member, and no ICMA/ISMA variant, is invented here.
 - *Last coupon date.* The issue describes deriving "the previous coupon date
   relative to the valuation date". The field that actually exists on
   ``BLIStandaloneBondReferenceData`` is ``last_coupon_date``, and the reviewed
@@ -140,7 +158,7 @@ EXPIRY_DEPENDENT_FIELD_PATHS = (PATH_FORWARD_SETTLEMENT_DATE, PATH_OPTION_SETTLE
 # --- The approved narrow profile ----------------------------------------------
 #
 # Existing typed members only -- this module adds no enum value anywhere.
-UST_PROFILE_DAY_COUNT = DayCount.ACT_ACT_ISDA
+UST_PROFILE_DAY_COUNT = DayCount.ACT_ACT_BOND
 UST_PROFILE_BOND_TYPE = BondType.FIXED_COUPON_BULLET
 UST_PROFILE_EX_DIVIDEND_DAYS = 0
 UST_PROFILE_STATUS = BondStatus.ACTIVE

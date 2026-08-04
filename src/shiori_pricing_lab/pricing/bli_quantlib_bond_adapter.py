@@ -46,9 +46,19 @@ before, with no behavior change.
 purposes. `redemption_amount` is reserved for a future
 principal/redemption slice this module does not implement.
 
-**Day-count mapping (docs/29 §4):** `DayCount.ACT_ACT_ISDA` maps
-literally to `ql.ActualActual(ql.ActualActual.ISDA)` -- never to the
-ISMA/bond-basis variant. No new `DayCount` member is introduced here.
+**Day-count mapping (docs/29 §4; corrected for Issue #157).** `DayCount.ACT_ACT_ISDA`
+maps literally to `ql.ActualActual(ql.ActualActual.ISDA)`, exactly as
+before -- this behavior is unchanged. A second, genuinely distinct member,
+`DayCount.ACT_ACT_BOND`, maps to `ql.ActualActual(ql.ActualActual.Bond)`
+(QuantLib's name for the ISMA/bond-basis convention) -- the convention
+actually used for US Treasury coupon accrual, which ISDA's Actual/Actual is
+**not** a substitute for: ISDA prorates against the calendar year(s) the
+period spans (splitting at Feb 29), while Bond/ISMA prorates strictly
+within the bracketing coupon period, so a semi-annual period's full-period
+fraction is always exactly `0.5` under Bond/ISMA regardless of its actual
+day count, but not under ISDA. `ACT_ACT_ISDA` and `ACT_ACT_BOND` are never
+aliased to each other and never produce the same accrued-interest result
+over an irregular-length period.
 
 **Irregular stubs and inconsistent coupon grids (docs/29 §5, Codex P2
 review of PR #81):** `issue_date` through `maturity_date` must land on
@@ -78,6 +88,21 @@ full-period year fraction is not exactly `1 / periods_per_year` (e.g.
 `ACT_360` over an 182/183/184/185-actual-day semi-annual period) would
 otherwise silently accrue a slightly wrong amount under a naive
 `coupon * yearFraction(period_start, as_of) * 100` formula.
+
+**Reference-period-aware year fractions (Issue #157 correction).** Both
+`yearFraction` calls pass the bracketing coupon period's own start/end
+dates as QuantLib's explicit `startRef`/`endRef` arguments. `ACT_ACT_BOND`
+(`ql.ActualActual(ql.ActualActual.Bond)`) needs that reference period to
+compute correctly -- without it, QuantLib cannot know the coupon period's
+actual length and produces a different, wrong-for-this-purpose result (verified
+against `ql.ActualActual(ql.ActualActual.Bond)` called with no reference
+period in this module's own tests). `ACT_ACT_ISDA` ignores the extra
+reference-period arguments entirely and returns the identical result with
+or without them, so passing them unconditionally changes no existing
+`ACT_ACT_ISDA` behavior. This is schedule-aware wiring only -- it reuses the
+`period_start`/`period_end` this function already resolves from the
+existing regular-schedule check, and introduces no second schedule
+generator.
 
 **Ex-dividend window (docs/29 §6):** `accrued_interest_per_100` raises
 `BLIBondExDividendWindowError` for any `as_of_date` inside a bond's
@@ -402,6 +427,13 @@ def _day_counter(day_count: DayCount) -> ql.DayCounter:
         return ql.Thirty360(ql.Thirty360.BondBasis)
     if day_count is DayCount.ACT_ACT_ISDA:
         return ql.ActualActual(ql.ActualActual.ISDA)
+    if day_count is DayCount.ACT_ACT_BOND:
+        # QuantLib's name for the ISMA/bond-basis convention -- the actual US
+        # Treasury coupon-accrual convention. Correct results require the
+        # bracketing coupon period's own reference dates, passed explicitly
+        # by every caller of this day counter's `yearFraction` (see
+        # `accrued_interest_per_100`) -- never a schedule-less construction.
+        return ql.ActualActual(ql.ActualActual.Bond)
     raise ValueError(f"unsupported day_count for QuantLib mapping: {day_count!r}")
 
 
@@ -636,8 +668,19 @@ def accrued_interest_per_100(
 
     day_counter = _day_counter(bond.day_count)
     period_start_ql = _to_ql_date(period_start)
-    elapsed_fraction = day_counter.yearFraction(period_start_ql, _to_ql_date(as_of))
-    full_period_fraction = day_counter.yearFraction(period_start_ql, _to_ql_date(period_end))
+    period_end_ql = _to_ql_date(period_end)
+    as_of_ql = _to_ql_date(as_of)
+    # startRef/endRef are the bracketing coupon period's own bounds -- required
+    # for ACT_ACT_BOND to compute correctly (see the module docstring), and
+    # inert for every other day counter here (ACT_ACT_ISDA ignores them
+    # entirely; ACT_360/ACT_365_FIXED/THIRTY_360 take no reference period at
+    # all). Passing them unconditionally changes no existing day count's result.
+    elapsed_fraction = day_counter.yearFraction(
+        period_start_ql, as_of_ql, period_start_ql, period_end_ql
+    )
+    full_period_fraction = day_counter.yearFraction(
+        period_start_ql, period_end_ql, period_start_ql, period_end_ql
+    )
     if full_period_fraction <= 0:
         # Defensive guard (Codex P2 review of PR #81): unreachable given
         # period_start < period_end and a sane day counter, but proration

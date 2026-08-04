@@ -113,7 +113,9 @@ def test_supported_ust_resolves_every_advanced_field():
 def test_supported_ust_field_values_come_from_the_approved_profile():
     values = _values(_resolve())
 
-    assert values[PATH_DAY_COUNT] == "ACT_ACT_ISDA"
+    # The distinct US Treasury bond-basis convention, not ISDA's Actual/Actual
+    # (Issue #157 correction) -- see the module docstring's day-count section.
+    assert values[PATH_DAY_COUNT] == "ACT_ACT_BOND"
     assert values[PATH_BOND_TYPE] == "FIXED_COUPON_BULLET"
     assert values[PATH_EX_DIVIDEND_DAYS] == 0
     assert values[PATH_STATUS] == "ACTIVE"
