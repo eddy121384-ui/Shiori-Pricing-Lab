@@ -571,34 +571,35 @@ def test_a_gilt_shaped_bond_collects_every_reason_at_once():
 
 
 @pytest.mark.parametrize("date_field", ["issue_date", "maturity_date", "first_coupon_date"])
-def test_a_missing_schedule_date_blocks_only_the_fields_that_need_it(date_field):
+def test_a_missing_schedule_date_leaves_only_the_fields_that_need_it_unresolved(date_field):
+    """Issue #161 P2 correction: `issue_date`/`maturity_date`/`first_coupon_date`
+    have no Advanced override anywhere on this route, so a field that cannot
+    resolve because one of them is missing is left unresolved -- absent from
+    both `fields` and `unresolved_fields` -- rather than a repairable
+    `BLOCKED`. `BLOCKED` would falsely promise the browser a trader override
+    is a genuine route past it; here there is none. See
+    `test_a_contradicting_day_count_description_blocks_only_the_day_count`
+    for a field that genuinely is BLOCKED-and-repairable, for contrast."""
+
     profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, date_field: None})
 
     assert profile.supported is True
     assert profile.rejection_reasons == ()
-    blocked = {item.path for item in profile.unresolved_fields}
+    assert profile.unresolved_fields == ()
     # maturity_date additionally carries the "has it matured?" question, so it
-    # withholds `status` too. Nothing else is ever affected.
-    expected_blocked = (
+    # leaves `status` unresolved too. Nothing else is ever affected.
+    expected_unresolved = (
         {PATH_LAST_COUPON_DATE, PATH_STATUS}
         if date_field == "maturity_date"
         else {PATH_LAST_COUPON_DATE}
     )
-    assert blocked == expected_blocked
     resolved = _values(profile)
-    assert set(resolved) == set(UST_ADVANCED_FIELD_PATHS) - expected_blocked
+    assert set(resolved) == set(UST_ADVANCED_FIELD_PATHS) - expected_unresolved
+    for path in expected_unresolved:
+        assert path not in resolved
     # The fields that did resolve carry real values, not placeholders.
     assert resolved[PATH_DAY_COUNT] == UST_PROFILE_DAY_COUNT.value
     assert resolved[PATH_REPORTING_DATE] == _VALUATION_DATE
-
-
-def test_a_blocked_field_names_the_input_it_is_missing():
-    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, "first_coupon_date": None})
-
-    reason = next(
-        item.reason for item in profile.unresolved_fields if item.path == PATH_LAST_COUPON_DATE
-    )
-    assert "first_coupon_date" in reason
 
 
 def test_an_unusable_valuation_date_blocks_only_its_own_two_fields():
@@ -619,10 +620,24 @@ def test_an_unusable_valuation_date_blocks_only_its_own_two_fields():
 def test_a_blocked_field_is_never_reported_as_a_product_rejection():
     """The two lists are the browser's repairable/not-repairable signal."""
 
-    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, "first_coupon_date": None})
+    profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": "ISMA-30/360"})
 
     assert profile.rejection_reasons == ()
     assert profile.unresolved_fields != ()
+
+
+def test_a_missing_bond_master_field_is_never_reported_as_repairable_blocked():
+    """The inverse of the test above: a field the trader genuinely cannot fix
+    in Advanced (because its input has no Advanced control at all) must not
+    appear in `unresolved_fields` -- that list is a promise of a real route,
+    and a missing `first_coupon_date` has none (Issue #161 P2 correction)."""
+
+    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, "first_coupon_date": None})
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert profile.unresolved_fields == ()
+    assert PATH_LAST_COUPON_DATE not in _values(profile)
 
 
 def _assert_refused(profile, *, expected_fragment: str) -> None:

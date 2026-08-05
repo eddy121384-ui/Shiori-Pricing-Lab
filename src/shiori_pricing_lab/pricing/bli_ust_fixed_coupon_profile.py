@@ -154,13 +154,42 @@ repair the underlying issue/maturity/first-coupon grid that the adapter also
 validates. That is a genuine product/schedule refusal, not a field-level
 blocker, and the browser must not offer an Advanced route out of it.
 
-**Missing schedule dates block one field, not the ticket.** When an
-individual Bloomberg schedule date is absent or malformed there is no grid
-to call irregular -- there is simply nothing to derive ``last_coupon_date``
-from. That is a field-level ``BLOCKED``, and the trader can supply the date
-in Advanced. The same applies to ``status`` and ``reporting_date`` when the
-maturity or valuation date they depend on is unusable: those fields block,
-and the rest of the profile is still filled.
+**A missing schedule date leaves the rest of the profile filled -- but is not
+always a repairable ``BLOCKED`` (Issue #161 P2 correction).** ``BLOCKED``
+promises the browser a genuine route past it: an Advanced control the
+trader can fill that, once filled, actually lets the ticket price. That
+promise is only true when the field the trader would type into is the one
+thing standing in the way.
+
+``reporting_date`` keeps that promise: it depends on this run's own
+``valuation_date`` (never a Bloomberg field), and ``reporting-date-input``
+is a real Advanced control, so a malformed ``valuation_date`` correctly
+comes back ``BLOCKED`` there.
+
+``last_coupon_date`` and ``status`` do not, when the *reason* is a missing
+``issue_date``, ``maturity_date`` or ``first_coupon_date``. Real Bloomberg
+workstation UAT (a bond shaped like ``US91282CMC28`` with no confirmed
+``first_coupon_date``) exposed the bug: the first revision of this
+correction marked ``last_coupon_date`` ``BLOCKED`` there, and the browser
+offered its Advanced control as if typing a date would complete the
+ticket. It never could -- ``issue_date``, ``maturity_date`` and
+``first_coupon_date`` are genuine ``BondReferenceData`` destination fields
+(see :data:`_BOND_MASTER_ONLY_FIELDS`) with **no Advanced override
+anywhere on this route**, so the reviewed typed builder
+(``BLIStandaloneBondReferenceData.__post_init__``) still refuses the draft
+on the missing one regardless of what the trader types for
+``last_coupon_date``. The browser's own "Bloomberg Bond Master" workflow
+group already reports and blocks on exactly this, correctly, with the real
+next step (re-run Bloomberg Load) -- offering a second, ineffective route
+beside it is precisely the fake exit Issue #161 exists to remove.
+
+So: when the underlying reason is one of :data:`_BOND_MASTER_ONLY_FIELDS`
+being missing or unusable, ``last_coupon_date`` and ``status`` are left
+**unresolved** -- absent from both ``fields`` and ``unresolved_fields`` --
+rather than ``BLOCKED``. Every other field in scope (day count, bond type,
+ex-dividend days, and ``status``/``reporting_date`` when *their own* inputs
+are fine) is still resolved exactly as before; only the one or two fields
+this specific gap actually prevents are affected.
 
 **Day count correction (post-review, superseding the PR's first revision).**
 The first revision of this module used ``DayCount.ACT_ACT_ISDA`` for
@@ -299,6 +328,16 @@ _BLOOMBERG_TYPED_FIELD_BY_PATH = {
     PATH_BOND_TYPE: "bond_type",
     PATH_LAST_COUPON_DATE: "last_coupon_date",
 }
+
+# Bond Master destination fields with no Advanced override control anywhere
+# on this route (Issue #161 P2 correction) -- the browser's "Bloomberg Bond
+# Master" section shows them read-only, sourced from Bloomberg verbatim, and
+# offers no manual-entry control for any of them. When one of these is
+# missing or unusable, no Advanced entry can repair the fields that derive
+# from it: the fix is a fresh, successful Bloomberg Load, not a trader
+# override. See the module docstring's "A missing schedule date leaves the
+# rest of the profile filled" section.
+_BOND_MASTER_ONLY_FIELDS = ("issue_date", "maturity_date", "first_coupon_date")
 
 
 @dataclass(frozen=True)
@@ -658,32 +697,39 @@ def resolve_ust_advanced_field_profile(
 
     # Last coupon date. A confirmed typed Bloomberg value wins; otherwise the
     # reviewed coupon-schedule adapter derives it -- which needs all three
-    # schedule dates. Without them there is one blocked field, not an empty
-    # profile.
+    # schedule dates. When one of those (all `_BOND_MASTER_ONLY_FIELDS`, with
+    # no Advanced override anywhere) is missing, this is left unresolved
+    # rather than BLOCKED: BLOCKED promises a trader override is a genuine
+    # route past it, and there is none here -- see the module docstring's
+    # "A missing schedule date leaves the rest of the profile filled"
+    # section (Issue #161 P2 correction).
     if (
         _confirmed_typed_value(PATH_LAST_COUPON_DATE) is not None
         or derived_last_coupon is not None
     ):
         _resolve_field(PATH_LAST_COUPON_DATE, derived_last_coupon, PROVENANCE_SHIORI_DERIVED)
-    else:
-        _block(
-            PATH_LAST_COUPON_DATE,
-            "Bloomberg did not return a usable "
-            f"{', '.join(missing_schedule_inputs)} for this bond, so the reviewed coupon "
-            "schedule has nothing to derive the last coupon date from",
-        )
+    # else: left unresolved (absent from both `fields` and `unresolved_fields`)
+    # -- `missing_schedule_inputs` is always non-empty here, so this is never
+    # a field the trader's own Advanced entry could fix.
 
     # Status. ACTIVE is asserted only where the product gate could actually
-    # prove the bond has not matured -- which needs both dates.
-    if valuation is None or maturity is None:
-        _block(
-            PATH_STATUS,
-            "Shiori cannot compare this bond's maturity date "
-            f"({bond_master.get('maturity_date')!r}) with the run's valuation date "
-            f"({valuation_date!r}), so it will not assert that the bond is still active",
-        )
-    else:
-        _resolve_field(PATH_STATUS, UST_PROFILE_STATUS.value, PROVENANCE_UST_PROFILE_DEFAULT)
+    # prove the bond has not matured. A missing maturity_date is the same
+    # no-Advanced-override situation as last_coupon_date above, so it is left
+    # unresolved rather than BLOCKED for the same reason. A missing or
+    # malformed valuation_date is different: it is this run's own date, not
+    # a Bloomberg Bond Master field, and reporting_date's own BLOCKED case
+    # below shows the same input genuinely is repairable in Advanced.
+    if maturity is not None:
+        if valuation is None:
+            _block(
+                PATH_STATUS,
+                "Shiori cannot compare this bond's maturity date "
+                f"({bond_master.get('maturity_date')!r}) with the run's valuation date "
+                f"({valuation_date!r}), so it will not assert that the bond is still active",
+            )
+        else:
+            _resolve_field(PATH_STATUS, UST_PROFILE_STATUS.value, PROVENANCE_UST_PROFILE_DEFAULT)
+    # else: left unresolved (maturity_date missing) -- see comment above.
 
     # The reporting date is the run's own valuation date, carried across
     # mechanically -- not a market convention and not a profile constant.

@@ -1173,7 +1173,7 @@ def test_api_ust_profile_serializes_a_partial_answer_with_its_blocked_field(
 
     body = {
         **_UST_PROFILE_BODY,
-        "bond_master": {**_UST_PROFILE_BODY["bond_master"], "first_coupon_date": None},
+        "bond_master_raw": {**_UST_PROFILE_BODY["bond_master_raw"], "day_count": "ISMA-30/360"},
     }
     status, payload = _post_json(f"{server_url}/api/ust/profile", body)
 
@@ -1181,13 +1181,42 @@ def test_api_ust_profile_serializes_a_partial_answer_with_its_blocked_field(
     assert payload["supported"] is True
     assert payload["rejection_reasons"] == []
     assert [item["path"] for item in payload["unresolved_fields"]] == [
-        "bond_reference_data_universe.0.last_coupon_date"
+        "bond_reference_data_universe.0.day_count"
     ]
-    assert "first_coupon_date" in payload["unresolved_fields"][0]["reason"]
+    assert "ISMA-30/360" in payload["unresolved_fields"][0]["reason"]
     assert len(payload["fields"]) == 7
+    assert "bond_reference_data_universe.0.day_count" not in {
+        field["path"] for field in payload["fields"]
+    }
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_never_offers_a_repair_route_for_a_missing_bond_master_date(
+    server_url: str,
+) -> None:
+    """Issue #161 P2 correction: ``issue_date``, ``maturity_date`` and
+    ``first_coupon_date`` have no Advanced override anywhere on this route,
+    so a field that cannot resolve because one of them is missing must not
+    be reported in ``unresolved_fields`` -- that list is the browser's
+    signal that a real Advanced route exists, and here there is none."""
+
+    body = {
+        **_UST_PROFILE_BODY,
+        "bond_master": {**_UST_PROFILE_BODY["bond_master"], "first_coupon_date": None},
+    }
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["rejection_reasons"] == []
+    assert payload["unresolved_fields"] == []
     assert "bond_reference_data_universe.0.last_coupon_date" not in {
         field["path"] for field in payload["fields"]
     }
+    # Every other field -- including status, since maturity_date is present --
+    # still resolves; only last_coupon_date is affected by the missing
+    # first_coupon_date.
+    assert len(payload["fields"]) == 7
 
 
 def test_api_ust_profile_rejects_a_body_missing_required_keys(server_url: str) -> None:

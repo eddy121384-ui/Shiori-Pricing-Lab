@@ -4609,7 +4609,9 @@ _REAL_UST_BOND_MASTER_RAW = {
 }
 
 
-def _real_ust_lookup_response(*, bond_master: dict | None = None, **overrides) -> dict:
+def _real_ust_lookup_response(
+    *, bond_master: dict | None = None, bond_master_raw: dict | None = None, **overrides
+) -> dict:
     payload_overrides = {
         "isin": "US91282CMC28",
         "cusip": "91282CMC2",
@@ -4619,7 +4621,9 @@ def _real_ust_lookup_response(*, bond_master: dict | None = None, **overrides) -
     }
     return _default_bloomberg_bond_lookup_response(
         bond_master=bond_master if bond_master is not None else _REAL_UST_BOND_MASTER,
-        bond_master_raw=_REAL_UST_BOND_MASTER_RAW,
+        bond_master_raw=(
+            bond_master_raw if bond_master_raw is not None else _REAL_UST_BOND_MASTER_RAW
+        ),
         **payload_overrides,
     )
 
@@ -4724,7 +4728,85 @@ def test_one_blocked_field_never_blanks_the_others_and_stays_repairable(
 ) -> None:
     """Criterion 5 and 9 together: a field-level blocker keeps every other
     resolved value *and* offers a real override route, unlike a product
-    refusal."""
+    refusal. Uses the day-count-evidence contradiction -- the one case that
+    genuinely is repairable in Advanced -- since a missing Bloomberg schedule
+    date is not (see the P2-correction tests below)."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMC28",
+        response=_real_ust_lookup_response(
+            bond_master_raw={
+                "day_count": "ISMA-30/360",
+                "maturity_type": "NORMAL",
+                "calc_type": "STREET CONVENTION",
+            }
+        ),
+    )
+    _wait_for_ust_profile(page)
+    _set_expiry(page)
+    page.wait_for_timeout(300)
+
+    profile = _ust_profile(page)
+    assert profile["supported"] is True
+    assert [item["path"] for item in profile["unresolved_fields"]] == [
+        "bond_reference_data_universe.0.day_count"
+    ]
+    assert page.evaluate("() => window.__shioriTestBlockedFieldPaths()") == [
+        "bond_reference_data_universe.0.day_count"
+    ]
+
+    # Seven fields survived the eighth.
+    reference = _draft_reference(page)
+    assert reference["day_count"] is None
+    assert reference["bond_type"] == "FIXED_COUPON_BULLET"
+    assert reference["last_coupon_date"] == "2031-06-30"
+    assert reference["status"] == "ACTIVE"
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["reporting_date"] == "2026-07-20"
+    assert draft["option_settlement_date"] == "2026-10-21"
+
+    # Criterion 9: this one *is* repairable, so the route is offered for real.
+    assert not _profile_controls_disabled(page)
+    assert not page.eval_on_selector("#unresolved-goto-btn", "el => el.hidden")
+    page.click("#advanced-head")
+    assert not page.eval_on_selector("#day-count-select", "el => el.disabled")
+    assert "BLOCKED" in page.inner_text("#prov-day-count")
+    assert "ISMA-30/360" in page.inner_text("#prov-day-count")
+
+    page.select_option("#day-count-select", "ACT_360")
+    page.wait_for_timeout(250)
+    assert _draft_reference(page)["day_count"] == "ACT_360"
+    assert (
+        _field_provenance(page)["bond_reference_data_universe.0.day_count"]
+        == "TRADER_OVERRIDE"
+    )
+
+
+# --- Issue #161 P2 correction: a missing schedule date is NOT repairable ----
+#
+# Real Bloomberg workstation UAT (US91282CMC28-shaped, no confirmed
+# first_coupon_date) exposed a second-order fake exit: the first revision of
+# the P1 field-level fix marked last_coupon_date BLOCKED-and-repairable in
+# exactly this case, and the browser offered its Advanced control as a route
+# to complete the ticket. It never was one -- issue_date, maturity_date and
+# first_coupon_date are BondReferenceData destination fields with no
+# Advanced override anywhere on this route, so the reviewed typed builder
+# still refuses the draft on the missing one no matter what the trader types
+# for last_coupon_date. These tests drive the override path all the way
+# through the real POST /api/case/validate route (not just draft/provenance
+# state) to prove it, and confirm the non-repairable UI takes over instead.
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_missing_first_coupon_date_leaves_last_coupon_date_unresolved_not_blocked(
+    server_url, page
+) -> None:
+    """The resolver's own answer must not promise a route that does not
+    exist: last_coupon_date is absent from both `fields` and
+    `unresolved_fields`, not BLOCKED."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -4740,37 +4822,124 @@ def test_one_blocked_field_never_blanks_the_others_and_stays_repairable(
 
     profile = _ust_profile(page)
     assert profile["supported"] is True
-    assert [item["path"] for item in profile["unresolved_fields"]] == [
-        "bond_reference_data_universe.0.last_coupon_date"
-    ]
-    assert page.evaluate("() => window.__shioriTestBlockedFieldPaths()") == [
-        "bond_reference_data_universe.0.last_coupon_date"
-    ]
+    assert profile["rejection_reasons"] == []
+    assert profile["unresolved_fields"] == []
+    field_paths = {field["path"] for field in profile["fields"]}
+    assert "bond_reference_data_universe.0.last_coupon_date" not in field_paths
+    # The seven fields that do not depend on first_coupon_date are unaffected.
+    assert "bond_reference_data_universe.0.day_count" in field_paths
+    assert "bond_reference_data_universe.0.status" in field_paths
 
-    # Seven fields survived the eighth.
-    reference = _draft_reference(page)
-    assert reference["last_coupon_date"] is None
-    assert reference["day_count"] == "ACT_ACT_BOND"
-    assert reference["bond_type"] == "FIXED_COUPON_BULLET"
-    assert reference["status"] == "ACTIVE"
-    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
-    assert draft["reporting_date"] == "2026-07-20"
-    assert draft["option_settlement_date"] == "2026-10-21"
 
-    # Criterion 9: this one *is* repairable, so the route is offered for real.
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_the_last_coupon_date_control_is_disabled_and_offers_no_go_to(
+    server_url, page
+) -> None:
+    """Issue #161's fake-exit rule extended to a single field: this control
+    must not look like a legitimate completion route when it structurally
+    cannot be one."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMC28",
+        response=_real_ust_lookup_response(
+            bond_master={**_REAL_UST_BOND_MASTER, "first_coupon_date": None}
+        ),
+    )
+    _wait_for_ust_profile(page)
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
+    page.wait_for_timeout(300)
+
+    # The whole ticket is not disabled -- day_count/bond_type/ex_dividend_days
+    # genuinely did resolve and stay editable like any other field.
     assert not _profile_controls_disabled(page)
-    assert not page.eval_on_selector("#unresolved-goto-btn", "el => el.hidden")
     page.click("#advanced-head")
-    assert "BLOCKED" in page.inner_text("#prov-last-coupon-date")
-    assert "first_coupon_date" in page.inner_text("#prov-last-coupon-date")
+    assert page.eval_on_selector("#last-coupon-date-input", "el => el.disabled")
+    assert not page.eval_on_selector("#day-count-select", "el => el.disabled")
+    prov_text = page.inner_text("#prov-last-coupon-date")
+    assert "BLOCKED" not in prov_text
+    assert "Bloomberg Bond Master" in prov_text or "no Advanced control" in prov_text
 
-    page.fill("#last-coupon-date-input", "2031-06-30")
-    page.wait_for_timeout(250)
+    # The primary unresolved panel names the real, actionable blocker --
+    # Bloomberg's own missing data -- not last_coupon_date.
+    assert page.inner_text("#unresolved-title") == (
+        "Bloomberg did not return every confirmed Bond Master field"
+    )
+    assert "first_coupon_date" not in page.inner_text("#unresolved-why")
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_forcing_a_last_coupon_date_override_still_fails_real_builder_validation(
+    server_url, page
+) -> None:
+    """The literal ask: prove this end-to-end against the real typed builder,
+    not just draft/provenance state. Every other input is completed through
+    the real controls; last_coupon_date is then forced past its disabled
+    control (the worst case a broken future revision could reach) and the
+    live /api/case/validate route -- the same one Price is gated on -- is
+    asked directly whether the resulting draft is acceptable.
+
+    It must not be: first_coupon_date is still missing, and the reviewed
+    BLIStandaloneBondReferenceData construction requires it regardless of
+    last_coupon_date.
+    """
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMC28",
+        response=_real_ust_lookup_response(
+            bond_master={**_REAL_UST_BOND_MASTER, "first_coupon_date": None}
+        ),
+    )
+    _wait_for_ust_profile(page)
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    _fill_curve_nodes_only(page)
+    page.wait_for_timeout(300)
+
+    # Force the override past the disabled control -- exactly the same
+    # "input" listener a real keystroke triggers (markTraderOverride, then
+    # applyManualInputsToDraft), so this is not testing a different code path
+    # than a trader typing would reach if the control were ever left enabled.
+    page.evaluate(
+        """() => {
+            const el = document.querySelector("#last-coupon-date-input");
+            el.value = "2031-06-30";
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+        }"""
+    )
+    page.wait_for_timeout(200)
+
     assert _draft_reference(page)["last_coupon_date"] == "2031-06-30"
     assert (
         _field_provenance(page)["bond_reference_data_universe.0.last_coupon_date"]
         == "TRADER_OVERRIDE"
     )
+
+    # Front-end gating never even attempts validation, because the
+    # "Bloomberg Bond Master" workflow group is still unresolved.
+    assert page.evaluate("() => window.__shioriTestBuilderValidationState()") == "unknown"
+    assert _is_disabled(page, "#price-btn")
+
+    # The decisive check: ask the real typed builder directly, bypassing all
+    # front-end gating, with the exact draft the override just produced.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    response = page.request.post(
+        f"{server_url}/api/case/validate",
+        data=json.dumps(draft),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status == 200
+    payload = response.json()
+    assert payload["ready"] is False
+    assert "first_coupon_date" in payload["error"]
 
 
 # --- Criterion 10-11: Treasury 32nds on Strike and Forward ------------------

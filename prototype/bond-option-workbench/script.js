@@ -481,6 +481,33 @@
     return paths.filter((path) => blocked.has(path)).map((path) => `${path}: ${blocked.get(path)}`);
   }
 
+  // Which of last_coupon_date/status cannot resolve because a Bloomberg Bond
+  // Master date (issue_date, maturity_date, first_coupon_date) is itself
+  // missing (Issue #161 P2 correction). None of those three has an Advanced
+  // override anywhere on this page -- the resolver already leaves the
+  // affected field unresolved rather than BLOCKED for exactly this reason
+  // (see bli_ust_fixed_coupon_profile.py's module docstring), so this reads
+  // the same underlying fact straight from the draft's own Bond Master
+  // record, independent of the resolver's per-run answer, to render the
+  // group honestly and to keep its Go-to route closed off (a real Advanced
+  // entry here can never make this ticket price; the fix is a fresh,
+  // successful Bloomberg Load, which the "Bloomberg Bond Master" group
+  // already reports and blocks on).
+  function bondMasterGapPaths() {
+    if (!currentDraft) return [];
+    const record = referenceRecord(currentDraft);
+    const gaps = [];
+    if (
+      !(present(record.issue_date) && present(record.maturity_date) && present(record.first_coupon_date))
+    ) {
+      gaps.push("bond_reference_data_universe.0.last_coupon_date");
+    }
+    if (!present(record.maturity_date)) {
+      gaps.push("bond_reference_data_universe.0.status");
+    }
+    return gaps;
+  }
+
   // True when the Quote Side on screen is not the side the draft's quote was
   // actually sourced on.
   //
@@ -806,6 +833,34 @@
       revealAdvanced: true,
       unresolved: () => {
         const blocked = blockedReasonsForPaths(BOND_REFERENCE_PROFILE_PATHS);
+        const gaps = bondMasterGapPaths();
+        if (blocked.length === 0 && gaps.length > 0) {
+          // Issue #161 P2 correction: every remaining field here traces to a
+          // Bloomberg Bond Master date this security's response did not
+          // return, and none of those dates has an Advanced override
+          // anywhere on this page. Filling last_coupon_date or status by
+          // hand cannot make this ticket price -- the fix is a fresh,
+          // successful Bloomberg Load. goToDisabled closes off the one
+          // route this group would otherwise still offer.
+          return {
+            title: "Bond reference fields are not filled for this bond",
+            missing:
+              "Day count, bond type, ex-dividend days, last coupon date and bond " +
+              "status.",
+            why:
+              "Shiori filled every one of these it could. The rest depend on a " +
+              "Bloomberg Bond Master date this security's response did not return " +
+              "(" +
+              gaps.join(", ") +
+              "), and no Advanced control anywhere on this page can supply that " +
+              "date -- typing a value into these controls cannot repair it.",
+            evidence: EVIDENCE_BOND_REFERENCE,
+            next:
+              "See Bloomberg Bond Master below and run Bloomberg Load again for " +
+              "this security. No Advanced field here is a route past it.",
+            goToDisabled: true,
+          };
+        }
         return {
           title: "Bond reference fields are not filled for this bond",
           missing:
@@ -1654,24 +1709,45 @@
 
   function renderFieldProvenance() {
     const blocked = blockedFieldReasons();
+    const gaps = new Set(bondMasterGapPaths());
     // A product/schedule refusal is not repairable here, so these controls
     // are disabled rather than left looking like a way out (Issue #161).
     // Every other state -- including a field-level BLOCKED -- keeps them
     // editable, because there the trader's entry is a real route past it.
     const disabled = productUnsupported();
     PROFILE_FIELDS.forEach((field) => {
-      field.control().disabled = disabled;
       const target = field.provenanceEl();
       const tier = fieldProvenance.get(field.path) || null;
       const isOverride = tier === TRADER_OVERRIDE_BASIS;
+      // Issue #161 P2 correction: last_coupon_date/status cannot be repaired
+      // by typing into them while the Bloomberg Bond Master date they
+      // depend on is itself missing -- no Advanced control anywhere on this
+      // page supplies issue_date/maturity_date/first_coupon_date. A control
+      // the trader already overrode before this run reached that state
+      // stays editable (an existing override is never silently taken
+      // away); an untouched one is disabled rather than left looking like a
+      // real route.
+      const noRepairRoute = !isOverride && gaps.has(field.path);
+      field.control().disabled = disabled || noRepairRoute;
       const blockedReason = tier === null ? blocked.get(field.path) : undefined;
       target.classList.toggle("is-auto", tier !== null && !isOverride);
       target.classList.toggle("is-override", isOverride);
-      target.classList.toggle("is-blocked", blockedReason !== undefined || disabled);
+      target.classList.toggle(
+        "is-blocked",
+        blockedReason !== undefined || disabled || noRepairRoute
+      );
       if (disabled) {
         target.textContent =
           "Source: none — this bond is not supported on the current pricing path, so " +
           "Shiori fills nothing here and editing this field cannot make the ticket price.";
+        return;
+      }
+      if (noRepairRoute) {
+        target.textContent =
+          "Source: none — this depends on a Bloomberg Bond Master date this security's " +
+          "response did not return, and no Advanced control anywhere on this page " +
+          "supplies that date. Run Bloomberg Load again for this security; typing a " +
+          "value here cannot make this ticket price.";
         return;
       }
       if (blockedReason !== undefined) {
@@ -2712,9 +2788,12 @@
       typeof primary.unresolved === "function" ? primary.unresolved() : primary.unresolved;
     unresolvedFocusGroup = primary;
     els.unresolvedPanel.hidden = false;
-    // Every route offered from here is now a real one: the product-refusal
-    // case returned above before reaching this line.
-    els.unresolvedGotoBtn.hidden = false;
+    // Every route offered from here is real, with one narrower exception: a
+    // group whose own detail sets `goToDisabled` (Issue #161 P2 correction)
+    // -- every field left in it traces to a Bloomberg Bond Master date with
+    // no Advanced control anywhere, so Go-to would open Advanced onto a
+    // control that cannot repair anything.
+    els.unresolvedGotoBtn.hidden = Boolean(detail.goToDisabled);
     els.unresolvedTitle.textContent = detail.title;
     els.unresolvedMissing.textContent = detail.missing;
     els.unresolvedWhy.textContent = detail.why;
