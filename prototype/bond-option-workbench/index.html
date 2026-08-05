@@ -207,10 +207,16 @@
             <div class="toggle" id="position-toggle"><span class="opt" data-value="BUY">Buy</span><span class="opt" data-value="SELL">Sell</span></div>
           </div>
           <div class="form-row" data-workflow-group="strike"><label>Strike (per 100)</label>
-            <input class="control" id="strike-price-input" type="text" inputmode="decimal" placeholder="Not entered">
+            <div>
+              <input class="control" id="strike-price-input" type="text" inputmode="decimal" placeholder="98-16+ or 98.515625">
+              <div class="derived-source" id="strike-normalized-preview">&mdash;</div>
+            </div>
           </div>
           <div class="form-row" data-workflow-group="notional"><label>Notional</label>
-            <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="Not entered">
+            <div>
+              <input class="control" id="notional-input" type="text" inputmode="decimal" placeholder="1M or 1000000">
+              <div class="derived-source" id="notional-normalized-preview">&mdash;</div>
+            </div>
           </div>
           <div class="form-row expiry-row" data-workflow-group="expiry"><label>Expiry</label>
             <div>
@@ -269,7 +275,8 @@
               </div>
               <div class="review-control">
                 <label for="forward-price-input">Forward Clean Price (per 100)</label>
-                <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="Not entered">
+                <input class="control" id="forward-price-input" type="text" inputmode="decimal" placeholder="98-16+ or 98.515625">
+                <div class="derived-source" id="forward-normalized-preview">&mdash;</div>
               </div>
               <div class="review-note" id="forward-sourcing-note">&mdash;</div>
               <div class="review-provenance" id="forward-provenance">&mdash;</div>
@@ -326,14 +333,19 @@
               <div class="fixed-route-note">
                 For a supported UST fixed-coupon bullet, Shiori fills these from the
                 approved narrow UST profile and its own deterministic derivations, and
-                shows the source of every value. Bloomberg&rsquo;s
+                shows the source of every value. Each field is resolved on its own: one
+                field Shiori cannot resolve is marked <strong>BLOCKED</strong> for you to
+                set and never blanks the others. Bloomberg&rsquo;s
                 <code>DAY_CNT_DES</code>, <code>MTY_TYP</code> and
                 <code>CALC_TYP_DES</code> remain <em>display-only evidence</em> and are
-                still never coerced into a Shiori enum &mdash; they can only <em>block</em>
-                the profile when they do not match it exactly. Anything outside that
-                profile is filled with nothing at all and says why. Every control stays
-                editable; the moment you change one, its source becomes
-                <strong>TRADER_OVERRIDE</strong> and Shiori stops re-deriving it.
+                still never coerced into a Shiori enum &mdash; <code>MTY_TYP</code> and
+                <code>CALC_TYP_DES</code> decide nothing at all (a real UST returns
+                <code>NORMAL</code>), and a contradicting <code>DAY_CNT_DES</code> can
+                only withhold the day count itself. A bond whose product or coupon
+                schedule this pricing path cannot carry gets no fields and these controls
+                are disabled, because editing them could not make it price. Otherwise
+                every control stays editable; the moment you change one, its source
+                becomes <strong>TRADER_OVERRIDE</strong> and Shiori stops re-deriving it.
               </div>
               <div class="ust-profile-status" id="ust-profile-status">&mdash;</div>
               <div class="entry-grid">

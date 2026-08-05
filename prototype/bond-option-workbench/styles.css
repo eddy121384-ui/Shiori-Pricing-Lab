@@ -504,6 +504,17 @@ select.control:focus { border-color: var(--blue); }
 }
 .field-provenance.is-auto { color: #2f6f5e; }
 .field-provenance.is-override { color: #7a5a12; }
+/* Issue #161: a field the resolver refused, or a control disabled because the
+   whole product is unsupported. Read as a blocker, not as a filled value. */
+.field-provenance.is-blocked { color: #b3401f; }
+/* A disabled Advanced control is disabled because editing it genuinely
+   cannot make the ticket price -- it must not look like an ordinary input
+   waiting to be filled. */
+.control:disabled {
+  background: #f1efea;
+  color: var(--muted-2);
+  cursor: not-allowed;
+}
 .ust-profile-status {
   font-size: 11.5px;
   line-height: 1.45;

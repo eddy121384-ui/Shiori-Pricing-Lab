@@ -1,18 +1,25 @@
-"""Tests for `pricing/bli_ust_fixed_coupon_profile.py` (Issue #157).
+"""Tests for `pricing/bli_ust_fixed_coupon_profile.py` (Issues #157, #161).
 
 Covers the four-tier provenance contract, the eight resolved field values,
 the required `convention_profile` browser-state input (Issue #157 P1-1
 correction: never inferred, defaulted, or fabricated -- missing/blank/unknown
 is a clear `ValueError`, never a silent fallback to "UST"), the fail-closed
-product-shape gate (currency, the confirmed display-only Bloomberg evidence,
-callable/sinkable, zero coupon, coupon frequency, maturity, and missing
-schedule dates -- deliberately *not* an issuer-identity check; a
+product-shape gate (currency, callable/sinkable, zero coupon, coupon
+frequency, maturity -- deliberately *not* an issuer-identity check; a
 non-Treasury-looking bond is admitted when its shape fits and "UST" is
-selected), the field-level handling of an irregular coupon grid (blocks only
-`last_coupon_date`, not the other seven fields), the expiry-dependent
-settlement dates and their U.S. government-bond business-day roll, and the
-module boundaries that keep this resolver out of every pricing, curve,
-discounting, volatility and Greek path.
+selected), the whole-profile refusal of an irregular coupon grid, the
+expiry-dependent settlement dates and their U.S. government-bond business-day
+roll, and the module boundaries that keep this resolver out of every pricing,
+curve, discounting, volatility and Greek path.
+
+**Issue #161** adds the field-level contract these tests now pin: a real UST
+returning `MTY_TYP = NORMAL` must be admitted (the whole-profile
+description-string gate is gone), and a field the resolver cannot fill comes
+back in `unresolved_fields` while every other field keeps its resolved value.
+The two remaining kinds of refusal are kept apart deliberately, because the
+browser renders them differently: `rejection_reasons` is a product/schedule
+refusal no trader override can repair, `unresolved_fields` is a per-field
+blocker an Advanced override genuinely fixes.
 
 The derived `last_coupon_date` is not merely asserted against a literal: it
 is fed back into the reviewed coupon adapter through a real
@@ -51,6 +58,8 @@ from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
     PROVENANCE_SHIORI_DERIVED,
     PROVENANCE_UST_PROFILE_DEFAULT,
     UST_ADVANCED_FIELD_PATHS,
+    UST_PROFILE_BOND_TYPE,
+    UST_PROFILE_DAY_COUNT,
     BLIUstAdvancedFieldProfile,
     advance_ust_government_bond_business_days,
     resolve_ust_advanced_field_profile,
@@ -450,20 +459,84 @@ def test_a_bond_maturing_on_the_valuation_date_is_refused_too():
     )
 
 
-@pytest.mark.parametrize(
-    ("evidence_key", "value"),
-    [
-        ("day_count", "ISMA-30/360"),
-        ("maturity_type", "NORMAL"),
-        ("calc_type", "UK:BUMP/DMO METHOD"),
-        ("day_count", None),
-    ],
-)
-def test_bloomberg_evidence_that_does_not_match_the_profile_blocks_it(evidence_key, value):
-    _assert_refused(
-        _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, evidence_key: value}),
-        expected_fragment=f"Bloomberg {evidence_key} evidence",
+# --- 5b. Issue #161: description strings no longer gate the whole profile ----
+#
+# The regression this issue exists for: an ordinary Treasury note
+# (US91282CMC28, T 4 1/2 12/31/31) returns MTY_TYP = NORMAL on a real
+# Bloomberg workstation, and the first revision refused the entire profile
+# for it -- eight fields blank, and a form to fill by hand.
+
+
+_REAL_UST_BOND_MASTER = {
+    "coupon": 0.045,
+    "coupon_frequency": "SEMI_ANNUAL",
+    "issue_date": "2024-12-31",
+    "maturity_date": "2031-12-31",
+    "first_coupon_date": "2025-06-30",
+    "callable_flag": False,
+    "sinkable_flag": False,
+}
+
+
+def test_a_real_ust_returning_maturity_type_normal_is_admitted():
+    profile = _resolve(
+        isin="US91282CMC28",
+        bond_master=dict(_REAL_UST_BOND_MASTER),
+        bond_master_raw={
+            "day_count": "ACT/ACT",
+            "maturity_type": "NORMAL",
+            "calc_type": "STREET CONVENTION",
+        },
     )
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert profile.unresolved_fields == ()
+    assert set(_values(profile)) == set(UST_ADVANCED_FIELD_PATHS)
+
+
+@pytest.mark.parametrize("value", ["NORMAL", "AT MATURITY", None, "", "ANYTHING ELSE"])
+def test_maturity_type_evidence_decides_nothing(value):
+    """MTY_TYP is display-only evidence: it can neither admit nor refuse."""
+
+    profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "maturity_type": value})
+
+    assert profile.supported is True
+    assert profile.unresolved_fields == ()
+    assert not any("maturity_type" in reason for reason in profile.rejection_reasons)
+
+
+@pytest.mark.parametrize("value", ["STREET CONVENTION", "UK:BUMP/DMO METHOD", None, ""])
+def test_calc_type_evidence_decides_nothing(value):
+    profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "calc_type": value})
+
+    assert profile.supported is True
+    assert profile.unresolved_fields == ()
+
+
+def test_a_missing_day_count_description_blocks_nothing():
+    """A Bloomberg miss is not a contradiction, so the profile default stands."""
+
+    profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": None})
+
+    assert profile.supported is True
+    assert profile.unresolved_fields == ()
+    assert _provenance(profile)[PATH_DAY_COUNT] == PROVENANCE_UST_PROFILE_DEFAULT
+
+
+def test_a_contradicting_day_count_description_blocks_only_the_day_count():
+    """The one remaining use of a description string: it withholds its own field."""
+
+    profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": "ISMA-30/360"})
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert [item.path for item in profile.unresolved_fields] == [PATH_DAY_COUNT]
+    assert "ISMA-30/360" in profile.unresolved_fields[0].reason
+    # The other seven are untouched -- the whole point of Issue #161.
+    resolved = _values(profile)
+    assert PATH_DAY_COUNT not in resolved
+    assert set(resolved) == set(UST_ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT}
 
 
 def test_a_gilt_shaped_bond_collects_every_reason_at_once():
@@ -473,6 +546,8 @@ def test_a_gilt_shaped_bond_collects_every_reason_at_once():
         currency="GBP",
         bond_master={
             **_TREASURY_BOND_MASTER,
+            "coupon": 0.0,
+            "coupon_frequency": "ANNUAL",
             "issue_date": "2018-04-22",
             "maturity_date": "2028-10-22",
             "first_coupon_date": "2018-10-22",
@@ -492,11 +567,62 @@ def test_a_gilt_shaped_bond_collects_every_reason_at_once():
     assert len(profile.rejection_reasons) >= 3
 
 
-def test_missing_schedule_dates_are_refused_rather_than_guessed():
-    _assert_refused(
-        _resolve(bond_master={**_TREASURY_BOND_MASTER, "first_coupon_date": None}),
-        expected_fragment="first_coupon_date",
+# --- 5c. Issue #161: one missing input blocks one field, not eight -----------
+
+
+@pytest.mark.parametrize("date_field", ["issue_date", "maturity_date", "first_coupon_date"])
+def test_a_missing_schedule_date_blocks_only_the_fields_that_need_it(date_field):
+    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, date_field: None})
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    blocked = {item.path for item in profile.unresolved_fields}
+    # maturity_date additionally carries the "has it matured?" question, so it
+    # withholds `status` too. Nothing else is ever affected.
+    expected_blocked = (
+        {PATH_LAST_COUPON_DATE, PATH_STATUS}
+        if date_field == "maturity_date"
+        else {PATH_LAST_COUPON_DATE}
     )
+    assert blocked == expected_blocked
+    resolved = _values(profile)
+    assert set(resolved) == set(UST_ADVANCED_FIELD_PATHS) - expected_blocked
+    # The fields that did resolve carry real values, not placeholders.
+    assert resolved[PATH_DAY_COUNT] == UST_PROFILE_DAY_COUNT.value
+    assert resolved[PATH_REPORTING_DATE] == _VALUATION_DATE
+
+
+def test_a_blocked_field_names_the_input_it_is_missing():
+    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, "first_coupon_date": None})
+
+    reason = next(
+        item.reason for item in profile.unresolved_fields if item.path == PATH_LAST_COUPON_DATE
+    )
+    assert "first_coupon_date" in reason
+
+
+def test_an_unusable_valuation_date_blocks_only_its_own_two_fields():
+    profile = _resolve(valuation_date="not-a-date")
+
+    assert profile.supported is True
+    assert {item.path for item in profile.unresolved_fields} == {
+        PATH_REPORTING_DATE,
+        PATH_STATUS,
+    }
+    # Shiori will not assert ACTIVE without being able to compare maturity to
+    # a valuation date, but the profile-owned constants are unaffected.
+    resolved = _values(profile)
+    assert resolved[PATH_BOND_TYPE] == UST_PROFILE_BOND_TYPE.value
+    assert resolved[PATH_LAST_COUPON_DATE] == "2030-07-31"
+
+
+def test_a_blocked_field_is_never_reported_as_a_product_rejection():
+    """The two lists are the browser's repairable/not-repairable signal."""
+
+    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, "first_coupon_date": None})
+
+    assert profile.rejection_reasons == ()
+    assert profile.unresolved_fields != ()
 
 
 def _assert_refused(profile, *, expected_fragment: str) -> None:

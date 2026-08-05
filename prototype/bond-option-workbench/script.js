@@ -32,13 +32,29 @@
 //     settlement dates) are, since Issue #157, pre-filled for a supported UST
 //     fixed-coupon bullet by the server-side resolver, each stamped with the
 //     tier it came from -- BLOOMBERG_AUTO, SHIORI_DERIVED, UST_PROFILE_DEFAULT
-//     or TRADER_OVERRIDE. They stay in Advanced and stay editable; a bond
-//     outside that profile is still filled with nothing at all and says why.
-//     Shiori still sets none of them from a Bloomberg description string.
+//     or TRADER_OVERRIDE. Since Issue #161 they resolve *per field*: one
+//     field the resolver cannot fill comes back BLOCKED for the trader and
+//     never blanks the other seven. They stay in Advanced and stay editable
+//     -- except for a bond whose product/schedule the pricing path cannot
+//     carry at all, where they are filled with nothing, disabled, and no
+//     "Go to this input" is offered, because no edit there could make the
+//     ticket price. Shiori still sets none of them from a Bloomberg
+//     description string.
 //   - ADVANCED_OVERRIDE_REQUIRED / UNRESOLVED market inputs: forward clean
 //     price, direct price vol, and the Option Discount Curve. These are the
 //     three main-screen review groups, each stating the real Bloomberg
 //     evidence for why it cannot be sourced.
+//
+// **Trader-desk input formats (Issue #161).** Strike and Forward Clean Price
+// accept Treasury 32nds (98-16, 98-16+, 98-164, 99-032) as well as decimals,
+// and Notional accepts K/M shorthand -- each normalized here by one
+// deterministic parser into the canonical number the existing typed contract
+// already expects, with the normalized value previewed beside the field and a
+// malformed entry rejected with an explicit message rather than silently
+// becoming null or 0. The 32nds string and the "1.5M" string never reach the
+// draft, the builder, the engine, or either export. The Expiry UTC offset is
+// pre-filled to +08:00 on a new ticket and is the trader's to change; nothing
+// re-writes it for the life of that ticket.
 //
 // **Nothing here maps a Bloomberg description into a typed enum.**
 // DAY_CNT_DES, DAY_CNT, MTY_TYP, CALC_TYP_DES, SECURITY_TYP, CPN_TYP and
@@ -81,7 +97,9 @@
     optionTypeToggle: document.getElementById("option-type-toggle"),
     positionToggle: document.getElementById("position-toggle"),
     strikePrice: document.getElementById("strike-price-input"),
+    strikeNormalized: document.getElementById("strike-normalized-preview"),
     notional: document.getElementById("notional-input"),
+    notionalNormalized: document.getElementById("notional-normalized-preview"),
     expiryDatetime: document.getElementById("expiry-datetime-input"),
     expiryOffset: document.getElementById("expiry-offset-input"),
     expiryDerivedPreview: document.getElementById("expiry-derived-preview"),
@@ -89,6 +107,7 @@
     // Market review groups
     marketReviewSummary: document.getElementById("market-review-summary"),
     forwardPrice: document.getElementById("forward-price-input"),
+    forwardNormalized: document.getElementById("forward-normalized-preview"),
     forwardReviewStatus: document.getElementById("forward-review-status"),
     forwardSourcingNote: document.getElementById("forward-sourcing-note"),
     forwardProvenance: document.getElementById("forward-provenance"),
@@ -303,6 +322,9 @@
 
   const UST_PROFILE_SOURCE_SYSTEM = "SHIORI_UST_FIXED_COUPON_PROFILE";
   const TRADER_OVERRIDE_BASIS = "TRADER_OVERRIDE";
+  // Mirrors the resolver's own PROVENANCE_BLOCKED label. Not a value tier:
+  // it names a field the resolver refused to fill and handed to the trader.
+  const PROVENANCE_BLOCKED = "BLOCKED";
 
   // The currently selected Convention Profile -- browser-owned state, sent
   // as an explicit input on every /api/ust/profile request (Issue #157
@@ -328,6 +350,9 @@
       "the approved narrow UST fixed-coupon bullet profile's own value for this field",
     TRADER_OVERRIDE:
       "you set this value yourself; Shiori will not re-derive or reset it for this bond",
+    BLOCKED:
+      "Shiori has no safe value or method for this one field, so it is yours to set — " +
+      "every other field on this bond keeps the value Shiori resolved for it",
   };
 
   // path -> the control that holds it and the readout that explains it. The
@@ -389,6 +414,15 @@
     (field) => field.path === "forward_settlement_date" || field.path === "option_settlement_date"
   );
 
+  // Which of the eight paths each Advanced workflow group owns, so a group
+  // reports the blocked fields it is actually about (Issue #161).
+  const BOND_REFERENCE_PROFILE_PATHS = PROFILE_FIELDS.map((field) => field.path).filter((path) =>
+    path.startsWith("bond_reference_data_universe.")
+  );
+  const TIMING_PROFILE_PATHS = PROFILE_FIELDS.map((field) => field.path).filter(
+    (path) => !path.startsWith("bond_reference_data_universe.")
+  );
+
   // --- Workflow groups -----------------------------------------------------
   //
   // The ordinary trader workflow is exactly the groups whose `advanced` flag is
@@ -409,28 +443,42 @@
     return (draft.bond_reference_data_universe || [])[0] || {};
   }
 
-  // Why an Advanced group is still open. When the resolver has actually
-  // refused this bond, its own reasons are the answer -- the trader sees the
-  // real rejection rather than a generic "no profile is approved" line that
-  // stopped being true. Declared here because the workflow-group table below
-  // reads it.
-  function ustProfileRefusalWhy(fallback) {
-    if (ustProfile && ustProfile.supported === false) {
-      return (
-        "The current pricing path does not support this bond schedule/shape, so Shiori " +
-        "fills none of these fields. Changing Advanced fields cannot make this ticket " +
-        "price: " +
-        (ustProfile.rejection_reasons || []).join(" · ")
-      );
-    }
-    return fallback;
+  // --- The two kinds of "not filled", kept apart (Issue #161) --------------
+  //
+  // A product/schedule refusal and a field-level blocker look identical in a
+  // form -- an empty control -- and are opposite things to a trader. The
+  // first can never be repaired here, so offering an input for it is a fake
+  // exit; the second is exactly what the Advanced override is for. Every
+  // message and every control state below branches on which one it is, and
+  // nothing infers one from the other.
+
+  // True once the resolver has actually refused the product/schedule. Not
+  // true while no answer has arrived (null) -- Shiori not knowing yet is not
+  // the same as Shiori saying no.
+  function productUnsupported() {
+    return ustProfile !== null && ustProfile.supported === false;
   }
 
-  function ustProfileRefusalNext(fallback) {
-    return ustProfile && ustProfile.supported === false
-      ? "This ticket cannot be completed on the current pricing path. Changing Advanced " +
-          "fields cannot make it price."
-      : fallback;
+  function productRejectionReasons() {
+    return (ustProfile && ustProfile.rejection_reasons) || [];
+  }
+
+  // path -> the resolver's own reason it refused that one field. Empty
+  // whenever the whole product was refused: no field-level claim is made
+  // about a bond that never got as far as field resolution.
+  function blockedFieldReasons() {
+    const blocked = new Map();
+    ((ustProfile && ustProfile.unresolved_fields) || []).forEach((item) => {
+      blocked.set(item.path, item.reason);
+    });
+    return blocked;
+  }
+
+  // The blocked-field reasons for one Advanced group's own paths, so a group
+  // explains the fields it actually owns rather than every blocked field.
+  function blockedReasonsForPaths(paths) {
+    const blocked = blockedFieldReasons();
+    return paths.filter((path) => blocked.has(path)).map((path) => `${path}: ${blocked.get(path)}`);
   }
 
   // True when the Quote Side on screen is not the side the draft's quote was
@@ -559,13 +607,30 @@
       advanced: false,
       resolved: (draft) => present(draft.bond_option.strike_price),
       locator: "#strike-price-input",
-      unresolved: {
-        title: "Strike has not been entered",
-        missing: "The strike clean price, per 100.",
-        why: "This is a genuine trade decision on a PRICE payoff basis.",
-        evidence: "Not applicable — this is a trader input, not a sourced value.",
-        next: "Enter the strike per 100 in the Trade group.",
-      },
+      // A malformed entry and a blank one are the same structural state, but
+      // not the same thing to say: the trader who typed "98-33" needs to be
+      // told what is wrong with it, not that nothing was entered.
+      unresolved: () =>
+        inputNormalization.strike.error !== null
+          ? {
+              title: "Strike cannot be read",
+              missing: "The strike clean price, per 100.",
+              why: inputNormalization.strike.error,
+              evidence: "Not applicable — this is a trader input, not a sourced value.",
+              next:
+                "Correct the strike in the Trade group. Shiori normalizes a Treasury " +
+                "quote to decimal per 100 for you, but it will not guess at a quote it " +
+                "cannot read.",
+            }
+          : {
+              title: "Strike has not been entered",
+              missing: "The strike clean price, per 100.",
+              why: "This is a genuine trade decision on a PRICE payoff basis.",
+              evidence: "Not applicable — this is a trader input, not a sourced value.",
+              next:
+                "Enter the strike in the Trade group, as a decimal or a Treasury quote " +
+                "(98-16, 98-16+, 98-164, 99-032). Shiori normalizes it to decimal per 100.",
+            },
     },
     {
       id: "notional",
@@ -573,13 +638,24 @@
       advanced: false,
       resolved: (draft) => present(draft.bond_option.notional),
       locator: "#notional-input",
-      unresolved: {
-        title: "Notional has not been entered",
-        missing: "The trade notional.",
-        why: "This is a genuine trade decision and scales the total premium.",
-        evidence: "Not applicable — this is a trader input, not a sourced value.",
-        next: "Enter the notional in the Trade group.",
-      },
+      unresolved: () =>
+        inputNormalization.notional.error !== null
+          ? {
+              title: "Notional cannot be read",
+              missing: "The trade notional.",
+              why: inputNormalization.notional.error,
+              evidence: "Not applicable — this is a trader input, not a sourced value.",
+              next:
+                "Correct the notional in the Trade group. Shiori reads K and M " +
+                "shorthand, but it will not part-read an amount it cannot parse in full.",
+            }
+          : {
+              title: "Notional has not been entered",
+              missing: "The trade notional.",
+              why: "This is a genuine trade decision and scales the total premium.",
+              evidence: "Not applicable — this is a trader input, not a sourced value.",
+              next: "Enter the notional in the Trade group — 1,000,000, 1M or 1.5M all work.",
+            },
     },
     {
       id: "expiry",
@@ -600,8 +676,10 @@
           "input: no market-close, timezone or holiday convention is approved, " +
           "so Shiori will not invent one.",
         next:
-          "Set the expiry date and time, then enter the UTC offset it is quoted " +
-          "in (for example +08:00 or Z). Shiori keeps that offset exactly.",
+          "Set the expiry date and time. The UTC offset starts at +08:00 " +
+          "(Asia/Taipei) on a new ticket and is yours to change (for example Z or " +
+          "-05:00); Shiori keeps whichever offset you leave there, exactly, and " +
+          "never guesses the date or the time of day.",
       },
     },
     {
@@ -611,18 +689,31 @@
       resolved: (draft) =>
         present(draft.forward_clean_price_input.forward_clean_price_per_100),
       locator: "#forward-price-input",
-      unresolved: {
-        title: "Forward clean price cannot be sourced from Bloomberg",
-        missing: "The forward clean price, per 100, at forward settlement.",
-        why:
-          "OPT_UNDL_FORWARD_PX is the only candidate route and it is not " +
-          "applicable to a cash bond on the current DAPI route.",
-        evidence: EVIDENCE_FORWARD,
-        next:
-          "Enter the forward clean price you are pricing against. It is recorded " +
-          "as a trader override with provenance. Shiori will not reconstruct a " +
-          "forward from spot price, repo, FTP, MMkt or any par rate.",
-      },
+      unresolved: () =>
+        inputNormalization.forward.error !== null
+          ? {
+              title: "Forward clean price cannot be read",
+              missing: "The forward clean price, per 100, at forward settlement.",
+              why: inputNormalization.forward.error,
+              evidence: EVIDENCE_FORWARD,
+              next:
+                "Correct the forward clean price. It accepts the same Treasury quote " +
+                "formats as the strike and normalizes to decimal per 100; Shiori will " +
+                "not guess at a quote it cannot read.",
+            }
+          : {
+              title: "Forward clean price cannot be sourced from Bloomberg",
+              missing: "The forward clean price, per 100, at forward settlement.",
+              why:
+                "OPT_UNDL_FORWARD_PX is the only candidate route and it is not " +
+                "applicable to a cash bond on the current DAPI route.",
+              evidence: EVIDENCE_FORWARD,
+              next:
+                "Enter the forward clean price you are pricing against, as a decimal or " +
+                "a Treasury quote (98-16+, 99-032). It is recorded as a trader override " +
+                "with provenance. Shiori will not reconstruct a forward from spot price, " +
+                "repo, FTP, MMkt or any par rate.",
+            },
     },
     {
       id: "vol-review",
@@ -713,22 +804,28 @@
       },
       locator: "#day-count-select",
       revealAdvanced: true,
-      unresolved: () => ({
-        title: "Bond reference fields are not filled for this bond",
-        missing:
-          "Day count, bond type, ex-dividend days, last coupon date and bond " +
-          "status.",
-        why: ustProfileRefusalWhy(
-          "These are profile-owned or derivation-owned decisions, and the only " +
-            "approved profile is the narrow UST fixed-coupon bullet one."
-        ),
-        evidence: EVIDENCE_BOND_REFERENCE,
-        next: ustProfileRefusalNext(
-          "Open Advanced → Bond reference and set them yourself. Each entry is " +
-            "recorded as a trader override with provenance, beside the Bloomberg " +
-            "text that is evidence for it."
-        ),
-      }),
+      unresolved: () => {
+        const blocked = blockedReasonsForPaths(BOND_REFERENCE_PROFILE_PATHS);
+        return {
+          title: "Bond reference fields are not filled for this bond",
+          missing:
+            "Day count, bond type, ex-dividend days, last coupon date and bond " +
+            "status.",
+          why:
+            blocked.length > 0
+              ? "Shiori filled every one of these it could and stopped at the rest, " +
+                "which are yours to set: " +
+                blocked.join(" · ")
+              : "These are profile-owned or derivation-owned decisions, and the only " +
+                "approved profile is the narrow UST fixed-coupon bullet one.",
+          evidence: EVIDENCE_BOND_REFERENCE,
+          next:
+            "Open Advanced → Bond reference and set the outstanding fields yourself. " +
+            "Each entry is recorded as a trader override with provenance, beside the " +
+            "Bloomberg text that is evidence for it, and the fields Shiori did fill " +
+            "keep their own values.",
+        };
+      },
     },
     {
       id: "advanced-timing",
@@ -740,24 +837,29 @@
         present(draft.option_settlement_date),
       locator: "#reporting-date-input",
       revealAdvanced: true,
-      unresolved: () => ({
-        title: "Settlement and reporting dates are not filled for this bond",
-        missing:
-          "The reporting date, the forward settlement date and the option " +
-          "settlement date.",
-        why: ustProfileRefusalWhy(
-          "No Bloomberg field carries an OTC option's own cash settlement date, " +
-            "and the only approved calendar rule is the narrow UST fixed-coupon " +
-            "bullet profile's one-business-day roll on the U.S. government-bond " +
-            "calendar."
-        ),
-        evidence: EVIDENCE_TIMING,
-        next: ustProfileRefusalNext(
-          "Enter the expiry, or open Advanced → Timing & settlement and set the " +
-            "three dates yourself. Each is recorded as a trader override with " +
-            "provenance."
-        ),
-      }),
+      unresolved: () => {
+        const blocked = blockedReasonsForPaths(TIMING_PROFILE_PATHS);
+        return {
+          title: "Settlement and reporting dates are not filled for this bond",
+          missing:
+            "The reporting date, the forward settlement date and the option " +
+            "settlement date.",
+          why:
+            blocked.length > 0
+              ? "Shiori filled every one of these it could and stopped at the rest, " +
+                "which are yours to set: " +
+                blocked.join(" · ")
+              : "No Bloomberg field carries an OTC option's own cash settlement date, " +
+                "and the only approved calendar rule is the narrow UST fixed-coupon " +
+                "bullet profile's one-business-day roll on the U.S. government-bond " +
+                "calendar.",
+          evidence: EVIDENCE_TIMING,
+          next:
+            "Enter the expiry, or open Advanced → Timing & settlement and set the " +
+            "outstanding dates yourself. Each is recorded as a trader override with " +
+            "provenance.",
+        };
+      },
     },
   ];
 
@@ -787,8 +889,18 @@
 
   // The last UST profile answer for the currently loaded bond -- null until one
   // arrives, and cleared with the draft. Holds the server's own
-  // {supported, rejection_reasons, fields, pending_field_paths}.
+  // {supported, rejection_reasons, fields, pending_field_paths,
+  // unresolved_fields}.
   let ustProfile = null;
+
+  // The last parse of each trader-format numeric input (Issue #161). Kept so a
+  // malformed entry is explained beside its own field and in the unresolved
+  // panel, instead of reading as an ordinary "not entered yet" blank.
+  let inputNormalization = {
+    strike: inputBlank(),
+    notional: inputBlank(),
+    forward: inputBlank(),
+  };
 
   // path -> provenance tier, for the eight Advanced technical fields only.
   // Cleared with the draft, so one bond's tiers can never describe another's.
@@ -868,6 +980,169 @@
     const trimmed = (raw || "").trim();
     if (!/^-?\d+$/.test(trimmed)) return null;
     return Number.parseInt(trimmed, 10);
+  }
+
+  // --- Trader-desk input normalization (Issue #161) ------------------------
+  //
+  // One deterministic parser per format, each returning the same shape:
+  // `{ value, preview, error }`. `value` is always the *canonical* number the
+  // existing typed contract already expects -- decimal per 100 for a price, a
+  // plain number for a notional -- so nothing downstream changes: the draft,
+  // the JSON sent to the builder, the pricing engine and both exports never
+  // see a "98-16+" or a "1.5M" string. This is a format layer, not a pricing
+  // one: no rounding, no rescaling, no re-signing, no market assumption.
+  //
+  // A malformed entry never becomes null-in-silence, 0, or the previous
+  // value: it returns an `error` the caller renders beside the field, and the
+  // draft field stays unset, which keeps the existing typed-builder Price
+  // gate closed exactly as a blank field does.
+
+  // Handle, then two 32nds digits, then an optional sub-32nd. The tail is
+  // captured loosely on purpose so a wrong sub-32nd can be named in the error
+  // rather than collapsing into one generic "not a quote" message.
+  const TREASURY_32NDS_SHAPE = /^(\d+)-(\d{2})(.*)$/;
+  const PLAIN_DECIMAL_SHAPE = /^\d+(?:\.\d+)?$/;
+  const TREASURY_QUOTE_FORMS =
+    "Enter a decimal (98.515625) or a Treasury quote: 98-16, 98-16+, 98-164, 99-032.";
+
+  // A "+" is a half 32nd; a trailing digit is that many eighths of a 32nd.
+  const TREASURY_PLUS_EIGHTHS = 4;
+  const TREASURY_EIGHTHS_PER_32ND = 8;
+  const TREASURY_32NDS_PER_POINT = 32;
+
+  function inputProblem(error) {
+    return { value: null, preview: null, error: error };
+  }
+
+  function inputBlank() {
+    return { value: null, preview: null, error: null };
+  }
+
+  // Formats a normalized number for the on-screen preview only. Never used to
+  // build a request body, and never rounded: `maximumFractionDigits` is set
+  // wide enough that a preview can only ever show the value in full.
+  function previewNumber(value) {
+    return value.toLocaleString("en-US", { maximumFractionDigits: 20 });
+  }
+
+  // Bloomberg / trading-desk Treasury price -> decimal per 100.
+  //
+  //   98-16   -> 98 + 16/32                 = 98.5
+  //   98-16+  -> 98 + (16 + 4/8)/32         = 98.515625
+  //   98-164  -> 98 + (16 + 4/8)/32         = 98.515625
+  //   99-032  -> 99 + (3  + 2/8)/32         = 99.1015625
+  //   99-037  -> 99 + (3  + 7/8)/32         = 99.12109375
+  //
+  // Every one of these is an exact binary fraction, so the normalized decimal
+  // is exact rather than a rounded approximation of the trader's quote.
+  function parseTreasuryQuote(raw) {
+    const trimmed = (raw || "").trim();
+    if (trimmed === "") return inputBlank();
+
+    if (PLAIN_DECIMAL_SHAPE.test(trimmed)) {
+      const decimal = Number(trimmed);
+      if (!Number.isFinite(decimal)) {
+        return inputProblem(`“${trimmed}” is not a finite number. ${TREASURY_QUOTE_FORMS}`);
+      }
+      return {
+        value: decimal,
+        preview: `Normalized: ${previewNumber(decimal)} per 100`,
+        error: null,
+      };
+    }
+
+    const match = TREASURY_32NDS_SHAPE.exec(trimmed);
+    if (!match) {
+      return inputProblem(`“${trimmed}” is not a price Shiori can read. ${TREASURY_QUOTE_FORMS}`);
+    }
+    const handle = Number.parseInt(match[1], 10);
+    const thirtySeconds = Number.parseInt(match[2], 10);
+    const tail = match[3];
+    if (thirtySeconds > 31) {
+      return inputProblem(
+        `“${trimmed}” has ${match[2]} thirty-seconds; the 32nds part must be 00–31.`
+      );
+    }
+    let eighths = 0;
+    if (tail === "+") {
+      eighths = TREASURY_PLUS_EIGHTHS;
+    } else if (/^\d$/.test(tail)) {
+      eighths = Number.parseInt(tail, 10);
+      if (eighths > 7) {
+        return inputProblem(
+          `“${trimmed}” ends in ${tail}; the sub-32nd digit must be 0–7 (or “+”, a half 32nd).`
+        );
+      }
+    } else if (tail !== "") {
+      return inputProblem(
+        `“${trimmed}” has trailing text Shiori cannot read (“${tail}”). ${TREASURY_QUOTE_FORMS}`
+      );
+    }
+    const value =
+      handle +
+      (thirtySeconds + eighths / TREASURY_EIGHTHS_PER_32ND) / TREASURY_32NDS_PER_POINT;
+    return {
+      value: value,
+      preview: `${trimmed} · normalized ${previewNumber(value)} per 100`,
+      error: null,
+    };
+  }
+
+  // Trader-desk notional shorthand -> a plain positive number.
+  //
+  //   1K / 1k -> 1000     250K -> 250000     1M / 1m -> 1000000
+  //   1.5M    -> 1500000  1000000 -> 1000000 1,000,000 -> 1000000
+  //
+  // Deliberately no "B" or any other suffix: Issue #161 asked for K and M
+  // only, and an unrequested suffix would be grammar Shiori invented.
+  const NOTIONAL_SHAPE = /^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?([KkMm])?$/;
+  const NOTIONAL_FORMS = "Enter a number like 1000000, 1,000,000, 250K, 1M or 1.5M.";
+  const NOTIONAL_SUFFIX_EXPONENT = { K: 3, M: 6 };
+
+  function parseNotional(raw) {
+    const trimmed = (raw || "").trim();
+    if (trimmed === "") return inputBlank();
+
+    const match = NOTIONAL_SHAPE.exec(trimmed);
+    if (!match) {
+      return inputProblem(`“${trimmed}” is not a notional Shiori can read. ${NOTIONAL_FORMS}`);
+    }
+    const wholeDigits = match[1].replace(/,/g, "");
+    const fractionDigits = match[2] || "";
+    const suffix = match[3] ? match[3].toUpperCase() : null;
+    const exponent = (suffix ? NOTIONAL_SUFFIX_EXPONENT[suffix] : 0) - fractionDigits.length;
+
+    // Scaled-integer arithmetic rather than `Number(trimmed) * 1e6`: 1.1M is
+    // exactly 1,100,000 here, where the float multiplication would show
+    // 1100000.0000000001 in the preview and send it to the builder.
+    const mantissa = Number(wholeDigits + fractionDigits);
+    if (!Number.isSafeInteger(mantissa)) {
+      return inputProblem(
+        `“${trimmed}” has more significant digits than Shiori can represent exactly.`
+      );
+    }
+    const value =
+      exponent >= 0 ? mantissa * Math.pow(10, exponent) : mantissa / Math.pow(10, -exponent);
+    if (!Number.isFinite(value) || value <= 0) {
+      return inputProblem(`“${trimmed}” normalizes to ${value}; the notional must be above zero.`);
+    }
+    return {
+      value: value,
+      preview: `Normalized notional: ${previewNumber(value)}`,
+      error: null,
+    };
+  }
+
+  // The single point where the three trader-format controls are read. Both
+  // callers -- the form -> draft pass and the write-back after a priced run --
+  // go through here, so there is exactly one call site per parser and no way
+  // for two readers to disagree about a format.
+  function readTraderFormatInputs() {
+    return {
+      strike: parseTreasuryQuote(els.strikePrice.value),
+      notional: parseNotional(els.notional.value),
+      forward: parseTreasuryQuote(els.forwardPrice.value),
+    };
   }
 
   function selectValueOrNull(select) {
@@ -1013,6 +1288,20 @@
   const EXPIRY_OFFSET_PATTERN = /^(Z|[+-]\d{2}:\d{2})$/;
   const EXPIRY_LOCAL_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2})?$/;
 
+  // Issue #161: the offset a *new ticket* starts with -- Asia/Taipei, where
+  // this desk works. It is a pre-filled starting value for one control, not
+  // a convention and not an assumption about the trade: the trader can type
+  // any other explicit offset over it, and once they do, nothing in this
+  // file writes the control again for the life of the ticket (only a whole-
+  // run reset -- Clear, a second Load, a lookup failure -- restores it, and
+  // that is a *new* ticket by definition).
+  //
+  // Only the offset is pre-filled. The expiry date and time of day are still
+  // genuine trade decisions and are never guessed, and `expiry_timestamp`
+  // still carries the explicit offset the trader can see, never a timezone
+  // label and never the machine's local zone.
+  const DEFAULT_EXPIRY_UTC_OFFSET = "+08:00";
+
   function composeExpiry() {
     const localMatch = EXPIRY_LOCAL_PATTERN.exec((els.expiryDatetime.value || "").trim());
     const offset = (els.expiryOffset.value || "").trim();
@@ -1039,12 +1328,34 @@
     };
   }
 
+  // Issue #161: every trader-format field shows either what it normalized to
+  // or exactly what is wrong with it -- never a silent blank. The hint is the
+  // resting state before anything is typed, so the accepted formats are
+  // discoverable without a manual.
+  const STRIKE_FORMAT_HINT =
+    "Accepts a decimal or a Treasury quote: 98.515625, 98-16, 98-16+, 98-164, 99-032.";
+  const NOTIONAL_FORMAT_HINT = "Accepts 1000000, 1,000,000, 250K, 1M or 1.5M.";
+
+  function renderInputNormalization() {
+    [
+      [els.strikeNormalized, inputNormalization.strike, STRIKE_FORMAT_HINT],
+      [els.notionalNormalized, inputNormalization.notional, NOTIONAL_FORMAT_HINT],
+      [els.forwardNormalized, inputNormalization.forward, STRIKE_FORMAT_HINT],
+    ].forEach(([target, parsed, hint]) => {
+      const failed = parsed.error !== null;
+      target.classList.toggle("is-invalid", failed);
+      target.textContent = failed ? parsed.error : parsed.preview || hint;
+    });
+  }
+
   function renderExpiryPreview() {
     const expiry = composeExpiry();
     if (expiry.timestamp === null) {
       els.expiryDerivedPreview.textContent =
         expiry.note ||
-        "Enter the expiry date, local time and its UTC offset.";
+        `Enter the expiry date and local time. The UTC offset starts at ` +
+          `${DEFAULT_EXPIRY_UTC_OFFSET} (Asia/Taipei) on a new ticket — change it if ` +
+          "this expiry is quoted in another zone, and Shiori keeps whichever you set.";
       els.expiryDerivedPreview.classList.toggle("is-invalid", expiry.note !== null);
       return;
     }
@@ -1342,12 +1653,33 @@
   }
 
   function renderFieldProvenance() {
+    const blocked = blockedFieldReasons();
+    // A product/schedule refusal is not repairable here, so these controls
+    // are disabled rather than left looking like a way out (Issue #161).
+    // Every other state -- including a field-level BLOCKED -- keeps them
+    // editable, because there the trader's entry is a real route past it.
+    const disabled = productUnsupported();
     PROFILE_FIELDS.forEach((field) => {
+      field.control().disabled = disabled;
       const target = field.provenanceEl();
       const tier = fieldProvenance.get(field.path) || null;
       const isOverride = tier === TRADER_OVERRIDE_BASIS;
+      const blockedReason = tier === null ? blocked.get(field.path) : undefined;
       target.classList.toggle("is-auto", tier !== null && !isOverride);
       target.classList.toggle("is-override", isOverride);
+      target.classList.toggle("is-blocked", blockedReason !== undefined || disabled);
+      if (disabled) {
+        target.textContent =
+          "Source: none — this bond is not supported on the current pricing path, so " +
+          "Shiori fills nothing here and editing this field cannot make the ticket price.";
+        return;
+      }
+      if (blockedReason !== undefined) {
+        target.textContent =
+          `Source: ${PROVENANCE_BLOCKED} — ${blockedReason}. ` +
+          PROVENANCE_DESCRIPTIONS[PROVENANCE_BLOCKED];
+        return;
+      }
       if (tier === null) {
         target.textContent = currentDraft
           ? "Source: not set — Shiori has filled nothing here, so this value is yours to enter."
@@ -1383,12 +1715,12 @@
     const profileName = ustProfile.convention_profile || SELECTED_CONVENTION_PROFILE;
     if (!ustProfile.supported) {
       target.textContent =
-        `This bond schedule or shape is unsupported by the current pricing path and ` +
-        `does not fit the selected ${profileName} convention profile, ` +
-        "so Shiori pre-fills none of these fields. Changing Advanced fields cannot make " +
-        "this ticket price (this says nothing about who issued the " +
-        "bond -- only that its own terms don't match this profile's shape): " +
-        (ustProfile.rejection_reasons || []).join(" · ");
+        "This bond's product or coupon schedule is not supported on the current pricing " +
+        `path, and does not fit the selected ${profileName} convention profile, so Shiori ` +
+        "pre-fills none of these fields and has disabled them. No Advanced edit can make " +
+        "this ticket price (this says nothing about who issued the bond — only that its " +
+        "own terms are outside what this path carries): " +
+        productRejectionReasons().join(" · ");
       target.classList.add("is-unsupported");
       return;
     }
@@ -1396,14 +1728,14 @@
     const unresolved = ustProfile.unresolved_fields || [];
     let text =
       `Convention Profile: ${profileName}. This bond's shape fits it, so Shiori has ` +
-      "filled these fields and shown where each value came from.";
+      "filled every field it could and shown where each value came from.";
     if (pending.length > 0) {
       text += ` Waiting on the expiry before deriving: ${pending.join(", ")}.`;
     }
     if (unresolved.length > 0) {
       text +=
-        " " +
-        unresolved.map((item) => `${item.path} is not resolved: ${item.reason}`).join(" ");
+        " These are yours to set — every other field keeps the value Shiori resolved: " +
+        unresolved.map((item) => `${item.path} (${item.reason})`).join(" · ");
     }
     target.textContent = text;
     target.classList.add("is-supported");
@@ -1703,11 +2035,22 @@
     // Volatility basis is the one select with a real default: PRICE_VOL is the
     // direct, no-conversion basis the guard accepts.
     els.volatilityBasis.value = "PRICE_VOL";
+    // The one other pre-filled control (Issue #161). Set here, in the single
+    // function that starts a fresh ticket, so "new ticket" and "offset back
+    // to +08:00" are the same event by construction -- there is nowhere else
+    // for a re-render or a validation pass to reach it from.
+    els.expiryOffset.value = DEFAULT_EXPIRY_UTC_OFFSET;
     // Two blank rows: the minimum the curve contract needs, offered ready to
     // fill. They are structure only -- a blank row is never a node.
     clearCurveRows();
     addCurveRow("", "");
     addCurveRow("", "");
+    inputNormalization = {
+      strike: inputBlank(),
+      notional: inputBlank(),
+      forward: inputBlank(),
+    };
+    renderInputNormalization();
     renderExpiryPreview();
     renderTimestampUtcPreviews();
     renderCurveCoverage();
@@ -1721,14 +2064,33 @@
     renderTimestampUtcPreviews();
   }
 
+  // Writes a canonical number back into a trader-format control -- but leaves
+  // the trader's own text alone when it already normalizes to exactly that
+  // number (Issue #161). Without this, pressing Price would rewrite a strike
+  // typed as "98-16+" into "98.515625": the same value, but not the trader's
+  // own quote, and a control that visibly rewrites itself after every run.
+  function setNormalizedInputValue(input, parsed, value) {
+    if (parsed.error === null && parsed.value === value) return;
+    input.value = value ?? "";
+  }
+
   function setTradeFormFromDraft(draft) {
     setToggle(els.optionTypeToggle, draft.bond_option.option_type);
     setToggle(els.positionToggle, draft.bond_option.position);
-    els.strikePrice.value = draft.bond_option.strike_price ?? "";
-    els.notional.value = draft.bond_option.notional ?? "";
+    setNormalizedInputValue(
+      els.strikePrice, inputNormalization.strike, draft.bond_option.strike_price
+    );
+    setNormalizedInputValue(els.notional, inputNormalization.notional, draft.bond_option.notional);
     els.volatility.value = draft.volatility_input.volatility ?? "";
-    els.forwardPrice.value =
-      draft.forward_clean_price_input.forward_clean_price_per_100 ?? "";
+    setNormalizedInputValue(
+      els.forwardPrice,
+      inputNormalization.forward,
+      draft.forward_clean_price_input.forward_clean_price_per_100
+    );
+    // Re-read whatever the controls now hold, so the previews describe what is
+    // on screen rather than what was on screen before this write.
+    inputNormalization = readTraderFormatInputs();
+    renderInputNormalization();
   }
 
   // The six overlay-shaped fields, read directly off the current draft rather
@@ -1759,11 +2121,18 @@
     invalidatePendingPriceRequest();
     invalidatePendingBloombergRequest();
 
+    // Issue #161: the three trader-format numeric fields are normalized once,
+    // here, and only their canonical numbers reach the draft. A malformed
+    // entry yields null *and* a visible error beside the field -- the same
+    // structural state as blank, so the existing gate stays closed, but never
+    // silently so.
+    inputNormalization = readTraderFormatInputs();
+
     const bondOption = currentDraft.bond_option;
     bondOption.option_type = getOptionalToggleValue(els.optionTypeToggle);
     bondOption.position = getOptionalToggleValue(els.positionToggle);
-    bondOption.strike_price = numberOrNull(els.strikePrice.value);
-    bondOption.notional = numberOrNull(els.notional.value);
+    bondOption.strike_price = inputNormalization.strike.value;
+    bondOption.notional = inputNormalization.notional.value;
 
     // One expiry interaction produces both contract fields; neither is ever
     // guessed from the other.
@@ -1818,12 +2187,12 @@
 
     currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
     currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
-    currentDraft.forward_clean_price_input.forward_clean_price_per_100 = numberOrNull(
-      els.forwardPrice.value
-    );
+    currentDraft.forward_clean_price_input.forward_clean_price_per_100 =
+      inputNormalization.forward.value;
 
     currentDraft.curve_points = readCurveNodesFromRows();
 
+    renderInputNormalization();
     renderExpiryPreview();
     renderTimestampUtcPreviews();
     refreshOverrideProvenance();
@@ -2292,7 +2661,44 @@
     return WORKFLOW_GROUPS.filter((group) => !group.resolved(draft));
   }
 
+  // Issue #161: a bond the current pricing path cannot carry gets one honest
+  // panel and no input route at all. Before this, the page kept showing
+  // editable Advanced controls and a "Go to this input" button while
+  // simultaneously saying those edits could never make the ticket price --
+  // a fake exit. The rule now: no Go-to button, disabled profile controls
+  // (see renderFieldProvenance), and a next step that is actually available.
+  function renderProductUnsupportedDependency() {
+    unresolvedFocusGroup = null;
+    els.unresolvedPanel.hidden = false;
+    els.unresolvedGotoBtn.hidden = true;
+    els.unresolvedTitle.textContent =
+      "This bond is not supported on the current pricing path";
+    els.unresolvedMissing.textContent =
+      "Nothing you can enter in Advanced — these are facts about the bond and its " +
+      "schedule, not inputs Shiori is waiting for.";
+    els.unresolvedWhy.textContent = productRejectionReasons().join(" · ");
+    els.unresolvedEvidence.textContent =
+      "The reviewed resolver refused this bond's own terms or its coupon schedule, " +
+      "not one of its fields. The typed pricing adapter carries one regular " +
+      "fixed-coupon grid, so an irregular or stubbed schedule cannot be repaired by " +
+      "typing a last coupon date, and a callable, sinkable, matured or non-USD bond " +
+      "is outside the selected profile entirely.";
+    els.unresolvedNext.textContent =
+      "Read the reasons above. If one of them is a Bond Master value Bloomberg simply " +
+      "did not return, run Bloomberg Load again for this security; otherwise this bond " +
+      "is outside what the current pricing path carries and a different bond is the " +
+      "only way forward. The Advanced technical fields are disabled here precisely " +
+      "because changing them could not make this ticket price — Shiori will not offer " +
+      "an input that leads nowhere.";
+    els.unresolvedAlso.textContent =
+      "Everything else on this ticket is on hold until a supported bond is loaded.";
+  }
+
   function renderUnresolvedDependency(groups) {
+    if (productUnsupported()) {
+      renderProductUnsupportedDependency();
+      return;
+    }
     if (groups.length === 0) {
       els.unresolvedPanel.hidden = true;
       unresolvedFocusGroup = null;
@@ -2306,8 +2712,9 @@
       typeof primary.unresolved === "function" ? primary.unresolved() : primary.unresolved;
     unresolvedFocusGroup = primary;
     els.unresolvedPanel.hidden = false;
-    els.unresolvedGotoBtn.hidden =
-      primary.advanced && ustProfile && ustProfile.supported === false;
+    // Every route offered from here is now a real one: the product-refusal
+    // case returned above before reaching this line.
+    els.unresolvedGotoBtn.hidden = false;
     els.unresolvedTitle.textContent = detail.title;
     els.unresolvedMissing.textContent = detail.missing;
     els.unresolvedWhy.textContent = detail.why;
@@ -3234,4 +3641,11 @@
   window.__shioriTestTraderOverriddenPaths = () => Array.from(traderOverriddenPaths);
   window.__shioriTestUstProfile = () => ustProfile;
   window.__shioriTestSelectedConventionProfile = () => SELECTED_CONVENTION_PROFILE;
+  // Issue #161. The two parsers are pure functions of their argument, so
+  // exposing them tests the very code the page runs rather than a copy.
+  window.__shioriTestParseTreasuryQuote = (raw) => parseTreasuryQuote(raw);
+  window.__shioriTestParseNotional = (raw) => parseNotional(raw);
+  window.__shioriTestInputNormalization = () => inputNormalization;
+  window.__shioriTestBlockedFieldPaths = () => Array.from(blockedFieldReasons().keys());
+  window.__shioriTestDefaultExpiryUtcOffset = () => DEFAULT_EXPIRY_UTC_OFFSET;
 })();

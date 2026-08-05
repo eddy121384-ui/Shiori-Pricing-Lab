@@ -1139,6 +1139,57 @@ def test_api_ust_profile_reports_an_unsupported_bond_as_a_normal_answer(server_u
     assert any("is not USD" in reason for reason in payload["rejection_reasons"])
 
 
+@_QUANTLIB_SKIP
+def test_api_ust_profile_admits_a_real_ust_returning_maturity_type_normal(
+    server_url: str,
+) -> None:
+    """Issue #161's UAT regression, at the route: a display-only description
+    string must not turn an ordinary Treasury into an unsupported product."""
+
+    body = {
+        **_UST_PROFILE_BODY,
+        "isin": "US91282CMC28",
+        "bond_master_raw": {
+            "day_count": "ACT/ACT",
+            "maturity_type": "NORMAL",
+            "calc_type": "STREET CONVENTION",
+        },
+    }
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["rejection_reasons"] == []
+    assert payload["unresolved_fields"] == []
+    assert len(payload["fields"]) == 8
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_serializes_a_partial_answer_with_its_blocked_field(
+    server_url: str,
+) -> None:
+    """Issue #161: one field the resolver refused comes back in
+    ``unresolved_fields``; the other seven still come back in ``fields``."""
+
+    body = {
+        **_UST_PROFILE_BODY,
+        "bond_master": {**_UST_PROFILE_BODY["bond_master"], "first_coupon_date": None},
+    }
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["rejection_reasons"] == []
+    assert [item["path"] for item in payload["unresolved_fields"]] == [
+        "bond_reference_data_universe.0.last_coupon_date"
+    ]
+    assert "first_coupon_date" in payload["unresolved_fields"][0]["reason"]
+    assert len(payload["fields"]) == 7
+    assert "bond_reference_data_universe.0.last_coupon_date" not in {
+        field["path"] for field in payload["fields"]
+    }
+
+
 def test_api_ust_profile_rejects_a_body_missing_required_keys(server_url: str) -> None:
     body = {key: value for key, value in _UST_PROFILE_BODY.items() if key != "bond_master"}
     status, payload = _post_json(f"{server_url}/api/ust/profile", body)
