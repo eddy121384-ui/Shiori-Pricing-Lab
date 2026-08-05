@@ -443,6 +443,35 @@
     return (draft.bond_reference_data_universe || [])[0] || {};
   }
 
+  // Mirrors reference_data/_validation.py's `_parse_iso_date` exactly (Issue
+  // #161 P3 correction): the strict `YYYY-MM-DD` shape, then a real calendar
+  // round-trip so "2024-02-30" is rejected too, not just a malformed shape
+  // like "20241231". Bloomberg's own ISSUE_DT / MATURITY / FIRST_CPN_DT
+  // mnemonics pass through with zero format validation
+  // (data/bloomberg_bond_quote.py's `_passthrough_bloomberg_string`), so a
+  // non-ISO string reaching the draft is a real, reachable Bloomberg
+  // response shape, not a synthetic edge case -- and `present()` alone
+  // (non-blank-string only) cannot tell it apart from a genuinely usable
+  // date. This is the one place this file re-implements the resolver's own
+  // date-validity algorithm rather than reusing its answer directly,
+  // because the checks below must be correct immediately after Bloomberg
+  // Load, before the async POST /api/ust/profile round-trip completes --
+  // never guessed, never coerced, same grammar and same calendar rule the
+  // resolver itself uses.
+  const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
+
+  function isValidIsoDate(value) {
+    if (typeof value !== "string" || !ISO_DATE_SHAPE.test(value)) return false;
+    const [year, month, day] = value.split("-").map(Number);
+    if (month < 1 || month > 12) return false;
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    );
+  }
+
   // --- The two kinds of "not filled", kept apart (Issue #161) --------------
   //
   // A product/schedule refusal and a field-level blocker look identical in a
@@ -483,26 +512,42 @@
 
   // Which of last_coupon_date/status cannot resolve because a Bloomberg Bond
   // Master date (issue_date, maturity_date, first_coupon_date) is itself
-  // missing (Issue #161 P2 correction). None of those three has an Advanced
-  // override anywhere on this page -- the resolver already leaves the
-  // affected field unresolved rather than BLOCKED for exactly this reason
-  // (see bli_ust_fixed_coupon_profile.py's module docstring), so this reads
-  // the same underlying fact straight from the draft's own Bond Master
-  // record, independent of the resolver's per-run answer, to render the
-  // group honestly and to keep its Go-to route closed off (a real Advanced
-  // entry here can never make this ticket price; the fix is a fresh,
-  // successful Bloomberg Load, which the "Bloomberg Bond Master" group
-  // already reports and blocks on).
+  // missing *or not a valid, real calendar YYYY-MM-DD date* (Issue #161 P3
+  // correction). None of those three has an Advanced override anywhere on
+  // this page -- the resolver already leaves the affected field unresolved
+  // rather than BLOCKED for exactly this reason (see
+  // bli_ust_fixed_coupon_profile.py's module docstring), so this reads the
+  // same underlying fact straight from the draft's own Bond Master record,
+  // independent of the resolver's per-run answer, to render the group
+  // honestly and to keep its Go-to route closed off (a real Advanced entry
+  // here can never make this ticket price; the fix is a fresh, successful
+  // Bloomberg Load, which the "Bloomberg Bond Master" group already reports
+  // and blocks on).
+  //
+  // P3 correction: the first revision used `present()` here -- a bare
+  // non-blank-string check -- which a malformed-but-non-empty Bloomberg date
+  // (e.g. "20241231", no dashes) slips straight past. That silently
+  // re-opened the exact fake exit this function exists to close: the
+  // control stayed enabled, read "yours to enter", and Price never
+  // explained the real, unfixable cause until the typed builder finally
+  // rejected the draft after the trader had already "completed" the
+  // ticket. `isValidIsoDate` is the same strict grammar-plus-calendar check
+  // the resolver itself applies, so a malformed date is treated exactly
+  // like a missing one here too.
   function bondMasterGapPaths() {
     if (!currentDraft) return [];
     const record = referenceRecord(currentDraft);
     const gaps = [];
     if (
-      !(present(record.issue_date) && present(record.maturity_date) && present(record.first_coupon_date))
+      !(
+        isValidIsoDate(record.issue_date) &&
+        isValidIsoDate(record.maturity_date) &&
+        isValidIsoDate(record.first_coupon_date)
+      )
     ) {
       gaps.push("bond_reference_data_universe.0.last_coupon_date");
     }
-    if (!present(record.maturity_date)) {
+    if (!isValidIsoDate(record.maturity_date)) {
       gaps.push("bond_reference_data_universe.0.status");
     }
     return gaps;
@@ -787,14 +832,24 @@
       id: "bloomberg-reference",
       label: "Bloomberg Bond Master",
       advanced: true,
+      // Issue #161 P3 correction: the three schedule dates use
+      // `isValidIsoDate`, not `present`. A malformed-but-non-blank Bloomberg
+      // date (Bloomberg's own ISSUE_DT/MATURITY/FIRST_CPN_DT mnemonics carry
+      // no format guarantee -- see `isValidIsoDate`'s own comment) used to
+      // read as "present" and let this group report resolved, so the
+      // primary unresolved panel showed the wrong group entirely (the
+      // Advanced "Bond reference" one, whose fields looked editable and
+      // fixable) instead of this one's honest "run Bloomberg Load again".
+      // coupon / coupon_frequency / callable_flag / sinkable_flag are not
+      // date-shaped and keep the plain presence check.
       resolved: (draft) => {
         const record = referenceRecord(draft);
         return (
           present(record.coupon) &&
           present(record.coupon_frequency) &&
-          present(record.maturity_date) &&
-          present(record.issue_date) &&
-          present(record.first_coupon_date) &&
+          isValidIsoDate(record.maturity_date) &&
+          isValidIsoDate(record.issue_date) &&
+          isValidIsoDate(record.first_coupon_date) &&
           present(record.callable_flag) &&
           present(record.sinkable_flag)
         );

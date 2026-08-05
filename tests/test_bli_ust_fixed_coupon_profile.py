@@ -60,6 +60,7 @@ from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
     UST_ADVANCED_FIELD_PATHS,
     UST_PROFILE_BOND_TYPE,
     UST_PROFILE_DAY_COUNT,
+    UST_PROFILE_STATUS,
     BLIUstAdvancedFieldProfile,
     advance_ust_government_bond_business_days,
     resolve_ust_advanced_field_profile,
@@ -638,6 +639,52 @@ def test_a_missing_bond_master_field_is_never_reported_as_repairable_blocked():
     assert profile.rejection_reasons == ()
     assert profile.unresolved_fields == ()
     assert PATH_LAST_COUPON_DATE not in _values(profile)
+
+
+# --- 5d. Issue #161 P3: a malformed (non-empty) schedule date is not
+# "present" -- it is treated exactly like a missing one -------------------
+#
+# Independent-review finding: Bloomberg's own ISSUE_DT/MATURITY/FIRST_CPN_DT
+# mnemonics pass through with no format validation
+# (data/bloomberg_bond_quote.py's `_passthrough_bloomberg_string`), so a
+# real Bloomberg response can hand this resolver a non-blank string that is
+# not a valid ISO date. `_optional_iso_date` already treats that the same
+# as missing -- these tests pin that behaviour explicitly, since the
+# browser-side regression this issue actually exposed was a UI check that
+# used a bare non-blank-string test instead of the resolver's own
+# grammar-plus-calendar validity rule.
+
+
+@pytest.mark.parametrize(
+    "malformed_value",
+    [
+        "20241231",  # no dashes -- the exact shape a mis-configured
+        # Bloomberg date format returns
+        "31/12/2031",  # DD/MM/YYYY
+        "2031-13-01",  # month out of range
+        "2031-02-30",  # correct shape, impossible calendar date
+        "not-a-date",
+        "",
+    ],
+)
+@pytest.mark.parametrize("date_field", ["issue_date", "maturity_date", "first_coupon_date"])
+def test_a_malformed_schedule_date_is_treated_exactly_like_a_missing_one(
+    date_field, malformed_value
+):
+    profile = _resolve(bond_master={**_TREASURY_BOND_MASTER, date_field: malformed_value})
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert profile.unresolved_fields == ()
+    resolved = _values(profile)
+    assert PATH_LAST_COUPON_DATE not in resolved
+    if date_field == "maturity_date":
+        assert PATH_STATUS not in resolved
+    else:
+        assert resolved[PATH_STATUS] == UST_PROFILE_STATUS.value
+    # Every field that does not depend on the malformed date is unaffected.
+    assert resolved[PATH_DAY_COUNT] == UST_PROFILE_DAY_COUNT.value
+    assert resolved[PATH_REPORTING_DATE] == _VALUATION_DATE
 
 
 def _assert_refused(profile, *, expected_fragment: str) -> None:
