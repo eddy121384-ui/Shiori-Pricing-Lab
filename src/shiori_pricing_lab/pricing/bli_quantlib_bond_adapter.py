@@ -46,9 +46,19 @@ before, with no behavior change.
 purposes. `redemption_amount` is reserved for a future
 principal/redemption slice this module does not implement.
 
-**Day-count mapping (docs/29 §4):** `DayCount.ACT_ACT_ISDA` maps
-literally to `ql.ActualActual(ql.ActualActual.ISDA)` -- never to the
-ISMA/bond-basis variant. No new `DayCount` member is introduced here.
+**Day-count mapping (docs/29 §4; corrected for Issue #157).** `DayCount.ACT_ACT_ISDA`
+maps literally to `ql.ActualActual(ql.ActualActual.ISDA)`, exactly as
+before -- this behavior is unchanged. A second, genuinely distinct member,
+`DayCount.ACT_ACT_BOND`, maps to `ql.ActualActual(ql.ActualActual.Bond)`
+(QuantLib's name for the ISMA/bond-basis convention) -- the convention
+actually used for US Treasury coupon accrual, which ISDA's Actual/Actual is
+**not** a substitute for: ISDA prorates against the calendar year(s) the
+period spans (splitting at Feb 29), while Bond/ISMA prorates strictly
+within the bracketing coupon period, so a semi-annual period's full-period
+fraction is always exactly `0.5` under Bond/ISMA regardless of its actual
+day count, but not under ISDA. `ACT_ACT_ISDA` and `ACT_ACT_BOND` are never
+aliased to each other and never produce the same accrued-interest result
+over an irregular-length period.
 
 **Irregular stubs and inconsistent coupon grids (docs/29 §5, Codex P2
 review of PR #81):** `issue_date` through `maturity_date` must land on
@@ -78,6 +88,21 @@ full-period year fraction is not exactly `1 / periods_per_year` (e.g.
 `ACT_360` over an 182/183/184/185-actual-day semi-annual period) would
 otherwise silently accrue a slightly wrong amount under a naive
 `coupon * yearFraction(period_start, as_of) * 100` formula.
+
+**Reference-period-aware year fractions (Issue #157 correction).** Both
+`yearFraction` calls pass the bracketing coupon period's own start/end
+dates as QuantLib's explicit `startRef`/`endRef` arguments. `ACT_ACT_BOND`
+(`ql.ActualActual(ql.ActualActual.Bond)`) needs that reference period to
+compute correctly -- without it, QuantLib cannot know the coupon period's
+actual length and produces a different, wrong-for-this-purpose result (verified
+against `ql.ActualActual(ql.ActualActual.Bond)` called with no reference
+period in this module's own tests). `ACT_ACT_ISDA` ignores the extra
+reference-period arguments entirely and returns the identical result with
+or without them, so passing them unconditionally changes no existing
+`ACT_ACT_ISDA` behavior. This is schedule-aware wiring only -- it reuses the
+`period_start`/`period_end` this function already resolves from the
+existing regular-schedule check, and introduces no second schedule
+generator.
 
 **Ex-dividend window (docs/29 §6):** `accrued_interest_per_100` raises
 `BLIBondExDividendWindowError` for any `as_of_date` inside a bond's
@@ -120,7 +145,7 @@ from shiori_pricing_lab.data.bli_standalone_contract import (
     BLIStandaloneBondReferenceData,
     StandaloneBondReferenceData,
 )
-from shiori_pricing_lab.products.enums import DayCount, Frequency
+from shiori_pricing_lab.products.enums import DayCount, Frequency, coerce_enum
 from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceData
 
 try:
@@ -402,7 +427,99 @@ def _day_counter(day_count: DayCount) -> ql.DayCounter:
         return ql.Thirty360(ql.Thirty360.BondBasis)
     if day_count is DayCount.ACT_ACT_ISDA:
         return ql.ActualActual(ql.ActualActual.ISDA)
+    if day_count is DayCount.ACT_ACT_BOND:
+        # QuantLib's name for the ISMA/bond-basis convention -- the actual US
+        # Treasury coupon-accrual convention. Correct results require the
+        # bracketing coupon period's own reference dates, passed explicitly
+        # by every caller of this day counter's `yearFraction` (see
+        # `accrued_interest_per_100`) -- never a schedule-less construction.
+        return ql.ActualActual(ql.ActualActual.Bond)
     raise ValueError(f"unsupported day_count for QuantLib mapping: {day_count!r}")
+
+
+def derive_last_coupon_date(
+    *,
+    issue_date: str,
+    maturity_date: str,
+    first_coupon_date: str,
+    coupon_frequency: Frequency | str,
+) -> str:
+    """Return this bond's final scheduled coupon date before `maturity_date`.
+
+    The same regular-grid rules `_check_regular_schedule` already enforces,
+    run one step earlier: a caller that does not yet *have* a
+    `last_coupon_date` (because nothing has supplied one) cannot construct a
+    `BondReferenceData` to ask that function, yet the grid is fully
+    determined by `issue_date`, `maturity_date`, `first_coupon_date` and
+    `coupon_frequency` alone. Both candidate grids are considered exactly as
+    there -- the day-of-month-preserving `_add_months` arithmetic (non-EOM),
+    and QuantLib's own `endOfMonth=True` schedule (EOM), the latter only when
+    both endpoints are themselves calendar month-end -- with the declared
+    `first_coupon_date` resolving which one is in effect and non-EOM
+    preferred when both match.
+
+    This is deliberately the grid's **second-to-last** date, which is what
+    `last_coupon_date` means to every other function in this module (the
+    final coupon-at-maturity event combines with principal redemption and is
+    out of scope for this adapter slice). It is not a "previous coupon date
+    relative to some as-of date", and it never depends on a valuation date,
+    a settlement date, or the system clock.
+
+    Raises `BLIBondScheduleError` when no consistent regular grid exists --
+    including a bond with only one coupon period, whose grid has no coupon
+    date strictly before maturity at all -- so an irregular or stubbed bond
+    is refused rather than approximated. No stub methodology is introduced.
+    """
+
+    _require_quantlib()
+
+    issue = _parse_iso_date(issue_date, "issue_date")
+    maturity = _parse_iso_date(maturity_date, "maturity_date")
+    first_coupon = _parse_iso_date(first_coupon_date, "first_coupon_date")
+    frequency = coerce_enum(coupon_frequency, Frequency, "coupon_frequency")
+    months = _coupon_period_months(frequency)
+
+    total_months = (maturity.year - issue.year) * 12 + (maturity.month - issue.month)
+    if total_months <= 0 or total_months % months != 0:
+        raise BLIBondScheduleError(
+            f"issue_date ({issue_date!r}) to maturity_date ({maturity_date!r}) is not an "
+            f"exact multiple of the {months}-month coupon period, so no consistent regular "
+            "schedule exists (no stub approximation is computed)"
+        )
+    periods = total_months // months
+    if periods < 2:
+        raise BLIBondScheduleError(
+            f"issue_date ({issue_date!r}) to maturity_date ({maturity_date!r}) spans a "
+            "single coupon period, so there is no coupon date strictly before maturity to "
+            "derive -- the final coupon-at-maturity event is out of scope for this adapter"
+        )
+
+    # Non-EOM candidate: the existing, unchanged `_add_months` arithmetic. It
+    # raises for a day-of-month that does not exist in a stepped-to month,
+    # which only makes this candidate inapplicable (a legitimate EOM-only
+    # bond), never the bond irregular.
+    try:
+        if (
+            _add_months(issue, months) == first_coupon
+            and _add_months(issue, periods * months) == maturity
+        ):
+            return _add_months(issue, (periods - 1) * months).isoformat()
+    except ValueError:
+        pass
+
+    # EOM candidate: considered only when both endpoints are themselves
+    # calendar month-end, exactly as in `_check_regular_schedule`.
+    if _is_last_day_of_month(issue) and _is_last_day_of_month(maturity):
+        schedule_dates = _schedule_dates(issue, maturity, months, end_of_month=True)
+        if schedule_dates[-1] == maturity and schedule_dates[1] == first_coupon:
+            return schedule_dates[-2].isoformat()
+
+    raise BLIBondScheduleError(
+        f"no regular coupon grid runs from issue_date ({issue_date!r}) through "
+        f"maturity_date ({maturity_date!r}) with first_coupon_date "
+        f"({first_coupon_date!r}) at a {months}-month period, so this bond's first/last "
+        "coupon period is irregular and no last coupon date is derived"
+    )
 
 
 def coupon_flows_before(
@@ -551,8 +668,19 @@ def accrued_interest_per_100(
 
     day_counter = _day_counter(bond.day_count)
     period_start_ql = _to_ql_date(period_start)
-    elapsed_fraction = day_counter.yearFraction(period_start_ql, _to_ql_date(as_of))
-    full_period_fraction = day_counter.yearFraction(period_start_ql, _to_ql_date(period_end))
+    period_end_ql = _to_ql_date(period_end)
+    as_of_ql = _to_ql_date(as_of)
+    # startRef/endRef are the bracketing coupon period's own bounds -- required
+    # for ACT_ACT_BOND to compute correctly (see the module docstring), and
+    # inert for every other day counter here (ACT_ACT_ISDA ignores them
+    # entirely; ACT_360/ACT_365_FIXED/THIRTY_360 take no reference period at
+    # all). Passing them unconditionally changes no existing day count's result.
+    elapsed_fraction = day_counter.yearFraction(
+        period_start_ql, as_of_ql, period_start_ql, period_end_ql
+    )
+    full_period_fraction = day_counter.yearFraction(
+        period_start_ql, period_end_ql, period_start_ql, period_end_ql
+    )
     if full_period_fraction <= 0:
         # Defensive guard (Codex P2 review of PR #81): unreachable given
         # period_start < period_end and a sane day counter, but proration

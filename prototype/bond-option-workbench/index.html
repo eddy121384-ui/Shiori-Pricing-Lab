@@ -313,6 +313,7 @@
           <div class="card-head" id="advanced-head">
             <div class="card-title">Advanced</div>
             <div class="card-head-right">
+              <span class="convention-profile-badge" id="convention-profile-badge">Convention Profile: UST</span>
               <span class="card-summary" id="advanced-summary"></span>
               <span class="collapse-toggle" id="advanced-indicator">Expand</span>
             </div>
@@ -321,18 +322,20 @@
 
             <!-- A. Bond reference overrides -->
             <div class="adv-block" id="adv-bond-reference">
-              <div class="adv-title">Bond reference &mdash; trader override</div>
+              <div class="adv-title">Bond reference &mdash; profile-filled, trader-editable</div>
               <div class="fixed-route-note">
-                No UST / conventional-Gilt convention profile is approved yet, so Shiori
-                does not set these from Bloomberg. Bloomberg&rsquo;s
-                <code>DAY_CNT_DES</code>, <code>DAY_CNT</code>, <code>MTY_TYP</code>,
-                <code>CALC_TYP_DES</code>, <code>SECURITY_TYP</code>, <code>CPN_TYP</code>
-                and <code>PREV_CPN_DT</code> are shown as <em>display-only evidence</em>
-                beneath each field &mdash; they are never coerced into a Shiori enum.
-                Ex-dividend and security-status candidates returned <code>BAD_FLD</code> on
-                the Issue #149 workstation run. Everything you set here is recorded as a
-                trader override with provenance.
+                For a supported UST fixed-coupon bullet, Shiori fills these from the
+                approved narrow UST profile and its own deterministic derivations, and
+                shows the source of every value. Bloomberg&rsquo;s
+                <code>DAY_CNT_DES</code>, <code>MTY_TYP</code> and
+                <code>CALC_TYP_DES</code> remain <em>display-only evidence</em> and are
+                still never coerced into a Shiori enum &mdash; they can only <em>block</em>
+                the profile when they do not match it exactly. Anything outside that
+                profile is filled with nothing at all and says why. Every control stays
+                editable; the moment you change one, its source becomes
+                <strong>TRADER_OVERRIDE</strong> and Shiori stops re-deriving it.
               </div>
+              <div class="ust-profile-status" id="ust-profile-status">&mdash;</div>
               <div class="entry-grid">
                 <div class="form-row"><label>Day Count</label>
                   <div>
@@ -342,7 +345,9 @@
                       <option value="ACT_365_FIXED">ACT_365_FIXED</option>
                       <option value="THIRTY_360">THIRTY_360</option>
                       <option value="ACT_ACT_ISDA">ACT_ACT_ISDA</option>
+                      <option value="ACT_ACT_BOND">ACT_ACT_BOND</option>
                     </select>
+                    <div class="field-provenance" id="prov-day-count">&mdash;</div>
                     <div class="bbg-hint">Bloomberg <code>DAY_CNT_DES</code>: <span id="hint-day-count">Not available</span></div>
                   </div>
                 </div>
@@ -358,48 +363,69 @@
                       <option value="PERPETUAL">PERPETUAL</option>
                       <option value="STRUCTURED_NOTE">STRUCTURED_NOTE</option>
                     </select>
+                    <div class="field-provenance" id="prov-bond-type">&mdash;</div>
                     <div class="bbg-hint">Bloomberg <code>MTY_TYP</code>: <span id="hint-bond-type">Not available</span></div>
                   </div>
                 </div>
                 <div class="form-row"><label>Ex-Dividend Days</label>
-                  <input class="control" id="ex-dividend-days-input" type="text" inputmode="numeric" placeholder="Not entered">
+                  <div>
+                    <input class="control" id="ex-dividend-days-input" type="text" inputmode="numeric" placeholder="Not entered">
+                    <div class="field-provenance" id="prov-ex-dividend-days">&mdash;</div>
+                  </div>
                 </div>
                 <div class="form-row"><label>Last Coupon Date</label>
                   <div>
                     <input class="control" id="last-coupon-date-input" type="date">
+                    <div class="field-provenance" id="prov-last-coupon-date">&mdash;</div>
                     <div class="bbg-hint">Bloomberg <code>PREV_CPN_DT</code>: <span id="hint-last-coupon-date">Not available</span></div>
                   </div>
                 </div>
                 <div class="form-row"><label>Bond Status</label>
-                  <select class="control" id="bond-status-select">
-                    <option value="">Not entered</option>
-                    <option value="ACTIVE">ACTIVE</option>
-                    <option value="INACTIVE">INACTIVE</option>
-                  </select>
+                  <div>
+                    <select class="control" id="bond-status-select">
+                      <option value="">Not entered</option>
+                      <option value="ACTIVE">ACTIVE</option>
+                      <option value="INACTIVE">INACTIVE</option>
+                    </select>
+                    <div class="field-provenance" id="prov-bond-status">&mdash;</div>
+                  </div>
                 </div>
               </div>
             </div>
 
             <!-- B. Timing and settlement overrides -->
             <div class="adv-block" id="adv-timing">
-              <div class="adv-title">Timing &amp; settlement &mdash; trader override</div>
+              <div class="adv-title">Timing &amp; settlement &mdash; profile-filled, trader-editable</div>
               <div class="fixed-route-note">
-                No Bloomberg field describes an OTC option&rsquo;s own cash settlement date,
-                and <code>SETTLE_DT</code> / <code>DAYS_TO_SETTLE</code> describe the cash
-                bond&rsquo;s standard settlement &mdash; a different role that must not be
-                conflated. Fixing Reporting Date to Valuation Date is an unapproved route
-                decision, so it stays explicit. Shiori owns no market calendar and rolls no
-                date.
+                Still no Bloomberg field describes an OTC option&rsquo;s own cash settlement
+                date, and <code>SETTLE_DT</code> / <code>DAYS_TO_SETTLE</code> describe the
+                cash bond&rsquo;s standard settlement &mdash; a different role that must not
+                be conflated. For a supported UST, Shiori derives these itself instead:
+                Reporting Date is the run&rsquo;s own Valuation Date, and both settlement
+                dates are the expiry rolled forward one U.S. government-bond business day on
+                the existing QuantLib U.S. government-bond calendar &mdash; no hand-written
+                holiday table anywhere. Change the expiry and the settlement dates you have
+                not overridden are re-derived; change one yourself and Shiori leaves it
+                alone.
               </div>
               <div class="entry-grid">
                 <div class="form-row"><label>Reporting Date</label>
-                  <input class="control" id="reporting-date-input" type="date">
+                  <div>
+                    <input class="control" id="reporting-date-input" type="date">
+                    <div class="field-provenance" id="prov-reporting-date">&mdash;</div>
+                  </div>
                 </div>
                 <div class="form-row"><label>Forward Settlement Date</label>
-                  <input class="control" id="forward-settlement-date-input" type="date">
+                  <div>
+                    <input class="control" id="forward-settlement-date-input" type="date">
+                    <div class="field-provenance" id="prov-forward-settlement-date">&mdash;</div>
+                  </div>
                 </div>
                 <div class="form-row"><label>Option Settlement Date</label>
-                  <input class="control" id="option-settlement-date-input" type="date">
+                  <div>
+                    <input class="control" id="option-settlement-date-input" type="date">
+                    <div class="field-provenance" id="prov-option-settlement-date">&mdash;</div>
+                  </div>
                 </div>
               </div>
             </div>

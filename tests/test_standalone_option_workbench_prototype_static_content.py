@@ -224,6 +224,7 @@ def test_script_never_maps_a_bloomberg_description_into_a_typed_enum() -> None:
         assert f"{field}: null," in seeded, f"{field} is not seeded null from a lookup"
     # And the prohibited coercions appear nowhere at all.
     assert "ACT_ACT_ISDA" not in text
+    assert "ACT_ACT_BOND" not in text
     assert "FIXED_COUPON_BULLET" not in text
 
 
@@ -234,3 +235,108 @@ def test_price_gate_is_wired_to_the_real_builder_validation_route() -> None:
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
     assert "/api/case/validate" in text
     assert 'builderValidation.state === "ready"' in text
+
+
+# --- Issue #157: the eight Advanced technical fields --------------------------
+
+
+def test_index_html_shows_a_provenance_readout_for_every_pre_filled_field() -> None:
+    """No unlabelled silent default: every one of the eight fields has its own
+    visible source line, and the section says whether the profile applied."""
+
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "prov-day-count",
+        "prov-bond-type",
+        "prov-ex-dividend-days",
+        "prov-last-coupon-date",
+        "prov-bond-status",
+        "prov-reporting-date",
+        "prov-forward-settlement-date",
+        "prov-option-settlement-date",
+        "ust-profile-status",
+    ):
+        assert f'id="{element_id}"' in text
+
+
+def test_index_html_keeps_every_pre_filled_field_editable() -> None:
+    """Pre-filled is not read-only: unlike the derived timing values, none of
+    these eight controls is marked readonly."""
+
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "day-count-select",
+        "bond-type-select",
+        "ex-dividend-days-input",
+        "last-coupon-date-input",
+        "bond-status-select",
+        "reporting-date-input",
+        "forward-settlement-date-input",
+        "option-settlement-date-input",
+    ):
+        start = text.index(f'id="{element_id}"')
+        assert "readonly" not in text[start : start + 120]
+
+
+def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself() -> None:
+    """The browser holds no convention, calendar or schedule knowledge: it calls
+    the reviewed resolver and renders what comes back.
+
+    ``test_script_never_maps_a_bloomberg_description_into_a_typed_enum`` above
+    already asserts the two profile enum literals appear nowhere in this file;
+    together they mean an auto-filled value can only have come from the server.
+    """
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "/api/ust/profile" in text
+    for tier in (
+        "BLOOMBERG_AUTO",
+        "SHIORI_DERIVED",
+        "UST_PROFILE_DEFAULT",
+        "TRADER_OVERRIDE",
+    ):
+        assert tier in text
+    # No calendar, holiday table or coupon-date arithmetic on this side.
+    # Identifier-shaped names only: the prose above legitimately explains that
+    # Shiori writes no holiday table.
+    for forbidden in ("isBusinessDay", "businessDay", "addMonths", "HOLIDAYS"):
+        assert forbidden not in text
+
+
+def test_convention_profile_is_a_browser_state_input_not_a_hardcoded_server_default() -> None:
+    """Issue #157 P1-1 correction: convention_profile must be explicit
+    request input, and the badge that displays it must be sourced from that
+    same browser-state constant, not a second, independently-typed string."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "SELECTED_CONVENTION_PROFILE" in text
+    assert "convention_profile: SELECTED_CONVENTION_PROFILE" in text
+    assert "convention-profile-badge" in text
+
+    html_text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="convention-profile-badge"' in html_text
+    # Visible inside the always-rendered card-head row, not inside the
+    # collapsible advanced-body -- see the element's position relative to
+    # the "Advanced" card-head/card-body boundary.
+    head_start = html_text.index('id="advanced-head"')
+    body_start = html_text.index('id="advanced-body"')
+    badge_pos = html_text.index('id="convention-profile-badge"')
+    assert head_start < badge_pos < body_start
+
+
+def test_no_identity_verification_claim_anywhere_in_the_served_page() -> None:
+    """Structural proof the withdrawn Treasury-identity gate left no trace in
+    the served page's own text -- neither markup nor script content."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(
+        encoding="utf-8"
+    ) + (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    lowered = text.lower()
+    for forbidden in (
+        "identity_verified",
+        "treasury_verified",
+        "is_treasury",
+        "issuer_classification",
+        "verified as treasury",
+    ):
+        assert forbidden not in lowered

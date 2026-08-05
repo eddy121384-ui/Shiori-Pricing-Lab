@@ -283,9 +283,7 @@ def test_api_case_price_matches_direct_call_to_price_standalone_option_case(
     overlay["option_type"] = "PUT"
     overlay["strike_price"] = 100.0
 
-    status, payload = _post_json(
-        f"{server_url}/api/case/price", {"case": case, "overlay": overlay}
-    )
+    status, payload = _post_json(f"{server_url}/api/case/price", {"case": case, "overlay": overlay})
     assert status == 200
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
@@ -323,9 +321,7 @@ def test_api_case_price_uses_the_given_case_not_the_bundled_one(server_url: str)
     }
     overlay = extract_standalone_option_case_overlay(case)
 
-    status, payload = _post_json(
-        f"{server_url}/api/case/price", {"case": case, "overlay": overlay}
-    )
+    status, payload = _post_json(f"{server_url}/api/case/price", {"case": case, "overlay": overlay})
     assert status == 200
 
     _, _, expected_display = price_standalone_option_case(case)
@@ -422,10 +418,12 @@ def test_api_case_bloomberg_matches_direct_call_to_the_existing_bloomberg_workfl
         priced_case["bond_quote"]["clean_price_per_100"]
         == display["live_bloomberg_quote"]["clean_price_per_100"]
     )
-    unchanged = {k: v for k, v in priced_case.items()
-                 if k not in ("bond_quote", "pricing_timestamp")}
-    assert unchanged == {k: v for k, v in overlaid_case.items()
-                         if k not in ("bond_quote", "pricing_timestamp")}
+    unchanged = {
+        k: v for k, v in priced_case.items() if k not in ("bond_quote", "pricing_timestamp")
+    }
+    assert unchanged == {
+        k: v for k, v in overlaid_case.items() if k not in ("bond_quote", "pricing_timestamp")
+    }
 
 
 @_QUANTLIB_SKIP
@@ -1048,3 +1046,184 @@ def test_api_case_validate_rejects_a_malformed_body(server_url: str) -> None:
     status, payload = _post_bytes(f"{server_url}/api/case/validate", b"{not json")
     assert status == 400
     assert "invalid JSON body" in payload["error"]
+
+
+# --- Issue #157: POST /api/ust/profile ----------------------------------------
+
+_UST_PROFILE_BODY = {
+    "convention_profile": "UST",
+    "isin": "US91282CLJ89",
+    "currency": "USD",
+    "bond_master": {
+        "coupon": 0.0375,
+        "coupon_frequency": "SEMI_ANNUAL",
+        "issue_date": "2024-01-31",
+        "maturity_date": "2031-01-31",
+        "first_coupon_date": "2024-07-31",
+        "callable_flag": False,
+        "sinkable_flag": False,
+        "day_count": None,
+        "bond_type": None,
+        "last_coupon_date": None,
+    },
+    "bond_master_raw": {
+        "day_count": "ACT/ACT",
+        "maturity_type": "AT MATURITY",
+        "calc_type": "STREET CONVENTION",
+    },
+    "valuation_date": "2026-07-20",
+    "expiry_date": "2026-10-20",
+}
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_returns_every_field_with_its_provenance(server_url: str) -> None:
+    status, payload = _post_json(f"{server_url}/api/ust/profile", _UST_PROFILE_BODY)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["convention_profile"] == "UST"
+    assert payload["rejection_reasons"] == []
+    assert payload["pending_field_paths"] == []
+    assert payload["unresolved_fields"] == []
+    by_path = {field["path"]: field for field in payload["fields"]}
+    assert set(by_path) == {
+        "bond_reference_data_universe.0.day_count",
+        "bond_reference_data_universe.0.bond_type",
+        "bond_reference_data_universe.0.ex_dividend_days",
+        "bond_reference_data_universe.0.last_coupon_date",
+        "bond_reference_data_universe.0.status",
+        "reporting_date",
+        "forward_settlement_date",
+        "option_settlement_date",
+    }
+    assert all(field["provenance"] for field in payload["fields"])
+    assert by_path["reporting_date"]["value"] == "2026-07-20"
+    assert by_path["option_settlement_date"]["value"] == "2026-10-21"
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_omits_settlement_dates_until_an_expiry_exists(server_url: str) -> None:
+    body = {**_UST_PROFILE_BODY, "expiry_date": None}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["pending_field_paths"] == [
+        "forward_settlement_date",
+        "option_settlement_date",
+    ]
+    assert len(payload["fields"]) == 6
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_reports_an_unsupported_bond_as_a_normal_answer(server_url: str) -> None:
+    """A bond outside the profile is a real answer with reasons, not a bridge
+    error -- the browser has to be able to show why it filled nothing."""
+
+    body = {
+        **_UST_PROFILE_BODY,
+        "isin": "GB00BFX0ZL78",
+        "currency": "GBP",
+        "bond_master_raw": {
+            "day_count": "ACT/ACT",
+            "maturity_type": "NORMAL",
+            "calc_type": "UK:BUMP/DMO METHOD",
+        },
+    }
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is False
+    assert payload["fields"] == []
+    assert any("is not USD" in reason for reason in payload["rejection_reasons"])
+
+
+def test_api_ust_profile_rejects_a_body_missing_required_keys(server_url: str) -> None:
+    body = {key: value for key, value in _UST_PROFILE_BODY.items() if key != "bond_master"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 400
+    assert "bond_master" in payload["error"]
+
+
+def test_api_ust_profile_rejects_a_body_missing_convention_profile(server_url: str) -> None:
+    """Issue #157 P1-1 correction: convention_profile is required browser
+    state, never inferred or defaulted server-side."""
+
+    body = {key: value for key, value in _UST_PROFILE_BODY.items() if key != "convention_profile"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 400
+    assert "convention_profile" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_rejects_an_unknown_convention_profile_rather_than_defaulting(
+    server_url: str,
+) -> None:
+    body = {**_UST_PROFILE_BODY, "convention_profile": "GILT"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 400
+    assert "convention_profile" in payload["error"]
+    assert "GILT" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_admits_a_shape_compatible_non_us_isin_bond(server_url: str) -> None:
+    """Positive regression for the P1-1 correction: admission is shape-only.
+    A bond whose ISIN carries no US country prefix at all is still admitted
+    because its terms fit and "UST" was explicitly selected -- this makes no
+    claim about who issued it."""
+
+    body = {**_UST_PROFILE_BODY, "isin": "XS0999999999"}
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is True
+    assert payload["rejection_reasons"] == []
+    assert len(payload["fields"]) == 8
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_rejects_an_irregular_schedule(
+    server_url: str,
+) -> None:
+    body = {
+        **_UST_PROFILE_BODY,
+        "bond_master": {
+            **_UST_PROFILE_BODY["bond_master"],
+            "issue_date": "2024-03-05",
+        },
+    }
+    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+
+    assert status == 200
+    assert payload["supported"] is False
+    assert payload["fields"] == []
+    assert payload["unresolved_fields"] == []
+    assert "regular coupon schedules only" in payload["rejection_reasons"][0]
+    assert "editing last_coupon_date cannot repair" in payload["rejection_reasons"][0]
+
+
+def test_api_ust_profile_rejects_a_malformed_body(server_url: str) -> None:
+    status, payload = _post_bytes(f"{server_url}/api/ust/profile", b"{not json")
+    assert status == 400
+    assert "invalid JSON body" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_ust_profile_makes_no_bloomberg_call_and_reads_no_clock(monkeypatch) -> None:
+    """The route is a pure function of its body: it prices nothing, loads
+    nothing, and must stay callable while the trader is still typing."""
+
+    def _fail(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("the UST profile route must not call Bloomberg or price")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_bond_identity_and_quote", _fail)
+    monkeypatch.setattr(server_module, "price_standalone_option_case", _fail)
+    monkeypatch.setattr(server_module, "_shiori_acquisition_now", _fail)
+
+    payload = server_module.resolve_ust_profile(dict(_UST_PROFILE_BODY))
+    assert payload["supported"] is True

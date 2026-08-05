@@ -17,7 +17,7 @@ forward-price, yield-conversion, or Black-76 logic, or get wired into
 from __future__ import annotations
 
 import inspect
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -47,7 +47,7 @@ from shiori_pricing_lab.reference_data.bond_reference_data import BondReferenceD
 from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 
-pytest.importorskip("QuantLib")
+ql = pytest.importorskip("QuantLib")
 
 _ELIGIBLE_BOND = next(bond for bond in SYNTHETIC_BOND_FIXTURES if bond.isin == "XS0000000001")
 
@@ -118,6 +118,39 @@ def _act_360_bond() -> BondReferenceData:
         ex_dividend_days=0,
         first_coupon_date="2025-07-15",
         last_coupon_date="2029-07-15",
+        status=BondStatus.ACTIVE,
+    )
+
+
+def _act_act_bond_convention_bond(day_count: DayCount = DayCount.ACT_ACT_BOND) -> BondReferenceData:
+    # Issue #157 correction fixture: a regular semi-annual grid (day-of-month
+    # 31, all target months have 31 days, no EOM complications) spanning
+    # 2023-01-31 -> 2026-01-31 -- three full years, six periods. Its second
+    # period, 2023-07-31 -> 2024-01-31, straddles the 2023/2024 calendar-year
+    # boundary (a non-leap year meeting a leap one), and its third period,
+    # 2024-01-31 -> 2024-07-31, sits entirely inside leap year 2024 and spans
+    # Feb 29 2024. One fixture exercises both the cross-year-boundary and the
+    # leap-year proration cases ACT_ACT_ISDA and ACT_ACT_BOND genuinely
+    # disagree on (day_count is a parameter precisely so the identical bond
+    # shape can be re-priced under both conventions for comparison).
+    return BondReferenceData(
+        isin="XS0TEST-ACTACTBOND",
+        issuer="Synthetic ACT/ACT-Bond Test Issuer",
+        currency=Currency.USD,
+        coupon=0.045,
+        coupon_frequency=Frequency.SEMI_ANNUAL,
+        maturity_date="2026-01-31",
+        issue_date="2023-01-31",
+        day_count=day_count,
+        business_day_convention=BusinessDayConvention.MODIFIED_FOLLOWING,
+        redemption_amount=100.0,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        yield_convention=BondYieldConvention.SEMI_ANNUAL_COMPOUND,
+        ex_dividend_days=0,
+        first_coupon_date="2023-07-31",
+        last_coupon_date="2025-07-31",
         status=BondStatus.ACTIVE,
     )
 
@@ -483,6 +516,172 @@ def test_accrued_interest_act_360_diverges_from_naive_unprorated_formula():
     actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
     assert actual == pytest.approx(expected_prorated)
     assert actual != pytest.approx(naive_unprorated)
+
+
+# --- 5b. ACT_ACT_BOND (Issue #157 correction) -------------------------------
+#
+# ACT_ACT_ISDA and ACT_ACT_BOND are genuinely different day-count rules, not a
+# naming difference (see the module docstring and DayCount's own docstring):
+# ISDA prorates against the calendar year(s) a period spans; Bond/ISMA (the
+# actual US Treasury coupon-accrual convention) prorates strictly within the
+# bracketing coupon period, so a semi-annual full period is always exactly 0.5
+# under Bond regardless of its actual day count. These tests prove the
+# adapter's ACT_ACT_BOND mapping (a) prorates correctly for a plain regular
+# period, a period crossing a calendar-year boundary, and a period spanning a
+# leap day, (b) matches a direct, independently-constructed QuantLib
+# `ActualActual(Bond)` call with the same explicit reference period, and
+# (c) genuinely disagrees with ACT_ACT_ISDA on the same bond shape and period
+# -- so a future accidental revert back to ISDA would be caught here.
+
+
+def test_regular_semiannual_act_act_bond_period_prorates_to_exactly_half():
+    # A period entirely away from any leap day or year boundary: full-period
+    # elapsed/full ratio still must equal actual elapsed days / actual full
+    # days exactly, and the full-period fraction itself must be exactly 0.5
+    # for a semi-annual bond under Bond/ISMA (unlike ISDA, whose full-period
+    # fraction is *not* generally exactly 0.5 -- see the ACT_360-style
+    # divergence tests above and the cross-year/leap-year tests below).
+    bond = _act_act_bond_convention_bond()
+    period_start = date(2024, 7, 31)
+    period_end = date(2025, 1, 31)
+    as_of = date(2024, 10, 15)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    period_coupon_amount = bond.coupon * 100 / 2  # periods_per_year = 2
+    expected = period_coupon_amount * elapsed_days / full_period_days
+
+    actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+
+    full_period_fraction = ql.ActualActual(ql.ActualActual.Bond).yearFraction(
+        ql.Date(period_start.day, period_start.month, period_start.year),
+        ql.Date(period_end.day, period_end.month, period_end.year),
+        ql.Date(period_start.day, period_start.month, period_start.year),
+        ql.Date(period_end.day, period_end.month, period_end.year),
+    )
+    assert full_period_fraction == pytest.approx(0.5)
+
+
+def test_act_act_bond_period_crossing_new_years_eve_prorates_by_actual_days():
+    # 2023-07-31 -> 2024-01-31: a non-leap year (2023) meeting a leap one
+    # (2024) across 12/31. Bond/ISMA proration is unaffected by that boundary
+    # -- only the actual elapsed/full day counts matter.
+    bond = _act_act_bond_convention_bond()
+    period_start = date(2023, 7, 31)
+    period_end = date(2024, 1, 31)
+    as_of = date(2023, 12, 15)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    period_coupon_amount = bond.coupon * 100 / 2
+    expected = period_coupon_amount * elapsed_days / full_period_days
+
+    actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+
+
+def test_act_act_bond_period_spanning_feb_29_prorates_by_actual_days():
+    # 2024-01-31 -> 2024-07-31: entirely inside leap year 2024 and spans
+    # Feb 29 2024. Bond/ISMA's proration does not treat that extra day
+    # specially -- only the period's actual elapsed/full day counts matter,
+    # exactly as for any other regular period.
+    bond = _act_act_bond_convention_bond()
+    period_start = date(2024, 1, 31)
+    period_end = date(2024, 7, 31)
+    as_of = date(2024, 4, 15)
+    elapsed_days = (as_of - period_start).days
+    full_period_days = (period_end - period_start).days
+    period_coupon_amount = bond.coupon * 100 / 2
+    expected = period_coupon_amount * elapsed_days / full_period_days
+
+    actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("as_of",),
+    [
+        (date(2023, 12, 15),),  # crosses the 2023/2024 (non-leap/leap) boundary
+        (date(2024, 4, 15),),  # spans Feb 29 2024
+    ],
+)
+def test_act_act_bond_matches_a_direct_quantlib_actualactual_bond_call(as_of):
+    # Cross-validates the adapter against QuantLib's own ActualActual(Bond)
+    # constructed and called independently here, with the same explicit
+    # reference period the adapter itself passes -- proving the adapter does
+    # not silently diverge from what "ACT_ACT_BOND" is actually supposed to
+    # mean, for exactly the two scenarios this correction was about (a
+    # calendar-year boundary and a leap day).
+    bond = _act_act_bond_convention_bond()
+    period_start, period_end = (
+        (date(2023, 7, 31), date(2024, 1, 31))
+        if as_of.year == 2023
+        else (date(2024, 1, 31), date(2024, 7, 31))
+    )
+
+    def _ql_date(value: date) -> ql.Date:
+        return ql.Date(value.day, value.month, value.year)
+
+    day_counter = ql.ActualActual(ql.ActualActual.Bond)
+    elapsed_fraction = day_counter.yearFraction(
+        _ql_date(period_start), _ql_date(as_of), _ql_date(period_start), _ql_date(period_end)
+    )
+    full_period_fraction = day_counter.yearFraction(
+        _ql_date(period_start),
+        _ql_date(period_end),
+        _ql_date(period_start),
+        _ql_date(period_end),
+    )
+    period_coupon_amount = bond.coupon * 100 / 2
+    expected = period_coupon_amount * elapsed_fraction / full_period_fraction
+
+    actual = accrued_interest_per_100(bond, as_of_date=as_of.isoformat())
+    assert actual == pytest.approx(expected)
+
+
+def test_act_act_bond_is_numerically_distinguishable_from_act_act_isda():
+    # The decisive regression test for the withdrawn ACT_ACT_ISDA choice: on
+    # the identical bond shape and the identical as_of date, ACT_ACT_BOND and
+    # ACT_ACT_ISDA must produce genuinely different accrued interest for the
+    # period crossing the 2023/2024 calendar-year boundary.
+    #
+    # This is deliberately the cross-year period, not the pure leap-day one
+    # (2024-01-31 -> 2024-07-31): that period sits entirely inside the single
+    # calendar year 2024, so ISDA's own year-length divisor (366, for the
+    # leap year) is identical for both its elapsed and full-period
+    # `yearFraction` calls and cancels out of the ratio -- reducing ISDA's
+    # elapsed/full ratio to exactly the same actual-day ratio ACT_ACT_BOND
+    # already computes (confirmed by direct QuantLib comparison while writing
+    # this test). ISDA and Bond genuinely disagree only once a period's
+    # elapsed and full-period spans are divided by *different* calendar-year
+    # lengths -- exactly what crossing a non-leap/leap boundary produces.
+    bond_convention_bond = _act_act_bond_convention_bond(day_count=DayCount.ACT_ACT_BOND)
+    isda_convention_bond = _act_act_bond_convention_bond(day_count=DayCount.ACT_ACT_ISDA)
+    as_of = date(2023, 12, 15)
+
+    bond_accrued = accrued_interest_per_100(bond_convention_bond, as_of_date=as_of.isoformat())
+    isda_accrued = accrued_interest_per_100(isda_convention_bond, as_of_date=as_of.isoformat())
+
+    assert bond_accrued != pytest.approx(isda_accrued)
+
+
+def test_act_act_bond_full_period_fraction_is_always_exactly_half_for_semiannual():
+    # Unlike ACT_ACT_ISDA (whose full-period fraction tracks the actual
+    # calendar-year composition of the period and is generally *not* exactly
+    # 0.5 -- see the cross-year and leap-year periods above), Bond/ISMA's
+    # full-period fraction is exactly 1/periods_per_year by construction,
+    # regardless of the period's actual day count. This is checked directly
+    # against accrued interest approaching (but never reaching) the full
+    # period coupon amount as as_of approaches period_end, for the
+    # cross-year-boundary period specifically.
+    bond = _act_act_bond_convention_bond()
+    period_end = date(2024, 1, 31)
+    period_coupon_amount = bond.coupon * 100 / 2
+
+    near_end = accrued_interest_per_100(
+        bond, as_of_date=(period_end - timedelta(days=1)).isoformat()
+    )
+    assert near_end < period_coupon_amount
+    assert near_end == pytest.approx(period_coupon_amount * 183 / 184)
 
 
 def test_accrued_interest_out_of_range_as_of_date_raises():

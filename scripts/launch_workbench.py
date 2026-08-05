@@ -70,7 +70,7 @@ DEFAULT_PORT = 8765
 # title -- so a stale server from a parent revision is never mistaken for a
 # current, reusable one. Bump this alongside the server module's own
 # API_CONTRACT_ID whenever the API contract changes.
-_EXPECTED_API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v9"
+_EXPECTED_API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v11"
 
 
 class LauncherError(Exception):
