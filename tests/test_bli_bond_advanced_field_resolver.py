@@ -1,4 +1,4 @@
-"""Tests for `pricing/bli_ust_fixed_coupon_profile.py` (Issues #157, #161).
+"""Tests for `pricing/bli_bond_advanced_field_resolver.py` (Issues #157, #161).
 
 Covers the four-tier provenance contract, the eight resolved field values,
 the required `convention_profile` browser-state input (Issue #157 P1-1
@@ -25,10 +25,21 @@ The derived `last_coupon_date` is not merely asserted against a literal: it
 is fed back into the reviewed coupon adapter through a real
 `BLIStandaloneBondReferenceData`, which is exactly the consumer that rejects
 a wrong one.
+
+**Issue #161 requirement A** splits this module in two: the common resolver
+tested here, and the convention profiles in `bli_bond_convention_profile.py`
+(tested in `test_bli_bond_convention_profile.py`). Everything above the
+"market-agnostic" section at the end of this file is the UST regression that
+must not move -- PR #162 passed real Bloomberg workstation UAT with exactly
+these values. The section at the end pins the other half: that the resolver
+reads every market-varying value from the selected profile record rather than
+from a UST constant, which is what lets a second market be a data change
+instead of a second resolver.
 """
 
 from __future__ import annotations
 
+import ast
 import inspect
 from dataclasses import fields as dataclass_fields
 from datetime import date
@@ -36,15 +47,9 @@ from datetime import date
 import pytest
 
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
-from shiori_pricing_lab.pricing import bli_ust_fixed_coupon_profile as profile_module
-from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
-    BLIBondScheduleError,
-    BLIQuantLibNotAvailableError,
-    accrued_interest_per_100,
-    derive_last_coupon_date,
-)
-from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
-    CONVENTION_PROFILE_UST,
+from shiori_pricing_lab.pricing import bli_bond_advanced_field_resolver as profile_module
+from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
+    ADVANCED_FIELD_PATHS,
     EXPIRY_DEPENDENT_FIELD_PATHS,
     PATH_BOND_TYPE,
     PATH_DAY_COUNT,
@@ -56,16 +61,23 @@ from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
     PATH_STATUS,
     PROVENANCE_BLOOMBERG_AUTO,
     PROVENANCE_SHIORI_DERIVED,
-    PROVENANCE_UST_PROFILE_DEFAULT,
-    UST_ADVANCED_FIELD_PATHS,
-    UST_PROFILE_BOND_TYPE,
-    UST_PROFILE_DAY_COUNT,
-    UST_PROFILE_STATUS,
-    BLIUstAdvancedFieldProfile,
-    advance_ust_government_bond_business_days,
-    resolve_ust_advanced_field_profile,
-    ust_government_bond_calendar,
+    BLIBondAdvancedFieldProfile,
+    advance_settlement_business_days,
+    resolve_bond_advanced_field_profile,
 )
+from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+    CALENDAR_US_GOVERNMENT_BOND,
+    UST_CONVENTION_PROFILE,
+    BLIConventionProfile,
+)
+from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
+    BLIBondScheduleError,
+    BLIQuantLibNotAvailableError,
+    accrued_interest_per_100,
+    derive_last_coupon_date,
+)
+from shiori_pricing_lab.products.enums import Currency, DayCount, Frequency
+from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 
 # A UST-shaped fixture: a regular semi-annual grid from 2024-01-31 to
 # 2031-01-31 (14 whole periods). The numbers are synthetic test values, not a
@@ -98,7 +110,7 @@ _EXPIRY_DATE = "2026-10-20"  # a Tuesday
 
 def _resolve(**overrides):
     kwargs = {
-        "convention_profile": CONVENTION_PROFILE_UST,
+        "convention_profile": UST_CONVENTION_PROFILE.name,
         "isin": _ISIN,
         "currency": "USD",
         "bond_master": dict(_TREASURY_BOND_MASTER),
@@ -107,7 +119,7 @@ def _resolve(**overrides):
         "expiry_date": _EXPIRY_DATE,
     }
     kwargs.update(overrides)
-    return resolve_ust_advanced_field_profile(**kwargs)
+    return resolve_bond_advanced_field_profile(**kwargs)
 
 
 def _values(profile) -> dict:
@@ -129,7 +141,7 @@ def test_supported_ust_resolves_every_advanced_field():
     assert profile.rejection_reasons == ()
     assert profile.pending_field_paths == ()
     assert profile.unresolved_fields == ()
-    assert tuple(field.path for field in profile.fields) == UST_ADVANCED_FIELD_PATHS
+    assert tuple(field.path for field in profile.fields) == ADVANCED_FIELD_PATHS
 
 
 def test_supported_ust_field_values_come_from_the_approved_profile():
@@ -152,10 +164,10 @@ def test_supported_ust_field_values_come_from_the_approved_profile():
 def test_every_field_declares_which_tier_it_came_from():
     provenance = _provenance(_resolve())
 
-    assert provenance[PATH_DAY_COUNT] == PROVENANCE_UST_PROFILE_DEFAULT
-    assert provenance[PATH_BOND_TYPE] == PROVENANCE_UST_PROFILE_DEFAULT
-    assert provenance[PATH_EX_DIVIDEND_DAYS] == PROVENANCE_UST_PROFILE_DEFAULT
-    assert provenance[PATH_STATUS] == PROVENANCE_UST_PROFILE_DEFAULT
+    assert provenance[PATH_DAY_COUNT] == UST_CONVENTION_PROFILE.default_provenance
+    assert provenance[PATH_BOND_TYPE] == UST_CONVENTION_PROFILE.default_provenance
+    assert provenance[PATH_EX_DIVIDEND_DAYS] == UST_CONVENTION_PROFILE.default_provenance
+    assert provenance[PATH_STATUS] == UST_CONVENTION_PROFILE.default_provenance
     assert provenance[PATH_LAST_COUPON_DATE] == PROVENANCE_SHIORI_DERIVED
     assert provenance[PATH_REPORTING_DATE] == PROVENANCE_SHIORI_DERIVED
     assert provenance[PATH_FORWARD_SETTLEMENT_DATE] == PROVENANCE_SHIORI_DERIVED
@@ -188,8 +200,8 @@ def test_a_confirmed_typed_bloomberg_value_outranks_the_profile_default():
         assert provenance[path] == PROVENANCE_BLOOMBERG_AUTO
     # Fields that are not Bond Master destination fields have no Bloomberg
     # tier at all, so they stay on the profile default.
-    assert provenance[PATH_EX_DIVIDEND_DAYS] == PROVENANCE_UST_PROFILE_DEFAULT
-    assert provenance[PATH_STATUS] == PROVENANCE_UST_PROFILE_DEFAULT
+    assert provenance[PATH_EX_DIVIDEND_DAYS] == UST_CONVENTION_PROFILE.default_provenance
+    assert provenance[PATH_STATUS] == UST_CONVENTION_PROFILE.default_provenance
 
 
 def test_a_mismatched_confirmed_last_coupon_date_rejects_the_whole_profile():
@@ -210,7 +222,7 @@ def test_a_bloomberg_description_string_never_becomes_a_typed_value():
 
     profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": "ACT/ACT"})
     day_count = next(f for f in profile.fields if f.path == PATH_DAY_COUNT)
-    assert day_count.provenance == PROVENANCE_UST_PROFILE_DEFAULT
+    assert day_count.provenance == UST_CONVENTION_PROFILE.default_provenance
     assert day_count.value != "ACT/ACT"
 
 
@@ -312,13 +324,13 @@ def test_settlement_dates_roll_on_the_us_government_bond_calendar(expiry, expect
 
 
 def test_the_calendar_is_quantlibs_own_us_government_bond_market():
-    assert ust_government_bond_calendar().name() == "US government bond market"
+    assert UST_CONVENTION_PROFILE.calendar().name() == "US government bond market"
 
 
 def test_advancing_requires_a_positive_business_day_count():
     for bad in (0, -1, 1.0, True):
         with pytest.raises(ValueError):
-            advance_ust_government_bond_business_days(date(2026, 10, 20), bad)
+            advance_settlement_business_days(date(2026, 10, 20), bad, UST_CONVENTION_PROFILE)
 
 
 # --- 4. convention_profile: required browser-state input (Issue #157 P1-1) --
@@ -359,7 +371,7 @@ def test_no_treasury_identity_claim_exists_anywhere_in_the_result_shape():
     that it has verified an issuer's identity. Structural proof: no field on
     the result dataclass even names such a concept."""
 
-    field_names = {f.name for f in dataclass_fields(BLIUstAdvancedFieldProfile)}
+    field_names = {f.name for f in dataclass_fields(BLIBondAdvancedFieldProfile)}
     for forbidden in ("identity", "issuer_classification", "treasury_verified", "is_treasury"):
         assert forbidden not in field_names
     assert field_names == {
@@ -493,7 +505,7 @@ def test_a_real_ust_returning_maturity_type_normal_is_admitted():
     assert profile.supported is True
     assert profile.rejection_reasons == ()
     assert profile.unresolved_fields == ()
-    assert set(_values(profile)) == set(UST_ADVANCED_FIELD_PATHS)
+    assert set(_values(profile)) == set(ADVANCED_FIELD_PATHS)
 
 
 @pytest.mark.parametrize("value", ["NORMAL", "AT MATURITY", None, "", "ANYTHING ELSE"])
@@ -522,7 +534,7 @@ def test_a_missing_day_count_description_blocks_nothing():
 
     assert profile.supported is True
     assert profile.unresolved_fields == ()
-    assert _provenance(profile)[PATH_DAY_COUNT] == PROVENANCE_UST_PROFILE_DEFAULT
+    assert _provenance(profile)[PATH_DAY_COUNT] == UST_CONVENTION_PROFILE.default_provenance
 
 
 def test_a_contradicting_day_count_description_blocks_only_the_day_count():
@@ -537,12 +549,12 @@ def test_a_contradicting_day_count_description_blocks_only_the_day_count():
     # The other seven are untouched -- the whole point of Issue #161.
     resolved = _values(profile)
     assert PATH_DAY_COUNT not in resolved
-    assert set(resolved) == set(UST_ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT}
+    assert set(resolved) == set(ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT}
 
 
 def test_a_gilt_shaped_bond_collects_every_reason_at_once():
-    profile = resolve_ust_advanced_field_profile(
-        convention_profile=CONVENTION_PROFILE_UST,
+    profile = resolve_bond_advanced_field_profile(
+        convention_profile=UST_CONVENTION_PROFILE.name,
         isin="GB00BFX0ZL78",
         currency="GBP",
         bond_master={
@@ -595,11 +607,11 @@ def test_a_missing_schedule_date_leaves_only_the_fields_that_need_it_unresolved(
         else {PATH_LAST_COUPON_DATE}
     )
     resolved = _values(profile)
-    assert set(resolved) == set(UST_ADVANCED_FIELD_PATHS) - expected_unresolved
+    assert set(resolved) == set(ADVANCED_FIELD_PATHS) - expected_unresolved
     for path in expected_unresolved:
         assert path not in resolved
     # The fields that did resolve carry real values, not placeholders.
-    assert resolved[PATH_DAY_COUNT] == UST_PROFILE_DAY_COUNT.value
+    assert resolved[PATH_DAY_COUNT] == UST_CONVENTION_PROFILE.day_count.value
     assert resolved[PATH_REPORTING_DATE] == _VALUATION_DATE
 
 
@@ -614,7 +626,7 @@ def test_an_unusable_valuation_date_blocks_only_its_own_two_fields():
     # Shiori will not assert ACTIVE without being able to compare maturity to
     # a valuation date, but the profile-owned constants are unaffected.
     resolved = _values(profile)
-    assert resolved[PATH_BOND_TYPE] == UST_PROFILE_BOND_TYPE.value
+    assert resolved[PATH_BOND_TYPE] == UST_CONVENTION_PROFILE.bond_type.value
     assert resolved[PATH_LAST_COUPON_DATE] == "2030-07-31"
 
 
@@ -681,9 +693,9 @@ def test_a_malformed_schedule_date_is_treated_exactly_like_a_missing_one(
     if date_field == "maturity_date":
         assert PATH_STATUS not in resolved
     else:
-        assert resolved[PATH_STATUS] == UST_PROFILE_STATUS.value
+        assert resolved[PATH_STATUS] == UST_CONVENTION_PROFILE.status.value
     # Every field that does not depend on the malformed date is unaffected.
-    assert resolved[PATH_DAY_COUNT] == UST_PROFILE_DAY_COUNT.value
+    assert resolved[PATH_DAY_COUNT] == UST_CONVENTION_PROFILE.day_count.value
     assert resolved[PATH_REPORTING_DATE] == _VALUATION_DATE
 
 
@@ -779,3 +791,250 @@ def test_module_reads_no_clock():
     source = inspect.getsource(profile_module)
     for forbidden in ("datetime.now", "date.today", "time.time"):
         assert forbidden not in source
+
+
+# =============================================================================
+# Issue #161 requirement A: the resolver is market-agnostic
+# =============================================================================
+#
+# Everything above pins the UST profile's behaviour, which must not regress.
+# What follows pins the property that makes a second and third market
+# possible without a second and third resolver: **nothing in this module is
+# UST-specific**. Every market-varying value is read from the profile record,
+# so registering a profile is a data change.
+#
+# The synthetic profile below asserts nothing about any real market. Its
+# values are deliberately different from UST's in every field precisely so a
+# hardcoded UST constant anywhere in the resolver would show up as a failure
+# here. Registering a *real* market's profile needs that market's conventions
+# confirmed by Bloomberg evidence, an existing reviewed document, or Eddy --
+# which is why `CONVENTION_PROFILES` still holds only UST.
+
+_SYNTHETIC_PROFILE = BLIConventionProfile(
+    name="SYNTHETIC_TEST",
+    currency=Currency.EUR,
+    coupon_frequencies=(Frequency.ANNUAL,),
+    day_count=DayCount.THIRTY_360,
+    day_count_evidence="SYNTHETIC/TEST",
+    bond_type=BondType.FIXED_COUPON_BULLET,
+    ex_dividend_days=3,
+    status=BondStatus.ACTIVE,
+    settlement_business_days=2,
+    settlement_calendar=CALENDAR_US_GOVERNMENT_BOND,
+)
+
+# An annual grid: 2024-01-31 to 2031-01-31, first coupon 2025-01-31.
+_ANNUAL_BOND_MASTER = {
+    "coupon": 0.0275,
+    "coupon_frequency": "ANNUAL",
+    "issue_date": "2024-01-31",
+    "maturity_date": "2031-01-31",
+    "first_coupon_date": "2025-01-31",
+    "callable_flag": False,
+    "sinkable_flag": False,
+    "day_count": None,
+    "bond_type": None,
+    "last_coupon_date": None,
+}
+
+
+@pytest.fixture()
+def synthetic_registry(monkeypatch):
+    monkeypatch.setitem(
+        profile_module.__dict__["get_convention_profile"].__globals__["CONVENTION_PROFILES"],
+        _SYNTHETIC_PROFILE.name,
+        _SYNTHETIC_PROFILE,
+    )
+    return _SYNTHETIC_PROFILE
+
+
+def _resolve_synthetic(**overrides):
+    kwargs = {
+        "convention_profile": _SYNTHETIC_PROFILE.name,
+        "isin": "XS0000000042",
+        "currency": "EUR",
+        "bond_master": dict(_ANNUAL_BOND_MASTER),
+        "bond_master_raw": {},
+        "valuation_date": _VALUATION_DATE,
+        "expiry_date": _EXPIRY_DATE,
+    }
+    kwargs.update(overrides)
+    return resolve_bond_advanced_field_profile(**kwargs)
+
+
+def test_every_profile_owned_value_comes_from_the_selected_profile(synthetic_registry):
+    """The decisive anti-hardcoding test: with a profile whose every constant
+    differs from UST's, every resolved value must be that profile's."""
+
+    profile = _resolve_synthetic()
+
+    assert profile.supported is True
+    assert profile.convention_profile == "SYNTHETIC_TEST"
+    values = _values(profile)
+    assert values[PATH_DAY_COUNT] == DayCount.THIRTY_360.value
+    assert values[PATH_BOND_TYPE] == BondType.FIXED_COUPON_BULLET.value
+    assert values[PATH_EX_DIVIDEND_DAYS] == 3
+    assert values[PATH_STATUS] == BondStatus.ACTIVE.value
+    # None of them carries a UST value or a UST label.
+    assert values[PATH_DAY_COUNT] != UST_CONVENTION_PROFILE.day_count.value
+    assert values[PATH_EX_DIVIDEND_DAYS] != UST_CONVENTION_PROFILE.ex_dividend_days
+    provenance = _provenance(profile)
+    for path in (PATH_DAY_COUNT, PATH_BOND_TYPE, PATH_EX_DIVIDEND_DAYS, PATH_STATUS):
+        assert provenance[path] == "SYNTHETIC_TEST_PROFILE_DEFAULT"
+        assert provenance[path] != UST_CONVENTION_PROFILE.default_provenance
+
+
+def test_the_settlement_lag_is_the_selected_profiles_own(synthetic_registry):
+    """UST's lag is one business day; this profile's is two. A hardcoded 1
+    anywhere in the resolver fails here."""
+
+    values = _values(_resolve_synthetic())
+    expected = advance_settlement_business_days(
+        date(2026, 10, 20), 2, _SYNTHETIC_PROFILE
+    ).isoformat()
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == expected
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == expected
+    ust_settlement = advance_settlement_business_days(
+        date(2026, 10, 20), 1, UST_CONVENTION_PROFILE
+    ).isoformat()
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] != ust_settlement
+
+
+def test_the_coupon_grid_uses_bloombergs_confirmed_frequency_not_a_constant(synthetic_registry):
+    """`last_coupon_date` on an *annual* grid proves the schedule is generated
+    with the frequency Bloomberg confirmed for this bond, not with a
+    semi-annual constant left over from the UST slice."""
+
+    values = _values(_resolve_synthetic())
+    assert values[PATH_LAST_COUPON_DATE] == "2030-01-31"
+    # And the reviewed adapter agrees, asked independently.
+    assert values[PATH_LAST_COUPON_DATE] == derive_last_coupon_date(
+        issue_date="2024-01-31",
+        maturity_date="2031-01-31",
+        first_coupon_date="2025-01-31",
+        coupon_frequency=Frequency.ANNUAL,
+    )
+
+
+def test_a_frequency_the_profile_states_no_conventions_for_fails_closed(synthetic_registry):
+    """The profile covers annual only, so a semi-annual bond is refused for
+    the whole profile rather than silently accrued on annual conventions."""
+
+    profile = _resolve_synthetic(
+        bond_master={**_ANNUAL_BOND_MASTER, "coupon_frequency": "SEMI_ANNUAL"}
+    )
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    assert any("SEMI_ANNUAL" in reason for reason in profile.rejection_reasons)
+    assert any("SYNTHETIC_TEST" in reason for reason in profile.rejection_reasons)
+
+
+def test_a_currency_outside_the_profile_fails_closed_naming_that_profile(synthetic_registry):
+    profile = _resolve_synthetic(currency="USD")
+
+    assert profile.supported is False
+    assert any(
+        "is not EUR" in reason and "SYNTHETIC_TEST" in reason
+        for reason in profile.rejection_reasons
+    )
+
+
+def test_the_day_count_evidence_string_is_the_selected_profiles_own(synthetic_registry):
+    """Bloomberg's DAY_CNT_DES is compared against *this* profile's expected
+    description, not UST's. "ACT/ACT" contradicts this profile, and blocks
+    only `day_count` -- every other field keeps its value."""
+
+    profile = _resolve_synthetic(bond_master_raw={"day_count": "ACT/ACT"})
+
+    assert profile.supported is True
+    assert [item.path for item in profile.unresolved_fields] == [PATH_DAY_COUNT]
+    assert "'ACT/ACT'" in profile.unresolved_fields[0].reason
+    assert "'SYNTHETIC/TEST'" in profile.unresolved_fields[0].reason
+    # The seven other fields are unaffected.
+    values = _values(profile)
+    assert PATH_DAY_COUNT not in values
+    assert values[PATH_BOND_TYPE] == BondType.FIXED_COUPON_BULLET.value
+    assert values[PATH_EX_DIVIDEND_DAYS] == 3
+    assert values[PATH_STATUS] == BondStatus.ACTIVE.value
+    assert values[PATH_REPORTING_DATE] == _VALUATION_DATE
+
+
+def test_the_matching_evidence_string_still_never_produces_the_value(synthetic_registry):
+    """Issue #145's prohibition, per profile: a matching description string
+    withholds nothing, but the value still comes from the approved profile
+    constant rather than from the string."""
+
+    profile = _resolve_synthetic(bond_master_raw={"day_count": "SYNTHETIC/TEST"})
+
+    assert profile.unresolved_fields == ()
+    assert _values(profile)[PATH_DAY_COUNT] == DayCount.THIRTY_360.value
+    assert _provenance(profile)[PATH_DAY_COUNT] == "SYNTHETIC_TEST_PROFILE_DEFAULT"
+
+
+def test_the_market_independent_derivations_never_carry_a_profile_label(synthetic_registry):
+    """`reporting_date` and the settlement dates are mechanical derivations,
+    not any market's conventions, so they stay SHIORI_DERIVED whichever
+    profile is selected."""
+
+    for profile in (_resolve(), _resolve_synthetic()):
+        provenance = _provenance(profile)
+        for path in (
+            PATH_REPORTING_DATE,
+            PATH_LAST_COUPON_DATE,
+            PATH_FORWARD_SETTLEMENT_DATE,
+            PATH_OPTION_SETTLEMENT_DATE,
+        ):
+            assert provenance[path] == PROVENANCE_SHIORI_DERIVED
+
+
+def test_the_product_shape_refusals_are_market_independent(synthetic_registry):
+    """Callable, sinkable, non-positive coupon and matured are properties of
+    the bond, not of a market, so they refuse under any profile."""
+
+    for overrides, fragment in (
+        ({"callable_flag": True}, "callable"),
+        ({"sinkable_flag": True}, "sinkable"),
+        ({"coupon": 0.0}, "zero-coupon"),
+        ({"coupon": None}, "fixed coupon is required"),
+        ({"maturity_date": "2020-01-31"}, "matured bond is never pre-filled"),
+    ):
+        profile = _resolve_synthetic(bond_master={**_ANNUAL_BOND_MASTER, **overrides})
+        assert profile.supported is False, overrides
+        assert profile.fields == ()
+        assert any(fragment in reason for reason in profile.rejection_reasons), overrides
+
+
+def test_the_resolver_names_no_profile_and_no_market_anywhere_in_its_code():
+    """Structural proof of requirement A: the resolver branches on no profile
+    name and no market. Adding a market is a profile record, never an `if`
+    here -- which is what stops three markets becoming three drifting
+    resolvers."""
+
+    source = inspect.getsource(profile_module)
+    tree = ast.parse(source)
+
+    # Prose is excluded, code is not: the docstrings legitimately explain the
+    # UST history this split came from, while a market name surviving in the
+    # *code* would mean the resolver still branches on one. Every remaining
+    # string literal is deliberately still checked -- `if name == "UST"` is
+    # exactly the kind of thing this test exists to catch.
+    docstring_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                docstring_lines.update(range(first.lineno, first.end_lineno + 1))
+
+    code = "\n".join(
+        line.split("#")[0]
+        for number, line in enumerate(source.splitlines(), start=1)
+        if number not in docstring_lines
+    )
+    for market in ("UST", "GILT", "CORPORATE", "GERMAN", "TREASURY"):
+        assert market not in code, f"the common resolver must not name {market!r}"

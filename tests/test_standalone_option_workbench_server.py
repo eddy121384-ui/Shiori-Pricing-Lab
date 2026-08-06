@@ -1048,9 +1048,9 @@ def test_api_case_validate_rejects_a_malformed_body(server_url: str) -> None:
     assert "invalid JSON body" in payload["error"]
 
 
-# --- Issue #157: POST /api/ust/profile ----------------------------------------
+# --- Issues #157/#161: POST /api/bond/advanced-profile ----------------------------------------
 
-_UST_PROFILE_BODY = {
+_PROFILE_BODY = {
     "convention_profile": "UST",
     "isin": "US91282CLJ89",
     "currency": "USD",
@@ -1077,8 +1077,8 @@ _UST_PROFILE_BODY = {
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_returns_every_field_with_its_provenance(server_url: str) -> None:
-    status, payload = _post_json(f"{server_url}/api/ust/profile", _UST_PROFILE_BODY)
+def test_api_advanced_profile_returns_every_field_with_its_provenance(server_url: str) -> None:
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", _PROFILE_BODY)
 
     assert status == 200
     assert payload["supported"] is True
@@ -1103,9 +1103,11 @@ def test_api_ust_profile_returns_every_field_with_its_provenance(server_url: str
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_omits_settlement_dates_until_an_expiry_exists(server_url: str) -> None:
-    body = {**_UST_PROFILE_BODY, "expiry_date": None}
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+def test_api_advanced_profile_omits_settlement_dates_until_an_expiry_exists(
+    server_url: str,
+) -> None:
+    body = {**_PROFILE_BODY, "expiry_date": None}
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is True
@@ -1117,12 +1119,14 @@ def test_api_ust_profile_omits_settlement_dates_until_an_expiry_exists(server_ur
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_reports_an_unsupported_bond_as_a_normal_answer(server_url: str) -> None:
+def test_api_advanced_profile_reports_an_unsupported_bond_as_a_normal_answer(
+    server_url: str,
+) -> None:
     """A bond outside the profile is a real answer with reasons, not a bridge
     error -- the browser has to be able to show why it filled nothing."""
 
     body = {
-        **_UST_PROFILE_BODY,
+        **_PROFILE_BODY,
         "isin": "GB00BFX0ZL78",
         "currency": "GBP",
         "bond_master_raw": {
@@ -1131,7 +1135,7 @@ def test_api_ust_profile_reports_an_unsupported_bond_as_a_normal_answer(server_u
             "calc_type": "UK:BUMP/DMO METHOD",
         },
     }
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is False
@@ -1140,14 +1144,14 @@ def test_api_ust_profile_reports_an_unsupported_bond_as_a_normal_answer(server_u
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_admits_a_real_ust_returning_maturity_type_normal(
+def test_api_advanced_profile_admits_a_real_ust_returning_maturity_type_normal(
     server_url: str,
 ) -> None:
     """Issue #161's UAT regression, at the route: a display-only description
     string must not turn an ordinary Treasury into an unsupported product."""
 
     body = {
-        **_UST_PROFILE_BODY,
+        **_PROFILE_BODY,
         "isin": "US91282CMC28",
         "bond_master_raw": {
             "day_count": "ACT/ACT",
@@ -1155,7 +1159,7 @@ def test_api_ust_profile_admits_a_real_ust_returning_maturity_type_normal(
             "calc_type": "STREET CONVENTION",
         },
     }
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is True
@@ -1165,17 +1169,17 @@ def test_api_ust_profile_admits_a_real_ust_returning_maturity_type_normal(
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_serializes_a_partial_answer_with_its_blocked_field(
+def test_api_advanced_profile_serializes_a_partial_answer_with_its_blocked_field(
     server_url: str,
 ) -> None:
     """Issue #161: one field the resolver refused comes back in
     ``unresolved_fields``; the other seven still come back in ``fields``."""
 
     body = {
-        **_UST_PROFILE_BODY,
-        "bond_master_raw": {**_UST_PROFILE_BODY["bond_master_raw"], "day_count": "ISMA-30/360"},
+        **_PROFILE_BODY,
+        "bond_master_raw": {**_PROFILE_BODY["bond_master_raw"], "day_count": "ISMA-30/360"},
     }
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is True
@@ -1191,7 +1195,7 @@ def test_api_ust_profile_serializes_a_partial_answer_with_its_blocked_field(
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_never_offers_a_repair_route_for_a_missing_bond_master_date(
+def test_api_advanced_profile_never_offers_a_repair_route_for_a_missing_bond_master_date(
     server_url: str,
 ) -> None:
     """Issue #161 P2 correction: ``issue_date``, ``maturity_date`` and
@@ -1201,10 +1205,10 @@ def test_api_ust_profile_never_offers_a_repair_route_for_a_missing_bond_master_d
     signal that a real Advanced route exists, and here there is none."""
 
     body = {
-        **_UST_PROFILE_BODY,
-        "bond_master": {**_UST_PROFILE_BODY["bond_master"], "first_coupon_date": None},
+        **_PROFILE_BODY,
+        "bond_master": {**_PROFILE_BODY["bond_master"], "first_coupon_date": None},
     }
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is True
@@ -1219,31 +1223,33 @@ def test_api_ust_profile_never_offers_a_repair_route_for_a_missing_bond_master_d
     assert len(payload["fields"]) == 7
 
 
-def test_api_ust_profile_rejects_a_body_missing_required_keys(server_url: str) -> None:
-    body = {key: value for key, value in _UST_PROFILE_BODY.items() if key != "bond_master"}
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+def test_api_advanced_profile_rejects_a_body_missing_required_keys(server_url: str) -> None:
+    body = {key: value for key, value in _PROFILE_BODY.items() if key != "bond_master"}
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 400
     assert "bond_master" in payload["error"]
 
 
-def test_api_ust_profile_rejects_a_body_missing_convention_profile(server_url: str) -> None:
+def test_api_advanced_profile_rejects_a_body_missing_convention_profile(server_url: str) -> None:
     """Issue #157 P1-1 correction: convention_profile is required browser
     state, never inferred or defaulted server-side."""
 
-    body = {key: value for key, value in _UST_PROFILE_BODY.items() if key != "convention_profile"}
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    body = {
+        key: value for key, value in _PROFILE_BODY.items() if key != "convention_profile"
+    }
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 400
     assert "convention_profile" in payload["error"]
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_rejects_an_unknown_convention_profile_rather_than_defaulting(
+def test_api_advanced_profile_rejects_an_unknown_convention_profile_rather_than_defaulting(
     server_url: str,
 ) -> None:
-    body = {**_UST_PROFILE_BODY, "convention_profile": "GILT"}
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    body = {**_PROFILE_BODY, "convention_profile": "GILT"}
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 400
     assert "convention_profile" in payload["error"]
@@ -1251,14 +1257,16 @@ def test_api_ust_profile_rejects_an_unknown_convention_profile_rather_than_defau
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_admits_a_shape_compatible_non_us_isin_bond(server_url: str) -> None:
+def test_api_advanced_profile_admits_a_shape_compatible_non_us_isin_bond(
+    server_url: str,
+) -> None:
     """Positive regression for the P1-1 correction: admission is shape-only.
     A bond whose ISIN carries no US country prefix at all is still admitted
     because its terms fit and "UST" was explicitly selected -- this makes no
     claim about who issued it."""
 
-    body = {**_UST_PROFILE_BODY, "isin": "XS0999999999"}
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    body = {**_PROFILE_BODY, "isin": "XS0999999999"}
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is True
@@ -1267,17 +1275,17 @@ def test_api_ust_profile_admits_a_shape_compatible_non_us_isin_bond(server_url: 
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_rejects_an_irregular_schedule(
+def test_api_advanced_profile_rejects_an_irregular_schedule(
     server_url: str,
 ) -> None:
     body = {
-        **_UST_PROFILE_BODY,
+        **_PROFILE_BODY,
         "bond_master": {
-            **_UST_PROFILE_BODY["bond_master"],
+            **_PROFILE_BODY["bond_master"],
             "issue_date": "2024-03-05",
         },
     }
-    status, payload = _post_json(f"{server_url}/api/ust/profile", body)
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", body)
 
     assert status == 200
     assert payload["supported"] is False
@@ -1287,14 +1295,14 @@ def test_api_ust_profile_rejects_an_irregular_schedule(
     assert "editing last_coupon_date cannot repair" in payload["rejection_reasons"][0]
 
 
-def test_api_ust_profile_rejects_a_malformed_body(server_url: str) -> None:
-    status, payload = _post_bytes(f"{server_url}/api/ust/profile", b"{not json")
+def test_api_advanced_profile_rejects_a_malformed_body(server_url: str) -> None:
+    status, payload = _post_bytes(f"{server_url}/api/bond/advanced-profile", b"{not json")
     assert status == 400
     assert "invalid JSON body" in payload["error"]
 
 
 @_QUANTLIB_SKIP
-def test_api_ust_profile_makes_no_bloomberg_call_and_reads_no_clock(monkeypatch) -> None:
+def test_api_advanced_profile_makes_no_bloomberg_call_and_reads_no_clock(monkeypatch) -> None:
     """The route is a pure function of its body: it prices nothing, loads
     nothing, and must stay callable while the trader is still typing."""
 
@@ -1305,5 +1313,5 @@ def test_api_ust_profile_makes_no_bloomberg_call_and_reads_no_clock(monkeypatch)
     monkeypatch.setattr(server_module, "price_standalone_option_case", _fail)
     monkeypatch.setattr(server_module, "_shiori_acquisition_now", _fail)
 
-    payload = server_module.resolve_ust_profile(dict(_UST_PROFILE_BODY))
+    payload = server_module.resolve_bond_advanced_profile(dict(_PROFILE_BODY))
     assert payload["supported"] is True

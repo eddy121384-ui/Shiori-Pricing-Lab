@@ -194,14 +194,30 @@ html, body {
    expanded (Issue #157 P1-1 correction): the selected Convention Profile is
    browser state, not a claim about the bond's identity, and must never be
    hidden behind a collapsed section. */
-.convention-profile-badge {
+/* The Convention Profile picker sits in the Advanced card head, visible
+   without expanding the card (Issue #161 requirement D): the profile the
+   eight Advanced values came from must never be something the trader has to
+   go looking for, and it must be theirs to change. */
+.convention-profile-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: #2f6f5e;
+}
+.convention-profile-picker select {
+  font: inherit;
+  color: inherit;
+  background: #fff;
   border: 1px solid #2f6f5e;
   border-radius: 999px;
   padding: 2px 9px;
+}
+.convention-profile-picker select:disabled {
+  color: #8a8f98;
+  border-color: #c9ced6;
 }
 .card-summary:empty {
   display: none;
@@ -515,14 +531,14 @@ select.control:focus { border-color: var(--blue); }
   color: var(--muted-2);
   cursor: not-allowed;
 }
-.ust-profile-status {
+.advanced-profile-status {
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--muted-2);
   margin-bottom: 8px;
 }
-.ust-profile-status.is-supported { color: #2f6f5e; }
-.ust-profile-status.is-unsupported { color: #b3401f; }
+.advanced-profile-status.is-supported { color: #2f6f5e; }
+.advanced-profile-status.is-unsupported { color: #b3401f; }
 
 .bbg-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; }
 .bbg-hint code {

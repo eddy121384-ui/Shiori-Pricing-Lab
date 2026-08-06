@@ -254,7 +254,7 @@ def test_index_html_shows_a_provenance_readout_for_every_pre_filled_field() -> N
         "prov-reporting-date",
         "prov-forward-settlement-date",
         "prov-option-settlement-date",
-        "ust-profile-status",
+        "advanced-profile-status",
     ):
         assert f'id="{element_id}"' in text
 
@@ -288,7 +288,7 @@ def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself
     """
 
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
-    assert "/api/ust/profile" in text
+    assert "/api/bond/advanced-profile" in text
     for tier in (
         "BLOOMBERG_AUTO",
         "SHIORI_DERIVED",
@@ -304,24 +304,51 @@ def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself
 
 
 def test_convention_profile_is_a_browser_state_input_not_a_hardcoded_server_default() -> None:
-    """Issue #157 P1-1 correction: convention_profile must be explicit
-    request input, and the badge that displays it must be sourced from that
-    same browser-state constant, not a second, independently-typed string."""
+    """Issue #157 P1-1 correction, extended by Issue #161 requirement D:
+    convention_profile must be explicit request input, and the control that
+    displays it must be a real, visible, trader-overridable selector sourced
+    from that same browser state -- not a second, independently-typed
+    string, and no longer a hardcoded constant."""
 
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
-    assert "SELECTED_CONVENTION_PROFILE" in text
-    assert "convention_profile: SELECTED_CONVENTION_PROFILE" in text
-    assert "convention-profile-badge" in text
+    assert "let selectedConventionProfile = null;" in text
+    assert "convention_profile: selectedConventionProfile," in text
+    assert "convention-profile-select" in text
+    # The picker is a genuine override: a change handler that records the
+    # trader took the selection over and re-asks the resolver.
+    assert "conventionProfileOverridden = true;" in text
 
     html_text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
-    assert 'id="convention-profile-badge"' in html_text
+    assert 'id="convention-profile-select"' in html_text
     # Visible inside the always-rendered card-head row, not inside the
     # collapsible advanced-body -- see the element's position relative to
     # the "Advanced" card-head/card-body boundary.
     head_start = html_text.index('id="advanced-head"')
     body_start = html_text.index('id="advanced-body"')
-    badge_pos = html_text.index('id="convention-profile-badge"')
-    assert head_start < badge_pos < body_start
+    picker_pos = html_text.index('id="convention-profile-select"')
+    assert head_start < picker_pos < body_start
+
+
+def test_the_profile_selector_options_are_never_a_second_copy_of_the_registry() -> None:
+    """Issue #161 requirement D: the selectable profiles must come from the
+    server's own registry, so a trader can never pick a profile the resolver
+    would reject, nor be denied one it would accept.
+
+    The page therefore hardcodes no profile name at all: its options are
+    built from the suggestion response's `supported_convention_profiles`.
+    """
+
+    from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+        SUPPORTED_CONVENTION_PROFILE_NAMES,
+    )
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "supported_convention_profiles" in text
+    for name in SUPPORTED_CONVENTION_PROFILE_NAMES:
+        assert f'"{name}"' not in text, (
+            f"script.js names the {name!r} profile literally; the selector's options must "
+            "come from the server's registry, not a second copy of it"
+        )
 
 
 def test_no_identity_verification_claim_anywhere_in_the_served_page() -> None:

@@ -127,33 +127,47 @@ dict exactly like this one.
   distinct concern from ``/api/case/bloomberg`` above, which still requires
   and reprices an active case; this route never touches or requires one.
 
-**UST Advanced-field profile (Issue #157).** One more stateless route:
+**Advanced-field profile (Issues #157, #161).** Two more stateless routes:
 
-- ``POST /api/ust/profile`` -- body is ``{"convention_profile", "isin",
-  "currency", "bond_master", "bond_master_raw", "valuation_date",
+- ``POST /api/bond/advanced-profile`` -- body is ``{"convention_profile",
+  "isin", "currency", "bond_master", "bond_master_raw", "valuation_date",
   "expiry_date"}``. ``convention_profile`` (Issue #157 P1-1 correction) is
   required **browser state**, not a server-computed value -- it names which
-  convention profile the browser currently has selected (this PR's scope
-  accepts only ``"UST"``); the server never defaults or infers it, and never
-  falls back to ``"UST"`` for a missing/blank/unknown value. ``isin``,
-  ``currency``, ``bond_master`` and ``bond_master_raw`` come verbatim from
-  one already-completed ``POST /api/bloomberg/bond`` response;
+  convention profile the browser currently has selected; the server never
+  defaults or infers it, and never falls back to any profile for a
+  missing/blank/unregistered value. ``isin``, ``currency``, ``bond_master``
+  and ``bond_master_raw`` come verbatim from one already-completed
+  ``POST /api/bloomberg/bond`` response;
   ``valuation_date``/``expiry_date`` from the run itself (``expiry_date``
   may be omitted or ``null`` while the trader has not entered the expiry
-  yet). Calls ``resolve_ust_advanced_field_profile`` exactly once and
+  yet). Calls ``resolve_bond_advanced_field_profile`` exactly once and
   returns its result as ``{"supported", "convention_profile",
   "rejection_reasons", "fields", "pending_field_paths",
   "unresolved_fields"}``. This route makes no Bloomberg call, reads no
   clock, prices nothing, and stores nothing: it is a pure function of the
-  body, so the browser can call it again whenever expiry changes. A bond
-  whose *product shape or coupon schedule* the current pricing path cannot
-  carry is a normal HTTP 200 answer with ``supported: false`` and its
-  reasons -- not an error, and never a claim about who issued the bond --
-  while a malformed body, unrecognized ``convention_profile``, or a missing
-  QuantLib install returns HTTP 400. Since Issue #161 a supported answer may
-  still be partial: ``fields`` carries every field that resolved and
-  ``unresolved_fields`` carries the per-field ``BLOCKED`` reasons, so one
-  unknown field never blanks the seven that are known.
+  body, so the browser can call it again whenever expiry or the selected
+  profile changes. A bond whose *product shape or coupon schedule* the
+  current pricing path cannot carry is a normal HTTP 200 answer with
+  ``supported: false`` and its reasons -- not an error, and never a claim
+  about who issued the bond -- while a malformed body, unregistered
+  ``convention_profile``, or a missing QuantLib install returns HTTP 400.
+  Since Issue #161 a supported answer may still be partial: ``fields``
+  carries every field that resolved and ``unresolved_fields`` carries the
+  per-field ``BLOCKED`` reasons, so one unknown field never blanks the seven
+  that are known. (Issue #161 renamed this route from ``/api/ust/profile``:
+  the resolver behind it is no longer UST-specific.)
+
+- ``POST /api/bond/convention-profile/suggest`` -- body is ``{"currency",
+  "bond_master"}``, both verbatim from the same Bloomberg response. Returns
+  ``{"suggested", "candidates", "reasons",
+  "supported_convention_profiles"}``. ``suggested`` names a profile only
+  when the bond's Bloomberg-confirmed currency and coupon frequency narrow
+  the registry to exactly one; two or more ``candidates`` means ``suggested``
+  is ``null`` and the trader picks, which is the honest answer Issue #161
+  requires instead of falling back to eight hand-typed technical fields. No
+  ISIN, CUSIP, or security name is read, and no issuer classification is
+  claimed. ``supported_convention_profiles`` is the registry's own list, so
+  the browser's selector cannot drift from the server's.
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -188,8 +202,12 @@ from shiori_pricing_lab.data.bloomberg_bond_quote import (
     load_bloomberg_bond_identity_and_quote,
     parse_bond_identifier,
 )
-from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
-    resolve_ust_advanced_field_profile,
+from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
+    resolve_bond_advanced_field_profile,
+)
+from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+    SUPPORTED_CONVENTION_PROFILE_NAMES,
+    suggest_convention_profile,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -282,7 +300,15 @@ DEFAULT_PORT = 8765
 # carries per-field BLOCKED reasons the current page renders and gates its
 # Go-to route on. A stale -v11 process would still answer, but with the
 # all-or-nothing semantics that reject a real UST returning MTY_TYP=NORMAL.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v12"
+#
+# Bumped to -v13 for Issue #161's common-resolver split: POST
+# /api/ust/profile is renamed POST /api/bond/advanced-profile (the resolver
+# behind it is no longer UST-specific), and POST
+# /api/bond/convention-profile/suggest is added so the page can render a
+# visible, overridable Convention Profile selector sourced from the server's
+# own registry. A stale -v12 process would 404 both, leaving the page with no
+# profile selection and every Advanced field back on manual entry.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v13"
 
 
 def load_base_case() -> dict:
@@ -494,7 +520,7 @@ def lookup_bloomberg_bond(bond_identifier: str, quote_side: str) -> dict:
     return {**result, "acquired_at": acquired_at, "source_system": _BLOOMBERG_SOURCE_SYSTEM}
 
 
-_UST_PROFILE_REQUIRED_KEYS = (
+_ADVANCED_PROFILE_REQUIRED_KEYS = (
     "convention_profile",
     "isin",
     "currency",
@@ -503,16 +529,51 @@ _UST_PROFILE_REQUIRED_KEYS = (
     "valuation_date",
 )
 
+_SUGGEST_PROFILE_REQUIRED_KEYS = ("currency", "bond_master")
 
-def resolve_ust_profile(body: dict) -> dict:
-    """Return the UST Advanced-field profile for one Bloomberg-loaded bond.
 
-    Calls the existing ``resolve_ust_advanced_field_profile`` exactly once and
-    serializes its result -- this function decides nothing about conventions,
-    calendars, schedules or eligibility itself, and adds no fallback for
-    ``convention_profile`` that resolver does not already have (Issue #157
-    P1-1 correction: it is required browser state, never inferred or
-    defaulted here or in the resolver). ``expiry_date`` is optional (absent
+def suggest_bond_convention_profile(body: dict) -> dict:
+    """Return which convention profile this bond's confirmed terms narrow to.
+
+    Calls ``suggest_convention_profile`` exactly once and serializes its
+    result, plus the registry's own list of selectable profiles so the
+    browser renders a selector that cannot drift from the server. This
+    function classifies nothing: the suggestion is registry narrowing by the
+    bond's Bloomberg-confirmed currency and coupon frequency, and a
+    ``suggested`` of ``null`` with two or more ``candidates`` is the honest
+    "ask the trader which profile" answer -- never a request to hand-type
+    the Advanced technical fields.
+
+    Raises ``ValueError`` for a body that is not a JSON object with the two
+    required keys.
+    """
+
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    missing = [key for key in _SUGGEST_PROFILE_REQUIRED_KEYS if key not in body]
+    if missing:
+        raise ValueError(f"request body is missing required key(s): {missing}")
+
+    suggestion = suggest_convention_profile(
+        currency=body["currency"], bond_master=body["bond_master"]
+    )
+    return {
+        "suggested": suggestion.suggested,
+        "candidates": list(suggestion.candidates),
+        "reasons": list(suggestion.reasons),
+        "supported_convention_profiles": list(SUPPORTED_CONVENTION_PROFILE_NAMES),
+    }
+
+
+def resolve_bond_advanced_profile(body: dict) -> dict:
+    """Return the Advanced-field profile for one Bloomberg-loaded bond.
+
+    Calls the common resolver ``resolve_bond_advanced_field_profile`` exactly
+    once and serializes its result -- this function decides nothing about
+    conventions, calendars, schedules or eligibility itself, and adds no
+    fallback for ``convention_profile`` that resolver does not already have
+    (Issue #157 P1-1 correction: it is required browser state, never inferred
+    or defaulted here or in the resolver). ``expiry_date`` is optional (absent
     or ``null`` while the trader has not entered an expiry yet); the two
     settlement dates then come back under ``pending_field_paths`` instead of
     being guessed.
@@ -523,20 +584,20 @@ def resolve_ust_profile(body: dict) -> dict:
     with a partial ``fields`` list plus per-field ``unresolved_fields``
     (Issue #161) -- also serialized verbatim, and also not an error.
     Raises ``ValueError`` for a body that is not a JSON object
-    with the six required keys, or whose ``convention_profile`` the
-    resolver does not recognize, and propagates
-    ``BLIQuantLibNotAvailableError`` unchanged when the optional QuantLib
-    dependency is missing -- the coupon schedule and the U.S. government-bond
-    calendar both come from it and neither is approximated.
+    with the six required keys, or whose ``convention_profile`` is not a
+    registered profile, and propagates ``BLIQuantLibNotAvailableError``
+    unchanged when the optional QuantLib dependency is missing -- the coupon
+    schedule and the selected profile's settlement calendar both come from it
+    and neither is approximated.
     """
 
     if not isinstance(body, dict):
         raise ValueError("request body must be a JSON object")
-    missing = [key for key in _UST_PROFILE_REQUIRED_KEYS if key not in body]
+    missing = [key for key in _ADVANCED_PROFILE_REQUIRED_KEYS if key not in body]
     if missing:
         raise ValueError(f"request body is missing required key(s): {missing}")
 
-    profile = resolve_ust_advanced_field_profile(
+    profile = resolve_bond_advanced_field_profile(
         convention_profile=body["convention_profile"],
         isin=body["isin"],
         currency=body["currency"],
@@ -742,18 +803,32 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, result)
 
-    def _handle_api_ust_profile(self, raw_body: bytes) -> None:
+    def _handle_api_bond_advanced_profile(self, raw_body: bytes) -> None:
         try:
             body = json.loads(raw_body)
         except json.JSONDecodeError as exc:
             self._write_json(400, {"error": f"invalid JSON body: {exc}"})
             return
         try:
-            payload = resolve_ust_profile(body)
+            payload = resolve_bond_advanced_profile(body)
         except Exception as exc:  # noqa: BLE001
             self._write_json(400, {"error": f"{type(exc).__name__}: {exc}"})
             return
         # A bond outside the profile is a normal answer, not a bridge error.
+        self._write_json(200, payload)
+
+    def _handle_api_bond_profile_suggest(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        try:
+            payload = suggest_bond_convention_profile(body)
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        # "Shiori cannot tell which profile" is a normal answer, not an error.
         self._write_json(200, payload)
 
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
@@ -785,7 +860,8 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/case/validate": _handle_api_case_validate,
         "/api/case/bloomberg": _handle_api_case_bloomberg,
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
-        "/api/ust/profile": _handle_api_ust_profile,
+        "/api/bond/advanced-profile": _handle_api_bond_advanced_profile,
+        "/api/bond/convention-profile/suggest": _handle_api_bond_profile_suggest,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

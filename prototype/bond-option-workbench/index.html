@@ -320,7 +320,12 @@
           <div class="card-head" id="advanced-head">
             <div class="card-title">Advanced</div>
             <div class="card-head-right">
-              <span class="convention-profile-badge" id="convention-profile-badge">Convention Profile: UST</span>
+              <label class="convention-profile-picker" for="convention-profile-select">
+                <span class="convention-profile-picker-label">Convention Profile</span>
+                <select id="convention-profile-select">
+                  <option value="">Select a convention profile…</option>
+                </select>
+              </label>
               <span class="card-summary" id="advanced-summary"></span>
               <span class="collapse-toggle" id="advanced-indicator">Expand</span>
             </div>
@@ -347,7 +352,7 @@
                 every control stays editable; the moment you change one, its source
                 becomes <strong>TRADER_OVERRIDE</strong> and Shiori stops re-deriving it.
               </div>
-              <div class="ust-profile-status" id="ust-profile-status">&mdash;</div>
+              <div class="advanced-profile-status" id="advanced-profile-status">&mdash;</div>
               <div class="entry-grid">
                 <div class="form-row"><label>Day Count</label>
                   <div>
