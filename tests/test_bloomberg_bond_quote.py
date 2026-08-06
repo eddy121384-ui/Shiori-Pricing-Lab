@@ -1064,6 +1064,12 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
         "day_count": "ACT/ACT",
         "maturity_type": "AT MATURITY",
         "calc_type": "STREET CONVENTION",
+        "security_type": None,
+        "coupon_type": None,
+        "inflation_linked_indicator": None,
+        "convertible": None,
+        "mortgage_type": None,
+        "principal_factor": None,
     }
     # Never auto-converted into a Shiori enum: ACT/ACT must never become
     # ACT_ACT_ISDA, AT MATURITY must never become FIXED_COUPON_BULLET, and

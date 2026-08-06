@@ -115,7 +115,7 @@ and a UK Gilt (``GB00BFX0ZL78``) are enabled in ``_BOND_MASTER_FIELD_MAP``
 map's own docstring for each field's exact value-transform rule). Every
 other ``BondReferenceData`` field stays ``None`` until Eddy confirms a
 mnemonic for it the same way via ``tools/bloomberg_dapi_probe.py``. A second,
-separate dict, ``"bond_master_raw"``, carries three further mnemonics
+separate dict, ``"bond_master_raw"``, carries confirmed evidence mnemonics
 (``DAY_CNT_DES``, ``MTY_TYP``, ``CALC_TYP_DES``) Eddy confirmed return a
 value but are *not* safe to coerce into a typed ``BondReferenceData`` field
 (e.g. ``"ACT/ACT"`` must never be auto-converted to ``ACT_ACT_ISDA``) --
@@ -548,6 +548,12 @@ _BOND_MASTER_RAW_DISPLAY_FIELD_MAP: dict[str, str] = {
     "day_count": "DAY_CNT_DES",
     "maturity_type": "MTY_TYP",
     "calc_type": "CALC_TYP_DES",
+    "security_type": "SECURITY_TYP",
+    "coupon_type": "CPN_TYP",
+    "inflation_linked_indicator": "INFLATION_LINKED_INDICATOR",
+    "convertible": "CONVERTIBLE",
+    "mortgage_type": "MTG_TYP",
+    "principal_factor": "PRINCIPAL_FACTOR",
 }
 
 
@@ -587,7 +593,8 @@ def load_bloomberg_bond_identity_and_quote(
       responses (see ``_BOND_MASTER_FIELD_MAP``'s own docstring for each
       field's exact value-transform rule); every other key is ``None`` until
       Eddy confirms a mnemonic for it the same way.
-    - ``"bond_master_raw"``: three further Bloomberg mnemonics
+    - ``"bond_master_raw"``: Bloomberg evidence mnemonics that remain outside
+      the typed ``BondReferenceData`` schema
       (``DAY_CNT_DES``, ``MTY_TYP``, ``CALC_TYP_DES``) Eddy confirmed return a
       value but are display-only -- never coerced into a typed
       ``BondReferenceData`` field (e.g. ``"ACT/ACT"`` is never auto-converted

@@ -144,8 +144,8 @@ profile would otherwise supply, so ``day_count`` alone comes back ``BLOCKED``
 for the trader to set. The seven other fields are unaffected. This is still
 the opposite of the mapping #145 forbids: a matching string never *produces*
 a typed value (the value comes from the approved profile constant), a
-missing string blocks nothing, and a contradicting string can only withhold
-the one field it is evidence about.
+missing or contradicting string withholds only the one field it is evidence
+about. This stricter absence rule follows Eddy's later workstation approval.
 
 **Irregular schedules fail closed.** The current typed pricing adapter accepts
 only one internally consistent regular coupon grid. An irregular or stubbed
@@ -314,10 +314,41 @@ UST_PROFILE_SETTLEMENT_BUSINESS_DAYS = 1
 # The one display-only Bloomberg description string still read here, and only
 # to *withhold* the single field it is evidence about (Issue #161). A present
 # value reading anything else contradicts UST_PROFILE_DAY_COUNT, so day_count
-# alone comes back BLOCKED; a missing value blocks nothing; a matching value
-# is never mapped into a typed enum (see the module docstring). MTY_TYP and
+# alone comes back BLOCKED; a missing value also proves nothing and blocks that
+# field; a matching value is never mapped into a typed enum. MTY_TYP and
 # CALC_TYP_DES are not read at all -- real USTs return MTY_TYP = NORMAL.
 UST_PROFILE_DAY_COUNT_EVIDENCE = "ACT/ACT"
+
+# Exact workstation-confirmed evidence only. These strings are deliberately
+# case-sensitive and are not normalized: an absent, blank, exceptional, or
+# different Bloomberg value proves nothing and therefore fails closed.
+_PLAIN_FIXED_COUPON_EVIDENCE = "FIXED"
+_NON_INFLATION_LINKED_EVIDENCE = "N"
+_NON_CONVERTIBLE_EVIDENCE = "N"
+
+# DAY_CNT_DES evidence belongs to the manually selected convention profile;
+# SECURITY_TYP is intentionally absent because its observed values do not
+# identify an issuer safely. The two additional entries are the approved
+# evidence contract for the profile expansion, even while this resolver's
+# public route remains UST-only.
+PROFILE_DAY_COUNT_EVIDENCE = {
+    CONVENTION_PROFILE_UST: "ACT/ACT",
+    "US_CORPORATE": "30/360",
+    "GERMAN_GOVT": "ACT/ACT",
+}
+
+
+def has_plain_fixed_non_inflation_non_convertible_evidence(
+    bond_master_raw: dict[str, object],
+) -> bool:
+    """Return true only for the three approved exact Bloomberg tokens."""
+
+    return (
+        bond_master_raw.get("coupon_type") == _PLAIN_FIXED_COUPON_EVIDENCE
+        and bond_master_raw.get("inflation_linked_indicator")
+        == _NON_INFLATION_LINKED_EVIDENCE
+        and bond_master_raw.get("convertible") == _NON_CONVERTIBLE_EVIDENCE
+    )
 
 # Bond Master keys that are genuine BondReferenceData destination fields, so a
 # non-null value there is a typed Bloomberg value rather than a description
@@ -603,6 +634,16 @@ def resolve_ust_advanced_field_profile(
     bond_master = dict(bond_master or {})
     bond_master_raw = dict(bond_master_raw or {})
 
+    if not has_plain_fixed_non_inflation_non_convertible_evidence(bond_master_raw):
+        return _unsupported(
+            convention_profile,
+            (
+                "Bloomberg must return exactly CPN_TYP='FIXED', "
+                "INFLATION_LINKED_INDICATOR='N', and CONVERTIBLE='N'; missing, "
+                "exceptional, blank, or any other values fail closed",
+            ),
+        )
+
     reasons = _product_rejection_reasons(
         currency=currency,
         bond_master=bond_master,
@@ -673,17 +714,16 @@ def resolve_ust_advanced_field_profile(
     # read, and only to withhold this single field when it contradicts the
     # profile (Issue #161) -- never to produce a typed value.
     day_count_evidence = bond_master_raw.get("day_count")
+    expected_day_count_evidence = PROFILE_DAY_COUNT_EVIDENCE[convention_profile]
     day_count_evidence_contradicts = (
         _confirmed_typed_value(PATH_DAY_COUNT) is None
-        and isinstance(day_count_evidence, str)
-        and bool(day_count_evidence.strip())
-        and day_count_evidence != UST_PROFILE_DAY_COUNT_EVIDENCE
+        and day_count_evidence != expected_day_count_evidence
     )
     if day_count_evidence_contradicts:
         _block(
             PATH_DAY_COUNT,
             f"Bloomberg day-count evidence reads {day_count_evidence!r}, not "
-            f"{UST_PROFILE_DAY_COUNT_EVIDENCE!r}, so it contradicts this profile's day "
+            f"{expected_day_count_evidence!r}, so it contradicts this profile's day "
             "count; Shiori will not map a description string into a typed day count, and "
             "will not apply the profile default over Bloomberg's own description",
         )

@@ -63,6 +63,7 @@ from shiori_pricing_lab.pricing.bli_ust_fixed_coupon_profile import (
     UST_PROFILE_STATUS,
     BLIUstAdvancedFieldProfile,
     advance_ust_government_bond_business_days,
+    has_plain_fixed_non_inflation_non_convertible_evidence,
     resolve_ust_advanced_field_profile,
     ust_government_bond_calendar,
 )
@@ -89,6 +90,9 @@ _TREASURY_BOND_MASTER_RAW = {
     "day_count": "ACT/ACT",
     "maturity_type": "AT MATURITY",
     "calc_type": "STREET CONVENTION",
+    "coupon_type": "FIXED",
+    "inflation_linked_indicator": "N",
+    "convertible": "N",
 }
 
 _ISIN = "US91282CLJ89"
@@ -484,6 +488,7 @@ def test_a_real_ust_returning_maturity_type_normal_is_admitted():
         isin="US91282CMC28",
         bond_master=dict(_REAL_UST_BOND_MASTER),
         bond_master_raw={
+            **_TREASURY_BOND_MASTER_RAW,
             "day_count": "ACT/ACT",
             "maturity_type": "NORMAL",
             "calc_type": "STREET CONVENTION",
@@ -515,14 +520,39 @@ def test_calc_type_evidence_decides_nothing(value):
     assert profile.unresolved_fields == ()
 
 
-def test_a_missing_day_count_description_blocks_nothing():
-    """A Bloomberg miss is not a contradiction, so the profile default stands."""
+def test_a_missing_day_count_description_blocks_only_day_count():
+    """Missing evidence cannot establish the selected profile's convention."""
 
     profile = _resolve(bond_master_raw={**_TREASURY_BOND_MASTER_RAW, "day_count": None})
 
     assert profile.supported is True
-    assert profile.unresolved_fields == ()
-    assert _provenance(profile)[PATH_DAY_COUNT] == PROVENANCE_UST_PROFILE_DEFAULT
+    assert [item.path for item in profile.unresolved_fields] == [PATH_DAY_COUNT]
+    assert PATH_DAY_COUNT not in _provenance(profile)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("coupon_type", None),
+        ("coupon_type", "fixed"),
+        ("coupon_type", "FLOATING"),
+        ("inflation_linked_indicator", None),
+        ("inflation_linked_indicator", "Y"),
+        ("convertible", None),
+        ("convertible", "Y"),
+    ],
+)
+def test_product_evidence_whitelist_fails_closed(field, value):
+    raw = {**_TREASURY_BOND_MASTER_RAW, field: value}
+
+    assert has_plain_fixed_non_inflation_non_convertible_evidence(raw) is False
+    _assert_refused(_resolve(bond_master_raw=raw), expected_fragment="CPN_TYP='FIXED'")
+
+
+def test_exact_product_evidence_whitelist_is_accepted():
+    assert has_plain_fixed_non_inflation_non_convertible_evidence(
+        _TREASURY_BOND_MASTER_RAW
+    ) is True
 
 
 def test_a_contradicting_day_count_description_blocks_only_the_day_count():
@@ -554,6 +584,7 @@ def test_a_gilt_shaped_bond_collects_every_reason_at_once():
             "first_coupon_date": "2018-10-22",
         },
         bond_master_raw={
+            **_TREASURY_BOND_MASTER_RAW,
             "day_count": "ACT/ACT",
             "maturity_type": "NORMAL",
             "calc_type": "UK:BUMP/DMO METHOD",
