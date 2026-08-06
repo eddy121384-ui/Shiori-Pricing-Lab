@@ -3998,6 +3998,15 @@
   window.__shioriTestSelectedConventionProfile = () => selectedConventionProfile;
   window.__shioriTestConventionProfileCandidates = () => conventionProfileCandidates;
   window.__shioriTestConventionProfileOverridden = () => conventionProfileOverridden;
+  // Read-only generation fence for browser tests (no production behavior
+  // depends on this accessor existing). `conventionProfileGeneration` is
+  // bumped exactly twice per successful Bloomberg Load -- once by
+  // resetRunState, once by refreshConventionProfileCandidates -- and by
+  // nothing else, so a test can wait for it to increase past a
+  // pre-click value to know a fresh load's reset has genuinely happened,
+  // rather than polling DOM text that can already equal the expected value
+  // when the same identifier is loaded twice in a row (Issue #161 CI fix).
+  window.__shioriTestConventionProfileGeneration = () => conventionProfileGeneration;
   // Issue #161. The two parsers are pure functions of their argument, so
   // exposing them tests the very code the page runs rather than a copy.
   window.__shioriTestParseTreasuryQuote = (raw) => parseTreasuryQuote(raw);

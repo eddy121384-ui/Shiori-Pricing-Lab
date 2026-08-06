@@ -145,7 +145,7 @@ pass the same checks.
 
 Bloomberg workstation evidence (Issue #161 follow-up; see
 ``bli_bond_convention_profile``'s own evidence log for the full probe
-record) now confirms three of the five
+record) now confirms three of the four
 :data:`~bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`:
 ``coupon_type`` (via ``CPN_TYP``, confirmed value ``"FIXED"``),
 ``inflation_linked_flag`` and ``convertible_flag`` (via
@@ -155,16 +155,24 @@ Each is checked by *value*, via
 never merely by presence -- a real floater's ``coupon_type == "FLOATING"``
 must still fail to confirm anything.
 
-The remaining two, ``security_type`` and ``amortizing_flag``, have **no
-approved criterion at all**: ``SECURITY_TYP`` is confirmed to return a value
-(``"US GOVERNMENT"`` / ``"GLOBAL"`` / ``"EURO-ZONE"`` across the three
-probed securities) but nothing has established which values would confirm a
-plain bullet, and no working amortizing-evidence mnemonic exists yet
+``security_type`` is deliberately not one of the four fields any more
+(Eddy's explicit correction): ``SECURITY_TYP`` is confirmed to return a
+value (``"US GOVERNMENT"`` / ``"GLOBAL"`` / ``"EURO-ZONE"`` across the three
+probed securities), but it cannot safely classify a profile, and Shiori
+never auto-selects one anyway -- the trader always picks explicitly (see
+``bli_bond_convention_profile.convention_profile_candidates``) -- so gating
+*admission* on a field whose only conceivable job would have been
+classification added friction with no safety benefit. It is still carried
+on ``bond_master`` as display/evidence data; it just no longer blocks
+anything here.
+
+The remaining one, ``amortizing_flag``, has **no approved criterion at
+all**: no working amortizing-evidence mnemonic exists yet
 (``IS_AMORTIZING``/``AMORT_TYP``/``REDEMP_TYP``/``SCHED_TYP`` confirmed
 ``BAD_FLD``, ``MTG_TYP`` confirmed not applicable, ``PRINCIPAL_FACTOR ==
-1.0`` explicitly not approved as evidence). These two therefore always fail
+1.0`` explicitly not approved as evidence). It therefore always fails
 :func:`confirms_plain_fixed_coupon_evidence` regardless of what
-``bond_master`` holds for them, which is what keeps every non-UST profile
+``bond_master`` holds for it, which is what keeps every non-UST profile
 fail-closed today even with the other three fields confirmed.
 
 Every profile except ``UST`` therefore refuses a bond whose structure is not
@@ -570,13 +578,17 @@ def _product_rejection_reasons(
     # non-None, but not evidence of a plain bullet -- so each field is judged
     # by `confirms_plain_fixed_coupon_evidence`, which requires the specific
     # value Bloomberg workstation evidence confirmed (see
-    # `bli_bond_convention_profile`'s own evidence log). `security_type` and
-    # `amortizing_flag` have no approved criterion at all yet, so they always
-    # fail this check regardless of what bond_master holds for them -- which
-    # is what keeps every non-UST profile fail-closed until real bullet-vs-
-    # amortizing evidence exists, and is why selecting the profile by hand
-    # can never push such a bond through: this is checked here, not in the
-    # browser.
+    # `bli_bond_convention_profile`'s own evidence log). `security_type` is
+    # deliberately not one of PLAIN_FIXED_COUPON_EVIDENCE_FIELDS any more
+    # (Eddy's correction: it cannot safely classify a profile, and Shiori
+    # never auto-selects one anyway, so gating on it added friction with no
+    # safety benefit) -- it is still carried on bond_master as display/
+    # evidence data, just never read here. `amortizing_flag` has no approved
+    # criterion at all yet, so it always fails this check regardless of what
+    # bond_master holds for it -- which is what keeps every non-UST profile
+    # fail-closed until real amortizing evidence exists, and is why selecting
+    # the profile by hand can never push such a bond through: this is
+    # checked here, not in the browser.
     if profile.plain_fixed_coupon_evidence_required:
         unconfirmed = tuple(
             field

@@ -329,6 +329,26 @@ def _load_bloomberg_bond(
     issuer class). The selection is skipped when this bond has no such
     candidate -- a GBP bond has none at all -- and can be skipped explicitly
     with ``profile=None`` by tests that assert the unselected state.
+
+    **Same-identifier reload race (Issue #161 CI fix).** A retry/reset test
+    calls this helper twice for the *same* identifier (e.g. a malformed date
+    fixed by a second Load of the same ISIN). ``#resolved-bond-isin`` then
+    reads identically before and after the click, so waiting on that text
+    alone can resolve on its very first poll -- before ``resetRunState``
+    has even run for the second load -- and the picker/profile waits below
+    would then observe the *first* load's stale, already-selected state. A
+    ``page.select_option`` that finds the target value already selected is a
+    no-op (no ``change`` event), so the coming ``resetRunState`` wipes the
+    selection with nothing left to reselect it, and ``refreshAdvancedProfile``
+    is never triggered -- the exact hang the CI timeout reported.
+
+    The fix waits first for ``conventionProfileGeneration`` (a monotonic
+    counter bumped exactly twice per successful load, by ``resetRunState``
+    and by ``refreshConventionProfileCandidates``, and by nothing else) to
+    increase past its pre-click value. Unlike a same-valued DOM string, an
+    integer comparison with ``>`` cannot spuriously already be true, so this
+    is an unambiguous fence: once it passes, the reset for *this* click has
+    genuinely happened, and the ISIN/candidates waits that follow are safe.
     """
 
     payload = response if response is not None else _default_bloomberg_bond_lookup_response()
@@ -339,7 +359,12 @@ def _load_bloomberg_bond(
     page.route("**/api/bloomberg/bond", _handle)
     page.fill("#bond-identifier-input", identifier)
     _select_quote_side(page, side)
+    generation_before = page.evaluate("() => window.__shioriTestConventionProfileGeneration()")
     page.click("#load-bloomberg-bond-btn")
+    page.wait_for_function(
+        "before => window.__shioriTestConventionProfileGeneration() > before",
+        arg=generation_before,
+    )
     page.wait_for_function(
         "expected => document.querySelector('#resolved-bond-isin').textContent === expected",
         arg=payload["isin"],
@@ -5921,17 +5946,23 @@ def test_the_provenance_readout_names_the_selected_profile_not_ust(server_url, p
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
 def test_populated_but_uncriteria_evidence_still_refuses_us_corporate(server_url, page) -> None:
-    """Issue #161 follow-up items 1-3, end to end, corrected.
+    """Issue #161 follow-up items 1-3, end to end, corrected twice.
 
     An earlier revision of this test supplied `security_type`/`amortizing_
     flag` values and expected US_CORPORATE to resolve -- that was wrong: real
     Bloomberg workstation evidence only confirmed `coupon_type`/
-    `inflation_linked_flag`/`convertible_flag`. `security_type` and
-    `amortizing_flag` have no approved criterion at all (see the resolver's
-    own evidence log), so no bond_master content can satisfy them today,
-    even with every field populated and superficially plausible. This proves
-    the gate correctly stays fail-closed rather than admitting on presence
-    alone -- the exact bug the value-based check exists to prevent."""
+    `inflation_linked_flag`/`convertible_flag`. A second correction then
+    removed `security_type` from the gate entirely (Eddy: it cannot safely
+    classify a profile, and Shiori never auto-selects one anyway), so this
+    now supplies it as ordinary display/evidence data -- present, with a
+    plausible-looking value, and irrelevant to the outcome either way.
+    `amortizing_flag` is the one field with no approved criterion at all
+    (see the resolver's own evidence log), so no bond_master content can
+    satisfy it today, even a superficially plausible `False`. This proves
+    the gate correctly stays fail-closed on that one field rather than
+    admitting on presence alone -- the exact bug the value-based check
+    exists to prevent -- while `security_type` is carried along and cited
+    nowhere."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -5954,10 +5985,11 @@ def test_populated_but_uncriteria_evidence_still_refuses_us_corporate(server_url
     assert profile["convention_profile"] == "US_CORPORATE"
     assert profile["supported"] is False
     reasons = " ".join(profile["rejection_reasons"])
-    assert "security_type" in reasons
     assert "amortizing_flag" in reasons
-    # The three genuinely-confirmed fields are not cited as the problem.
+    # The three genuinely-confirmed fields, and security_type (no longer
+    # part of the gate at all), are not cited as the problem.
     assert "coupon_type" not in reasons
     assert "inflation_linked_flag" not in reasons
     assert "convertible_flag" not in reasons
+    assert "security_type" not in reasons
     assert _profile_controls_disabled(page)

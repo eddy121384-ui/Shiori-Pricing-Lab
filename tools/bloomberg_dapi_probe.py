@@ -49,15 +49,18 @@ his own Bloomberg Terminal:
 
 - Confirmed and wired into
   ``shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_EVIDENCE_FIELD_MAP``
-  (all three securities returned a value, and each field's confirmed value is
-  what the pricing convention-profile gate now requires -- see
+  as *admission* evidence (all three securities returned a value, and each
+  field's confirmed value is what the pricing convention-profile gate now
+  requires -- see
   ``pricing.bli_bond_convention_profile.confirms_plain_fixed_coupon_evidence``):
   ``CPN_TYP`` (all three: ``"FIXED"``), ``INFLATION_LINKED_INDICATOR`` (all
   three: ``"N"``), ``CONVERTIBLE`` (all three: ``"N"``).
-- Confirmed to return a value, but **not** wired anywhere -- no criterion
-  exists for what value would confirm a plain fixed-coupon bullet, and a
-  guessed one is not acceptable: ``SECURITY_TYP`` (``"US GOVERNMENT"`` /
-  ``"GLOBAL"`` / ``"EURO-ZONE"`` respectively).
+- Confirmed to return a value and wired into the same map, but as
+  display/evidence data only -- **not** an admission criterion (Eddy's
+  explicit correction: it cannot safely classify a profile, and Shiori
+  never auto-selects one anyway, since the trader always picks explicitly):
+  ``SECURITY_TYP`` (``"US GOVERNMENT"`` / ``"GLOBAL"`` / ``"EURO-ZONE"``
+  respectively).
 - Confirmed ``BAD_FLD`` against the corporate and German government
   candidates -- must not be re-added without a fresh, separately-approved
   confirmation (same standing as ``PENULTIMATE_COUPON_DATE``/
@@ -147,12 +150,15 @@ _REQUEST_TIMEOUT_MS = 10_000
 # history sections above) -- CPN/CPN_FREQ/ISSUE_DT/MATURITY/FIRST_CPN_DT/
 # CALLABLE/SINKABLE and CPN_TYP/INFLATION_LINKED_INDICATOR/CONVERTIBLE are
 # confirmed and wired into _BOND_MASTER_FIELD_MAP /
-# _BOND_MASTER_EVIDENCE_FIELD_MAP; DAY_CNT_DES/MTY_TYP/CALC_TYP_DES are
-# confirmed and wired into _BOND_MASTER_RAW_DISPLAY_FIELD_MAP (display-only);
-# PENULTIMATE_COUPON_DATE/REDEMPTION_VALUE/IS_AMORTIZING/AMORT_TYP/
-# REDEMP_TYP/SCHED_TYP/MTG_TYP are confirmed rejected and must not be
-# re-added without a fresh confirmation; SECURITY_TYP/PRINCIPAL_FACTOR are
-# confirmed to return a value but have no approved use. Add a new entry here
+# _BOND_MASTER_EVIDENCE_FIELD_MAP as admission evidence; SECURITY_TYP is
+# confirmed and wired into _BOND_MASTER_EVIDENCE_FIELD_MAP too, but as
+# display/evidence data only, not an admission criterion; DAY_CNT_DES/
+# MTY_TYP/CALC_TYP_DES are confirmed and wired into
+# _BOND_MASTER_RAW_DISPLAY_FIELD_MAP (display-only); PENULTIMATE_COUPON_DATE/
+# REDEMPTION_VALUE/IS_AMORTIZING/AMORT_TYP/REDEMP_TYP/SCHED_TYP/MTG_TYP are
+# confirmed rejected and must not be re-added without a fresh confirmation;
+# PRINCIPAL_FACTOR is confirmed to return a value but has no approved use.
+# Add a new entry here
 # only for a genuinely new, not-yet-probed candidate mnemonic -- see the
 # "still needed" section above for what Eddy should look for next
 # (bullet-vs-amortizing / principal-repayment-schedule evidence) and where.

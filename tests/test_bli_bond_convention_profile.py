@@ -428,19 +428,34 @@ def test_a_present_but_wrong_value_does_not_confirm(field, non_confirming_value)
     assert confirms_plain_fixed_coupon_evidence(field, non_confirming_value) is False
 
 
-@pytest.mark.parametrize("field", ["security_type", "amortizing_flag"])
 @pytest.mark.parametrize(
     "value",
     [None, "US GOVERNMENT", "GLOBAL", "EURO-ZONE", True, False, 0, 1, "ANYTHING"],
 )
-def test_fields_with_no_approved_criterion_never_confirm_any_value(field, value):
-    """`security_type` is confirmed to return a value (Bloomberg workstation
-    evidence: "US GOVERNMENT" / "GLOBAL" / "EURO-ZONE") but nothing has
-    established which values would mean "plain bullet" -- and no working
-    amortizing-evidence mnemonic exists at all. Both therefore reject every
-    value, not just absence, until a real criterion is approved."""
+def test_amortizing_flag_never_confirms_any_value(value):
+    """No working amortizing-evidence mnemonic exists at all, so this field
+    rejects every value, not just absence, until a real criterion is
+    approved."""
 
-    assert confirms_plain_fixed_coupon_evidence(field, value) is False
+    assert confirms_plain_fixed_coupon_evidence("amortizing_flag", value) is False
+
+
+def test_security_type_is_removed_from_the_gates_field_list():
+    """Eddy's second-revision correction: `SECURITY_TYP` cannot safely
+    classify a profile, and Shiori never auto-selects one anyway (the trader
+    always picks explicitly), so `security_type` is no longer one of
+    `PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` at all -- the resolver's gate never
+    asks about it, in either direction. It is still confirmed to return a
+    value (Bloomberg workstation evidence: "US GOVERNMENT" / "GLOBAL" /
+    "EURO-ZONE") and is still populated on `bond_master` for display/
+    evidence, via `bloomberg_bond_quote._BOND_MASTER_EVIDENCE_FIELD_MAP` --
+    it just no longer gates admission."""
+
+    assert "security_type" not in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+    # The predicate function itself still has no criterion for it if ever
+    # asked (defence in depth, not the mechanism that protects admission --
+    # that mechanism is simply that the resolver's loop never reaches it).
+    assert confirms_plain_fixed_coupon_evidence("security_type", "US GOVERNMENT") is False
 
 
 def test_an_unrecognized_field_name_never_confirms():

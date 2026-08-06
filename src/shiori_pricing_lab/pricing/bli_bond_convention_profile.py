@@ -109,9 +109,22 @@ _CALENDAR_FACTORIES = {
 # reset frequency in ``CPN_FREQ`` and is neither callable nor sinkable, so it
 # passes every check that exists today -- which is precisely the exposure
 # this gate closes for the two new profiles.
+#
+# ``security_type`` is deliberately **not** in this tuple (Eddy's explicit
+# correction, second revision). Bloomberg's ``SECURITY_TYP`` cannot safely
+# classify a profile on its own, and it was never going to be asked to:
+# Shiori does not auto-select a profile at all (see
+# :func:`convention_profile_candidates` above) -- the trader always picks
+# one explicitly. Gating *admission* on a field whose only conceivable job
+# would have been classification, when Shiori already refuses to classify,
+# is friction with no safety benefit. ``security_type`` is still read and
+# carried on ``bond_master`` (see the data loader module's own
+# ``_BOND_MASTER_EVIDENCE_FIELD_MAP``) as display/evidence data and as a
+# data point for any future, separately-approved auto-selection design --
+# it simply no longer blocks plain-fixed-coupon admission. The one real
+# structural gap this profile still needs closed is ``amortizing_flag``.
 PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
     "coupon_type",
-    "security_type",
     "inflation_linked_flag",
     "convertible_flag",
     "amortizing_flag",
@@ -137,17 +150,16 @@ PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
 #   returned ``"N"``.
 # - ``CONVERTIBLE`` -> ``convertible_flag``: all three returned ``"N"``.
 #
-# **Confirmed to return a value, but explicitly NOT approved as structural
-# evidence** -- no criterion exists for what value would confirm a plain
-# bullet, so it stays unwired and the field permanently blocks the gate
-# until one is:
+# **Confirmed to return a value, wired for display/evidence, but explicitly
+# not a plain-fixed-coupon admission criterion** (Eddy's correction above --
+# not "unconfirmed", a deliberate non-gating field):
 #
 # - ``SECURITY_TYP`` -> ``security_type``: returned ``"US GOVERNMENT"``
 #   (UST), ``"GLOBAL"`` (corporate candidate), ``"EURO-ZONE"`` (German govt
 #   candidate). Three different strings on three different markets is
-#   evidence the field carries *some* classification, not evidence of what
-#   values would mean "plain fixed-coupon bullet" -- that mapping is not
-#   guessed here.
+#   evidence the field carries *some* classification, but not one Shiori
+#   safely acts on for admission -- and, per the trader-selects-the-profile
+#   design, it was never asked to.
 #
 # **Confirmed rejected** -- probed as amortizing-evidence candidates,
 # disproven, and must not be re-added without a fresh, separately-approved
@@ -162,7 +174,8 @@ PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
 #   candidates, but explicitly **not approved** as amortizing evidence --
 #   Eddy's own reasoning: a factor of 1.0 only proves the principal has not
 #   yet paid down, never that no future amortization schedule exists. There
-#   is still no approved criterion for ``amortizing_flag``.
+#   is still no approved criterion for ``amortizing_flag`` -- the one
+#   remaining structural gap that keeps every non-UST profile fail-closed.
 #
 # No further Bloomberg mnemonic guessing follows any of this. The next step
 # is Eddy searching Bloomberg's own field directory on his workstation
@@ -177,7 +190,9 @@ PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
 # the evidence log above. A field with no entry here has no approved
 # criterion at all -- not "no value yet", but no confirmed rule for what any
 # value would mean -- so it can never confirm anything regardless of what
-# ``bond_master`` holds for it (`security_type`, `amortizing_flag`).
+# ``bond_master`` holds for it (only ``amortizing_flag`` today;
+# ``security_type`` is not in :data:`PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` at
+# all any more, so this function is never asked about it).
 _PLAIN_FIXED_COUPON_EVIDENCE_CHECKS: dict[str, Callable[[object], bool]] = {
     "coupon_type": lambda value: value == "FIXED",
     "inflation_linked_flag": lambda value: value is False,
@@ -194,9 +209,9 @@ def confirms_plain_fixed_coupon_evidence(field: str, value: object) -> bool:
     ``"FLOATING"``) that must still fail to confirm anything, which is why
     the resolver never treats "the key exists" as sufficient evidence on its
     own. A field with no entry in :data:`_PLAIN_FIXED_COUPON_EVIDENCE_CHECKS`
-    (``security_type``, ``amortizing_flag``) has no approved criterion at
-    all yet, so this always returns ``False`` for it regardless of the
-    value -- see the evidence log above for why.
+    (``amortizing_flag`` today) has no approved criterion at all yet, so this
+    always returns ``False`` for it regardless of the value -- see the
+    evidence log above for why.
     """
 
     check = _PLAIN_FIXED_COUPON_EVIDENCE_CHECKS.get(field)

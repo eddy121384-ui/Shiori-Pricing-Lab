@@ -995,6 +995,7 @@ def test_identity_lookup_requests_every_confirmed_bond_master_and_raw_field(monk
         "MTY_TYP",
         "CALC_TYP_DES",
         "CPN_TYP",
+        "SECURITY_TYP",
         "INFLATION_LINKED_INDICATOR",
         "CONVERTIBLE",
     ):
@@ -1002,11 +1003,9 @@ def test_identity_lookup_requests_every_confirmed_bond_master_and_raw_field(monk
     # Confirmed BAD_FLD mnemonics must never be re-added to the request.
     assert "PENULTIMATE_COUPON_DATE" not in sent_fields
     assert "REDEMPTION_VALUE" not in sent_fields
-    # Issue #161 follow-up: SECURITY_TYP is confirmed to return a value but
-    # has no approved use, and none of the amortizing-evidence candidates
+    # Issue #161 follow-up: none of the amortizing-evidence candidates
     # survived probing -- none of them is ever requested.
     for rejected_or_unmapped in (
-        "SECURITY_TYP",
         "IS_AMORTIZING",
         "AMORT_TYP",
         "REDEMP_TYP",
@@ -1025,8 +1024,9 @@ def test_identity_lookup_bond_master_evidence_fields_populate_from_a_corporate_f
 ):
     # US023135EC69 -- Eddy's Issue #161 follow-up workstation evidence for a
     # real USD fixed-rate corporate bond candidate: CPN_TYP="FIXED",
-    # SECURITY_TYP="GLOBAL" (confirmed to return a value, not wired -- no
-    # approved criterion), INFLATION_LINKED_INDICATOR="N", CONVERTIBLE="N".
+    # SECURITY_TYP="GLOBAL" (confirmed and wired as display/evidence data --
+    # not an admission criterion, per Eddy's correction),
+    # INFLATION_LINKED_INDICATOR="N", CONVERTIBLE="N".
     _install_fake_blpapi(
         monkeypatch,
         events=[
@@ -1051,10 +1051,12 @@ def test_identity_lookup_bond_master_evidence_fields_populate_from_a_corporate_f
     assert result["bond_master"]["coupon_type"] == "FIXED"
     assert result["bond_master"]["inflation_linked_flag"] is False
     assert result["bond_master"]["convertible_flag"] is False
-    # SECURITY_TYP returned a value, but there is no confirmed criterion or
-    # mnemonic mapping for it -- it stays None, exactly like an unmapped
-    # BondReferenceData destination field.
-    assert result["bond_master"]["security_type"] is None
+    # SECURITY_TYP is wired and populated -- display/evidence data, not an
+    # admission criterion (the resolver's PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+    # no longer names security_type at all).
+    assert result["bond_master"]["security_type"] == "GLOBAL"
+    # amortizing_flag has no confirmed mnemonic or mapping at all -- it stays
+    # None, exactly like an unmapped BondReferenceData destination field.
     assert result["bond_master"]["amortizing_flag"] is None
 
 
@@ -1086,6 +1088,7 @@ def test_identity_lookup_bond_master_evidence_fields_populate_from_a_german_govt
     )
 
     assert result["bond_master"]["coupon_type"] == "FIXED"
+    assert result["bond_master"]["security_type"] == "EURO-ZONE"
     assert result["bond_master"]["inflation_linked_flag"] is False
     assert result["bond_master"]["convertible_flag"] is False
     assert result["bond_master_raw"]["day_count"] == "ACT/ACT"
@@ -1221,8 +1224,8 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
     # US91282CLJ89 -- Eddy's real US Treasury DAPI evidence (PR #141 body),
     # plus the plain-fixed-coupon structural-evidence values Eddy's Issue
     # #161 follow-up workstation probe confirmed for a real UST
-    # (US91282CMC28): CPN_TYP="FIXED", INFLATION_LINKED_INDICATOR="N",
-    # CONVERTIBLE="N".
+    # (US91282CMC28): CPN_TYP="FIXED", SECURITY_TYP="US GOVERNMENT",
+    # INFLATION_LINKED_INDICATOR="N", CONVERTIBLE="N".
     _install_fake_blpapi(
         monkeypatch,
         events=[
@@ -1241,6 +1244,7 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
                         MTY_TYP="AT MATURITY",
                         CALC_TYP_DES="STREET CONVENTION",
                         CPN_TYP="FIXED",
+                        SECURITY_TYP="US GOVERNMENT",
                         INFLATION_LINKED_INDICATOR="N",
                         CONVERTIBLE="N",
                     ),
@@ -1268,7 +1272,7 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
         "yield_convention": None,
         "business_day_convention": None,
         "coupon_type": "FIXED",
-        "security_type": None,
+        "security_type": "US GOVERNMENT",
         "inflation_linked_flag": False,
         "convertible_flag": False,
         "amortizing_flag": None,

@@ -127,12 +127,12 @@ call succeed or fail as a whole exactly as before.
 
 **Plain fixed-coupon structural evidence (Issue #161 follow-up).** A third
 group of ``bond_master`` keys, separate from the ``BondReferenceData``
-schema fields above: they exist only so the Advanced-field resolver's
+schema fields above: they exist so the Advanced-field resolver's
 convention-profile gate
 (``pricing.bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS``)
 can positively confirm a bond's structure before applying any profile but
 UST, and are never written into a typed ``BondReferenceData``. Real
-Bloomberg workstation evidence confirmed three of the five:
+Bloomberg workstation evidence confirmed four of the five:
 
 - ``CPN_TYP`` -> ``coupon_type``: passed through verbatim (confirmed value
   ``"FIXED"`` on an ordinary fixed-rate bond; other values are not coerced
@@ -142,16 +142,24 @@ Bloomberg workstation evidence confirmed three of the five:
   ``CONVERTIBLE`` -> ``convertible_flag``: only exact ``"Y"``/``"N"`` map to
   ``True``/``False``, via the same confirmed-Y/N transform as
   ``callable_flag``/``sinkable_flag``.
+- ``SECURITY_TYP`` -> ``security_type``: passed through verbatim (confirmed
+  values ``"US GOVERNMENT"``/``"GLOBAL"``/``"EURO-ZONE"`` across the three
+  probed securities). Populated for display/evidence and for any future,
+  separately-approved auto-selection research -- but, per Eddy's explicit
+  correction, it is **not** one of
+  ``pricing.bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS``
+  any more: ``SECURITY_TYP`` cannot safely classify a profile, and Shiori
+  never auto-selects one anyway (the trader always picks explicitly), so
+  gating admission on it added friction with no safety benefit.
 
-``security_type`` and ``amortizing_flag`` remain ``None`` always: ``
-SECURITY_TYP`` was confirmed to return a value but no criterion exists for
-what value would confirm a plain bullet, and no candidate amortizing-
-evidence mnemonic has survived probing (``IS_AMORTIZING``/``AMORT_TYP``/
+``amortizing_flag`` remains ``None`` always: no candidate amortizing-evidence
+mnemonic has survived probing (``IS_AMORTIZING``/``AMORT_TYP``/
 ``REDEMP_TYP``/``SCHED_TYP`` confirmed ``BAD_FLD``, ``MTG_TYP`` confirmed
 not applicable, ``PRINCIPAL_FACTOR`` confirmed returned but explicitly not
 approved as evidence -- see ``bli_bond_convention_profile``'s own evidence
-log for the full record). Neither is requested from Bloomberg here; there is
-no mnemonic to request.
+log for the full record). It is not requested from Bloomberg here; there is
+no mnemonic to request. It is the one remaining structural gap that keeps
+every non-UST profile fail-closed today.
 """
 
 from __future__ import annotations
@@ -581,16 +589,26 @@ _BOND_MASTER_RAW_DISPLAY_FIELD_MAP: dict[str, str] = {
 # --- Plain fixed-coupon structural evidence (Issue #161 follow-up) -----------
 #
 # NOT BondReferenceData fields -- see the module docstring's own section.
-# These keys exist only for pricing.bli_bond_convention_profile's
-# PLAIN_FIXED_COUPON_EVIDENCE_FIELDS gate, and are kept manually in sync with
-# that tuple by cross-reference comment (the same "no shared import" pattern
-# already used for _BOND_MASTER_DESTINATION_FIELDS vs. BondReferenceData's
-# own fields) since `data/` does not import from `pricing/`.
+# These keys exist for pricing.bli_bond_convention_profile's non-UST
+# structural gate, and are kept manually in sync with that module's own
+# field vocabulary by cross-reference comment (the same "no shared import"
+# pattern already used for _BOND_MASTER_DESTINATION_FIELDS vs.
+# BondReferenceData's own fields) since `data/` does not import from
+# `pricing/`.
 #
-# Three of five are confirmed and wired below; `security_type` and
-# `amortizing_flag` have no confirmed mnemonic or approved criterion at all
-# (see the module docstring), so they are listed as destinations but have no
-# entry in `_BOND_MASTER_EVIDENCE_FIELD_MAP` and therefore always stay None.
+# Four of five are confirmed and wired below. `amortizing_flag` still has no
+# confirmed mnemonic or approved criterion at all (see the module docstring),
+# so it is listed as a destination but has no entry in
+# `_BOND_MASTER_EVIDENCE_FIELD_MAP` and therefore always stays None.
+#
+# `security_type` is wired here even though
+# `pricing.bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` no
+# longer names it (Eddy's correction: SECURITY_TYP cannot safely classify a
+# profile, and Shiori never auto-selects one anyway, so gating admission on
+# it added friction with no safety benefit). It is still confirmed to return
+# a real value, so it is still populated here -- as display/evidence data
+# and as a data point for any future, separately-approved auto-selection
+# design -- just no longer read by the admission gate.
 _BOND_MASTER_EVIDENCE_FIELDS = (
     "coupon_type",
     "security_type",
@@ -601,6 +619,7 @@ _BOND_MASTER_EVIDENCE_FIELDS = (
 
 _BOND_MASTER_EVIDENCE_FIELD_MAP: dict[str, tuple[str, Callable[[str], object | None]]] = {
     "coupon_type": ("CPN_TYP", _passthrough_bloomberg_string),
+    "security_type": ("SECURITY_TYP", _passthrough_bloomberg_string),
     "inflation_linked_flag": ("INFLATION_LINKED_INDICATOR", _boolean_flag_from_bloomberg_yes_no),
     "convertible_flag": ("CONVERTIBLE", _boolean_flag_from_bloomberg_yes_no),
 }
@@ -877,9 +896,9 @@ def load_bloomberg_bond_identity_and_quote(
     # module docstring's own section and _BOND_MASTER_EVIDENCE_FIELD_MAP's
     # comment. Written into the same bond_master dict as the schema fields
     # above because the Advanced-field resolver's convention-profile gate
-    # already reads both from that one dict. `security_type` and
-    # `amortizing_flag` have no mapping entry, so they follow the identical
-    # "no confirmed mnemonic -> None" rule the schema fields already use.
+    # already reads both from that one dict. `amortizing_flag` has no
+    # mapping entry, so it follows the identical "no confirmed mnemonic ->
+    # None" rule the schema fields already use.
     for evidence_field in _BOND_MASTER_EVIDENCE_FIELDS:
         mapping = _BOND_MASTER_EVIDENCE_FIELD_MAP.get(evidence_field)
         if mapping is None:

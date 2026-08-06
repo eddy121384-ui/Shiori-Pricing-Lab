@@ -1071,15 +1071,20 @@ def test_the_resolver_names_no_profile_and_no_market_anywhere_in_its_code():
 # profile refuses until Bloomberg has confirmed what the bond actually is.
 #
 # Bloomberg workstation evidence (Issue #161 follow-up) confirmed three of
-# the five evidence fields -- `coupon_type` ("FIXED"), `inflation_linked_flag`
-# and `convertible_flag` (both `False`) -- but explicitly not the other two:
-# `security_type` returns a value with no approved criterion, and no working
-# amortizing-evidence mnemonic survived probing at all. What follows proves
-# the gate correctly distinguishes "this field's value confirms plain fixed
-# coupon" from "this field merely has a value" -- the exact bug a naive
-# presence-only check would have -- and that today's real-shaped evidence
-# (3 confirmed, 2 permanently unconfirmed) still leaves every non-UST profile
-# fail-closed, satisfying Eddy's item 3 instruction directly.
+# the four evidence fields -- `coupon_type` ("FIXED"), `inflation_linked_flag`
+# and `convertible_flag` (both `False`). `security_type` returns a value too,
+# but per Eddy's second-revision correction it is not in
+# `PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` at all any more: it cannot safely
+# classify a profile, and Shiori never auto-selects one anyway (the trader
+# always picks explicitly), so it is kept as display/evidence data and never
+# blocks admission. The one field with no working mnemonic at all is
+# `amortizing_flag`. What follows proves the gate correctly distinguishes
+# "this field's value confirms plain fixed coupon" from "this field merely
+# has a value" -- the exact bug a naive presence-only check would have -- and
+# that today's real-shaped evidence (3 confirmed, `amortizing_flag`
+# permanently unconfirmed, `security_type` irrelevant either way) still
+# leaves every non-UST profile fail-closed on `amortizing_flag` alone,
+# satisfying Eddy's item 3 instruction directly.
 
 # A separate profile from `_SYNTHETIC_PROFILE`: this one's gate is ON
 # (`plain_fixed_coupon_evidence_required` defaults to `True`), because these
@@ -1131,7 +1136,8 @@ _CONFIRMED_STRUCTURAL_EVIDENCE = {
 def test_the_three_confirmed_fields_alone_do_not_admit_a_non_ust_profile(gated_registry):
     """Item 3, the decisive regression: even with every field Bloomberg has
     actually confirmed, a non-UST profile must still refuse, because
-    `security_type`/`amortizing_flag` have no approved criterion at all."""
+    `amortizing_flag` has no approved criterion at all. `security_type` is
+    not part of the gate any more, so it is not even mentioned."""
 
     profile = _resolve_gated(
         bond_master={**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
@@ -1140,13 +1146,49 @@ def test_the_three_confirmed_fields_alone_do_not_admit_a_non_ust_profile(gated_r
     assert profile.supported is False
     assert profile.fields == ()
     reason = " ".join(profile.rejection_reasons)
-    assert "security_type" in reason
     assert "amortizing_flag" in reason
     # The three genuinely-confirmed fields are not cited: they are pulling
-    # their weight, and only the two truly-unconfirmed ones block.
+    # their weight, and only the one truly-unconfirmed field blocks.
     assert "coupon_type" not in reason
     assert "inflation_linked_flag" not in reason
     assert "convertible_flag" not in reason
+    # security_type is not part of PLAIN_FIXED_COUPON_EVIDENCE_FIELDS any
+    # more (Eddy's correction), so it is never mentioned in either direction.
+    assert "security_type" not in reason
+
+
+def test_security_type_never_blocks_admission_present_or_absent(gated_registry):
+    """The decisive regression for Eddy's correction itself: whether
+    `security_type` is present, absent, or contradicts every value ever
+    observed, the outcome (still fail-closed on `amortizing_flag` alone)
+    does not change -- because the field is simply never read for
+    admission any more."""
+
+    without_security_type = _resolve_gated(
+        bond_master={**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
+    )
+    with_confirmed_security_type = _resolve_gated(
+        bond_master={
+            **_ANNUAL_BOND_MASTER,
+            **_CONFIRMED_STRUCTURAL_EVIDENCE,
+            "security_type": "EURO-ZONE",
+        }
+    )
+    with_unrecognized_security_type = _resolve_gated(
+        bond_master={
+            **_ANNUAL_BOND_MASTER,
+            **_CONFIRMED_STRUCTURAL_EVIDENCE,
+            "security_type": "SOMETHING BLOOMBERG NEVER RETURNED",
+        }
+    )
+
+    for profile in (
+        without_security_type,
+        with_confirmed_security_type,
+        with_unrecognized_security_type,
+    ):
+        assert profile.supported is False
+        assert profile.rejection_reasons == without_security_type.rejection_reasons
 
 
 @pytest.mark.parametrize(
@@ -1177,14 +1219,19 @@ def test_a_present_but_wrong_value_still_blocks_the_field_it_belongs_to(
 
 def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_registry):
     """The end-to-end proof, using a bond_master shaped exactly like what
-    `load_bloomberg_bond_identity_and_quote` returns today: three evidence
-    keys populated with their confirmed values, two (`security_type`,
-    `amortizing_flag`) simply absent -- no mnemonic exists for them, so
-    `bond_master.get(...)` is `None`, exactly like any other unmapped
-    destination. Still `supported=False`."""
+    `load_bloomberg_bond_identity_and_quote` returns today: four evidence
+    keys populated (`coupon_type`/`inflation_linked_flag`/`convertible_flag`
+    with their confirmed values, `security_type` with a real Bloomberg
+    string -- the loader wires it now), `amortizing_flag` simply absent --
+    no mnemonic exists for it, so `bond_master.get(...)` is `None`, exactly
+    like any other unmapped destination. Still `supported=False`, and only on
+    `amortizing_flag`."""
 
-    bond_master = {**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
-    assert "security_type" not in bond_master
+    bond_master = {
+        **_ANNUAL_BOND_MASTER,
+        **_CONFIRMED_STRUCTURAL_EVIDENCE,
+        "security_type": "GLOBAL",
+    }
     assert "amortizing_flag" not in bond_master
 
     profile = _resolve_gated(bond_master=bond_master)
@@ -1196,7 +1243,8 @@ def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_
     assert "has not confirmed this bond is a plain fixed-coupon bullet" in reason
     assert "floating-rate, inflation-linked, convertible or amortizing" in reason
     assert "selecting it by hand does not establish it" in reason
-    assert "security_type" in reason and "amortizing_flag" in reason
+    assert "amortizing_flag" in reason
+    assert "security_type" not in reason
 
 
 def test_ust_is_exempt_so_its_uat_passed_behaviour_does_not_regress():
@@ -1227,15 +1275,30 @@ def test_the_evidence_gate_is_checked_server_side_not_left_to_the_browser(
     assert "confirms_plain_fixed_coupon_evidence" in source
 
 
-def test_the_permanently_unconfirmed_fields_reject_any_value_unit_level():
-    """Unit-level companion to the integration tests above: `security_type`
-    and `amortizing_flag` fail `confirms_plain_fixed_coupon_evidence` for
-    every value, not merely for `None` -- there is no way to satisfy them
-    today, by any bond_master content."""
+def test_the_permanently_unconfirmed_field_rejects_any_value_unit_level():
+    """Unit-level companion to the integration tests above: `amortizing_flag`
+    fails `confirms_plain_fixed_coupon_evidence` for every value, not merely
+    for `None` -- there is no way to satisfy it today, by any bond_master
+    content."""
 
-    for field in ("security_type", "amortizing_flag"):
-        for value in (None, "US GOVERNMENT", "GLOBAL", True, False, 0, "ANYTHING"):
-            assert confirms_plain_fixed_coupon_evidence(field, value) is False, (field, value)
+    for value in (None, True, False, 0, "ANYTHING"):
+        assert confirms_plain_fixed_coupon_evidence("amortizing_flag", value) is False, value
+
+
+def test_security_type_is_not_in_the_gates_field_list_at_all():
+    """The structural guarantee behind Eddy's correction: the resolver's
+    loop only ever asks `confirms_plain_fixed_coupon_evidence` about fields
+    in `PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`, and `security_type` is not one
+    of them -- so it is not merely "always False", it is never asked at
+    all."""
+
+    assert "security_type" not in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+    assert set(PLAIN_FIXED_COUPON_EVIDENCE_FIELDS) == {
+        "coupon_type",
+        "inflation_linked_flag",
+        "convertible_flag",
+        "amortizing_flag",
+    }
 
 
 # =============================================================================
