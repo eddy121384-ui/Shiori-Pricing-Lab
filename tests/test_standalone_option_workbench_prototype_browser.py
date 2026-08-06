@@ -311,12 +311,25 @@ def _main_screen_group_ids(page) -> list[str]:
 
 
 def _load_bloomberg_bond(
-    page, *, identifier: str = "US91282CLJ89", side: str = "MID", response: dict | None = None
+    page,
+    *,
+    identifier: str = "US91282CLJ89",
+    side: str = "MID",
+    response: dict | None = None,
+    profile: str | None = "UST",
 ) -> None:
     """Mocks ``/api/bloomberg/bond`` and drives one full successful lookup
     through the real UI controls, waiting for the resolved-bond panel to show
     *this* lookup's own ISIN before returning (not merely "not hidden", which
-    would already be true if an earlier lookup populated it)."""
+    would already be true if an earlier lookup populated it).
+
+    ``profile`` then selects a Convention Profile through the real picker,
+    because Shiori no longer selects one itself (Issue #161 follow-up item 1:
+    currency and coupon frequency describe a bond's cash flows, not its
+    issuer class). The selection is skipped when this bond has no such
+    candidate -- a GBP bond has none at all -- and can be skipped explicitly
+    with ``profile=None`` by tests that assert the unselected state.
+    """
 
     payload = response if response is not None else _default_bloomberg_bond_lookup_response()
 
@@ -332,6 +345,17 @@ def _load_bloomberg_bond(
         arg=payload["isin"],
     )
     page.unroute("**/api/bloomberg/bond", _handle)
+
+    if profile is None:
+        return
+    # Read the candidate list for *this* load, in one evaluation, so a
+    # concurrent reset between "is it there?" and "what is it?" cannot make
+    # the two disagree.
+    candidates = page.wait_for_function(
+        "() => window.__shioriTestConventionProfileCandidates()"
+    ).json_value()
+    if profile in candidates["candidates"]:
+        page.select_option("#convention-profile-select", profile)
 
 
 def _refresh_display(
@@ -1176,10 +1200,10 @@ def test_gilt_shaped_regular_grid_bond_is_refused_before_any_profile_is_selected
     # to resolve the bond against.
     assert _selected_convention_profile(page) is None
     assert _advanced_profile(page) is None
-    suggestion = _convention_profile_suggestion(page)
-    assert suggestion["suggested"] is None
-    assert suggestion["candidates"] == []
-    assert any("GBP" in reason for reason in suggestion["reasons"])
+    candidates = _convention_profile_candidates(page)
+    assert candidates["candidates"] == []
+    assert "suggested" not in candidates
+    assert any("GBP" in reason for reason in candidates["reasons"])
 
     _fill_non_profile_inputs(page, strike="95.50")
     page.wait_for_timeout(250)
@@ -3631,8 +3655,8 @@ def _wait_for_advanced_profile(page) -> None:
     page.wait_for_function("() => window.__shioriTestAdvancedProfile() !== null")
 
 
-def _convention_profile_suggestion(page):
-    return page.evaluate("() => window.__shioriTestConventionProfileSuggestion()")
+def _convention_profile_candidates(page):
+    return page.evaluate("() => window.__shioriTestConventionProfileCandidates()")
 
 
 def _selected_convention_profile(page):
@@ -3643,15 +3667,15 @@ def _wait_for_profile_decision(page) -> None:
     """Wait until Shiori has settled what it can do for this bond (Issue #161).
 
     Two settled outcomes, and a bond reaches exactly one of them: the
-    resolver answered for a selected profile, or the registry says no
-    profile covers this bond at all -- in which case no profile request is
+    resolver answered for a selected profile, or no registered profile covers
+    this bond at all -- in which case no profile request is
     ever sent, so waiting on the resolver's answer alone would hang forever.
     """
 
     page.wait_for_function(
         "() => window.__shioriTestAdvancedProfile() !== null || "
-        "(window.__shioriTestConventionProfileSuggestion() !== null && "
-        "window.__shioriTestConventionProfileSuggestion().candidates.length === 0)"
+        "(window.__shioriTestConventionProfileCandidates() !== null && "
+        "window.__shioriTestConventionProfileCandidates().candidates.length === 0)"
     )
 
 
@@ -3749,7 +3773,10 @@ def test_every_auto_filled_value_shows_its_provenance(server_url, page) -> None:
     # was a trader override.
     stamped = {record["path"]: record for record in _override_provenance(page)}
     assert stamped["reporting_date"]["basis"] == "SHIORI_DERIVED"
-    assert stamped["reporting_date"]["source_system"] == "SHIORI_UST_FIXED_COUPON_PROFILE"
+    # Derived from the selected profile, not fixed (Issue #161 follow-up item
+    # 6): with three profiles registered, a fixed SHIORI_UST_... label would
+    # stamp a German government bond's values as the UST profile's.
+    assert stamped["reporting_date"]["source_system"] == "SHIORI_UST_CONVENTION_PROFILE"
 
 
 @_PLAYWRIGHT_SKIP
@@ -4327,18 +4354,38 @@ def test_convention_profile_picker_is_visible_even_with_advanced_collapsed(
     assert page.input_value("#convention-profile-select") == ""
     assert _control_disabled(page, "#convention-profile-select")
 
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    _wait_for_advanced_profile(page)
+    # Loaded, but with no profile selected: Shiori offers the choices and
+    # makes none of them (Issue #161 follow-up item 1).
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), profile=None)
+    page.wait_for_function("() => window.__shioriTestConventionProfileCandidates() !== null")
 
     assert _is_actually_hidden(page, "advanced-body")  # still collapsed
     assert not _is_actually_hidden(page, "convention-profile-select")
-    assert page.input_value("#convention-profile-select") == "UST"
+    assert page.input_value("#convention-profile-select") == ""
+    assert _selected_convention_profile(page) is None
+    assert _advanced_profile(page) is None
     assert not _control_disabled(page, "#convention-profile-select")
-    # Suggested, not chosen -- and the page says which.
-    assert _convention_profile_suggestion(page)["suggested"] == "UST"
-    assert page.evaluate("() => window.__shioriTestConventionProfileOverridden()") is False
+    # A real UST and a real US corporate are indistinguishable on confirmed
+    # Bloomberg facts, so both are offered and neither is chosen.
+    options = page.eval_on_selector_all(
+        "#convention-profile-select option", "els => els.map((el) => el.value)"
+    )
+    assert options == ["", "UST", "US_CORPORATE"]
     page.click("#advanced-head")
-    assert "Shiori suggested it" in page.inner_text("#advanced-profile-status")
+    status = page.inner_text("#advanced-profile-status")
+    assert "No convention profile is selected for this bond" in status
+    assert "Shiori will not choose one for you" in status
+
+    # Selecting one is what resolves the fields, and the page says the
+    # selection was the trader's.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_for_advanced_profile(page)
+
+    assert page.input_value("#convention-profile-select") == "UST"
+    assert page.evaluate("() => window.__shioriTestConventionProfileOverridden()") is True
+    assert "you selected it; Shiori does not choose a profile" in page.inner_text(
+        "#advanced-profile-status"
+    )
 
 
 @_PLAYWRIGHT_SKIP
@@ -5556,7 +5603,7 @@ def test_clear_and_a_second_load_each_restore_the_taipei_offset(server_url, page
 
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
-def test_the_suggestion_request_carries_no_identifier_of_any_kind(server_url, page) -> None:
+def test_the_candidates_request_carries_no_identifier_of_any_kind(server_url, page) -> None:
     """The wire-level proof of the rule: Shiori cannot guess an issuer from an
     ISIN, a CUSIP or a security name, because none of them is ever sent."""
 
@@ -5567,7 +5614,7 @@ def test_the_suggestion_request_carries_no_identifier_of_any_kind(server_url, pa
         route.continue_()
 
     page.goto(f"{server_url}/")
-    page.route("**/api/bond/convention-profile/suggest", capture)
+    page.route("**/api/bond/convention-profile/candidates", capture)
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
     _wait_for_advanced_profile(page)
 
@@ -5582,9 +5629,8 @@ def test_the_suggestion_request_carries_no_identifier_of_any_kind(server_url, pa
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
 def test_a_trader_override_of_the_profile_is_sent_and_survives(server_url, page) -> None:
-    """The override half of requirement D: the trader's selection is what the
-    resolver is actually asked to apply, and a later suggestion never takes
-    it back."""
+    """The selection half of requirement D: the trader's choice is what the
+    resolver is actually asked to apply, and nothing else ever selects."""
 
     requested: list = []
 
@@ -5594,14 +5640,23 @@ def test_a_trader_override_of_the_profile_is_sent_and_survives(server_url, page)
 
     page.goto(f"{server_url}/")
     page.route("**/api/bond/advanced-profile", capture)
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    # No profile chosen yet: not one resolver request is sent, because there
+    # is no profile to resolve against.
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), profile=None)
+    page.wait_for_function("() => window.__shioriTestConventionProfileCandidates() !== null")
+    page.wait_for_timeout(250)
+
+    assert requested == []
+    assert page.evaluate("() => window.__shioriTestConventionProfileOverridden()") is False
+
+    page.select_option("#convention-profile-select", "UST")
     _wait_for_advanced_profile(page)
 
     assert requested == ["UST"]
-    assert page.evaluate("() => window.__shioriTestConventionProfileOverridden()") is False
+    assert page.evaluate("() => window.__shioriTestConventionProfileOverridden()") is True
 
     # Selecting the empty option is a real trader action: it withdraws the
-    # suggestion Shiori made. Nothing may then be resolved against it.
+    # selection. Nothing may then be resolved against it.
     page.select_option("#convention-profile-select", "")
     page.wait_for_timeout(250)
 
@@ -5612,16 +5667,16 @@ def test_a_trader_override_of_the_profile_is_sent_and_survives(server_url, page)
     # And the page asks for a profile -- not for the eight technical fields.
     page.click("#advanced-head")
     status = page.inner_text("#advanced-profile-status")
-    assert "Shiori has not selected a convention profile for this bond" in status
-    assert "Choose the Convention Profile that applies" in status
+    assert "No convention profile is selected for this bond" in status
+    assert "Select the Convention Profile that applies" in status
 
-    # Re-selecting resolves again, and the page now says the trader chose it.
-    page.select_option("#convention-profile-select", "UST")
+    # The other USD profile is a real choice, and it is sent verbatim.
+    page.select_option("#convention-profile-select", "US_CORPORATE")
     _wait_for_advanced_profile(page)
 
-    assert requested == ["UST", "UST"]
-    assert _selected_convention_profile(page) == "UST"
-    assert "you selected it" in page.inner_text("#advanced-profile-status")
+    assert requested == ["UST", "US_CORPORATE"]
+    assert _selected_convention_profile(page) == "US_CORPORATE"
+    assert _advanced_profile(page)["convention_profile"] == "US_CORPORATE"
 
 
 @_PLAYWRIGHT_SKIP
@@ -5677,36 +5732,187 @@ def test_clear_resets_the_profile_selection_with_the_rest_of_the_run(
 
     assert _selected_convention_profile(page) is None
     assert _advanced_profile(page) is None
-    assert _convention_profile_suggestion(page) is None
+    assert _convention_profile_candidates(page) is None
     assert page.input_value("#convention-profile-select") == ""
     assert _control_disabled(page, "#convention-profile-select")
 
 
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
-def test_a_failed_suggestion_request_fills_nothing_and_says_so(server_url, page) -> None:
+def test_a_failed_candidates_request_fills_nothing_and_says_so(server_url, page) -> None:
     """Transport failure on the suggestion route is reported honestly: no
     profile, no pre-filled fields, and no silent fallback to one."""
 
     page.goto(f"{server_url}/")
     page.route(
-        "**/api/bond/convention-profile/suggest",
+        "**/api/bond/convention-profile/candidates",
         lambda route: route.fulfill(
             status=500,
             content_type="application/json",
             body=json.dumps({"error": "registry unavailable"}),
         ),
     )
-    _load_bloomberg_bond(page, response=_treasury_lookup_response())
-    page.wait_for_function(
-        "() => window.__shioriTestGetCurrentDraft() !== null"
-    )
+    # No profile selection is possible at all here: the route the picker's
+    # options come from never answered.
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), profile=None)
+    page.wait_for_function("() => window.__shioriTestGetCurrentDraft() !== null")
     page.wait_for_timeout(300)
 
     assert _selected_convention_profile(page) is None
+    assert _convention_profile_candidates(page) is None
     assert _advanced_profile(page) is None
     assert _field_provenance(page) == {}
+    assert _control_disabled(page, "#convention-profile-select")
     page.click("#advanced-head")
     status = page.inner_text("#advanced-profile-status")
     assert "could not reach its own convention-profile registry" in status
     assert _is_disabled(page, "#price-btn")
+
+
+# =============================================================================
+# Issue #161 follow-up item 5: a hand-selected profile is not evidence
+# =============================================================================
+#
+# The exposure: a USD floating-rate note returns its *current* coupon in CPN
+# and its reset frequency in CPN_FREQ, and is neither CALLABLE nor SINKABLE.
+# Nothing in the confirmed Bond Master tells it apart from an ordinary
+# fixed-coupon corporate bond. So every profile but UST refuses until
+# Bloomberg has positively established the structure -- and the refusal lives
+# in the resolver, not the page, so choosing a profile by hand cannot route
+# around it.
+
+
+_GERMAN_GOVT_BOND_MASTER = {
+    "coupon": 0.023,
+    "coupon_frequency": "ANNUAL",
+    "issue_date": "2024-02-15",
+    "maturity_date": "2034-02-15",
+    "first_coupon_date": "2025-02-15",
+    "callable_flag": False,
+    "sinkable_flag": False,
+}
+
+
+def _german_govt_lookup_response(*, bond_master: dict | None = None, **overrides) -> dict:
+    payload_overrides = {
+        "isin": "DE0001102614",
+        "cusip": "D20955AB1",
+        "name": "SYNTHETIC EUR ANNUAL GOVERNMENT BOND",
+        "currency": "EUR",
+        "clean_price_per_100": 97.44,
+        "accrued_interest_per_100": 0.98,
+        "acquired_at": "2026-07-20T11:28:00+08:00",
+        **overrides,
+    }
+    return _default_bloomberg_bond_lookup_response(
+        bond_master=bond_master if bond_master is not None else _GERMAN_GOVT_BOND_MASTER,
+        bond_master_raw={},
+        **payload_overrides,
+    )
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_selecting_us_corporate_on_a_real_bond_fails_closed_on_structure(
+    server_url, page
+) -> None:
+    """The decisive end-to-end case for item 5. The same USD semi-annual bond
+    that resolves completely under UST must refuse under US_CORPORATE, because
+    US_CORPORATE requires evidence Bloomberg has not confirmed."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), profile="US_CORPORATE")
+    _wait_for_advanced_profile(page)
+
+    profile = _advanced_profile(page)
+    assert profile["convention_profile"] == "US_CORPORATE"
+    assert profile["supported"] is False
+    assert profile["fields"] == []
+    reasons = " ".join(profile["rejection_reasons"])
+    assert "plain fixed-coupon bullet" in reasons
+    assert "floating-rate, inflation-linked, convertible or amortizing" in reasons
+    assert "selecting it by hand does not establish it" in reasons
+
+    # No fake exit: the Advanced controls are disabled, not offered.
+    assert _profile_controls_disabled(page)
+    assert _field_provenance(page) == {}
+    assert _is_disabled(page, "#price-btn")
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_selecting_german_govt_on_a_real_eur_bond_fails_closed_on_structure(
+    server_url, page
+) -> None:
+    """The same, for the third profile: a EUR annual bond narrows to
+    GERMAN_GOVT alone, and still refuses on unconfirmed structure."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        identifier="DE0001102614",
+        response=_german_govt_lookup_response(),
+        profile="GERMAN_GOVT",
+    )
+    _wait_for_advanced_profile(page)
+
+    assert _convention_profile_candidates(page)["candidates"] == ["GERMAN_GOVT"]
+    profile = _advanced_profile(page)
+    assert profile["convention_profile"] == "GERMAN_GOVT"
+    assert profile["supported"] is False
+    assert "plain fixed-coupon bullet" in " ".join(profile["rejection_reasons"])
+    assert _profile_controls_disabled(page)
+    assert _is_disabled(page, "#price-btn")
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_the_ust_profile_is_the_only_one_that_still_resolves_today(server_url, page) -> None:
+    """Both halves of Eddy's instruction in one place: UST's UAT-passed
+    behaviour is untouched, and switching the very same bond to the other USD
+    profile refuses it."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), profile="UST")
+    _set_expiry(page)
+    _wait_for_advanced_profile(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    assert _advanced_profile(page)["supported"] is True
+    reference = _draft_reference(page)
+    assert reference["day_count"] == "ACT_ACT_BOND"
+    assert reference["ex_dividend_days"] == 0
+    assert _field_provenance(page)["bond_reference_data_universe.0.day_count"] == (
+        "UST_PROFILE_DEFAULT"
+    )
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_for_advanced_profile(page)
+    page.wait_for_timeout(200)
+
+    assert _advanced_profile(page)["supported"] is False
+    # And every value the UST profile had supplied is withdrawn rather than
+    # left on screen under a profile that refused the bond.
+    reference = _draft_reference(page)
+    assert reference["day_count"] is None
+    assert reference["ex_dividend_days"] is None
+    assert _field_provenance(page) == {}
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_the_provenance_readout_names_the_selected_profile_not_ust(server_url, page) -> None:
+    """Issue #161 follow-up item 6, as the trader reads it: the tier label and
+    its explanation both follow the selected profile."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(), profile="UST")
+    _wait_for_advanced_profile(page)
+    page.click("#advanced-head")
+
+    readout = page.inner_text("#prov-day-count")
+    assert "UST_PROFILE_DEFAULT" in readout
+    assert "the UST convention profile's own approved value for this field" in readout
+    assert "US_CORPORATE" not in readout

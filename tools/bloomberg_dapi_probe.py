@@ -86,7 +86,31 @@ _REQUEST_TIMEOUT_MS = 10_000
 # (display-only); PENULTIMATE_COUPON_DATE/REDEMPTION_VALUE are confirmed
 # BAD_FLD and must not be re-added without a fresh confirmation. Add a new
 # entry here only for a genuinely new, not-yet-probed candidate mnemonic.
-_CANDIDATE_BOND_MASTER_FIELDS: dict[str, str] = {}
+#
+# **Issue #161 follow-up: plain fixed-coupon structural evidence.** The five
+# candidates below are the ones Shiori needs before any convention profile
+# other than UST may be applied to a real bond. Today nothing in the
+# confirmed Bond Master distinguishes an ordinary fixed-coupon bullet from a
+# floater, a linker, a convertible or an amortizer: a floating-rate note
+# returns its *current* coupon in CPN and its reset frequency in CPN_FREQ,
+# and is neither CALLABLE nor SINKABLE, so it passes every check that
+# exists. `bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`
+# names the destination facts these would supply, and the resolver refuses
+# every non-UST profile until they are confirmed.
+#
+# **These are proposals to probe, not mappings.** Each one may come back
+# `returned`, `absent`, or `field_exception` (BAD_FLD), and a mnemonic that
+# returns a value still needs Eddy's confirmation of what its values *mean*
+# before anything is mapped -- exactly as #145 requires, and exactly as
+# DAY_CNT_DES/MTY_TYP/CALC_TYP_DES were kept display-only for that reason.
+# Nothing in this repo reads any of them yet.
+_CANDIDATE_BOND_MASTER_FIELDS: dict[str, str] = {
+    "CPN_TYP": "coupon_type -- would evidence FIXED vs FLOATING/VARIABLE coupon",
+    "SECURITY_TYP": "security_type -- would evidence the instrument classification",
+    "INFLATION_LINKED_INDICATOR": "inflation_linked_flag -- would evidence a linker",
+    "CONVERTIBLE": "convertible_flag -- would evidence a convertible",
+    "IS_AMORTIZING": "amortizing_flag -- would evidence an amortizing redemption",
+}
 # business_day_convention, bond_type, yield_convention, ex_dividend_days,
 # status: deliberately no candidate here at all -- pass --fields explicitly
 # if you have one.

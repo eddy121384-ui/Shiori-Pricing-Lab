@@ -320,13 +320,21 @@
   // the four provenance tiers each one came from, and stops re-deriving any
   // field the trader has taken over.
 
-  // The export's own source_system label for a profile-supplied value. Its
-  // value is deliberately left as-is by Issue #161: it is part of the run
-  // export contract that issue's boundary section puts out of scope, and
-  // with only the UST profile registered today no other profile's value can
-  // ever be stamped with it. Registering a second profile must make this
-  // profile-dependent in the same change that registers it.
-  const UST_PROFILE_SOURCE_SYSTEM = "SHIORI_UST_FIXED_COUPON_PROFILE";
+  // The export's own source_system label for a profile-supplied value.
+  //
+  // Issue #161 follow-up item 6: with US_CORPORATE and GERMAN_GOVT
+  // registered alongside UST, a fixed `SHIORI_UST_FIXED_COUPON_PROFILE`
+  // string would stamp a German government bond's day count and settlement
+  // dates as having come from the UST profile. It is therefore derived from
+  // the profile actually selected, and mirrors the server's own
+  // `BLIConventionProfile.source_system`. The UST value consequently changes
+  // from `SHIORI_UST_FIXED_COUPON_PROFILE` to `SHIORI_UST_CONVENTION_PROFILE`
+  // -- a deliberate, instructed change, not a silent one.
+  function conventionProfileSourceSystem() {
+    return selectedConventionProfile === null
+      ? MANUAL_SOURCE_SYSTEM
+      : `SHIORI_${selectedConventionProfile}_CONVENTION_PROFILE`;
+  }
   const TRADER_OVERRIDE_BASIS = "TRADER_OVERRIDE";
   // Mirrors the resolver's own PROVENANCE_BLOCKED label. Not a value tier:
   // it names a field the resolver refused to fill and handed to the trader.
@@ -337,25 +345,24 @@
   // #157 P1-1 correction). The server never infers, defaults, or fabricates
   // it; it only validates the selection this file sends and echoes it back.
   //
-  // Issue #161 makes it a real, visible, overridable selection rather than a
-  // constant. It stays `null` until either Shiori's own suggestion narrows
-  // the registry to exactly one profile or the trader picks one, and while
-  // it is `null` no profile request is sent at all -- an Advanced field
-  // filled from an unselected profile would be a value nobody chose. What
-  // the trader is asked for when Shiori cannot tell is a *profile*, never
-  // the eight technical fields.
+  // Issue #161 makes it a real, visible selection rather than a constant, and
+  // the follow-up correction makes it the *trader's* selection alone: it
+  // stays `null` until the trader picks, and while it is `null` no profile
+  // request is sent at all -- an Advanced field filled from an unselected
+  // profile would be a value nobody chose. Shiori narrows the choices (see
+  // `refreshConventionProfileCandidates`) but never makes one. What the page
+  // asks for is a *profile*, never the eight technical fields.
   let selectedConventionProfile = null;
-  // The last answer from /api/bond/convention-profile/suggest, and whether
-  // the trader has taken the selection over. A trader's choice is never
-  // overwritten by a later suggestion for the same bond; loading a different
-  // bond resets both along with the rest of the run state.
-  let conventionProfileSuggestion = null;
+  // The last answer from /api/bond/convention-profile/candidates. Loading a
+  // different bond resets it, the selection and the override flag together
+  // with the rest of the run state.
+  let conventionProfileCandidates = null;
   let conventionProfileOverridden = false;
   let conventionProfileGeneration = 0;
   let conventionProfileTransportError = null;
 
-  // What each provenance tier means, in the trader's own terms. The tier
-  // string itself always comes from the server.
+  // What each market-independent provenance tier means, in the trader's own
+  // terms. The tier string itself always comes from the server.
   const PROVENANCE_DESCRIPTIONS = {
     BLOOMBERG_AUTO:
       "a typed value Bloomberg itself returned for this bond, mapped by a confirmed " +
@@ -363,14 +370,33 @@
     SHIORI_DERIVED:
       "derived mechanically by Shiori from this run's own loaded bond terms, valuation " +
       "date and expiry, using existing reviewed logic",
-    UST_PROFILE_DEFAULT:
-      "the approved narrow UST fixed-coupon bullet profile's own value for this field",
     TRADER_OVERRIDE:
       "you set this value yourself; Shiori will not re-derive or reset it for this bond",
     BLOCKED:
       "Shiori has no safe value or method for this one field, so it is yours to set — " +
       "every other field on this bond keeps the value Shiori resolved for it",
   };
+
+  // The remaining tier is the selected profile's own, and there is now more
+  // than one profile, so its label and its description are both derived from
+  // the tier string the server sent rather than written out per market
+  // (Issue #161 follow-up item 6). A German government bond's values must
+  // never be described, or exported, as the UST profile's.
+  const PROFILE_DEFAULT_TIER_SUFFIX = "_PROFILE_DEFAULT";
+
+  function profileNameFromTier(tier) {
+    return typeof tier === "string" && tier.endsWith(PROFILE_DEFAULT_TIER_SUFFIX)
+      ? tier.slice(0, -PROFILE_DEFAULT_TIER_SUFFIX.length)
+      : null;
+  }
+
+  function provenanceDescription(tier) {
+    const profileName = profileNameFromTier(tier);
+    if (profileName !== null) {
+      return `the ${profileName} convention profile's own approved value for this field`;
+    }
+    return PROVENANCE_DESCRIPTIONS[tier] || "";
+  }
 
   // path -> the control that holds it and the readout that explains it. The
   // paths are spelled exactly as the resolver's own
@@ -513,8 +539,8 @@
   // be exactly the fake exit this issue exists to remove.
   function noProfileCoversThisBond() {
     return (
-      conventionProfileSuggestion !== null &&
-      (conventionProfileSuggestion.candidates || []).length === 0
+      conventionProfileCandidates !== null &&
+      (conventionProfileCandidates.candidates || []).length === 0
     );
   }
 
@@ -527,7 +553,7 @@
     if (advancedProfile && advancedProfile.rejection_reasons) {
       return advancedProfile.rejection_reasons;
     }
-    if (noProfileCoversThisBond()) return conventionProfileSuggestion.reasons || [];
+    if (noProfileCoversThisBond()) return conventionProfileCandidates.reasons || [];
     return [];
   }
 
@@ -1757,17 +1783,18 @@
     });
   }
 
-  // Renders the picker from the server's own registry list, so the options a
+  function conventionProfileCandidateNames() {
+    return (conventionProfileCandidates && conventionProfileCandidates.candidates) || [];
+  }
+
+  // Renders the picker from the server's own candidate list, so the options a
   // trader can choose can never drift from the profiles the resolver will
-  // actually accept. The trader's own selection always wins over the
-  // suggestion; an empty option stays available whenever nothing is selected
-  // yet, so the control never silently implies a profile Shiori did not pick.
+  // actually accept for *this* bond. The empty option is always present: the
+  // selection starts empty and stays empty until the trader makes it, because
+  // Shiori does not choose a profile (see `refreshConventionProfileCandidates`).
   function renderConventionProfilePicker() {
     const select = els.conventionProfileSelect;
-    const available =
-      (conventionProfileSuggestion &&
-        conventionProfileSuggestion.supported_convention_profiles) ||
-      [];
+    const available = conventionProfileCandidateNames();
     const wanted = ["", ...available];
     const present = Array.from(select.options).map((option) => option.value);
     if (present.join(",") !== wanted.join(",")) {
@@ -1783,11 +1810,19 @@
     select.disabled = available.length === 0;
   }
 
-  // Asks the server which profile this bond's own confirmed terms narrow to.
-  // Adopts a suggestion only while the trader has not taken the selection
-  // over, and only for the bond this request was made for -- a late answer
-  // for a previous bond can never select a profile for the next one.
-  async function refreshConventionProfileSuggestion() {
+  // Asks the server which profiles this bond's own confirmed terms leave
+  // open, for the bond this request was made for -- a late answer for a
+  // previous bond can never populate the next one's picker.
+  //
+  // **Shiori never selects a profile here.** An earlier revision adopted the
+  // server's suggestion whenever the confirmed currency and coupon frequency
+  // narrowed the registry to one name; Eddy withdrew that, because those two
+  // facts describe a bond's cash flows rather than its issuer class, and the
+  // Bloomberg field that would classify it (SECURITY_TYP) is still
+  // unconfirmed. The selection stays empty until the trader makes it -- and
+  // what the page then asks for is a *profile*, never the eight Advanced
+  // technical fields.
+  async function refreshConventionProfileCandidates() {
     if (!currentDraft || !resolvedBloombergBond) return;
     const generation = ++conventionProfileGeneration;
     const requestBody = {
@@ -1797,7 +1832,7 @@
 
     let payload;
     try {
-      const response = await fetch("/api/bond/convention-profile/suggest", {
+      const response = await fetch("/api/bond/convention-profile/candidates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
@@ -1808,7 +1843,7 @@
       }
     } catch (error) {
       if (generation !== conventionProfileGeneration) return;
-      conventionProfileSuggestion = null;
+      conventionProfileCandidates = null;
       conventionProfileTransportError = String((error && error.message) || error);
       renderConventionProfilePicker();
       renderAdvancedProfileStatus();
@@ -1817,16 +1852,10 @@
     if (generation !== conventionProfileGeneration) return;
 
     conventionProfileTransportError = null;
-    conventionProfileSuggestion = payload;
-    if (!conventionProfileOverridden) {
-      // `suggested` is null whenever the confirmed facts fit more than one
-      // profile (or none). Leaving the selection empty there is the honest
-      // state: Shiori asks for a profile rather than guessing an issuer.
-      selectedConventionProfile = payload.suggested || null;
-    }
+    conventionProfileCandidates = payload;
     renderConventionProfilePicker();
     renderAdvancedProfileStatus();
-    refreshAdvancedProfile();
+    syncDraftGating();
   }
 
   function markTraderOverride(path) {
@@ -1921,7 +1950,7 @@
       if (blockedReason !== undefined) {
         target.textContent =
           `Source: ${PROVENANCE_BLOCKED} — ${blockedReason}. ` +
-          PROVENANCE_DESCRIPTIONS[PROVENANCE_BLOCKED];
+          provenanceDescription(PROVENANCE_BLOCKED);
         return;
       }
       if (tier === null) {
@@ -1930,7 +1959,7 @@
           : "—";
         return;
       }
-      target.textContent = `Source: ${tier} — ${PROVENANCE_DESCRIPTIONS[tier] || ""}`;
+      target.textContent = `Source: ${tier} — ${provenanceDescription(tier)}`;
     });
   }
 
@@ -1943,8 +1972,9 @@
     }
     if (conventionProfileTransportError !== null) {
       target.textContent =
-        "Shiori could not reach its own convention-profile registry, so it has suggested " +
-        "nothing and pre-filled nothing here: " + conventionProfileTransportError;
+        "Shiori could not reach its own convention-profile registry, so it has offered " +
+        "no profile to select and pre-filled nothing here: " +
+        conventionProfileTransportError;
       target.classList.add("is-unsupported");
       return;
     }
@@ -1966,11 +1996,12 @@
     // back to asking the trader to hand-type the eight technical fields.
     if (!selectedConventionProfile) {
       const reasons =
-        (conventionProfileSuggestion && conventionProfileSuggestion.reasons) || [];
+        (conventionProfileCandidates && conventionProfileCandidates.reasons) || [];
       target.textContent =
-        "Shiori has not selected a convention profile for this bond, so it has pre-filled " +
-        "nothing here. Choose the Convention Profile that applies and Shiori will fill " +
-        "every Advanced field it can" +
+        "No convention profile is selected for this bond, so Shiori has pre-filled nothing " +
+        "here. Shiori will not choose one for you — it has no confirmed Bloomberg " +
+        "classification to choose from. Select the Convention Profile that applies and it " +
+        "will fill every Advanced field it can" +
         (reasons.length > 0 ? ": " + reasons.join(" · ") : ".");
       target.classList.add("is-unsupported");
       return;
@@ -2004,16 +2035,10 @@
     }
     const pending = advancedProfile.pending_field_paths || [];
     const unresolved = advancedProfile.unresolved_fields || [];
-    // How this profile came to be selected is part of the answer: a trader
-    // reading "Shiori suggested it" must be able to tell it apart from
-    // "I chose it", because only the first is Shiori's claim to defend.
-    const selectionBasis = conventionProfileOverridden
-      ? "you selected it"
-      : "Shiori suggested it because this bond's confirmed currency and coupon frequency " +
-        "fit exactly one profile — never from its ISIN, CUSIP or name — and you can change it";
     let text =
-      `Convention Profile: ${profileName} (${selectionBasis}). This bond's shape fits it, ` +
-      "so Shiori has filled every field it could and shown where each value came from.";
+      `Convention Profile: ${profileName} (you selected it; Shiori does not choose a ` +
+      "profile). This bond's shape fits it, so Shiori has filled every field it could and " +
+      "shown where each value came from.";
     if (pending.length > 0) {
       text += ` Waiting on the expiry before deriving: ${pending.join(", ")}.`;
     }
@@ -2212,12 +2237,14 @@
         path: field.path,
         value: String(value),
         source_system:
-          basis === TRADER_OVERRIDE_BASIS ? MANUAL_SOURCE_SYSTEM : UST_PROFILE_SOURCE_SYSTEM,
+          basis === TRADER_OVERRIDE_BASIS
+            ? MANUAL_SOURCE_SYSTEM
+            : conventionProfileSourceSystem(),
         basis: basis,
         reason_not_sourced:
           basis === TRADER_OVERRIDE_BASIS
             ? field.reason
-            : `${field.reason} ${PROVENANCE_DESCRIPTIONS[basis] || ""}`.trim(),
+            : `${field.reason} ${provenanceDescription(basis)}`.trim(),
         run_acquired_at: anchor,
       });
     });
@@ -3340,7 +3367,7 @@
     // including a profile the trader chose by hand. Bumping this generation
     // also voids any suggestion still outstanding.
     conventionProfileGeneration++;
-    conventionProfileSuggestion = null;
+    conventionProfileCandidates = null;
     conventionProfileOverridden = false;
     conventionProfileTransportError = null;
     selectedConventionProfile = null;
@@ -3576,10 +3603,9 @@
     syncDraftGating();
     // A fresh bond, a fresh profile: resetRunState above already discarded the
     // previous one's tiers, overrides and profile selection, so nothing here
-    // is inherited. Ask which profile this bond's own confirmed terms narrow
-    // to first -- that call, once it has a selection, is what triggers the
-    // field resolution.
-    refreshConventionProfileSuggestion();
+    // is inherited. This only populates the picker -- the trader's own
+    // selection is what triggers field resolution.
+    refreshConventionProfileCandidates();
   }
 
   // Prices the current draft through the existing reviewed builder -- reuses
@@ -3925,16 +3951,17 @@
   clearTraderForm();
   syncDraftGating();
   // Always visible, whether or not Advanced is expanded, and whether or not a
-  // bond is loaded yet. Its options come from the server's own registry (via
-  // the suggestion response) rather than a second, independently-typed copy
-  // of the profile list, and its value is the one piece of browser state this
-  // file sends as convention_profile on every profile request.
+  // bond is loaded yet. Its options come from the server's own candidate list
+  // rather than a second, independently-typed copy of the profile registry,
+  // and its value is the one piece of browser state this file sends as
+  // convention_profile on every profile request.
   renderConventionProfilePicker();
   els.conventionProfileSelect.addEventListener("change", () => {
     const chosen = els.conventionProfileSelect.value || null;
     if (chosen === selectedConventionProfile) return;
-    // The trader's choice sticks for this bond: a later suggestion never
-    // takes it back. Loading a different bond resets this with the run state.
+    // Records that the selection is the trader's own. Nothing in this file
+    // ever sets `selectedConventionProfile` outside this handler and the
+    // per-bond reset, so a profile can only ever be a deliberate choice.
     conventionProfileOverridden = true;
     selectedConventionProfile = chosen;
     // The previous profile's answer describes a profile that is no longer
@@ -3966,7 +3993,7 @@
   window.__shioriTestTraderOverriddenPaths = () => Array.from(traderOverriddenPaths);
   window.__shioriTestAdvancedProfile = () => advancedProfile;
   window.__shioriTestSelectedConventionProfile = () => selectedConventionProfile;
-  window.__shioriTestConventionProfileSuggestion = () => conventionProfileSuggestion;
+  window.__shioriTestConventionProfileCandidates = () => conventionProfileCandidates;
   window.__shioriTestConventionProfileOverridden = () => conventionProfileOverridden;
   // Issue #161. The two parsers are pure functions of their argument, so
   // exposing them tests the very code the page runs rather than a copy.

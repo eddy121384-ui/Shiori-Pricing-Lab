@@ -26,34 +26,36 @@ not, anywhere, claim to have established who issued a bond. There is no
 issuer classification here, and (per Eddy's explicit product-direction
 correction on Issue #157 P1-1) no ISIN country prefix, no CUSIP issuer block
 and no security-name matching is used to pick a profile. The profile is
-applied because it is *selected* -- by the trader, or by a suggestion the
-trader can see and override -- not because Shiori believes it has identified
-the bond's issuer.
+applied because it is *selected* by the trader -- not because Shiori believes
+it has identified the bond's issuer.
 
-**Suggestion is registry narrowing, not classification** (see
-:func:`suggest_convention_profile`). Shiori suggests a profile only when the
-bond's *own confirmed terms* fit exactly one registered profile. Two
-candidates means no suggestion and an explicit trader choice; zero candidates
-means no suggestion and honest reasons. That rule is what keeps requirement
-D's promise -- "when Shiori cannot safely tell, ask the trader for a profile,
-never for eight hand-typed technical fields" -- true by construction rather
-than by good intentions, and it is the reason the suggestion stops being
-useful for USD the moment a second USD profile is registered. That is
-correct, not a regression: a confirmed Bloomberg currency of ``USD`` is
-evidence about the bond's currency and nothing else.
+**Shiori does not auto-select a profile (Issue #161 follow-up correction).**
+An earlier revision of this module suggested a profile whenever the bond's
+confirmed currency and coupon frequency narrowed the registry to exactly one
+entry. Eddy withdrew that: currency and coupon frequency are evidence about a
+bond's *cash flows*, never about its issuer class, and the narrowing only
+looked safe because ``UST`` happened to be the sole registered USD profile.
+With ``US_CORPORATE`` registered alongside it the same USD semi-annual bond
+fits both, and no confirmed Bloomberg classification field exists to tell
+them apart -- ``SECURITY_TYP`` is still an unprobed candidate in
+Shiori's Bloomberg DAPI probe tool (under ``tools/``).
+
+So :func:`convention_profile_candidates` narrows and never chooses. Narrowing
+is safe because it only ever *removes* profiles whose stated conventions do
+not cover this bond's own confirmed terms; choosing among what remains needs
+classification evidence Shiori does not have. Until it does, the trader
+selects the profile -- which is exactly what Issue #161 requires as the
+honest fallback, and is emphatically not a fallback to hand-typing the eight
+Advanced technical fields.
 
 **Every value here needs an approved source.** A profile's constants are
 market conventions -- day count, coupon frequency compatibility,
 ex-dividend, settlement lag, settlement calendar, bond-type default. Per
 ``AGENTS.md`` rule 7 and Issue #161's own boundary, each one must come from
 Bloomberg evidence, an existing reviewed document, or Eddy's explicit
-confirmation. **Model recall is not a source.** :data:`CONVENTION_PROFILES`
-therefore contains exactly the profiles whose every constant has such a
-source today, which is why ``UST`` is currently alone in it: see this
-module's ``docs``-facing note in Issue #161 for the ``US_CORPORATE`` and
-``GERMAN_GOVT`` constants still awaiting confirmation. Registering a profile
-whose day count or settlement calendar was guessed would produce a wrong
-accrued interest, and therefore a wrong dirty price, silently.
+confirmation. **Model recall is not a source.** The three registered profiles
+below carry, per field, the source each value came from; anything without one
+is ``None`` and blocks its own field rather than being guessed.
 """
 
 from __future__ import annotations
@@ -76,11 +78,51 @@ except ImportError:  # QuantLib is optional -- pyproject.toml [project.optional-
 # for the U.S. government-bond market -- this repo writes no holiday rules,
 # partial or otherwise.
 
-CALENDAR_US_GOVERNMENT_BOND = "US_GOVERNMENT_BOND"
+# QuantLib's ``UnitedStates(GovernmentBond)`` -- its own name for the U.S.
+# bond market's holiday schedule, which is the SIFMA-recommended schedule
+# Eddy named for ``US_CORPORATE``. QuantLib 1.43 exposes no separate "SIFMA"
+# market (its ``UnitedStates::Market`` members are Settlement, NYSE,
+# GovernmentBond, NERC, LiborImpact, FederalReserve and SOFR), so UST and
+# US_CORPORATE name the same calendar object here rather than one of them
+# getting a second, silently-different holiday table.
+CALENDAR_US_BOND_MARKET = "US_BOND_MARKET"
+CALENDAR_TARGET = "TARGET"
 
 _CALENDAR_FACTORIES = {
-    CALENDAR_US_GOVERNMENT_BOND: lambda: ql.UnitedStates(ql.UnitedStates.GovernmentBond),
+    CALENDAR_US_BOND_MARKET: lambda: ql.UnitedStates(ql.UnitedStates.GovernmentBond),
+    CALENDAR_TARGET: lambda: ql.TARGET(),
 }
+
+
+# --- Plain fixed-coupon structural evidence (Issue #161 follow-up) ------------
+#
+# The Bond Master facts that would let Shiori positively establish a bond is
+# an ordinary fixed-coupon bullet rather than a floater, a linker, a
+# convertible or an amortizer. **None of them has a confirmed Bloomberg
+# mnemonic today** -- they are the candidates
+# Shiori's Bloomberg DAPI probe tool (under ``tools/``) now proposes for
+# Eddy to probe -- so the
+# gate that requires them always refuses, which is the intended fail-closed
+# state, not a bug.
+#
+# The already-confirmed ``CALLABLE`` and ``SINKABLE`` flags are deliberately
+# not in this tuple: they are checked separately by the resolver's own
+# product-shape gate, and neither of them says anything about whether the
+# coupon is fixed. A USD floater returns a current coupon in ``CPN`` and a
+# reset frequency in ``CPN_FREQ`` and is neither callable nor sinkable, so it
+# passes every check that exists today -- which is precisely the exposure
+# this gate closes for the two new profiles.
+PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
+    "coupon_type",
+    "security_type",
+    "inflation_linked_flag",
+    "convertible_flag",
+    "amortizing_flag",
+)
+
+
+class BLIConventionProfileCalendarError(RuntimeError):
+    """Raised when a profile's settlement calendar cannot be constructed."""
 
 
 @dataclass(frozen=True)
@@ -95,8 +137,25 @@ class BLIConventionProfile:
 
     ``name`` is the selection token that crosses the browser/server boundary
     (``convention_profile`` in the request body) and is echoed back in the
-    response. ``default_provenance`` is derived from it so a profile can
-    never be registered whose provenance label disagrees with its own name.
+    response. ``default_provenance`` and ``source_system`` are both derived
+    from it, so a profile can never be registered whose provenance tier or
+    export label disagrees with its own name.
+
+    Two fields are deliberately **optional**, because "this market's value is
+    not confirmed" is a real state that must not be papered over with a
+    guess:
+
+    - ``ex_dividend_days`` -- ``None`` means no approved default for this
+      market. The resolver then uses a typed Bloomberg value if one is ever
+      returned, and otherwise blocks that one field for the trader to set,
+      leaving every other Advanced field resolved as normal.
+    - ``day_count_evidence`` -- ``None`` means Bloomberg's own
+      ``DAY_CNT_DES`` description string for this market has not been
+      confirmed, so it is not read at all for this profile. It is only ever
+      used to *withhold* ``day_count`` when it contradicts, never to produce
+      a typed value from a string (Issue #145's prohibition, intact), and
+      comparing against an unconfirmed expected string would block every
+      ordinary bond in the market instead.
     """
 
     name: str
@@ -107,16 +166,21 @@ class BLIConventionProfile:
     # would otherwise silently accrue a Bund on a semi-annual grid.
     coupon_frequencies: tuple[Frequency, ...]
     day_count: DayCount
-    # The Bloomberg ``DAY_CNT_DES`` description string that agrees with
-    # ``day_count`` for this market. Used only to *withhold* ``day_count``
-    # when Bloomberg's own description contradicts it -- never to produce a
-    # typed value from a string (Issue #145's prohibition, kept intact).
-    day_count_evidence: str
     bond_type: BondType
-    ex_dividend_days: int
     status: BondStatus
     settlement_business_days: int
     settlement_calendar: str
+    ex_dividend_days: int | None = None
+    day_count_evidence: str | None = None
+    # Whether this profile may only be applied to a bond Shiori can
+    # positively establish is a plain fixed-coupon bullet, using the
+    # confirmed Bond Master facts in
+    # :data:`PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`. ``UST`` is exempt by
+    # Eddy's explicit instruction (its behaviour passed real Bloomberg
+    # workstation UAT and must not regress); every other market requires the
+    # evidence, so selecting a profile by hand can never push a floater, a
+    # linker, a convertible or an amortizer through.
+    plain_fixed_coupon_evidence_required: bool = True
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
@@ -126,15 +190,18 @@ class BLIConventionProfile:
                 f"convention profile {self.name!r} must state at least one coupon "
                 "frequency its conventions cover"
             )
-        if isinstance(self.ex_dividend_days, bool) or not isinstance(self.ex_dividend_days, int):
-            raise ValueError(
-                f"convention profile {self.name!r} ex_dividend_days must be an int, got "
-                f"{self.ex_dividend_days!r}"
-            )
-        if self.ex_dividend_days < 0:
-            raise ValueError(
-                f"convention profile {self.name!r} ex_dividend_days must be non-negative"
-            )
+        if self.ex_dividend_days is not None:
+            if isinstance(self.ex_dividend_days, bool) or not isinstance(
+                self.ex_dividend_days, int
+            ):
+                raise ValueError(
+                    f"convention profile {self.name!r} ex_dividend_days must be an int or "
+                    f"None (no approved default), got {self.ex_dividend_days!r}"
+                )
+            if self.ex_dividend_days < 0:
+                raise ValueError(
+                    f"convention profile {self.name!r} ex_dividend_days must be non-negative"
+                )
         if self.settlement_business_days <= 0:
             raise ValueError(
                 f"convention profile {self.name!r} settlement_business_days must be positive"
@@ -156,6 +223,19 @@ class BLIConventionProfile:
 
         return f"{self.name}_PROFILE_DEFAULT"
 
+    @property
+    def source_system(self) -> str:
+        """This profile's own ``source_system`` label in the run export.
+
+        Derived from the profile's name for the same reason as
+        :attr:`default_provenance`: with three registered profiles, a fixed
+        ``SHIORI_UST_...`` string would stamp a German government bond's
+        values as having come from the UST profile (Issue #161 follow-up
+        item 6).
+        """
+
+        return f"SHIORI_{self.name}_CONVENTION_PROFILE"
+
     def calendar(self) -> ql.Calendar:
         """Return this profile's reviewed QuantLib settlement calendar."""
 
@@ -167,18 +247,17 @@ class BLIConventionProfile:
         return _CALENDAR_FACTORIES[self.settlement_calendar]()
 
 
-class BLIConventionProfileCalendarError(RuntimeError):
-    """Raised when a profile's settlement calendar cannot be constructed."""
-
-
 # --- The registered profiles --------------------------------------------------
-#
-# UST reproduces PR #162's already-UAT-passed constants exactly, value for
-# value. Its day count is ACT_ACT_BOND (QuantLib's ActualActual::Bond, the
-# ISMA/bond-basis convention) rather than ACT_ACT_ISDA -- see that PR's
-# correction and `products/enums.py`: the two are genuinely different accrual
-# rules, and ISDA here would misprice accrued interest on every UST.
 
+# Reproduces PR #162's already-UAT-passed constants exactly, value for value.
+# Its day count is ACT_ACT_BOND (QuantLib's ActualActual::Bond, the ISMA /
+# bond-basis convention) rather than ACT_ACT_ISDA -- see that PR's correction
+# and `products/enums.py`: the two are genuinely different accrual rules, and
+# ISDA here would misprice accrued interest on every UST.
+#
+# It is the one profile exempt from the plain-fixed-coupon evidence gate, by
+# Eddy's explicit instruction: this exact behaviour passed real Bloomberg
+# workstation UAT on US91282CMC28 and Issue #161 requires it not regress.
 UST_CONVENTION_PROFILE = BLIConventionProfile(
     name="UST",
     currency=Currency.USD,
@@ -189,22 +268,57 @@ UST_CONVENTION_PROFILE = BLIConventionProfile(
     ex_dividend_days=0,
     status=BondStatus.ACTIVE,
     settlement_business_days=1,
-    settlement_calendar=CALENDAR_US_GOVERNMENT_BOND,
+    settlement_calendar=CALENDAR_US_BOND_MARKET,
+    plain_fixed_coupon_evidence_required=False,
 )
 
-# Issue #161 asks for `US_CORPORATE` and `GERMAN_GOVT`/`EUR_GOVT` alongside
-# `UST`. They are deliberately **not** registered here yet, and this is the
-# blocking gap reported on that issue rather than an oversight: each one needs
-# a day-count fallback, an ex-dividend rule, a settlement lag, a settlement
-# calendar and a coupon-frequency set, and none of those five has a Bloomberg
-# evidence record, a reviewed document in `docs/`, or Eddy's confirmation
-# today. `docs/30_ust_forward_vol_discounting_reconciliation.md` is explicit
-# that settlement dates are "days only if display defines them ... no assumed
-# calendar", so inventing one here would contradict an already-reviewed
-# decision. The framework above is what makes registering them, once
-# confirmed, a data change of a few lines rather than a second resolver.
+# Annex A, confirmed by Eddy: USD, semi-annual, 30/360 (bond basis), T+2 on
+# the SIFMA-recommended U.S. bond-market calendar.
+#
+# `ex_dividend_days` is deliberately absent: Eddy confirmed the four values
+# above and explicitly did *not* confirm an ex-dividend default for this
+# market, so the resolver blocks that one field rather than assuming zero.
+# `day_count_evidence` is absent for the same reason -- Bloomberg's
+# `DAY_CNT_DES` string for a 30/360 corporate has not been observed, and
+# comparing against a guessed one would block `day_count` on every ordinary
+# corporate bond.
+US_CORPORATE_CONVENTION_PROFILE = BLIConventionProfile(
+    name="US_CORPORATE",
+    currency=Currency.USD,
+    coupon_frequencies=(Frequency.SEMI_ANNUAL,),
+    day_count=DayCount.THIRTY_360,
+    bond_type=BondType.FIXED_COUPON_BULLET,
+    status=BondStatus.ACTIVE,
+    settlement_business_days=2,
+    settlement_calendar=CALENDAR_US_BOND_MARKET,
+)
+
+# Annex A, confirmed by Eddy: EUR, annual, ACT/ACT (bond basis -- QuantLib's
+# ActualActual::Bond, the ISMA convention), T+2 on the TARGET calendar. Named
+# GERMAN_GOVT rather than EUR_GOVT at Eddy's direction, so a French or
+# Italian government bond gets its own profile rather than quietly borrowing
+# this one's settlement calendar and day count.
+#
+# `ex_dividend_days` and `day_count_evidence` are absent for the same reasons
+# as US_CORPORATE above.
+GERMAN_GOVT_CONVENTION_PROFILE = BLIConventionProfile(
+    name="GERMAN_GOVT",
+    currency=Currency.EUR,
+    coupon_frequencies=(Frequency.ANNUAL,),
+    day_count=DayCount.ACT_ACT_BOND,
+    bond_type=BondType.FIXED_COUPON_BULLET,
+    status=BondStatus.ACTIVE,
+    settlement_business_days=2,
+    settlement_calendar=CALENDAR_TARGET,
+)
+
 CONVENTION_PROFILES: dict[str, BLIConventionProfile] = {
-    UST_CONVENTION_PROFILE.name: UST_CONVENTION_PROFILE,
+    profile.name: profile
+    for profile in (
+        UST_CONVENTION_PROFILE,
+        US_CORPORATE_CONVENTION_PROFILE,
+        GERMAN_GOVT_CONVENTION_PROFILE,
+    )
 }
 
 SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
@@ -239,42 +353,40 @@ def get_convention_profile(convention_profile: object) -> BLIConventionProfile:
 
 
 @dataclass(frozen=True)
-class BLIConventionProfileSuggestion:
-    """Which profile (if any) the bond's own confirmed terms narrow down to.
+class BLIConventionProfileCandidates:
+    """Which profiles this bond's own confirmed terms have not ruled out.
 
-    ``suggested`` is a profile name only when *exactly one* registered
-    profile's stated currency and coupon frequency match what Bloomberg
-    confirmed for this bond. ``candidates`` lists every profile that fits, so
-    the browser can show the trader a real choice instead of a blank; when
-    it holds two or more names, the honest answer is a profile selection --
-    never a request to hand-type the Advanced technical fields.
+    ``candidates`` holds every registered profile whose stated currency and
+    coupon frequency cover this bond. It is a *narrowing*, never a choice:
 
-    ``reasons`` explains an absent suggestion in the trader's own terms.
+    - **empty** -- no registered profile states conventions for this bond at
+      all. There is nothing for the trader to select, so this is a refusal,
+      and the browser disables the Advanced controls exactly as it does for
+      any other unsupported product.
+    - **one or more** -- the trader selects which one applies. Shiori does
+      not pick, even when only one name is left, because narrowing by
+      currency and coupon frequency is not issuer classification and the
+      Bloomberg field that would be (``SECURITY_TYP``) is still unconfirmed.
+
+    There is deliberately no ``suggested`` field. See the module docstring.
     """
 
-    suggested: str | None
     candidates: tuple[str, ...]
     reasons: tuple[str, ...]
 
 
-def suggest_convention_profile(
+def convention_profile_candidates(
     *,
     currency: object,
     bond_master: dict | None,
-) -> BLIConventionProfileSuggestion:
-    """Narrow the registry by the bond's confirmed terms; never classify it.
+) -> BLIConventionProfileCandidates:
+    """Narrow the registry by the bond's confirmed terms; never choose for the trader.
 
     This reads exactly two Bloomberg-confirmed facts -- the currency the
     quote came back in, and ``CPN_FREQ``'s typed coupon frequency -- and asks
     which registered profiles state conventions for that combination. It
     reads no ISIN, no CUSIP, no security name, and no description string, and
     it makes no claim about who issued the bond.
-
-    Narrowing to one profile is not proof that the profile is right: a USD
-    semi-annual corporate bond narrows to ``UST`` today purely because no
-    other USD profile is registered yet. That is why the result is a
-    *suggestion* the trader sees and can override, and why the profile the
-    browser sends is what the resolver actually applies.
     """
 
     bond_master = dict(bond_master or {})
@@ -287,27 +399,22 @@ def suggest_convention_profile(
         and any(frequency.value == coupon_frequency for frequency in profile.coupon_frequencies)
     )
 
-    if len(candidates) == 1:
-        return BLIConventionProfileSuggestion(
-            suggested=candidates[0], candidates=candidates, reasons=()
-        )
     if not candidates:
-        return BLIConventionProfileSuggestion(
-            suggested=None,
+        return BLIConventionProfileCandidates(
             candidates=(),
             reasons=(
                 f"no convention profile Shiori has states conventions for a {currency!r} "
-                f"bond paying a {coupon_frequency!r} coupon, so there is nothing to "
-                "suggest; select a profile only if one of them genuinely applies",
+                f"bond paying a {coupon_frequency!r} coupon, so there is no profile to "
+                "select and nothing here can be pre-filled",
             ),
         )
-    return BLIConventionProfileSuggestion(
-        suggested=None,
+    return BLIConventionProfileCandidates(
         candidates=candidates,
         reasons=(
-            f"a {currency!r} bond paying a {coupon_frequency!r} coupon fits more than one "
-            f"convention profile ({', '.join(candidates)}), and Shiori will not guess an "
-            "issuer from an ISIN, a CUSIP or a security name; choose the profile that "
-            "applies to this bond",
+            f"a {currency!r} bond paying a {coupon_frequency!r} coupon fits "
+            f"{', '.join(candidates)}. Shiori will not choose between profiles: currency "
+            "and coupon frequency describe this bond's cash flows, not its issuer class, "
+            "and it will never guess one from an ISIN, a CUSIP or a security name. Select "
+            "the profile that applies to this bond",
         ),
     )

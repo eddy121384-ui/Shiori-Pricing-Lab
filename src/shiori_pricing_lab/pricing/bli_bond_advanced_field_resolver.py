@@ -36,9 +36,11 @@ The split this module now implements:
   and the whole field-level BLOCKED/unresolved contract.
 - **``bli_bond_convention_profile.py``** -- only the values that genuinely
   differ between markets, one frozen record per profile: currency, the coupon
-  frequencies its conventions are stated for, day count and the Bloomberg
-  description string that agrees with it, bond type, ex-dividend days,
-  status, settlement lag and settlement calendar.
+  frequencies its conventions are stated for, day count and (where observed)
+  the Bloomberg description string that agrees with it, bond type,
+  ex-dividend days where a default was confirmed, status, settlement lag,
+  settlement calendar, and whether the profile may be applied only to a bond
+  whose plain fixed-coupon structure is positively established.
 
 Supporting a further market is therefore a new profile record, never a second
 copy of this file. Nothing below branches on a profile *name*.
@@ -124,18 +126,41 @@ own :attr:`BLIBondAdvancedFieldProfile.convention_profile` echoes the
 validated selection back, so the browser renders the profile it was actually
 resolved against rather than the one it assumes it asked for.
 
-Shiori may *suggest* a profile (see
-``bli_bond_convention_profile.suggest_convention_profile``), but a suggestion
-is registry narrowing by the bond's own confirmed currency and coupon
-frequency -- never issuer classification -- and the trader can always
-override it. When the confirmed facts fit more than one profile, the honest
-request is a profile selection, never eight hand-typed technical fields.
+**Shiori never chooses the profile.**
+``bli_bond_convention_profile.convention_profile_candidates`` narrows the
+registry to the profiles whose stated conventions cover this bond's own
+confirmed currency and coupon frequency, and stops there: those two facts
+describe a bond's cash flows, not its issuer class, and the Bloomberg field
+that would classify it (``SECURITY_TYP``) is an unprobed candidate. The
+trader selects from what is left. When nothing is left, that is a refusal;
+when something is, the honest request is a profile selection, never eight
+hand-typed technical fields.
+
+**Plain fixed-coupon structural evidence.** A positive coupon at some
+frequency, on a bond that is neither callable nor sinkable, does not
+establish that the bond is an ordinary fixed-coupon bullet. A floating-rate
+note returns its *current* coupon in ``CPN`` and its reset frequency in
+``CPN_FREQ``; an inflation-linked bond, a convertible and an amortizer all
+pass the same checks. The Bloomberg facts that would settle it
+(:data:`~bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` --
+coupon type, security type, and the inflation-linked/convertible/amortizing
+flags) have **no confirmed mnemonic today**; they are the candidates
+Shiori's Bloomberg DAPI probe tool (under ``tools/``) proposes for Eddy
+to probe.
+
+Every profile except ``UST`` therefore refuses a bond whose structure is not
+positively established, and the refusal is a *product* refusal no Advanced
+edit repairs. It is checked here rather than in the browser precisely so
+that selecting a profile by hand cannot push a floater through. ``UST`` is
+exempt by Eddy's explicit instruction: that behaviour passed real Bloomberg
+workstation UAT on ``US91282CMC28`` and must not regress.
 
 **Product-shape gate: fail-closed, and never an identity claim.** The
 profile is applied only to a bond that passes *every* condition in
 :func:`_product_rejection_reasons`: a currency and coupon frequency the
 selected profile states conventions for, not callable, not sinkable, a
-positive numeric coupon, and not already matured. Anything that fails gets no
+positive numeric coupon, not already matured, and (for every profile but
+``UST``) a positively established plain fixed-coupon structure. Anything that fails gets no
 profile at all and is reported with its reasons, so an unsupported instrument
 stops clearly instead of being silently given some market's conventions. None
 of these conditions is, or was ever intended as, proof of who issued the
@@ -165,7 +190,19 @@ that profile would otherwise supply, so ``day_count`` alone comes back
 This is still the opposite of the mapping #145 forbids: a matching string
 never *produces* a typed value (the value comes from the approved profile
 constant), a missing string blocks nothing, and a contradicting string can
-only withhold the one field it is evidence about.
+only withhold the one field it is evidence about. A profile whose own
+``day_count_evidence`` is ``None`` -- because Bloomberg's description string
+for that market has not been observed -- does not read ``DAY_CNT_DES`` at
+all, since comparing against a guessed expected string would block
+``day_count`` on every ordinary bond in that market.
+
+**Ex-dividend days follow the same "no approved value, no guess" rule.** A
+profile carries an ex-dividend default only where one was actually confirmed
+for that market. Where it was not, a typed Bloomberg value wins if one is
+ever returned, and otherwise ``ex_dividend_days`` alone comes back
+``BLOCKED``: ``ex-dividend-days-input`` is a real Advanced control, so a
+trader override is a genuine route past it, and every other Advanced field
+still resolves normally.
 
 **Irregular schedules fail closed.** The current typed pricing adapter accepts
 only one internally consistent regular coupon grid. An irregular or stubbed
@@ -238,6 +275,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+    PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     BLIConventionProfile,
     get_convention_profile,
 )
@@ -300,12 +338,22 @@ EXPIRY_DEPENDENT_FIELD_PATHS = (PATH_FORWARD_SETTLEMENT_DATE, PATH_OPTION_SETTLE
 
 # Bond Master keys that are genuine BondReferenceData destination fields, so a
 # non-null value there is a typed Bloomberg value rather than a description
-# string. ex_dividend_days and status are deliberately absent: they are not
-# destination fields at all, so no Bloomberg tier exists for them.
+# string. ``status`` is deliberately absent: it is not a destination field at
+# all, so no Bloomberg tier exists for it.
+#
+# ``ex_dividend_days`` is listed even though the Bloomberg bond-quote loader
+# does not populate it today (its ``_BOND_MASTER_DESTINATION_FIELDS`` has no
+# such entry, and no mnemonic for one is confirmed -- ``EX_DVD_DT`` is still
+# an unprobed candidate). Listing it adds no mapping and invents no mnemonic:
+# it means that *if* Eddy ever confirms one, the typed value it returns is
+# used ahead of any profile default, exactly like the other three. Until
+# then ``bond_master.get("ex_dividend_days")`` is simply ``None``, and a
+# profile with no approved default blocks that one field.
 _BLOOMBERG_TYPED_FIELD_BY_PATH = {
     PATH_DAY_COUNT: "day_count",
     PATH_BOND_TYPE: "bond_type",
     PATH_LAST_COUPON_DATE: "last_coupon_date",
+    PATH_EX_DIVIDEND_DAYS: "ex_dividend_days",
 }
 
 # Bond Master destination fields with no Advanced override control anywhere
@@ -491,6 +539,29 @@ def _product_rejection_reasons(
             "convention profile states conventions for those coupon frequencies only"
         )
 
+    # Plain fixed-coupon structural evidence. A positive coupon at some
+    # frequency, on a bond that is neither callable nor sinkable, does *not*
+    # establish a fixed-coupon bullet: a floater returns its current coupon in
+    # CPN and its reset frequency in CPN_FREQ, and an inflation-linked bond, a
+    # convertible and an amortizer all pass every check above too. The
+    # Bloomberg facts that would settle it have no confirmed mnemonic yet, so
+    # a profile that requires them refuses until they exist -- and selecting
+    # the profile by hand cannot push such a bond through, which is the whole
+    # point of checking it here rather than in the browser.
+    if profile.plain_fixed_coupon_evidence_required:
+        missing = tuple(
+            field for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS if bond_master.get(field) is None
+        )
+        if missing:
+            reasons.append(
+                "Bloomberg has not confirmed this bond is a plain fixed-coupon bullet: "
+                f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing, so "
+                "Shiori cannot rule out a floating-rate, inflation-linked, convertible or "
+                f"amortizing structure. The {profile.name} convention profile is applied "
+                "only to a bond whose structure is positively established, and selecting "
+                "it by hand does not establish it"
+            )
+
     # A missing or malformed valuation/maturity date is *not* rejected here:
     # it blocks only the individual fields that depend on it (``status`` and
     # ``reporting_date``, resolved per field in
@@ -628,9 +699,14 @@ def resolve_bond_advanced_field_profile(
     # Day count. Bloomberg's DAY_CNT_DES is the one description string still
     # read, and only to withhold this single field when it contradicts the
     # selected profile (Issue #161) -- never to produce a typed value.
+    # A profile with no confirmed ``day_count_evidence`` string does not read
+    # DAY_CNT_DES at all: without an observed expected value there is nothing
+    # to call a contradiction, and comparing against a guessed string would
+    # block ``day_count`` on every ordinary bond in that market.
     day_count_evidence = bond_master_raw.get("day_count")
     day_count_evidence_contradicts = (
-        _confirmed_typed_value(PATH_DAY_COUNT) is None
+        profile.day_count_evidence is not None
+        and _confirmed_typed_value(PATH_DAY_COUNT) is None
         and isinstance(day_count_evidence, str)
         and bool(day_count_evidence.strip())
         and day_count_evidence != profile.day_count_evidence
@@ -647,7 +723,28 @@ def resolve_bond_advanced_field_profile(
         _resolve_field(PATH_DAY_COUNT, profile.day_count.value, profile.default_provenance)
 
     _resolve_field(PATH_BOND_TYPE, profile.bond_type.value, profile.default_provenance)
-    _resolve_field(PATH_EX_DIVIDEND_DAYS, profile.ex_dividend_days, profile.default_provenance)
+
+    # Ex-dividend days. A profile carries an approved default only where one
+    # was actually confirmed for that market (``UST``'s zero). Where it was
+    # not, a typed Bloomberg value is used if one is ever returned, and
+    # otherwise this one field blocks for the trader to set -- a genuine
+    # route past it, since ``ex-dividend-days-input`` is a real Advanced
+    # control. Every other Advanced field still resolves.
+    if (
+        profile.ex_dividend_days is not None
+        or _confirmed_typed_value(PATH_EX_DIVIDEND_DAYS) is not None
+    ):
+        _resolve_field(
+            PATH_EX_DIVIDEND_DAYS, profile.ex_dividend_days, profile.default_provenance
+        )
+    else:
+        _block(
+            PATH_EX_DIVIDEND_DAYS,
+            f"the {profile.name} convention profile has no approved ex-dividend default, "
+            "and Bloomberg returned no typed ex-dividend value for this bond, so Shiori "
+            "will not guess one; every other field on this bond keeps the value Shiori "
+            "resolved for it",
+        )
 
     # Last coupon date. A confirmed typed Bloomberg value wins; otherwise the
     # reviewed coupon-schedule adapter derives it -- which needs all three

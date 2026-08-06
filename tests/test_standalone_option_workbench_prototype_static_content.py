@@ -331,11 +331,11 @@ def test_convention_profile_is_a_browser_state_input_not_a_hardcoded_server_defa
 
 def test_the_profile_selector_options_are_never_a_second_copy_of_the_registry() -> None:
     """Issue #161 requirement D: the selectable profiles must come from the
-    server's own registry, so a trader can never pick a profile the resolver
-    would reject, nor be denied one it would accept.
+    server's own answer, so a trader can never pick a profile the resolver
+    would reject for this bond, nor be denied one it would accept.
 
     The page therefore hardcodes no profile name at all: its options are
-    built from the suggestion response's `supported_convention_profiles`.
+    built from the candidates response.
     """
 
     from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
@@ -343,12 +343,58 @@ def test_the_profile_selector_options_are_never_a_second_copy_of_the_registry() 
     )
 
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
-    assert "supported_convention_profiles" in text
+    assert "conventionProfileCandidateNames()" in text
     for name in SUPPORTED_CONVENTION_PROFILE_NAMES:
         assert f'"{name}"' not in text, (
             f"script.js names the {name!r} profile literally; the selector's options must "
-            "come from the server's registry, not a second copy of it"
+            "come from the server's own answer, not a second copy of the registry"
         )
+
+
+def test_the_page_never_selects_a_convention_profile_for_the_trader() -> None:
+    """Issue #161 follow-up item 1, structurally.
+
+    Auto-selection was withdrawn because currency and coupon frequency
+    describe a bond's cash flows, not its issuer class. The page must
+    therefore assign `selectedConventionProfile` in exactly two places -- the
+    picker's own change handler, and the per-bond reset that clears it -- and
+    must not read a `suggested` field from anywhere.
+    """
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "suggested" not in text
+
+    assignments = [
+        line.strip()
+        for line in text.splitlines()
+        if "selectedConventionProfile =" in line and "===" not in line
+    ]
+    assert assignments == [
+        "let selectedConventionProfile = null;",
+        "selectedConventionProfile = null;",
+        "selectedConventionProfile = chosen;",
+    ], assignments
+
+
+def test_the_export_source_system_follows_the_selected_profile() -> None:
+    """Issue #161 follow-up item 6: with three profiles registered, a fixed
+    `SHIORI_UST_...` label would stamp a German government bond's values as
+    the UST profile's."""
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "`SHIORI_${selectedConventionProfile}_CONVENTION_PROFILE`" in text
+    assert "profileNameFromTier" in text
+
+    # Executable lines only: the comments legitimately quote the withdrawn
+    # label and the tier it belonged to, precisely to record that they are no
+    # longer written out.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("//")
+    )
+    assert "SHIORI_UST_FIXED_COUPON_PROFILE" not in code
+    # The provenance tier's description is derived the same way, so no
+    # market's name is written out per tier either.
+    assert "UST_PROFILE_DEFAULT" not in code
 
 
 def test_no_identity_verification_claim_anywhere_in_the_served_page() -> None:

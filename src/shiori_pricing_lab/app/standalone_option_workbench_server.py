@@ -157,14 +157,16 @@ dict exactly like this one.
   that are known. (Issue #161 renamed this route from ``/api/ust/profile``:
   the resolver behind it is no longer UST-specific.)
 
-- ``POST /api/bond/convention-profile/suggest`` -- body is ``{"currency",
+- ``POST /api/bond/convention-profile/candidates`` -- body is ``{"currency",
   "bond_master"}``, both verbatim from the same Bloomberg response. Returns
-  ``{"suggested", "candidates", "reasons",
-  "supported_convention_profiles"}``. ``suggested`` names a profile only
-  when the bond's Bloomberg-confirmed currency and coupon frequency narrow
-  the registry to exactly one; two or more ``candidates`` means ``suggested``
-  is ``null`` and the trader picks, which is the honest answer Issue #161
-  requires instead of falling back to eight hand-typed technical fields. No
+  ``{"candidates", "reasons", "supported_convention_profiles"}``.
+  ``candidates`` holds every registered profile whose stated currency and
+  coupon frequency cover this bond. It is a narrowing, never a choice: an
+  empty list is a refusal (no profile covers this bond, so there is nothing
+  to select), and a non-empty list is what the trader selects from. **Shiori
+  never picks for the trader, even when one name is left** -- narrowing by
+  currency and coupon frequency is not issuer classification, and the
+  Bloomberg field that would be (``SECURITY_TYP``) is still unconfirmed. No
   ISIN, CUSIP, or security name is read, and no issuer classification is
   claimed. ``supported_convention_profiles`` is the registry's own list, so
   the browser's selector cannot drift from the server's.
@@ -207,7 +209,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     SUPPORTED_CONVENTION_PROFILE_NAMES,
-    suggest_convention_profile,
+    convention_profile_candidates,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -303,12 +305,20 @@ DEFAULT_PORT = 8765
 #
 # Bumped to -v13 for Issue #161's common-resolver split: POST
 # /api/ust/profile is renamed POST /api/bond/advanced-profile (the resolver
-# behind it is no longer UST-specific), and POST
-# /api/bond/convention-profile/suggest is added so the page can render a
-# visible, overridable Convention Profile selector sourced from the server's
-# own registry. A stale -v12 process would 404 both, leaving the page with no
-# profile selection and every Advanced field back on manual entry.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v13"
+# behind it is no longer UST-specific), and a convention-profile route is
+# added so the page can render a visible, overridable Convention Profile
+# selector sourced from the server's own registry. A stale -v12 process would
+# 404 both, leaving the page with no profile selection and every Advanced
+# field back on manual entry.
+#
+# Bumped to -v14 for Issue #161's follow-up: the second route is
+# /api/bond/convention-profile/candidates (was .../suggest) and its response
+# no longer carries "suggested" at all -- Shiori narrows the registry but
+# never picks a profile, since no confirmed Bloomberg classification field
+# exists to pick with. US_CORPORATE and GERMAN_GOVT are registered alongside
+# UST, so a -v13 page would offer only UST, and a -v13 server would answer a
+# current page's candidates request with a 404.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v14"
 
 
 def load_base_case() -> dict:
@@ -529,20 +539,20 @@ _ADVANCED_PROFILE_REQUIRED_KEYS = (
     "valuation_date",
 )
 
-_SUGGEST_PROFILE_REQUIRED_KEYS = ("currency", "bond_master")
+_CANDIDATES_REQUIRED_KEYS = ("currency", "bond_master")
 
 
-def suggest_bond_convention_profile(body: dict) -> dict:
-    """Return which convention profile this bond's confirmed terms narrow to.
+def resolve_bond_convention_profile_candidates(body: dict) -> dict:
+    """Return which convention profiles this bond's confirmed terms leave open.
 
-    Calls ``suggest_convention_profile`` exactly once and serializes its
-    result, plus the registry's own list of selectable profiles so the
-    browser renders a selector that cannot drift from the server. This
-    function classifies nothing: the suggestion is registry narrowing by the
-    bond's Bloomberg-confirmed currency and coupon frequency, and a
-    ``suggested`` of ``null`` with two or more ``candidates`` is the honest
-    "ask the trader which profile" answer -- never a request to hand-type
-    the Advanced technical fields.
+    Calls ``convention_profile_candidates`` exactly once and serializes its
+    result, plus the registry's own list of profiles so the browser renders a
+    selector that cannot drift from the server. This function classifies
+    nothing and chooses nothing: it narrows by the bond's Bloomberg-confirmed
+    currency and coupon frequency, and the trader selects from what is left.
+    An empty ``candidates`` list is a refusal (no registered profile covers
+    this bond); a non-empty one is a request for a profile selection --
+    never a request to hand-type the Advanced technical fields.
 
     Raises ``ValueError`` for a body that is not a JSON object with the two
     required keys.
@@ -550,17 +560,16 @@ def suggest_bond_convention_profile(body: dict) -> dict:
 
     if not isinstance(body, dict):
         raise ValueError("request body must be a JSON object")
-    missing = [key for key in _SUGGEST_PROFILE_REQUIRED_KEYS if key not in body]
+    missing = [key for key in _CANDIDATES_REQUIRED_KEYS if key not in body]
     if missing:
         raise ValueError(f"request body is missing required key(s): {missing}")
 
-    suggestion = suggest_convention_profile(
+    result = convention_profile_candidates(
         currency=body["currency"], bond_master=body["bond_master"]
     )
     return {
-        "suggested": suggestion.suggested,
-        "candidates": list(suggestion.candidates),
-        "reasons": list(suggestion.reasons),
+        "candidates": list(result.candidates),
+        "reasons": list(result.reasons),
         "supported_convention_profiles": list(SUPPORTED_CONVENTION_PROFILE_NAMES),
     }
 
@@ -817,18 +826,18 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         # A bond outside the profile is a normal answer, not a bridge error.
         self._write_json(200, payload)
 
-    def _handle_api_bond_profile_suggest(self, raw_body: bytes) -> None:
+    def _handle_api_bond_profile_candidates(self, raw_body: bytes) -> None:
         try:
             body = json.loads(raw_body)
         except json.JSONDecodeError as exc:
             self._write_json(400, {"error": f"invalid JSON body: {exc}"})
             return
         try:
-            payload = suggest_bond_convention_profile(body)
+            payload = resolve_bond_convention_profile_candidates(body)
         except Exception as exc:  # noqa: BLE001
             self._write_json(400, {"error": f"{type(exc).__name__}: {exc}"})
             return
-        # "Shiori cannot tell which profile" is a normal answer, not an error.
+        # "no profile covers this bond" is a normal answer, not an error.
         self._write_json(200, payload)
 
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
@@ -861,7 +870,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/case/bloomberg": _handle_api_case_bloomberg,
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
         "/api/bond/advanced-profile": _handle_api_bond_advanced_profile,
-        "/api/bond/convention-profile/suggest": _handle_api_bond_profile_suggest,
+        "/api/bond/convention-profile/candidates": _handle_api_bond_profile_candidates,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

@@ -66,7 +66,8 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
-    CALENDAR_US_GOVERNMENT_BOND,
+    CALENDAR_US_BOND_MARKET,
+    PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     UST_CONVENTION_PROFILE,
     BLIConventionProfile,
 )
@@ -820,8 +821,17 @@ _SYNTHETIC_PROFILE = BLIConventionProfile(
     ex_dividend_days=3,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
-    settlement_calendar=CALENDAR_US_GOVERNMENT_BOND,
+    settlement_calendar=CALENDAR_US_BOND_MARKET,
 )
+
+# Presence markers for the plain fixed-coupon structural evidence every
+# profile but UST requires. **These are not confirmed Bloomberg values and
+# assert nothing about any mnemonic's semantics**: the gate checks only that
+# the facts were established at all, and no confirmed mnemonic supplies them
+# yet (they are the candidates `tools/bloomberg_dapi_probe.py` proposes). A
+# real bond therefore never reaches these tests' state today -- which is
+# exactly what `test_a_real_bloomberg_bond_never_passes_...` below pins.
+_STRUCTURAL_EVIDENCE = dict.fromkeys(PLAIN_FIXED_COUPON_EVIDENCE_FIELDS, "SYNTHETIC_EVIDENCE")
 
 # An annual grid: 2024-01-31 to 2031-01-31, first coupon 2025-01-31.
 _ANNUAL_BOND_MASTER = {
@@ -835,6 +845,7 @@ _ANNUAL_BOND_MASTER = {
     "day_count": None,
     "bond_type": None,
     "last_coupon_date": None,
+    **_STRUCTURAL_EVIDENCE,
 }
 
 
@@ -1038,3 +1049,211 @@ def test_the_resolver_names_no_profile_and_no_market_anywhere_in_its_code():
     )
     for market in ("UST", "GILT", "CORPORATE", "GERMAN", "TREASURY"):
         assert market not in code, f"the common resolver must not name {market!r}"
+
+
+# =============================================================================
+# Issue #161 follow-up: fail-closed until the structure is established
+# =============================================================================
+#
+# The exposure this closes: a positive coupon at some frequency, on a bond
+# that is neither callable nor sinkable, does not make a bond a fixed-coupon
+# bullet. A floating-rate note returns its *current* coupon in CPN and its
+# reset frequency in CPN_FREQ and passes every one of those checks. So does a
+# linker, a convertible and an amortizer. UST is exempt by Eddy's explicit
+# instruction (its behaviour passed real workstation UAT); every other
+# profile refuses until Bloomberg has confirmed what the bond actually is.
+
+
+def _real_bloomberg_bond_master(**overrides) -> dict:
+    """A bond master shaped exactly like a real Bloomberg response today.
+
+    That is: every confirmed field populated, and **none** of the structural
+    evidence fields, because no mnemonic for any of them is confirmed yet.
+    """
+
+    master = {
+        key: value
+        for key, value in _ANNUAL_BOND_MASTER.items()
+        if key not in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+    }
+    master.update(overrides)
+    return master
+
+
+def test_a_real_bloomberg_bond_never_passes_a_non_ust_profile_today(synthetic_registry):
+    """Item 5, the decisive one: selecting a profile by hand does not
+    establish what the bond is, so it cannot push one through."""
+
+    profile = _resolve_synthetic(bond_master=_real_bloomberg_bond_master())
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    assert profile.unresolved_fields == ()
+    reason = " ".join(profile.rejection_reasons)
+    assert "has not confirmed this bond is a plain fixed-coupon bullet" in reason
+    assert "floating-rate, inflation-linked, convertible or amortizing" in reason
+    assert "selecting it by hand does not establish it" in reason
+
+
+def test_the_refusal_names_every_missing_piece_of_evidence(synthetic_registry):
+    """So a probe run has a checklist, rather than one field at a time."""
+
+    profile = _resolve_synthetic(bond_master=_real_bloomberg_bond_master())
+
+    reason = " ".join(profile.rejection_reasons)
+    for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS:
+        assert field in reason
+
+
+@pytest.mark.parametrize("missing", PLAIN_FIXED_COUPON_EVIDENCE_FIELDS)
+def test_one_missing_evidence_field_is_enough_to_refuse(synthetic_registry, missing):
+    """Fail-closed means *every* piece, not a majority of them."""
+
+    profile = _resolve_synthetic(bond_master={**_ANNUAL_BOND_MASTER, missing: None})
+
+    assert profile.supported is False
+    assert missing in " ".join(profile.rejection_reasons)
+
+
+def test_ust_is_exempt_so_its_uat_passed_behaviour_does_not_regress():
+    """The other half of Eddy's instruction. A real Treasury carries none of
+    the structural evidence fields either, and must still resolve every
+    Advanced field exactly as PR #162 shipped."""
+
+    assert all(
+        field not in _TREASURY_BOND_MASTER for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+    )
+    profile = _resolve()
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert tuple(field.path for field in profile.fields) == ADVANCED_FIELD_PATHS
+
+
+def test_the_evidence_gate_is_checked_server_side_not_left_to_the_browser(
+    synthetic_registry,
+):
+    """Structural proof of *where* item 5's guarantee lives. The refusal comes
+    out of the resolver itself, so no browser state -- including a
+    hand-selected profile -- can route around it."""
+
+    source = inspect.getsource(profile_module._product_rejection_reasons)
+    assert "plain_fixed_coupon_evidence_required" in source
+    assert "PLAIN_FIXED_COUPON_EVIDENCE_FIELDS" in source
+
+
+# =============================================================================
+# Issue #161 follow-up: ex-dividend days are never guessed
+# =============================================================================
+
+
+def _no_ex_dividend_profile() -> BLIConventionProfile:
+    return BLIConventionProfile(
+        name="NO_EX_DIV_TEST",
+        currency=Currency.EUR,
+        coupon_frequencies=(Frequency.ANNUAL,),
+        day_count=DayCount.THIRTY_360,
+        bond_type=BondType.FIXED_COUPON_BULLET,
+        status=BondStatus.ACTIVE,
+        settlement_business_days=2,
+        settlement_calendar=CALENDAR_US_BOND_MARKET,
+    )
+
+
+@pytest.fixture()
+def no_ex_dividend_registry(monkeypatch):
+    profile = _no_ex_dividend_profile()
+    monkeypatch.setitem(
+        profile_module.__dict__["get_convention_profile"].__globals__["CONVENTION_PROFILES"],
+        profile.name,
+        profile,
+    )
+    return profile
+
+
+def test_a_profile_with_no_ex_dividend_default_blocks_only_that_field(
+    no_ex_dividend_registry,
+):
+    """Item 3: the one unknown field blocks, and the other seven resolve. A
+    blocked field is a genuine route past it -- `ex-dividend-days-input` is a
+    real Advanced control the trader can fill."""
+
+    profile = _resolve_synthetic(convention_profile="NO_EX_DIV_TEST")
+
+    assert profile.supported is True
+    assert [item.path for item in profile.unresolved_fields] == [PATH_EX_DIVIDEND_DAYS]
+    assert "no approved ex-dividend default" in profile.unresolved_fields[0].reason
+
+    values = _values(profile)
+    assert PATH_EX_DIVIDEND_DAYS not in values
+    assert values[PATH_DAY_COUNT] == DayCount.THIRTY_360.value
+    assert values[PATH_BOND_TYPE] == BondType.FIXED_COUPON_BULLET.value
+    assert values[PATH_STATUS] == BondStatus.ACTIVE.value
+    assert values[PATH_LAST_COUPON_DATE] == "2030-01-31"
+    assert values[PATH_REPORTING_DATE] == _VALUATION_DATE
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] is not None
+    assert values[PATH_OPTION_SETTLEMENT_DATE] is not None
+
+
+def test_a_typed_bloomberg_ex_dividend_value_is_used_when_one_exists(
+    no_ex_dividend_registry,
+):
+    """"Use a typed Bond Master value if there is one" -- so the day a
+    mnemonic is confirmed, the block lifts on its own."""
+
+    profile = _resolve_synthetic(
+        convention_profile="NO_EX_DIV_TEST",
+        bond_master={**_ANNUAL_BOND_MASTER, "ex_dividend_days": 7},
+    )
+
+    assert profile.unresolved_fields == ()
+    assert _values(profile)[PATH_EX_DIVIDEND_DAYS] == 7
+    assert _provenance(profile)[PATH_EX_DIVIDEND_DAYS] == PROVENANCE_BLOOMBERG_AUTO
+
+
+def test_a_typed_bloomberg_zero_is_a_value_not_an_absence(no_ex_dividend_registry):
+    """Zero ex-dividend days is a real convention, not "nothing returned"."""
+
+    profile = _resolve_synthetic(
+        convention_profile="NO_EX_DIV_TEST",
+        bond_master={**_ANNUAL_BOND_MASTER, "ex_dividend_days": 0},
+    )
+
+    assert profile.unresolved_fields == ()
+    assert _values(profile)[PATH_EX_DIVIDEND_DAYS] == 0
+    assert _provenance(profile)[PATH_EX_DIVIDEND_DAYS] == PROVENANCE_BLOOMBERG_AUTO
+
+
+def test_a_confirmed_profile_default_still_wins_over_nothing(synthetic_registry):
+    """The synthetic profile *does* have a confirmed default, so it resolves
+    -- the blocking above is about absence, not about profiles in general."""
+
+    profile = _resolve_synthetic()
+
+    assert profile.unresolved_fields == ()
+    assert _values(profile)[PATH_EX_DIVIDEND_DAYS] == 3
+
+
+# =============================================================================
+# Issue #161 follow-up: an unconfirmed day-count description blocks nothing
+# =============================================================================
+
+
+def test_a_profile_without_a_confirmed_description_string_ignores_day_cnt_des(
+    no_ex_dividend_registry,
+):
+    """`day_count_evidence=None` means Bloomberg's DAY_CNT_DES for this market
+    has not been observed. Comparing against a guessed expected string would
+    block `day_count` on every ordinary bond in that market, so it is not
+    read at all -- and `day_count` still comes from the confirmed profile
+    constant, never from the string."""
+
+    profile = _resolve_synthetic(
+        convention_profile="NO_EX_DIV_TEST",
+        bond_master_raw={"day_count": "ACT/ACT"},
+    )
+
+    blocked = [item.path for item in profile.unresolved_fields]
+    assert PATH_DAY_COUNT not in blocked
+    assert _values(profile)[PATH_DAY_COUNT] == DayCount.THIRTY_360.value
+    assert _provenance(profile)[PATH_DAY_COUNT] == "NO_EX_DIV_TEST_PROFILE_DEFAULT"
