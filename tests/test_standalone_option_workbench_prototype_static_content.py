@@ -340,3 +340,62 @@ def test_no_identity_verification_claim_anywhere_in_the_served_page() -> None:
         "verified as treasury",
     ):
         assert forbidden not in lowered
+
+
+# --- Issue #161: one parser, and a preview beside every field it parses ------
+
+
+def test_every_trader_format_field_has_its_own_normalized_readout() -> None:
+    """A normalized value or an explicit error is shown beside each of the
+    three fields Issue #161 makes trader-format, so neither a silent
+    conversion nor a silently-dropped entry has anywhere to hide."""
+
+    html_text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+
+    for control_id, readout_id in (
+        ("strike-price-input", "strike-normalized-preview"),
+        ("notional-input", "notional-normalized-preview"),
+        ("forward-price-input", "forward-normalized-preview"),
+    ):
+        assert f'id="{control_id}"' in html_text
+        assert f'id="{readout_id}"' in html_text
+        # The readout sits with its own control, not in some distant summary.
+        assert 0 < html_text.index(readout_id) - html_text.index(control_id) < 400
+
+
+def test_the_trader_format_parsers_exist_exactly_once_and_only_in_the_browser() -> None:
+    """Issue #161 forbids browser/server/builder each growing their own
+    parser. There is one Treasury-quote parser and one notional parser, both
+    in script.js, and the canonical numeric contract is unchanged everywhere
+    else -- so no Python module needs (or has) a copy."""
+
+    script_text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+
+    assert script_text.count("function parseTreasuryQuote(") == 1
+    assert script_text.count("function parseNotional(") == 1
+    # Both trader-format price fields go through the same parser, the notional
+    # never does, and each control is read in exactly one place -- so two
+    # readers cannot drift into disagreeing about a format.
+    assert script_text.count("parseTreasuryQuote(els.strikePrice.value)") == 1
+    assert script_text.count("parseTreasuryQuote(els.forwardPrice.value)") == 1
+    assert script_text.count("parseNotional(els.notional.value)") == 1
+    assert script_text.count("function readTraderFormatInputs(") == 1
+
+    src_dir = PROTOTYPE_DIR.parents[1] / "src"
+    for path in src_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert "parse_treasury_32nds" not in text, path
+        assert "parseTreasuryQuote" not in text, path
+
+
+def test_the_expiry_offset_default_is_declared_once_and_is_taipei() -> None:
+    """The pre-filled offset is one named constant, so "new ticket" and "back
+    to +08:00" cannot drift apart, and it is never applied to the expiry date
+    or time of day."""
+
+    script_text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+
+    assert script_text.count('const DEFAULT_EXPIRY_UTC_OFFSET = "+08:00";') == 1
+    # Written to exactly one control, in exactly one place.
+    assert script_text.count("els.expiryOffset.value = DEFAULT_EXPIRY_UTC_OFFSET") == 1
+    assert "els.expiryDatetime.value = DEFAULT" not in script_text

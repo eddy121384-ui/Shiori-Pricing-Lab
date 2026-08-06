@@ -146,11 +146,14 @@ dict exactly like this one.
   "unresolved_fields"}``. This route makes no Bloomberg call, reads no
   clock, prices nothing, and stores nothing: it is a pure function of the
   body, so the browser can call it again whenever expiry changes. A bond
-  whose *shape* does not fit the selected profile is a normal HTTP 200
-  answer with ``supported: false`` and its reasons -- not an error, and
-  never a claim about who issued the bond -- while a malformed body,
-  unrecognized ``convention_profile``, or a missing QuantLib install
-  returns HTTP 400.
+  whose *product shape or coupon schedule* the current pricing path cannot
+  carry is a normal HTTP 200 answer with ``supported: false`` and its
+  reasons -- not an error, and never a claim about who issued the bond --
+  while a malformed body, unrecognized ``convention_profile``, or a missing
+  QuantLib install returns HTTP 400. Since Issue #161 a supported answer may
+  still be partial: ``fields`` carries every field that resolved and
+  ``unresolved_fields`` carries the per-field ``BLOCKED`` reasons, so one
+  unknown field never blanks the seven that are known.
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -272,7 +275,14 @@ DEFAULT_PORT = 8765
 # "unresolved_fields" keys. A stale process predating this would 400 every
 # request the current page sends (missing key) or omit fields the current
 # page reads.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v11"
+#
+# Bumped to -v12 for Issue #161: the same route's answer became field-level.
+# "supported: false" now means only a product/schedule refusal no Advanced
+# edit can repair, "fields" may be partial, and "unresolved_fields" actually
+# carries per-field BLOCKED reasons the current page renders and gates its
+# Go-to route on. A stale -v11 process would still answer, but with the
+# all-or-nothing semantics that reject a real UST returning MTY_TYP=NORMAL.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v12"
 
 
 def load_base_case() -> dict:
@@ -507,9 +517,12 @@ def resolve_ust_profile(body: dict) -> dict:
     settlement dates then come back under ``pending_field_paths`` instead of
     being guessed.
 
-    A bond whose shape does not fit the selected profile is *not* an error:
-    it returns ``supported: false`` with the profile's own reasons,
-    verbatim. Raises ``ValueError`` for a body that is not a JSON object
+    A bond whose product shape or coupon schedule the current pricing path
+    cannot carry is *not* an error: it returns ``supported: false`` with the
+    profile's own reasons, verbatim. A supported bond may still come back
+    with a partial ``fields`` list plus per-field ``unresolved_fields``
+    (Issue #161) -- also serialized verbatim, and also not an error.
+    Raises ``ValueError`` for a body that is not a JSON object
     with the six required keys, or whose ``convention_profile`` the
     resolver does not recognize, and propagates
     ``BLIQuantLibNotAvailableError`` unchanged when the optional QuantLib
