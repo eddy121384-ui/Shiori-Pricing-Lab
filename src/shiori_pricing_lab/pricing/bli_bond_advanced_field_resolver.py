@@ -141,19 +141,38 @@ frequency, on a bond that is neither callable nor sinkable, does not
 establish that the bond is an ordinary fixed-coupon bullet. A floating-rate
 note returns its *current* coupon in ``CPN`` and its reset frequency in
 ``CPN_FREQ``; an inflation-linked bond, a convertible and an amortizer all
-pass the same checks. The Bloomberg facts that would settle it
-(:data:`~bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` --
-coupon type, security type, and the inflation-linked/convertible/amortizing
-flags) have **no confirmed mnemonic today**; they are the candidates
-Shiori's Bloomberg DAPI probe tool (under ``tools/``) proposes for Eddy
-to probe.
+pass the same checks.
+
+Bloomberg workstation evidence (Issue #161 follow-up; see
+``bli_bond_convention_profile``'s own evidence log for the full probe
+record) now confirms three of the five
+:data:`~bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`:
+``coupon_type`` (via ``CPN_TYP``, confirmed value ``"FIXED"``),
+``inflation_linked_flag`` and ``convertible_flag`` (via
+``INFLATION_LINKED_INDICATOR``/``CONVERTIBLE``, confirmed value ``False``).
+Each is checked by *value*, via
+:func:`~bli_bond_convention_profile.confirms_plain_fixed_coupon_evidence`,
+never merely by presence -- a real floater's ``coupon_type == "FLOATING"``
+must still fail to confirm anything.
+
+The remaining two, ``security_type`` and ``amortizing_flag``, have **no
+approved criterion at all**: ``SECURITY_TYP`` is confirmed to return a value
+(``"US GOVERNMENT"`` / ``"GLOBAL"`` / ``"EURO-ZONE"`` across the three
+probed securities) but nothing has established which values would confirm a
+plain bullet, and no working amortizing-evidence mnemonic exists yet
+(``IS_AMORTIZING``/``AMORT_TYP``/``REDEMP_TYP``/``SCHED_TYP`` confirmed
+``BAD_FLD``, ``MTG_TYP`` confirmed not applicable, ``PRINCIPAL_FACTOR ==
+1.0`` explicitly not approved as evidence). These two therefore always fail
+:func:`confirms_plain_fixed_coupon_evidence` regardless of what
+``bond_master`` holds for them, which is what keeps every non-UST profile
+fail-closed today even with the other three fields confirmed.
 
 Every profile except ``UST`` therefore refuses a bond whose structure is not
-positively established, and the refusal is a *product* refusal no Advanced
-edit repairs. It is checked here rather than in the browser precisely so
-that selecting a profile by hand cannot push a floater through. ``UST`` is
-exempt by Eddy's explicit instruction: that behaviour passed real Bloomberg
-workstation UAT on ``US91282CMC28`` and must not regress.
+*fully* positively established, and the refusal is a *product* refusal no
+Advanced edit repairs. It is checked here rather than in the browser
+precisely so that selecting a profile by hand cannot push a floater through.
+``UST`` is exempt by Eddy's explicit instruction: that behaviour passed real
+Bloomberg workstation UAT on ``US91282CMC28`` and must not regress.
 
 **Product-shape gate: fail-closed, and never an identity claim.** The
 profile is applied only to a bond that passes *every* condition in
@@ -277,6 +296,7 @@ from datetime import date
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     BLIConventionProfile,
+    confirms_plain_fixed_coupon_evidence,
     get_convention_profile,
 )
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
@@ -543,23 +563,34 @@ def _product_rejection_reasons(
     # frequency, on a bond that is neither callable nor sinkable, does *not*
     # establish a fixed-coupon bullet: a floater returns its current coupon in
     # CPN and its reset frequency in CPN_FREQ, and an inflation-linked bond, a
-    # convertible and an amortizer all pass every check above too. The
-    # Bloomberg facts that would settle it have no confirmed mnemonic yet, so
-    # a profile that requires them refuses until they exist -- and selecting
-    # the profile by hand cannot push such a bond through, which is the whole
-    # point of checking it here rather than in the browser.
+    # convertible and an amortizer all pass every check above too.
+    #
+    # This is a *value* check, not a presence check (Issue #161 follow-up):
+    # `bond_master.get("coupon_type")` can be a real floater's "FLOATING" --
+    # non-None, but not evidence of a plain bullet -- so each field is judged
+    # by `confirms_plain_fixed_coupon_evidence`, which requires the specific
+    # value Bloomberg workstation evidence confirmed (see
+    # `bli_bond_convention_profile`'s own evidence log). `security_type` and
+    # `amortizing_flag` have no approved criterion at all yet, so they always
+    # fail this check regardless of what bond_master holds for them -- which
+    # is what keeps every non-UST profile fail-closed until real bullet-vs-
+    # amortizing evidence exists, and is why selecting the profile by hand
+    # can never push such a bond through: this is checked here, not in the
+    # browser.
     if profile.plain_fixed_coupon_evidence_required:
-        missing = tuple(
-            field for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS if bond_master.get(field) is None
+        unconfirmed = tuple(
+            field
+            for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+            if not confirms_plain_fixed_coupon_evidence(field, bond_master.get(field))
         )
-        if missing:
+        if unconfirmed:
             reasons.append(
                 "Bloomberg has not confirmed this bond is a plain fixed-coupon bullet: "
-                f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing, so "
-                "Shiori cannot rule out a floating-rate, inflation-linked, convertible or "
-                f"amortizing structure. The {profile.name} convention profile is applied "
-                "only to a bond whose structure is positively established, and selecting "
-                "it by hand does not establish it"
+                f"{', '.join(unconfirmed)} {'is' if len(unconfirmed) == 1 else 'are'} not "
+                "confirmed, so Shiori cannot rule out a floating-rate, inflation-linked, "
+                f"convertible or amortizing structure. The {profile.name} convention "
+                "profile is applied only to a bond whose structure is positively "
+                "established, and selecting it by hand does not establish it"
             )
 
     # A missing or malformed valuation/maturity date is *not* rejected here:

@@ -5920,13 +5920,18 @@ def test_the_provenance_readout_names_the_selected_profile_not_ust(server_url, p
 
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
-def test_a_resolved_us_corporate_bond_exports_its_own_source_system(server_url, page) -> None:
-    """Issue #161 follow-up item 6, compatibility correction, end to end.
+def test_populated_but_uncriteria_evidence_still_refuses_us_corporate(server_url, page) -> None:
+    """Issue #161 follow-up items 1-3, end to end, corrected.
 
-    Once Bloomberg has confirmed the plain fixed-coupon structural evidence
-    (synthetic here -- no real mnemonic exists yet), US_CORPORATE resolves
-    like any other profile, and its run-export label must be its own
-    distinct value, not UST's."""
+    An earlier revision of this test supplied `security_type`/`amortizing_
+    flag` values and expected US_CORPORATE to resolve -- that was wrong: real
+    Bloomberg workstation evidence only confirmed `coupon_type`/
+    `inflation_linked_flag`/`convertible_flag`. `security_type` and
+    `amortizing_flag` have no approved criterion at all (see the resolver's
+    own evidence log), so no bond_master content can satisfy them today,
+    even with every field populated and superficially plausible. This proves
+    the gate correctly stays fail-closed rather than admitting on presence
+    alone -- the exact bug the value-based check exists to prevent."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -5943,17 +5948,16 @@ def test_a_resolved_us_corporate_bond_exports_its_own_source_system(server_url, 
         ),
         profile="US_CORPORATE",
     )
-    _set_expiry(page)
     _wait_for_advanced_profile(page)
-    page.wait_for_function(
-        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
-    )
 
-    assert _advanced_profile(page)["supported"] is True
-    assert _advanced_profile(page)["source_system"] == "SHIORI_US_CORPORATE_CONVENTION_PROFILE"
-
-    stamped = {record["path"]: record for record in _override_provenance(page)}
-    assert stamped["reporting_date"]["source_system"] == (
-        "SHIORI_US_CORPORATE_CONVENTION_PROFILE"
-    )
-    assert stamped["reporting_date"]["source_system"] != "SHIORI_UST_FIXED_COUPON_PROFILE"
+    profile = _advanced_profile(page)
+    assert profile["convention_profile"] == "US_CORPORATE"
+    assert profile["supported"] is False
+    reasons = " ".join(profile["rejection_reasons"])
+    assert "security_type" in reasons
+    assert "amortizing_flag" in reasons
+    # The three genuinely-confirmed fields are not cited as the problem.
+    assert "coupon_type" not in reasons
+    assert "inflation_linked_flag" not in reasons
+    assert "convertible_flag" not in reasons
+    assert _profile_controls_disabled(page)

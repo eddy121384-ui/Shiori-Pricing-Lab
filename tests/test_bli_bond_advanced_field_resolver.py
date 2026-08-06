@@ -70,6 +70,7 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     UST_CONVENTION_PROFILE,
     BLIConventionProfile,
+    confirms_plain_fixed_coupon_evidence,
 )
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
     BLIBondScheduleError,
@@ -807,9 +808,16 @@ def test_module_reads_no_clock():
 # The synthetic profile below asserts nothing about any real market. Its
 # values are deliberately different from UST's in every field precisely so a
 # hardcoded UST constant anywhere in the resolver would show up as a failure
-# here. Registering a *real* market's profile needs that market's conventions
-# confirmed by Bloomberg evidence, an existing reviewed document, or Eddy --
-# which is why `CONVENTION_PROFILES` still holds only UST.
+# here.
+#
+# `plain_fixed_coupon_evidence_required=False`: this profile exists to prove
+# field-*value* derivation (day count, ex-dividend, settlement lag, bond
+# type, status, last_coupon_date, the day-count-evidence contradiction rule)
+# is read from the profile record rather than hardcoded -- a concern entirely
+# separate from the structural-evidence gate, which has its own dedicated
+# `_GATED_SYNTHETIC_PROFILE` below. Mixing the two into one profile would
+# mean every one of these tests would first have to fight through the gate
+# just to observe an unrelated field's value.
 
 _SYNTHETIC_PROFILE = BLIConventionProfile(
     name="SYNTHETIC_TEST",
@@ -823,18 +831,13 @@ _SYNTHETIC_PROFILE = BLIConventionProfile(
     settlement_business_days=2,
     settlement_calendar=CALENDAR_US_SIFMA,
     source_system="SHIORI_SYNTHETIC_TEST_CONVENTION_PROFILE",
+    plain_fixed_coupon_evidence_required=False,
 )
 
-# Presence markers for the plain fixed-coupon structural evidence every
-# profile but UST requires. **These are not confirmed Bloomberg values and
-# assert nothing about any mnemonic's semantics**: the gate checks only that
-# the facts were established at all, and no confirmed mnemonic supplies them
-# yet (they are the candidates `tools/bloomberg_dapi_probe.py` proposes). A
-# real bond therefore never reaches these tests' state today -- which is
-# exactly what `test_a_real_bloomberg_bond_never_passes_...` below pins.
-_STRUCTURAL_EVIDENCE = dict.fromkeys(PLAIN_FIXED_COUPON_EVIDENCE_FIELDS, "SYNTHETIC_EVIDENCE")
-
-# An annual grid: 2024-01-31 to 2031-01-31, first coupon 2025-01-31.
+# An annual grid: 2024-01-31 to 2031-01-31, first coupon 2025-01-31. No
+# structural-evidence fields at all -- irrelevant to a profile whose gate is
+# off, and every gated test below builds its own evidence overlay explicitly
+# rather than inheriting one from here.
 _ANNUAL_BOND_MASTER = {
     "coupon": 0.0275,
     "coupon_frequency": "ANNUAL",
@@ -846,18 +849,21 @@ _ANNUAL_BOND_MASTER = {
     "day_count": None,
     "bond_type": None,
     "last_coupon_date": None,
-    **_STRUCTURAL_EVIDENCE,
 }
+
+
+def _register_profile(monkeypatch, profile: BLIConventionProfile) -> BLIConventionProfile:
+    monkeypatch.setitem(
+        profile_module.__dict__["get_convention_profile"].__globals__["CONVENTION_PROFILES"],
+        profile.name,
+        profile,
+    )
+    return profile
 
 
 @pytest.fixture()
 def synthetic_registry(monkeypatch):
-    monkeypatch.setitem(
-        profile_module.__dict__["get_convention_profile"].__globals__["CONVENTION_PROFILES"],
-        _SYNTHETIC_PROFILE.name,
-        _SYNTHETIC_PROFILE,
-    )
-    return _SYNTHETIC_PROFILE
+    return _register_profile(monkeypatch, _SYNTHETIC_PROFILE)
 
 
 def _resolve_synthetic(**overrides):
@@ -1063,29 +1069,125 @@ def test_the_resolver_names_no_profile_and_no_market_anywhere_in_its_code():
 # linker, a convertible and an amortizer. UST is exempt by Eddy's explicit
 # instruction (its behaviour passed real workstation UAT); every other
 # profile refuses until Bloomberg has confirmed what the bond actually is.
+#
+# Bloomberg workstation evidence (Issue #161 follow-up) confirmed three of
+# the five evidence fields -- `coupon_type` ("FIXED"), `inflation_linked_flag`
+# and `convertible_flag` (both `False`) -- but explicitly not the other two:
+# `security_type` returns a value with no approved criterion, and no working
+# amortizing-evidence mnemonic survived probing at all. What follows proves
+# the gate correctly distinguishes "this field's value confirms plain fixed
+# coupon" from "this field merely has a value" -- the exact bug a naive
+# presence-only check would have -- and that today's real-shaped evidence
+# (3 confirmed, 2 permanently unconfirmed) still leaves every non-UST profile
+# fail-closed, satisfying Eddy's item 3 instruction directly.
+
+# A separate profile from `_SYNTHETIC_PROFILE`: this one's gate is ON
+# (`plain_fixed_coupon_evidence_required` defaults to `True`), because these
+# tests are specifically about that gate, not about field-value derivation.
+_GATED_SYNTHETIC_PROFILE = BLIConventionProfile(
+    name="GATED_SYNTHETIC_TEST",
+    currency=Currency.EUR,
+    coupon_frequencies=(Frequency.ANNUAL,),
+    day_count=DayCount.THIRTY_360,
+    bond_type=BondType.FIXED_COUPON_BULLET,
+    ex_dividend_days=3,
+    status=BondStatus.ACTIVE,
+    settlement_business_days=2,
+    settlement_calendar=CALENDAR_US_SIFMA,
+    source_system="SHIORI_GATED_SYNTHETIC_TEST_CONVENTION_PROFILE",
+)
 
 
-def _real_bloomberg_bond_master(**overrides) -> dict:
-    """A bond master shaped exactly like a real Bloomberg response today.
+@pytest.fixture()
+def gated_registry(monkeypatch):
+    return _register_profile(monkeypatch, _GATED_SYNTHETIC_PROFILE)
 
-    That is: every confirmed field populated, and **none** of the structural
-    evidence fields, because no mnemonic for any of them is confirmed yet.
-    """
 
-    master = {
-        key: value
-        for key, value in _ANNUAL_BOND_MASTER.items()
-        if key not in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+def _resolve_gated(**overrides):
+    kwargs = {
+        "convention_profile": _GATED_SYNTHETIC_PROFILE.name,
+        "isin": "XS0000000042",
+        "currency": "EUR",
+        "bond_master": dict(_ANNUAL_BOND_MASTER),
+        "bond_master_raw": {},
+        "valuation_date": _VALUATION_DATE,
+        "expiry_date": _EXPIRY_DATE,
     }
-    master.update(overrides)
-    return master
+    kwargs.update(overrides)
+    return resolve_bond_advanced_field_profile(**kwargs)
 
 
-def test_a_real_bloomberg_bond_never_passes_a_non_ust_profile_today(synthetic_registry):
-    """Item 5, the decisive one: selecting a profile by hand does not
-    establish what the bond is, so it cannot push one through."""
+# The confirmed positive values for the three fields Bloomberg workstation
+# evidence actually settled -- not a placeholder string. Using anything else
+# here (as an earlier revision of this test file did, before the evidence
+# existed) would no longer prove what these tests need to prove.
+_CONFIRMED_STRUCTURAL_EVIDENCE = {
+    "coupon_type": "FIXED",
+    "inflation_linked_flag": False,
+    "convertible_flag": False,
+}
 
-    profile = _resolve_synthetic(bond_master=_real_bloomberg_bond_master())
+
+def test_the_three_confirmed_fields_alone_do_not_admit_a_non_ust_profile(gated_registry):
+    """Item 3, the decisive regression: even with every field Bloomberg has
+    actually confirmed, a non-UST profile must still refuse, because
+    `security_type`/`amortizing_flag` have no approved criterion at all."""
+
+    profile = _resolve_gated(
+        bond_master={**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
+    )
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    reason = " ".join(profile.rejection_reasons)
+    assert "security_type" in reason
+    assert "amortizing_flag" in reason
+    # The three genuinely-confirmed fields are not cited: they are pulling
+    # their weight, and only the two truly-unconfirmed ones block.
+    assert "coupon_type" not in reason
+    assert "inflation_linked_flag" not in reason
+    assert "convertible_flag" not in reason
+
+
+@pytest.mark.parametrize(
+    "field, wrong_value",
+    [
+        ("coupon_type", "FLOATING"),
+        ("inflation_linked_flag", True),
+        ("convertible_flag", True),
+    ],
+)
+def test_a_present_but_wrong_value_still_blocks_the_field_it_belongs_to(
+    gated_registry, field, wrong_value
+):
+    """The exact bug a presence-only check would miss: `bond_master[field]`
+    is not `None` here (a real floater's Bloomberg response would not be
+    empty either), and it must still fail to confirm anything."""
+
+    bond_master = {
+        **_ANNUAL_BOND_MASTER,
+        **_CONFIRMED_STRUCTURAL_EVIDENCE,
+        field: wrong_value,
+    }
+    profile = _resolve_gated(bond_master=bond_master)
+
+    assert profile.supported is False
+    assert field in " ".join(profile.rejection_reasons)
+
+
+def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_registry):
+    """The end-to-end proof, using a bond_master shaped exactly like what
+    `load_bloomberg_bond_identity_and_quote` returns today: three evidence
+    keys populated with their confirmed values, two (`security_type`,
+    `amortizing_flag`) simply absent -- no mnemonic exists for them, so
+    `bond_master.get(...)` is `None`, exactly like any other unmapped
+    destination. Still `supported=False`."""
+
+    bond_master = {**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
+    assert "security_type" not in bond_master
+    assert "amortizing_flag" not in bond_master
+
+    profile = _resolve_gated(bond_master=bond_master)
 
     assert profile.supported is False
     assert profile.fields == ()
@@ -1094,26 +1196,7 @@ def test_a_real_bloomberg_bond_never_passes_a_non_ust_profile_today(synthetic_re
     assert "has not confirmed this bond is a plain fixed-coupon bullet" in reason
     assert "floating-rate, inflation-linked, convertible or amortizing" in reason
     assert "selecting it by hand does not establish it" in reason
-
-
-def test_the_refusal_names_every_missing_piece_of_evidence(synthetic_registry):
-    """So a probe run has a checklist, rather than one field at a time."""
-
-    profile = _resolve_synthetic(bond_master=_real_bloomberg_bond_master())
-
-    reason = " ".join(profile.rejection_reasons)
-    for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS:
-        assert field in reason
-
-
-@pytest.mark.parametrize("missing", PLAIN_FIXED_COUPON_EVIDENCE_FIELDS)
-def test_one_missing_evidence_field_is_enough_to_refuse(synthetic_registry, missing):
-    """Fail-closed means *every* piece, not a majority of them."""
-
-    profile = _resolve_synthetic(bond_master={**_ANNUAL_BOND_MASTER, missing: None})
-
-    assert profile.supported is False
-    assert missing in " ".join(profile.rejection_reasons)
+    assert "security_type" in reason and "amortizing_flag" in reason
 
 
 def test_ust_is_exempt_so_its_uat_passed_behaviour_does_not_regress():
@@ -1132,7 +1215,7 @@ def test_ust_is_exempt_so_its_uat_passed_behaviour_does_not_regress():
 
 
 def test_the_evidence_gate_is_checked_server_side_not_left_to_the_browser(
-    synthetic_registry,
+    gated_registry,
 ):
     """Structural proof of *where* item 5's guarantee lives. The refusal comes
     out of the resolver itself, so no browser state -- including a
@@ -1141,6 +1224,18 @@ def test_the_evidence_gate_is_checked_server_side_not_left_to_the_browser(
     source = inspect.getsource(profile_module._product_rejection_reasons)
     assert "plain_fixed_coupon_evidence_required" in source
     assert "PLAIN_FIXED_COUPON_EVIDENCE_FIELDS" in source
+    assert "confirms_plain_fixed_coupon_evidence" in source
+
+
+def test_the_permanently_unconfirmed_fields_reject_any_value_unit_level():
+    """Unit-level companion to the integration tests above: `security_type`
+    and `amortizing_flag` fail `confirms_plain_fixed_coupon_evidence` for
+    every value, not merely for `None` -- there is no way to satisfy them
+    today, by any bond_master content."""
+
+    for field in ("security_type", "amortizing_flag"):
+        for value in (None, "US GOVERNMENT", "GLOBAL", True, False, 0, "ANYTHING"):
+            assert confirms_plain_fixed_coupon_evidence(field, value) is False, (field, value)
 
 
 # =============================================================================
@@ -1149,6 +1244,9 @@ def test_the_evidence_gate_is_checked_server_side_not_left_to_the_browser(
 
 
 def _no_ex_dividend_profile() -> BLIConventionProfile:
+    # Gate off (`plain_fixed_coupon_evidence_required=False`): these tests
+    # are about the ex-dividend default, not the structural-evidence gate --
+    # see `_GATED_SYNTHETIC_PROFILE` above for that battery.
     return BLIConventionProfile(
         name="NO_EX_DIV_TEST",
         currency=Currency.EUR,
@@ -1159,6 +1257,7 @@ def _no_ex_dividend_profile() -> BLIConventionProfile:
         settlement_business_days=2,
         settlement_calendar=CALENDAR_US_SIFMA,
         source_system="SHIORI_NO_EX_DIV_TEST_CONVENTION_PROFILE",
+        plain_fixed_coupon_evidence_required=False,
     )
 
 

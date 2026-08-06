@@ -762,9 +762,14 @@ _CUSIP_IDENTIFIER = "/cusip/91282CLJ8"
 def _empty_bond_master() -> dict:
     """The expected ``bond_master`` shape when a fixture supplies none of the
     confirmed Bloomberg mnemonics -- every destination present, every value
-    ``None`` (never a fabricated/synthetic value)."""
+    ``None`` (never a fabricated/synthetic value). Covers both the
+    ``BondReferenceData`` schema fields and the plain-fixed-coupon
+    structural-evidence fields (Issue #161 follow-up) -- both groups live in
+    the same ``bond_master`` dict."""
 
-    return dict.fromkeys(module._BOND_MASTER_DESTINATION_FIELDS)
+    return dict.fromkeys(
+        module._BOND_MASTER_DESTINATION_FIELDS + module._BOND_MASTER_EVIDENCE_FIELDS
+    )
 
 
 def _empty_bond_master_raw() -> dict:
@@ -989,11 +994,207 @@ def test_identity_lookup_requests_every_confirmed_bond_master_and_raw_field(monk
         "DAY_CNT_DES",
         "MTY_TYP",
         "CALC_TYP_DES",
+        "CPN_TYP",
+        "INFLATION_LINKED_INDICATOR",
+        "CONVERTIBLE",
     ):
         assert mnemonic in sent_fields
     # Confirmed BAD_FLD mnemonics must never be re-added to the request.
     assert "PENULTIMATE_COUPON_DATE" not in sent_fields
     assert "REDEMPTION_VALUE" not in sent_fields
+    # Issue #161 follow-up: SECURITY_TYP is confirmed to return a value but
+    # has no approved use, and none of the amortizing-evidence candidates
+    # survived probing -- none of them is ever requested.
+    for rejected_or_unmapped in (
+        "SECURITY_TYP",
+        "IS_AMORTIZING",
+        "AMORT_TYP",
+        "REDEMP_TYP",
+        "SCHED_TYP",
+        "MTG_TYP",
+        "PRINCIPAL_FACTOR",
+    ):
+        assert rejected_or_unmapped not in sent_fields
+
+
+# --- Plain fixed-coupon structural evidence fields (Issue #161 follow-up) -----
+
+
+def test_identity_lookup_bond_master_evidence_fields_populate_from_a_corporate_fixture(
+    monkeypatch,
+):
+    # US023135EC69 -- Eddy's Issue #161 follow-up workstation evidence for a
+    # real USD fixed-rate corporate bond candidate: CPN_TYP="FIXED",
+    # SECURITY_TYP="GLOBAL" (confirmed to return a value, not wired -- no
+    # approved criterion), INFLATION_LINKED_INDICATOR="N", CONVERTIBLE="N".
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(
+                        CPN_TYP="FIXED",
+                        SECURITY_TYP="GLOBAL",
+                        INFLATION_LINKED_INDICATOR="N",
+                        CONVERTIBLE="N",
+                    ),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon_type"] == "FIXED"
+    assert result["bond_master"]["inflation_linked_flag"] is False
+    assert result["bond_master"]["convertible_flag"] is False
+    # SECURITY_TYP returned a value, but there is no confirmed criterion or
+    # mnemonic mapping for it -- it stays None, exactly like an unmapped
+    # BondReferenceData destination field.
+    assert result["bond_master"]["security_type"] is None
+    assert result["bond_master"]["amortizing_flag"] is None
+
+
+def test_identity_lookup_bond_master_evidence_fields_populate_from_a_german_govt_fixture(
+    monkeypatch,
+):
+    # DE000BU2Z072 -- Eddy's Issue #161 follow-up workstation evidence for a
+    # real EUR fixed-rate German government bond candidate.
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(
+                        CPN_TYP="FIXED",
+                        SECURITY_TYP="EURO-ZONE",
+                        INFLATION_LINKED_INDICATOR="N",
+                        CONVERTIBLE="N",
+                        DAY_CNT_DES="ACT/ACT",
+                    ),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon_type"] == "FIXED"
+    assert result["bond_master"]["inflation_linked_flag"] is False
+    assert result["bond_master"]["convertible_flag"] is False
+    assert result["bond_master_raw"]["day_count"] == "ACT/ACT"
+
+
+def test_identity_lookup_a_real_floaters_coupon_type_passes_through_unjudged(monkeypatch):
+    """This loader never judges FIXED vs. FLOATING -- it passes the raw
+    Bloomberg string through unchanged, exactly like every other confirmed
+    mnemonic. Whether "FLOATING" confirms or refuses a profile is the
+    resolver's `confirms_plain_fixed_coupon_evidence`, not this loader's."""
+
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER, fields=_identity_fields(CPN_TYP="FLOATING")
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon_type"] == "FLOATING"
+
+
+def test_identity_lookup_inflation_linked_flag_unknown_value_stays_none(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(INFLATION_LINKED_INDICATOR="MAYBE"),
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["inflation_linked_flag"] is None
+
+
+def test_identity_lookup_convertible_flag_unknown_value_stays_none(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields(CONVERTIBLE="Y"))
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    # "Y" is a confirmed value (True), not unknown -- included here to prove
+    # a *convertible* bond's flag is reported truthfully rather than
+    # silently coerced toward the "safe" False a guessed default might pick.
+    assert result["bond_master"]["convertible_flag"] is True
+
+
+def test_identity_lookup_evidence_field_absence_never_fails_the_request(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon_type"] is None
+    assert result["bond_master"]["inflation_linked_flag"] is None
+    assert result["bond_master"]["convertible_flag"] is None
+    assert result["isin"] == "US91282CLJ89"
+    assert result["clean_price_per_100"] == 99.75
+
+
+def test_identity_lookup_evidence_field_exception_never_fails_the_request(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER,
+                    fields=_identity_fields(),
+                    field_exceptions=["[BAD_FLD] CPN_TYP not applicable to security"],
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["coupon_type"] is None
+    assert result["isin"] == "US91282CLJ89"
+    assert holder["session"].stopped is True
 
 
 def test_identity_lookup_bond_master_all_none_when_fixture_supplies_no_confirmed_values(
@@ -1017,7 +1218,11 @@ def test_identity_lookup_bond_master_all_none_when_fixture_supplies_no_confirmed
 def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_fixture(
     monkeypatch,
 ):
-    # US91282CLJ89 -- Eddy's real US Treasury DAPI evidence (PR #141 body).
+    # US91282CLJ89 -- Eddy's real US Treasury DAPI evidence (PR #141 body),
+    # plus the plain-fixed-coupon structural-evidence values Eddy's Issue
+    # #161 follow-up workstation probe confirmed for a real UST
+    # (US91282CMC28): CPN_TYP="FIXED", INFLATION_LINKED_INDICATOR="N",
+    # CONVERTIBLE="N".
     _install_fake_blpapi(
         monkeypatch,
         events=[
@@ -1035,6 +1240,9 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
                         DAY_CNT_DES="ACT/ACT",
                         MTY_TYP="AT MATURITY",
                         CALC_TYP_DES="STREET CONVENTION",
+                        CPN_TYP="FIXED",
+                        INFLATION_LINKED_INDICATOR="N",
+                        CONVERTIBLE="N",
                     ),
                 )
             )
@@ -1059,6 +1267,11 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
         "bond_type": None,
         "yield_convention": None,
         "business_day_convention": None,
+        "coupon_type": "FIXED",
+        "security_type": None,
+        "inflation_linked_flag": False,
+        "convertible_flag": False,
+        "amortizing_flag": None,
     }
     assert result["bond_master_raw"] == {
         "day_count": "ACT/ACT",

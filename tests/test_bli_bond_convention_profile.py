@@ -37,10 +37,12 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     CALENDAR_US_SIFMA,
     CONVENTION_PROFILES,
     GERMAN_GOVT_CONVENTION_PROFILE,
+    PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     SUPPORTED_CONVENTION_PROFILE_NAMES,
     US_CORPORATE_CONVENTION_PROFILE,
     UST_CONVENTION_PROFILE,
     BLIConventionProfile,
+    confirms_plain_fixed_coupon_evidence,
     convention_profile_candidates,
     get_convention_profile,
 )
@@ -149,14 +151,16 @@ def test_neither_new_profile_guesses_an_ex_dividend_default():
     assert UST_CONVENTION_PROFILE.ex_dividend_days == 0
 
 
-def test_neither_new_profile_guesses_a_day_count_description_string():
+def test_the_new_profiles_day_count_evidence_matches_the_workstation_probe():
     """`day_count_evidence` withholds `day_count` when Bloomberg's own
-    DAY_CNT_DES contradicts the profile. Neither market's string has been
-    observed, and comparing against a guessed one would block `day_count` on
-    every ordinary bond in that market."""
+    DAY_CNT_DES contradicts the profile. Both new markets' strings are now
+    Bloomberg workstation evidence (Issue #161 follow-up: US023135EC69 ->
+    "30/360", DE000BU2Z072 -> "ACT/ACT"), not a guess -- both happen to agree
+    with the confirmed Annex A day count, so they are wired the same way
+    UST's is."""
 
-    assert US_CORPORATE_CONVENTION_PROFILE.day_count_evidence is None
-    assert GERMAN_GOVT_CONVENTION_PROFILE.day_count_evidence is None
+    assert US_CORPORATE_CONVENTION_PROFILE.day_count_evidence == "30/360"
+    assert GERMAN_GOVT_CONVENTION_PROFILE.day_count_evidence == "ACT/ACT"
     assert UST_CONVENTION_PROFILE.day_count_evidence == "ACT/ACT"
 
 
@@ -378,3 +382,74 @@ def test_a_missing_bond_master_is_not_an_error():
 
     result = convention_profile_candidates(currency="USD", bond_master=None)
     assert result.candidates == ()
+
+
+# =============================================================================
+# Issue #161 follow-up: confirms_plain_fixed_coupon_evidence, unit-level
+# =============================================================================
+#
+# The Bloomberg workstation evidence log next to PLAIN_FIXED_COUPON_EVIDENCE_
+# FIELDS above records exactly what was probed. These tests pin the
+# resulting predicate: a *value* check, not a presence check, and a hard
+# "no" for the two fields with no approved criterion at all.
+
+
+@pytest.mark.parametrize(
+    "field, confirming_value",
+    [
+        ("coupon_type", "FIXED"),
+        ("inflation_linked_flag", False),
+        ("convertible_flag", False),
+    ],
+)
+def test_the_confirmed_value_positively_confirms_its_field(field, confirming_value):
+    assert confirms_plain_fixed_coupon_evidence(field, confirming_value) is True
+
+
+@pytest.mark.parametrize(
+    "field, non_confirming_value",
+    [
+        ("coupon_type", "FLOATING"),
+        ("coupon_type", "VARIABLE"),
+        ("coupon_type", None),
+        ("coupon_type", "fixed"),  # not normalized/case-folded, same discipline as Y/N flags
+        ("inflation_linked_flag", True),
+        ("inflation_linked_flag", None),
+        ("inflation_linked_flag", "N"),  # the raw string, not the transformed bool
+        ("convertible_flag", True),
+        ("convertible_flag", None),
+    ],
+)
+def test_a_present_but_wrong_value_does_not_confirm(field, non_confirming_value):
+    """The exact bug a presence-only check ('is it not None?') would miss: a
+    real floater's Bloomberg response has a non-None `coupon_type`, and it
+    must still fail to confirm a plain fixed-coupon bullet."""
+
+    assert confirms_plain_fixed_coupon_evidence(field, non_confirming_value) is False
+
+
+@pytest.mark.parametrize("field", ["security_type", "amortizing_flag"])
+@pytest.mark.parametrize(
+    "value",
+    [None, "US GOVERNMENT", "GLOBAL", "EURO-ZONE", True, False, 0, 1, "ANYTHING"],
+)
+def test_fields_with_no_approved_criterion_never_confirm_any_value(field, value):
+    """`security_type` is confirmed to return a value (Bloomberg workstation
+    evidence: "US GOVERNMENT" / "GLOBAL" / "EURO-ZONE") but nothing has
+    established which values would mean "plain bullet" -- and no working
+    amortizing-evidence mnemonic exists at all. Both therefore reject every
+    value, not just absence, until a real criterion is approved."""
+
+    assert confirms_plain_fixed_coupon_evidence(field, value) is False
+
+
+def test_an_unrecognized_field_name_never_confirms():
+    assert confirms_plain_fixed_coupon_evidence("not_a_real_field", "FIXED") is False
+
+
+def test_every_evidence_field_is_covered_by_the_predicate():
+    """Structural completeness: the predicate has an opinion (True/False,
+    never an exception) for every field the resolver actually iterates."""
+
+    for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS:
+        assert confirms_plain_fixed_coupon_evidence(field, "anything") in (True, False)

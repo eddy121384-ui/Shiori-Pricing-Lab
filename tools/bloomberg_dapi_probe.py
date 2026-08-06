@@ -41,6 +41,70 @@ at all (their earlier candidate mnemonics were rejected above, for
 ``bond_type``/``yield_convention``, or never had one to begin with) --
 probe a new candidate for these explicitly via ``--fields``.
 
+**Resolution history (Issue #161 follow-up: plain fixed-coupon structural
+evidence).** Eddy probed ``US91282CMC28`` (UST, already admitted),
+``US023135EC69`` (a real USD fixed-rate corporate bond candidate) and
+``DE000BU2Z072`` (a real EUR fixed-rate German government bond candidate) on
+his own Bloomberg Terminal:
+
+- Confirmed and wired into
+  ``shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_EVIDENCE_FIELD_MAP``
+  (all three securities returned a value, and each field's confirmed value is
+  what the pricing convention-profile gate now requires -- see
+  ``pricing.bli_bond_convention_profile.confirms_plain_fixed_coupon_evidence``):
+  ``CPN_TYP`` (all three: ``"FIXED"``), ``INFLATION_LINKED_INDICATOR`` (all
+  three: ``"N"``), ``CONVERTIBLE`` (all three: ``"N"``).
+- Confirmed to return a value, but **not** wired anywhere -- no criterion
+  exists for what value would confirm a plain fixed-coupon bullet, and a
+  guessed one is not acceptable: ``SECURITY_TYP`` (``"US GOVERNMENT"`` /
+  ``"GLOBAL"`` / ``"EURO-ZONE"`` respectively).
+- Confirmed ``BAD_FLD`` against the corporate and German government
+  candidates -- must not be re-added without a fresh, separately-approved
+  confirmation (same standing as ``PENULTIMATE_COUPON_DATE``/
+  ``REDEMPTION_VALUE`` above): ``IS_AMORTIZING``, ``AMORT_TYP``,
+  ``REDEMP_TYP``, ``SCHED_TYP``.
+- Confirmed not applicable to either candidate, same standing: ``MTG_TYP``.
+- Confirmed to **return** ``1.000000`` on both candidates, but explicitly
+  **not approved** as amortizing evidence: ``PRINCIPAL_FACTOR``. Eddy's own
+  reasoning -- a factor of 1.0 only proves the principal has not yet paid
+  down, never that no future amortization schedule exists.
+
+Also confirmed against ``US91282CMC28``, ``US023135EC69`` and
+``DE000BU2Z072`` (not a new field, but new observations of an
+already-confirmed one): ``DAY_CNT_DES`` reads ``"30/360"`` for the corporate
+candidate and ``"ACT/ACT"`` for the German government candidate, both
+matching Annex A's confirmed day count for that market -- see
+``bli_bond_convention_profile.US_CORPORATE_CONVENTION_PROFILE``/
+``GERMAN_GOVT_CONVENTION_PROFILE``'s own ``day_count_evidence``.
+
+**Still needed: a bullet-vs-amortizing / principal-repayment-schedule
+field.** Every candidate probed so far for ``amortizing_flag`` is rejected
+(see above), and this script will not propose another guessed mnemonic --
+that is not what turned up a working result last time. The next step is
+Eddy's own Bloomberg Terminal, not this script:
+
+- ``FLDS<GO>``: search using plain-language keywords rather than a guessed
+  mnemonic -- try ``amortiz``, ``sinking fund``, ``redemption type``,
+  ``principal payment``, ``payment schedule``, ``prepayment``, and
+  ``factor`` (in addition to the already-rejected ``PRINCIPAL_FACTOR``, a
+  *schedule*-shaped field rather than a point-in-time factor may exist
+  under a related name). For each hit, copy back: the exact mnemonic
+  (as ``FLDS`` displays it, e.g. ``MNEMONIC (CATEGORY)``), and Bloomberg's
+  own one-line field description.
+- ``HELP HELP`` (or the Bloomberg analytics/reference-data help desk): ask
+  in plain language, e.g. *"What reference-data field identifies whether a
+  bond redeems via bullet, amortizing schedule, or sinking fund?"* or *"Is
+  there a field that shows a bond's principal repayment schedule or
+  amortization type?"* Copy back the mnemonic(s) named in the reply,
+  verbatim.
+
+Either way: copying back a mnemonic and its description is **not** a
+mapping decision by itself. A mnemonic found this way still needs a probe
+run against a real bond (via ``--fields``, exactly like the five above)
+before Eddy confirms what its values mean, and only then does it get wired
+into ``_BOND_MASTER_EVIDENCE_FIELD_MAP`` and
+``confirms_plain_fixed_coupon_evidence``.
+
 **Usage** (on a Bloomberg-networked workstation, Terminal running and
 logged in locally)::
 
@@ -78,42 +142,24 @@ _APIFLDS_SERVICE = "//blp/apiflds"
 _REQUEST_TIMEOUT_MS = 10_000
 
 # Candidate Bond Master field mnemonics -- UNCONFIRMED against any live DAPI
-# response. Empty: all 12 of this script's original candidates are now
-# resolved one way or another (see the module docstring's resolution history
-# above) -- CPN/CPN_FREQ/ISSUE_DT/MATURITY/FIRST_CPN_DT/CALLABLE/SINKABLE are
-# confirmed and wired into _BOND_MASTER_FIELD_MAP; DAY_CNT_DES/MTY_TYP/
-# CALC_TYP_DES are confirmed and wired into _BOND_MASTER_RAW_DISPLAY_FIELD_MAP
-# (display-only); PENULTIMATE_COUPON_DATE/REDEMPTION_VALUE are confirmed
-# BAD_FLD and must not be re-added without a fresh confirmation. Add a new
-# entry here only for a genuinely new, not-yet-probed candidate mnemonic.
-#
-# **Issue #161 follow-up: plain fixed-coupon structural evidence.** The five
-# candidates below are the ones Shiori needs before any convention profile
-# other than UST may be applied to a real bond. Today nothing in the
-# confirmed Bond Master distinguishes an ordinary fixed-coupon bullet from a
-# floater, a linker, a convertible or an amortizer: a floating-rate note
-# returns its *current* coupon in CPN and its reset frequency in CPN_FREQ,
-# and is neither CALLABLE nor SINKABLE, so it passes every check that
-# exists. `bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`
-# names the destination facts these would supply, and the resolver refuses
-# every non-UST profile until they are confirmed.
-#
-# **These are proposals to probe, not mappings.** Each one may come back
-# `returned`, `absent`, or `field_exception` (BAD_FLD), and a mnemonic that
-# returns a value still needs Eddy's confirmation of what its values *mean*
-# before anything is mapped -- exactly as #145 requires, and exactly as
-# DAY_CNT_DES/MTY_TYP/CALC_TYP_DES were kept display-only for that reason.
-# Nothing in this repo reads any of them yet.
-_CANDIDATE_BOND_MASTER_FIELDS: dict[str, str] = {
-    "CPN_TYP": "coupon_type -- would evidence FIXED vs FLOATING/VARIABLE coupon",
-    "SECURITY_TYP": "security_type -- would evidence the instrument classification",
-    "INFLATION_LINKED_INDICATOR": "inflation_linked_flag -- would evidence a linker",
-    "CONVERTIBLE": "convertible_flag -- would evidence a convertible",
-    "IS_AMORTIZING": "amortizing_flag -- would evidence an amortizing redemption",
-}
+# response. Empty: every candidate this script has ever proposed is now
+# resolved one way or another (see the module docstring's two resolution-
+# history sections above) -- CPN/CPN_FREQ/ISSUE_DT/MATURITY/FIRST_CPN_DT/
+# CALLABLE/SINKABLE and CPN_TYP/INFLATION_LINKED_INDICATOR/CONVERTIBLE are
+# confirmed and wired into _BOND_MASTER_FIELD_MAP /
+# _BOND_MASTER_EVIDENCE_FIELD_MAP; DAY_CNT_DES/MTY_TYP/CALC_TYP_DES are
+# confirmed and wired into _BOND_MASTER_RAW_DISPLAY_FIELD_MAP (display-only);
+# PENULTIMATE_COUPON_DATE/REDEMPTION_VALUE/IS_AMORTIZING/AMORT_TYP/
+# REDEMP_TYP/SCHED_TYP/MTG_TYP are confirmed rejected and must not be
+# re-added without a fresh confirmation; SECURITY_TYP/PRINCIPAL_FACTOR are
+# confirmed to return a value but have no approved use. Add a new entry here
+# only for a genuinely new, not-yet-probed candidate mnemonic -- see the
+# "still needed" section above for what Eddy should look for next
+# (bullet-vs-amortizing / principal-repayment-schedule evidence) and where.
+_CANDIDATE_BOND_MASTER_FIELDS: dict[str, str] = {}
 # business_day_convention, bond_type, yield_convention, ex_dividend_days,
-# status: deliberately no candidate here at all -- pass --fields explicitly
-# if you have one.
+# status, amortizing_flag: deliberately no candidate here at all -- pass
+# --fields explicitly if you have one.
 
 
 @dataclass(frozen=True)

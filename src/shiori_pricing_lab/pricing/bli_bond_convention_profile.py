@@ -60,6 +60,7 @@ is ``None`` and blocks its own field rather than being guessed.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from shiori_pricing_lab.products.enums import Currency, DayCount, Frequency
@@ -99,12 +100,7 @@ _CALENDAR_FACTORIES = {
 #
 # The Bond Master facts that would let Shiori positively establish a bond is
 # an ordinary fixed-coupon bullet rather than a floater, a linker, a
-# convertible or an amortizer. **None of them has a confirmed Bloomberg
-# mnemonic today** -- they are the candidates
-# Shiori's Bloomberg DAPI probe tool (under ``tools/``) now proposes for
-# Eddy to probe -- so the
-# gate that requires them always refuses, which is the intended fail-closed
-# state, not a bug.
+# convertible or an amortizer.
 #
 # The already-confirmed ``CALLABLE`` and ``SINKABLE`` flags are deliberately
 # not in this tuple: they are checked separately by the resolver's own
@@ -120,6 +116,93 @@ PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
     "convertible_flag",
     "amortizing_flag",
 )
+
+# --- Bloomberg workstation evidence log (Issue #161 follow-up) ---------------
+#
+# Real evidence Eddy captured on his own Bloomberg Terminal, against
+# ``US91282CMC28`` (UST, already admitted), ``US023135EC69`` (a USD
+# fixed-rate corporate bond candidate) and ``DE000BU2Z072`` (a EUR fixed-rate
+# German government bond candidate). See Shiori's Bloomberg DAPI probe tool's
+# own module docstring (under ``tools/``) for the raw per-field probe output
+# this summarizes. Recorded here, not just in a chat log, because AGENTS.md
+# rule 6 requires deterministic code to trace to real evidence, not to
+# something the model recalls.
+#
+# **Confirmed and wired into structural evidence** (all three securities
+# returned a value; see :func:`confirms_plain_fixed_coupon_evidence` below
+# for what value each one must carry to count as positive confirmation):
+#
+# - ``CPN_TYP`` -> ``coupon_type``: all three returned ``"FIXED"``.
+# - ``INFLATION_LINKED_INDICATOR`` -> ``inflation_linked_flag``: all three
+#   returned ``"N"``.
+# - ``CONVERTIBLE`` -> ``convertible_flag``: all three returned ``"N"``.
+#
+# **Confirmed to return a value, but explicitly NOT approved as structural
+# evidence** -- no criterion exists for what value would confirm a plain
+# bullet, so it stays unwired and the field permanently blocks the gate
+# until one is:
+#
+# - ``SECURITY_TYP`` -> ``security_type``: returned ``"US GOVERNMENT"``
+#   (UST), ``"GLOBAL"`` (corporate candidate), ``"EURO-ZONE"`` (German govt
+#   candidate). Three different strings on three different markets is
+#   evidence the field carries *some* classification, not evidence of what
+#   values would mean "plain fixed-coupon bullet" -- that mapping is not
+#   guessed here.
+#
+# **Confirmed rejected** -- probed as amortizing-evidence candidates,
+# disproven, and must not be re-added without a fresh, separately-approved
+# confirmation (same standing as ``PENULTIMATE_COUPON_DATE``/
+# ``REDEMPTION_VALUE`` in Shiori's Bloomberg DAPI probe tool (under ``tools/``)):
+#
+# - ``IS_AMORTIZING``, ``AMORT_TYP``, ``REDEMP_TYP``, ``SCHED_TYP``:
+#   confirmed ``BAD_FLD`` against the corporate and German government
+#   candidates.
+# - ``MTG_TYP``: confirmed not applicable to either candidate.
+# - ``PRINCIPAL_FACTOR``: confirmed **returned** ``1.000000`` on both
+#   candidates, but explicitly **not approved** as amortizing evidence --
+#   Eddy's own reasoning: a factor of 1.0 only proves the principal has not
+#   yet paid down, never that no future amortization schedule exists. There
+#   is still no approved criterion for ``amortizing_flag``.
+#
+# No further Bloomberg mnemonic guessing follows any of this. The next step
+# is Eddy searching Bloomberg's own field directory on his workstation
+# (``FLDS<GO>``) or asking Bloomberg support (``HELP HELP``) for the field
+# that identifies bullet vs. amortizing redemption or a principal repayment
+# schedule -- see Shiori's Bloomberg DAPI probe tool (under ``tools/``)'s own "still needed"
+# section for the exact keywords and what to copy back.
+
+
+# Field -> the predicate its Bloomberg-sourced value must satisfy to count as
+# positive confirmation that this bond is a plain fixed-coupon bullet, per
+# the evidence log above. A field with no entry here has no approved
+# criterion at all -- not "no value yet", but no confirmed rule for what any
+# value would mean -- so it can never confirm anything regardless of what
+# ``bond_master`` holds for it (`security_type`, `amortizing_flag`).
+_PLAIN_FIXED_COUPON_EVIDENCE_CHECKS: dict[str, Callable[[object], bool]] = {
+    "coupon_type": lambda value: value == "FIXED",
+    "inflation_linked_flag": lambda value: value is False,
+    "convertible_flag": lambda value: value is False,
+}
+
+
+def confirms_plain_fixed_coupon_evidence(field: str, value: object) -> bool:
+    """Whether ``value`` (from ``bond_master[field]``) positively confirms
+    this one structural-evidence field for a plain fixed-coupon bullet.
+
+    This is a *value* check, not a presence check: ``bond_master`` can carry
+    a non-``None`` value for ``coupon_type`` (e.g. a real floater's
+    ``"FLOATING"``) that must still fail to confirm anything, which is why
+    the resolver never treats "the key exists" as sufficient evidence on its
+    own. A field with no entry in :data:`_PLAIN_FIXED_COUPON_EVIDENCE_CHECKS`
+    (``security_type``, ``amortizing_flag``) has no approved criterion at
+    all yet, so this always returns ``False`` for it regardless of the
+    value -- see the evidence log above for why.
+    """
+
+    check = _PLAIN_FIXED_COUPON_EVIDENCE_CHECKS.get(field)
+    if check is None:
+        return False
+    return bool(check(value))
 
 
 class BLIConventionProfileCalendarError(RuntimeError):
@@ -289,18 +372,21 @@ UST_CONVENTION_PROFILE = BLIConventionProfile(
 # Annex A, confirmed by Eddy: USD, semi-annual, 30/360 (bond basis), T+2 on
 # the SIFMA-recommended U.S. bond-market calendar.
 #
-# `ex_dividend_days` is deliberately absent: Eddy confirmed the four values
-# above and explicitly did *not* confirm an ex-dividend default for this
-# market, so the resolver blocks that one field rather than assuming zero.
-# `day_count_evidence` is absent for the same reason -- Bloomberg's
-# `DAY_CNT_DES` string for a 30/360 corporate has not been observed, and
-# comparing against a guessed one would block `day_count` on every ordinary
-# corporate bond.
+# `ex_dividend_days` is deliberately absent: Eddy confirmed the four Annex A
+# values above and explicitly did *not* confirm an ex-dividend default for
+# this market, so the resolver blocks that one field rather than assuming
+# zero. `day_count_evidence="30/360"` is the Bloomberg workstation evidence
+# log's own DAY_CNT_DES observation for US023135EC69 (a real USD fixed-rate
+# corporate bond candidate) -- it agrees with the confirmed Annex A day
+# count, so it is wired the same way UST's is: DAY_CNT_DES reading anything
+# else contradicts this profile and withholds day_count alone for the trader
+# to set.
 US_CORPORATE_CONVENTION_PROFILE = BLIConventionProfile(
     name="US_CORPORATE",
     currency=Currency.USD,
     coupon_frequencies=(Frequency.SEMI_ANNUAL,),
     day_count=DayCount.THIRTY_360,
+    day_count_evidence="30/360",
     bond_type=BondType.FIXED_COUPON_BULLET,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
@@ -314,13 +400,17 @@ US_CORPORATE_CONVENTION_PROFILE = BLIConventionProfile(
 # Italian government bond gets its own profile rather than quietly borrowing
 # this one's settlement calendar and day count.
 #
-# `ex_dividend_days` and `day_count_evidence` are absent for the same reasons
-# as US_CORPORATE above.
+# `ex_dividend_days` is absent for the same reason as US_CORPORATE above.
+# `day_count_evidence="ACT/ACT"` is the Bloomberg workstation evidence log's
+# own DAY_CNT_DES observation for DE000BU2Z072 (a real EUR fixed-rate German
+# government bond candidate) -- it agrees with the confirmed Annex A day
+# count, so it is wired the same way.
 GERMAN_GOVT_CONVENTION_PROFILE = BLIConventionProfile(
     name="GERMAN_GOVT",
     currency=Currency.EUR,
     coupon_frequencies=(Frequency.ANNUAL,),
     day_count=DayCount.ACT_ACT_BOND,
+    day_count_evidence="ACT/ACT",
     bond_type=BondType.FIXED_COUPON_BULLET,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
