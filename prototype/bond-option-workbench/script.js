@@ -322,18 +322,21 @@
 
   // The export's own source_system label for a profile-supplied value.
   //
-  // Issue #161 follow-up item 6: with US_CORPORATE and GERMAN_GOVT
-  // registered alongside UST, a fixed `SHIORI_UST_FIXED_COUPON_PROFILE`
-  // string would stamp a German government bond's day count and settlement
-  // dates as having come from the UST profile. It is therefore derived from
-  // the profile actually selected, and mirrors the server's own
-  // `BLIConventionProfile.source_system`. The UST value consequently changes
-  // from `SHIORI_UST_FIXED_COUPON_PROFILE` to `SHIORI_UST_CONVENTION_PROFILE`
-  // -- a deliberate, instructed change, not a silent one.
+  // Issue #161 follow-up item 6 (compatibility correction): this is never
+  // computed here. Each registered profile states its own explicit
+  // `source_system` server-side (`BLIConventionProfile.source_system`) --
+  // UST keeps its pre-existing, already-shipped
+  // `SHIORI_UST_FIXED_COUPON_PROFILE` unchanged, while US_CORPORATE and
+  // GERMAN_GOVT get their own distinct labels. `/api/bond/advanced-profile`'s
+  // response now carries that value verbatim as `source_system`, and this
+  // file reads it from the last resolved answer rather than deriving a
+  // string from the selected profile's name -- deriving it here would be
+  // exactly the second, independently-typed copy of server truth this file
+  // avoids everywhere else (see `renderConventionProfilePicker`).
   function conventionProfileSourceSystem() {
-    return selectedConventionProfile === null
-      ? MANUAL_SOURCE_SYSTEM
-      : `SHIORI_${selectedConventionProfile}_CONVENTION_PROFILE`;
+    return advancedProfile && typeof advancedProfile.source_system === "string"
+      ? advancedProfile.source_system
+      : MANUAL_SOURCE_SYSTEM;
   }
   const TRADER_OVERRIDE_BASIS = "TRADER_OVERRIDE";
   // Mirrors the resolver's own PROVENANCE_BLOCKED label. Not a value tier:

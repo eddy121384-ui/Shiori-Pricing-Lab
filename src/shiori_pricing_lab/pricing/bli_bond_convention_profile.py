@@ -78,18 +78,19 @@ except ImportError:  # QuantLib is optional -- pyproject.toml [project.optional-
 # for the U.S. government-bond market -- this repo writes no holiday rules,
 # partial or otherwise.
 
-# QuantLib's ``UnitedStates(GovernmentBond)`` -- its own name for the U.S.
-# bond market's holiday schedule, which is the SIFMA-recommended schedule
-# Eddy named for ``US_CORPORATE``. QuantLib 1.43 exposes no separate "SIFMA"
+# The semantic name stays ``US_SIFMA`` -- what Eddy actually confirmed for
+# ``US_CORPORATE`` -- even though the QuantLib object behind it is
+# ``UnitedStates(GovernmentBond)``. QuantLib 1.43 exposes no separate "SIFMA"
 # market (its ``UnitedStates::Market`` members are Settlement, NYSE,
-# GovernmentBond, NERC, LiborImpact, FederalReserve and SOFR), so UST and
-# US_CORPORATE name the same calendar object here rather than one of them
-# getting a second, silently-different holiday table.
-CALENDAR_US_BOND_MARKET = "US_BOND_MARKET"
+# GovernmentBond, NERC, LiborImpact, FederalReserve and SOFR); accepted as the
+# implementation, per Eddy, but the name in this code must not call a
+# corporate-bond convention a "UST calendar" -- the two profiles share a
+# QuantLib object, not an identity.
+CALENDAR_US_SIFMA = "US_SIFMA"
 CALENDAR_TARGET = "TARGET"
 
 _CALENDAR_FACTORIES = {
-    CALENDAR_US_BOND_MARKET: lambda: ql.UnitedStates(ql.UnitedStates.GovernmentBond),
+    CALENDAR_US_SIFMA: lambda: ql.UnitedStates(ql.UnitedStates.GovernmentBond),
     CALENDAR_TARGET: lambda: ql.TARGET(),
 }
 
@@ -137,9 +138,20 @@ class BLIConventionProfile:
 
     ``name`` is the selection token that crosses the browser/server boundary
     (``convention_profile`` in the request body) and is echoed back in the
-    response. ``default_provenance`` and ``source_system`` are both derived
-    from it, so a profile can never be registered whose provenance tier or
-    export label disagrees with its own name.
+    response. ``default_provenance`` is derived from it, so a profile can
+    never be registered whose provenance tier disagrees with its own name.
+
+    ``source_system`` is **not** derived from ``name``, and this is a
+    deliberate compatibility correction: an earlier revision derived it as
+    ``f"SHIORI_{name}_CONVENTION_PROFILE"``, which would have silently
+    changed UST's already-shipped run-export value from
+    ``SHIORI_UST_FIXED_COUPON_PROFILE`` (PR #162, real Bloomberg workstation
+    UAT) to ``SHIORI_UST_CONVENTION_PROFILE``. Eddy's instruction is that the
+    existing UST export contract must not move for the sake of a uniform
+    naming scheme, so every profile states its own ``source_system``
+    explicitly instead -- see :data:`UST_CONVENTION_PROFILE` for the
+    preserved value, and :data:`US_CORPORATE_CONVENTION_PROFILE` /
+    :data:`GERMAN_GOVT_CONVENTION_PROFILE` for the new profiles' own.
 
     Two fields are deliberately **optional**, because "this market's value is
     not confirmed" is a real state that must not be papered over with a
@@ -170,6 +182,10 @@ class BLIConventionProfile:
     status: BondStatus
     settlement_business_days: int
     settlement_calendar: str
+    # This profile's own explicit ``source_system`` label for the run
+    # export. Explicit, not derived from ``name`` -- see this dataclass's own
+    # docstring for why UST's value must not move.
+    source_system: str
     ex_dividend_days: int | None = None
     day_count_evidence: str | None = None
     # Whether this profile may only be applied to a bond Shiori can
@@ -189,6 +205,11 @@ class BLIConventionProfile:
             raise ValueError(
                 f"convention profile {self.name!r} must state at least one coupon "
                 "frequency its conventions cover"
+            )
+        if not self.source_system or not self.source_system.strip():
+            raise ValueError(
+                f"convention profile {self.name!r} must state an explicit, non-blank "
+                "source_system for the run export"
             )
         if self.ex_dividend_days is not None:
             if isinstance(self.ex_dividend_days, bool) or not isinstance(
@@ -223,19 +244,6 @@ class BLIConventionProfile:
 
         return f"{self.name}_PROFILE_DEFAULT"
 
-    @property
-    def source_system(self) -> str:
-        """This profile's own ``source_system`` label in the run export.
-
-        Derived from the profile's name for the same reason as
-        :attr:`default_provenance`: with three registered profiles, a fixed
-        ``SHIORI_UST_...`` string would stamp a German government bond's
-        values as having come from the UST profile (Issue #161 follow-up
-        item 6).
-        """
-
-        return f"SHIORI_{self.name}_CONVENTION_PROFILE"
-
     def calendar(self) -> ql.Calendar:
         """Return this profile's reviewed QuantLib settlement calendar."""
 
@@ -258,6 +266,11 @@ class BLIConventionProfile:
 # It is the one profile exempt from the plain-fixed-coupon evidence gate, by
 # Eddy's explicit instruction: this exact behaviour passed real Bloomberg
 # workstation UAT on US91282CMC28 and Issue #161 requires it not regress.
+#
+# `source_system` is PR #162's already-shipped, UAT-passed export label,
+# verbatim. It is explicit here rather than derived from `name` specifically
+# so registering US_CORPORATE and GERMAN_GOVT beside it cannot move it --
+# see BLIConventionProfile's own docstring.
 UST_CONVENTION_PROFILE = BLIConventionProfile(
     name="UST",
     currency=Currency.USD,
@@ -268,7 +281,8 @@ UST_CONVENTION_PROFILE = BLIConventionProfile(
     ex_dividend_days=0,
     status=BondStatus.ACTIVE,
     settlement_business_days=1,
-    settlement_calendar=CALENDAR_US_BOND_MARKET,
+    settlement_calendar=CALENDAR_US_SIFMA,
+    source_system="SHIORI_UST_FIXED_COUPON_PROFILE",
     plain_fixed_coupon_evidence_required=False,
 )
 
@@ -290,7 +304,8 @@ US_CORPORATE_CONVENTION_PROFILE = BLIConventionProfile(
     bond_type=BondType.FIXED_COUPON_BULLET,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
-    settlement_calendar=CALENDAR_US_BOND_MARKET,
+    settlement_calendar=CALENDAR_US_SIFMA,
+    source_system="SHIORI_US_CORPORATE_CONVENTION_PROFILE",
 )
 
 # Annex A, confirmed by Eddy: EUR, annual, ACT/ACT (bond basis -- QuantLib's
@@ -310,6 +325,7 @@ GERMAN_GOVT_CONVENTION_PROFILE = BLIConventionProfile(
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
     settlement_calendar=CALENDAR_TARGET,
+    source_system="SHIORI_GERMAN_GOVT_CONVENTION_PROFILE",
 )
 
 CONVENTION_PROFILES: dict[str, BLIConventionProfile] = {

@@ -1103,6 +1103,27 @@ def test_api_advanced_profile_returns_every_field_with_its_provenance(server_url
 
 
 @_QUANTLIB_SKIP
+def test_api_advanced_profile_source_system_is_the_pre_existing_ust_export_value(
+    server_url: str,
+) -> None:
+    """Issue #161 follow-up item 6, compatibility correction, pinned at the
+    HTTP boundary.
+
+    UST's ``source_system`` in the run export is
+    ``SHIORI_UST_FIXED_COUPON_PROFILE`` -- the value PR #162 shipped and real
+    Bloomberg workstation UAT already passed against. Registering
+    ``US_CORPORATE`` and ``GERMAN_GOVT`` alongside it must not move it, and
+    each of those two carries its own distinct label rather than a value
+    derived from a shared naming pattern.
+    """
+
+    status, payload = _post_json(f"{server_url}/api/bond/advanced-profile", _PROFILE_BODY)
+
+    assert status == 200
+    assert payload["source_system"] == "SHIORI_UST_FIXED_COUPON_PROFILE"
+
+
+@_QUANTLIB_SKIP
 def test_api_advanced_profile_omits_settlement_dates_until_an_expiry_exists(
     server_url: str,
 ) -> None:

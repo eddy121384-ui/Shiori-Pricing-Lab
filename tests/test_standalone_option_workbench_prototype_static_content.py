@@ -376,22 +376,32 @@ def test_the_page_never_selects_a_convention_profile_for_the_trader() -> None:
     ], assignments
 
 
-def test_the_export_source_system_follows_the_selected_profile() -> None:
-    """Issue #161 follow-up item 6: with three profiles registered, a fixed
-    `SHIORI_UST_...` label would stamp a German government bond's values as
-    the UST profile's."""
+def test_the_export_source_system_is_read_from_the_server_never_derived() -> None:
+    """Issue #161 follow-up item 6, compatibility correction.
+
+    An earlier revision computed the export label client-side as
+    `SHIORI_${selectedConventionProfile}_CONVENTION_PROFILE`, which would
+    have silently changed UST's already-shipped
+    `SHIORI_UST_FIXED_COUPON_PROFILE` value the moment a second profile was
+    registered. The corrected design reads `source_system` verbatim from
+    `/api/bond/advanced-profile`'s own response -- the same single source of
+    truth (`BLIConventionProfile.source_system`) the server-side regression
+    test pins -- so the browser can never recompute a label that disagrees
+    with it.
+    """
 
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
-    assert "`SHIORI_${selectedConventionProfile}_CONVENTION_PROFILE`" in text
+    assert "advancedProfile.source_system" in text
     assert "profileNameFromTier" in text
 
     # Executable lines only: the comments legitimately quote the withdrawn
-    # label and the tier it belonged to, precisely to record that they are no
-    # longer written out.
+    # derivation and the pre-existing label it must not overwrite, precisely
+    # to record that neither is computed in this file any more.
     code = "\n".join(
         line for line in text.splitlines() if not line.strip().startswith("//")
     )
     assert "SHIORI_UST_FIXED_COUPON_PROFILE" not in code
+    assert "_CONVENTION_PROFILE`" not in code  # no template-literal derivation of any kind
     # The provenance tier's description is derived the same way, so no
     # market's name is written out per tier either.
     assert "UST_PROFILE_DEFAULT" not in code

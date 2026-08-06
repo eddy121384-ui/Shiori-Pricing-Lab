@@ -3773,10 +3773,10 @@ def test_every_auto_filled_value_shows_its_provenance(server_url, page) -> None:
     # was a trader override.
     stamped = {record["path"]: record for record in _override_provenance(page)}
     assert stamped["reporting_date"]["basis"] == "SHIORI_DERIVED"
-    # Derived from the selected profile, not fixed (Issue #161 follow-up item
-    # 6): with three profiles registered, a fixed SHIORI_UST_... label would
-    # stamp a German government bond's values as the UST profile's.
-    assert stamped["reporting_date"]["source_system"] == "SHIORI_UST_CONVENTION_PROFILE"
+    # UST's pre-existing, already-shipped export value, unchanged (Issue #161
+    # follow-up item 6, compatibility correction): registering US_CORPORATE
+    # and GERMAN_GOVT beside UST must not move it.
+    assert stamped["reporting_date"]["source_system"] == "SHIORI_UST_FIXED_COUPON_PROFILE"
 
 
 @_PLAYWRIGHT_SKIP
@@ -5916,3 +5916,44 @@ def test_the_provenance_readout_names_the_selected_profile_not_ust(server_url, p
     assert "UST_PROFILE_DEFAULT" in readout
     assert "the UST convention profile's own approved value for this field" in readout
     assert "US_CORPORATE" not in readout
+
+
+@_PLAYWRIGHT_SKIP
+@_QUANTLIB_SKIP
+def test_a_resolved_us_corporate_bond_exports_its_own_source_system(server_url, page) -> None:
+    """Issue #161 follow-up item 6, compatibility correction, end to end.
+
+    Once Bloomberg has confirmed the plain fixed-coupon structural evidence
+    (synthetic here -- no real mnemonic exists yet), US_CORPORATE resolves
+    like any other profile, and its run-export label must be its own
+    distinct value, not UST's."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={
+                **_TREASURY_BOND_MASTER,
+                "coupon_type": "FIXED",
+                "security_type": "CORP",
+                "inflation_linked_flag": False,
+                "convertible_flag": False,
+                "amortizing_flag": False,
+            }
+        ),
+        profile="US_CORPORATE",
+    )
+    _set_expiry(page)
+    _wait_for_advanced_profile(page)
+    page.wait_for_function(
+        "() => window.__shioriTestGetCurrentDraft().option_settlement_date !== null"
+    )
+
+    assert _advanced_profile(page)["supported"] is True
+    assert _advanced_profile(page)["source_system"] == "SHIORI_US_CORPORATE_CONVENTION_PROFILE"
+
+    stamped = {record["path"]: record for record in _override_provenance(page)}
+    assert stamped["reporting_date"]["source_system"] == (
+        "SHIORI_US_CORPORATE_CONVENTION_PROFILE"
+    )
+    assert stamped["reporting_date"]["source_system"] != "SHIORI_UST_FIXED_COUPON_PROFILE"

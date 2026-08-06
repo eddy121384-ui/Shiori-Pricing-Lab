@@ -34,7 +34,7 @@ import pytest
 
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     CALENDAR_TARGET,
-    CALENDAR_US_BOND_MARKET,
+    CALENDAR_US_SIFMA,
     CONVENTION_PROFILES,
     GERMAN_GOVT_CONVENTION_PROFILE,
     SUPPORTED_CONVENTION_PROFILE_NAMES,
@@ -61,7 +61,8 @@ def _synthetic_profile(**overrides) -> BLIConventionProfile:
         "ex_dividend_days": 3,
         "status": BondStatus.ACTIVE,
         "settlement_business_days": 2,
-        "settlement_calendar": CALENDAR_US_BOND_MARKET,
+        "settlement_calendar": CALENDAR_US_SIFMA,
+        "source_system": "SHIORI_SYNTHETIC_TEST_CONVENTION_PROFILE",
     }
     kwargs.update(overrides)
     return BLIConventionProfile(**kwargs)
@@ -84,7 +85,7 @@ def test_the_ust_profile_keeps_every_constant_pr_162_shipped():
     assert UST_CONVENTION_PROFILE.ex_dividend_days == 0
     assert UST_CONVENTION_PROFILE.status is BondStatus.ACTIVE
     assert UST_CONVENTION_PROFILE.settlement_business_days == 1
-    assert UST_CONVENTION_PROFILE.settlement_calendar == CALENDAR_US_BOND_MARKET
+    assert UST_CONVENTION_PROFILE.settlement_calendar == CALENDAR_US_SIFMA
 
 
 def test_the_ust_day_count_is_bond_basis_not_isda():
@@ -118,7 +119,7 @@ def test_the_us_corporate_profile_matches_the_confirmed_annex_a_conventions():
     assert profile.coupon_frequencies == (Frequency.SEMI_ANNUAL,)
     assert profile.day_count is DayCount.THIRTY_360
     assert profile.settlement_business_days == 2
-    assert profile.settlement_calendar == CALENDAR_US_BOND_MARKET
+    assert profile.settlement_calendar == CALENDAR_US_SIFMA
     assert profile.bond_type is BondType.FIXED_COUPON_BULLET
     assert profile.status is BondStatus.ACTIVE
 
@@ -211,18 +212,34 @@ def test_an_unregistered_selection_is_an_error_never_a_default(unknown):
     assert "never silently falls back" in str(excinfo.value)
 
 
-def test_the_provenance_and_export_labels_are_derived_from_the_profiles_own_name():
-    """So a profile's tier label, its export `source_system` and its selection
-    token cannot drift apart -- and a German bond's values can never be
-    stamped as the UST profile's (Issue #161 follow-up item 6)."""
+def test_the_provenance_label_is_derived_from_the_profiles_own_name():
+    """So a profile's tier label and its selection token cannot drift apart."""
 
     assert UST_CONVENTION_PROFILE.default_provenance == "UST_PROFILE_DEFAULT"
-    assert UST_CONVENTION_PROFILE.source_system == "SHIORI_UST_CONVENTION_PROFILE"
     assert GERMAN_GOVT_CONVENTION_PROFILE.default_provenance == "GERMAN_GOVT_PROFILE_DEFAULT"
+    assert _synthetic_profile(name="ANOTHER").default_provenance == "ANOTHER_PROFILE_DEFAULT"
+
+
+def test_the_export_source_system_is_explicit_per_profile_not_derived():
+    """The compatibility correction, pinned exactly.
+
+    `source_system` is NOT `f"SHIORI_{name}_CONVENTION_PROFILE"` the way
+    `default_provenance` is: that derivation was withdrawn because it would
+    have silently changed UST's already-shipped export value (PR #162, real
+    Bloomberg workstation UAT) the moment a second profile was registered.
+    Every profile states its own value, and UST's is the pre-existing one,
+    unchanged."""
+
+    assert UST_CONVENTION_PROFILE.source_system == "SHIORI_UST_FIXED_COUPON_PROFILE"
+    assert US_CORPORATE_CONVENTION_PROFILE.source_system == (
+        "SHIORI_US_CORPORATE_CONVENTION_PROFILE"
+    )
     assert GERMAN_GOVT_CONVENTION_PROFILE.source_system == (
         "SHIORI_GERMAN_GOVT_CONVENTION_PROFILE"
     )
-    assert _synthetic_profile(name="ANOTHER").default_provenance == "ANOTHER_PROFILE_DEFAULT"
+    # None of them follows the `default_provenance` naming pattern for UST --
+    # structural proof the two are independent, not the same string reused.
+    assert UST_CONVENTION_PROFILE.source_system != "SHIORI_UST_CONVENTION_PROFILE"
 
     labels = {profile.source_system for profile in CONVENTION_PROFILES.values()}
     assert len(labels) == len(CONVENTION_PROFILES)
@@ -248,6 +265,8 @@ def test_the_supported_names_tuple_matches_the_registry():
         ({"ex_dividend_days": -1}, "non-negative"),
         ({"settlement_business_days": 0}, "must be positive"),
         ({"settlement_calendar": "MADE_UP"}, "not one of the reviewed"),
+        ({"source_system": ""}, "explicit, non-blank source_system"),
+        ({"source_system": "   "}, "explicit, non-blank source_system"),
     ],
 )
 def test_a_malformed_profile_is_rejected_at_construction(overrides, fragment):

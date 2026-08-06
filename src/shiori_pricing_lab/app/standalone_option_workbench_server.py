@@ -210,6 +210,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     SUPPORTED_CONVENTION_PROFILE_NAMES,
     convention_profile_candidates,
+    get_convention_profile,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -618,6 +619,16 @@ def resolve_bond_advanced_profile(body: dict) -> dict:
     return {
         "supported": profile.supported,
         "convention_profile": profile.convention_profile,
+        # This profile's own explicit run-export label (Issue #161 follow-up
+        # item 6/compatibility correction). Read from the registry record
+        # itself -- never re-derived here -- so the browser's export never
+        # drifts from `BLIConventionProfile.source_system`, and so UST's
+        # already-shipped `SHIORI_UST_FIXED_COUPON_PROFILE` value cannot be
+        # accidentally recomputed as something else. `profile.convention_profile`
+        # is always a name `resolve_bond_advanced_field_profile` already
+        # validated via `get_convention_profile`, whether or not this bond's
+        # shape was admitted.
+        "source_system": get_convention_profile(profile.convention_profile).source_system,
         "rejection_reasons": list(profile.rejection_reasons),
         "fields": [
             {"path": field.path, "value": field.value, "provenance": field.provenance}

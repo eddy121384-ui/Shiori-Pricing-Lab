@@ -66,7 +66,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
-    CALENDAR_US_BOND_MARKET,
+    CALENDAR_US_SIFMA,
     PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     UST_CONVENTION_PROFILE,
     BLIConventionProfile,
@@ -821,7 +821,8 @@ _SYNTHETIC_PROFILE = BLIConventionProfile(
     ex_dividend_days=3,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
-    settlement_calendar=CALENDAR_US_BOND_MARKET,
+    settlement_calendar=CALENDAR_US_SIFMA,
+    source_system="SHIORI_SYNTHETIC_TEST_CONVENTION_PROFILE",
 )
 
 # Presence markers for the plain fixed-coupon structural evidence every
@@ -1156,7 +1157,8 @@ def _no_ex_dividend_profile() -> BLIConventionProfile:
         bond_type=BondType.FIXED_COUPON_BULLET,
         status=BondStatus.ACTIVE,
         settlement_business_days=2,
-        settlement_calendar=CALENDAR_US_BOND_MARKET,
+        settlement_calendar=CALENDAR_US_SIFMA,
+        source_system="SHIORI_NO_EX_DIV_TEST_CONVENTION_PROFILE",
     )
 
 
