@@ -140,22 +140,24 @@ hand-typed technical fields.
 frequency, on a bond that is neither callable nor sinkable, does not
 establish that the bond is an ordinary fixed-coupon bullet. A floating-rate
 note returns its *current* coupon in ``CPN`` and its reset frequency in
-``CPN_FREQ``; an inflation-linked bond, a convertible and an amortizer all
-pass the same checks.
+``CPN_FREQ``; an inflation-linked bond, a convertible, and a bond with any
+other non-bullet redemption structure all pass the same checks.
 
 Bloomberg workstation evidence (Issue #161 follow-up; see
 ``bli_bond_convention_profile``'s own evidence log for the full probe
-record) now confirms three of the four
+record) confirms all four
 :data:`~bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`:
 ``coupon_type`` (via ``CPN_TYP``, confirmed value ``"FIXED"``),
 ``inflation_linked_flag`` and ``convertible_flag`` (via
-``INFLATION_LINKED_INDICATOR``/``CONVERTIBLE``, confirmed value ``False``).
-Each is checked by *value*, via
-:func:`~bli_bond_convention_profile.confirms_plain_fixed_coupon_evidence`,
+``INFLATION_LINKED_INDICATOR``/``CONVERTIBLE``, confirmed value ``False``),
+and ``maturity_refund_type`` (via ``MTY_TYP``/DS092, confirmed values
+``"NORMAL"`` or ``"AT MATURITY"`` -- see below). Each is checked by *value*,
+via :func:`~bli_bond_convention_profile.confirms_plain_fixed_coupon_evidence`,
 never merely by presence -- a real floater's ``coupon_type == "FLOATING"``
-must still fail to confirm anything.
+must still fail to confirm anything, and so must a real callable bond's
+``maturity_refund_type == "CALLABLE"``.
 
-``security_type`` is deliberately not one of the four fields any more
+``security_type`` is deliberately not one of the four fields
 (Eddy's explicit correction): ``SECURITY_TYP`` is confirmed to return a
 value (``"US GOVERNMENT"`` / ``"GLOBAL"`` / ``"EURO-ZONE"`` across the three
 probed securities), but it cannot safely classify a profile, and Shiori
@@ -166,21 +168,42 @@ classification added friction with no safety benefit. It is still carried
 on ``bond_master`` as display/evidence data; it just no longer blocks
 anything here.
 
-The remaining one, ``amortizing_flag``, has **no approved criterion at
-all**: no working amortizing-evidence mnemonic exists yet
-(``IS_AMORTIZING``/``AMORT_TYP``/``REDEMP_TYP``/``SCHED_TYP`` confirmed
+``amortizing_flag`` was the fourth field until Eddy's redemption-structure
+correction replaced it with ``maturity_refund_type`` (below): it had **no
+approved criterion at all** (no working amortizing-evidence mnemonic exists
+-- ``IS_AMORTIZING``/``AMORT_TYP``/``REDEMP_TYP``/``SCHED_TYP`` confirmed
 ``BAD_FLD``, ``MTG_TYP`` confirmed not applicable, ``PRINCIPAL_FACTOR ==
-1.0`` explicitly not approved as evidence). It therefore always fails
+1.0`` explicitly not approved as evidence), so it always failed
 :func:`confirms_plain_fixed_coupon_evidence` regardless of what
-``bond_master`` holds for it, which is what keeps every non-UST profile
-fail-closed today even with the other three fields confirmed.
+``bond_master`` held for it -- keeping every non-UST profile permanently
+fail-closed, with no path to admission for any bond. It is no longer read
+here at all, the same non-gating treatment as ``security_type``.
+
+``maturity_refund_type`` (Issue #161 follow-up: redemption-structure gate)
+is sourced from Bloomberg's ``MTY_TYP`` (DS092), whose own Full Definition /
+Enumerations name a bounded set of redemption-structure values. Unlike
+``amortizing_flag``, this is a real, bounded classification: exactly
+``"NORMAL"`` and ``"AT MATURITY"`` describe a plain, unconditional bullet
+redemption and are the entire allowlist (see
+:func:`~bli_bond_convention_profile._confirms_plain_bullet_redemption_structure`);
+``"CALLABLE"``, ``"PUTABLE"``, ``"SINKABLE"``, ``"CONVERTIBLE"``,
+``"PERPETUAL"``, ``"PASS-THRU"``, ``"EXTENDIBLE"``, any combination value
+carrying one of those as a substring, and anything absent or
+field-exceptioned are all outside it and fail closed the same way -- **not**
+a denylist, so a value Bloomberg adds later fails closed too. ``UST``
+(``US91282CMC28``) confirmed ``"NORMAL"``; a real USD corporate bond, AMZN,
+confirmed ``"CALLABLE"`` and is correctly refused -- proof the allowlist
+discriminates, not a candidate positive UAT security. See ``MTY_TYP``'s own
+note below for why this is a *different* use of the same mnemonic from the
+one this module withdrew, not a reintroduction of it.
 
 Every profile except ``UST`` therefore refuses a bond whose structure is not
 *fully* positively established, and the refusal is a *product* refusal no
 Advanced edit repairs. It is checked here rather than in the browser
-precisely so that selecting a profile by hand cannot push a floater through.
-``UST`` is exempt by Eddy's explicit instruction: that behaviour passed real
-Bloomberg workstation UAT on ``US91282CMC28`` and must not regress.
+precisely so that selecting a profile by hand cannot push a floater, or a
+real callable bond, through. ``UST`` is exempt by Eddy's explicit
+instruction: that behaviour passed real Bloomberg workstation UAT on
+``US91282CMC28`` and must not regress.
 
 **Product-shape gate: fail-closed, and never an identity claim.** The
 profile is applied only to a bond that passes *every* condition in
@@ -198,16 +221,29 @@ is the explicit, accepted design (Issue #157 review discussion), not an
 oversight: the profile is applied because it is selected, not because Shiori
 believes it has identified the issuer.
 
-**The three display-only description strings are evidence, never admission
-(Issue #161 correction).** The first revision made ``DAY_CNT_DES =
-ACT/ACT``, ``MTY_TYP = AT MATURITY`` and ``CALC_TYP_DES = STREET
-CONVENTION`` *necessary* conditions for the whole profile. Bloomberg
-workstation UAT on ``US91282CMC28`` -- an ordinary 4.5% 12/31/31 Treasury
-note -- returned ``MTY_TYP = NORMAL``, so that string equality was rejecting
-real USTs. ``MTY_TYP`` and ``CALC_TYP_DES`` are therefore no longer read
-here at all: nothing in this module has established what their values mean
-semantically, and an unproven string must not decide a product's fate in
-either direction.
+**The display-only description strings are evidence, never a single-string
+admission equality (Issue #161 correction).** The first revision made
+``DAY_CNT_DES = ACT/ACT``, ``MTY_TYP = AT MATURITY`` and ``CALC_TYP_DES =
+STREET CONVENTION`` *necessary* conditions for the whole profile -- one
+hardcoded expected string, compared for equality against the raw
+``bond_master_raw`` description. Bloomberg workstation UAT on
+``US91282CMC28`` -- an ordinary 4.5% 12/31/31 Treasury note -- returned
+``MTY_TYP = NORMAL``, so that string equality was rejecting real USTs.
+``CALC_TYP_DES`` is therefore no longer read here at all: nothing in this
+module has established what its values mean semantically, and an unproven
+string must not decide a product's fate in either direction.
+
+``MTY_TYP`` itself is read again (Issue #161 follow-up: redemption-structure
+gate above), but as a genuinely different mechanism, not a reinstatement of
+the withdrawn one: it is now a **typed structural-evidence field**
+(``maturity_refund_type`` on ``bond_master``, populated the same way
+``coupon_type``/``inflation_linked_flag``/``convertible_flag`` are), checked
+against a **two-value allowlist** (``"NORMAL"`` *or* ``"AT MATURITY"``) that
+does not depend on which profile is selected -- exactly the bug the first
+revision had, where a single profile-specific expected string rejected the
+other equally-valid one, is what the allowlist has two entries to prevent.
+The separate, still-unchanged ``bond_master_raw["maturity_type"]`` display
+string is untouched by this and still never interpreted.
 
 ``DAY_CNT_DES`` keeps exactly one, strictly-narrowing, **field-level** role:
 when it is present and reads something other than the selected profile's
@@ -577,7 +613,8 @@ def _product_rejection_reasons(
     # frequency, on a bond that is neither callable nor sinkable, does *not*
     # establish a fixed-coupon bullet: a floater returns its current coupon in
     # CPN and its reset frequency in CPN_FREQ, and an inflation-linked bond, a
-    # convertible and an amortizer all pass every check above too.
+    # convertible, and a bond with any other non-bullet redemption structure
+    # all pass every check above too.
     #
     # This is a *value* check, not a presence check (Issue #161 follow-up):
     # `bond_master.get("coupon_type")` can be a real floater's "FLOATING" --
@@ -589,12 +626,20 @@ def _product_rejection_reasons(
     # (Eddy's correction: it cannot safely classify a profile, and Shiori
     # never auto-selects one anyway, so gating on it added friction with no
     # safety benefit) -- it is still carried on bond_master as display/
-    # evidence data, just never read here. `amortizing_flag` has no approved
-    # criterion at all yet, so it always fails this check regardless of what
-    # bond_master holds for it -- which is what keeps every non-UST profile
-    # fail-closed until real amortizing evidence exists, and is why selecting
-    # the profile by hand can never push such a bond through: this is
-    # checked here, not in the browser.
+    # evidence data, just never read here.
+    #
+    # `maturity_refund_type` (Bloomberg's MTY_TYP/DS092) is this gate's
+    # redemption-structure evidence (Issue #161 follow-up, replacing the
+    # permanently-unconfirmable `amortizing_flag`): only Bloomberg's own
+    # "NORMAL"/"AT MATURITY" -- a plain bullet at maturity -- confirm
+    # anything; every other confirmed enumeration value (CALLABLE, PUTABLE,
+    # SINKABLE, CONVERTIBLE, PERPETUAL, PASS-THRU, EXTENDIBLE, or a
+    # combination carrying one of those) and anything absent or
+    # field-exceptioned fail closed the same way. A real callable bond's
+    # confirmed "CALLABLE" is non-None and must still fail to confirm
+    # anything -- the same value-not-presence rule as `coupon_type` above,
+    # not a special case. Selecting a profile by hand can never push such a
+    # bond through: this is checked here, not in the browser.
     if profile.plain_fixed_coupon_evidence_required:
         unconfirmed = tuple(
             field
@@ -606,9 +651,11 @@ def _product_rejection_reasons(
                 "Bloomberg has not confirmed this bond is a plain fixed-coupon bullet: "
                 f"{', '.join(unconfirmed)} {'is' if len(unconfirmed) == 1 else 'are'} not "
                 "confirmed, so Shiori cannot rule out a floating-rate, inflation-linked, "
-                f"convertible or amortizing structure. The {profile.name} convention "
-                "profile is applied only to a bond whose structure is positively "
-                "established, and selecting it by hand does not establish it"
+                "convertible, or unsupported redemption structure (callable, putable, "
+                "sinkable, perpetual, pass-through, extendible, or otherwise not a plain "
+                f"bullet at maturity). The {profile.name} convention profile is applied "
+                "only to a bond whose structure is positively established, and selecting "
+                "it by hand does not establish it"
             )
 
     # A missing or malformed valuation/maturity date is *not* rejected here:

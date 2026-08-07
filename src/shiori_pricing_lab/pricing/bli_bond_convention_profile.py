@@ -100,7 +100,8 @@ _CALENDAR_FACTORIES = {
 #
 # The Bond Master facts that would let Shiori positively establish a bond is
 # an ordinary fixed-coupon bullet rather than a floater, a linker, a
-# convertible or an amortizer.
+# convertible, or a bond whose redemption is otherwise not a plain bullet at
+# maturity.
 #
 # The already-confirmed ``CALLABLE`` and ``SINKABLE`` flags are deliberately
 # not in this tuple: they are checked separately by the resolver's own
@@ -121,34 +122,89 @@ _CALENDAR_FACTORIES = {
 # carried on ``bond_master`` (see the data loader module's own
 # ``_BOND_MASTER_EVIDENCE_FIELD_MAP``) as display/evidence data and as a
 # data point for any future, separately-approved auto-selection design --
-# it simply no longer blocks plain-fixed-coupon admission. The one real
-# structural gap this profile still needs closed is ``amortizing_flag``.
+# it simply no longer blocks plain-fixed-coupon admission.
+#
+# ``maturity_refund_type`` -- sourced from Bloomberg's ``MTY_TYP`` (DS092) --
+# replaces ``amortizing_flag`` as this gate's redemption-structure evidence
+# (Eddy's explicit correction, third revision). ``amortizing_flag`` had no
+# approved criterion at all (see the evidence log below for why every
+# candidate mnemonic probed for it was rejected), so it kept every non-UST
+# profile permanently fail-closed with no path to admission, ever, for any
+# bond. ``MTY_TYP`` is different: Bloomberg's own Full Definition /
+# Enumerations name a bounded set of redemption-structure values, so a
+# genuine plain-bullet bond can now be positively confirmed by an exact-value
+# allowlist (see :func:`_confirms_plain_bullet_redemption_structure` below),
+# not merely have every candidate mnemonic disproven. ``amortizing_flag``
+# stays a valid ``bond_master`` key (see the data loader module's own
+# ``_BOND_MASTER_EVIDENCE_FIELDS``) in case a real mnemonic for it is ever
+# separately confirmed, but it is no longer read by this gate at all -- the
+# same non-gating treatment as ``security_type`` above, for the same reason:
+# a field this gate no longer needs to ask about.
 PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
     "coupon_type",
     "inflation_linked_flag",
     "convertible_flag",
-    "amortizing_flag",
+    "maturity_refund_type",
 )
+
+# Bloomberg's own MTY_TYP (DS092) Full Definition / Enumerations name a
+# bounded set of redemption-structure values. Exactly two describe a plain,
+# unconditional bullet redemption at maturity -- the only structure this
+# profile's fixed-coupon pricing path supports -- and are the entire
+# allowlist. Every other confirmed enumeration value (``CALLABLE``,
+# ``PUTABLE``, ``SINKABLE``, ``CONVERTIBLE``, ``PERPETUAL``, ``PASS-THRU``,
+# ``EXTENDIBLE``), any combination value carrying one of those as a
+# substring (e.g. a compound ``"CALLABLE/PUTABLE"``-style value), and
+# anything absent, unmapped, or field-exceptioned (``None``) are all outside
+# this allowlist and therefore all fail closed the same way -- an allowlist
+# rather than a denylist, so an enumeration value Bloomberg adds later fails
+# closed too, with no code change required.
+_REDEMPTION_STRUCTURE_ALLOWED_VALUES = frozenset({"NORMAL", "AT MATURITY"})
+
+
+def _confirms_plain_bullet_redemption_structure(value: object) -> bool:
+    """DS092/MTY_TYP's exact-value allowlist check for
+    :data:`PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`'s ``maturity_refund_type``.
+
+    ``True`` only for Bloomberg's own ``"NORMAL"`` or ``"AT MATURITY"`` --
+    see :data:`_REDEMPTION_STRUCTURE_ALLOWED_VALUES`'s own comment for why
+    those two, and for everything else the allowlist therefore excludes.
+    """
+
+    return isinstance(value, str) and value in _REDEMPTION_STRUCTURE_ALLOWED_VALUES
+
 
 # --- Bloomberg workstation evidence log (Issue #161 follow-up) ---------------
 #
 # Real evidence Eddy captured on his own Bloomberg Terminal, against
 # ``US91282CMC28`` (UST, already admitted), ``US023135EC69`` (a USD
-# fixed-rate corporate bond candidate) and ``DE000BU2Z072`` (a EUR fixed-rate
-# German government bond candidate). See Shiori's Bloomberg DAPI probe tool's
-# own module docstring (under ``tools/``) for the raw per-field probe output
-# this summarizes. Recorded here, not just in a chat log, because AGENTS.md
-# rule 6 requires deterministic code to trace to real evidence, not to
-# something the model recalls.
+# fixed-rate corporate bond candidate), ``DE000BU2Z072`` (a EUR fixed-rate
+# German government bond candidate), ``GB00BFX0ZL78`` (a UK Gilt -- evidence
+# only, this market is not registered, see the "Deliberately not registered:
+# Gilt" note below) and a real USD corporate bond, AMZN. See Shiori's
+# Bloomberg DAPI probe tool's own module docstring (under ``tools/``) for the
+# raw per-field probe output this summarizes. Recorded here, not just in a
+# chat log, because AGENTS.md rule 6 requires deterministic code to trace to
+# real evidence, not to something the model recalls.
 #
-# **Confirmed and wired into structural evidence** (all three securities
-# returned a value; see :func:`confirms_plain_fixed_coupon_evidence` below
-# for what value each one must carry to count as positive confirmation):
+# **Confirmed and wired into structural evidence** (see
+# :func:`confirms_plain_fixed_coupon_evidence` below for what value each one
+# must carry to count as positive confirmation):
 #
-# - ``CPN_TYP`` -> ``coupon_type``: all three returned ``"FIXED"``.
+# - ``CPN_TYP`` -> ``coupon_type``: ``US91282CMC28``/``US023135EC69``/
+#   ``DE000BU2Z072`` all returned ``"FIXED"``.
 # - ``INFLATION_LINKED_INDICATOR`` -> ``inflation_linked_flag``: all three
 #   returned ``"N"``.
 # - ``CONVERTIBLE`` -> ``convertible_flag``: all three returned ``"N"``.
+# - ``MTY_TYP`` (DS092) -> ``maturity_refund_type`` (Issue #161 follow-up:
+#   redemption-structure gate). ``US91282CMC28`` returned ``"NORMAL"``;
+#   ``GB00BFX0ZL78`` (evidence only -- Gilt is not a registered profile)
+#   returned ``"AT MATURITY"``; both are the allowlist's positive evidence.
+#   AMZN, a real USD corporate bond, returned ``"CALLABLE"`` -- confirmed
+#   negative evidence that the allowlist correctly refuses a real callable
+#   bond, **not** a candidate USD-corporate UAT security (it must never be
+#   promoted to one; a callable bond is exactly what this gate exists to
+#   keep out).
 #
 # **Confirmed to return a value, wired for display/evidence, but explicitly
 # not a plain-fixed-coupon admission criterion** (Eddy's correction above --
@@ -161,28 +217,29 @@ PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
 #   safely acts on for admission -- and, per the trader-selects-the-profile
 #   design, it was never asked to.
 #
-# **Confirmed rejected** -- probed as amortizing-evidence candidates,
-# disproven, and must not be re-added without a fresh, separately-approved
-# confirmation (same standing as ``PENULTIMATE_COUPON_DATE``/
-# ``REDEMPTION_VALUE`` in Shiori's Bloomberg DAPI probe tool (under ``tools/``)):
+# **Superseded, not re-added** -- the earlier ``amortizing_flag`` candidate
+# probes, disproven, and must not be re-added without a fresh,
+# separately-approved confirmation (same standing as
+# ``PENULTIMATE_COUPON_DATE``/``REDEMPTION_VALUE`` in Shiori's Bloomberg DAPI
+# probe tool (under ``tools/``)): ``IS_AMORTIZING``, ``AMORT_TYP``,
+# ``REDEMP_TYP``, ``SCHED_TYP`` (confirmed ``BAD_FLD`` against the corporate
+# and German government candidates), ``MTG_TYP`` (confirmed not applicable to
+# either), and ``PRINCIPAL_FACTOR`` (confirmed to return ``1.000000`` on
+# both, but never approved as amortizing evidence -- a factor of 1.0 only
+# proves the principal has not yet paid down, never that no future
+# amortization schedule exists). ``MTY_TYP`` replaces this whole line of
+# investigation as the gate's redemption-structure evidence rather than
+# resolving it: Bloomberg's own maturity/redemption-type classification, not
+# an amortization-specific field.
 #
-# - ``IS_AMORTIZING``, ``AMORT_TYP``, ``REDEMP_TYP``, ``SCHED_TYP``:
-#   confirmed ``BAD_FLD`` against the corporate and German government
-#   candidates.
-# - ``MTG_TYP``: confirmed not applicable to either candidate.
-# - ``PRINCIPAL_FACTOR``: confirmed **returned** ``1.000000`` on both
-#   candidates, but explicitly **not approved** as amortizing evidence --
-#   Eddy's own reasoning: a factor of 1.0 only proves the principal has not
-#   yet paid down, never that no future amortization schedule exists. There
-#   is still no approved criterion for ``amortizing_flag`` -- the one
-#   remaining structural gap that keeps every non-UST profile fail-closed.
-#
-# No further Bloomberg mnemonic guessing follows any of this. The next step
-# is Eddy searching Bloomberg's own field directory on his workstation
-# (``FLDS<GO>``) or asking Bloomberg support (``HELP HELP``) for the field
-# that identifies bullet vs. amortizing redemption or a principal repayment
-# schedule -- see Shiori's Bloomberg DAPI probe tool (under ``tools/``)'s own "still needed"
-# section for the exact keywords and what to copy back.
+# **Still needed:** a real, confirmed non-callable USD corporate bond and a
+# real, confirmed German government bond -- i.e. an ``MTY_TYP`` of
+# ``"NORMAL"`` or ``"AT MATURITY"`` on an actual ``US_CORPORATE``/
+# ``GERMAN_GOVT`` candidate security, alongside the three other confirmed
+# structural-evidence fields -- for a genuine end-to-end pricing UAT on
+# either market. AMZN proved the gate rejects correctly; it does not, and
+# cannot, prove the gate admits correctly, since it is deliberately a
+# rejected security.
 
 
 # Field -> the predicate its Bloomberg-sourced value must satisfy to count as
@@ -190,13 +247,14 @@ PLAIN_FIXED_COUPON_EVIDENCE_FIELDS = (
 # the evidence log above. A field with no entry here has no approved
 # criterion at all -- not "no value yet", but no confirmed rule for what any
 # value would mean -- so it can never confirm anything regardless of what
-# ``bond_master`` holds for it (only ``amortizing_flag`` today;
-# ``security_type`` is not in :data:`PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` at
-# all any more, so this function is never asked about it).
+# ``bond_master`` holds for it. ``security_type``/``amortizing_flag`` are not
+# in :data:`PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` at all any more, so this
+# function is never asked about either of them.
 _PLAIN_FIXED_COUPON_EVIDENCE_CHECKS: dict[str, Callable[[object], bool]] = {
     "coupon_type": lambda value: value == "FIXED",
     "inflation_linked_flag": lambda value: value is False,
     "convertible_flag": lambda value: value is False,
+    "maturity_refund_type": _confirms_plain_bullet_redemption_structure,
 }
 
 
@@ -208,10 +266,12 @@ def confirms_plain_fixed_coupon_evidence(field: str, value: object) -> bool:
     a non-``None`` value for ``coupon_type`` (e.g. a real floater's
     ``"FLOATING"``) that must still fail to confirm anything, which is why
     the resolver never treats "the key exists" as sufficient evidence on its
-    own. A field with no entry in :data:`_PLAIN_FIXED_COUPON_EVIDENCE_CHECKS`
-    (``amortizing_flag`` today) has no approved criterion at all yet, so this
-    always returns ``False`` for it regardless of the value -- see the
-    evidence log above for why.
+    own. The same is true of ``maturity_refund_type``: a real callable
+    bond's Bloomberg-confirmed ``"CALLABLE"`` is non-``None`` and must still
+    fail to confirm anything (see AMZN in the evidence log above). A field
+    with no entry in :data:`_PLAIN_FIXED_COUPON_EVIDENCE_CHECKS` has no
+    approved criterion at all, so this always returns ``False`` for it
+    regardless of the value.
     """
 
     check = _PLAIN_FIXED_COUPON_EVIDENCE_CHECKS.get(field)
@@ -465,7 +525,11 @@ GERMAN_GOVT_CONVENTION_PROFILE = BLIConventionProfile(
 # first, and must not collapse "7 business days" into "7 calendar days" when
 # converting it into ``ex_dividend_days`` -- the two are not the same number
 # of days off a coupon date, and this repo does not write that shortcut for
-# any market it registers.
+# any market it registers. Separately, ``GB00BFX0ZL78``'s confirmed
+# ``MTY_TYP`` of ``"AT MATURITY"`` (see the Bloomberg workstation evidence
+# log above) is valid redemption-structure allowlist evidence on its own
+# terms -- it says nothing about the ex-dividend window, and does not change
+# that Gilt stays unregistered here.
 CONVENTION_PROFILES: dict[str, BLIConventionProfile] = {
     profile.name: profile
     for profile in (

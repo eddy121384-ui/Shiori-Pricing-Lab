@@ -28,9 +28,11 @@ them is now resolved, so the default candidate list below is empty:
 - Confirmed and wired into ``_BOND_MASTER_FIELD_MAP`` (typed schema, with an
   explicit value transform): ``CPN``, ``CPN_FREQ``, ``ISSUE_DT``,
   ``MATURITY``, ``FIRST_CPN_DT``, ``CALLABLE``, ``SINKABLE``.
-- Confirmed to return a value, but wired only into
+- Confirmed to return a value, and wired into
   ``_BOND_MASTER_RAW_DISPLAY_FIELD_MAP`` (display-only -- never safe to
   coerce into a typed enum): ``DAY_CNT_DES``, ``MTY_TYP``, ``CALC_TYP_DES``.
+  ``MTY_TYP`` is *also* wired a second time, as typed structural evidence --
+  see the Issue #161 follow-up resolution history below.
 - Confirmed ``BAD_FLD`` against both test securities -- must not be
   re-added without a fresh, separately-approved confirmation:
   ``PENULTIMATE_COUPON_DATE``, ``REDEMPTION_VALUE``.
@@ -61,34 +63,48 @@ Gilt" note for why the two are not interchangeable here).
 
 **Resolution history (Issue #161 follow-up: plain fixed-coupon structural
 evidence).** Eddy probed ``US91282CMC28`` (UST, already admitted),
-``US023135EC69`` (a real USD fixed-rate corporate bond candidate) and
-``DE000BU2Z072`` (a real EUR fixed-rate German government bond candidate) on
+``US023135EC69`` (a real USD fixed-rate corporate bond candidate),
+``DE000BU2Z072`` (a real EUR fixed-rate German government bond candidate),
+``GB00BFX0ZL78`` (a UK Gilt -- redemption-structure evidence only, this
+market is not a registered profile) and AMZN (a real USD corporate bond) on
 his own Bloomberg Terminal:
 
 - Confirmed and wired into
   ``shiori_pricing_lab.data.bloomberg_bond_quote._BOND_MASTER_EVIDENCE_FIELD_MAP``
-  as *admission* evidence (all three securities returned a value, and each
-  field's confirmed value is what the pricing convention-profile gate now
-  requires -- see
+  as *admission* evidence (each field's confirmed value is what the pricing
+  convention-profile gate now requires -- see
   ``pricing.bli_bond_convention_profile.confirms_plain_fixed_coupon_evidence``):
-  ``CPN_TYP`` (all three: ``"FIXED"``), ``INFLATION_LINKED_INDICATOR`` (all
-  three: ``"N"``), ``CONVERTIBLE`` (all three: ``"N"``).
+  ``CPN_TYP`` (``US91282CMC28``/``US023135EC69``/``DE000BU2Z072``, all three:
+  ``"FIXED"``), ``INFLATION_LINKED_INDICATOR`` (all three: ``"N"``),
+  ``CONVERTIBLE`` (all three: ``"N"``).
+- ``MTY_TYP`` (DS092) -> ``maturity_refund_type`` (Issue #161 follow-up:
+  redemption-structure gate, replacing ``amortizing_flag`` below). Confirmed
+  and wired as *admission* evidence via an exact-value allowlist, per
+  Bloomberg's own MTY_TYP Full Definition / Enumerations:
+  ``US91282CMC28`` (UST) returned ``"NORMAL"``; ``GB00BFX0ZL78`` (evidence
+  only) returned ``"AT MATURITY"`` -- both are the allowlist's positive
+  evidence. AMZN returned ``"CALLABLE"`` -- confirmed *negative* evidence
+  that the allowlist correctly refuses a real callable bond; AMZN is a
+  rejection fixture, never a candidate positive UAT security for
+  ``US_CORPORATE``.
 - Confirmed to return a value and wired into the same map, but as
   display/evidence data only -- **not** an admission criterion (Eddy's
   explicit correction: it cannot safely classify a profile, and Shiori
   never auto-selects one anyway, since the trader always picks explicitly):
   ``SECURITY_TYP`` (``"US GOVERNMENT"`` / ``"GLOBAL"`` / ``"EURO-ZONE"``
   respectively).
-- Confirmed ``BAD_FLD`` against the corporate and German government
-  candidates -- must not be re-added without a fresh, separately-approved
-  confirmation (same standing as ``PENULTIMATE_COUPON_DATE``/
-  ``REDEMPTION_VALUE`` above): ``IS_AMORTIZING``, ``AMORT_TYP``,
-  ``REDEMP_TYP``, ``SCHED_TYP``.
-- Confirmed not applicable to either candidate, same standing: ``MTG_TYP``.
-- Confirmed to **return** ``1.000000`` on both candidates, but explicitly
-  **not approved** as amortizing evidence: ``PRINCIPAL_FACTOR``. Eddy's own
-  reasoning -- a factor of 1.0 only proves the principal has not yet paid
-  down, never that no future amortization schedule exists.
+
+**Superseded, not re-added** (same standing as ``PENULTIMATE_COUPON_DATE``/
+``REDEMPTION_VALUE`` above -- confirmed ``BAD_FLD``/not-applicable/rejected,
+must not be re-added without a fresh, separately-approved confirmation):
+the earlier ``amortizing_flag`` candidates ``IS_AMORTIZING``, ``AMORT_TYP``,
+``REDEMP_TYP``, ``SCHED_TYP`` (``BAD_FLD`` against the corporate and German
+government candidates), ``MTG_TYP`` (not applicable to either), and
+``PRINCIPAL_FACTOR`` (returned ``1.000000`` on both, but a factor of 1.0
+only proves the principal has not yet paid down, never that no future
+amortization schedule exists -- never approved as evidence). ``MTY_TYP``
+replaces this whole line of investigation as the gate's redemption-structure
+evidence rather than resolving it.
 
 Also confirmed against ``US91282CMC28``, ``US023135EC69`` and
 ``DE000BU2Z072`` (not a new field, but new observations of an
@@ -98,33 +114,18 @@ matching Annex A's confirmed day count for that market -- see
 ``bli_bond_convention_profile.US_CORPORATE_CONVENTION_PROFILE``/
 ``GERMAN_GOVT_CONVENTION_PROFILE``'s own ``day_count_evidence``.
 
-**Still needed: a bullet-vs-amortizing / principal-repayment-schedule
-field.** Every candidate probed so far for ``amortizing_flag`` is rejected
-(see above), and this script will not propose another guessed mnemonic --
-that is not what turned up a working result last time. The next step is
-Eddy's own Bloomberg Terminal, not this script:
-
-- ``FLDS<GO>``: search using plain-language keywords rather than a guessed
-  mnemonic -- try ``amortiz``, ``sinking fund``, ``redemption type``,
-  ``principal payment``, ``payment schedule``, ``prepayment``, and
-  ``factor`` (in addition to the already-rejected ``PRINCIPAL_FACTOR``, a
-  *schedule*-shaped field rather than a point-in-time factor may exist
-  under a related name). For each hit, copy back: the exact mnemonic
-  (as ``FLDS`` displays it, e.g. ``MNEMONIC (CATEGORY)``), and Bloomberg's
-  own one-line field description.
-- ``HELP HELP`` (or the Bloomberg analytics/reference-data help desk): ask
-  in plain language, e.g. *"What reference-data field identifies whether a
-  bond redeems via bullet, amortizing schedule, or sinking fund?"* or *"Is
-  there a field that shows a bond's principal repayment schedule or
-  amortization type?"* Copy back the mnemonic(s) named in the reply,
-  verbatim.
-
-Either way: copying back a mnemonic and its description is **not** a
-mapping decision by itself. A mnemonic found this way still needs a probe
-run against a real bond (via ``--fields``, exactly like the five above)
-before Eddy confirms what its values mean, and only then does it get wired
-into ``_BOND_MASTER_EVIDENCE_FIELD_MAP`` and
-``confirms_plain_fixed_coupon_evidence``.
+**Still needed: a real, confirmed non-callable USD corporate bond and German
+government bond.** The redemption-structure gate itself is now resolved
+(``MTY_TYP``, above) -- what remains is a genuine end-to-end pricing UAT
+candidate for each of ``US_CORPORATE``/``GERMAN_GOVT``: a real security
+whose confirmed ``MTY_TYP`` reads ``"NORMAL"`` or ``"AT MATURITY"``,
+alongside the three other confirmed structural-evidence fields, priced
+through this path start to finish. AMZN proved the gate rejects a real
+callable bond correctly; it does not, and cannot, prove the gate admits
+correctly, since it is deliberately a rejected security. The next step is
+probing a new candidate security (via ``--identifier``/``--fields``, exactly
+like the securities above) on Eddy's own Bloomberg Terminal, not a new
+field mnemonic.
 
 **Usage** (on a Bloomberg-networked workstation, Terminal running and
 logged in locally)::
@@ -166,20 +167,22 @@ _REQUEST_TIMEOUT_MS = 10_000
 # response. Empty: every candidate this script has ever proposed is now
 # resolved one way or another (see the module docstring's two resolution-
 # history sections above) -- CPN/CPN_FREQ/ISSUE_DT/MATURITY/FIRST_CPN_DT/
-# CALLABLE/SINKABLE and CPN_TYP/INFLATION_LINKED_INDICATOR/CONVERTIBLE are
-# confirmed and wired into _BOND_MASTER_FIELD_MAP /
+# CALLABLE/SINKABLE and CPN_TYP/INFLATION_LINKED_INDICATOR/CONVERTIBLE/
+# MTY_TYP are confirmed and wired into _BOND_MASTER_FIELD_MAP /
 # _BOND_MASTER_EVIDENCE_FIELD_MAP as admission evidence; SECURITY_TYP is
 # confirmed and wired into _BOND_MASTER_EVIDENCE_FIELD_MAP too, but as
 # display/evidence data only, not an admission criterion; DAY_CNT_DES/
 # MTY_TYP/CALC_TYP_DES are confirmed and wired into
-# _BOND_MASTER_RAW_DISPLAY_FIELD_MAP (display-only); PENULTIMATE_COUPON_DATE/
-# REDEMPTION_VALUE/IS_AMORTIZING/AMORT_TYP/REDEMP_TYP/SCHED_TYP/MTG_TYP are
-# confirmed rejected and must not be re-added without a fresh confirmation;
-# PRINCIPAL_FACTOR is confirmed to return a value but has no approved use.
-# Add a new entry here
+# _BOND_MASTER_RAW_DISPLAY_FIELD_MAP too (display-only -- MTY_TYP is
+# deliberately wired to both maps, see that map's own comment for why);
+# PENULTIMATE_COUPON_DATE/REDEMPTION_VALUE/IS_AMORTIZING/AMORT_TYP/
+# REDEMP_TYP/SCHED_TYP/MTG_TYP are confirmed rejected and must not be
+# re-added without a fresh confirmation; PRINCIPAL_FACTOR is confirmed to
+# return a value but has no approved use. Add a new entry here
 # only for a genuinely new, not-yet-probed candidate mnemonic -- see the
-# "still needed" section above for what Eddy should look for next
-# (bullet-vs-amortizing / principal-repayment-schedule evidence) and where.
+# "still needed" section above for what Eddy should look for next (a real,
+# confirmed non-callable USD corporate/German government UAT security) and
+# where.
 _CANDIDATE_BOND_MASTER_FIELDS: dict[str, str] = {}
 # business_day_convention, bond_type, yield_convention, ex_dividend_days,
 # status, amortizing_flag: deliberately no candidate here at all -- pass

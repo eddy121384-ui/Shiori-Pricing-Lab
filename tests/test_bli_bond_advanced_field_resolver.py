@@ -1138,9 +1138,10 @@ _CONFIRMED_STRUCTURAL_EVIDENCE = {
 
 def test_the_three_confirmed_fields_alone_do_not_admit_a_non_ust_profile(gated_registry):
     """Item 3, the decisive regression: even with every field Bloomberg has
-    actually confirmed, a non-UST profile must still refuse, because
-    `amortizing_flag` has no approved criterion at all. `security_type` is
-    not part of the gate any more, so it is not even mentioned."""
+    actually confirmed, a non-UST profile must still refuse when
+    `maturity_refund_type` is absent -- `bond_master.get(...)` is `None`
+    here, outside the allowlist. `security_type` is not part of the gate any
+    more, so it is not even mentioned."""
 
     profile = _resolve_gated(
         bond_master={**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
@@ -1149,7 +1150,7 @@ def test_the_three_confirmed_fields_alone_do_not_admit_a_non_ust_profile(gated_r
     assert profile.supported is False
     assert profile.fields == ()
     reason = " ".join(profile.rejection_reasons)
-    assert "amortizing_flag" in reason
+    assert "maturity_refund_type" in reason
     # The three genuinely-confirmed fields are not cited: they are pulling
     # their weight, and only the one truly-unconfirmed field blocks.
     assert "coupon_type" not in reason
@@ -1160,12 +1161,35 @@ def test_the_three_confirmed_fields_alone_do_not_admit_a_non_ust_profile(gated_r
     assert "security_type" not in reason
 
 
+@pytest.mark.parametrize("maturity_refund_type", ["NORMAL", "AT MATURITY"])
+def test_all_four_confirmed_fields_together_admit_a_non_ust_profile(
+    gated_registry, maturity_refund_type
+):
+    """The other half of item 3, now provable for the first time: unlike
+    `amortizing_flag`, `maturity_refund_type` has a real allowlist, so a
+    non-UST profile *can* be admitted once all four structural-evidence
+    fields are confirmed -- either allowlisted value, matching Eddy's
+    confirmed evidence for `UST` (`"NORMAL"`) and a UK Gilt (`"AT
+    MATURITY"`, evidence only)."""
+
+    profile = _resolve_gated(
+        bond_master={
+            **_ANNUAL_BOND_MASTER,
+            **_CONFIRMED_STRUCTURAL_EVIDENCE,
+            "maturity_refund_type": maturity_refund_type,
+        }
+    )
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+
+
 def test_security_type_never_blocks_admission_present_or_absent(gated_registry):
     """The decisive regression for Eddy's correction itself: whether
     `security_type` is present, absent, or contradicts every value ever
-    observed, the outcome (still fail-closed on `amortizing_flag` alone)
-    does not change -- because the field is simply never read for
-    admission any more."""
+    observed, the outcome (still fail-closed on `maturity_refund_type` alone,
+    since it is absent in every case here) does not change -- because the
+    field is simply never read for admission any more."""
 
     without_security_type = _resolve_gated(
         bond_master={**_ANNUAL_BOND_MASTER, **_CONFIRMED_STRUCTURAL_EVIDENCE}
@@ -1200,18 +1224,23 @@ def test_security_type_never_blocks_admission_present_or_absent(gated_registry):
         ("coupon_type", "FLOATING"),
         ("inflation_linked_flag", True),
         ("convertible_flag", True),
+        ("maturity_refund_type", "CALLABLE"),
     ],
 )
 def test_a_present_but_wrong_value_still_blocks_the_field_it_belongs_to(
     gated_registry, field, wrong_value
 ):
     """The exact bug a presence-only check would miss: `bond_master[field]`
-    is not `None` here (a real floater's Bloomberg response would not be
-    empty either), and it must still fail to confirm anything."""
+    is not `None` here (a real floater's, or a real callable bond's -- AMZN's
+    confirmed `"CALLABLE"` -- Bloomberg response would not be empty either),
+    and it must still fail to confirm anything. All three other fields
+    (including `maturity_refund_type` when it is not the one under test) are
+    confirmed, so the refusal is provably about this one field alone."""
 
     bond_master = {
         **_ANNUAL_BOND_MASTER,
         **_CONFIRMED_STRUCTURAL_EVIDENCE,
+        "maturity_refund_type": "NORMAL",
         field: wrong_value,
     }
     profile = _resolve_gated(bond_master=bond_master)
@@ -1222,20 +1251,22 @@ def test_a_present_but_wrong_value_still_blocks_the_field_it_belongs_to(
 
 def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_registry):
     """The end-to-end proof, using a bond_master shaped exactly like what
-    `load_bloomberg_bond_identity_and_quote` returns today: four evidence
+    `load_bloomberg_bond_identity_and_quote` returns today for a bond whose
+    redemption structure Bloomberg has not (yet) confirmed: four evidence
     keys populated (`coupon_type`/`inflation_linked_flag`/`convertible_flag`
     with their confirmed values, `security_type` with a real Bloomberg
-    string -- the loader wires it now), `amortizing_flag` simply absent --
-    no mnemonic exists for it, so `bond_master.get(...)` is `None`, exactly
-    like any other unmapped destination. Still `supported=False`, and only on
-    `amortizing_flag`."""
+    string -- the loader wires it now), `maturity_refund_type` simply
+    absent -- exactly like any other unmapped destination. Still
+    `supported=False`, and only on `maturity_refund_type`. (`amortizing_flag`
+    is not part of the gate at all any more -- see
+    `test_amortizing_flag_is_no_longer_part_of_the_gate` below.)"""
 
     bond_master = {
         **_ANNUAL_BOND_MASTER,
         **_CONFIRMED_STRUCTURAL_EVIDENCE,
         "security_type": "GLOBAL",
     }
-    assert "amortizing_flag" not in bond_master
+    assert "maturity_refund_type" not in bond_master
 
     profile = _resolve_gated(bond_master=bond_master)
 
@@ -1244,10 +1275,33 @@ def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_
     assert profile.unresolved_fields == ()
     reason = " ".join(profile.rejection_reasons)
     assert "has not confirmed this bond is a plain fixed-coupon bullet" in reason
-    assert "floating-rate, inflation-linked, convertible or amortizing" in reason
+    assert "floating-rate, inflation-linked, convertible, or unsupported redemption structure" in (
+        reason
+    )
     assert "selecting it by hand does not establish it" in reason
-    assert "amortizing_flag" in reason
+    assert "maturity_refund_type" in reason
     assert "security_type" not in reason
+
+
+def test_a_real_callable_bond_is_refused_end_to_end(gated_registry):
+    """AMZN, a real USD corporate bond, confirmed `MTY_TYP = "CALLABLE"` --
+    the negative-evidence proof the gate correctly refuses it, using the
+    exact confirmed value, not a placeholder. A callable bond is exactly
+    what this gate exists to keep out, so this is the decisive case, not an
+    edge case."""
+
+    bond_master = {
+        **_ANNUAL_BOND_MASTER,
+        **_CONFIRMED_STRUCTURAL_EVIDENCE,
+        "maturity_refund_type": "CALLABLE",
+    }
+
+    profile = _resolve_gated(bond_master=bond_master)
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    reason = " ".join(profile.rejection_reasons)
+    assert "maturity_refund_type" in reason
 
 
 @pytest.mark.parametrize(
@@ -1257,17 +1311,18 @@ def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_
         ("GERMAN_GOVT", "EUR", _ANNUAL_BOND_MASTER),
     ],
 )
-def test_only_amortizing_flag_blocks_a_real_registered_non_ust_profile(
+def test_only_maturity_refund_type_blocks_a_real_registered_non_ust_profile_when_absent(
     convention_profile, currency, bond_master_base
 ):
     """Item 5's decisive regression, on the *actual* registered profiles --
     not `GATED_SYNTHETIC_TEST` -- now that both carry a confirmed
     `ex_dividend_days=0` (Issue #161 follow-up: ex-dividend convention
     convergence). With every other structural-evidence field confirmed and
-    only `amortizing_flag` missing, the sole refusal reason is
-    `amortizing_flag`: not `ex_dividend_days`/"ex-dividend" (that field is no
-    longer unconfirmed for either market) and not `security_type` (never
-    part of the gate at all)."""
+    only `maturity_refund_type` missing (no confirmed non-callable UAT
+    security exists for either market yet), the sole refusal reason is
+    `maturity_refund_type`: not `ex_dividend_days`/"ex-dividend" (that field
+    is no longer unconfirmed for either market) and not `security_type`
+    (never part of the gate at all)."""
 
     profile = resolve_bond_advanced_field_profile(
         convention_profile=convention_profile,
@@ -1283,10 +1338,48 @@ def test_only_amortizing_flag_blocks_a_real_registered_non_ust_profile(
     assert profile.fields == ()
     assert profile.unresolved_fields == ()
     reason = " ".join(profile.rejection_reasons)
-    assert "amortizing_flag" in reason
+    assert "maturity_refund_type" in reason
     assert "security_type" not in reason
     assert "ex_dividend" not in reason
     assert "ex-dividend" not in reason
+
+
+@pytest.mark.parametrize(
+    "convention_profile, currency, bond_master_base",
+    [
+        ("US_CORPORATE", "USD", _TREASURY_BOND_MASTER),
+        ("GERMAN_GOVT", "EUR", _ANNUAL_BOND_MASTER),
+    ],
+)
+def test_a_real_callable_bond_is_refused_on_a_real_registered_non_ust_profile(
+    convention_profile, currency, bond_master_base
+):
+    """AMZN, a real USD corporate bond, confirmed `MTY_TYP = "CALLABLE"` --
+    proof this gate rejects a genuinely callable bond on the actual
+    registered profile, using the confirmed negative-evidence value, not a
+    placeholder. AMZN itself is a rejection fixture only (it must never be
+    promoted to a positive `US_CORPORATE` UAT security); the same value is
+    exercised against `GERMAN_GOVT` too, since the allowlist does not vary
+    by profile."""
+
+    profile = resolve_bond_advanced_field_profile(
+        convention_profile=convention_profile,
+        isin="XS0000000042",
+        currency=currency,
+        bond_master={
+            **bond_master_base,
+            **_CONFIRMED_STRUCTURAL_EVIDENCE,
+            "maturity_refund_type": "CALLABLE",
+        },
+        bond_master_raw={},
+        valuation_date=_VALUATION_DATE,
+        expiry_date=_EXPIRY_DATE,
+    )
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    reason = " ".join(profile.rejection_reasons)
+    assert "maturity_refund_type" in reason
 
 
 def test_ust_is_exempt_so_its_uat_passed_behaviour_does_not_regress():
@@ -1317,12 +1410,17 @@ def test_the_evidence_gate_is_checked_server_side_not_left_to_the_browser(
     assert "confirms_plain_fixed_coupon_evidence" in source
 
 
-def test_the_permanently_unconfirmed_field_rejects_any_value_unit_level():
-    """Unit-level companion to the integration tests above: `amortizing_flag`
-    fails `confirms_plain_fixed_coupon_evidence` for every value, not merely
-    for `None` -- there is no way to satisfy it today, by any bond_master
-    content."""
+def test_amortizing_flag_is_no_longer_part_of_the_gate():
+    """`amortizing_flag` had no approved criterion at all, which kept every
+    non-UST profile permanently fail-closed with no path to admission for
+    any bond -- Eddy's third-revision correction replaced it with
+    `maturity_refund_type` (MTY_TYP) in `PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`.
+    Unit-level companion to the integration tests above: `amortizing_flag`
+    still fails `confirms_plain_fixed_coupon_evidence` for every value (the
+    same defence-in-depth `security_type` gets), but the resolver's gate
+    loop never asks about it at all any more."""
 
+    assert "amortizing_flag" not in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
     for value in (None, True, False, 0, "ANYTHING"):
         assert confirms_plain_fixed_coupon_evidence("amortizing_flag", value) is False, value
 
@@ -1339,7 +1437,7 @@ def test_security_type_is_not_in_the_gates_field_list_at_all():
         "coupon_type",
         "inflation_linked_flag",
         "convertible_flag",
-        "amortizing_flag",
+        "maturity_refund_type",
     }
 
 

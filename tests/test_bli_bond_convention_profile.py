@@ -443,9 +443,12 @@ def test_a_present_but_wrong_value_does_not_confirm(field, non_confirming_value)
     [None, "US GOVERNMENT", "GLOBAL", "EURO-ZONE", True, False, 0, 1, "ANYTHING"],
 )
 def test_amortizing_flag_never_confirms_any_value(value):
-    """No working amortizing-evidence mnemonic exists at all, so this field
-    rejects every value, not just absence, until a real criterion is
-    approved."""
+    """`amortizing_flag` is no longer one of `PLAIN_FIXED_COUPON_EVIDENCE_FIELDS`
+    at all (Eddy's third-revision correction: `maturity_refund_type`/MTY_TYP
+    replaces it as the gate's redemption-structure evidence, below) -- this
+    pins the same defence-in-depth this module already gives `security_type`:
+    the predicate itself still has no criterion for a field the gate no
+    longer asks about, so it rejects every value regardless."""
 
     assert confirms_plain_fixed_coupon_evidence("amortizing_flag", value) is False
 
@@ -466,6 +469,69 @@ def test_security_type_is_removed_from_the_gates_field_list():
     # asked (defence in depth, not the mechanism that protects admission --
     # that mechanism is simply that the resolver's loop never reaches it).
     assert confirms_plain_fixed_coupon_evidence("security_type", "US GOVERNMENT") is False
+
+
+def test_maturity_refund_type_replaces_amortizing_flag_in_the_gates_field_list():
+    """Eddy's third-revision correction: `amortizing_flag` had no approved
+    criterion at all, which kept every non-UST profile permanently
+    fail-closed with no path to admission for any bond. `MTY_TYP` is a real,
+    bounded Bloomberg classification instead, so `maturity_refund_type`
+    takes its place in the gate -- the field list stays four long, with one
+    member swapped, not five."""
+
+    assert PLAIN_FIXED_COUPON_EVIDENCE_FIELDS == (
+        "coupon_type",
+        "inflation_linked_flag",
+        "convertible_flag",
+        "maturity_refund_type",
+    )
+    assert "amortizing_flag" not in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS
+
+
+@pytest.mark.parametrize("value", ["NORMAL", "AT MATURITY"])
+def test_maturity_refund_type_confirms_exactly_the_two_bullet_values(value):
+    """Eddy's confirmed positive evidence: UST (`US91282CMC28`) returned
+    `"NORMAL"`; a UK Gilt (`GB00BFX0ZL78`, evidence only -- Gilt is not a
+    registered profile) returned `"AT MATURITY"`. Both describe a plain,
+    unconditional bullet redemption at maturity and are the entire
+    allowlist."""
+
+    assert confirms_plain_fixed_coupon_evidence("maturity_refund_type", value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "CALLABLE",
+        "PUTABLE",
+        "SINKABLE",
+        "CONVERTIBLE",
+        "PERPETUAL",
+        "PASS-THRU",
+        "EXTENDIBLE",
+        "CALLABLE/PUTABLE",  # a combination value carrying a rejected substring
+        "PARTIALLY CALLABLE",
+        "PUTABLE, SINKABLE",
+        "normal",  # not normalized/case-folded, same discipline as every other field
+        "at maturity",
+        "",
+        "ANYTHING",
+        None,
+        True,
+        0,
+    ],
+)
+def test_maturity_refund_type_rejects_every_non_allowlisted_value(value):
+    """Bloomberg's own MTY_TYP (DS092) Full Definition / Enumerations name
+    every one of the confirmed enumeration values here (`CALLABLE`,
+    `PUTABLE`, `SINKABLE`, `CONVERTIBLE`, `PERPETUAL`, `PASS-THRU`,
+    `EXTENDIBLE`), and a combination value can carry one of those as a
+    substring -- an allowlist, not a denylist, so every one of these, plus
+    anything absent, malformed, or simply unrecognized, fails closed the
+    same way. AMZN, a real USD corporate bond, confirmed `"CALLABLE"` --
+    proof this is not a hypothetical case."""
+
+    assert confirms_plain_fixed_coupon_evidence("maturity_refund_type", value) is False
 
 
 def test_an_unrecognized_field_name_never_confirms():

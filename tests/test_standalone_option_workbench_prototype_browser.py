@@ -5855,7 +5855,9 @@ def test_selecting_us_corporate_on_a_real_bond_fails_closed_on_structure(
     assert profile["fields"] == []
     reasons = " ".join(profile["rejection_reasons"])
     assert "plain fixed-coupon bullet" in reasons
-    assert "floating-rate, inflation-linked, convertible or amortizing" in reasons
+    assert "floating-rate, inflation-linked, convertible, or unsupported redemption structure" in (
+        reasons
+    )
     assert "selecting it by hand does not establish it" in reasons
 
     # No fake exit: the Advanced controls are disabled, not offered.
@@ -5946,7 +5948,7 @@ def test_the_provenance_readout_names_the_selected_profile_not_ust(server_url, p
 @_PLAYWRIGHT_SKIP
 @_QUANTLIB_SKIP
 def test_populated_but_uncriteria_evidence_still_refuses_us_corporate(server_url, page) -> None:
-    """Issue #161 follow-up items 1-3, end to end, corrected twice.
+    """Issue #161 follow-up items 1-3, end to end, corrected a third time.
 
     An earlier revision of this test supplied `security_type`/`amortizing_
     flag` values and expected US_CORPORATE to resolve -- that was wrong: real
@@ -5955,14 +5957,13 @@ def test_populated_but_uncriteria_evidence_still_refuses_us_corporate(server_url
     removed `security_type` from the gate entirely (Eddy: it cannot safely
     classify a profile, and Shiori never auto-selects one anyway), so this
     now supplies it as ordinary display/evidence data -- present, with a
-    plausible-looking value, and irrelevant to the outcome either way.
-    `amortizing_flag` is the one field with no approved criterion at all
-    (see the resolver's own evidence log), so no bond_master content can
-    satisfy it today, even a superficially plausible `False`. This proves
-    the gate correctly stays fail-closed on that one field rather than
-    admitting on presence alone -- the exact bug the value-based check
-    exists to prevent -- while `security_type` is carried along and cited
-    nowhere."""
+    plausible-looking value, and irrelevant to the outcome either way. A
+    third correction (Eddy) replaced `amortizing_flag` -- which had no
+    approved criterion at all -- with `maturity_refund_type` (MTY_TYP) as
+    the gate's redemption-structure evidence; `amortizing_flag` is still
+    carried along here (also irrelevant, also cited nowhere) but
+    `maturity_refund_type` is the field this bond has not confirmed, so no
+    bond_master content admits it today without that field."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(
@@ -5985,9 +5986,9 @@ def test_populated_but_uncriteria_evidence_still_refuses_us_corporate(server_url
     assert profile["convention_profile"] == "US_CORPORATE"
     assert profile["supported"] is False
     reasons = " ".join(profile["rejection_reasons"])
-    assert "amortizing_flag" in reasons
-    # The three genuinely-confirmed fields, and security_type (no longer
-    # part of the gate at all), are not cited as the problem.
+    assert "maturity_refund_type" in reasons
+    # The three genuinely-confirmed fields, and security_type/amortizing_flag
+    # (neither part of the gate any more), are not cited as the problem.
     assert "coupon_type" not in reasons
     assert "inflation_linked_flag" not in reasons
     assert "convertible_flag" not in reasons

@@ -1118,6 +1118,56 @@ def test_identity_lookup_a_real_floaters_coupon_type_passes_through_unjudged(mon
     assert result["bond_master"]["coupon_type"] == "FLOATING"
 
 
+def test_identity_lookup_maturity_refund_type_populates_from_mty_typ(monkeypatch):
+    """AMZN -- Eddy's Issue #161 follow-up redemption-structure-gate
+    workstation evidence for a real USD corporate bond: MTY_TYP="CALLABLE".
+    This loader never judges the value (that is the pricing layer's own
+    exact-value allowlist, `confirms_plain_fixed_coupon_evidence`) -- it
+    passes the raw Bloomberg string through unchanged, exactly like every
+    other confirmed mnemonic, whether or not the value happens to be one the
+    allowlist will later refuse."""
+
+    _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(
+                _security_data(
+                    security=_ISIN_IDENTIFIER, fields=_identity_fields(MTY_TYP="CALLABLE")
+                )
+            )
+        ],
+    )
+
+    result = load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    assert result["bond_master"]["maturity_refund_type"] == "CALLABLE"
+    # The same mnemonic also still populates the untouched, unjudged raw
+    # display string -- MTY_TYP is deliberately wired to both destinations.
+    assert result["bond_master_raw"]["maturity_type"] == "CALLABLE"
+
+
+def test_identity_lookup_requests_mty_typ_exactly_once(monkeypatch):
+    """MTY_TYP is named by both `_BOND_MASTER_RAW_DISPLAY_FIELD_MAP` and
+    `_BOND_MASTER_EVIDENCE_FIELD_MAP` -- the request must still ask Bloomberg
+    for it only once, not twice, per security."""
+
+    holder = _install_fake_blpapi(
+        monkeypatch,
+        events=[
+            _response_event(_security_data(security=_ISIN_IDENTIFIER, fields=_identity_fields()))
+        ],
+    )
+
+    load_bloomberg_bond_identity_and_quote(
+        identifier=_ISIN_IDENTIFIER, quote_side=TreasuryFTPQuoteSide.MID
+    )
+
+    sent_fields = holder["session"].last_request.fields
+    assert sent_fields.count("MTY_TYP") == 1
+
+
 def test_identity_lookup_inflation_linked_flag_unknown_value_stays_none(monkeypatch):
     _install_fake_blpapi(
         monkeypatch,
@@ -1275,6 +1325,7 @@ def test_identity_lookup_populates_confirmed_bond_master_fields_from_a_treasury_
         "security_type": "US GOVERNMENT",
         "inflation_linked_flag": False,
         "convertible_flag": False,
+        "maturity_refund_type": "AT MATURITY",
         "amortizing_flag": None,
     }
     assert result["bond_master_raw"] == {
