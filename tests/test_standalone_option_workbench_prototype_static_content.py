@@ -254,7 +254,7 @@ def test_index_html_shows_a_provenance_readout_for_every_pre_filled_field() -> N
         "prov-reporting-date",
         "prov-forward-settlement-date",
         "prov-option-settlement-date",
-        "ust-profile-status",
+        "advanced-profile-status",
     ):
         assert f'id="{element_id}"' in text
 
@@ -288,7 +288,7 @@ def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself
     """
 
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
-    assert "/api/ust/profile" in text
+    assert "/api/bond/advanced-profile" in text
     for tier in (
         "BLOOMBERG_AUTO",
         "SHIORI_DERIVED",
@@ -304,24 +304,107 @@ def test_script_asks_the_server_for_the_profile_and_decides_no_convention_itself
 
 
 def test_convention_profile_is_a_browser_state_input_not_a_hardcoded_server_default() -> None:
-    """Issue #157 P1-1 correction: convention_profile must be explicit
-    request input, and the badge that displays it must be sourced from that
-    same browser-state constant, not a second, independently-typed string."""
+    """Issue #157 P1-1 correction, extended by Issue #161 requirement D:
+    convention_profile must be explicit request input, and the control that
+    displays it must be a real, visible, trader-overridable selector sourced
+    from that same browser state -- not a second, independently-typed
+    string, and no longer a hardcoded constant."""
 
     text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
-    assert "SELECTED_CONVENTION_PROFILE" in text
-    assert "convention_profile: SELECTED_CONVENTION_PROFILE" in text
-    assert "convention-profile-badge" in text
+    assert "let selectedConventionProfile = null;" in text
+    assert "convention_profile: selectedConventionProfile," in text
+    assert "convention-profile-select" in text
+    # The picker is a genuine override: a change handler that records the
+    # trader took the selection over and re-asks the resolver.
+    assert "conventionProfileOverridden = true;" in text
 
     html_text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
-    assert 'id="convention-profile-badge"' in html_text
+    assert 'id="convention-profile-select"' in html_text
     # Visible inside the always-rendered card-head row, not inside the
     # collapsible advanced-body -- see the element's position relative to
     # the "Advanced" card-head/card-body boundary.
     head_start = html_text.index('id="advanced-head"')
     body_start = html_text.index('id="advanced-body"')
-    badge_pos = html_text.index('id="convention-profile-badge"')
-    assert head_start < badge_pos < body_start
+    picker_pos = html_text.index('id="convention-profile-select"')
+    assert head_start < picker_pos < body_start
+
+
+def test_the_profile_selector_options_are_never_a_second_copy_of_the_registry() -> None:
+    """Issue #161 requirement D: the selectable profiles must come from the
+    server's own answer, so a trader can never pick a profile the resolver
+    would reject for this bond, nor be denied one it would accept.
+
+    The page therefore hardcodes no profile name at all: its options are
+    built from the candidates response.
+    """
+
+    from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+        SUPPORTED_CONVENTION_PROFILE_NAMES,
+    )
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "conventionProfileCandidateNames()" in text
+    for name in SUPPORTED_CONVENTION_PROFILE_NAMES:
+        assert f'"{name}"' not in text, (
+            f"script.js names the {name!r} profile literally; the selector's options must "
+            "come from the server's own answer, not a second copy of the registry"
+        )
+
+
+def test_the_page_never_selects_a_convention_profile_for_the_trader() -> None:
+    """Issue #161 follow-up item 1, structurally.
+
+    Auto-selection was withdrawn because currency and coupon frequency
+    describe a bond's cash flows, not its issuer class. The page must
+    therefore assign `selectedConventionProfile` in exactly two places -- the
+    picker's own change handler, and the per-bond reset that clears it -- and
+    must not read a `suggested` field from anywhere.
+    """
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "suggested" not in text
+
+    assignments = [
+        line.strip()
+        for line in text.splitlines()
+        if "selectedConventionProfile =" in line and "===" not in line
+    ]
+    assert assignments == [
+        "let selectedConventionProfile = null;",
+        "selectedConventionProfile = null;",
+        "selectedConventionProfile = chosen;",
+    ], assignments
+
+
+def test_the_export_source_system_is_read_from_the_server_never_derived() -> None:
+    """Issue #161 follow-up item 6, compatibility correction.
+
+    An earlier revision computed the export label client-side as
+    `SHIORI_${selectedConventionProfile}_CONVENTION_PROFILE`, which would
+    have silently changed UST's already-shipped
+    `SHIORI_UST_FIXED_COUPON_PROFILE` value the moment a second profile was
+    registered. The corrected design reads `source_system` verbatim from
+    `/api/bond/advanced-profile`'s own response -- the same single source of
+    truth (`BLIConventionProfile.source_system`) the server-side regression
+    test pins -- so the browser can never recompute a label that disagrees
+    with it.
+    """
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    assert "advancedProfile.source_system" in text
+    assert "profileNameFromTier" in text
+
+    # Executable lines only: the comments legitimately quote the withdrawn
+    # derivation and the pre-existing label it must not overwrite, precisely
+    # to record that neither is computed in this file any more.
+    code = "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("//")
+    )
+    assert "SHIORI_UST_FIXED_COUPON_PROFILE" not in code
+    assert "_CONVENTION_PROFILE`" not in code  # no template-literal derivation of any kind
+    # The provenance tier's description is derived the same way, so no
+    # market's name is written out per tier either.
+    assert "UST_PROFILE_DEFAULT" not in code
 
 
 def test_no_identity_verification_claim_anywhere_in_the_served_page() -> None:

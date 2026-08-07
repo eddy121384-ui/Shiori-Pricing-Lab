@@ -138,7 +138,7 @@
     advancedBody: document.getElementById("advanced-body"),
     advancedIndicator: document.getElementById("advanced-indicator"),
     advancedSummary: document.getElementById("advanced-summary"),
-    conventionProfileBadge: document.getElementById("convention-profile-badge"),
+    conventionProfileSelect: document.getElementById("convention-profile-select"),
     dayCount: document.getElementById("day-count-select"),
     bondTypeSelect: document.getElementById("bond-type-select"),
     exDividendDays: document.getElementById("ex-dividend-days-input"),
@@ -150,7 +150,7 @@
     reportingDate: document.getElementById("reporting-date-input"),
     forwardSettlementDate: document.getElementById("forward-settlement-date-input"),
     optionSettlementDate: document.getElementById("option-settlement-date-input"),
-    ustProfileStatus: document.getElementById("ust-profile-status"),
+    advancedProfileStatus: document.getElementById("advanced-profile-status"),
     provDayCount: document.getElementById("prov-day-count"),
     provBondType: document.getElementById("prov-bond-type"),
     provExDividendDays: document.getElementById("prov-ex-dividend-days"),
@@ -311,7 +311,7 @@
   //
   // The eight non-market Advanced technical fields are no longer typed one by
   // one. After a Bloomberg Load -- and again whenever the expiry changes --
-  // the page asks POST /api/ust/profile, whose whole answer is computed
+  // the page asks POST /api/bond/advanced-profile, whose whole answer is computed
   // server-side by the reviewed deterministic resolver
   // (pricing/bli_ust_fixed_coupon_profile.py). This file decides *nothing*
   // about conventions: it never contains a day-count, bond-type or status
@@ -320,25 +320,52 @@
   // the four provenance tiers each one came from, and stops re-deriving any
   // field the trader has taken over.
 
-  const UST_PROFILE_SOURCE_SYSTEM = "SHIORI_UST_FIXED_COUPON_PROFILE";
+  // The export's own source_system label for a profile-supplied value.
+  //
+  // Issue #161 follow-up item 6 (compatibility correction): this is never
+  // computed here. Each registered profile states its own explicit
+  // `source_system` server-side (`BLIConventionProfile.source_system`) --
+  // UST keeps its pre-existing, already-shipped
+  // `SHIORI_UST_FIXED_COUPON_PROFILE` unchanged, while US_CORPORATE and
+  // GERMAN_GOVT get their own distinct labels. `/api/bond/advanced-profile`'s
+  // response now carries that value verbatim as `source_system`, and this
+  // file reads it from the last resolved answer rather than deriving a
+  // string from the selected profile's name -- deriving it here would be
+  // exactly the second, independently-typed copy of server truth this file
+  // avoids everywhere else (see `renderConventionProfilePicker`).
+  function conventionProfileSourceSystem() {
+    return advancedProfile && typeof advancedProfile.source_system === "string"
+      ? advancedProfile.source_system
+      : MANUAL_SOURCE_SYSTEM;
+  }
   const TRADER_OVERRIDE_BASIS = "TRADER_OVERRIDE";
   // Mirrors the resolver's own PROVENANCE_BLOCKED label. Not a value tier:
   // it names a field the resolver refused to fill and handed to the trader.
   const PROVENANCE_BLOCKED = "BLOCKED";
 
   // The currently selected Convention Profile -- browser-owned state, sent
-  // as an explicit input on every /api/ust/profile request (Issue #157
-  // P1-1 correction). The server never infers, defaults, or fabricates
-  // this value; it only validates the selection this file sends and echoes
-  // it back. This PR's scope offers no profile-selector control, so this
-  // is fixed to "UST" -- but it is still real state flowing browser ->
-  // server, not a value the server invents on its own, and a future
-  // selector control would only need to change this one binding, not the
-  // request/response contract around it.
-  const SELECTED_CONVENTION_PROFILE = "UST";
+  // as an explicit input on every /api/bond/advanced-profile request (Issue
+  // #157 P1-1 correction). The server never infers, defaults, or fabricates
+  // it; it only validates the selection this file sends and echoes it back.
+  //
+  // Issue #161 makes it a real, visible selection rather than a constant, and
+  // the follow-up correction makes it the *trader's* selection alone: it
+  // stays `null` until the trader picks, and while it is `null` no profile
+  // request is sent at all -- an Advanced field filled from an unselected
+  // profile would be a value nobody chose. Shiori narrows the choices (see
+  // `refreshConventionProfileCandidates`) but never makes one. What the page
+  // asks for is a *profile*, never the eight technical fields.
+  let selectedConventionProfile = null;
+  // The last answer from /api/bond/convention-profile/candidates. Loading a
+  // different bond resets it, the selection and the override flag together
+  // with the rest of the run state.
+  let conventionProfileCandidates = null;
+  let conventionProfileOverridden = false;
+  let conventionProfileGeneration = 0;
+  let conventionProfileTransportError = null;
 
-  // What each provenance tier means, in the trader's own terms. The tier
-  // string itself always comes from the server.
+  // What each market-independent provenance tier means, in the trader's own
+  // terms. The tier string itself always comes from the server.
   const PROVENANCE_DESCRIPTIONS = {
     BLOOMBERG_AUTO:
       "a typed value Bloomberg itself returned for this bond, mapped by a confirmed " +
@@ -346,14 +373,33 @@
     SHIORI_DERIVED:
       "derived mechanically by Shiori from this run's own loaded bond terms, valuation " +
       "date and expiry, using existing reviewed logic",
-    UST_PROFILE_DEFAULT:
-      "the approved narrow UST fixed-coupon bullet profile's own value for this field",
     TRADER_OVERRIDE:
       "you set this value yourself; Shiori will not re-derive or reset it for this bond",
     BLOCKED:
       "Shiori has no safe value or method for this one field, so it is yours to set — " +
       "every other field on this bond keeps the value Shiori resolved for it",
   };
+
+  // The remaining tier is the selected profile's own, and there is now more
+  // than one profile, so its label and its description are both derived from
+  // the tier string the server sent rather than written out per market
+  // (Issue #161 follow-up item 6). A German government bond's values must
+  // never be described, or exported, as the UST profile's.
+  const PROFILE_DEFAULT_TIER_SUFFIX = "_PROFILE_DEFAULT";
+
+  function profileNameFromTier(tier) {
+    return typeof tier === "string" && tier.endsWith(PROFILE_DEFAULT_TIER_SUFFIX)
+      ? tier.slice(0, -PROFILE_DEFAULT_TIER_SUFFIX.length)
+      : null;
+  }
+
+  function provenanceDescription(tier) {
+    const profileName = profileNameFromTier(tier);
+    if (profileName !== null) {
+      return `the ${profileName} convention profile's own approved value for this field`;
+    }
+    return PROVENANCE_DESCRIPTIONS[tier] || "";
+  }
 
   // path -> the control that holds it and the readout that explains it. The
   // paths are spelled exactly as the resolver's own
@@ -455,7 +501,7 @@
   // date. This is the one place this file re-implements the resolver's own
   // date-validity algorithm rather than reusing its answer directly,
   // because the checks below must be correct immediately after Bloomberg
-  // Load, before the async POST /api/ust/profile round-trip completes --
+  // Load, before the async POST /api/bond/advanced-profile round-trip completes --
   // never guessed, never coerced, same grammar and same calendar rule the
   // resolver itself uses.
   const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
@@ -484,12 +530,34 @@
   // True once the resolver has actually refused the product/schedule. Not
   // true while no answer has arrived (null) -- Shiori not knowing yet is not
   // the same as Shiori saying no.
+  // True when the current pricing path cannot carry this bond at all, so the
+  // Advanced controls are disabled rather than left looking like a way out.
+  //
+  // Two distinct situations, both genuinely unrepairable here (Issue #161):
+  // the selected profile refused the bond's product shape or coupon
+  // schedule, and -- new with the profile registry -- *no* registered
+  // convention profile states conventions for this bond's own confirmed
+  // currency and coupon frequency at all. The second is not "pick a
+  // profile": there is nothing to pick, so offering the eight fields would
+  // be exactly the fake exit this issue exists to remove.
+  function noProfileCoversThisBond() {
+    return (
+      conventionProfileCandidates !== null &&
+      (conventionProfileCandidates.candidates || []).length === 0
+    );
+  }
+
   function productUnsupported() {
-    return ustProfile !== null && ustProfile.supported === false;
+    return (advancedProfile !== null && advancedProfile.supported === false) ||
+      noProfileCoversThisBond();
   }
 
   function productRejectionReasons() {
-    return (ustProfile && ustProfile.rejection_reasons) || [];
+    if (advancedProfile && advancedProfile.rejection_reasons) {
+      return advancedProfile.rejection_reasons;
+    }
+    if (noProfileCoversThisBond()) return conventionProfileCandidates.reasons || [];
+    return [];
   }
 
   // path -> the resolver's own reason it refused that one field. Empty
@@ -497,7 +565,7 @@
   // about a bond that never got as far as field resolution.
   function blockedFieldReasons() {
     const blocked = new Map();
-    ((ustProfile && ustProfile.unresolved_fields) || []).forEach((item) => {
+    ((advancedProfile && advancedProfile.unresolved_fields) || []).forEach((item) => {
       blocked.set(item.path, item.reason);
     });
     return blocked;
@@ -1001,7 +1069,7 @@
   // arrives, and cleared with the draft. Holds the server's own
   // {supported, rejection_reasons, fields, pending_field_paths,
   // unresolved_fields}.
-  let ustProfile = null;
+  let advancedProfile = null;
 
   // The last parse of each trader-format numeric input (Issue #161). Kept so a
   // malformed entry is explained beside its own field and in the unresolved
@@ -1695,25 +1763,102 @@
     els.discountingReadout.textContent = coverage.message;
   }
 
-  // --- UST profile: fetch, apply, provenance --------------------------------
+  // --- Advanced-field profile: fetch, apply, provenance ---------------------
 
-  let ustProfileGeneration = 0;
-  let lastUstProfileKey = null;
-  let ustProfileTransportError = null;
+  let advancedProfileGeneration = 0;
+  let lastAdvancedProfileKey = null;
+  let advancedProfileTransportError = null;
 
   // The complete set of inputs the server's answer depends on. A profile
   // response is adopted only while this key still reads the same, which is
-  // what makes a late answer for a previous bond -- or for a previous expiry
-  // -- impossible to apply.
-  function ustProfileKey() {
-    if (!currentDraft || !resolvedBloombergBond) return null;
+  // what makes a late answer for a previous bond -- or for a previous expiry,
+  // or for a profile the trader has since changed away from -- impossible to
+  // apply. A null selected profile makes the key null, so nothing is
+  // requested and nothing is filled until a profile is actually selected.
+  function advancedProfileKey() {
+    if (!currentDraft || !resolvedBloombergBond || !selectedConventionProfile) return null;
     return JSON.stringify({
-      convention_profile: SELECTED_CONVENTION_PROFILE,
+      convention_profile: selectedConventionProfile,
       isin: resolvedBloombergBond.isin,
       currency: currentDraft.bond_option.currency,
       valuation_date: currentDraft.valuation_date,
       expiry_date: currentDraft.bond_option.expiry_date,
     });
+  }
+
+  function conventionProfileCandidateNames() {
+    return (conventionProfileCandidates && conventionProfileCandidates.candidates) || [];
+  }
+
+  // Renders the picker from the server's own candidate list, so the options a
+  // trader can choose can never drift from the profiles the resolver will
+  // actually accept for *this* bond. The empty option is always present: the
+  // selection starts empty and stays empty until the trader makes it, because
+  // Shiori does not choose a profile (see `refreshConventionProfileCandidates`).
+  function renderConventionProfilePicker() {
+    const select = els.conventionProfileSelect;
+    const available = conventionProfileCandidateNames();
+    const wanted = ["", ...available];
+    const present = Array.from(select.options).map((option) => option.value);
+    if (present.join(",") !== wanted.join(",")) {
+      select.innerHTML = "";
+      wanted.forEach((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value === "" ? "Select a convention profile…" : value;
+        select.appendChild(option);
+      });
+    }
+    select.value = selectedConventionProfile || "";
+    select.disabled = available.length === 0;
+  }
+
+  // Asks the server which profiles this bond's own confirmed terms leave
+  // open, for the bond this request was made for -- a late answer for a
+  // previous bond can never populate the next one's picker.
+  //
+  // **Shiori never selects a profile here.** An earlier revision adopted the
+  // server's suggestion whenever the confirmed currency and coupon frequency
+  // narrowed the registry to one name; Eddy withdrew that, because those two
+  // facts describe a bond's cash flows rather than its issuer class, and the
+  // Bloomberg field that would classify it (SECURITY_TYP) is still
+  // unconfirmed. The selection stays empty until the trader makes it -- and
+  // what the page then asks for is a *profile*, never the eight Advanced
+  // technical fields.
+  async function refreshConventionProfileCandidates() {
+    if (!currentDraft || !resolvedBloombergBond) return;
+    const generation = ++conventionProfileGeneration;
+    const requestBody = {
+      currency: currentDraft.bond_option.currency,
+      bond_master: resolvedBloombergBond.bond_master || {},
+    };
+
+    let payload;
+    try {
+      const response = await fetch("/api/bond/convention-profile/candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+      payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload && payload.error ? payload.error : `HTTP ${response.status}`);
+      }
+    } catch (error) {
+      if (generation !== conventionProfileGeneration) return;
+      conventionProfileCandidates = null;
+      conventionProfileTransportError = String((error && error.message) || error);
+      renderConventionProfilePicker();
+      renderAdvancedProfileStatus();
+      return;
+    }
+    if (generation !== conventionProfileGeneration) return;
+
+    conventionProfileTransportError = null;
+    conventionProfileCandidates = payload;
+    renderConventionProfilePicker();
+    renderAdvancedProfileStatus();
+    syncDraftGating();
   }
 
   function markTraderOverride(path) {
@@ -1726,7 +1871,7 @@
   // Writes the server's values into the trader's own controls. Deliberately
   // the only place anything writes to these eight controls outside a full
   // reset, and it never touches a path the trader has taken over.
-  function applyUstProfileFields(profile) {
+  function applyAdvancedProfileFields(profile) {
     if (!currentDraft) return;
     const supplied = new Map(
       (profile.fields || []).map((field) => [field.path, field])
@@ -1808,7 +1953,7 @@
       if (blockedReason !== undefined) {
         target.textContent =
           `Source: ${PROVENANCE_BLOCKED} — ${blockedReason}. ` +
-          PROVENANCE_DESCRIPTIONS[PROVENANCE_BLOCKED];
+          provenanceDescription(PROVENANCE_BLOCKED);
         return;
       }
       if (tier === null) {
@@ -1817,34 +1962,70 @@
           : "—";
         return;
       }
-      target.textContent = `Source: ${tier} — ${PROVENANCE_DESCRIPTIONS[tier] || ""}`;
+      target.textContent = `Source: ${tier} — ${provenanceDescription(tier)}`;
     });
   }
 
-  function renderUstProfileStatus() {
-    const target = els.ustProfileStatus;
+  function renderAdvancedProfileStatus() {
+    const target = els.advancedProfileStatus;
     target.classList.remove("is-supported", "is-unsupported");
     if (!currentDraft) {
       target.textContent = "—";
       return;
     }
-    if (ustProfileTransportError !== null) {
+    if (conventionProfileTransportError !== null) {
       target.textContent =
-        `Shiori could not reach its own ${SELECTED_CONVENTION_PROFILE} profile resolver, ` +
-        "so nothing here has been pre-filled: " + ustProfileTransportError;
+        "Shiori could not reach its own convention-profile registry, so it has offered " +
+        "no profile to select and pre-filled nothing here: " +
+        conventionProfileTransportError;
       target.classList.add("is-unsupported");
       return;
     }
-    if (ustProfile === null) {
+    // No registered profile covers this bond at all. That is a refusal, not
+    // a question: there is no profile to pick, so this reads like any other
+    // unsupported product rather than inviting a selection that cannot help.
+    if (noProfileCoversThisBond()) {
       target.textContent =
-        `Checking this bond's shape against the selected ${SELECTED_CONVENTION_PROFILE} ` +
+        "No convention profile Shiori has covers this bond, so it has pre-filled none of " +
+        "these fields and has disabled them. No Advanced edit and no profile selection " +
+        "can make this ticket price (this says nothing about who issued the bond — only " +
+        "that its own confirmed terms are outside what Shiori's profiles state " +
+        "conventions for): " + productRejectionReasons().join(" · ");
+      target.classList.add("is-unsupported");
+      return;
+    }
+    // No profile selected, but one or more genuinely fit: the one thing to
+    // ask for is a profile. Issue #161 is explicit that this must never fall
+    // back to asking the trader to hand-type the eight technical fields.
+    if (!selectedConventionProfile) {
+      const reasons =
+        (conventionProfileCandidates && conventionProfileCandidates.reasons) || [];
+      target.textContent =
+        "No convention profile is selected for this bond, so Shiori has pre-filled nothing " +
+        "here. Shiori will not choose one for you — it has no confirmed Bloomberg " +
+        "classification to choose from. Select the Convention Profile that applies and it " +
+        "will fill every Advanced field it can" +
+        (reasons.length > 0 ? ": " + reasons.join(" · ") : ".");
+      target.classList.add("is-unsupported");
+      return;
+    }
+    if (advancedProfileTransportError !== null) {
+      target.textContent =
+        `Shiori could not reach its own ${selectedConventionProfile} profile resolver, ` +
+        "so nothing here has been pre-filled: " + advancedProfileTransportError;
+      target.classList.add("is-unsupported");
+      return;
+    }
+    if (advancedProfile === null) {
+      target.textContent =
+        `Checking this bond's shape against the selected ${selectedConventionProfile} ` +
         "convention profile…";
       return;
     }
     // Echo the server's own confirmation of which profile it actually
     // resolved against -- never assume it matches what was sent.
-    const profileName = ustProfile.convention_profile || SELECTED_CONVENTION_PROFILE;
-    if (!ustProfile.supported) {
+    const profileName = advancedProfile.convention_profile || selectedConventionProfile;
+    if (!advancedProfile.supported) {
       target.textContent =
         "This bond's product or coupon schedule is not supported on the current pricing " +
         `path, and does not fit the selected ${profileName} convention profile, so Shiori ` +
@@ -1855,11 +2036,12 @@
       target.classList.add("is-unsupported");
       return;
     }
-    const pending = ustProfile.pending_field_paths || [];
-    const unresolved = ustProfile.unresolved_fields || [];
+    const pending = advancedProfile.pending_field_paths || [];
+    const unresolved = advancedProfile.unresolved_fields || [];
     let text =
-      `Convention Profile: ${profileName}. This bond's shape fits it, so Shiori has ` +
-      "filled every field it could and shown where each value came from.";
+      `Convention Profile: ${profileName} (you selected it; Shiori does not choose a ` +
+      "profile). This bond's shape fits it, so Shiori has filled every field it could and " +
+      "shown where each value came from.";
     if (pending.length > 0) {
       text += ` Waiting on the expiry before deriving: ${pending.join(", ")}.`;
     }
@@ -1875,13 +2057,13 @@
   // One request per genuine change of the inputs the answer depends on -- not
   // one per keystroke. The server route is a pure function of its body, so
   // re-asking with an unchanged key could only return the same answer.
-  async function refreshUstProfile() {
-    const key = ustProfileKey();
-    if (key === null || key === lastUstProfileKey) return;
-    lastUstProfileKey = key;
-    const generation = ++ustProfileGeneration;
+  async function refreshAdvancedProfile() {
+    const key = advancedProfileKey();
+    if (key === null || key === lastAdvancedProfileKey) return;
+    lastAdvancedProfileKey = key;
+    const generation = ++advancedProfileGeneration;
     const requestBody = {
-      convention_profile: SELECTED_CONVENTION_PROFILE,
+      convention_profile: selectedConventionProfile,
       isin: resolvedBloombergBond.isin,
       currency: currentDraft.bond_option.currency,
       bond_master: resolvedBloombergBond.bond_master || {},
@@ -1893,24 +2075,24 @@
     let response;
     let payload;
     try {
-      response = await fetch("/api/ust/profile", {
+      response = await fetch("/api/bond/advanced-profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
       });
       payload = await response.json();
     } catch (err) {
-      if (generation !== ustProfileGeneration) return;
+      if (generation !== advancedProfileGeneration) return;
       // Shiori does not know whether a profile applies, which is not the same
       // as knowing it does not. Nothing is filled, the state says so, and the
       // key is released so the next edit retries. The expiry-dependent
       // settlement dates were already withdrawn synchronously in
       // applyManualInputsToDraft when this key changed -- this failure must
       // not restore them or leave a stale one behind (Issue #157 P1-2).
-      lastUstProfileKey = null;
-      ustProfile = null;
-      ustProfileTransportError = err.message;
-      renderUstProfileStatus();
+      lastAdvancedProfileKey = null;
+      advancedProfile = null;
+      advancedProfileTransportError = err.message;
+      renderAdvancedProfileStatus();
       renderFieldProvenance();
       syncDraftGating();
       return;
@@ -1920,24 +2102,24 @@
     // or another expiry while this answer was outstanding, which is exactly
     // the case where applying it would fill a field from data the trader has
     // left behind.
-    if (generation !== ustProfileGeneration) return;
-    if (ustProfileKey() !== key) return;
+    if (generation !== advancedProfileGeneration) return;
+    if (advancedProfileKey() !== key) return;
     if (!response.ok) {
       // Same guarantee as the transport-failure branch above: the withdrawn
       // settlement dates stay withdrawn, never restored from a failed
       // request (Issue #157 P1-2).
-      lastUstProfileKey = null;
-      ustProfile = null;
-      ustProfileTransportError = (payload && payload.error) || "profile request failed";
-      renderUstProfileStatus();
+      lastAdvancedProfileKey = null;
+      advancedProfile = null;
+      advancedProfileTransportError = (payload && payload.error) || "profile request failed";
+      renderAdvancedProfileStatus();
       renderFieldProvenance();
       syncDraftGating();
       return;
     }
-    ustProfileTransportError = null;
-    ustProfile = payload;
-    applyUstProfileFields(payload);
-    renderUstProfileStatus();
+    advancedProfileTransportError = null;
+    advancedProfile = payload;
+    applyAdvancedProfileFields(payload);
+    renderAdvancedProfileStatus();
     renderFieldProvenance();
     syncDraftGating();
   }
@@ -2058,12 +2240,14 @@
         path: field.path,
         value: String(value),
         source_system:
-          basis === TRADER_OVERRIDE_BASIS ? MANUAL_SOURCE_SYSTEM : UST_PROFILE_SOURCE_SYSTEM,
+          basis === TRADER_OVERRIDE_BASIS
+            ? MANUAL_SOURCE_SYSTEM
+            : conventionProfileSourceSystem(),
         basis: basis,
         reason_not_sourced:
           basis === TRADER_OVERRIDE_BASIS
             ? field.reason
-            : `${field.reason} ${PROVENANCE_DESCRIPTIONS[basis] || ""}`.trim(),
+            : `${field.reason} ${provenanceDescription(basis)}`.trim(),
         run_acquired_at: anchor,
       });
     });
@@ -2295,8 +2479,8 @@
     // longer on screen. A trader-overridden path is never touched here --
     // it survives untouched and is still validated by the real typed builder
     // like any other field.
-    const profileKeyBeforeThisEdit = lastUstProfileKey;
-    if (ustProfileKey() !== profileKeyBeforeThisEdit) {
+    const profileKeyBeforeThisEdit = lastAdvancedProfileKey;
+    if (advancedProfileKey() !== profileKeyBeforeThisEdit) {
       EXPIRY_DEPENDENT_PROFILE_FIELDS.forEach((field) => {
         if (traderOverriddenPaths.has(field.path)) return;
         field.control().value = "";
@@ -2305,8 +2489,8 @@
       // The last profile answer describes the key that is about to change --
       // it must not keep being shown (or trusted) as if it still applied to
       // the new one while the fresh request below is outstanding.
-      ustProfile = null;
-      ustProfileTransportError = null;
+      advancedProfile = null;
+      advancedProfileTransportError = null;
     }
 
     // The acquisition-derived values are deliberately not read back from the
@@ -2329,13 +2513,13 @@
     refreshOverrideProvenance();
     renderOverrideProvenance();
     renderFieldProvenance();
-    renderUstProfileStatus();
+    renderAdvancedProfileStatus();
     invalidateBuilderValidation();
     syncDraftGating();
     // Cheap unless the expiry (or the loaded bond) actually changed: the
     // profile request is keyed on its own inputs, so an unrelated edit --
     // strike, notional, a curve node -- asks nothing and re-derives nothing.
-    refreshUstProfile();
+    refreshAdvancedProfile();
   }
 
   function shioriIdentifierSuffix(bond) {
@@ -2910,7 +3094,7 @@
 
   async function runBuilderValidation() {
     validationTimer = null;
-    if (!currentDraft || !ustProfile || ustProfile.supported !== true) return;
+    if (!currentDraft || !advancedProfile || advancedProfile.supported !== true) return;
     const generation = ++validationGeneration;
     const draftAtRequestTime = currentDraft;
     let response;
@@ -2990,9 +3174,9 @@
     const profileReady =
       hasDraft &&
       resolvedBloombergBond !== null &&
-      ustProfileTransportError === null &&
-      ustProfile !== null &&
-      ustProfile.supported === true;
+      advancedProfileTransportError === null &&
+      advancedProfile !== null &&
+      advancedProfile.supported === true;
     if (
       draftComplete &&
       profileReady &&
@@ -3174,12 +3358,23 @@
     // and releasing the key permanently voids any answer still outstanding, so
     // a late response for the previous bond can never fill the next one's
     // fields -- and no override, tier or rejection reason survives either.
-    ustProfileGeneration++;
-    ustProfile = null;
+    advancedProfileGeneration++;
+    advancedProfile = null;
     fieldProvenance = new Map();
     traderOverriddenPaths = new Set();
-    lastUstProfileKey = null;
-    ustProfileTransportError = null;
+    lastAdvancedProfileKey = null;
+    advancedProfileTransportError = null;
+    // The convention-profile selection belongs to the bond that was loaded,
+    // not to the page: a Clear, or a Load of a different security, must not
+    // leave the next bond silently carrying the previous one's profile --
+    // including a profile the trader chose by hand. Bumping this generation
+    // also voids any suggestion still outstanding.
+    conventionProfileGeneration++;
+    conventionProfileCandidates = null;
+    conventionProfileOverridden = false;
+    conventionProfileTransportError = null;
+    selectedConventionProfile = null;
+    renderConventionProfilePicker();
 
     renderResolvedBondPanel();
     clearBondMaster();
@@ -3189,7 +3384,7 @@
     renderRouteMetadata();
     renderOverrideProvenance();
     renderFieldProvenance();
-    renderUstProfileStatus();
+    renderAdvancedProfileStatus();
     setAdvancedCollapsed(true);
 
     els.errorBanner.hidden = true;
@@ -3403,15 +3598,17 @@
     renderRouteMetadata();
     renderOverrideProvenance();
     renderFieldProvenance();
-    renderUstProfileStatus();
+    renderAdvancedProfileStatus();
 
     els.statusText.textContent = "Bloomberg bond loaded";
     renderResolvedBondPanel();
     renderBondMaster(resolvedBloombergBond);
     syncDraftGating();
     // A fresh bond, a fresh profile: resetRunState above already discarded the
-    // previous one's tiers and overrides, so nothing here is inherited.
-    refreshUstProfile();
+    // previous one's tiers, overrides and profile selection, so nothing here
+    // is inherited. This only populates the picker -- the trader's own
+    // selection is what triggers field resolution.
+    refreshConventionProfileCandidates();
   }
 
   // Prices the current draft through the existing reviewed builder -- reuses
@@ -3598,10 +3795,10 @@
     refreshOverrideProvenance();
     renderOverrideProvenance();
     renderFieldProvenance();
-    renderUstProfileStatus();
+    renderAdvancedProfileStatus();
     // Only re-asks if the re-acquisition actually moved one of the profile's
     // own inputs; the trader's overrides survive this untouched either way.
-    refreshUstProfile();
+    refreshAdvancedProfile();
 
     renderContext(extractContextFromDraft(currentDraft));
     setCurrentDisplay(withOverrideProvenance(display));
@@ -3756,11 +3953,35 @@
   setAdvancedCollapsed(true);
   clearTraderForm();
   syncDraftGating();
-  // Always visible, whether or not Advanced is expanded, and whether or not
-  // a bond is loaded yet -- sourced from the one browser-state constant this
-  // file sends as convention_profile on every profile request, never a
-  // second, independently-typed copy of the same string.
-  els.conventionProfileBadge.textContent = `Convention Profile: ${SELECTED_CONVENTION_PROFILE}`;
+  // Always visible, whether or not Advanced is expanded, and whether or not a
+  // bond is loaded yet. Its options come from the server's own candidate list
+  // rather than a second, independently-typed copy of the profile registry,
+  // and its value is the one piece of browser state this file sends as
+  // convention_profile on every profile request.
+  renderConventionProfilePicker();
+  els.conventionProfileSelect.addEventListener("change", () => {
+    const chosen = els.conventionProfileSelect.value || null;
+    if (chosen === selectedConventionProfile) return;
+    // Records that the selection is the trader's own. Nothing in this file
+    // ever sets `selectedConventionProfile` outside this handler and the
+    // per-bond reset, so a profile can only ever be a deliberate choice.
+    conventionProfileOverridden = true;
+    selectedConventionProfile = chosen;
+    // The previous profile's answer describes a profile that is no longer
+    // selected, so it must stop being shown or trusted while the fresh
+    // request is outstanding -- the same rule the expiry change already
+    // follows. Trader-overridden fields are deliberately left untouched.
+    advancedProfileGeneration++;
+    advancedProfile = null;
+    advancedProfileTransportError = null;
+    lastAdvancedProfileKey = null;
+    applyAdvancedProfileFields({ fields: [] });
+    renderConventionProfilePicker();
+    renderFieldProvenance();
+    renderAdvancedProfileStatus();
+    syncDraftGating();
+    refreshAdvancedProfile();
+  });
 
   // Test-only, read-only accessors: they change no stored value, API response,
   // conversion, or pricing behavior.
@@ -3773,8 +3994,19 @@
   window.__shioriTestSourcedQuoteInvalidated = () => sourcedQuoteInvalidated;
   window.__shioriTestFieldProvenance = () => Object.fromEntries(fieldProvenance);
   window.__shioriTestTraderOverriddenPaths = () => Array.from(traderOverriddenPaths);
-  window.__shioriTestUstProfile = () => ustProfile;
-  window.__shioriTestSelectedConventionProfile = () => SELECTED_CONVENTION_PROFILE;
+  window.__shioriTestAdvancedProfile = () => advancedProfile;
+  window.__shioriTestSelectedConventionProfile = () => selectedConventionProfile;
+  window.__shioriTestConventionProfileCandidates = () => conventionProfileCandidates;
+  window.__shioriTestConventionProfileOverridden = () => conventionProfileOverridden;
+  // Read-only generation fence for browser tests (no production behavior
+  // depends on this accessor existing). `conventionProfileGeneration` is
+  // bumped exactly twice per successful Bloomberg Load -- once by
+  // resetRunState, once by refreshConventionProfileCandidates -- and by
+  // nothing else, so a test can wait for it to increase past a
+  // pre-click value to know a fresh load's reset has genuinely happened,
+  // rather than polling DOM text that can already equal the expected value
+  // when the same identifier is loaded twice in a row (Issue #161 CI fix).
+  window.__shioriTestConventionProfileGeneration = () => conventionProfileGeneration;
   // Issue #161. The two parsers are pure functions of their argument, so
   // exposing them tests the very code the page runs rather than a copy.
   window.__shioriTestParseTreasuryQuote = (raw) => parseTreasuryQuote(raw);

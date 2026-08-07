@@ -124,6 +124,53 @@ into ``bond_master`` or any typed schema. A Bond Master field's absence,
 field exception, or simply not being mapped yet never fails the request --
 unlike the seven required identity/quote fields above, which still make this
 call succeed or fail as a whole exactly as before.
+
+**Plain fixed-coupon structural evidence (Issue #161 follow-up).** A third
+group of ``bond_master`` keys, separate from the ``BondReferenceData``
+schema fields above: they exist so the Advanced-field resolver's
+convention-profile gate
+(``pricing.bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS``)
+can positively confirm a bond's structure before applying any profile but
+UST, and are never written into a typed ``BondReferenceData``. Real
+Bloomberg workstation evidence confirmed five of the six:
+
+- ``CPN_TYP`` -> ``coupon_type``: passed through verbatim (confirmed value
+  ``"FIXED"`` on an ordinary fixed-rate bond; other values are not coerced
+  or interpreted here -- that judgment belongs to the resolver's own
+  ``confirms_plain_fixed_coupon_evidence``).
+- ``INFLATION_LINKED_INDICATOR`` -> ``inflation_linked_flag``,
+  ``CONVERTIBLE`` -> ``convertible_flag``: only exact ``"Y"``/``"N"`` map to
+  ``True``/``False``, via the same confirmed-Y/N transform as
+  ``callable_flag``/``sinkable_flag``.
+- ``SECURITY_TYP`` -> ``security_type``: passed through verbatim (confirmed
+  values ``"US GOVERNMENT"``/``"GLOBAL"``/``"EURO-ZONE"`` across the three
+  probed securities). Populated for display/evidence and for any future,
+  separately-approved auto-selection research -- but, per Eddy's explicit
+  correction, it is **not** one of
+  ``pricing.bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS``
+  any more: ``SECURITY_TYP`` cannot safely classify a profile, and Shiori
+  never auto-selects one anyway (the trader always picks explicitly), so
+  gating admission on it added friction with no safety benefit.
+- ``MTY_TYP`` (DS092) -> ``maturity_refund_type`` (Issue #161 follow-up:
+  redemption-structure gate): passed through verbatim -- confirmed
+  ``"NORMAL"`` on ``US91282CMC28`` (UST) and ``"CALLABLE"`` on AMZN, a real
+  USD corporate bond. This is a *second*, typed wiring of the same MTY_TYP
+  mnemonic already read into ``bond_master_raw["maturity_type"]`` above
+  (display-only, never interpreted there); this one is interpreted, by the
+  pricing layer's own exact-value allowlist, never here -- this loader
+  passes the raw string through unchanged either way, exactly like
+  ``coupon_type``/``security_type``.
+
+``amortizing_flag`` remains ``None`` always: no candidate amortizing-evidence
+mnemonic has survived probing (``IS_AMORTIZING``/``AMORT_TYP``/
+``REDEMP_TYP``/``SCHED_TYP`` confirmed ``BAD_FLD``, ``MTG_TYP`` confirmed
+not applicable, ``PRINCIPAL_FACTOR`` confirmed returned but explicitly not
+approved as evidence -- see ``bli_bond_convention_profile``'s own evidence
+log for the full record). It is not requested from Bloomberg here; there is
+no mnemonic to request. It is no longer read by the pricing gate either --
+Eddy's redemption-structure correction replaced it with
+``maturity_refund_type`` above, which is a real, bounded Bloomberg
+classification rather than a permanently-unconfirmable one.
 """
 
 from __future__ import annotations
@@ -550,6 +597,60 @@ _BOND_MASTER_RAW_DISPLAY_FIELD_MAP: dict[str, str] = {
     "calc_type": "CALC_TYP_DES",
 }
 
+# --- Plain fixed-coupon structural evidence (Issue #161 follow-up) -----------
+#
+# NOT BondReferenceData fields -- see the module docstring's own section.
+# These keys exist for pricing.bli_bond_convention_profile's non-UST
+# structural gate, and are kept manually in sync with that module's own
+# field vocabulary by cross-reference comment (the same "no shared import"
+# pattern already used for _BOND_MASTER_DESTINATION_FIELDS vs.
+# BondReferenceData's own fields) since `data/` does not import from
+# `pricing/`.
+#
+# Five of six are confirmed and wired below. `amortizing_flag` still has no
+# confirmed mnemonic or approved criterion at all (see the module docstring),
+# so it is listed as a destination but has no entry in
+# `_BOND_MASTER_EVIDENCE_FIELD_MAP` and therefore always stays None. It is no
+# longer read by the pricing gate either (Eddy's redemption-structure
+# correction below), but the key is kept in case a real mnemonic is ever
+# separately confirmed for it.
+#
+# `security_type` is wired here even though
+# `pricing.bli_bond_convention_profile.PLAIN_FIXED_COUPON_EVIDENCE_FIELDS` no
+# longer names it (Eddy's correction: SECURITY_TYP cannot safely classify a
+# profile, and Shiori never auto-selects one anyway, so gating admission on
+# it added friction with no safety benefit). It is still confirmed to return
+# a real value, so it is still populated here -- as display/evidence data
+# and as a data point for any future, separately-approved auto-selection
+# design -- just no longer read by the admission gate.
+#
+# `maturity_refund_type` (Issue #161 follow-up: redemption-structure gate)
+# is a *second*, typed wiring of the same MTY_TYP mnemonic already read
+# verbatim into `bond_master_raw["maturity_type"]` above (display-only,
+# never interpreted) -- this one is structural evidence, subject to the
+# pricing layer's own exact-value allowlist
+# (`confirms_plain_fixed_coupon_evidence`), and now replaces
+# `amortizing_flag` as the gate's controlling field there. Wiring the same
+# mnemonic to both destinations is deliberate: the raw display string is
+# shown to the trader verbatim and never coerced, while this evidence field
+# is read by pricing's own allowlist and never shown as-is.
+_BOND_MASTER_EVIDENCE_FIELDS = (
+    "coupon_type",
+    "security_type",
+    "inflation_linked_flag",
+    "convertible_flag",
+    "maturity_refund_type",
+    "amortizing_flag",
+)
+
+_BOND_MASTER_EVIDENCE_FIELD_MAP: dict[str, tuple[str, Callable[[str], object | None]]] = {
+    "coupon_type": ("CPN_TYP", _passthrough_bloomberg_string),
+    "security_type": ("SECURITY_TYP", _passthrough_bloomberg_string),
+    "inflation_linked_flag": ("INFLATION_LINKED_INDICATOR", _boolean_flag_from_bloomberg_yes_no),
+    "convertible_flag": ("CONVERTIBLE", _boolean_flag_from_bloomberg_yes_no),
+    "maturity_refund_type": ("MTY_TYP", _passthrough_bloomberg_string),
+}
+
 
 def load_bloomberg_bond_identity_and_quote(
     *,
@@ -580,13 +681,18 @@ def load_bloomberg_bond_identity_and_quote(
     plus two Bond Master dicts (PR #141 third revision):
 
     - ``"bond_master"``: one key per ``BondReferenceData`` field this lookup
-      can ever populate (``_BOND_MASTER_DESTINATION_FIELDS``). Seven of them
-      (``coupon``, ``coupon_frequency``, ``issue_date``, ``maturity_date``,
-      ``first_coupon_date``, ``callable_flag``, ``sinkable_flag``) are
-      populated from the mnemonics Eddy confirmed against real Bloomberg DAPI
-      responses (see ``_BOND_MASTER_FIELD_MAP``'s own docstring for each
-      field's exact value-transform rule); every other key is ``None`` until
-      Eddy confirms a mnemonic for it the same way.
+      can ever populate (``_BOND_MASTER_DESTINATION_FIELDS``), plus six
+      plain-fixed-coupon structural-evidence keys that are **not**
+      ``BondReferenceData`` fields (``_BOND_MASTER_EVIDENCE_FIELDS`` -- see
+      the module docstring's own section). Seven schema fields (``coupon``,
+      ``coupon_frequency``, ``issue_date``, ``maturity_date``,
+      ``first_coupon_date``, ``callable_flag``, ``sinkable_flag``) and four
+      evidence fields (``coupon_type``, ``inflation_linked_flag``,
+      ``convertible_flag``, ``maturity_refund_type``) are populated from
+      mnemonics Eddy confirmed against real Bloomberg DAPI responses (see
+      ``_BOND_MASTER_FIELD_MAP``/``_BOND_MASTER_EVIDENCE_FIELD_MAP``'s own
+      docstrings for each field's exact value-transform rule); every other
+      key is ``None`` until Eddy confirms a mnemonic for it the same way.
     - ``"bond_master_raw"``: three further Bloomberg mnemonics
       (``DAY_CNT_DES``, ``MTY_TYP``, ``CALC_TYP_DES``) Eddy confirmed return a
       value but are display-only -- never coerced into a typed
@@ -651,12 +757,22 @@ def load_bloomberg_bond_identity_and_quote(
         request.append("fields", _CURRENCY_FIELD)
         request.append("fields", price_field)
         request.append("fields", _ACCRUED_INTEREST_FIELD)
-        # Confirmed Bond Master fields (typed schema, via _BOND_MASTER_FIELD_MAP)
-        # plus confirmed raw display-only fields (_BOND_MASTER_RAW_DISPLAY_FIELD_MAP)
-        # -- both requested in the same call; see their own docstrings above.
+        # Confirmed Bond Master fields (typed schema, via _BOND_MASTER_FIELD_MAP),
+        # confirmed raw display-only fields (_BOND_MASTER_RAW_DISPLAY_FIELD_MAP),
+        # and confirmed plain-fixed-coupon structural evidence fields
+        # (_BOND_MASTER_EVIDENCE_FIELD_MAP) -- all requested in the same call;
+        # see their own docstrings above. MTY_TYP is named by both the raw
+        # display map and the evidence map (Issue #161 follow-up), so
+        # mnemonics are deduplicated before being appended -- Bloomberg is
+        # never asked for the same field twice in one request.
+        requested_mnemonics: list[str] = []
         for bloomberg_mnemonic, _transform in _BOND_MASTER_FIELD_MAP.values():
-            request.append("fields", bloomberg_mnemonic)
+            requested_mnemonics.append(bloomberg_mnemonic)
         for bloomberg_mnemonic in _BOND_MASTER_RAW_DISPLAY_FIELD_MAP.values():
+            requested_mnemonics.append(bloomberg_mnemonic)
+        for bloomberg_mnemonic, _transform in _BOND_MASTER_EVIDENCE_FIELD_MAP.values():
+            requested_mnemonics.append(bloomberg_mnemonic)
+        for bloomberg_mnemonic in dict.fromkeys(requested_mnemonics):
             request.append("fields", bloomberg_mnemonic)
 
         session.sendRequest(request)
@@ -807,6 +923,23 @@ def load_bloomberg_bond_identity_and_quote(
         bloomberg_mnemonic, transform = mapping
         raw_value = _optional_field(bloomberg_mnemonic)
         bond_master[destination_field] = transform(raw_value) if raw_value is not None else None
+
+    # Plain fixed-coupon structural evidence fields (Issue #161 follow-up):
+    # NOT BondReferenceData fields, and never coerced into one -- see the
+    # module docstring's own section and _BOND_MASTER_EVIDENCE_FIELD_MAP's
+    # comment. Written into the same bond_master dict as the schema fields
+    # above because the Advanced-field resolver's convention-profile gate
+    # already reads both from that one dict. `amortizing_flag` has no
+    # mapping entry, so it follows the identical "no confirmed mnemonic ->
+    # None" rule the schema fields already use.
+    for evidence_field in _BOND_MASTER_EVIDENCE_FIELDS:
+        mapping = _BOND_MASTER_EVIDENCE_FIELD_MAP.get(evidence_field)
+        if mapping is None:
+            bond_master[evidence_field] = None
+            continue
+        bloomberg_mnemonic, transform = mapping
+        raw_value = _optional_field(bloomberg_mnemonic)
+        bond_master[evidence_field] = transform(raw_value) if raw_value is not None else None
 
     # Raw display-only fields (never coerced into a typed schema): confirmed
     # to return a value, but not safe to map into a BondReferenceData enum --
