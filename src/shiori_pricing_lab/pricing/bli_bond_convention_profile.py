@@ -258,7 +258,12 @@ class BLIConventionProfile:
     - ``ex_dividend_days`` -- ``None`` means no approved default for this
       market. The resolver then uses a typed Bloomberg value if one is ever
       returned, and otherwise blocks that one field for the trader to set,
-      leaving every other Advanced field resolved as normal.
+      leaving every other Advanced field resolved as normal. All three
+      registered profiles now carry a confirmed value (Issue #161 follow-up:
+      ex-dividend convention convergence) -- ``None`` stays available for a
+      future market whose ex-dividend window genuinely is not zero and is
+      not yet confirmed (a UK Gilt; see the "Deliberately not registered"
+      note below), not for any market registered today.
     - ``day_count_evidence`` -- ``None`` means Bloomberg's own
       ``DAY_CNT_DES`` description string for this market has not been
       confirmed, so it is not read at all for this profile. It is only ever
@@ -387,11 +392,16 @@ UST_CONVENTION_PROFILE = BLIConventionProfile(
 # Annex A, confirmed by Eddy: USD, semi-annual, 30/360 (bond basis), T+2 on
 # the SIFMA-recommended U.S. bond-market calendar.
 #
-# `ex_dividend_days` is deliberately absent: Eddy confirmed the four Annex A
-# values above and explicitly did *not* confirm an ex-dividend default for
-# this market, so the resolver blocks that one field rather than assuming
-# zero. `day_count_evidence="30/360"` is the Bloomberg workstation evidence
-# log's own DAY_CNT_DES observation for US023135EC69 (a real USD fixed-rate
+# `ex_dividend_days=0` (Issue #161 follow-up: ex-dividend convention
+# convergence). This is a profile convention Eddy confirmed directly, not a
+# Bloomberg-sourced value -- no DAPI mnemonic is required or read for it, the
+# same way none of Annex A's other three values needs one. It states only
+# that Shiori applies no pre-payment ex-dividend window for this market; the
+# record-date-to-payment-date coupon *entitlement* question (who gets the
+# coupon when settlement falls between the two) is a separate concern this
+# field does not model and this PR does not implement.
+# `day_count_evidence="30/360"` is the Bloomberg workstation evidence log's
+# own DAY_CNT_DES observation for US023135EC69 (a real USD fixed-rate
 # corporate bond candidate) -- it agrees with the confirmed Annex A day
 # count, so it is wired the same way UST's is: DAY_CNT_DES reading anything
 # else contradicts this profile and withholds day_count alone for the trader
@@ -403,6 +413,7 @@ US_CORPORATE_CONVENTION_PROFILE = BLIConventionProfile(
     day_count=DayCount.THIRTY_360,
     day_count_evidence="30/360",
     bond_type=BondType.FIXED_COUPON_BULLET,
+    ex_dividend_days=0,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
     settlement_calendar=CALENDAR_US_SIFMA,
@@ -415,11 +426,16 @@ US_CORPORATE_CONVENTION_PROFILE = BLIConventionProfile(
 # Italian government bond gets its own profile rather than quietly borrowing
 # this one's settlement calendar and day count.
 #
-# `ex_dividend_days` is absent for the same reason as US_CORPORATE above.
-# `day_count_evidence="ACT/ACT"` is the Bloomberg workstation evidence log's
-# own DAY_CNT_DES observation for DE000BU2Z072 (a real EUR fixed-rate German
-# government bond candidate) -- it agrees with the confirmed Annex A day
-# count, so it is wired the same way.
+# `ex_dividend_days=0` (Issue #161 follow-up: ex-dividend convention
+# convergence), confirmed by Eddy from the market rule itself rather than a
+# Bloomberg field: for German government bonds the ex-date coincides with the
+# coupon payment date, so there is no pre-payment ex-dividend window for
+# Shiori to model at all -- zero is the correct convention here, not an
+# unconfirmed guess standing in for one. `day_count_evidence="ACT/ACT"` is
+# the Bloomberg workstation evidence log's own DAY_CNT_DES observation for
+# DE000BU2Z072 (a real EUR fixed-rate German government bond candidate) --
+# it agrees with the confirmed Annex A day count, so it is wired the same
+# way.
 GERMAN_GOVT_CONVENTION_PROFILE = BLIConventionProfile(
     name="GERMAN_GOVT",
     currency=Currency.EUR,
@@ -427,12 +443,29 @@ GERMAN_GOVT_CONVENTION_PROFILE = BLIConventionProfile(
     day_count=DayCount.ACT_ACT_BOND,
     day_count_evidence="ACT/ACT",
     bond_type=BondType.FIXED_COUPON_BULLET,
+    ex_dividend_days=0,
     status=BondStatus.ACTIVE,
     settlement_business_days=2,
     settlement_calendar=CALENDAR_TARGET,
     source_system="SHIORI_GERMAN_GOVT_CONVENTION_PROFILE",
 )
 
+# --- Deliberately not registered: Gilt (Issue #161, future work) -------------
+#
+# A UK Gilt is not a fourth profile in this PR, and ``ex_dividend_days=0`` on
+# the two profiles above must not be read as a template for one. Eddy's own
+# Bloomberg Terminal search turned up ``EX_DIVIDEND_DATE_GILTS_REALTIME`` --
+# a real, Gilt-specific field name, which is itself the evidence that Gilts
+# are a genuinely different market here: a bond with an actual, non-zero
+# pre-payment ex-dividend window (conventionally quoted as **7 business
+# days**), not a market where the window happens to be zero. Recorded here as
+# evidence only -- this mnemonic is not probed, not confirmed against a real
+# Gilt response, and not wired into any profile by this PR. Whoever builds
+# the Gilt profile later must confirm the field's actual returned value
+# first, and must not collapse "7 business days" into "7 calendar days" when
+# converting it into ``ex_dividend_days`` -- the two are not the same number
+# of days off a coupon date, and this repo does not write that shortcut for
+# any market it registers.
 CONVENTION_PROFILES: dict[str, BLIConventionProfile] = {
     profile.name: profile
     for profile in (

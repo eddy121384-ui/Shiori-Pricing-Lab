@@ -35,11 +35,29 @@ them is now resolved, so the default candidate list below is empty:
   re-added without a fresh, separately-approved confirmation:
   ``PENULTIMATE_COUPON_DATE``, ``REDEMPTION_VALUE``.
 
-``business_day_convention``, ``bond_type``, ``yield_convention``,
-``ex_dividend_days``, and ``status`` still have no confirmed-safe mnemonic
-at all (their earlier candidate mnemonics were rejected above, for
-``bond_type``/``yield_convention``, or never had one to begin with) --
-probe a new candidate for these explicitly via ``--fields``.
+``business_day_convention``, ``bond_type``, ``yield_convention``, and
+``status`` still have no confirmed-safe mnemonic at all (their earlier
+candidate mnemonics were rejected above, for ``bond_type``/
+``yield_convention``, or never had one to begin with) -- probe a new
+candidate for these explicitly via ``--fields``.
+
+``ex_dividend_days`` is a special case (Issue #161 follow-up: ex-dividend
+convention convergence): every market registered in
+``bli_bond_convention_profile.CONVENTION_PROFILES`` today (``UST``,
+``US_CORPORATE``, ``GERMAN_GOVT``) carries its own confirmed value as a
+*profile convention*, not a probed Bloomberg field -- so none of them needs
+a mnemonic here. That is not true of every market Shiori might register
+later: Eddy's own workstation search turned up
+``EX_DIVIDEND_DATE_GILTS_REALTIME``, a real, Gilt-specific field name,
+which is itself evidence that a UK Gilt has a genuine, non-zero pre-payment
+ex-dividend window (conventionally quoted as 7 business days) rather than
+one that happens to be zero. This mnemonic is recorded here as evidence
+only -- it has not been probed against a live DAPI response, its returned
+value is not confirmed, and it is not wired into any profile. A future Gilt
+profile must probe and confirm it first, and must not collapse "7 business
+days" into "7 calendar days" when converting it into ``ex_dividend_days``
+(see ``bli_bond_convention_profile``'s own "Deliberately not registered:
+Gilt" note for why the two are not interchangeable here).
 
 **Resolution history (Issue #161 follow-up: plain fixed-coupon structural
 evidence).** Eddy probed ``US91282CMC28`` (UST, already admitted),

@@ -229,7 +229,13 @@ for that market. Where it was not, a typed Bloomberg value wins if one is
 ever returned, and otherwise ``ex_dividend_days`` alone comes back
 ``BLOCKED``: ``ex-dividend-days-input`` is a real Advanced control, so a
 trader override is a genuine route past it, and every other Advanced field
-still resolves normally.
+still resolves normally. All three profiles registered today (``UST``,
+``US_CORPORATE``, ``GERMAN_GOVT``) carry a confirmed zero (Issue #161
+follow-up: ex-dividend convention convergence), so this path no longer
+blocks any of them -- the mechanism stays exactly as it is for a future
+market whose window is not confirmed, or is confirmed non-zero (a UK Gilt;
+see ``bli_bond_convention_profile``'s own "Deliberately not registered"
+note).
 
 **Irregular schedules fail closed.** The current typed pricing adapter accepts
 only one internally consistent regular coupon grid. An irregular or stubbed

@@ -16,10 +16,13 @@ Three things are pinned here:
    candidate. The trader selects -- which is Issue #161's whole point,
    because the alternative it replaces is hand-typing eight technical fields.
 
-3. **"Not confirmed" is a real state, not a value to guess.** `US_CORPORATE`
-   and `GERMAN_GOVT` carry the four conventions Eddy confirmed from Annex A
-   and *no* ex-dividend default, because none was confirmed for either
-   market. The record must permit that rather than force an int.
+3. **"Not confirmed" is a real state, not a value to guess.** The record type
+   permits an absent ex-dividend default (`ex_dividend_days=None`) rather
+   than forcing an int, for a market where none has been confirmed. All
+   three profiles registered today have a confirmed value, though:
+   `US_CORPORATE`'s and `GERMAN_GOVT`'s zero (Issue #161 follow-up:
+   ex-dividend convention convergence) alongside Annex A's other four
+   conventions Eddy confirmed for each, and UST's pre-existing zero.
 
 The UST profile's own constants are pinned too: PR #162 passed real Bloomberg
 workstation UAT with those exact values, and neither the refactor that moved
@@ -139,14 +142,21 @@ def test_the_german_govt_profile_matches_the_confirmed_annex_a_conventions():
     assert profile.status is BondStatus.ACTIVE
 
 
-def test_neither_new_profile_guesses_an_ex_dividend_default():
-    """Eddy confirmed four conventions per market and explicitly did not
-    confirm an ex-dividend rule for either. `None` is what "not confirmed"
-    looks like; a zero here would be a guess that silently changes accrued
-    interest inside an ex-dividend window."""
+def test_both_new_profiles_now_carry_a_confirmed_zero_ex_dividend_default():
+    """Issue #161 follow-up: ex-dividend convention convergence.
 
-    assert US_CORPORATE_CONVENTION_PROFILE.ex_dividend_days is None
-    assert GERMAN_GOVT_CONVENTION_PROFILE.ex_dividend_days is None
+    `US_CORPORATE` is a profile convention Eddy confirmed directly -- no
+    Bloomberg mnemonic is required or read for it, the same way none of
+    Annex A's other three values needs one. `GERMAN_GOVT`'s zero comes from
+    the market rule itself: a Bund's ex-date coincides with its coupon
+    payment date, so there is no pre-payment ex-dividend window to model.
+    Neither is a guess standing in for "not confirmed" -- see
+    `test_an_absent_ex_dividend_default_is_accepted_not_an_error` below for
+    that state, which the record type must still be able to express for a
+    future, not-yet-confirmed market."""
+
+    assert US_CORPORATE_CONVENTION_PROFILE.ex_dividend_days == 0
+    assert GERMAN_GOVT_CONVENTION_PROFILE.ex_dividend_days == 0
     # UST's confirmed zero is untouched.
     assert UST_CONVENTION_PROFILE.ex_dividend_days == 0
 

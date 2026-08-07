@@ -42,6 +42,7 @@ from __future__ import annotations
 import ast
 import inspect
 from dataclasses import fields as dataclass_fields
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -67,7 +68,9 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     CALENDAR_US_SIFMA,
+    GERMAN_GOVT_CONVENTION_PROFILE,
     PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
+    US_CORPORATE_CONVENTION_PROFILE,
     UST_CONVENTION_PROFILE,
     BLIConventionProfile,
     confirms_plain_fixed_coupon_evidence,
@@ -1247,6 +1250,45 @@ def test_real_bloomberg_shaped_evidence_still_leaves_the_gate_fail_closed(gated_
     assert "security_type" not in reason
 
 
+@pytest.mark.parametrize(
+    "convention_profile, currency, bond_master_base",
+    [
+        ("US_CORPORATE", "USD", _TREASURY_BOND_MASTER),
+        ("GERMAN_GOVT", "EUR", _ANNUAL_BOND_MASTER),
+    ],
+)
+def test_only_amortizing_flag_blocks_a_real_registered_non_ust_profile(
+    convention_profile, currency, bond_master_base
+):
+    """Item 5's decisive regression, on the *actual* registered profiles --
+    not `GATED_SYNTHETIC_TEST` -- now that both carry a confirmed
+    `ex_dividend_days=0` (Issue #161 follow-up: ex-dividend convention
+    convergence). With every other structural-evidence field confirmed and
+    only `amortizing_flag` missing, the sole refusal reason is
+    `amortizing_flag`: not `ex_dividend_days`/"ex-dividend" (that field is no
+    longer unconfirmed for either market) and not `security_type` (never
+    part of the gate at all)."""
+
+    profile = resolve_bond_advanced_field_profile(
+        convention_profile=convention_profile,
+        isin="XS0000000042",
+        currency=currency,
+        bond_master={**bond_master_base, **_CONFIRMED_STRUCTURAL_EVIDENCE},
+        bond_master_raw={},
+        valuation_date=_VALUATION_DATE,
+        expiry_date=_EXPIRY_DATE,
+    )
+
+    assert profile.supported is False
+    assert profile.fields == ()
+    assert profile.unresolved_fields == ()
+    reason = " ".join(profile.rejection_reasons)
+    assert "amortizing_flag" in reason
+    assert "security_type" not in reason
+    assert "ex_dividend" not in reason
+    assert "ex-dividend" not in reason
+
+
 def test_ust_is_exempt_so_its_uat_passed_behaviour_does_not_regress():
     """The other half of Eddy's instruction. A real Treasury carries none of
     the structural evidence fields either, and must still resolve every
@@ -1396,6 +1438,54 @@ def test_a_confirmed_profile_default_still_wins_over_nothing(synthetic_registry)
 
     assert profile.unresolved_fields == ()
     assert _values(profile)[PATH_EX_DIVIDEND_DAYS] == 3
+
+
+# =============================================================================
+# Issue #161 follow-up: ex-dividend convention convergence resolves cleanly
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "real_profile, currency, bond_master_base",
+    [
+        (US_CORPORATE_CONVENTION_PROFILE, "USD", _TREASURY_BOND_MASTER),
+        (GERMAN_GOVT_CONVENTION_PROFILE, "EUR", _ANNUAL_BOND_MASTER),
+    ],
+)
+def test_us_corporate_and_german_govt_ex_dividend_days_resolve_to_the_confirmed_zero(
+    monkeypatch, real_profile, currency, bond_master_base
+):
+    """Item 2's decisive regression: the *actual* registered profile's own
+    `ex_dividend_days=0` reaches the resolved field with the right
+    provenance, not merely the profile record in isolation
+    (`test_bli_bond_convention_profile.py` already pins that).
+
+    The structural-evidence gate is deliberately bypassed here via a
+    `dataclasses.replace` clone with `plain_fixed_coupon_evidence_required`
+    turned off -- the boundary in Eddy's request is explicit that this PR
+    does not touch that gate, so this test isolates ex-dividend field
+    resolution from it rather than waiting on amortizing evidence that does
+    not exist yet. The gate itself, unchanged, is covered by
+    `test_only_amortizing_flag_blocks_a_real_registered_non_ust_profile`
+    above."""
+
+    bypassed = replace(real_profile, plain_fixed_coupon_evidence_required=False)
+    _register_profile(monkeypatch, bypassed)
+
+    profile = resolve_bond_advanced_field_profile(
+        convention_profile=real_profile.name,
+        isin="XS0000000042",
+        currency=currency,
+        bond_master=dict(bond_master_base),
+        bond_master_raw={},
+        valuation_date=_VALUATION_DATE,
+        expiry_date=_EXPIRY_DATE,
+    )
+
+    assert profile.supported is True
+    assert profile.unresolved_fields == ()
+    assert _values(profile)[PATH_EX_DIVIDEND_DAYS] == 0
+    assert _provenance(profile)[PATH_EX_DIVIDEND_DAYS] == real_profile.default_provenance
 
 
 # =============================================================================
