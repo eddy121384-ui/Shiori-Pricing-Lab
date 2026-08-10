@@ -137,13 +137,13 @@ def test_discover_field_documentation_pass_2_failure_keeps_pass_1_results():
     assert "timed out" in report.override_error
 
 
-def test_discover_field_documentation_sanitizes_documentation_text():
+def test_discover_field_documentation_applies_structural_redaction_to_documentation():
     def _describe(fields):
         return [
             _description(
                 field,
                 description="host:8194 leaked in description",
-                documentation="uuid=12345678 leaked in documentation",
+                documentation="see C:\\Users\\eddy\\docs leaked in documentation",
                 detail="C:\\Users\\eddy\\leak.log",
             )
             for field in fields
@@ -153,9 +153,35 @@ def test_discover_field_documentation_sanitizes_documentation_text():
 
     described = report.primary_descriptions[0]
     assert "host:8194" not in described.description
-    assert "12345678" not in described.documentation
+    assert "C:\\Users\\eddy" not in described.documentation
     assert "C:\\Users\\eddy" not in described.detail
     assert "<redacted host>" in described.description
+    assert "<redacted path>" in described.documentation
+
+
+def test_discover_field_documentation_preserves_bloomberg_override_syntax():
+    # Issue #165 round 5: the real finding against PAY_CURVE_NAME/
+    # REC_CURVE_NAME -- Bloomberg's own documented override-value
+    # vocabulary must survive sanitization untouched.
+    def _describe(fields):
+        return [
+            _description(
+                field,
+                documentation=(
+                    "Valid override values: BLP (Bloomberg default), "
+                    "USER (user-supplied override), DFLT (field default)."
+                ),
+            )
+            for field in fields
+        ]
+
+    report = discover_field_documentation(("PAY_CURVE_NAME",), describe=_describe)
+
+    described = report.primary_descriptions[0]
+    assert described.documentation == (
+        "Valid override values: BLP (Bloomberg default), "
+        "USER (user-supplied override), DFLT (field default)."
+    )
 
 
 # --- rendering / report writing ------------------------------------------------------

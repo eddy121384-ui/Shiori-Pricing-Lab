@@ -72,7 +72,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bloomberg_dapi_probe import FieldDescription, describe_fields
-from bloomberg_input_sourcing_probe import sanitize_external_text
+from bloomberg_input_sourcing_probe import (
+    sanitize_external_text,
+    sanitize_field_documentation_text,
+)
 
 # Field mnemonics Eddy's own Issue #165 round 2 workstation run actually
 # returned via //blp/apiflds's FieldSearchRequest.searchSpec for the search
@@ -108,19 +111,26 @@ def _utc_now() -> str:
 def _sanitized_description(description: FieldDescription) -> FieldDescription:
     """Sanitize the Bloomberg-authored text on one field description.
 
-    ``description``/``documentation``/``detail`` are Bloomberg-authored
-    free text and go through ``sanitize_external_text`` at this boundary,
-    exactly like ``bloomberg_input_sourcing_probe``'s own
-    ``_sanitized_description`` does for its option-context fields --
-    ``field``/``status``/``mnemonic``/``datatype``/``overrides`` are
-    Bloomberg's own short structural tokens, not sanitized (they are never
-    a place client/session/host identity metadata would appear).
+    ``description``/``documentation`` are Bloomberg's own *static field
+    documentation* -- these go through the narrower
+    ``sanitize_field_documentation_text`` (Issue #165 round 5), which does
+    not corrupt Bloomberg's own documented override-syntax vocabulary
+    (``USER``/``BLP``/``DFLT``, ...) the way the generic sensitive-key pass
+    did (a real round-5 finding against ``PAY_CURVE_NAME``/
+    ``REC_CURVE_NAME``'s documentation). ``detail`` carries a per-field
+    ``fieldError`` -- a runtime response, not static documentation -- and
+    still goes through the full ``sanitize_external_text``, exactly like
+    ``bloomberg_input_sourcing_probe``'s own ``_sanitized_description`` does
+    for its option-context fields. ``field``/``status``/``mnemonic``/
+    ``datatype``/``overrides`` are Bloomberg's own short structural tokens,
+    not sanitized (they are never a place client/session/host identity
+    metadata would appear).
     """
 
     return replace(
         description,
-        description=sanitize_external_text(description.description),
-        documentation=sanitize_external_text(description.documentation),
+        description=sanitize_field_documentation_text(description.description),
+        documentation=sanitize_field_documentation_text(description.documentation),
         detail=sanitize_external_text(description.detail),
     )
 

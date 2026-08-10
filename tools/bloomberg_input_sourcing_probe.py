@@ -544,8 +544,7 @@ INPUT_ROWS: tuple[InputRow, ...] = (
         input_id="pricing_inputs.forward_clean_price",
         section=SECTION_FORWARD,
         question=(
-            "Does OPT_UNDL_FORWARD_PX return a usable forward clean price, and with what "
-            "overrides?"
+            "Does OPT_UNDL_FORWARD_PX return a usable forward clean price, and with what overrides?"
         ),
         candidates=(
             Candidate(
@@ -617,8 +616,7 @@ INPUT_ROWS: tuple[InputRow, ...] = (
         input_id="benchmark_quote.premium_per_100",
         section=SECTION_VOL,
         question=(
-            "Can a benchmark premium feed the existing deterministic implied PRICE_VOL "
-            "solver?"
+            "Can a benchmark premium feed the existing deterministic implied PRICE_VOL solver?"
         ),
         candidates=(),
         fallback_disposition=ADVANCED_OVERRIDE_REQUIRED,
@@ -963,6 +961,42 @@ def sanitize_external_text(
     return sanitized
 
 
+def sanitize_field_documentation_text(text: str | None) -> str | None:
+    """Sanitize Bloomberg *static field documentation* text -- deliberately
+    narrower than :func:`sanitize_external_text`.
+
+    Issue #165 round 5: Bloomberg's own ``FieldInfoRequest`` field
+    documentation legitimately uses short all-caps tokens such as
+    ``USER``/``BLP``/``DFLT`` as documented override-value labels (e.g.
+    "valid override values: BLP (Bloomberg-calculated), USER
+    (user-supplied), DFLT (field default)") -- running
+    :func:`sanitize_external_text`'s generic ``key=value`` sensitive-key
+    pass over this text corrupts genuine field-semantics evidence (a real
+    round-5 finding: ``PAY_CURVE_NAME``/``REC_CURVE_NAME``'s documentation
+    came back with ``USER=<redacted>`` in place of Bloomberg's own
+    documented syntax). Static field documentation is a different kind of
+    text than a runtime error, a connection message, a service schema
+    dump, or a raw response/record dump -- those must keep using
+    :func:`sanitize_external_text` unchanged.
+
+    This function still removes genuinely dangerous *structural* leakage a
+    documentation string is not expected to (and must not silently be
+    allowed to) carry: a host:port pair, a bare IPv4 address, and a
+    filesystem/UNC path. It does **not** apply
+    :data:`_SENSITIVE_KEY_PATTERN`'s ``key=value`` identity-redaction pass,
+    and it does not scrub override values (static documentation carries no
+    ``AppliedOverride`` context to scrub against).
+    """
+
+    if not text:
+        return text
+    sanitized = str(text)
+    sanitized = _HOST_PORT_PATTERN.sub("<redacted host>", sanitized)
+    sanitized = _BARE_IPV4_PATTERN.sub("<redacted host>", sanitized)
+    sanitized = _PATH_PATTERN.sub("<redacted path>", sanitized)
+    return sanitized
+
+
 def _group_mnemonics(group: str) -> tuple[str, ...]:
     """Every catalogued mnemonic for one request group, in catalogue order, deduplicated."""
 
@@ -977,17 +1011,21 @@ def _group_mnemonics(group: str) -> tuple[str, ...]:
 def _sanitized_description(description: FieldDescription) -> FieldDescription:
     """Sanitize the Bloomberg-authored text on one field description.
 
-    ``//blp/apiflds`` can answer with a per-field ``fieldError`` rather than
-    raising, so this path carries external text just like the two exception
-    handlers do -- and its description/documentation are Bloomberg-authored
-    as well. All three go through :func:`sanitize_external_text` here, at the
+    ``description``/``documentation`` are Bloomberg's own *static field
+    documentation* (``FieldInfoRequest``'s answer to "what is this field") --
+    these go through the narrower :func:`sanitize_field_documentation_text`
+    (Issue #165 round 5), which does not corrupt Bloomberg's own documented
+    override-syntax vocabulary (``USER``/``BLP``/``DFLT``, ...) the way the
+    generic sensitive-key pass did. ``detail`` carries a per-field
+    ``fieldError`` -- a runtime response, not static documentation -- and
+    still goes through the full :func:`sanitize_external_text`, at this same
     boundary, so nothing downstream has to remember to.
     """
 
     return replace(
         description,
-        description=sanitize_external_text(description.description),
-        documentation=sanitize_external_text(description.documentation),
+        description=sanitize_field_documentation_text(description.description),
+        documentation=sanitize_field_documentation_text(description.documentation),
         detail=sanitize_external_text(description.detail),
     )
 
@@ -1222,9 +1260,7 @@ def plan_overrides(
             )
             continue
         source = f"{'fixed' if is_fixed_role else 'fixture'}:{role}"
-        applied.append(
-            AppliedOverride(field=override_field, value=context[role], source=source)
-        )
+        applied.append(AppliedOverride(field=override_field, value=context[role], source=source))
         applied_note = (
             "Applied automatically from the documented fixed value for this role."
             if is_fixed_role
@@ -1264,16 +1300,13 @@ def plan_overrides(
                     role=None,
                     source=None,
                     note=(
-                        NEVER_MAPPED_OVERRIDES[override_field]
-                        + " A --override for it was ignored."
+                        NEVER_MAPPED_OVERRIDES[override_field] + " A --override for it was ignored."
                     ),
                     metadata=metadata_by_field.get(override_field),
                 )
             )
             continue
-        applied.append(
-            AppliedOverride(field=override_field, value=value, source="user_supplied")
-        )
+        applied.append(AppliedOverride(field=override_field, value=value, source="user_supplied"))
         plan.append(
             OverridePlanEntry(
                 override_field=override_field,
@@ -1643,8 +1676,7 @@ def _discovery_result(discovery: DiscoveryEvidence) -> dict:
             "error": discovery.override_error,
             "requested_fields": list(discovery.override_fields),
             "fields": [
-                _described_field(description)
-                for description in discovery.override_descriptions
+                _described_field(description) for description in discovery.override_descriptions
             ],
         },
     }
