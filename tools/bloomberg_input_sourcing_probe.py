@@ -760,13 +760,29 @@ _SCRUBBED_OVERRIDE_VALUE = "<redacted override value>"
 # Structural patterns scrubbed out of any external text before it is stored.
 # Bloomberg's own error text can carry connection and session detail as well
 # as a quoted request, and none of it belongs in a committable report.
+#
+# Issue #165 round 3: Eddy's real workstation run proved a Bloomberg DAPI
+# error payload can still carry client/session/host identity metadata this
+# set previously missed -- a bare IP (no ":port"), a Windows UNC path
+# (`\\host\share\...`), and key=value/key:value identity pairs whose key
+# name is a compound like "clientId"/"computerName" that the old
+# `\bauth\b`-style word-boundary alone would not catch glued to a suffix
+# (e.g. "authId=..." is one word, "auth" alone never matches it). The
+# additions below are widened defensively; see
+# `tests/test_bloomberg_input_sourcing_probe.py`'s synthetic regression
+# tests for exactly what each one now catches.
 _HOST_PORT_PATTERN = re.compile(r"\b[A-Za-z0-9_.-]+:\d{2,5}\b")
+_BARE_IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _PATH_PATTERN = re.compile(
-    r"(?:[A-Za-z]:\\[^\s\"']+|/(?:home|Users|users|root|var|tmp|opt)/[^\s\"']+)"
+    r"(?:[A-Za-z]:\\[^\s\"']+|\\\\[^\s\"']+|/(?:home|Users|users|root|var|tmp|opt)/[^\s\"']+)"
 )
 _SENSITIVE_KEY_PATTERN = re.compile(
-    r"(?i)\b(uuid|user(?:name)?|terminal|serial|sid|session|token|password|passwd|auth|"
-    r"credential|api[_-]?key)\s*[=:]\s*\S+"
+    r"(?i)\b("
+    r"uuid|user(?:name)?|terminal|serial|sid|session(?:id)?|token|password|passwd|"
+    r"auth(?:id)?|credential|api[_-]?key|"
+    r"host(?:name)?|computername|domain|client(?:id|app(?:name)?)?|machine|"
+    r"workstation|deviceid|mac(?:address)?|emrsid|ip(?:address)?|app(?:lication)?name"
+    r")\s*[=:]\s*\S+"
 )
 
 # The option context this probe sends when a discovered override's role is
@@ -886,10 +902,14 @@ def sanitize_external_text(
        anchored to the override's own field id, so even a one-character value
        is removed precisely), then, for values longer than one character, any
        remaining bare token-boundary occurrence;
-    2. host:port pairs;
-    3. filesystem paths;
-    4. ``key=value`` pairs whose key names a terminal, session, user,
-       serial, token or credential.
+    2. ``key=value``/``key: value`` pairs whose key names a terminal,
+       session, user, client, host, machine, domain, device, MAC address or
+       credential (Issue #165 round 3 widened this list after Eddy's real
+       workstation run showed a compound key, e.g. ``authId=``/
+       ``clientAppName=``, was not caught by the narrower word-boundary
+       match this list used before);
+    3. filesystem paths, including a Windows UNC path (``\\\\host\\share\\...``);
+    4. host:port pairs, then any remaining bare IPv4 address with no port.
 
     The failure itself stays legible -- field ids, error categories and
     surrounding wording are untouched. Best-effort by design for (1): it
@@ -931,9 +951,15 @@ def sanitize_external_text(
     for variant in sorted(variants, key=len, reverse=True):
         bare = re.compile(rf"(?<![\w.-]){re.escape(variant)}(?![\w.-])")
         sanitized = bare.sub(_SCRUBBED_OVERRIDE_VALUE, sanitized)
-    sanitized = _SENSITIVE_KEY_PATTERN.sub(r"\1=<redacted>", sanitized)
-    sanitized = _PATH_PATTERN.sub("<redacted path>", sanitized)
+    # Host:port and bare-IP patterns run before the general sensitive-key
+    # catch-all: a literal "host:8194"/"10.20.30.40:8194" shape should
+    # redact as a whole host, not have "host"/"ip" as its own dangling
+    # key=value match once the more specific pattern below has already
+    # consumed the rest of it.
     sanitized = _HOST_PORT_PATTERN.sub("<redacted host>", sanitized)
+    sanitized = _BARE_IPV4_PATTERN.sub("<redacted host>", sanitized)
+    sanitized = _PATH_PATTERN.sub("<redacted path>", sanitized)
+    sanitized = _SENSITIVE_KEY_PATTERN.sub(r"\1=<redacted>", sanitized)
     return sanitized
 
 

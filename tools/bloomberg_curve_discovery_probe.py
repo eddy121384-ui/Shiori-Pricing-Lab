@@ -32,14 +32,18 @@ files) -- no per-keyword FLDS lookups, no manual field hunting.
    operation (e.g. an SDK-version method mismatch) is reported against that
    operation only and never blocks the rest of the run or the schema dump
    already captured in step 1.
-3. For ``//blp/apiflds`` only (Issue #165 item 4): for every operation whose
-   own introspected request schema exposes a top-level ``STRING``-typed
-   element, sends one request per search term (default: "stripped curve",
-   "zero curve", "discount factor", "curve members", "SWDF") using that
-   *discovered* element name -- never a name this script invents -- and
-   records Bloomberg's raw response text. If no such operation/element
-   exists, that absence is reported explicitly as the Issue #165 item 7
-   limitation, rather than falling back to a guessed mnemonic.
+3. For ``//blp/apiflds`` only, sends one request per search term (default:
+   "stripped curve", "zero curve", "discount factor", "curve members",
+   "SWDF") via ``FieldSearchRequest.searchSpec`` -- the one (operation,
+   request element) pair a real workstation run confirmed works (Issue
+   #165 round 3), still gated on ``discover_service``'s own introspection
+   of *this run* actually reporting that pair, never assumed present
+   without it. Round 2's broader heuristic -- any top-level ``STRING``
+   element on any operation -- is deliberately narrowed away: it risked
+   sending requests to unrelated operations that merely happened to have a
+   string field. If this run's introspection does not report that exact
+   pair, that absence is reported explicitly as a limitation, rather than
+   falling back to a guessed mnemonic or a different element.
 4. ``//blp/refdata`` gets the same schema capture (steps 1-2) but no search
    attempt (Issue #165 item 5 only asks for the formal schema, not a search
    call there).
@@ -92,6 +96,17 @@ DEFAULT_SEARCH_TERMS: tuple[str, ...] = (
     "curve members",
     "SWDF",
 )
+
+# Issue #165 round 3: Eddy's real workstation run proved exactly this
+# (operation, request element) pair is the working //blp/apiflds field
+# search route -- it returned SW174/SW173/SW167-169/SW754-755/DY766/DY768
+# for the search terms above. This is no longer "any top-level STRING
+# element on any operation" (round 2's blind heuristic); it is narrowed to
+# the one pair workstation evidence actually confirmed, still gated on
+# `discover_service`'s own introspection reporting that pair for real on
+# this run -- never assumed present without that confirmation.
+_PROVEN_SEARCH_OPERATION = "FieldSearchRequest"
+_PROVEN_SEARCH_ELEMENT = "searchSpec"
 
 DEFAULT_OUTPUT_DIRNAME = "shiori_curve_discovery_output"
 MARKDOWN_FILENAME = "bloomberg_curve_discovery_probe.md"
@@ -330,15 +345,17 @@ def attempt_field_search(
     search_terms: tuple[str, ...],
     send_request=_send_request,
 ) -> tuple[SearchAttempt, ...]:
-    """Best-effort: call every apiflds operation whose own schema exposed a string element.
+    """Call ``FieldSearchRequest.searchSpec`` -- the one pair workstation evidence proved.
 
-    ``discover_service`` already recorded, per operation, which top-level
-    request elements are ``STRING``-typed (never a name this script
-    invented). This sends one request per ``(operation, element, term)``
-    combination, using ``request.set`` first and falling back to
-    ``request.append`` for a repeated element -- both are real ``Request``
-    methods already used by this repo's other probe tools. A failure on one
-    attempt is recorded against that attempt only.
+    Issue #165 round 3: this no longer tries every apiflds operation with
+    any top-level ``STRING`` request element (round 2's broader, unproven
+    heuristic risked sending requests to unrelated operations that merely
+    happened to have a string field). It only fires for the operation named
+    ``FieldSearchRequest`` using its ``searchSpec`` element -- and even then
+    only when ``discover_service``'s own introspection of *this run*
+    actually reports that element on that operation, never assumed present
+    without that confirmation. A failure on one attempt is recorded against
+    that attempt only.
     """
 
     attempts: list[SearchAttempt] = []
@@ -346,7 +363,11 @@ def attempt_field_search(
         return tuple(attempts)
 
     for operation in apiflds_evidence.operations:
+        if operation.name != _PROVEN_SEARCH_OPERATION:
+            continue
         for element_name in operation.candidate_string_elements:
+            if element_name != _PROVEN_SEARCH_ELEMENT:
+                continue
             for term in search_terms:
                 collected: list[str] = []
 
@@ -399,18 +420,22 @@ def run_discovery(search_terms: tuple[str, ...] = DEFAULT_SEARCH_TERMS) -> Disco
     search_attempts = attempt_field_search(apiflds, search_terms)
 
     search_capability_found = any(
-        operation.candidate_string_elements for operation in apiflds.operations
+        operation.name == _PROVEN_SEARCH_OPERATION
+        and _PROVEN_SEARCH_ELEMENT in operation.candidate_string_elements
+        for operation in apiflds.operations
     )
     limitation_note = None
     if apiflds.opened and not search_capability_found:
         limitation_note = (
-            "No //blp/apiflds operation exposed a top-level STRING request element "
-            "in this run's structured introspection (Issue #165 item 7). This may "
-            "mean the field-search capability genuinely does not exist on this "
-            "route, or that this blpapi SDK version needs a different structured "
-            "schema walk than the one this script attempted -- either way, the "
-            "full schema dump above (service.toString()) is still captured and "
-            "should be reviewed by hand before falling back to a minimal manual "
+            f"This run's own introspection did not report {_PROVEN_SEARCH_OPERATION}."
+            f"{_PROVEN_SEARCH_ELEMENT} -- the one (operation, element) pair a prior "
+            "workstation run confirmed (Issue #165 round 3). This script deliberately "
+            "no longer treats any other top-level STRING request element as a search "
+            "capability (round 2's broader heuristic was narrowed after that "
+            "confirmation). The full schema dump above (service.toString()) is still "
+            "captured and should be reviewed by hand -- e.g. to confirm whether "
+            f"{_PROVEN_SEARCH_OPERATION} is present under a different element name on "
+            "this workstation/SDK version -- before falling back to a minimal manual "
             "FLDS search, per Issue #165's own escalation order."
         )
     elif not apiflds.opened:

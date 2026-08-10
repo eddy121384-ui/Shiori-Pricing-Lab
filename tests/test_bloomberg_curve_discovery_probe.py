@@ -332,7 +332,7 @@ def test_run_discovery_flags_missing_search_capability(monkeypatch):
 
     assert report.search_capability_found is False
     assert report.limitation_note is not None
-    assert "no //blp/apiflds operation exposed" in report.limitation_note.lower()
+    assert "did not report fieldsearchrequest.searchspec" in report.limitation_note.lower()
     assert report.search_attempts == ()
 
 
@@ -460,6 +460,77 @@ def test_attempt_field_search_skips_operations_with_no_candidate_element():
     attempts = attempt_field_search(evidence, ("stripped curve",), send_request=lambda **_: None)
 
     assert attempts == ()
+
+
+# --- Issue #165 round 3: narrowed to the one proven (operation, element) pair ------
+
+
+def test_attempt_field_search_skips_a_string_element_on_an_unproven_operation_name():
+    # A different operation happening to expose a top-level STRING element
+    # called "searchSpec" must not be treated as search capability -- round
+    # 2's blind "any STRING element" heuristic would have fired here; round
+    # 3 requires the operation name itself to be the proven one too.
+    evidence = _service_evidence(
+        OperationEvidence(
+            name="SomeOtherRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("searchSpec",),
+        )
+    )
+
+    attempts = attempt_field_search(evidence, ("stripped curve",), send_request=lambda **_: None)
+
+    assert attempts == ()
+
+
+def test_attempt_field_search_skips_an_unproven_element_name_on_the_proven_operation():
+    # FieldSearchRequest with a different string element name than the
+    # proven "searchSpec" must not be attempted either -- both halves of the
+    # pair must match what workstation evidence actually confirmed.
+    evidence = _service_evidence(
+        OperationEvidence(
+            name="FieldSearchRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("someOtherStringField",),
+        )
+    )
+
+    attempts = attempt_field_search(evidence, ("stripped curve",), send_request=lambda **_: None)
+
+    assert attempts == ()
+
+
+def test_run_discovery_search_capability_requires_the_exact_proven_pair(monkeypatch):
+    # A schema exposing a STRING element under a different name must not be
+    # reported as search_capability_found, even though round 2 would have.
+    request_definition = _FakeSchemaElementDefinition(
+        "FieldSearchRequest",
+        _FakeSchemaTypeDefinition(
+            _FakeDataType.SEQUENCE,
+            element_defs=[
+                _FakeSchemaElementDefinition(
+                    "notTheProvenElement", _FakeSchemaTypeDefinition(_FakeDataType.STRING)
+                ),
+            ],
+        ),
+    )
+    operation = _FakeOperation("FieldSearchRequest", request_definition=request_definition)
+    _install_fake_blpapi(
+        monkeypatch,
+        services={
+            _APIFLDS: _FakeService(operations=[operation]),
+            _REFDATA: _FakeService(),
+        },
+    )
+
+    report = run_discovery(("stripped curve",))
+
+    assert report.search_capability_found is False
+    assert report.search_attempts == ()
 
 
 def test_attempt_field_search_uses_the_discovered_element_name(monkeypatch):

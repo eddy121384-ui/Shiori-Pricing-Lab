@@ -1160,6 +1160,110 @@ def test_sanitizer_passes_ordinary_bloomberg_text_through():
     assert sanitize_external_text("") == ""
 
 
+# --- Issue #165 round 3: widened client/session/host identity coverage -----------
+#
+# Eddy's real workstation run proved a Bloomberg DAPI error payload can carry
+# client/session/host identity metadata the round-2 patterns above missed.
+# Every value below is synthetic (fabricated for this test), never a real
+# captured payload -- these are regression tests for this sanitizer's own
+# pattern coverage, not evidence about what Bloomberg actually sent Eddy.
+
+
+def test_sanitizer_removes_a_bare_ipv4_address_with_no_port():
+    sanitized = sanitize_external_text("connection refused from 10.20.30.40 during retry")
+
+    assert "10.20.30.40" not in sanitized
+    assert "<redacted host>" in sanitized
+    assert "connection refused from" in sanitized
+
+
+def test_sanitizer_still_redacts_a_host_port_pair_as_a_host_not_a_dangling_key():
+    # A literal "host:8194" shape must still resolve to the more specific
+    # host:port pattern, not leave a dangling "host=<redacted>" match from
+    # the broadened sensitive-key list below.
+    sanitized = sanitize_external_text("session failed against host:8194")
+
+    assert "host:8194" not in sanitized
+    assert "<redacted host>" in sanitized
+    assert "host=<redacted>" not in sanitized
+
+
+def test_sanitizer_removes_a_windows_unc_path():
+    sanitized = sanitize_external_text(
+        r"could not read \\bbg-fileserver\share\eddy\session.log during startup"
+    )
+
+    assert "bbg-fileserver" not in sanitized
+    assert "<redacted path>" in sanitized
+    assert "during startup" in sanitized
+
+
+def test_sanitizer_removes_compound_client_and_session_identity_keys():
+    text = (
+        "clientId=SYNTH-CLIENT-01 clientAppName=SYNTH-APP authId=SYNTH-AUTH-99 "
+        "computerName=SYNTH-WS-07 workstation=SYNTH-DESK domain=SYNTH-CORP "
+        "deviceId=SYNTH-DEV-42 macAddress=AA:BB:CC:DD:EE:FF emrsid=SYNTH-EMR-1 "
+        "applicationName=SYNTH-APP-NAME"
+    )
+
+    sanitized = sanitize_external_text(text)
+
+    for leaked in (
+        "SYNTH-CLIENT-01",
+        "SYNTH-APP",
+        "SYNTH-AUTH-99",
+        "SYNTH-WS-07",
+        "SYNTH-DESK",
+        "SYNTH-CORP",
+        "SYNTH-DEV-42",
+        "SYNTH-EMR-1",
+        "SYNTH-APP-NAME",
+    ):
+        assert leaked not in sanitized
+    assert "clientId=<redacted>" in sanitized
+    assert "clientAppName=<redacted>" in sanitized
+    assert "authId=<redacted>" in sanitized
+    assert "computerName=<redacted>" in sanitized
+    assert "workstation=<redacted>" in sanitized
+    assert "domain=<redacted>" in sanitized
+    assert "deviceId=<redacted>" in sanitized
+    assert "emrsid=<redacted>" in sanitized
+    assert "applicationName=<redacted>" in sanitized
+    # AA:BB:CC:DD:EE:FF is not this sanitizer's declared scope (a MAC
+    # address's own value, only its labeled `macAddress=` key) -- the key
+    # itself is still redacted so the label never leaks its value pairing.
+    assert "macAddress=<redacted>" in sanitized
+
+
+def test_sanitizer_synthetic_full_client_identity_payload_never_leaks_end_to_end(
+    monkeypatch, tmp_path, capsys
+):
+    # A synthetic stand-in for the shape of payload Eddy's real run proved
+    # can occur -- fabricated identifiers only, never a real capture.
+    def _describe(fields):
+        raise RuntimeError(
+            "Bloomberg DAPI session error for clientId=SYNTH-CID-7788 "
+            "computerName=SYNTH-HOST-99 from 172.16.5.9 via "
+            r"\\synth-fileserver\blpapi\SYNTH-USER\session.log"
+        )
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "SYNTH-CID-7788" not in surface
+        assert "SYNTH-HOST-99" not in surface
+        assert "172.16.5.9" not in surface
+        assert "synth-fileserver" not in surface
+        assert "SYNTH-USER" not in surface
+
+
 def test_connection_failures_are_sanitized_in_every_output(monkeypatch, tmp_path, capsys):
     def _probe(identifier, fields, overrides=None):
         raise RuntimeError(
