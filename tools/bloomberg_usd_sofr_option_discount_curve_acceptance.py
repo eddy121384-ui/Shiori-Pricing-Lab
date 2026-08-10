@@ -15,12 +15,23 @@ Bloomberg workstation and see, side by side: each generated curve node's
 ``rate`` (decimal) *and* its recomputed percent value (``rate * 100`` --
 the inverse of the loader's own percent-to-decimal conversion, so no
 extra Bloomberg field is requested here), each tenor's preserved
-discount-factor evidence and its own raw ``LAST_PRICE``, and each node's
-``MATURITY``. Eddy can then compare these against what round 11's probe
-already showed him for the same two default tickers, and against terminal
-Curve #490 / SWDF directly. **This script asserts no such match itself**
--- it only surfaces the values for Eddy's own manual acceptance judgment,
-the same discipline every prior round in this issue has followed.
+discount-factor evidence and its own raw ``LAST_PRICE``, and the node's
+own authoritative date. Eddy can then compare these against what round
+11's probe already showed him for the same two default tickers, and
+against terminal Curve #490 / SWDF directly. **This script asserts no
+such match itself** -- it only surfaces the values for Eddy's own manual
+acceptance judgment, the same discipline every prior round in this issue
+has followed.
+
+**``node_maturity`` vs. ``discount_factor_maturity``.** The report's
+``node_maturity`` field is the curve node's own authoritative date --
+Bloomberg's ``MATURITY`` for the ``Z`` ticker, read from ``BLICurvePoint.
+maturity_date`` (the production loader already requires this to match the
+``D`` ticker's own ``MATURITY`` at the same tenor, failing closed
+otherwise). ``discount_factor_maturity`` is the ``D`` ticker's own
+``MATURITY``, shown separately for transparency only -- it is never
+labeled as the curve node's maturity, since ``D`` is corroborating
+cross-check evidence, not the node's own source of date.
 
 **One command, run once.** Eddy runs::
 
@@ -108,13 +119,21 @@ def run_acceptance(
                 "rate_basis": point.rate_basis.value,
                 "zero_rate_decimal": point.rate,
                 "zero_rate_percent_recomputed": point.rate * 100.0,
+                # The curve node's own authoritative date -- Bloomberg's MATURITY
+                # for the Z ticker, preserved verbatim on the BLICurvePoint itself.
+                # Never the D ticker's date (see discount_factor_maturity below).
+                "node_maturity": point.maturity_date,
                 "discount_factor_security": evidence.security if evidence else None,
                 "discount_factor": evidence.discount_factor if evidence else None,
                 "discount_factor_raw_last_price": evidence.raw_last_price if evidence else None,
                 "discount_factor_in_zero_one_range": (
                     (0.0 < evidence.discount_factor <= 1.0) if evidence else None
                 ),
-                "maturity": evidence.maturity if evidence else None,
+                # The D ticker's own MATURITY -- shown separately for transparency
+                # only. The production loader already requires this to equal
+                # node_maturity (fails closed otherwise), so this is corroborating
+                # evidence, never a second candidate node date.
+                "discount_factor_maturity": evidence.maturity if evidence else None,
             }
         )
 
@@ -164,16 +183,20 @@ def render_markdown(data: dict) -> str:
             f"{node['discount_factor_security']!r}, in (0,1]: "
             f"{node['discount_factor_in_zero_one_range']})"
         )
-        lines.append(f"maturity: {node['maturity']}")
+        lines.append(f"node maturity (Z, authoritative): {node['node_maturity']}")
+        lines.append(
+            "discount-factor maturity (D, corroborating evidence): "
+            f"{node['discount_factor_maturity']}"
+        )
         lines.append("")
 
     lines.append("## Status")
     lines.append("")
     lines.append(
-        "Compare each node's zero rate / discount factor / maturity above against "
-        "terminal Curve #490 / SWDF and against round 11's own probe output for the "
-        "same default tickers. This script asserts no match itself -- that judgment "
-        "is Eddy's."
+        "Compare each node's zero rate / discount factor / node maturity above "
+        "against terminal Curve #490 / SWDF and against round 11's own probe "
+        "output for the same default tickers. This script asserts no match itself "
+        "-- that judgment is Eddy's."
     )
 
     return "\n".join(lines)
@@ -244,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  - tenor {node['tenor']}: rate={node['zero_rate_decimal']} "
             f"({node['zero_rate_percent_recomputed']}%)  DF={node['discount_factor']}  "
-            f"maturity={node['maturity']}"
+            f"node_maturity={node['node_maturity']}  "
+            f"discount_factor_maturity={node['discount_factor_maturity']}"
         )
     print("")
     print("Full report (paste back or attach either file):")

@@ -297,6 +297,42 @@ def test_rate_basis_does_not_imply_interpolation_or_discount_factor():
     assert module_names.isdisjoint(forbidden_names)
 
 
+# --- 3c. maturity_date: optional, explicit YYYY-MM-DD (Issue #165 production phase) ---
+
+
+def test_curve_point_maturity_date_defaults_to_none():
+    point = _curve_point()
+    assert point.maturity_date is None
+
+
+def test_curve_point_accepts_an_explicit_maturity_date():
+    point = _curve_point(maturity_date="2028-08-10")
+    assert point.maturity_date == "2028-08-10"
+
+
+def test_curve_point_rejects_a_malformed_maturity_date():
+    with pytest.raises(ValueError, match="maturity_date must be a YYYY-MM-DD date string"):
+        _curve_point(maturity_date="not-a-date")
+
+
+def test_curve_point_rejects_a_compact_maturity_date():
+    with pytest.raises(ValueError, match="maturity_date must be a YYYY-MM-DD date string"):
+        _curve_point(maturity_date="20280810")
+
+
+def test_curve_point_rejects_a_blank_maturity_date():
+    with pytest.raises(ValueError, match="maturity_date must be a non-blank string"):
+        _curve_point(maturity_date="")
+
+
+def test_fixture_curve_points_have_no_maturity_date_by_default():
+    # The pre-existing synthetic fixture rows are nominal tenor labels only
+    # -- no source system reports a real calendar date for them, so this
+    # optional field must stay None and not be silently backfilled.
+    for point in SYNTHETIC_BLI_MARKET_DATA_SNAPSHOT.curve_points:
+        assert point.maturity_date is None
+
+
 # --- 4. FTP percent/decimal consistency -----------------------------------
 
 
@@ -497,9 +533,7 @@ def test_bond_quote_price_only_passes():
 
 
 def test_bond_quote_yield_only_passes():
-    quote = _bond_quote(
-        price_type=BLIQuoteBasis.YIELD, clean_price_per_100=None, yield_value=0.041
-    )
+    quote = _bond_quote(price_type=BLIQuoteBasis.YIELD, clean_price_per_100=None, yield_value=0.041)
     assert quote.yield_value == 0.041
     assert quote.clean_price_per_100 is None
 

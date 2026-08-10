@@ -56,10 +56,23 @@ tenor_to_year_fraction`` grammar before any Bloomberg request is sent.
 **Fields requested: exactly ``LAST_PRICE`` and ``MATURITY``, for both the
 ``Z`` and ``D`` synthetic security at every requested tenor**, in one
 ``ReferenceDataRequest``. ``LAST_PRICE`` is the field Eddy's own Excel
-formulas use verbatim; ``MATURITY`` is Bloomberg's own returned node date
--- used as this curve's authoritative node date for the duplicate/
-non-increasing-maturity fail-closed check below, never invented from the
-nominal tenor label.
+formulas use verbatim; ``MATURITY`` is Bloomberg's own returned node date,
+parsed and validated as a real ``YYYY-MM-DD`` calendar date for *both*
+securities -- never invented from the nominal tenor label.
+
+**``MATURITY`` is preserved, not discarded.** The ``Z`` security's own
+``MATURITY`` is the authoritative curve node date: it is written verbatim
+into ``BLICurvePoint.maturity_date`` (Issue #165 production-phase schema
+addition, see ``data/bli_snapshot.py``) -- never reconstructed from
+``tenor`` -- and also drives the duplicate/non-increasing-maturity
+fail-closed check below. The ``D`` security's own ``MATURITY`` is
+required to be **identical** to the ``Z`` security's at the same tenor
+(both are evidence for the same curve node); a mismatch fails closed with
+a precise error naming both tickers and both dates rather than silently
+keeping only one. ``D``'s own maturity is also carried on
+``BloombergDiscountFactorEvidence.maturity`` for transparency, but it is
+never the *curve point's* maturity -- callers must read
+``BLICurvePoint.maturity_date`` for that.
 
 **Percent-to-decimal conversion (Z only).** The ``Z`` ticker's
 ``LAST_PRICE`` is divided by 100 (Bloomberg convention: a displayed
@@ -88,7 +101,9 @@ offending security/tenor:**
 - a ``fieldExceptions`` entry on either security;
 - a missing/blank ``LAST_PRICE`` or ``MATURITY`` on either security;
 - a ``MATURITY`` value that does not parse as a strict ``YYYY-MM-DD``
-  calendar date (reuses ``data._validation._parse_iso_date``);
+  calendar date on either security (reuses
+  ``data._validation._parse_iso_date``);
+- a ``Z``/``D`` ``MATURITY`` mismatch at the same tenor;
 - two different tenors whose ``Z`` security resolves to the same
   ``MATURITY`` (duplicate curve node date);
 - a ``Z`` ``MATURITY`` that does not strictly increase, in ascending
@@ -392,6 +407,14 @@ def load_bloomberg_usd_sofr_option_discount_curve(
 
         return raw_last_price, raw_maturity
 
+    def _parse_maturity(security: str, raw_maturity: str) -> date:
+        try:
+            return _parse_iso_date(raw_maturity, f"{security} MATURITY")
+        except ValueError as exc:
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI returned a non-parseable MATURITY for {security!r}: {exc}"
+            ) from exc
+
     curve_points: list[BLICurvePoint] = []
     evidence: list[BloombergDiscountFactorEvidence] = []
     node_maturities: list[tuple[float, str, date]] = []
@@ -416,12 +439,21 @@ def load_bloomberg_usd_sofr_option_discount_curve(
                 f"strictly positive, got {discount_factor!r}"
             )
 
-        try:
-            zero_maturity_date = _parse_iso_date(raw_zero_maturity, f"{zero_security} MATURITY")
-        except ValueError as exc:
+        zero_maturity_date = _parse_maturity(zero_security, raw_zero_maturity)
+        df_maturity_date = _parse_maturity(discount_factor_security, raw_df_maturity)
+
+        # D is presented as same-node cross-check evidence for Z -- if Bloomberg's
+        # own returned MATURITY disagrees between the two tickers at this tenor,
+        # they are not evidence for the same curve node, and this must fail closed
+        # rather than silently keep only Z's date.
+        if zero_maturity_date != df_maturity_date:
             raise BLIBloombergDapiError(
-                f"Bloomberg DAPI returned a non-parseable MATURITY for {zero_security!r}: {exc}"
-            ) from exc
+                f"Bloomberg DAPI MATURITY mismatch for tenor {tenor!r}: "
+                f"{zero_security!r} returned {zero_maturity_date.isoformat()!r}, "
+                f"{discount_factor_security!r} returned {df_maturity_date.isoformat()!r} -- "
+                "Z and D do not evidence the same curve node"
+            )
+
         year_fraction = tenor_to_year_fraction(tenor)
         node_maturities.append((year_fraction, tenor, zero_maturity_date))
 
@@ -436,6 +468,7 @@ def load_bloomberg_usd_sofr_option_discount_curve(
                 rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
                 source_system=USD_SOFR_SOURCE_SYSTEM,
                 status=BLIMarketDataStatus.ACTIVE,
+                maturity_date=raw_zero_maturity,
             )
         )
         evidence.append(

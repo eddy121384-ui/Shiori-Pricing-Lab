@@ -4,11 +4,15 @@
 Standalone workstation diagnostic CLI, not part of the production pricing
 path. These tests prove: (1) it calls the production loader with the
 loader's own default tenors unless overridden; (2) it reports each node's
-zero rate (decimal and recomputed percent), preserved discount-factor
-evidence, and maturity, without asserting a match to any prior observation
-itself; (3) a `BLIBloombergDapiError`/`ImportError`/`ValueError` from the
-loader is reported, never raised past `main`; (4) report rendering/writing
-and the CLI's tenor-override contract.
+zero rate (decimal and recomputed percent) and preserved discount-factor
+evidence, without asserting a match to any prior observation itself;
+(3) the report's `node_maturity` comes from the curve point's own
+`maturity_date` (the Z ticker's authoritative date) and `discount_factor_
+maturity` comes from the D ticker's own evidence -- the two are always
+reported under distinct keys, and D's date is never labeled as the node's
+own maturity; (4) a `BLIBloombergDapiError`/`ImportError`/`ValueError`
+from the loader is reported, never raised past `main`; (5) report
+rendering/writing and the CLI's tenor-override contract.
 
 No `blpapi` faking needed: `run_acceptance` takes the production loader as
 an injectable `load` callable.
@@ -51,7 +55,7 @@ from shiori_pricing_lab.data.bloomberg_option_discount_curve import (  # noqa: E
 from shiori_pricing_lab.products.enums import Currency  # noqa: E402
 
 
-def _curve_point(tenor, rate) -> BLICurvePoint:
+def _curve_point(tenor, rate, maturity_date) -> BLICurvePoint:
     return BLICurvePoint(
         curve_id=USD_SOFR_CURVE_ID,
         curve_name=USD_SOFR_CURVE_NAME,
@@ -62,6 +66,7 @@ def _curve_point(tenor, rate) -> BLICurvePoint:
         rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
         source_system="BLOOMBERG_DAPI",
         status=BLIMarketDataStatus.ACTIVE,
+        maturity_date=maturity_date,
     )
 
 
@@ -79,7 +84,10 @@ def _evidence(
 
 def _success_result() -> BloombergUsdSofrOptionDiscountCurveResult:
     return BloombergUsdSofrOptionDiscountCurveResult(
-        curve_points=(_curve_point("1Y", 0.0175), _curve_point("2Y", 0.0325)),
+        curve_points=(
+            _curve_point("1Y", 0.0175, "2027-08-10"),
+            _curve_point("2Y", 0.0325, "2028-08-10"),
+        ),
         discount_factor_evidence=(
             _evidence("1Y", "S0490D 1Y BLC2 Curncy", "0.98", 0.98, "2027-08-10"),
             _evidence("2Y", "S0490D 2Y BLC2 Curncy", "0.94", 0.94, "2028-08-10"),
@@ -131,7 +139,27 @@ def test_run_reports_preserved_discount_factor_evidence():
     assert by_tenor["1Y"]["discount_factor"] == pytest.approx(0.98)
     assert by_tenor["1Y"]["discount_factor_raw_last_price"] == "0.98"
     assert by_tenor["1Y"]["discount_factor_security"] == "S0490D 1Y BLC2 Curncy"
-    assert by_tenor["1Y"]["maturity"] == "2027-08-10"
+    assert by_tenor["1Y"]["discount_factor_maturity"] == "2027-08-10"
+
+
+def test_run_reports_node_maturity_from_the_curve_points_own_maturity_date():
+    report = run_acceptance(load=lambda *, tenors: _success_result())
+
+    by_tenor = {n["tenor"]: n for n in report.nodes}
+    assert by_tenor["1Y"]["node_maturity"] == "2027-08-10"
+    assert by_tenor["2Y"]["node_maturity"] == "2028-08-10"
+
+
+def test_node_maturity_is_never_the_same_dict_key_as_discount_factor_maturity():
+    # Guards against exactly the mislabeling bug this contract was fixed
+    # for: the D ticker's own date must never be reported under the same
+    # key as the node's own (Z-sourced) authoritative date.
+    report = run_acceptance(load=lambda *, tenors: _success_result())
+
+    for node in report.nodes:
+        assert "node_maturity" in node
+        assert "discount_factor_maturity" in node
+        assert "maturity" not in node
 
 
 def test_run_flags_discount_factor_in_zero_one_range_as_a_fact_not_a_verdict():
@@ -303,7 +331,8 @@ def test_main_writes_report_and_prints_the_paths(monkeypatch, capsys, tmp_path):
                     "discount_factor": 0.98,
                     "discount_factor_raw_last_price": "0.98",
                     "discount_factor_in_zero_one_range": True,
-                    "maturity": "2027-08-10",
+                    "node_maturity": "2027-08-10",
+                    "discount_factor_maturity": "2027-08-10",
                 },
             ),
         ),

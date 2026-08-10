@@ -427,7 +427,7 @@ def test_missing_maturity_fails_closed(monkeypatch):
         load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
 
 
-def test_non_parseable_maturity_fails_closed(monkeypatch):
+def test_non_parseable_zero_maturity_fails_closed(monkeypatch):
     records = [
         _security_record(security=_ZERO_1Y, last_price="1.75", maturity="not-a-date"),
         _security_record(security=_DF_1Y, last_price="0.98", maturity="2027-08-10"),
@@ -436,6 +436,60 @@ def test_non_parseable_maturity_fails_closed(monkeypatch):
 
     with pytest.raises(BLIBloombergDapiError, match="YYYY-MM-DD"):
         load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
+
+
+def test_non_parseable_discount_factor_maturity_fails_closed(monkeypatch):
+    records = [
+        _security_record(security=_ZERO_1Y, last_price="1.75", maturity="2027-08-10"),
+        _security_record(security=_DF_1Y, last_price="0.98", maturity="not-a-date"),
+    ]
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError, match="YYYY-MM-DD"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
+
+
+# --- Z/D maturity mismatch (same-node cross-check) ------------------------------------
+
+
+def test_z_and_d_maturity_mismatch_at_the_same_tenor_fails_closed(monkeypatch):
+    records = [
+        _security_record(security=_ZERO_1Y, last_price="1.75", maturity="2027-08-10"),
+        _security_record(security=_DF_1Y, last_price="0.98", maturity="2027-08-11"),
+    ]
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError, match="MATURITY mismatch"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
+
+
+def test_z_and_d_maturity_mismatch_error_names_both_tickers_and_dates(monkeypatch):
+    records = [
+        _security_record(security=_ZERO_1Y, last_price="1.75", maturity="2027-08-10"),
+        _security_record(security=_DF_1Y, last_price="0.98", maturity="2027-08-11"),
+    ]
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError) as exc_info:
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
+
+    message = str(exc_info.value)
+    assert _ZERO_1Y in message
+    assert _DF_1Y in message
+    assert "2027-08-10" in message
+    assert "2027-08-11" in message
+
+
+def test_z_and_d_matching_maturity_at_the_same_tenor_succeeds(monkeypatch):
+    records = [
+        _security_record(security=_ZERO_1Y, last_price="1.75", maturity="2027-08-10"),
+        _security_record(security=_DF_1Y, last_price="0.98", maturity="2027-08-10"),
+    ]
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
+
+    assert result.curve_points[0].maturity_date == "2027-08-10"
 
 
 # --- non-finite zero rate / non-positive discount factor ----------------------------
@@ -543,6 +597,34 @@ def test_successful_curve_produces_option_discount_curve_continuous_zero_rate_po
         assert point.rate_basis is BLICurveRateBasis.CONTINUOUS_ZERO_RATE
         assert point.source_system == "BLOOMBERG_DAPI"
         assert point.status is BLIMarketDataStatus.ACTIVE
+
+
+def test_curve_point_preserves_the_z_tickers_own_maturity_verbatim(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=_both_tenors_success(maturity_1y="2027-08-10", maturity_2y="2028-08-10"),
+    )
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y", "2Y"))
+
+    by_tenor = {p.tenor: p for p in result.curve_points}
+    assert by_tenor["1Y"].maturity_date == "2027-08-10"
+    assert by_tenor["2Y"].maturity_date == "2028-08-10"
+
+
+def test_curve_point_maturity_date_is_never_reconstructed_from_tenor(monkeypatch):
+    # A tenor of "1Y" from an arbitrary valuation date would never itself
+    # equal "2030-01-15" -- this asserts the field carries Bloomberg's own
+    # returned value through unchanged, not a tenor-derived guess.
+    _install_fake_blpapi(
+        monkeypatch, events=_both_tenors_success(maturity_1y="2030-01-15", maturity_2y="2031-06-20")
+    )
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y", "2Y"))
+
+    by_tenor = {p.tenor: p for p in result.curve_points}
+    assert by_tenor["1Y"].maturity_date == "2030-01-15"
+    assert by_tenor["2Y"].maturity_date == "2031-06-20"
 
 
 def test_zero_rate_percent_is_converted_to_decimal(monkeypatch):
