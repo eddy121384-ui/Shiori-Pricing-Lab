@@ -885,6 +885,167 @@ def test_api_bloomberg_bond_never_calls_pricing(server_url: str, monkeypatch) ->
     assert status == 200
 
 
+# --- Issue #167: /api/bloomberg/option-discount-curve (Markets view) ------------
+
+
+def _fake_curve_result():
+    from shiori_pricing_lab.data.bli_snapshot import (
+        BLICurvePoint,
+        BLICurvePurpose,
+        BLICurveRateBasis,
+        BLIMarketDataStatus,
+    )
+    from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+        BloombergDiscountFactorEvidence,
+        BloombergUsdSofrOptionDiscountCurveResult,
+    )
+    from shiori_pricing_lab.products.enums import Currency
+
+    tenors_and_maturities = [("1Y", "2027-08-11"), ("2Y", "2028-08-11"), ("5Y", "2031-08-11")]
+    rates = {"1Y": 0.038172, "2Y": 0.039156, "5Y": 0.040781}
+    dfs = {"1Y": 0.972346, "2Y": 0.947680, "5Y": 0.814250}
+    curve_points = tuple(
+        BLICurvePoint(
+            curve_id="USD_SOFR_OPTION_DISCOUNT_CURVE",
+            curve_name="USD SOFR Option Discount Curve (Bloomberg Curve #490)",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor=tenor,
+            rate=rates[tenor],
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date=maturity,
+        )
+        for tenor, maturity in tenors_and_maturities
+    )
+    evidence = tuple(
+        BloombergDiscountFactorEvidence(
+            tenor=tenor,
+            security=f"S0490D {tenor} BLC2 Curncy",
+            raw_last_price=str(dfs[tenor]),
+            discount_factor=dfs[tenor],
+            maturity=maturity,
+        )
+        for tenor, maturity in tenors_and_maturities
+    )
+    return BloombergUsdSofrOptionDiscountCurveResult(
+        curve_points=curve_points, discount_factor_evidence=evidence
+    )
+
+
+def test_api_option_discount_curve_returns_nodes_from_the_production_loader(
+    server_url: str, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fake_curve_result
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_shiori_acquisition_now",
+        lambda: datetime(2026, 8, 11, 12, 34, 45, tzinfo=UTC),
+    )
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 200
+    assert payload["curve_id"] == "USD_SOFR_OPTION_DISCOUNT_CURVE"
+    assert payload["source_system"] == "BLOOMBERG_DAPI"
+    assert payload["rate_basis"] == "CONTINUOUS_ZERO_RATE"
+    assert payload["acquired_at"] == "2026-08-11T12:34:45+00:00"
+    assert payload["coverage"] == {
+        "first_tenor": "1Y",
+        "last_tenor": "5Y",
+        "first_maturity": "2027-08-11",
+        "last_maturity": "2031-08-11",
+    }
+    assert payload["nodes"] == [
+        {
+            "tenor": "1Y",
+            "maturity": "2027-08-11",
+            "zero_rate_percent": pytest.approx(3.8172),
+            "discount_factor": pytest.approx(0.972346),
+            "par_rate_percent": None,
+        },
+        {
+            "tenor": "2Y",
+            "maturity": "2028-08-11",
+            "zero_rate_percent": pytest.approx(3.9156),
+            "discount_factor": pytest.approx(0.947680),
+            "par_rate_percent": None,
+        },
+        {
+            "tenor": "5Y",
+            "maturity": "2031-08-11",
+            "zero_rate_percent": pytest.approx(4.0781),
+            "discount_factor": pytest.approx(0.814250),
+            "par_rate_percent": None,
+        },
+    ]
+
+
+def test_api_option_discount_curve_never_fabricates_a_par_rate(
+    server_url: str, monkeypatch
+) -> None:
+    # Issue #167 RED gate: no verified Bloomberg DAPI route for par/swap rate
+    # exists for Curve #490 -- every node's par_rate_percent must stay None,
+    # never filled from the zero rate or any other value.
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fake_curve_result
+    )
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+    assert status == 200
+    assert all(node["par_rate_percent"] is None for node in payload["nodes"])
+
+
+def test_api_option_discount_curve_returns_502_on_bloomberg_failure(
+    server_url: str, monkeypatch
+) -> None:
+    def _fail():
+        raise BLIBloombergDapiError("Bloomberg DAPI session failed to start")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fail)
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 502
+    assert "Bloomberg DAPI session failed to start" in payload["error"]
+
+
+def test_api_option_discount_curve_never_falls_back_to_sample_data(
+    server_url: str, monkeypatch
+) -> None:
+    calls = []
+
+    def _fail():
+        calls.append(1)
+        raise BLIBloombergDapiError("boom")
+
+    def _must_not_price(*args, **kwargs):
+        raise AssertionError("the curve route must never touch pricing")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fail)
+    monkeypatch.setattr(server_module, "price_standalone_option_case", _must_not_price)
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 502
+    assert "nodes" not in payload
+    assert calls == [1]
+
+
+def test_api_option_discount_curve_reuses_the_production_loader_unmodified(
+    server_url: str,
+) -> None:
+    # No monkeypatching of the loader itself here -- proves the route imports
+    # and calls the exact same function name Issue #165/#166 already shipped,
+    # not a private copy. blpapi is not installed in CI, so this fails closed
+    # with BLIBloombergDapiError rather than succeeding or hanging.
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+    assert status == 502
+    assert "blpapi" in payload["error"]
+
+
 # --- Issue #138: /api/export/json and /api/export/markdown ----------------------
 
 
