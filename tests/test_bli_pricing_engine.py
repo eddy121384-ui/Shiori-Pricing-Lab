@@ -70,6 +70,8 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
+from datetime import date
+from math import exp
 
 import pytest
 
@@ -240,13 +242,123 @@ def test_supported_case_returns_success_with_pinned_pv():
     assert result.assumptions["option_discount_factor"] == pytest.approx(
         _EXPECTED_OPTION_DISCOUNT_FACTOR
     )
-    assert result.assumptions["black76_pv_per_100"] == pytest.approx(
-        _EXPECTED_BLACK76_PV_PER_100
-    )
+    assert result.assumptions["black76_pv_per_100"] == pytest.approx(_EXPECTED_BLACK76_PV_PER_100)
     assert result.pv == pytest.approx(_EXPECTED_PV)
     assert result.dv01 is None
     assert result.cashflows is None
     assert result.method == "black76_forward_clean_price_v1"
+
+
+# --- 1b. Issue #165 live-wiring follow-up: explicit maturity_date consumed --
+
+
+def _option_discount_curve_points_with_explicit_dates(currency) -> tuple[BLICurvePoint, ...]:
+    """Same OPTION_DISCOUNT_CURVE rates as `_local_short_tenor_curve_points`
+    (0.028/0.032), but with explicit `maturity_date`s deliberately
+    different from what the nominal tenor labels ("1M"/"1Y") would imply
+    -- 45 and 274 days after valuation_date 2026-07-01, vs. the tenor
+    labels' own ~30.4 and 365 days. Both still bracket the bond option's
+    own T = 90/365 (2026-09-29), so this stays an in-range interpolation
+    case, not the out-of-coverage case (see the dedicated test below).
+    """
+
+    common = {
+        "curve_id": "TEST_LOCAL_OPTION_DISCOUNT_CURVE",
+        "curve_name": "TEST_LOCAL_OPTION_DISCOUNT_CURVE",
+        "curve_purpose": BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+        "rate_basis": BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+        "source_system": "TEST_LOCAL_CURVE",
+        "status": BLIMarketDataStatus.ACTIVE,
+        "currency": currency,
+    }
+    return (
+        BLICurvePoint(tenor="1M", rate=0.028, maturity_date="2026-08-15", **common),
+        BLICurvePoint(tenor="1Y", rate=0.032, maturity_date="2027-04-01", **common),
+    )
+
+
+def _bundle_replacing_option_discount_curve(points: tuple[BLICurvePoint, ...]) -> BLIMVPInputBundle:
+    base_bundle = _local_supported_bundle()
+    non_option_points = tuple(
+        point
+        for point in base_bundle.market_data_snapshot.curve_points
+        if point.curve_purpose is not BLICurvePurpose.OPTION_DISCOUNT_CURVE
+    )
+    new_snapshot = replace(
+        base_bundle.market_data_snapshot, curve_points=non_option_points + points
+    )
+    return replace(base_bundle, market_data_snapshot=new_snapshot)
+
+
+@_requires_quantlib
+def test_explicit_maturity_date_changes_the_live_option_discount_factor():
+    tenor_only_result = price_bli_mvp(_local_supported_bundle())
+
+    currency = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.currency
+    explicit_date_bundle = _bundle_replacing_option_discount_curve(
+        _option_discount_curve_points_with_explicit_dates(currency)
+    )
+    explicit_date_result = price_bli_mvp(explicit_date_bundle)
+
+    # Same rates (0.028/0.032), same target T (90/365) -- only the node
+    # coordinates differ (tenor label vs. explicit date), so if the live
+    # engine is genuinely consuming the explicit dates end-to-end, the two
+    # results must differ.
+    assert explicit_date_result.assumptions["option_discount_factor"] != pytest.approx(
+        tenor_only_result.assumptions["option_discount_factor"]
+    )
+
+    # Independently derive the expected value from the explicit dates
+    # themselves (plain date arithmetic + the same piecewise-linear/
+    # exp(-rT) formula Annex A specifies), never by calling
+    # build_continuous_zero_curve_nodes/interpolate_continuous_zero_rate/
+    # continuous_discount_factor -- the same "derive by hand" discipline
+    # this file's own pinned-PV test above already uses.
+    valuation_date = date(2026, 7, 1)
+    node_a_year_fraction = (date(2026, 8, 15) - valuation_date).days / 365.0
+    node_b_year_fraction = (date(2027, 4, 1) - valuation_date).days / 365.0
+    target_year_fraction = explicit_date_result.assumptions["time_to_expiry_year_fraction"]
+    expected_zero_rate = 0.028 + (0.032 - 0.028) * (target_year_fraction - node_a_year_fraction) / (
+        node_b_year_fraction - node_a_year_fraction
+    )
+    expected_discount_factor = exp(-expected_zero_rate * target_year_fraction)
+
+    assert explicit_date_result.assumptions["option_discount_factor"] == pytest.approx(
+        expected_discount_factor
+    )
+    # And provably not the tenor-derived value, ruling out a coincidental match.
+    assert expected_discount_factor != pytest.approx(_EXPECTED_OPTION_DISCOUNT_FACTOR)
+
+
+@_requires_quantlib
+def test_explicit_maturity_date_out_of_coverage_still_fails_closed():
+    # Both explicit-date nodes fall strictly after the option's own T
+    # (90/365 from valuation_date 2026-07-01) -- out of coverage, same
+    # shape as test_shared_mvp_fixture_curve_range_gap_maps_to_engine_error
+    # above, must still fail closed rather than extrapolate.
+    currency = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.product.bond_option.currency
+    common = {
+        "curve_id": "TEST_LOCAL_OPTION_DISCOUNT_CURVE",
+        "curve_name": "TEST_LOCAL_OPTION_DISCOUNT_CURVE",
+        "curve_purpose": BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+        "rate_basis": BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+        "source_system": "TEST_LOCAL_CURVE",
+        "status": BLIMarketDataStatus.ACTIVE,
+        "currency": currency,
+    }
+    out_of_coverage_points = (
+        BLICurvePoint(tenor="1Y", rate=0.028, maturity_date="2027-04-01", **common),
+        BLICurvePoint(tenor="2Y", rate=0.032, maturity_date="2028-04-01", **common),
+    )
+    bundle = _bundle_replacing_option_discount_curve(out_of_coverage_points)
+
+    result = price_bli_mvp(bundle)
+
+    assert result.status is PricingStatus.FAILED
+    assert result.errors[0].code is PricingErrorCode.ENGINE_ERROR
+    assert "outside the node range" in result.errors[0].message
+    assert result.errors[0].detail["exception_type"] == "ValueError"
+    assert result.pv is None
 
 
 @_requires_quantlib
@@ -258,12 +370,8 @@ def test_pv_equals_pv_per_100_times_notional_over_100():
     assert notional != 100.0  # otherwise this test would not distinguish scaling
     assert notional == 50.0
 
-    assert result.assumptions["black76_pv_per_100"] == pytest.approx(
-        _EXPECTED_BLACK76_PV_PER_100
-    )
-    assert result.pv == pytest.approx(
-        result.assumptions["black76_pv_per_100"] * notional / 100.0
-    )
+    assert result.assumptions["black76_pv_per_100"] == pytest.approx(_EXPECTED_BLACK76_PV_PER_100)
+    assert result.pv == pytest.approx(result.assumptions["black76_pv_per_100"] * notional / 100.0)
     assert result.pv == pytest.approx(_EXPECTED_PV)
     assert result.pv != pytest.approx(result.assumptions["black76_pv_per_100"])
     assert result.assumptions["notional"] == notional
@@ -391,9 +499,7 @@ def test_missing_clean_price_fails():
     # fully supported), not an unsupported product shape -- so this maps
     # to MISSING_MARKET_DATA, not UNSUPPORTED_PRODUCT.
     assert result.errors[0].code is PricingErrorCode.MISSING_MARKET_DATA
-    assert any(
-        "clean_price_per_100" in reason for reason in result.errors[0].detail["reasons"]
-    )
+    assert any("clean_price_per_100" in reason for reason in result.errors[0].detail["reasons"])
 
 
 def test_unsupported_volatility_basis_fails():
@@ -410,9 +516,7 @@ def test_unsupported_volatility_basis_fails():
 
     assert result.status is PricingStatus.FAILED
     assert result.errors[0].code is PricingErrorCode.UNSUPPORTED_PRODUCT
-    assert any(
-        "volatility_basis" in reason for reason in result.errors[0].detail["reasons"]
-    )
+    assert any("volatility_basis" in reason for reason in result.errors[0].detail["reasons"])
 
 
 def test_combined_shape_and_data_failure_prefers_unsupported_product():

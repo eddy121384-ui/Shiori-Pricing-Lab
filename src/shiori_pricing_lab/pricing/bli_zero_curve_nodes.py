@@ -78,15 +78,21 @@ are unchanged by this slice** -- only how a node's own `year_fraction`
 coordinate is computed changed, and only for rows that opt in by
 carrying an explicit `maturity_date`.
 
-This module is not imported by, and does not change the behavior of,
-`pricing/bli_pricing_engine.py::price_bli_mvp` -- `price_bli_mvp` (and
-`bli_forward_clean_price.py`/`bli_standalone_option_pricing_inputs.py`,
-the chain's other two live callers) do not yet pass `as_of_date` through
-to `discount_factor_from_continuous_zero_curve`, so today's live pricing
-paths still process only tenor-only curve points, exactly as before this
-slice. Wiring `valuation_date` into those call sites so an explicit-date
-Bloomberg curve point is reachable end-to-end through live pricing is a
-separate, not-yet-authorized follow-up.
+**Live wiring (Issue #165 final live-wiring follow-up):** the two
+Issue #165-relevant `OPTION_DISCOUNT_CURVE` pricing paths --
+`bli_pricing_engine.py::_price_bli_mvp_from_fields` and
+`bli_standalone_option_pricing_inputs.py::_option_discount_factor_to_date`
+-- now pass `as_of_date=valuation_date` through
+`discount_factor_from_continuous_zero_curve` down to this function, so a
+Bloomberg-sourced `BLICurvePoint` with an explicit `maturity_date` is
+consumed end-to-end with its real date, using each caller's own
+`valuation_date` (already the reference date every other year-fraction
+each of them computes is anchored to). `bli_forward_clean_price.py`
+(`BOND_REFERENCE_CURVE`, not `OPTION_DISCOUNT_CURVE`) is deliberately
+**not** wired -- explicitly out of scope for Issue #165. Every curve made
+of purely tenor-only rows (every curve this codebase priced before Issue
+#165's Bloomberg ingestion) is completely unaffected: `as_of_date` is
+never read unless at least one selected row carries `maturity_date`.
 """
 
 from __future__ import annotations

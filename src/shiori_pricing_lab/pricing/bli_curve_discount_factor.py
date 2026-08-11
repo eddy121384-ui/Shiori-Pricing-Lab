@@ -32,12 +32,19 @@ selected row carries an explicit `maturity_date`. Optional, defaults to
 `None`; every existing caller that never sets it keeps identical
 behavior (a purely tenor-only curve never reads it).
 
-This module is not imported by, and does not change the behavior of,
-`pricing/bli_pricing_engine.py::price_bli_mvp` -- none of this chain's
-three live callers (`bli_pricing_engine.py`,
-`bli_forward_clean_price.py`, `bli_standalone_option_pricing_inputs.py`)
-pass `as_of_date` through yet, so today's live pricing paths are
-unaffected by this parameter's addition.
+**Live wiring (Issue #165 final live-wiring follow-up):**
+`bli_pricing_engine.py::_price_bli_mvp_from_fields` (both the
+`BLIMVPInputBundle` and standalone-request paths, which share this exact
+composition) and
+`bli_standalone_option_pricing_inputs.py::_option_discount_factor_to_date`
+both now pass `as_of_date=valuation_date` for their `OPTION_DISCOUNT_CURVE`
+resolution -- the same `valuation_date` each already uses to anchor every
+other year-fraction it computes. `bli_forward_clean_price.py` (which
+resolves `BOND_REFERENCE_CURVE`, not `OPTION_DISCOUNT_CURVE`) is
+deliberately **not** wired here -- explicitly out of scope for Issue #165.
+This module itself still does not change behavior for any curve whose
+points are all tenor-only (`maturity_date is None`), which is every curve
+this codebase has priced before Issue #165's Bloomberg ingestion.
 """
 
 from __future__ import annotations
