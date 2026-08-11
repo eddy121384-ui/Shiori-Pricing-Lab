@@ -4015,3 +4015,449 @@
   window.__shioriTestBlockedFieldPaths = () => Array.from(blockedFieldReasons().keys());
   window.__shioriTestDefaultExpiryUtcOffset = () => DEFAULT_EXPIRY_UTC_OFFSET;
 })();
+
+// Markets view (Issue #167): read-only USD SOFR Option Discount Curve viewer.
+//
+// Deliberately a second, self-contained IIFE rather than woven into the
+// Pricing IIFE above -- it shares no state with the trader-draft workflow and
+// touches none of it. This file performs no pricing, discounting, bootstrap,
+// interpolation, or par/zero conversion of any kind; it only calls
+// POST /api/bloomberg/option-discount-curve (see
+// standalone_option_workbench_server.fetch_usd_sofr_option_discount_curve)
+// and renders the response verbatim -- one Zero Rate Curve chart, a summary
+// strip, and the full node table. SWAP (Par Rate) is rendered exactly as the
+// server sends it, including `null` (rendered as "—", never fabricated,
+// never substituted with the zero rate).
+(function () {
+  "use strict";
+
+  const navPricing = document.getElementById("nav-pricing");
+  const navMarkets = document.getElementById("nav-markets");
+  const viewPricing = document.getElementById("view-pricing");
+  const viewMarkets = document.getElementById("view-markets");
+  if (!navMarkets || !viewMarkets) return; // Markets view not present on this page
+
+  const els = {
+    footer: document.getElementById("app-footer"),
+    refreshBtn: document.getElementById("markets-refresh-btn"),
+    meta: document.getElementById("markets-curve-meta"),
+    acquiredRow: document.getElementById("markets-acquired-at"),
+    acquiredValue: document.getElementById("markets-acquired-at-value"),
+    loading: document.getElementById("markets-loading"),
+    errorSection: document.getElementById("markets-error"),
+    errorDetail: document.getElementById("markets-error-detail"),
+    staleBanner: document.getElementById("markets-stale-banner"),
+    staleAcquired: document.getElementById("markets-stale-acquired-at"),
+    staleDetail: document.getElementById("markets-stale-detail"),
+    content: document.getElementById("markets-content"),
+    chartWrap: document.getElementById("markets-chart-svg-wrap"),
+    tableCard: document.getElementById("markets-table-card"),
+    tableBody: document.getElementById("markets-table-body"),
+    summaryNodes: document.getElementById("markets-summary-nodes"),
+    summaryCoverage: document.getElementById("markets-summary-coverage"),
+    summary1y: document.getElementById("markets-summary-1y"),
+    summary10y: document.getElementById("markets-summary-10y"),
+    summary30y: document.getElementById("markets-summary-30y"),
+    summarySource: document.getElementById("markets-summary-source"),
+  };
+
+  // The chart's x-axis shows only these tenors' labels (Issue #167 §5): every
+  // valid node is still plotted as a line/dot, this only thins the labels.
+  const MAJOR_AXIS_TENORS = [
+    "1W", "1M", "3M", "6M", "1Y", "2Y", "5Y", "10Y", "20Y", "30Y", "50Y",
+  ];
+
+  // Deliberately explicit, never a generic string-humanizer: these are the
+  // only two enum values the server ever sends (BLOOMBERG_DAPI /
+  // CONTINUOUS_ZERO_RATE), so the display label is a fixed, reviewed mapping,
+  // not a guess about what an unrecognized value might mean. An unrecognized
+  // value falls back to the raw string, verbatim, never invented.
+  const SOURCE_SYSTEM_LABELS = { BLOOMBERG_DAPI: "Bloomberg DAPI" };
+  const RATE_BASIS_LABELS = { CONTINUOUS_ZERO_RATE: "Continuous Zero Rate" };
+
+  const NBSP_DASH = "—";
+
+  let lastSuccessfulCurve = null;
+  let isLoadingCurve = false;
+
+  function switchToView(view) {
+    const showMarkets = view === "markets";
+    viewMarkets.hidden = !showMarkets;
+    viewPricing.hidden = showMarkets;
+    if (els.footer) els.footer.hidden = showMarkets;
+    navMarkets.classList.toggle("active", showMarkets);
+    navPricing.classList.toggle("active", !showMarkets);
+    if (showMarkets && !lastSuccessfulCurve && !isLoadingCurve) {
+      loadCurve();
+    }
+  }
+
+  navMarkets.addEventListener("click", () => switchToView("markets"));
+  navPricing.addEventListener("click", () => switchToView("pricing"));
+  els.refreshBtn.addEventListener("click", () => loadCurve());
+
+  function formatPercent(value, digits) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return NBSP_DASH;
+    return `${value.toFixed(digits)}%`;
+  }
+
+  function formatNumber(value, digits) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return NBSP_DASH;
+    return value.toFixed(digits);
+  }
+
+  function nodeByTenor(nodes, tenor) {
+    return nodes.find((node) => node.tenor === tenor) || null;
+  }
+
+  // Fails closed on anything the server contract does not promise (Issue
+  // #167 requirement 8: malformed response must be a clear error state, not
+  // a half-rendered page). Every field this function checks is one the
+  // Markets view actually reads below.
+  function validateCurvePayload(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("malformed response: expected a JSON object");
+    }
+    for (const key of [
+      "curve_id", "curve_name", "source_system", "rate_basis", "acquired_at", "coverage", "nodes",
+    ]) {
+      if (!(key in payload)) throw new Error(`malformed response: missing "${key}"`);
+    }
+    if (!Array.isArray(payload.nodes) || payload.nodes.length === 0) {
+      throw new Error("malformed response: \"nodes\" must be a non-empty array");
+    }
+    payload.nodes.forEach((node, index) => {
+      const label = node && typeof node === "object" ? node.tenor : index;
+      if (!node || typeof node !== "object") {
+        throw new Error(`malformed response: node ${index} is not an object`);
+      }
+      if (typeof node.tenor !== "string" || !node.tenor) {
+        throw new Error(`malformed response: node ${index} has an invalid tenor`);
+      }
+      if (typeof node.maturity !== "string" || !node.maturity) {
+        throw new Error(`malformed response: node ${label} is missing its maturity`);
+      }
+      if (typeof node.zero_rate_percent !== "number" || !Number.isFinite(node.zero_rate_percent)) {
+        throw new Error(`malformed response: node ${label} has a non-numeric zero rate`);
+      }
+      if (typeof node.discount_factor !== "number" || !Number.isFinite(node.discount_factor)) {
+        throw new Error(`malformed response: node ${label} has a non-numeric discount factor`);
+      }
+      if (node.par_rate_percent !== null && typeof node.par_rate_percent !== "number") {
+        throw new Error(`malformed response: node ${label} has an invalid par rate`);
+      }
+    });
+    return payload;
+  }
+
+  async function loadCurve() {
+    if (isLoadingCurve) return;
+    isLoadingCurve = true;
+    els.refreshBtn.classList.add("is-disabled");
+    els.errorSection.hidden = true;
+    els.staleBanner.hidden = true;
+    if (!lastSuccessfulCurve) {
+      els.content.hidden = true;
+      els.tableCard.hidden = true;
+      els.loading.hidden = false;
+    }
+
+    try {
+      const response = await fetch("/api/bloomberg/option-discount-curve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      let payload;
+      try {
+        payload = await response.json();
+      } catch (parseError) {
+        throw new Error("malformed response: not valid JSON");
+      }
+      if (!response.ok) {
+        throw new Error((payload && payload.error) || `server returned HTTP ${response.status}`);
+      }
+      validateCurvePayload(payload);
+      lastSuccessfulCurve = payload;
+      renderCurve(payload);
+      els.loading.hidden = true;
+      els.errorSection.hidden = true;
+      els.staleBanner.hidden = true;
+      els.content.hidden = false;
+      els.tableCard.hidden = false;
+    } catch (error) {
+      els.loading.hidden = true;
+      if (lastSuccessfulCurve) {
+        // A prior successful load stays on screen -- but a failed refresh
+        // must never look like a successful one (Issue #167 requirement 8):
+        // the acquired timestamp stays the old one and the failure is named.
+        els.staleBanner.hidden = false;
+        els.staleAcquired.textContent = lastSuccessfulCurve.acquired_at;
+        els.staleDetail.textContent = error.message;
+      } else {
+        els.errorSection.hidden = false;
+        els.errorDetail.textContent = error.message;
+        els.content.hidden = true;
+        els.tableCard.hidden = true;
+      }
+    } finally {
+      isLoadingCurve = false;
+      els.refreshBtn.classList.remove("is-disabled");
+    }
+  }
+
+  function renderCurve(payload) {
+    const curveNumberMatch = /\(([^)]+)\)\s*$/.exec(payload.curve_name || "");
+    const curveNumberLabel = curveNumberMatch ? curveNumberMatch[1] : payload.curve_id;
+    els.meta.textContent = [
+      curveNumberLabel,
+      SOURCE_SYSTEM_LABELS[payload.source_system] || payload.source_system,
+      RATE_BASIS_LABELS[payload.rate_basis] || payload.rate_basis,
+    ].join(" · ");
+
+    els.acquiredRow.hidden = false;
+    els.acquiredValue.textContent = payload.acquired_at;
+
+    renderSummaryStrip(payload);
+    renderChart(payload.nodes);
+    renderTable(payload.nodes);
+  }
+
+  function renderSummaryStrip(payload) {
+    const nodes = payload.nodes;
+    els.summaryNodes.textContent = String(nodes.length);
+    els.summaryCoverage.textContent =
+      payload.coverage && payload.coverage.first_tenor && payload.coverage.last_tenor
+        ? `${payload.coverage.first_tenor} – ${payload.coverage.last_tenor}`
+        : NBSP_DASH;
+
+    const oneYear = nodeByTenor(nodes, "1Y");
+    const tenYear = nodeByTenor(nodes, "10Y");
+    const thirtyYear = nodeByTenor(nodes, "30Y");
+    els.summary1y.textContent = oneYear ? formatPercent(oneYear.zero_rate_percent, 4) : NBSP_DASH;
+    els.summary10y.textContent = tenYear ? formatPercent(tenYear.zero_rate_percent, 4) : NBSP_DASH;
+    els.summary30y.textContent = thirtyYear ? formatPercent(thirtyYear.zero_rate_percent, 4) : NBSP_DASH;
+
+    const curveNumberMatch = /\(([^)]+)\)\s*$/.exec(payload.curve_name || "");
+    els.summarySource.textContent = curveNumberMatch
+      ? curveNumberMatch[1].replace("Curve ", "")
+      : payload.source_system;
+  }
+
+  function renderTable(nodes) {
+    els.tableBody.textContent = "";
+    for (const node of nodes) {
+      const row = document.createElement("tr");
+
+      const tenorCell = document.createElement("td");
+      tenorCell.textContent = node.tenor;
+      row.appendChild(tenorCell);
+
+      const maturityCell = document.createElement("td");
+      maturityCell.textContent = node.maturity;
+      row.appendChild(maturityCell);
+
+      const parCell = document.createElement("td");
+      parCell.className = "num";
+      if (node.par_rate_percent === null) {
+        parCell.textContent = NBSP_DASH;
+        parCell.classList.add("unavailable");
+      } else {
+        parCell.textContent = formatPercent(node.par_rate_percent, 4);
+      }
+      row.appendChild(parCell);
+
+      const zeroCell = document.createElement("td");
+      zeroCell.className = "num";
+      zeroCell.textContent = formatPercent(node.zero_rate_percent, 4);
+      row.appendChild(zeroCell);
+
+      const dfCell = document.createElement("td");
+      dfCell.className = "num";
+      dfCell.textContent = formatNumber(node.discount_factor, 6);
+      row.appendChild(dfCell);
+
+      els.tableBody.appendChild(row);
+    }
+  }
+
+  // ---- Chart: one Zero Rate Curve line, inline SVG, no charting library ----
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const CHART_WIDTH = 880;
+  const CHART_HEIGHT = 300;
+  const CHART_MARGIN = { top: 12, right: 16, bottom: 30, left: 46 };
+
+  function computeNiceYAxis(values) {
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min;
+    const pad = span === 0 ? Math.max(0.25, Math.abs(min) * 0.1) : span * 0.15;
+    const roughLo = min - pad;
+    const roughHi = max + pad;
+    const tickCount = 5;
+    const rawStep = (roughHi - roughLo) / tickCount || 1;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(Math.abs(rawStep))));
+    const residual = rawStep / magnitude;
+    let niceResidual;
+    if (residual > 5) niceResidual = 10;
+    else if (residual > 2) niceResidual = 5;
+    else if (residual > 1) niceResidual = 2;
+    else niceResidual = 1;
+    const step = niceResidual * magnitude;
+    const lo = Math.floor(roughLo / step) * step;
+    const hi = Math.ceil(roughHi / step) * step;
+    const ticks = [];
+    for (let value = lo; value <= hi + step / 2; value += step) {
+      ticks.push(Math.round(value * 1e6) / 1e6);
+    }
+    return { lo, hi, ticks };
+  }
+
+  function renderChart(nodes) {
+    els.chartWrap.textContent = "";
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`);
+    svg.setAttribute("width", String(CHART_WIDTH));
+    svg.setAttribute("height", String(CHART_HEIGHT));
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Zero Rate Curve");
+
+    const plotWidth = CHART_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+    const plotHeight = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
+    const yAxis = computeNiceYAxis(nodes.map((node) => node.zero_rate_percent));
+
+    const xFor = (index) =>
+      CHART_MARGIN.left + (nodes.length === 1 ? plotWidth / 2 : (index / (nodes.length - 1)) * plotWidth);
+    const yFor = (value) =>
+      CHART_MARGIN.top + plotHeight - ((value - yAxis.lo) / (yAxis.hi - yAxis.lo)) * plotHeight;
+
+    // Horizontal gridlines + y-axis tick labels.
+    for (const tick of yAxis.ticks) {
+      const y = yFor(tick);
+      const gridline = document.createElementNS(SVG_NS, "line");
+      gridline.setAttribute("x1", String(CHART_MARGIN.left));
+      gridline.setAttribute("x2", String(CHART_WIDTH - CHART_MARGIN.right));
+      gridline.setAttribute("y1", String(y));
+      gridline.setAttribute("y2", String(y));
+      gridline.setAttribute("stroke", "#eef0f4");
+      gridline.setAttribute("stroke-dasharray", "3 3");
+      svg.appendChild(gridline);
+
+      const label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("x", String(CHART_MARGIN.left - 8));
+      label.setAttribute("y", String(y + 4));
+      label.setAttribute("text-anchor", "end");
+      label.setAttribute("font-size", "11");
+      label.setAttribute("fill", "#99a1b0");
+      label.textContent = tick.toFixed(2);
+      svg.appendChild(label);
+    }
+
+    // X-axis tick labels: only the major tenors (Issue #167 §5), never all
+    // 32, even though every node still gets a plotted dot.
+    nodes.forEach((node, index) => {
+      if (!MAJOR_AXIS_TENORS.includes(node.tenor)) return;
+      const label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("x", String(xFor(index)));
+      label.setAttribute("y", String(CHART_HEIGHT - CHART_MARGIN.bottom + 18));
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("font-size", "11");
+      label.setAttribute("fill", "#99a1b0");
+      label.textContent = node.tenor;
+      svg.appendChild(label);
+    });
+
+    // The single Zero Rate Curve line (Issue #167 §5: exactly one line).
+    const points = nodes.map((node, index) => `${xFor(index)},${yFor(node.zero_rate_percent)}`).join(" ");
+    const polyline = document.createElementNS(SVG_NS, "polyline");
+    polyline.setAttribute("points", points);
+    polyline.setAttribute("fill", "none");
+    polyline.setAttribute("stroke", "var(--chart-line)");
+    polyline.setAttribute("stroke-width", "2");
+    svg.appendChild(polyline);
+
+    // Node dots, each focusable/hoverable for the tooltip (Issue #167 §5:
+    // hover/focus must show Tenor / Maturity / Zero Rate / Discount Factor).
+    const tooltip = document.createElement("div");
+    tooltip.className = "markets-chart-tooltip";
+    tooltip.hidden = true;
+
+    nodes.forEach((node, index) => {
+      const cx = xFor(index);
+      const cy = yFor(node.zero_rate_percent);
+
+      const group = document.createElementNS(SVG_NS, "g");
+      group.setAttribute("class", "markets-chart-node");
+      group.setAttribute("tabindex", "0");
+      group.setAttribute(
+        "aria-label",
+        `Tenor ${node.tenor}, maturity ${node.maturity}, zero rate ${formatPercent(node.zero_rate_percent, 4)}, discount factor ${formatNumber(node.discount_factor, 6)}`
+      );
+
+      const hitArea = document.createElementNS(SVG_NS, "circle");
+      hitArea.setAttribute("cx", String(cx));
+      hitArea.setAttribute("cy", String(cy));
+      hitArea.setAttribute("r", "9");
+      hitArea.setAttribute("fill", "transparent");
+      group.appendChild(hitArea);
+
+      const dot = document.createElementNS(SVG_NS, "circle");
+      dot.setAttribute("cx", String(cx));
+      dot.setAttribute("cy", String(cy));
+      dot.setAttribute("r", "3.5");
+      group.appendChild(dot);
+
+      const showTooltip = () => {
+        group.classList.add("is-focused");
+        tooltip.hidden = false;
+        tooltip.innerHTML = "";
+        [
+          ["Tenor:", node.tenor],
+          ["Maturity:", node.maturity],
+          ["Zero Rate:", formatPercent(node.zero_rate_percent, 4)],
+          ["Discount Factor:", formatNumber(node.discount_factor, 6)],
+        ].forEach(([label, value]) => {
+          const row = document.createElement("div");
+          row.className = "tt-row";
+          const k = document.createElement("span");
+          k.className = "tt-k";
+          k.textContent = label;
+          const v = document.createElement("span");
+          v.textContent = value;
+          row.appendChild(k);
+          row.appendChild(v);
+          tooltip.appendChild(row);
+        });
+        const leftPercent = (cx / CHART_WIDTH) * 100;
+        const topPercent = (cy / CHART_HEIGHT) * 100;
+        tooltip.style.left = `${leftPercent}%`;
+        tooltip.style.top = `${topPercent}%`;
+        tooltip.style.transform =
+          leftPercent > 70 ? "translate(-100%, -115%)" : "translate(-10%, -115%)";
+      };
+      const hideTooltip = () => {
+        group.classList.remove("is-focused");
+        tooltip.hidden = true;
+      };
+
+      group.addEventListener("mouseenter", showTooltip);
+      group.addEventListener("mouseleave", hideTooltip);
+      group.addEventListener("focus", showTooltip);
+      group.addEventListener("blur", hideTooltip);
+
+      svg.appendChild(group);
+    });
+
+    els.chartWrap.appendChild(svg);
+    els.chartWrap.appendChild(tooltip);
+  }
+
+  // Test-only, read-only accessors -- change no stored value, API response,
+  // or rendering decision (mirrors the Pricing IIFE's own __shioriTest*
+  // convention above).
+  window.__shioriTestMarketsSwitchToView = (view) => switchToView(view);
+  window.__shioriTestMarketsCurrentCurve = () => lastSuccessfulCurve;
+  window.__shioriTestMarketsLoadCurve = () => loadCurve();
+})();

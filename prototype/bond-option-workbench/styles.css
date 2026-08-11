@@ -144,6 +144,15 @@ html, body {
   overflow-y: auto;
   overflow-x: hidden;
 }
+/* .main's own explicit `display: flex` ties the UA stylesheet's
+   `[hidden] { display: none }` rule in specificity and (as the later, author
+   rule) wins -- same class of bug the .instr-header/.workspace/.id-grid
+   overrides below fix for .main's own children. Issue #167's Markets view
+   toggles #view-pricing/#view-markets themselves (both carry class `.main`),
+   so the top-level container needs the same override. */
+.main[hidden] {
+  display: none;
+}
 
 /* Several .main children set their own explicit `display` below (flex/grid),
    which otherwise ties in specificity with the UA stylesheet's
@@ -334,6 +343,13 @@ html, body {
   height: 56px; background: var(--card); border-top: 1px solid var(--border);
   display: flex; align-items: center; padding: 0 22px; flex: 0 0 auto;
 }
+/* .footer's own explicit `display: flex` ties the UA stylesheet's
+   `[hidden] { display: none }` rule in specificity and (as the later, author
+   rule) wins -- same class of bug the .instr-header/.workspace/.id-grid/
+   .markets-view overrides elsewhere in this file fix. The Markets view
+   (Issue #167) hides the footer while active, since its Price/Clear/Export
+   actions are Pricing-only. */
+.footer[hidden] { display: none; }
 .valid { display: flex; align-items: center; gap: 9px; font-size: 14px; color: #3d4658; }
 .valid .check { color: var(--green); display: flex; }
 .foot-actions { margin-left: auto; display: flex; gap: 12px; }
@@ -725,3 +741,64 @@ select.control:focus { border-color: var(--blue); }
 }
 .provenance-empty { font-size: 12px; color: var(--muted-2); font-style: italic; }
 .provenance-empty[hidden] { display: none; }
+
+/* ---------- Markets view (Issue #167) ---------- */
+/* #view-markets' own visibility is handled by the shared `.main[hidden]`
+   override above (it carries class `.main` too). */
+
+.markets-header-card { padding: 16px 22px; }
+.markets-header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.markets-title-block { display: flex; flex-direction: column; gap: 6px; }
+.markets-title { font-size: 21px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.2px; }
+.markets-meta { font-size: 13px; color: var(--muted); }
+.markets-meta .sep { margin: 0 8px; color: var(--muted-2); }
+.markets-acquired { margin-top: 10px; font-size: 12.5px; color: var(--muted-2); text-align: right; }
+.markets-acquired .v { color: #4b5563; font-weight: 600; }
+
+.markets-status { padding: 14px 22px; font-size: 14px; color: var(--muted); }
+.markets-status-error { border-color: #f3c6c6; background: #fff6f6; }
+.markets-error-title { font-weight: 700; color: #b0362f; margin-bottom: 4px; }
+.markets-error-detail { font-size: 13px; color: #8a3a35; }
+.markets-status-warning { border-color: #f4dfa8; background: #fffaf0; color: #8a641a; font-size: 13px; }
+.markets-stale-detail { display: block; margin-top: 2px; color: #8a3a35; }
+
+.markets-chart-card .card-body { display: flex; flex-direction: column; gap: 14px; }
+.markets-chart-wrap { display: flex; gap: 6px; }
+.markets-chart-ylabel {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  font-size: 12px; color: var(--muted); text-align: center; padding: 4px 0;
+  flex: 0 0 auto;
+}
+.markets-chart-svg-wrap { flex: 1 1 auto; min-width: 0; position: relative; }
+.markets-chart-svg-wrap svg { display: block; width: 100%; height: auto; }
+.markets-chart-node circle { fill: var(--chart-line); }
+.markets-chart-node:hover circle, .markets-chart-node.is-focused circle { r: 5; }
+.markets-chart-tooltip {
+  position: absolute; pointer-events: none; z-index: 5;
+  background: var(--text-strong); color: #fff; font-size: 12px;
+  border-radius: 8px; padding: 8px 10px; box-shadow: var(--shadow);
+  line-height: 1.6; white-space: nowrap;
+}
+.markets-chart-tooltip[hidden] { display: none; }
+.markets-chart-tooltip .tt-row { display: flex; gap: 14px; justify-content: space-between; }
+.markets-chart-tooltip .tt-k { color: #b8c0d4; }
+
+.markets-summary-strip {
+  display: grid; grid-template-columns: repeat(6, 1fr);
+  border-top: 1px solid var(--border); padding-top: 12px;
+}
+.markets-summary-item { display: flex; flex-direction: column; gap: 4px; padding: 0 14px; border-left: 1px solid var(--border); }
+.markets-summary-item:first-child { border-left: none; padding-left: 0; }
+.ms-lbl { font-size: 12px; color: var(--muted); }
+.ms-val { font-size: 16px; font-weight: 700; color: var(--text-strong); }
+
+.markets-table-wrap { overflow-x: auto; }
+.markets-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.markets-table th {
+  text-align: left; font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--muted); text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid var(--border);
+}
+.markets-table th.num, .markets-table td.num { text-align: right; }
+.markets-table td { padding: 7px 10px; border-bottom: 1px solid #f1f2f5; color: var(--text); font-variant-numeric: tabular-nums; }
+.markets-table tbody tr:hover { background: #f9fafc; }
+.markets-table td.unavailable { color: var(--muted-2); }
