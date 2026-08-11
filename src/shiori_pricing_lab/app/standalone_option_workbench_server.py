@@ -174,20 +174,24 @@ dict exactly like this one.
 **Markets curve viewer (Issue #167).** One more stateless, read-only route:
 
 - ``POST /api/bloomberg/option-discount-curve`` -- takes no request body.
-  Calls the existing, unmodified
-  ``load_bloomberg_usd_sofr_option_discount_curve`` (Issue #165/#166)
-  exactly once and returns ``{"curve_id", "curve_name", "source_system",
-  "rate_basis", "acquired_at", "coverage", "nodes"}``, where each node is
-  ``{"tenor", "maturity", "zero_rate_percent", "discount_factor",
-  "par_rate_percent"}``. This route performs no bootstrap, no second curve,
-  and no re-derivation of zero from discount factor or vice versa --
-  ``discount_factor`` on every node comes from the same call's own discount-
-  factor evidence, matched by tenor. ``par_rate_percent`` is always ``None``:
-  no verified Bloomberg DAPI acquisition route for a par/swap rate exists for
-  Curve #490 (only the ``Z``/``D`` synthetic tickers are confirmed), so this
-  route never fabricates, derives, or substitutes the zero rate for a par
-  rate. A Bloomberg-side failure returns HTTP 502 with ``{"error": "..."}``
-  -- there is no sample-data fallback, live or otherwise.
+  Calls two existing, unmodified production loaders, each exactly once:
+  ``load_bloomberg_usd_sofr_option_discount_curve`` (Issue #165/#166, the
+  ``S0490Z``/``S0490D`` Zero Rate / DF contract) and
+  ``load_bloomberg_usd_sofr_par_rate_curve`` (Issue #168, the ``USOSFR*``
+  SWAP Par Rate contract), joined by tenor. Returns ``{"curve_id",
+  "curve_name", "source_system", "rate_basis", "acquired_at", "coverage",
+  "nodes"}``, where each node is ``{"tenor", "maturity",
+  "zero_rate_percent", "discount_factor", "par_rate_percent"}``. This route
+  performs no bootstrap, no second curve, and no re-derivation of any field
+  from another -- ``discount_factor`` comes from the Zero/DF loader's own
+  discount-factor evidence and ``par_rate_percent`` from the par-rate
+  loader's own points, both matched by tenor, never recomputed or converted
+  into each other. A tenor the par-rate loader does not carry is ``None``
+  (unavailable) on that node, never fabricated. A Bloomberg-side failure
+  from either loader returns HTTP 502 with ``{"error": "..."}`` -- there is
+  no sample-data fallback, live or otherwise, and a failure from one loader
+  fails the whole response rather than returning a curve with only the
+  other loader's data.
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -228,6 +232,9 @@ from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
     USD_SOFR_CURVE_NAME,
     USD_SOFR_SOURCE_SYSTEM,
     load_bloomberg_usd_sofr_option_discount_curve,
+)
+from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
+    load_bloomberg_usd_sofr_par_rate_curve,
 )
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
@@ -350,7 +357,14 @@ DEFAULT_PORT = 8765
 # gained a Markets sidebar view (chart, summary strip, node table) alongside
 # the unchanged Pricing view. A stale -v14 process would 404 the new route
 # and the Markets nav item would have nothing to switch to.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v15"
+#
+# Bumped to -v16 once Issue #168's USOSFR* par-rate loader landed on main:
+# POST /api/bloomberg/option-discount-curve now joins that loader's own
+# points onto the Zero/DF nodes by tenor, so every node's par_rate_percent
+# is a real Bloomberg value instead of always None. A stale -v15 process
+# would still answer the route but every SWAP (Par Rate) cell would read
+# unavailable even though the loader now exists.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v16"
 
 
 def load_base_case() -> dict:
@@ -565,28 +579,37 @@ def lookup_bloomberg_bond(bond_identifier: str, quote_side: str) -> dict:
 def fetch_usd_sofr_option_discount_curve() -> dict:
     """Load the live production USD SOFR Option Discount Curve for the Markets view.
 
-    Calls the existing, unmodified
-    ``load_bloomberg_usd_sofr_option_discount_curve`` (Issue #165/#166)
-    exactly once -- no bootstrap, no re-derivation of zero from discount
-    factor or vice versa, no second curve, no sample-data fallback. Every
-    node's ``discount_factor`` comes from that same call's own
-    ``discount_factor_evidence`` (matched by tenor), never recomputed.
+    Calls two existing, unmodified production loaders, each exactly once:
 
-    ``par_rate_percent`` is always ``None`` (Issue #167 RED-gate finding: no
-    verified Bloomberg DAPI acquisition route for a par/swap rate exists for
-    Curve #490 -- only the ``Z`` zero-rate and ``D`` discount-factor
-    synthetic tickers are confirmed). This function never fabricates,
-    derives, or substitutes the zero rate for a par rate; the Markets view
-    renders this field as unavailable.
+    - ``load_bloomberg_usd_sofr_option_discount_curve`` (Issue #165/#166) --
+      the authoritative ``S0490Z``/``S0490D`` Zero Rate / DF contract. Every
+      node's ``maturity``/``zero_rate_percent`` come from its own
+      ``curve_points``, and ``discount_factor`` from its own
+      ``discount_factor_evidence`` -- matched by tenor, never recomputed.
+    - ``load_bloomberg_usd_sofr_par_rate_curve`` (Issue #168) -- the
+      ``USOSFR*`` SWAP (Par Rate) contract, joined onto the same nodes by
+      tenor. This is the same canonical 32-tenor Curve #490 universe both
+      loaders share (enforced at import time by the par-rate module itself),
+      so every node ordinarily gets a match; a tenor the par-rate loader
+      does not carry is left ``None`` (unavailable) rather than fabricated,
+      derived from the zero rate, or bootstrapped.
 
-    Raises ``BLIBloombergDapiError`` for any Bloomberg-side failure -- never
-    caught or remapped here, and the clock is never read before the loader
-    has actually succeeded.
+    No bootstrap, no re-derivation of zero from discount factor or vice
+    versa, no second Zero Rate curve, no par-to-zero/zero-to-par conversion,
+    no sample-data fallback. A Bloomberg-side failure from either loader
+    raises ``BLIBloombergDapiError`` -- never caught or remapped here, and
+    the whole call fails rather than returning a curve with only one of the
+    two loaders' data. The clock is never read before both loaders have
+    actually succeeded.
     """
 
     result = load_bloomberg_usd_sofr_option_discount_curve()
+    par_rate_result = load_bloomberg_usd_sofr_par_rate_curve()
     discount_factor_by_tenor = {
         evidence.tenor: evidence.discount_factor for evidence in result.discount_factor_evidence
+    }
+    par_rate_percent_by_tenor = {
+        point.tenor: point.par_rate_percent for point in par_rate_result.points
     }
     nodes = [
         {
@@ -594,7 +617,7 @@ def fetch_usd_sofr_option_discount_curve() -> dict:
             "maturity": point.maturity_date,
             "zero_rate_percent": point.rate * 100.0,
             "discount_factor": discount_factor_by_tenor[point.tenor],
-            "par_rate_percent": None,
+            "par_rate_percent": par_rate_percent_by_tenor.get(point.tenor),
         }
         for point in result.curve_points
     ]
