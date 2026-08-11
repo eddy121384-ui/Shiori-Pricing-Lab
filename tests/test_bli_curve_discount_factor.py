@@ -202,6 +202,88 @@ def test_invalid_target_year_fraction_raises_value_error(target):
         )
 
 
+# --- 10b. Explicit maturity_date pass-through (Issue #165 P1 follow-up) -------
+
+
+def _explicit_date_points():
+    return (
+        BLICurvePoint(
+            curve_id="TEST_BLOOMBERG_CURVE",
+            curve_name="Test Bloomberg Curve",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor="1Y",
+            rate=0.02,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="test",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date="2027-08-01",
+        ),
+        BLICurvePoint(
+            curve_id="TEST_BLOOMBERG_CURVE",
+            curve_name="Test Bloomberg Curve",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor="2Y",
+            rate=0.03,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="test",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date="2028-08-01",
+        ),
+    )
+
+
+def test_explicit_date_curve_computes_discount_factor_from_the_actual_dates():
+    # ACT/365F from 2026-08-01: node 1 at 365/365=1.0, node 2 at 731/365 --
+    # target exactly at node 2's own date-derived year_fraction.
+    target_year_fraction = 731 / 365.0
+    result = discount_factor_from_continuous_zero_curve(
+        _explicit_date_points(),
+        currency=Currency.USD,
+        curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+        target_year_fraction=target_year_fraction,
+        as_of_date="2026-08-01",
+    )
+    assert result == pytest.approx(exp(-0.03 * target_year_fraction))
+
+
+def test_explicit_date_curve_without_as_of_date_fails_closed():
+    with pytest.raises(ValueError, match="no as_of_date was supplied"):
+        discount_factor_from_continuous_zero_curve(
+            _explicit_date_points(),
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            target_year_fraction=1.0,
+        )
+
+
+def test_legacy_tenor_only_curve_out_of_coverage_behavior_is_unchanged():
+    # Same out-of-range case as test #5 above, now also asserting an
+    # unrelated as_of_date=None default doesn't change the outcome --
+    # a purely tenor-only curve's out-of-coverage rejection is identical
+    # before and after this slice.
+    with pytest.raises(ValueError, match="extrapolation"):
+        discount_factor_from_continuous_zero_curve(
+            _CURVE_POINTS,
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            target_year_fraction=10.0,
+            as_of_date=None,
+        )
+
+
+def test_explicit_date_curve_out_of_coverage_target_still_rejected():
+    with pytest.raises(ValueError, match="extrapolation"):
+        discount_factor_from_continuous_zero_curve(
+            _explicit_date_points(),
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            target_year_fraction=10.0,
+            as_of_date="2026-08-01",
+        )
+
+
 # --- 11. Boundary / module tests ----------------------------------------------
 
 
