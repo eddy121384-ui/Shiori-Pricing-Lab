@@ -322,18 +322,23 @@ class BLICurvePoint:
     rather than being silently coerced to a default.
 
     ``maturity_date`` (Issue #165 production phase) is an optional,
-    explicit ``YYYY-MM-DD`` calendar date -- the *authoritative* node
-    date for a row whose source system reports one (e.g. Bloomberg's own
+    explicit ``YYYY-MM-DD`` calendar date. When supplied, it is the
+    *authoritative* source node date for this row (e.g. Bloomberg's own
     returned ``MATURITY`` for a synthetic curve ticker), preserved
-    verbatim rather than reconstructed from ``tenor``. It defaults to
-    ``None`` so every existing curve row/fixture that has no such date
-    (most of them -- ``tenor`` is a nominal label, not a date, for the
-    majority of this schema's rows today) stays valid unchanged. When
-    given, it is validated as a real calendar date but is not yet read by
-    any interpolation/discount-factor helper -- those still key off
-    ``tenor`` (``pricing/bli_curve_tenor.py::tenor_to_year_fraction``);
-    wiring a real date into that path is a separate, not-yet-authorized
-    slice.
+    verbatim rather than reconstructed from ``tenor``, and it is what
+    ``pricing/bli_zero_curve_nodes.py::build_continuous_zero_curve_nodes``
+    actually prices from: that helper derives the row's time coordinate
+    from this explicit date (via ``year_fraction_to_expiry``) rather than
+    from ``tenor``, and doing so requires the caller to also supply that
+    same helper's own ``as_of_date`` -- the curve's authoritative
+    valuation/as-of date -- explicitly; it is never silently derived,
+    defaulted, or reconstructed. It defaults to ``None`` so every existing
+    curve row/fixture that has no such date (most of them -- ``tenor`` is
+    a nominal label, not a date, for the majority of this schema's rows
+    today) stays valid unchanged; for those rows, ``tenor`` parsing via
+    ``pricing/bli_curve_tenor.py::tenor_to_year_fraction`` remains the
+    legacy fallback coordinate, exactly as before ``maturity_date``
+    existed.
     """
 
     curve_id: str

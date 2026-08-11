@@ -393,6 +393,117 @@ def test_shared_pricing_tenor_parser_still_rejects_1w():
         tenor_to_year_fraction("1W")
 
 
+# --- Codex P2 fix: exact-enumeration canonical acquisition ordering -----------------
+#
+# Codex correctly identified that the earlier W=7/M=30/Y=365 nominal-day
+# ordering could collide across units (e.g. "60W" and "14M" both resolved to
+# 420), which could make the non-increasing-maturity fail-closed check's
+# outcome depend on Python's stable-sort tie-breaking -- and therefore on
+# caller input order. The fix replaces that generic arithmetic with an exact
+# label -> canonical-index mapping built from DEFAULT_USD_SOFR_TENORS's own
+# position, which cannot collide (32 distinct labels, 32 distinct indices)
+# and is fully independent of caller order. These tests pin that fix.
+
+
+@pytest.mark.parametrize("unverified_tenor", ["60W", "14M", "11Y"])
+def test_an_unverified_but_syntactically_valid_tenor_fails_pre_dapi(unverified_tenor):
+    # "60W"/"14M"/"11Y" are shaped exactly like a valid Bloomberg tenor label
+    # but are not part of the 32-label workstation-verified Curve #490
+    # universe -- this loader must never generate or probe an unverified
+    # Bloomberg synthetic security for them, and must reject them with the
+    # same pre-DAPI ValueError a malformed label gets.
+    with pytest.raises(ValueError, match="unsupported tenor label"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=(unverified_tenor,))
+
+
+_PERMUTATION_TENOR_SPECS = (
+    ("1W", "1.50", "0.9997", "2026-08-08"),
+    ("6M", "1.60", "0.9920", "2027-02-01"),
+    ("18M", "1.90", "0.9720", "2028-02-01"),
+    ("2Y", "3.25", "0.9400", "2028-08-01"),
+    ("10Y", "4.00", "0.6800", "2036-08-01"),
+)
+# The canonical acquisition order for this subset, per DEFAULT_USD_SOFR_TENORS's
+# own index (1W=0, 6M=8, 18M=15, 2Y=16, 10Y=24) -- deliberately not the order
+# the specs tuple above happens to be written in.
+_PERMUTATION_CANONICAL_ORDER = ("1W", "6M", "18M", "2Y", "10Y")
+
+
+def _permutation_subset_records() -> list:
+    records = []
+    for tenor, zero_pct, df, maturity in _PERMUTATION_TENOR_SPECS:
+        records.append(
+            _security_record(
+                security=build_zero_rate_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor),
+                last_price=zero_pct,
+                maturity=maturity,
+            )
+        )
+        records.append(
+            _security_record(
+                security=build_discount_factor_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor),
+                last_price=df,
+                maturity=maturity,
+            )
+        )
+    return records
+
+
+@pytest.mark.parametrize(
+    "caller_order",
+    [
+        ("2Y", "1W", "6M", "18M", "10Y"),
+        ("10Y", "18M", "2Y", "6M", "1W"),
+        ("6M", "10Y", "1W", "2Y", "18M"),
+        ("1W", "6M", "18M", "2Y", "10Y"),  # already in canonical order
+    ],
+)
+def test_arbitrary_permutations_of_a_verified_subset_produce_identical_canonical_ordering(
+    monkeypatch, caller_order
+):
+    _install_fake_blpapi(monkeypatch, events=[_response_event(_permutation_subset_records())])
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=caller_order)
+
+    assert [p.tenor for p in result.curve_points] == list(_PERMUTATION_CANONICAL_ORDER)
+    assert [e.tenor for e in result.discount_factor_evidence] == list(_PERMUTATION_CANONICAL_ORDER)
+
+
+def test_caller_order_cannot_change_pass_fail_behavior_on_a_maturity_violation(monkeypatch):
+    # "3W" (canonical index 2) must resolve before "1M" (canonical index 3).
+    # Here Bloomberg's own returned MATURITY puts "3W" *after* "1M" -- a
+    # violation of the canonical increasing-maturity contract that must
+    # fail closed identically regardless of which order the caller happened
+    # to list the two tenors in.
+    records = [
+        _security_record(
+            security=build_zero_rate_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, "3W"),
+            last_price="1.55",
+            maturity="2026-09-01",
+        ),
+        _security_record(
+            security=build_discount_factor_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, "3W"),
+            last_price="0.9993",
+            maturity="2026-09-01",
+        ),
+        _security_record(
+            security=build_zero_rate_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, "1M"),
+            last_price="1.60",
+            maturity="2026-08-15",
+        ),
+        _security_record(
+            security=build_discount_factor_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, "1M"),
+            last_price="0.9990",
+            maturity="2026-08-15",
+        ),
+    ]
+
+    for caller_order in [("3W", "1M"), ("1M", "3W")]:
+        _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+        with pytest.raises(BLIBloombergDapiError, match="did not increase"):
+            load_bloomberg_usd_sofr_option_discount_curve(tenors=caller_order)
+
+
 # --- ticker construction ------------------------------------------------------------
 
 
@@ -757,7 +868,7 @@ def test_discount_factor_evidence_is_never_written_into_a_curve_point(monkeypatc
     assert len(result.discount_factor_evidence) == len(result.curve_points)
 
 
-def test_result_is_sorted_by_ascending_year_fraction_regardless_of_input_order(monkeypatch):
+def test_result_is_sorted_by_canonical_acquisition_order_regardless_of_input_order(monkeypatch):
     _install_fake_blpapi(monkeypatch, events=_both_tenors_success())
 
     result = load_bloomberg_usd_sofr_option_discount_curve(tenors=("2Y", "1Y"))
@@ -1099,17 +1210,17 @@ def test_non_finite_discount_factor_fails_closed(monkeypatch):
 # tenor tuple (all 32 tenors, "1W"/"2W"/"3W" included) rather than a smaller
 # synthetic subset. Rates/DFs are still synthetic fixture values (never
 # claimed as real Bloomberg observations); maturities are generated
-# deterministically from each tenor's own nominal calendar-day order key
-# (module._validate_bloomberg_tenor_label -- tenor_to_year_fraction cannot
-# be used here since it still rejects "1W"/"2W"/"3W" by design) so they are
-# always self-consistent (strictly increasing in the same order as
+# deterministically from each tenor's own fixed canonical acquisition-order
+# index (module._validate_bloomberg_tenor_label -- tenor_to_year_fraction
+# cannot be used here since it still rejects "1W"/"2W"/"3W" by design) so
+# they are always self-consistent (strictly increasing in the same order as
 # DEFAULT_USD_SOFR_TENORS itself).
 
 
 def _default_tenor_maturity(tenor: str) -> str:
     epoch = date(2026, 8, 1)
-    days = module._validate_bloomberg_tenor_label(tenor)
-    return (epoch + timedelta(days=days)).isoformat()
+    index = module._validate_bloomberg_tenor_label(tenor)
+    return (epoch + timedelta(days=30 * index)).isoformat()
 
 
 def _default_tenor_records() -> list:
@@ -1135,7 +1246,7 @@ def _default_tenor_records() -> list:
     return records
 
 
-def test_default_tenor_set_generates_all_58_expected_z_and_d_tickers(monkeypatch):
+def test_default_tenor_set_generates_all_64_expected_z_and_d_tickers(monkeypatch):
     holder = _install_fake_blpapi(monkeypatch, events=[_response_event(_default_tenor_records())])
 
     load_bloomberg_usd_sofr_option_discount_curve(tenors=DEFAULT_USD_SOFR_TENORS)
