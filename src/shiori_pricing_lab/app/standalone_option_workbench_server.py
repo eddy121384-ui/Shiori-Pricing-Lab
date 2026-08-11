@@ -171,6 +171,28 @@ dict exactly like this one.
   claimed. ``supported_convention_profiles`` is the registry's own list, so
   the browser's selector cannot drift from the server's.
 
+**Markets curve viewer (Issue #167).** One more stateless, read-only route:
+
+- ``POST /api/bloomberg/option-discount-curve`` -- takes no request body.
+  Calls two existing, unmodified production loaders, each exactly once:
+  ``load_bloomberg_usd_sofr_option_discount_curve`` (Issue #165/#166, the
+  ``S0490Z``/``S0490D`` Zero Rate / DF contract) and
+  ``load_bloomberg_usd_sofr_par_rate_curve`` (Issue #168, the ``USOSFR*``
+  SWAP Par Rate contract), joined by tenor. Returns ``{"curve_id",
+  "curve_name", "source_system", "rate_basis", "acquired_at", "coverage",
+  "nodes"}``, where each node is ``{"tenor", "maturity",
+  "zero_rate_percent", "discount_factor", "par_rate_percent"}``. This route
+  performs no bootstrap, no second curve, and no re-derivation of any field
+  from another -- ``discount_factor`` comes from the Zero/DF loader's own
+  discount-factor evidence and ``par_rate_percent`` from the par-rate
+  loader's own points, both matched by tenor, never recomputed or converted
+  into each other. A tenor the par-rate loader does not carry is ``None``
+  (unavailable) on that node, never fabricated. A Bloomberg-side failure
+  from either loader returns HTTP 502 with ``{"error": "..."}`` -- there is
+  no sample-data fallback, live or otherwise, and a failure from one loader
+  fails the whole response rather than returning a curve with only the
+  other loader's data.
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -201,8 +223,18 @@ from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     extract_standalone_option_case_overlay,
 )
 from shiori_pricing_lab.data.bloomberg_bond_quote import (
+    BLIBloombergDapiError,
     load_bloomberg_bond_identity_and_quote,
     parse_bond_identifier,
+)
+from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+    USD_SOFR_CURVE_ID,
+    USD_SOFR_CURVE_NAME,
+    USD_SOFR_SOURCE_SYSTEM,
+    load_bloomberg_usd_sofr_option_discount_curve,
+)
+from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
+    load_bloomberg_usd_sofr_par_rate_curve,
 )
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
@@ -319,7 +351,20 @@ DEFAULT_PORT = 8765
 # exists to pick with. US_CORPORATE and GERMAN_GOVT are registered alongside
 # UST, so a -v13 page would offer only UST, and a -v13 server would answer a
 # current page's candidates request with a 404.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v14"
+#
+# Bumped to -v15 for Issue #167's read-only Markets curve viewer: POST
+# /api/bloomberg/option-discount-curve is a new route, and the served page
+# gained a Markets sidebar view (chart, summary strip, node table) alongside
+# the unchanged Pricing view. A stale -v14 process would 404 the new route
+# and the Markets nav item would have nothing to switch to.
+#
+# Bumped to -v16 once Issue #168's USOSFR* par-rate loader landed on main:
+# POST /api/bloomberg/option-discount-curve now joins that loader's own
+# points onto the Zero/DF nodes by tenor, so every node's par_rate_percent
+# is a real Bloomberg value instead of always None. A stale -v15 process
+# would still answer the route but every SWAP (Par Rate) cell would read
+# unavailable even though the loader now exists.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v16"
 
 
 def load_base_case() -> dict:
@@ -529,6 +574,69 @@ def lookup_bloomberg_bond(bond_identifier: str, quote_side: str) -> dict:
     )
     acquired_at = _shiori_acquisition_now().isoformat(timespec="seconds")
     return {**result, "acquired_at": acquired_at, "source_system": _BLOOMBERG_SOURCE_SYSTEM}
+
+
+def fetch_usd_sofr_option_discount_curve() -> dict:
+    """Load the live production USD SOFR Option Discount Curve for the Markets view.
+
+    Calls two existing, unmodified production loaders, each exactly once:
+
+    - ``load_bloomberg_usd_sofr_option_discount_curve`` (Issue #165/#166) --
+      the authoritative ``S0490Z``/``S0490D`` Zero Rate / DF contract. Every
+      node's ``maturity``/``zero_rate_percent`` come from its own
+      ``curve_points``, and ``discount_factor`` from its own
+      ``discount_factor_evidence`` -- matched by tenor, never recomputed.
+    - ``load_bloomberg_usd_sofr_par_rate_curve`` (Issue #168) -- the
+      ``USOSFR*`` SWAP (Par Rate) contract, joined onto the same nodes by
+      tenor. This is the same canonical 32-tenor Curve #490 universe both
+      loaders share (enforced at import time by the par-rate module itself),
+      so every node ordinarily gets a match; a tenor the par-rate loader
+      does not carry is left ``None`` (unavailable) rather than fabricated,
+      derived from the zero rate, or bootstrapped.
+
+    No bootstrap, no re-derivation of zero from discount factor or vice
+    versa, no second Zero Rate curve, no par-to-zero/zero-to-par conversion,
+    no sample-data fallback. A Bloomberg-side failure from either loader
+    raises ``BLIBloombergDapiError`` -- never caught or remapped here, and
+    the whole call fails rather than returning a curve with only one of the
+    two loaders' data. The clock is never read before both loaders have
+    actually succeeded.
+    """
+
+    result = load_bloomberg_usd_sofr_option_discount_curve()
+    par_rate_result = load_bloomberg_usd_sofr_par_rate_curve()
+    discount_factor_by_tenor = {
+        evidence.tenor: evidence.discount_factor for evidence in result.discount_factor_evidence
+    }
+    par_rate_percent_by_tenor = {
+        point.tenor: point.par_rate_percent for point in par_rate_result.points
+    }
+    nodes = [
+        {
+            "tenor": point.tenor,
+            "maturity": point.maturity_date,
+            "zero_rate_percent": point.rate * 100.0,
+            "discount_factor": discount_factor_by_tenor[point.tenor],
+            "par_rate_percent": par_rate_percent_by_tenor.get(point.tenor),
+        }
+        for point in result.curve_points
+    ]
+    acquired_at = _shiori_acquisition_now().isoformat(timespec="seconds")
+    coverage = {
+        "first_tenor": nodes[0]["tenor"] if nodes else None,
+        "last_tenor": nodes[-1]["tenor"] if nodes else None,
+        "first_maturity": nodes[0]["maturity"] if nodes else None,
+        "last_maturity": nodes[-1]["maturity"] if nodes else None,
+    }
+    return {
+        "curve_id": USD_SOFR_CURVE_ID,
+        "curve_name": USD_SOFR_CURVE_NAME,
+        "source_system": USD_SOFR_SOURCE_SYSTEM,
+        "rate_basis": result.curve_points[0].rate_basis.value if result.curve_points else None,
+        "acquired_at": acquired_at,
+        "coverage": coverage,
+        "nodes": nodes,
+    }
 
 
 _ADVANCED_PROFILE_REQUIRED_KEYS = (
@@ -851,6 +959,20 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         # "no profile covers this bond" is a normal answer, not an error.
         self._write_json(200, payload)
 
+    def _handle_api_bloomberg_option_discount_curve(self, raw_body: bytes) -> None:
+        # No request body is read: the Markets view always asks for the one
+        # full production curve, never a caller-chosen tenor subset -- this
+        # route takes no input at all.
+        try:
+            payload = fetch_usd_sofr_option_discount_curve()
+        except BLIBloombergDapiError as exc:
+            self._write_json(502, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(500, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
         try:
             body = json.loads(raw_body)
@@ -882,6 +1004,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
         "/api/bond/advanced-profile": _handle_api_bond_advanced_profile,
         "/api/bond/convention-profile/candidates": _handle_api_bond_profile_candidates,
+        "/api/bloomberg/option-discount-curve": _handle_api_bloomberg_option_discount_curve,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

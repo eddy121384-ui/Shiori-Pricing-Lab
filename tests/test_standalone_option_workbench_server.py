@@ -885,6 +885,239 @@ def test_api_bloomberg_bond_never_calls_pricing(server_url: str, monkeypatch) ->
     assert status == 200
 
 
+# --- Issue #167: /api/bloomberg/option-discount-curve (Markets view) ------------
+
+
+_CURVE_TENORS_AND_MATURITIES = [
+    ("1Y", "2027-08-11"),
+    ("2Y", "2028-08-11"),
+    ("5Y", "2031-08-11"),
+]
+_CURVE_ZERO_RATES = {"1Y": 0.038172, "2Y": 0.039156, "5Y": 0.040781}
+_CURVE_DFS = {"1Y": 0.972346, "2Y": 0.947680, "5Y": 0.814250}
+# Deliberately different from the zero rates above (par vs. zero rate must
+# never be confused -- Issue #167 boundary): a test asserting the wrong
+# value here would mean the route mixed the two loaders up.
+_CURVE_PAR_RATES = {"1Y": 3.75, "2Y": 3.80, "5Y": 3.95}
+
+
+def _fake_curve_result():
+    from shiori_pricing_lab.data.bli_snapshot import (
+        BLICurvePoint,
+        BLICurvePurpose,
+        BLICurveRateBasis,
+        BLIMarketDataStatus,
+    )
+    from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+        BloombergDiscountFactorEvidence,
+        BloombergUsdSofrOptionDiscountCurveResult,
+    )
+    from shiori_pricing_lab.products.enums import Currency
+
+    curve_points = tuple(
+        BLICurvePoint(
+            curve_id="USD_SOFR_OPTION_DISCOUNT_CURVE",
+            curve_name="USD SOFR Option Discount Curve (Bloomberg Curve #490)",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor=tenor,
+            rate=_CURVE_ZERO_RATES[tenor],
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date=maturity,
+        )
+        for tenor, maturity in _CURVE_TENORS_AND_MATURITIES
+    )
+    evidence = tuple(
+        BloombergDiscountFactorEvidence(
+            tenor=tenor,
+            security=f"S0490D {tenor} BLC2 Curncy",
+            raw_last_price=str(_CURVE_DFS[tenor]),
+            discount_factor=_CURVE_DFS[tenor],
+            maturity=maturity,
+        )
+        for tenor, maturity in _CURVE_TENORS_AND_MATURITIES
+    )
+    return BloombergUsdSofrOptionDiscountCurveResult(
+        curve_points=curve_points, discount_factor_evidence=evidence
+    )
+
+
+def _fake_par_rate_result(tenors=("1Y", "2Y", "5Y")):
+    from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
+        BloombergUsdSofrParRateCurveResult,
+        BloombergUsdSofrParRatePoint,
+    )
+
+    points = tuple(
+        BloombergUsdSofrParRatePoint(
+            tenor=tenor,
+            security=f"USOSFR{tenor} Curncy",
+            raw_last_price=str(_CURVE_PAR_RATES[tenor]),
+            par_rate_percent=_CURVE_PAR_RATES[tenor],
+            source_system="BLOOMBERG_DAPI",
+        )
+        for tenor in tenors
+    )
+    return BloombergUsdSofrParRateCurveResult(points=points)
+
+
+def _patch_curve_loaders(monkeypatch, *, par_tenors=("1Y", "2Y", "5Y")) -> None:
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fake_curve_result
+    )
+    monkeypatch.setattr(
+        server_module,
+        "load_bloomberg_usd_sofr_par_rate_curve",
+        lambda: _fake_par_rate_result(par_tenors),
+    )
+
+
+def test_api_option_discount_curve_returns_nodes_from_the_production_loaders(
+    server_url: str, monkeypatch
+) -> None:
+    _patch_curve_loaders(monkeypatch)
+    monkeypatch.setattr(
+        server_module,
+        "_shiori_acquisition_now",
+        lambda: datetime(2026, 8, 11, 12, 34, 45, tzinfo=UTC),
+    )
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 200
+    assert payload["curve_id"] == "USD_SOFR_OPTION_DISCOUNT_CURVE"
+    assert payload["source_system"] == "BLOOMBERG_DAPI"
+    assert payload["rate_basis"] == "CONTINUOUS_ZERO_RATE"
+    assert payload["acquired_at"] == "2026-08-11T12:34:45+00:00"
+    assert payload["coverage"] == {
+        "first_tenor": "1Y",
+        "last_tenor": "5Y",
+        "first_maturity": "2027-08-11",
+        "last_maturity": "2031-08-11",
+    }
+    assert payload["nodes"] == [
+        {
+            "tenor": "1Y",
+            "maturity": "2027-08-11",
+            "zero_rate_percent": pytest.approx(3.8172),
+            "discount_factor": pytest.approx(0.972346),
+            "par_rate_percent": pytest.approx(3.75),
+        },
+        {
+            "tenor": "2Y",
+            "maturity": "2028-08-11",
+            "zero_rate_percent": pytest.approx(3.9156),
+            "discount_factor": pytest.approx(0.947680),
+            "par_rate_percent": pytest.approx(3.80),
+        },
+        {
+            "tenor": "5Y",
+            "maturity": "2031-08-11",
+            "zero_rate_percent": pytest.approx(4.0781),
+            "discount_factor": pytest.approx(0.814250),
+            "par_rate_percent": pytest.approx(3.95),
+        },
+    ]
+
+
+def test_api_option_discount_curve_leaves_a_node_unavailable_when_par_rate_is_missing(
+    server_url: str, monkeypatch
+) -> None:
+    # Only 1Y/5Y par rate points are supplied -- 2Y's zero/DF node must still
+    # be returned, but its par_rate_percent must be None, never fabricated,
+    # never derived from the zero rate, and never causing the whole
+    # response to fail.
+    _patch_curve_loaders(monkeypatch, par_tenors=("1Y", "5Y"))
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 200
+    par_rates_by_tenor = {node["tenor"]: node["par_rate_percent"] for node in payload["nodes"]}
+    assert par_rates_by_tenor == {
+        "1Y": pytest.approx(3.75),
+        "2Y": None,
+        "5Y": pytest.approx(3.95),
+    }
+
+
+def test_api_option_discount_curve_returns_502_on_zero_curve_loader_failure(
+    server_url: str, monkeypatch
+) -> None:
+    def _fail():
+        raise BLIBloombergDapiError("Bloomberg DAPI session failed to start")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fail)
+    monkeypatch.setattr(
+        server_module,
+        "load_bloomberg_usd_sofr_par_rate_curve",
+        lambda: (_ for _ in ()).throw(AssertionError("par-rate loader must not run")),
+    )
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 502
+    assert "Bloomberg DAPI session failed to start" in payload["error"]
+
+
+def test_api_option_discount_curve_returns_502_on_par_rate_loader_failure(
+    server_url: str, monkeypatch
+) -> None:
+    # A par-rate-only failure must still fail the whole response -- never a
+    # curve with only the Zero/DF loader's data and a silently blank SWAP
+    # column.
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fake_curve_result
+    )
+
+    def _fail():
+        raise BLIBloombergDapiError("Bloomberg DAPI par rate request failed")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_par_rate_curve", _fail)
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 502
+    assert "Bloomberg DAPI par rate request failed" in payload["error"]
+    assert "nodes" not in payload
+
+
+def test_api_option_discount_curve_never_falls_back_to_sample_data(
+    server_url: str, monkeypatch
+) -> None:
+    calls = []
+
+    def _fail():
+        calls.append(1)
+        raise BLIBloombergDapiError("boom")
+
+    def _must_not_price(*args, **kwargs):
+        raise AssertionError("the curve route must never touch pricing")
+
+    monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fail)
+    monkeypatch.setattr(server_module, "price_standalone_option_case", _must_not_price)
+
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+
+    assert status == 502
+    assert "nodes" not in payload
+    assert calls == [1]
+
+
+def test_api_option_discount_curve_reuses_the_production_loaders_unmodified(
+    server_url: str,
+) -> None:
+    # No monkeypatching of either loader here -- proves the route imports
+    # and calls the exact same function names Issue #165/#166 and #168
+    # already shipped, not private copies. blpapi is not installed in CI, so
+    # this fails closed with BLIBloombergDapiError rather than succeeding or
+    # hanging.
+    status, payload = _post_json(f"{server_url}/api/bloomberg/option-discount-curve", {})
+    assert status == 502
+    assert "blpapi" in payload["error"]
+
+
 # --- Issue #138: /api/export/json and /api/export/markdown ----------------------
 
 
