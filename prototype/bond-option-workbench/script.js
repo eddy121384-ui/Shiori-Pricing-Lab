@@ -4086,17 +4086,41 @@
   // shell chrome), so hiding #view-pricing alone leaves them showing a
   // previously-loaded bond's provenance/quote-side/as-of timestamp next to
   // the curve -- unrelated evidence presented as if it were curve context
-  // (Codex review, PR #170). Each element's own `hidden` state is saved
-  // before being force-hidden and restored on return to Pricing, rather than
-  // guessed or re-derived here -- this file has no visibility into why the
-  // Pricing IIFE set a given state, only that it should come back unchanged.
+  // (Codex review, PR #170).
+  //
+  // A save-the-`hidden`-flag-and-restore-it approach (this file's first
+  // attempt) does not work: `priceCurrentDraft`/`refreshBloombergAndPrice`'s
+  // async completion can call the Pricing IIFE's own `renderContext` at any
+  // time, including while Markets is still showing, which unhides these
+  // elements out from under a one-time snapshot (Codex re-review, PR #170)
+  // -- and a snapshot taken on a redundant second click on an
+  // already-active Markets nav item would itself capture the forced-hidden
+  // value, corrupting what gets restored later. Instead, an inline
+  // `display: none !important` is applied while Markets is active and
+  // removed on return -- a pure presentational override that never reads or
+  // writes `el.hidden` at all. Pricing's own rendering (`renderContext`/
+  // `clearContext`) keeps managing `hidden` exactly as it always has,
+  // completely unaware Markets exists; whatever it last decided is exactly
+  // what reappears the instant the override is removed, current at that
+  // moment rather than a stale pre-navigation snapshot. This is also
+  // naturally idempotent -- applying or removing the same inline style
+  // twice in a row (redundant nav clicks) changes nothing.
   const pricingContextEls = [
     document.getElementById("provenance-pill"),
     document.getElementById("quote-side-badge"),
     document.getElementById("sidebar-live-row"),
     document.getElementById("sidebar-asof-row"),
   ].filter(Boolean);
-  let savedPricingContextHidden = null;
+
+  function setPricingContextSuppressed(suppressed) {
+    pricingContextEls.forEach((el) => {
+      if (suppressed) {
+        el.style.setProperty("display", "none", "important");
+      } else {
+        el.style.removeProperty("display");
+      }
+    });
+  }
 
   function switchToView(view) {
     const showMarkets = view === "markets";
@@ -4105,18 +4129,7 @@
     if (els.footer) els.footer.hidden = showMarkets;
     navMarkets.classList.toggle("active", showMarkets);
     navPricing.classList.toggle("active", !showMarkets);
-
-    if (showMarkets) {
-      savedPricingContextHidden = pricingContextEls.map((el) => el.hidden);
-      pricingContextEls.forEach((el) => {
-        el.hidden = true;
-      });
-    } else if (savedPricingContextHidden) {
-      pricingContextEls.forEach((el, index) => {
-        el.hidden = savedPricingContextHidden[index];
-      });
-      savedPricingContextHidden = null;
-    }
+    setPricingContextSuppressed(showMarkets);
 
     if (showMarkets && !lastSuccessfulCurve && !isLoadingCurve) {
       loadCurve();

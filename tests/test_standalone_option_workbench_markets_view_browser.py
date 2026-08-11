@@ -248,6 +248,74 @@ def test_markets_hides_pricing_bond_provenance_and_restores_it_on_return(server_
         assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") != "none"
 
 
+def test_markets_context_suppression_survives_an_async_pricing_render_mid_visit(
+    server_url, page
+) -> None:
+    # Codex re-review (PR #170): renderContext runs asynchronously (a Price/
+    # Refresh completion) and can set `hidden = false` on these elements at
+    # any time, including while Markets is still showing -- a one-time
+    # snapshot-and-restore taken only at the moment of navigation cannot see
+    # that later mutation and the leak reappears. The fix must suppress them
+    # visually regardless of what `hidden` is subsequently set to, for as
+    # long as Markets stays active.
+    _route_curve(page, _FAKE_CURVE)
+    page.goto(f"{server_url}/")
+    page.click("#nav-markets")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-markets"))
+
+    # Simulate renderContext firing mid-visit (e.g. an in-flight Price/
+    # Refresh request that was already sent before the trader navigated away
+    # settling while Markets is still on screen).
+    page.evaluate(
+        """() => {
+            document.getElementById('provenance-pill').hidden = false;
+            document.getElementById('quote-side-badge').hidden = false;
+            document.getElementById('sidebar-live-row').hidden = false;
+            document.getElementById('sidebar-asof-row').hidden = false;
+        }"""
+    )
+
+    for selector in _PRICING_CONTEXT_SELECTORS:
+        assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") == "none"
+
+    # And the fresh value (not a stale pre-navigation snapshot) is what
+    # reappears on return to Pricing.
+    page.click("#nav-pricing")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-pricing"))
+    for selector in _PRICING_CONTEXT_SELECTORS:
+        assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") != "none"
+
+
+def test_repeated_markets_clicks_do_not_corrupt_the_restored_pricing_context(
+    server_url, page
+) -> None:
+    # Codex re-review (PR #170): a second click on the already-active Markets
+    # nav item must not re-capture the (now forced-hidden) state as if it
+    # were the original Pricing state -- otherwise returning to Pricing would
+    # incorrectly hide a provenance pill/badge/sidebar row that was visible
+    # before the trader ever left.
+    _route_curve(page, _FAKE_CURVE)
+    page.goto(f"{server_url}/")
+    page.evaluate(
+        """() => {
+            document.getElementById('provenance-pill').hidden = false;
+            document.getElementById('quote-side-badge').hidden = false;
+            document.getElementById('sidebar-live-row').hidden = false;
+            document.getElementById('sidebar-asof-row').hidden = false;
+        }"""
+    )
+
+    page.click("#nav-markets")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-markets"))
+    page.click("#nav-markets")  # redundant click while already on Markets
+    page.click("#nav-markets")  # and again
+
+    page.click("#nav-pricing")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-pricing"))
+    for selector in _PRICING_CONTEXT_SELECTORS:
+        assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") != "none"
+
+
 # --- Successful load (Acceptance B/C) ----------------------------------------
 
 
