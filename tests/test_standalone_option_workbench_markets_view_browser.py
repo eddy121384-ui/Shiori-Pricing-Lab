@@ -207,6 +207,47 @@ def test_switching_to_markets_and_back_does_not_disturb_pricing_state(server_url
     assert page.input_value("#bond-identifier-input") == "US91282CLJ89"
 
 
+_PRICING_CONTEXT_SELECTORS = [
+    "#provenance-pill",
+    "#quote-side-badge",
+    "#sidebar-live-row",
+    "#sidebar-asof-row",
+]
+
+
+def test_markets_hides_pricing_bond_provenance_and_restores_it_on_return(server_url, page) -> None:
+    # Codex review (PR #170): the top-nav provenance pill/quote-side badge and
+    # the sidebar Market Data rows live outside #view-pricing, so hiding that
+    # container alone left a previously-loaded bond's provenance/quote-side/
+    # as-of timestamp showing next to the curve -- unrelated evidence
+    # presented as if it were curve context.
+    _route_curve(page, _FAKE_CURVE)
+    page.goto(f"{server_url}/")
+
+    # Simulate "a bond has already been loaded/priced" the way renderContext
+    # does, without driving the full Bloomberg-load flow.
+    page.evaluate(
+        """() => {
+            document.getElementById('provenance-pill').hidden = false;
+            document.getElementById('quote-side-badge').hidden = false;
+            document.getElementById('sidebar-live-row').hidden = false;
+            document.getElementById('sidebar-asof-row').hidden = false;
+        }"""
+    )
+    for selector in _PRICING_CONTEXT_SELECTORS:
+        assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") != "none"
+
+    page.click("#nav-markets")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-markets"))
+    for selector in _PRICING_CONTEXT_SELECTORS:
+        assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") == "none"
+
+    page.click("#nav-pricing")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-pricing"))
+    for selector in _PRICING_CONTEXT_SELECTORS:
+        assert page.eval_on_selector(selector, "el => getComputedStyle(el).display") != "none"
+
+
 # --- Successful load (Acceptance B/C) ----------------------------------------
 
 

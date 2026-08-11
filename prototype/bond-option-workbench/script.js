@@ -4080,6 +4080,24 @@
   let lastSuccessfulCurve = null;
   let isLoadingCurve = false;
 
+  // Pricing-only bond/quote provenance context: the top-nav provenance pill
+  // and quote-side badge, and the sidebar's Market Data live-source/as-of
+  // rows. All four live outside #view-pricing (top nav / sidebar are shared
+  // shell chrome), so hiding #view-pricing alone leaves them showing a
+  // previously-loaded bond's provenance/quote-side/as-of timestamp next to
+  // the curve -- unrelated evidence presented as if it were curve context
+  // (Codex review, PR #170). Each element's own `hidden` state is saved
+  // before being force-hidden and restored on return to Pricing, rather than
+  // guessed or re-derived here -- this file has no visibility into why the
+  // Pricing IIFE set a given state, only that it should come back unchanged.
+  const pricingContextEls = [
+    document.getElementById("provenance-pill"),
+    document.getElementById("quote-side-badge"),
+    document.getElementById("sidebar-live-row"),
+    document.getElementById("sidebar-asof-row"),
+  ].filter(Boolean);
+  let savedPricingContextHidden = null;
+
   function switchToView(view) {
     const showMarkets = view === "markets";
     viewMarkets.hidden = !showMarkets;
@@ -4087,6 +4105,19 @@
     if (els.footer) els.footer.hidden = showMarkets;
     navMarkets.classList.toggle("active", showMarkets);
     navPricing.classList.toggle("active", !showMarkets);
+
+    if (showMarkets) {
+      savedPricingContextHidden = pricingContextEls.map((el) => el.hidden);
+      pricingContextEls.forEach((el) => {
+        el.hidden = true;
+      });
+    } else if (savedPricingContextHidden) {
+      pricingContextEls.forEach((el, index) => {
+        el.hidden = savedPricingContextHidden[index];
+      });
+      savedPricingContextHidden = null;
+    }
+
     if (showMarkets && !lastSuccessfulCurve && !isLoadingCurve) {
       loadCurve();
     }
