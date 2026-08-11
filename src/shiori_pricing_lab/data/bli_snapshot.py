@@ -232,18 +232,14 @@ class BLIBondQuote:
         object.__setattr__(
             self, "quote_side", coerce_enum(self.quote_side, TreasuryFTPQuoteSide, "quote_side")
         )
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "bond_quote")
 
         _require_non_blank(self.isin, "isin")
         _require_non_blank(self.source_system, "source_system")
 
         if self.clean_price_per_100 is None and self.yield_value is None:
-            raise ValueError(
-                "at least one of clean_price_per_100 / yield_value is required"
-            )
+            raise ValueError("at least one of clean_price_per_100 / yield_value is required")
 
         if self.clean_price_per_100 is not None:
             _require_finite_number(self.clean_price_per_100, "clean_price_per_100")
@@ -298,15 +294,11 @@ class BLIForwardCleanPriceInput:
         object.__setattr__(
             self, "quote_side", coerce_enum(self.quote_side, TreasuryFTPQuoteSide, "quote_side")
         )
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "forward_clean_price_input")
 
         _require_non_blank(self.source_system, "source_system")
-        _require_finite_number(
-            self.forward_clean_price_per_100, "forward_clean_price_per_100"
-        )
+        _require_finite_number(self.forward_clean_price_per_100, "forward_clean_price_per_100")
         if not self.forward_clean_price_per_100 > 0:
             raise ValueError(
                 "forward_clean_price_per_100 must be positive, got "
@@ -328,6 +320,25 @@ class BLICurvePoint:
     zero rate" fallback anywhere in this class -- a caller must always
     supply ``rate_basis`` explicitly, and an unrecognized value raises
     rather than being silently coerced to a default.
+
+    ``maturity_date`` (Issue #165 production phase) is an optional,
+    explicit ``YYYY-MM-DD`` calendar date. When supplied, it is the
+    *authoritative* source node date for this row (e.g. Bloomberg's own
+    returned ``MATURITY`` for a synthetic curve ticker), preserved
+    verbatim rather than reconstructed from ``tenor``, and it is what
+    ``pricing/bli_zero_curve_nodes.py::build_continuous_zero_curve_nodes``
+    actually prices from: that helper derives the row's time coordinate
+    from this explicit date (via ``year_fraction_to_expiry``) rather than
+    from ``tenor``, and doing so requires the caller to also supply that
+    same helper's own ``as_of_date`` -- the curve's authoritative
+    valuation/as-of date -- explicitly; it is never silently derived,
+    defaulted, or reconstructed. It defaults to ``None`` so every existing
+    curve row/fixture that has no such date (most of them -- ``tenor`` is
+    a nominal label, not a date, for the majority of this schema's rows
+    today) stays valid unchanged; for those rows, ``tenor`` parsing via
+    ``pricing/bli_curve_tenor.py::tenor_to_year_fraction`` remains the
+    legacy fallback coordinate, exactly as before ``maturity_date``
+    existed.
     """
 
     curve_id: str
@@ -339,6 +350,7 @@ class BLICurvePoint:
     rate_basis: BLICurveRateBasis
     source_system: str
     status: BLIMarketDataStatus
+    maturity_date: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "currency", coerce_enum(self.currency, Currency, "currency"))
@@ -352,9 +364,7 @@ class BLICurvePoint:
             "rate_basis",
             coerce_enum(self.rate_basis, BLICurveRateBasis, "rate_basis"),
         )
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "curve_point")
 
         _require_non_blank(self.curve_id, "curve_id")
@@ -365,6 +375,9 @@ class BLICurvePoint:
         # Yields/rates may legitimately be signed, same reasoning already
         # applied to BondOption.strike_yield -- no blanket sign constraint.
         _require_finite_number(self.rate, "rate")
+
+        if self.maturity_date is not None:
+            _parse_iso_date(self.maturity_date, "maturity_date")
 
 
 @dataclass(frozen=True)
@@ -391,9 +404,7 @@ class BLIDepositRateObservation:
         object.__setattr__(
             self, "quote_side", coerce_enum(self.quote_side, TreasuryFTPQuoteSide, "quote_side")
         )
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "deposit_rate_observation")
 
         _require_non_blank(self.source_system, "source_system")
@@ -436,9 +447,7 @@ class BLIVolatilityInput:
             "volatility_basis",
             coerce_enum(self.volatility_basis, BLIVolatilityBasis, "volatility_basis"),
         )
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "volatility_input")
 
         _require_non_blank(self.source_system, "source_system")
@@ -481,9 +490,7 @@ class BLICreditSpreadInput:
             "spread_treatment",
             coerce_enum(self.spread_treatment, BLICreditSpreadTreatment, "spread_treatment"),
         )
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "credit_spread_input")
 
         _require_non_blank(self.source_system, "source_system")
@@ -502,9 +509,7 @@ class BLICreditSpreadInput:
                     "credit_spread_basis must be None when spread_treatment is "
                     f"{self.spread_treatment.value}"
                 )
-            _require_non_blank(
-                self.override_or_fallback_audit, "override_or_fallback_audit"
-            )
+            _require_non_blank(self.override_or_fallback_audit, "override_or_fallback_audit")
             return
 
         # OBSERVED / OVERRIDE / FALLBACK all require an actual spread value.
@@ -522,9 +527,7 @@ class BLICreditSpreadInput:
                     "override_or_fallback_audit must be None when spread_treatment is OBSERVED"
                 )
         else:  # OVERRIDE / FALLBACK
-            _require_non_blank(
-                self.override_or_fallback_audit, "override_or_fallback_audit"
-            )
+            _require_non_blank(self.override_or_fallback_audit, "override_or_fallback_audit")
 
 
 def _validate_curve_points(curve_points: tuple[BLICurvePoint, ...]) -> None:
@@ -550,8 +553,7 @@ def _validate_curve_points(curve_points: tuple[BLICurvePoint, ...]) -> None:
         if node_key in seen_nodes:
             if seen_nodes[node_key] == point.rate:
                 raise ValueError(
-                    f"duplicate curve node for curve_id={point.curve_id!r} "
-                    f"tenor={point.tenor!r}"
+                    f"duplicate curve node for curve_id={point.curve_id!r} tenor={point.tenor!r}"
                 )
             raise ValueError(
                 f"conflicting rate for curve_id={point.curve_id!r} tenor={point.tenor!r}: "
@@ -598,9 +600,7 @@ class BLIMarketDataSnapshot:
     forward_clean_price_input: BLIForwardCleanPriceInput | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status")
-        )
+        object.__setattr__(self, "status", coerce_enum(self.status, BLIMarketDataStatus, "status"))
         _require_active_status(self.status, "snapshot")
 
         # valuation_date is explicit and parsed only for format validation --
@@ -619,18 +619,14 @@ class BLIMarketDataSnapshot:
         if self.deposit_rate_observation is not None and not isinstance(
             self.deposit_rate_observation, BLIDepositRateObservation
         ):
-            raise TypeError(
-                "deposit_rate_observation must be None or a BLIDepositRateObservation"
-            )
+            raise TypeError("deposit_rate_observation must be None or a BLIDepositRateObservation")
         # Optional at the general snapshot level (Issue #94): the legacy
         # bundle path neither supplies nor reads it, so its snapshots/fixtures
         # stay backward compatible. The standalone request requires it.
         if self.forward_clean_price_input is not None and not isinstance(
             self.forward_clean_price_input, BLIForwardCleanPriceInput
         ):
-            raise TypeError(
-                "forward_clean_price_input must be None or a BLIForwardCleanPriceInput"
-            )
+            raise TypeError("forward_clean_price_input must be None or a BLIForwardCleanPriceInput")
 
         curve_points = tuple(self.curve_points)
         object.__setattr__(self, "curve_points", curve_points)

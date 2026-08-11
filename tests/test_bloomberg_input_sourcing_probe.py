@@ -52,6 +52,7 @@ from bloomberg_input_sourcing_probe import (  # noqa: E402
     render_json,
     render_markdown,
     sanitize_external_text,
+    sanitize_field_documentation_text,
 )
 
 _GENERATED_AT = "2026-07-28T00:00:00+00:00"
@@ -400,9 +401,7 @@ def _default_report(overrides_by_field=None, user_overrides=(), context=None):
     if context is None:
         context = {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}
     plan, applied = plan_overrides(discovery, context, user_overrides)
-    evidence = collect_evidence(
-        module.DEFAULT_IDENTIFIERS, applied, probe=probe, clock=_clock()
-    )
+    evidence = collect_evidence(module.DEFAULT_IDENTIFIERS, applied, probe=probe, clock=_clock())
     return build_report(evidence, discovery, plan, _GENERATED_AT)
 
 
@@ -828,9 +827,7 @@ def _forward_discovery():
 
 
 def test_op188_is_sent_automatically_as_the_shiori_valuation_date():
-    plan, applied = plan_overrides(
-        _forward_discovery(), load_option_context_fixture(), ()
-    )
+    plan, applied = plan_overrides(_forward_discovery(), load_option_context_fixture(), ())
 
     entry = next(item for item in plan if item.override_field == "OP188")
     assert entry.status == module.OVERRIDE_APPLIED
@@ -889,9 +886,7 @@ def test_the_forward_probe_carries_the_confirmed_overrides_for_both_securities()
         discovery, {**load_option_context_fixture(), **module.FIXED_ROLE_VALUES}, ()
     )
 
-    evidence = collect_evidence(
-        module.DEFAULT_IDENTIFIERS, applied, probe=probe, clock=_clock()
-    )
+    evidence = collect_evidence(module.DEFAULT_IDENTIFIERS, applied, probe=probe, clock=_clock())
 
     option_calls = [call for call in probe.calls if "OPT_UNDL_FORWARD_PX" in call["fields"]]
     assert len(option_calls) == 2
@@ -1082,9 +1077,7 @@ def test_main_accepts_a_cli_override_that_repeats_the_approved_value(monkeypatch
 
     assert exit_code == 0
     written = json.loads((tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8"))
-    entry = next(
-        item for item in written["override_plan"] if item["override_field"] == "OP046"
-    )
+    entry = next(item for item in written["override_plan"] if item["override_field"] == "OP046")
     assert entry["status"] == module.OVERRIDE_APPLIED
     assert entry["source"] == "fixed:pricing_model"
 
@@ -1158,6 +1151,193 @@ def test_sanitizer_passes_ordinary_bloomberg_text_through():
     )
     assert sanitize_external_text(None) is None
     assert sanitize_external_text("") == ""
+
+
+# --- Issue #165 round 3: widened client/session/host identity coverage -----------
+#
+# Eddy's real workstation run proved a Bloomberg DAPI error payload can carry
+# client/session/host identity metadata the round-2 patterns above missed.
+# Every value below is synthetic (fabricated for this test), never a real
+# captured payload -- these are regression tests for this sanitizer's own
+# pattern coverage, not evidence about what Bloomberg actually sent Eddy.
+
+
+def test_sanitizer_removes_a_bare_ipv4_address_with_no_port():
+    sanitized = sanitize_external_text("connection refused from 10.20.30.40 during retry")
+
+    assert "10.20.30.40" not in sanitized
+    assert "<redacted host>" in sanitized
+    assert "connection refused from" in sanitized
+
+
+def test_sanitizer_still_redacts_a_host_port_pair_as_a_host_not_a_dangling_key():
+    # A literal "host:8194" shape must still resolve to the more specific
+    # host:port pattern, not leave a dangling "host=<redacted>" match from
+    # the broadened sensitive-key list below.
+    sanitized = sanitize_external_text("session failed against host:8194")
+
+    assert "host:8194" not in sanitized
+    assert "<redacted host>" in sanitized
+    assert "host=<redacted>" not in sanitized
+
+
+def test_sanitizer_removes_a_windows_unc_path():
+    sanitized = sanitize_external_text(
+        r"could not read \\bbg-fileserver\share\eddy\session.log during startup"
+    )
+
+    assert "bbg-fileserver" not in sanitized
+    assert "<redacted path>" in sanitized
+    assert "during startup" in sanitized
+
+
+def test_sanitizer_removes_compound_client_and_session_identity_keys():
+    text = (
+        "clientId=SYNTH-CLIENT-01 clientAppName=SYNTH-APP authId=SYNTH-AUTH-99 "
+        "computerName=SYNTH-WS-07 workstation=SYNTH-DESK domain=SYNTH-CORP "
+        "deviceId=SYNTH-DEV-42 macAddress=AA:BB:CC:DD:EE:FF emrsid=SYNTH-EMR-1 "
+        "applicationName=SYNTH-APP-NAME"
+    )
+
+    sanitized = sanitize_external_text(text)
+
+    for leaked in (
+        "SYNTH-CLIENT-01",
+        "SYNTH-APP",
+        "SYNTH-AUTH-99",
+        "SYNTH-WS-07",
+        "SYNTH-DESK",
+        "SYNTH-CORP",
+        "SYNTH-DEV-42",
+        "SYNTH-EMR-1",
+        "SYNTH-APP-NAME",
+    ):
+        assert leaked not in sanitized
+    assert "clientId=<redacted>" in sanitized
+    assert "clientAppName=<redacted>" in sanitized
+    assert "authId=<redacted>" in sanitized
+    assert "computerName=<redacted>" in sanitized
+    assert "workstation=<redacted>" in sanitized
+    assert "domain=<redacted>" in sanitized
+    assert "deviceId=<redacted>" in sanitized
+    assert "emrsid=<redacted>" in sanitized
+    assert "applicationName=<redacted>" in sanitized
+    # AA:BB:CC:DD:EE:FF is not this sanitizer's declared scope (a MAC
+    # address's own value, only its labeled `macAddress=` key) -- the key
+    # itself is still redacted so the label never leaks its value pairing.
+    assert "macAddress=<redacted>" in sanitized
+
+
+def test_sanitizer_synthetic_full_client_identity_payload_never_leaks_end_to_end(
+    monkeypatch, tmp_path, capsys
+):
+    # A synthetic stand-in for the shape of payload Eddy's real run proved
+    # can occur -- fabricated identifiers only, never a real capture.
+    def _describe(fields):
+        raise RuntimeError(
+            "Bloomberg DAPI session error for clientId=SYNTH-CID-7788 "
+            "computerName=SYNTH-HOST-99 from 172.16.5.9 via "
+            r"\\synth-fileserver\blpapi\SYNTH-USER\session.log"
+        )
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    markdown_text = (tmp_path / module.MARKDOWN_FILENAME).read_text(encoding="utf-8")
+    console = capsys.readouterr().out
+    for surface in (json_text, markdown_text, console):
+        assert "SYNTH-CID-7788" not in surface
+        assert "SYNTH-HOST-99" not in surface
+        assert "172.16.5.9" not in surface
+        assert "synth-fileserver" not in surface
+        assert "SYNTH-USER" not in surface
+
+
+# --- Issue #165 round 5: static field-documentation sanitizer boundary -----------
+#
+# A real finding: PAY_CURVE_NAME/REC_CURVE_NAME's own Bloomberg
+# documentation came back with "USER=<redacted>" in place of Bloomberg's
+# own documented override-syntax vocabulary, because sanitize_external_text
+# treated "USER" as a sensitive key. sanitize_field_documentation_text is
+# the narrower function that fixes this for static FieldInfoRequest
+# description/documentation text specifically -- sanitize_external_text
+# itself is unchanged and must still catch genuine identity leakage in
+# runtime/session/error/schema text.
+
+
+def test_field_documentation_sanitizer_preserves_bloombergs_own_override_syntax():
+    text = (
+        "Valid override values: BLP (Bloomberg-calculated value), "
+        "USER (user-supplied override), DFLT (field default). "
+        "See also HOST: field for related curve metadata."
+    )
+
+    assert sanitize_field_documentation_text(text) == text
+
+
+def test_field_documentation_sanitizer_still_redacts_structural_leaks():
+    text = (
+        "example: served from localhost:8194, address 10.20.30.40, "
+        "path C:\\Users\\eddy\\example.log"
+    )
+
+    sanitized = sanitize_field_documentation_text(text)
+
+    assert "localhost:8194" not in sanitized
+    assert "10.20.30.40" not in sanitized
+    assert "C:\\Users\\eddy" not in sanitized
+    assert "<redacted host>" in sanitized
+    assert "<redacted path>" in sanitized
+
+
+def test_field_documentation_sanitizer_passes_none_and_empty_through():
+    assert sanitize_field_documentation_text(None) is None
+    assert sanitize_field_documentation_text("") == ""
+
+
+def test_sanitize_external_text_still_redacts_identity_keys_bloomberg_documentation_does_not_get():
+    # sanitize_external_text (runtime/session/error/schema text) is
+    # unchanged by the round-5 fix -- it must still catch exactly what it
+    # caught before for the surfaces that actually need it.
+    text = "clientId=SYNTH-STILL-CAUGHT USER=SYNTH-STILL-CAUGHT-TOO"
+
+    sanitized = sanitize_external_text(text)
+
+    assert "SYNTH-STILL-CAUGHT" not in sanitized
+    assert "SYNTH-STILL-CAUGHT-TOO" not in sanitized
+    assert "clientId=<redacted>" in sanitized
+    assert "USER=<redacted>" in sanitized
+
+
+def test_metadata_documentation_field_error_detail_still_gets_full_sanitization(
+    monkeypatch, tmp_path
+):
+    # `detail` (a per-field fieldError, a runtime response) must still go
+    # through the full sanitize_external_text, unlike description/
+    # documentation -- proven end to end through the #149 tool's own report.
+    def _describe(fields):
+        return [
+            FieldDescription(
+                field=field,
+                status="field_error",
+                detail="rejected for clientId=SYNTH-DETAIL-LEAK at localhost:8194",
+            )
+            for field in fields
+        ]
+
+    monkeypatch.setattr(module, "probe_fields", _fake_probe({}))
+    monkeypatch.setattr(module, "describe_fields", _describe)
+
+    exit_code = main(["--output-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    json_text = (tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8")
+    assert "SYNTH-DETAIL-LEAK" not in json_text
+    assert "localhost:8194" not in json_text
 
 
 def test_connection_failures_are_sanitized_in_every_output(monkeypatch, tmp_path, capsys):
@@ -1345,7 +1525,16 @@ def test_a_per_field_metadata_error_is_sanitized(monkeypatch, tmp_path, capsys):
     assert "[BAD_FLD]" in detail and "<redacted host>" in detail
 
 
-def test_metadata_description_and_documentation_are_sanitized_too(monkeypatch, tmp_path):
+def test_metadata_description_and_documentation_keep_structural_redaction_only(
+    monkeypatch, tmp_path
+):
+    # Issue #165 round 5: description/documentation are Bloomberg's own
+    # *static* field documentation, sanitized with the narrower
+    # sanitize_field_documentation_text -- structural leaks (host:port,
+    # path) are still redacted, but Bloomberg's own documented
+    # override-syntax vocabulary (BLP/USER/DFLT) is no longer corrupted by
+    # the generic key=value pass the way it broke real PAY_CURVE_NAME/
+    # REC_CURVE_NAME documentation.
     def _describe(fields):
         return [
             FieldDescription(
@@ -1354,7 +1543,10 @@ def test_metadata_description_and_documentation_are_sanitized_too(monkeypatch, t
                 mnemonic=field,
                 description="served from localhost:8194",
                 datatype="Price",
-                documentation="see /home/eddy/docs for uuid=24681357",
+                documentation=(
+                    "see /home/eddy/docs for details. Valid override values: "
+                    "BLP (Bloomberg default), USER (user override), DFLT (field default)."
+                ),
             )
             for field in fields
         ]
@@ -1367,8 +1559,10 @@ def test_metadata_description_and_documentation_are_sanitized_too(monkeypatch, t
     written = json.loads((tmp_path / module.JSON_FILENAME).read_text(encoding="utf-8"))
     field = written["field_metadata_discovery"]["fields"][0]
     assert field["description"] == "served from <redacted host>"
-    assert "24681357" not in field["documentation_excerpt"]
     assert "/home/eddy" not in field["documentation_excerpt"]
+    assert "BLP (Bloomberg default)" in field["documentation_excerpt"]
+    assert "USER (user override)" in field["documentation_excerpt"]
+    assert "DFLT (field default)" in field["documentation_excerpt"]
 
 
 def test_a_one_character_override_never_leaks_from_a_request_error(monkeypatch, tmp_path, capsys):

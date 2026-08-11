@@ -368,6 +368,13 @@ def _price_bli_mvp_from_fields(
             currency=bond_option.currency,
             curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
             target_year_fraction=time_to_expiry,
+            # Issue #165 live-wiring follow-up: the OPTION_DISCOUNT_CURVE's own
+            # node coordinates resolve from an explicit Bloomberg maturity_date
+            # (via year_fraction_to_expiry) when present, using the same
+            # valuation_date this call's own time_to_expiry is already anchored
+            # to -- never a separate/invented reference date. A purely
+            # tenor-only curve (every curve priced today) never reads this.
+            as_of_date=valuation_date,
         )
         price_volatility = market_data_snapshot.volatility_input.volatility
         pv_per_100 = black76_price_option_pv_per_100(
@@ -640,9 +647,7 @@ def price_bli_mvp_standalone_option(
             "option_settlement_date": request.option_settlement_date,
             "time_to_expiry_year_fraction": inputs.time_to_expiry_year_fraction,
             "time_to_expiry_convention": "ACT_ACT_ISDA_fractional_timestamp",
-            "pricing_to_reporting_discount_factor": (
-                inputs.pricing_to_reporting_discount_factor
-            ),
+            "pricing_to_reporting_discount_factor": (inputs.pricing_to_reporting_discount_factor),
             "pricing_to_option_settlement_discount_factor": (
                 inputs.pricing_to_option_settlement_discount_factor
             ),
@@ -693,8 +698,7 @@ def price_bli_mvp_standalone_option(
             "greeks_units": {
                 "forward_price_delta": "premium per 100 per +1.00 forward clean price point",
                 "forward_price_gamma": (
-                    "delta per 100 per +1.00 forward clean price point "
-                    "(per price point squared)"
+                    "delta per 100 per +1.00 forward clean price point (per price point squared)"
                 ),
                 "vega": f"premium per 100 per +{VOLATILITY_POINT} absolute volatility",
                 "theta": (

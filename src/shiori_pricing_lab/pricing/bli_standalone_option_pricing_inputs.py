@@ -112,6 +112,18 @@ def _option_discount_factor_to_date(
     the valuation date itself gives ``1.0`` directly (no zero-tenor
     interpolation is attempted, matching Issue #94's explicit rule for the
     reporting date).
+
+    ``as_of_date=request.valuation_date`` (Issue #165 live-wiring follow-up)
+    is passed through to ``discount_factor_from_continuous_zero_curve`` so a
+    selected ``BLICurvePoint`` with an explicit Bloomberg ``maturity_date``
+    resolves its own node coordinate from that real date via
+    ``year_fraction_to_expiry`` rather than a tenor label -- this is
+    unrelated to, and does not change, this function's own ``coordinate``
+    (the *target* being requested on the curve, always ``(target_date -
+    valuation_date).days / 365.0`` regardless of how any individual curve
+    node's own coordinate was resolved). A purely tenor-only curve (every
+    curve this path has ever priced) never reads ``as_of_date`` at all, so
+    this wiring is a no-op for existing behavior.
     """
 
     valuation = _parse_iso_date(request.valuation_date, "valuation_date")
@@ -130,6 +142,7 @@ def _option_discount_factor_to_date(
         currency=request.bond_option.currency,
         curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
         target_year_fraction=coordinate,
+        as_of_date=request.valuation_date,
     )
 
 
