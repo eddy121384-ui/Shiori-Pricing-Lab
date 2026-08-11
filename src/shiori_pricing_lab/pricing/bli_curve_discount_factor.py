@@ -32,13 +32,15 @@ selected row carries an explicit `maturity_date`. Optional, defaults to
 `None`; every existing caller that never sets it keeps identical
 behavior (a purely tenor-only curve never reads it).
 
-**Live wiring (Issue #165 final live-wiring follow-up):**
-`bli_pricing_engine.py::_price_bli_mvp_from_fields` (both the
-`BLIMVPInputBundle` and standalone-request paths, which share this exact
-composition) and
+**Live wiring (Issue #165 final live-wiring follow-up):** two separate
+callers now pass `as_of_date=valuation_date` for their `OPTION_DISCOUNT_
+CURVE` resolution -- `bli_pricing_engine.py::_price_bli_mvp_from_fields`
+(the legacy `BLIMVPInputBundle` path's own composition; the standalone
+OVME-aligned path is a **separate numeric composition** that does not
+share `_price_bli_mvp_from_fields`, per that module's own docstring) and
 `bli_standalone_option_pricing_inputs.py::_option_discount_factor_to_date`
-both now pass `as_of_date=valuation_date` for their `OPTION_DISCOUNT_CURVE`
-resolution -- the same `valuation_date` each already uses to anchor every
+(the standalone path's own, independent route to this same resolver).
+Both use the same `valuation_date` each already uses to anchor every
 other year-fraction it computes. `bli_forward_clean_price.py` (which
 resolves `BOND_REFERENCE_CURVE`, not `OPTION_DISCOUNT_CURVE`) is
 deliberately **not** wired here -- explicitly out of scope for Issue #165.

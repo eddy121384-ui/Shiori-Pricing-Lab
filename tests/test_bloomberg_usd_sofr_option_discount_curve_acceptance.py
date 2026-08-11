@@ -162,6 +162,25 @@ def test_node_maturity_is_never_the_same_dict_key_as_discount_factor_maturity():
         assert "maturity" not in node
 
 
+def test_run_reports_the_z_ticker_reconstructed_from_the_pure_ticker_builder():
+    report = run_acceptance(load=lambda *, tenors: _success_result())
+
+    by_tenor = {n["tenor"]: n for n in report.nodes}
+    assert by_tenor["1Y"]["zero_rate_security"] == "S0490Z 1Y BLC2 Curncy"
+    assert by_tenor["2Y"]["zero_rate_security"] == "S0490Z 2Y BLC2 Curncy"
+
+
+def test_run_reports_maturity_match_true_when_z_and_d_agree():
+    # The production loader already fails closed on a Z/D mismatch before
+    # returning any node, so every successfully returned node's Z/D dates
+    # are always equal -- this restates that fact explicitly for Eddy's
+    # own quick visual check, never a second independent comparison.
+    report = run_acceptance(load=lambda *, tenors: _success_result())
+
+    for node in report.nodes:
+        assert node["maturity_match"] is True
+
+
 def test_run_flags_discount_factor_in_zero_one_range_as_a_fact_not_a_verdict():
     report = run_acceptance(load=lambda *, tenors: _success_result())
 
@@ -226,6 +245,36 @@ def test_build_report_and_render_round_trip():
     assert "0.0175" in markdown
     assert "0.98" in markdown
     assert "1Y" in as_json
+
+
+def test_render_markdown_includes_a_compact_full_curve_table():
+    report = run_acceptance(load=lambda *, tenors: _success_result())
+    data = build_report(report)
+
+    markdown = render_markdown(data)
+
+    assert "## Full curve, compact table" in markdown
+    assert "| Tenor | Z security | D security" in markdown
+    assert "| 1Y | S0490Z 1Y BLC2 Curncy | S0490D 1Y BLC2 Curncy" in markdown
+    assert "| 2Y | S0490Z 2Y BLC2 Curncy | S0490D 2Y BLC2 Curncy" in markdown
+    # One table row per node, in the same order as report.nodes.
+    assert markdown.index("| 1Y |") < markdown.index("| 2Y |")
+    assert "does not claim" in markdown.lower()
+
+
+def test_render_markdown_omits_the_compact_table_when_there_are_no_nodes():
+    empty_report = module.AcceptanceReport(
+        generated_at="2026-08-10T00:00:00+00:00",
+        tenors=("1Y",),
+        status="error",
+        error="Bloomberg DAPI securityError: BAD_SEC",
+        nodes=(),
+    )
+    data = build_report(empty_report)
+
+    markdown = render_markdown(data)
+
+    assert "## Full curve, compact table" not in markdown
 
 
 def test_write_report_writes_both_files(tmp_path):
@@ -325,6 +374,7 @@ def test_main_writes_report_and_prints_the_paths(monkeypatch, capsys, tmp_path):
                     "tenor": "1Y",
                     "curve_id": USD_SOFR_CURVE_ID,
                     "rate_basis": "CONTINUOUS_ZERO_RATE",
+                    "zero_rate_security": "S0490Z 1Y BLC2 Curncy",
                     "zero_rate_decimal": 0.0175,
                     "zero_rate_percent_recomputed": 1.75,
                     "discount_factor_security": "S0490D 1Y BLC2 Curncy",
@@ -333,6 +383,7 @@ def test_main_writes_report_and_prints_the_paths(monkeypatch, capsys, tmp_path):
                     "discount_factor_in_zero_one_range": True,
                     "node_maturity": "2027-08-10",
                     "discount_factor_maturity": "2027-08-10",
+                    "maturity_match": True,
                 },
             ),
         ),
@@ -342,7 +393,7 @@ def test_main_writes_report_and_prints_the_paths(monkeypatch, capsys, tmp_path):
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "tenor 1Y: rate=0.0175" in out
+    assert "tenor 1Y (S0490Z 1Y BLC2 Curncy): rate=0.0175" in out
     assert str((tmp_path / "out" / module.MARKDOWN_FILENAME).resolve()) in out
     assert (tmp_path / "out" / module.MARKDOWN_FILENAME).exists()
     assert (tmp_path / "out" / module.JSON_FILENAME).exists()

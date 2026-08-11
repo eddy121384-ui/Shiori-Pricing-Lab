@@ -712,3 +712,284 @@ def test_blpapi_not_installed_raises_bli_bloomberg_dapi_error(monkeypatch):
 
     with pytest.raises(BLIBloombergDapiError, match="blpapi is not installed"):
         load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y",))
+
+
+# --- N-tenor curve expansion coverage (Issue #165 full-curve expansion follow-up) ---
+#
+# These tenors/rates/dates are synthetic test fixture values only -- proving
+# the loader's *mechanism* scales correctly to an arbitrary caller-supplied
+# tenor set, never a claim about Bloomberg's real Curve #490 tenor universe
+# (which this round explicitly does not have full workstation evidence for;
+# see DEFAULT_USD_SOFR_TENORS, still ("1Y", "2Y"), and the round's own PR
+# report for the evidence-blocker statement).
+
+_MULTI_TENOR_SPECS = (
+    ("1Y", "1.75", "0.98", "2027-08-01"),
+    ("2Y", "3.25", "0.94", "2028-08-01"),
+    ("3Y", "3.50", "0.90", "2029-08-01"),
+    ("5Y", "3.75", "0.83", "2031-08-01"),
+    ("10Y", "4.00", "0.68", "2036-08-01"),
+)
+
+
+def _multi_tenor_records(specs=_MULTI_TENOR_SPECS, *, mismatched_tenor=None):
+    """Build Z+D securityData records for every (tenor, rate, df, maturity) spec.
+
+    ``mismatched_tenor``, if given, makes that one tenor's D record report a
+    MATURITY one day after its Z record's -- for the Z/D-mismatch tests.
+    """
+
+    records = []
+    for tenor, zero_pct, df, maturity in specs:
+        records.append(
+            _security_record(
+                security=module.build_zero_rate_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=zero_pct,
+                maturity=maturity,
+            )
+        )
+        df_maturity = maturity
+        if tenor == mismatched_tenor:
+            year, month, day = (int(part) for part in maturity.split("-"))
+            df_maturity = f"{year}-{month:02d}-{day + 1:02d}"
+        records.append(
+            _security_record(
+                security=module.build_discount_factor_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=df,
+                maturity=df_maturity,
+            )
+        )
+    return records
+
+
+def _multi_tenor_events(**kwargs):
+    return [_response_event(_multi_tenor_records(**kwargs))]
+
+
+_MULTI_TENOR_LABELS = tuple(spec[0] for spec in _MULTI_TENOR_SPECS)
+
+
+def test_every_configured_tenor_generates_the_exact_z_and_d_ticker_grammar(monkeypatch):
+    holder = _install_fake_blpapi(monkeypatch, events=_multi_tenor_events())
+
+    load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+    expected_securities = [
+        security
+        for tenor in _MULTI_TENOR_LABELS
+        for security in (
+            module.build_zero_rate_ticker(module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor),
+            module.build_discount_factor_ticker(module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor),
+        )
+    ]
+    assert holder["session"].last_request.securities == expected_securities
+
+
+def test_every_successful_tenor_produces_exactly_one_curve_point_and_one_evidence_record(
+    monkeypatch,
+):
+    _install_fake_blpapi(monkeypatch, events=_multi_tenor_events())
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+    assert len(result.curve_points) == len(_MULTI_TENOR_SPECS)
+    assert len(result.discount_factor_evidence) == len(_MULTI_TENOR_SPECS)
+    assert {p.tenor for p in result.curve_points} == set(_MULTI_TENOR_LABELS)
+    assert {e.tenor for e in result.discount_factor_evidence} == set(_MULTI_TENOR_LABELS)
+
+
+def test_returned_points_are_ordered_by_resolved_maturity_coordinates_for_many_tenors(
+    monkeypatch,
+):
+    scrambled_order = ("5Y", "1Y", "10Y", "2Y", "3Y")
+    _install_fake_blpapi(monkeypatch, events=_multi_tenor_events())
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=scrambled_order)
+
+    assert [p.tenor for p in result.curve_points] == list(_MULTI_TENOR_LABELS)
+    assert [e.tenor for e in result.discount_factor_evidence] == list(_MULTI_TENOR_LABELS)
+    # The real Bloomberg-returned maturity dates are themselves increasing
+    # in this same order -- confirms the output order tracks the actual
+    # resolved maturity coordinates, not merely the caller's request order.
+    maturities = [p.maturity_date for p in result.curve_points]
+    assert maturities == sorted(maturities)
+
+
+@pytest.mark.parametrize("mismatched_tenor", ["1Y", "3Y", "10Y"])
+def test_z_d_maturity_mismatch_at_any_tenor_aborts_the_whole_curve(monkeypatch, mismatched_tenor):
+    _install_fake_blpapi(monkeypatch, events=_multi_tenor_events(mismatched_tenor=mismatched_tenor))
+
+    with pytest.raises(BLIBloombergDapiError, match="MATURITY mismatch"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+@pytest.mark.parametrize("broken_tenor", ["1Y", "3Y", "10Y"])
+def test_bad_sec_at_any_tenor_aborts_the_whole_curve(monkeypatch, broken_tenor):
+    records = _multi_tenor_records()
+    broken_security = module.build_zero_rate_ticker(
+        module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, broken_tenor
+    )
+    records = [
+        _security_record(
+            security=broken_security, security_error="[BAD_SEC] Unknown/Invalid security"
+        )
+        if record.hasElement("security")
+        and record.getElement("security").getValueAsString() == broken_security
+        else record
+        for record in records
+    ]
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError, match="BAD_SEC"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+@pytest.mark.parametrize("broken_tenor", ["1Y", "3Y", "10Y"])
+def test_missing_last_price_at_any_tenor_aborts_the_whole_curve(monkeypatch, broken_tenor):
+    specs = tuple(
+        (tenor, None if tenor == broken_tenor else zero_pct, df, maturity)
+        for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS
+    )
+    records = []
+    for tenor, zero_pct, df, maturity in specs:
+        records.append(
+            _security_record(
+                security=module.build_zero_rate_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=zero_pct,
+                maturity=maturity,
+            )
+        )
+        records.append(
+            _security_record(
+                security=module.build_discount_factor_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=df,
+                maturity=maturity,
+            )
+        )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError, match="missing LAST_PRICE"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+@pytest.mark.parametrize("broken_tenor", ["1Y", "3Y", "10Y"])
+def test_missing_maturity_at_any_tenor_aborts_the_whole_curve(monkeypatch, broken_tenor):
+    records = []
+    for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS:
+        records.append(
+            _security_record(
+                security=module.build_zero_rate_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=zero_pct,
+                maturity=None if tenor == broken_tenor else maturity,
+            )
+        )
+        records.append(
+            _security_record(
+                security=module.build_discount_factor_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=df,
+                maturity=maturity,
+            )
+        )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError, match="missing MATURITY"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+def test_field_exception_at_a_later_tenor_aborts_the_whole_curve(monkeypatch):
+    broken_tenor = "5Y"
+    records = []
+    for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS:
+        if tenor == broken_tenor:
+            records.append(
+                _security_record(
+                    security=module.build_zero_rate_ticker(
+                        module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                    ),
+                    maturity=maturity,
+                    field_exceptions=["[BAD_FLD] not applicable"],
+                )
+            )
+        else:
+            records.append(
+                _security_record(
+                    security=module.build_zero_rate_ticker(
+                        module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                    ),
+                    last_price=zero_pct,
+                    maturity=maturity,
+                )
+            )
+        records.append(
+            _security_record(
+                security=module.build_discount_factor_ticker(
+                    module.USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor
+                ),
+                last_price=df,
+                maturity=maturity,
+            )
+        )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    with pytest.raises(BLIBloombergDapiError, match="BAD_FLD"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+def test_duplicate_maturity_among_many_tenors_aborts_the_whole_curve(monkeypatch):
+    specs = tuple(
+        (tenor, zero_pct, df, "2029-08-01" if tenor == "5Y" else maturity)
+        for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS
+    )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(_multi_tenor_records(specs))])
+
+    with pytest.raises(BLIBloombergDapiError, match="duplicate curve node maturity"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+def test_non_increasing_maturity_among_many_tenors_aborts_the_whole_curve(monkeypatch):
+    # "3Y"'s own MATURITY is placed before "2Y"'s -- breaks the required
+    # increasing-maturity progression even though every other tenor is fine.
+    specs = tuple(
+        (tenor, zero_pct, df, "2027-09-01" if tenor == "3Y" else maturity)
+        for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS
+    )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(_multi_tenor_records(specs))])
+
+    with pytest.raises(BLIBloombergDapiError, match="did not increase"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+
+def test_negative_zero_rate_remains_valid(monkeypatch):
+    specs = tuple(
+        (tenor, "-0.50" if tenor == "1Y" else zero_pct, df, maturity)
+        for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS
+    )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(_multi_tenor_records(specs))])
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
+
+    by_tenor = {p.tenor: p for p in result.curve_points}
+    assert by_tenor["1Y"].rate == pytest.approx(-0.005)
+
+
+def test_non_finite_discount_factor_fails_closed(monkeypatch):
+    specs = tuple(
+        (tenor, zero_pct, "nan" if tenor == "1Y" else df, maturity)
+        for tenor, zero_pct, df, maturity in _MULTI_TENOR_SPECS
+    )
+    _install_fake_blpapi(monkeypatch, events=[_response_event(_multi_tenor_records(specs))])
+
+    with pytest.raises(BLIBloombergDapiError, match="non-finite"):
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)

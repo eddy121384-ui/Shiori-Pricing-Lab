@@ -23,6 +23,18 @@ such match itself** -- it only surfaces the values for Eddy's own manual
 acceptance judgment, the same discipline every prior round in this issue
 has followed.
 
+**Compact full-curve table.** The written Markdown report leads with one
+row per tenor -- tenor, ``Z`` security, ``D`` security, authoritative node
+maturity, zero rate (decimal and percent), discount factor, ``D``
+maturity, and a ``Z``/``D`` maturity-match flag -- so Eddy can scan the
+whole curve and pick short/belly/long-end nodes to check against terminal
+Curve #490 / SWDF without reading the full per-tenor detail below it. The
+same fields are on every node in the JSON output too. **This table never
+claims Bloomberg parity itself** -- ``maturity_match`` only restates a
+fact the production loader already enforces (it fails closed on a
+mismatch before any node is returned), it is not a comparison against the
+terminal.
+
 **``node_maturity`` vs. ``discount_factor_maturity``.** The report's
 ``node_maturity`` field is the curve node's own authoritative date --
 Bloomberg's ``MATURITY`` for the ``Z`` ticker, read from ``BLICurvePoint.
@@ -60,7 +72,9 @@ from pathlib import Path
 from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError
 from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
     DEFAULT_USD_SOFR_TENORS,
+    USD_SOFR_BLOOMBERG_CURVE_NUMBER,
     BloombergUsdSofrOptionDiscountCurveResult,
+    build_zero_rate_ticker,
     load_bloomberg_usd_sofr_option_discount_curve,
 )
 
@@ -112,17 +126,25 @@ def run_acceptance(
     nodes: list[dict] = []
     for point in result.curve_points:
         evidence = evidence_by_tenor.get(point.tenor)
+        node_maturity = point.maturity_date
+        discount_factor_maturity = evidence.maturity if evidence else None
         nodes.append(
             {
                 "tenor": point.tenor,
                 "curve_id": point.curve_id,
                 "rate_basis": point.rate_basis.value,
+                # Reconstructed from the same pure ticker builder the
+                # production loader itself used -- not a second live
+                # request, and never a guessed/generated ticker.
+                "zero_rate_security": build_zero_rate_ticker(
+                    USD_SOFR_BLOOMBERG_CURVE_NUMBER, point.tenor
+                ),
                 "zero_rate_decimal": point.rate,
                 "zero_rate_percent_recomputed": point.rate * 100.0,
                 # The curve node's own authoritative date -- Bloomberg's MATURITY
                 # for the Z ticker, preserved verbatim on the BLICurvePoint itself.
                 # Never the D ticker's date (see discount_factor_maturity below).
-                "node_maturity": point.maturity_date,
+                "node_maturity": node_maturity,
                 "discount_factor_security": evidence.security if evidence else None,
                 "discount_factor": evidence.discount_factor if evidence else None,
                 "discount_factor_raw_last_price": evidence.raw_last_price if evidence else None,
@@ -131,9 +153,13 @@ def run_acceptance(
                 ),
                 # The D ticker's own MATURITY -- shown separately for transparency
                 # only. The production loader already requires this to equal
-                # node_maturity (fails closed otherwise), so this is corroborating
-                # evidence, never a second candidate node date.
-                "discount_factor_maturity": evidence.maturity if evidence else None,
+                # node_maturity (fails closed otherwise), so this should always
+                # be True for a successfully returned node -- shown explicitly
+                # for Eddy's own quick visual check, not recomputed trust.
+                "discount_factor_maturity": discount_factor_maturity,
+                "maturity_match": (
+                    node_maturity == discount_factor_maturity if evidence is not None else None
+                ),
             }
         )
 
@@ -159,6 +185,33 @@ def build_report(report: AcceptanceReport) -> dict:
     }
 
 
+_COMPACT_TABLE_HEADERS = (
+    "Tenor",
+    "Z security",
+    "D security",
+    "Node maturity (authoritative)",
+    "Zero rate (decimal)",
+    "Zero rate (percent)",
+    "Discount factor",
+    "D maturity",
+    "Z/D maturity match",
+)
+
+
+def _compact_table_row(node: dict) -> tuple[str, ...]:
+    return (
+        node["tenor"],
+        node["zero_rate_security"],
+        node["discount_factor_security"] or "",
+        node["node_maturity"] or "",
+        str(node["zero_rate_decimal"]),
+        str(node["zero_rate_percent_recomputed"]),
+        str(node["discount_factor"]),
+        node["discount_factor_maturity"] or "",
+        str(node["maturity_match"]),
+    )
+
+
 def render_markdown(data: dict) -> str:
     lines: list[str] = []
     lines.append("# Bloomberg USD SOFR option discount curve acceptance path (Issue #165)")
@@ -170,9 +223,29 @@ def render_markdown(data: dict) -> str:
         lines.append(f"Error: {data['error']}")
     lines.append("")
 
+    if data["nodes"]:
+        lines.append("## Full curve, compact table")
+        lines.append("")
+        lines.append("| " + " | ".join(_COMPACT_TABLE_HEADERS) + " |")
+        lines.append("|" + "|".join(["---"] * len(_COMPACT_TABLE_HEADERS)) + "|")
+        for node in data["nodes"]:
+            lines.append("| " + " | ".join(_compact_table_row(node)) + " |")
+        lines.append("")
+        lines.append(
+            "Compare selected short / belly / long-end rows above against "
+            "terminal Curve #490 / SWDF manually. This table does not claim "
+            "Bloomberg parity itself."
+        )
+        lines.append("")
+
+    lines.append("## Per-tenor detail")
+    lines.append("")
     for node in data["nodes"]:
-        lines.append(f"## tenor {node['tenor']}")
-        lines.append(f"curve_id: {node['curve_id']}  rate_basis: {node['rate_basis']}")
+        lines.append(f"### tenor {node['tenor']}")
+        lines.append(
+            f"zero_rate_security: {node['zero_rate_security']}  "
+            f"curve_id: {node['curve_id']}  rate_basis: {node['rate_basis']}"
+        )
         lines.append(
             f"zero rate: {node['zero_rate_decimal']} decimal "
             f"({node['zero_rate_percent_recomputed']} recomputed percent)"
@@ -265,10 +338,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {data['error']}", file=sys.stderr)
     for node in data["nodes"]:
         print(
-            f"  - tenor {node['tenor']}: rate={node['zero_rate_decimal']} "
-            f"({node['zero_rate_percent_recomputed']}%)  DF={node['discount_factor']}  "
-            f"node_maturity={node['node_maturity']}  "
-            f"discount_factor_maturity={node['discount_factor_maturity']}"
+            f"  - tenor {node['tenor']} ({node['zero_rate_security']}): "
+            f"rate={node['zero_rate_decimal']} ({node['zero_rate_percent_recomputed']}%)  "
+            f"DF={node['discount_factor']}  node_maturity={node['node_maturity']}  "
+            f"discount_factor_maturity={node['discount_factor_maturity']}  "
+            f"maturity_match={node['maturity_match']}"
         )
     print("")
     print("Full report (paste back or attach either file):")
