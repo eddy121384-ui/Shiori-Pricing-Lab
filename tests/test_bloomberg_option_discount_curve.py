@@ -286,12 +286,21 @@ def test_rejects_a_duplicate_tenor():
         load_bloomberg_usd_sofr_option_discount_curve(tenors=("1Y", "1Y"))
 
 
-def test_rejects_a_malformed_tenor_before_any_bloomberg_request():
+@pytest.mark.parametrize("malformed_tenor", ["1D", "1w", "0W", "1Q", "1 W", "abc", "12 MO"])
+def test_rejects_a_malformed_tenor_before_any_bloomberg_request(malformed_tenor):
+    # No blpapi installed in this test process at all -- if this loader's
+    # own local acquisition-label validation did not fail closed before
+    # ever reaching Bloomberg, the lazy `import blpapi` a few lines later
+    # would raise a different error (or, worse, a fake session might be
+    # hit); "unsupported tenor label" proves rejection happens first, pre-DAPI.
     with pytest.raises(ValueError, match="unsupported tenor label"):
-        load_bloomberg_usd_sofr_option_discount_curve(tenors=("1W",))
+        load_bloomberg_usd_sofr_option_discount_curve(tenors=(malformed_tenor,))
 
 
 _EXPECTED_DEFAULT_USD_SOFR_TENORS = (
+    "1W",
+    "2W",
+    "3W",
     "1M",
     "2M",
     "3M",
@@ -325,24 +334,20 @@ _EXPECTED_DEFAULT_USD_SOFR_TENORS = (
 
 
 def test_default_tenors_are_eddys_workstation_verified_curve_490_universe():
-    # Pinned exactly to the 29 M/Y tenors of Eddy's 32-tenor Bloomberg
-    # Curve Construction export -- "1W"/"2W"/"3W" are deliberately not
-    # here yet (see test_default_tenors_deliberately_exclude_week_tenors
-    # below), and "1Y" is kept rather than the export's own "12 MO"
+    # Pinned exactly to the full 32-tenor Bloomberg Curve Construction
+    # export (Issue #165 tenor decoupling restored "1W"/"2W"/"3W" to the
+    # default), and "1Y" is kept rather than the export's own "12 MO"
     # spelling (Eddy separately confirmed the "1Y" ticker resolves).
     assert DEFAULT_USD_SOFR_TENORS == _EXPECTED_DEFAULT_USD_SOFR_TENORS
-    assert len(DEFAULT_USD_SOFR_TENORS) == 29
+    assert len(DEFAULT_USD_SOFR_TENORS) == 32
 
 
-def test_default_tenors_deliberately_exclude_week_tenors():
-    # tenor_to_year_fraction (the shared, previously-reviewed
-    # curve-coordinate parser this loader validates every tenor against)
-    # does not accept week tenors -- including them in the default would
-    # make the loader's own default raise before any Bloomberg request is
-    # sent. This is a deliberate, reported gap, not an oversight.
-    assert "1W" not in DEFAULT_USD_SOFR_TENORS
-    assert "2W" not in DEFAULT_USD_SOFR_TENORS
-    assert "3W" not in DEFAULT_USD_SOFR_TENORS
+def test_default_tenors_include_the_literal_week_labels_first():
+    # "1W"/"2W"/"3W" are restored to the default, in that literal Bloomberg
+    # spelling -- never a substituted "7D"/"14D"/"21D" day-count label.
+    assert DEFAULT_USD_SOFR_TENORS[:3] == ("1W", "2W", "3W")
+    for substituted in ("7D", "14D", "21D"):
+        assert substituted not in DEFAULT_USD_SOFR_TENORS
 
 
 def test_default_tenors_use_1y_never_the_derived_12m_spelling():
@@ -350,12 +355,42 @@ def test_default_tenors_use_1y_never_the_derived_12m_spelling():
     assert "12M" not in DEFAULT_USD_SOFR_TENORS
 
 
-def test_an_explicit_week_tenor_still_fails_closed_not_silently_substituted():
-    # Confirms this loader does not invent a "7D"-style substitute for a
-    # week tenor even when a caller asks for one explicitly -- the same
-    # ValueError every other unsupported tenor label already raises.
+def test_week_tenor_ticker_builders_preserve_the_literal_bloomberg_label():
+    # The loader-local acquisition validator never rewrites a week label --
+    # the built ticker carries the exact "1W"/"2W"/"3W" text Eddy's export
+    # named, never a converted day-count spelling.
+    assert build_zero_rate_ticker("0490", "1W") == "S0490Z 1W BLC2 Curncy"
+    assert build_discount_factor_ticker("0490", "2W") == "S0490D 2W BLC2 Curncy"
+    assert build_zero_rate_ticker("0490", "3W") == "S0490Z 3W BLC2 Curncy"
+
+
+def test_a_week_tenor_passes_loader_validation_and_reaches_bloomberg(monkeypatch):
+    # "1W" is now a valid acquisition label (Issue #165 tenor decoupling) --
+    # it must pass this loader's own pre-DAPI validation and actually reach
+    # the (faked) Bloomberg request, unlike a genuinely malformed label.
+    zero_1w = "S0490Z 1W BLC2 Curncy"
+    df_1w = "S0490D 1W BLC2 Curncy"
+    records = [
+        _security_record(security=zero_1w, last_price="1.50", maturity="2026-08-18"),
+        _security_record(security=df_1w, last_price="0.9997", maturity="2026-08-18"),
+    ]
+    holder = _install_fake_blpapi(monkeypatch, events=[_response_event(records)])
+
+    result = load_bloomberg_usd_sofr_option_discount_curve(tenors=("1W",))
+
+    assert holder["session"].last_request.securities == [zero_1w, df_1w]
+    assert result.curve_points[0].tenor == "1W"
+    assert result.curve_points[0].maturity_date == "2026-08-18"
+
+
+def test_shared_pricing_tenor_parser_still_rejects_1w():
+    # Pin: the shared, previously-reviewed pricing/bli_curve_tenor.py
+    # parser is unmodified by Issue #165's tenor decoupling -- it must
+    # keep rejecting "1W" exactly as before. Live pricing of a
+    # week-labelled Bloomberg node never depends on this parser accepting
+    # "1W" -- see test_bli_zero_curve_nodes.py's own pin for that.
     with pytest.raises(ValueError, match="unsupported tenor label"):
-        load_bloomberg_usd_sofr_option_discount_curve(tenors=("1W",))
+        tenor_to_year_fraction("1W")
 
 
 # --- ticker construction ------------------------------------------------------------
@@ -1058,20 +1093,22 @@ def test_non_finite_discount_factor_fails_closed(monkeypatch):
         load_bloomberg_usd_sofr_option_discount_curve(tenors=_MULTI_TENOR_LABELS)
 
 
-# --- DEFAULT_USD_SOFR_TENORS full-set coverage (Issue #165 full-curve expansion) ----
+# --- DEFAULT_USD_SOFR_TENORS full-set coverage (Issue #165 tenor decoupling) ----
 #
 # Exercises the loader against its own real, workstation-verified default
-# tenor tuple (29 tenors -- see the module docstring for the "1W"/"2W"/"3W"
-# exclusion) rather than a smaller synthetic subset. Rates/DFs are still
-# synthetic fixture values (never claimed as real Bloomberg observations);
-# maturities are generated deterministically from each tenor's own
-# tenor_to_year_fraction so they are always self-consistent (strictly
-# increasing in the same order as DEFAULT_USD_SOFR_TENORS itself).
+# tenor tuple (all 32 tenors, "1W"/"2W"/"3W" included) rather than a smaller
+# synthetic subset. Rates/DFs are still synthetic fixture values (never
+# claimed as real Bloomberg observations); maturities are generated
+# deterministically from each tenor's own nominal calendar-day order key
+# (module._validate_bloomberg_tenor_label -- tenor_to_year_fraction cannot
+# be used here since it still rejects "1W"/"2W"/"3W" by design) so they are
+# always self-consistent (strictly increasing in the same order as
+# DEFAULT_USD_SOFR_TENORS itself).
 
 
 def _default_tenor_maturity(tenor: str) -> str:
     epoch = date(2026, 8, 1)
-    days = round(tenor_to_year_fraction(tenor) * 365.0)
+    days = module._validate_bloomberg_tenor_label(tenor)
     return (epoch + timedelta(days=days)).isoformat()
 
 
@@ -1111,19 +1148,19 @@ def test_default_tenor_set_generates_all_58_expected_z_and_d_tickers(monkeypatch
             build_discount_factor_ticker(USD_SOFR_BLOOMBERG_CURVE_NUMBER, tenor),
         )
     ]
-    assert len(expected_securities) == 58
+    assert len(expected_securities) == 64
     assert holder["session"].last_request.securities == expected_securities
-    # Every one of the 58 tickers carries the approved S0490Z/S0490D grammar.
+    # Every one of the 64 tickers carries the approved S0490Z/S0490D grammar.
     for security in expected_securities:
         assert security.startswith(("S0490Z ", "S0490D "))
         assert security.endswith(" BLC2 Curncy")
 
 
-def test_default_tenor_set_produces_29_curve_points_and_29_evidence_records(monkeypatch):
+def test_default_tenor_set_produces_32_curve_points_and_32_evidence_records(monkeypatch):
     _install_fake_blpapi(monkeypatch, events=[_response_event(_default_tenor_records())])
 
     result = load_bloomberg_usd_sofr_option_discount_curve(tenors=DEFAULT_USD_SOFR_TENORS)
 
-    assert len(result.curve_points) == 29
-    assert len(result.discount_factor_evidence) == 29
+    assert len(result.curve_points) == 32
+    assert len(result.discount_factor_evidence) == 32
     assert {p.tenor for p in result.curve_points} == set(DEFAULT_USD_SOFR_TENORS)

@@ -220,6 +220,28 @@ def test_explicit_date_node_uses_the_actual_date_not_the_nominal_tenor_fraction(
     assert nodes[0].source_maturity_date == "2028-08-01"
 
 
+def test_week_labelled_explicit_maturity_node_prices_from_its_own_date(monkeypatch):
+    # Pin (Issue #165 tenor decoupling): pricing/bli_curve_tenor.py::
+    # tenor_to_year_fraction still rejects "1W" -- it is deliberately never
+    # widened. A Bloomberg-sourced week-labelled BLICurvePoint must still
+    # price correctly because it always carries its own explicit
+    # maturity_date, so this path never calls tenor_to_year_fraction on
+    # "1W" at all. Monkeypatching tenor_to_year_fraction to always raise
+    # proves this node's coordinate never touches that function.
+    monkeypatch.setattr(
+        bli_zero_curve_nodes_module,
+        "tenor_to_year_fraction",
+        lambda tenor: (_ for _ in ()).throw(ValueError(f"unsupported tenor label: {tenor!r}")),
+    )
+    point = _point(tenor="1W", maturity_date="2026-08-08")
+
+    nodes = build_continuous_zero_curve_nodes((point,), as_of_date="2026-08-01")
+
+    assert nodes[0].source_tenor == "1W"
+    assert nodes[0].year_fraction == pytest.approx(7 / 365.0)
+    assert nodes[0].source_maturity_date == "2026-08-08"
+
+
 def test_legacy_tenor_only_node_is_unaffected_by_as_of_date_being_supplied():
     point = _point(tenor="2Y")  # maturity_date defaults to None
 

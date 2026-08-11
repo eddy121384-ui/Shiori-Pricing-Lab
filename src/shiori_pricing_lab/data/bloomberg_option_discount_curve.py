@@ -48,44 +48,47 @@ here and require a separate, later slice.
 **Explicit tenor set, never guessed.** ``tenors`` is a caller-supplied
 sequence of tenor labels (default: ``DEFAULT_USD_SOFR_TENORS``). This
 module never generates, extrapolates, or guesses a tenor; every tenor
-requested is exactly one Eddy named, validated against the existing,
-reviewed ``pricing/bli_curve_tenor.py::tenor_to_year_fraction`` grammar
-before any Bloomberg request is sent.
+requested is exactly one Eddy named, validated against this module's own
+``_validate_bloomberg_tenor_label`` grammar before any Bloomberg request
+is sent (see the "Acquisition-label validation/order is decoupled from
+pricing's tenor parser" section below).
 
-**Full-curve tenor universe (Issue #165 full-curve expansion, applying
-Eddy's workstation-verified evidence).** Eddy supplied Bloomberg's own
-Curve #490 Curve Construction export naming its full tenor universe.
-That export's ``USOSFR*`` rows are the *construction* route's OIS swap
-*input* instruments -- never ingested or referenced by this module, only
-read as evidence for which tenor labels the curve actually has. Of the
-32 tenors that export names, ``DEFAULT_USD_SOFR_TENORS`` below carries
-**29**: every ``M``/``Y`` tenor, using ``"1Y"`` rather than the export's
-``"12 MO"`` spelling (Eddy separately, directly confirmed
-``S0490Z 1Y BLC2 Curncy``/``S0490D 1Y BLC2 Curncy`` resolve -- that proven
-spelling is kept, never replaced with a derived ``"12M"``).
+**Full-curve tenor universe (Issue #165 tenor decoupling, applying Eddy's
+workstation-verified evidence).** Eddy supplied Bloomberg's own Curve #490
+Curve Construction export naming its full tenor universe. That export's
+``USOSFR*`` rows are the *construction* route's OIS swap *input*
+instruments -- never ingested or referenced by this module, only read as
+evidence for which tenor labels the curve actually has.
+``DEFAULT_USD_SOFR_TENORS`` below now carries all **32** of that export's
+tenors, ``"1W"``/``"2W"``/``"3W"`` included, using ``"1Y"`` rather than the
+export's own ``"12 MO"`` spelling for the one-year point (Eddy separately,
+directly confirmed ``S0490Z 1Y BLC2 Curncy``/``S0490D 1Y BLC2 Curncy``
+resolve -- that proven spelling is kept, never replaced with a derived
+``"12M"``).
 
-**Deliberately excluded from the default for now: ``"1W"``/``"2W"``/
-``"3W"``.** Eddy's export confirms Curve #490 has three week-denominated
-short-end tenors, but ``pricing/bli_curve_tenor.py::tenor_to_year_fraction``
--- the existing, shared, previously-reviewed curve-coordinate parser this
-loader calls to validate every tenor *before any Bloomberg request is
-sent*, and that every other consumer of ``BLICurvePoint.tenor`` in this
-codebase also relies on -- explicitly does not accept week tenors (see
-that module's own docstring: "no other tenor vocabulary (week tenors,
-...)"). Setting the default to include them as-is would make the
-loader's own default raise immediately, before ever reaching Bloomberg.
-This module does not invent a workaround (e.g. silently substituting
-``"7D"``, which is both an unconfirmed Bloomberg ticker spelling and a
-mismatch between the requested security and the stored ``tenor``) and
-does not silently extend the shared parser's own vocabulary on this
-loader's behalf -- extending week-tenor support in
-``tenor_to_year_fraction`` is a separate, not-yet-authorized decision
-that touches every other consumer of that module, not just this one.
-A caller who explicitly passes ``tenors=("1W", ...)`` today gets the
-same ``ValueError: unsupported tenor label`` this loader has always
-raised for any tenor ``tenor_to_year_fraction`` rejects -- this is not a
-new restriction, only the still-open reason the *default* cannot include
-them yet either.
+**Acquisition-label validation/order is decoupled from pricing's tenor
+parser.** ``pricing/bli_curve_tenor.py::tenor_to_year_fraction`` -- the
+existing, shared, previously-reviewed curve-coordinate parser every other
+consumer of ``BLICurvePoint.tenor`` in this codebase relies on --
+deliberately does not accept week tenors (see that module's own
+docstring: "no other tenor vocabulary (week tenors, ...)"), and Issue #165
+does not widen that shared parser's vocabulary; doing so would touch every
+other consumer of that module, not just this one. Instead, every tenor
+label this loader is asked to acquire from Bloomberg -- including
+``"1W"``/``"2W"``/``"3W"`` -- is validated and ordered by this module's own
+:func:`_validate_bloomberg_tenor_label`, a small, loader-local, strict
+``<int>W``/``<int>M``/``<int>Y`` grammar that exists purely for
+acquisition-time validation and Bloomberg-request ordering. It never
+computes a year fraction and is never imported by, or substituted into,
+``tenor_to_year_fraction`` or any pricing module. Every week-labelled node
+this loader returns still prices entirely from its own Bloomberg-returned
+``maturity_date`` -- ``pricing/bli_zero_curve_nodes.py`` never calls
+``tenor_to_year_fraction`` on a row that carries an explicit
+``maturity_date`` (see that module's own docstring), so ``tenor_to_year_
+fraction`` continuing to reject ``"1W"`` never blocks live pricing of a
+Bloomberg-sourced week-labelled node. The literal Bloomberg label
+(``"1W"``, never a substituted ``"7D"``) is preserved verbatim on both the
+built ticker and the returned ``BLICurvePoint.tenor``.
 
 **Fields requested: exactly ``LAST_PRICE`` and ``MATURITY``, for both the
 ``Z`` and ``D`` synthetic security at every requested tenor**, in one
@@ -141,7 +144,7 @@ offending security/tenor:**
 - two different tenors whose ``Z`` security resolves to the same
   ``MATURITY`` (duplicate curve node date);
 - a ``Z`` ``MATURITY`` that does not strictly increase, in ascending
-  ``tenor_to_year_fraction`` order, from one tenor to the next
+  ``_validate_bloomberg_tenor_label`` order, from one tenor to the next
   (non-increasing curve node date);
 - a converted zero rate that is not finite;
 - a discount factor that is not finite or not strictly positive.
@@ -171,6 +174,7 @@ base class, factory, registry, cache, or configuration framework.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -192,7 +196,6 @@ from shiori_pricing_lab.data.bloomberg_bond_quote import (
     _get_element_as_string,
     _parse_finite_float,
 )
-from shiori_pricing_lab.pricing.bli_curve_tenor import tenor_to_year_fraction
 from shiori_pricing_lab.products.enums import Currency
 
 _LAST_PRICE_FIELD = "LAST_PRICE"
@@ -212,17 +215,74 @@ USD_SOFR_CURVE_ID = "USD_SOFR_OPTION_DISCOUNT_CURVE"
 USD_SOFR_CURVE_NAME = "USD SOFR Option Discount Curve (Bloomberg Curve #490)"
 USD_SOFR_SOURCE_SYSTEM = "BLOOMBERG_DAPI"
 
+# Bloomberg-loader-local strict acquisition-label grammar (Issue #165 tenor
+# decoupling). Accepts exactly `<positive integer><W|M|Y>` -- Bloomberg's
+# own Curve #490 short/belly/long-end vocabulary -- and nothing else. This
+# is deliberately separate from `pricing/bli_curve_tenor.py::
+# tenor_to_year_fraction` (which accepts D/M/Y, never W, and is never
+# touched by Issue #165): this grammar exists only to validate/order
+# labels before/while building Bloomberg requests, never to compute a
+# year fraction or feed pricing math. Every Bloomberg-sourced BLICurvePoint
+# always carries its own Bloomberg-returned maturity_date, so live pricing
+# (pricing/bli_zero_curve_nodes.py) prices every node -- week-labelled or
+# not -- from that date directly and never calls tenor_to_year_fraction on
+# it.
+_BLOOMBERG_TENOR_LABEL_SHAPE = re.compile(r"(?P<value>[1-9][0-9]*)(?P<unit>[WMY])")
+
+# Nominal calendar-day multiplier per unit, used only to rank acquisition
+# labels against each other in approximate calendar order (e.g. so "18M"
+# ranks after "1Y", not before it merely because "M" < "Y"). This is a
+# coarse, W=7/M=30/Y=365 ordering convenience -- not a day-count
+# convention, never used as a time-to-expiry or year-fraction value, and
+# never fed to pricing (which always uses the node's own Bloomberg-returned
+# maturity_date, never this ranking).
+_BLOOMBERG_TENOR_UNIT_NOMINAL_DAYS = {"W": 7, "M": 30, "Y": 365}
+
+
+def _validate_bloomberg_tenor_label(tenor: str) -> int:
+    """Validate a strict Bloomberg acquisition tenor label; return its order key.
+
+    Accepts exactly a positive integer followed by ``W``/``M``/``Y`` (e.g.
+    ``"1W"``, ``"18M"``, ``"50Y"``) -- no whitespace, no lowercase, no
+    zero/negative values, no other unit (``D`` included -- Bloomberg's own
+    Curve #490 export never uses day tenors). Raises ``ValueError`` with
+    the same ``"unsupported tenor label"`` message
+    ``tenor_to_year_fraction`` raises for its own rejections, so every
+    caller of this loader sees one consistent error shape regardless of
+    which parser rejected the label.
+
+    The returned integer is ``value * nominal_days_per_unit`` (``W=7``,
+    ``M=30``, ``Y=365``) -- a coarse, monotonic acquisition-ordering key,
+    correct for every label in ``DEFAULT_USD_SOFR_TENORS`` (e.g. it orders
+    ``"18M"`` after ``"1Y"``, and ``"3W"`` before ``"1M"``). It is a
+    label-ordering convenience only, never a year fraction or day-count --
+    never compared against, mixed with, or substituted for
+    ``tenor_to_year_fraction``'s own output.
+    """
+
+    if not isinstance(tenor, str):
+        raise ValueError(f"unsupported tenor label: {tenor!r}")
+    match = _BLOOMBERG_TENOR_LABEL_SHAPE.fullmatch(tenor)
+    if not match:
+        raise ValueError(f"unsupported tenor label: {tenor!r}")
+    value = int(match.group("value"))
+    unit = match.group("unit")
+    return value * _BLOOMBERG_TENOR_UNIT_NOMINAL_DAYS[unit]
+
+
 # Eddy's own workstation-verified Curve #490 tenor universe (Bloomberg's
-# Curve Construction export), 29 of its 32 tenors -- every M/Y tenor,
-# "1Y" kept in place of the export's "12 MO" spelling (Eddy directly
-# confirmed the "1Y" ticker spelling resolves; never replaced with a
-# derived "12M"). "1W"/"2W"/"3W" are deliberately not in this default --
-# see the module docstring's "Deliberately excluded" section: the shared
-# tenor_to_year_fraction parser does not accept week tenors yet, and this
-# module does not silently extend that parser or substitute a guessed
-# spelling on its behalf. Override with an explicit tenors= argument for
-# any other tenor (that parser's own grammar still applies to it).
+# Curve Construction export), all 32 tenors -- "1W"/"2W"/"3W" restored
+# (Issue #165 tenor decoupling) now that this module validates/orders
+# acquisition labels via its own local `_validate_bloomberg_tenor_label`
+# rather than the shared `tenor_to_year_fraction`. "1Y" is kept in place
+# of the export's "12 MO" spelling (Eddy directly confirmed the "1Y"
+# ticker spelling resolves; never replaced with a derived "12M"). Override
+# with an explicit tenors= argument for any other tenor (this loader's own
+# grammar still applies to it).
 DEFAULT_USD_SOFR_TENORS: tuple[str, ...] = (
+    "1W",
+    "2W",
+    "3W",
     "1M",
     "2M",
     "3M",
@@ -266,8 +326,8 @@ def build_zero_rate_ticker(curve_number: str, tenor: str) -> str:
     Pure string construction from Eddy's own confirmed grammar -- never a
     guess. ``curve_number``/``tenor`` are used verbatim, with no format
     validation beyond simple substitution (callers validate ``tenor``
-    themselves via ``tenor_to_year_fraction`` before this is used to build
-    a request).
+    themselves via ``_validate_bloomberg_tenor_label`` before this is used
+    to build a request).
     """
 
     return f"S{curve_number}Z {tenor} {_TICKER_SUFFIX}"
@@ -303,7 +363,7 @@ class BloombergUsdSofrOptionDiscountCurveResult:
 
     ``curve_points`` are ready-to-use ``OPTION_DISCOUNT_CURVE``/
     ``CONTINUOUS_ZERO_RATE`` rows (see the module docstring's rate-basis
-    decision), sorted by ascending ``tenor_to_year_fraction``.
+    decision), sorted by ascending ``_validate_bloomberg_tenor_label`` order.
     ``discount_factor_evidence`` is the same-length, same-order ``D``-ticker
     evidence -- present for cross-check only.
     """
@@ -318,9 +378,9 @@ def load_bloomberg_usd_sofr_option_discount_curve(
     """Load a live Bloomberg Curve #490 USD SOFR option discount curve.
 
     ``tenors`` must be a non-empty sequence of distinct, non-blank tenor
-    labels, each accepted by ``tenor_to_year_fraction`` -- validated before
-    any Bloomberg request is sent, so a malformed tenor never reaches
-    Bloomberg at all. Defaults to ``DEFAULT_USD_SOFR_TENORS``.
+    labels, each accepted by ``_validate_bloomberg_tenor_label`` --
+    validated before any Bloomberg request is sent, so a malformed tenor
+    never reaches Bloomberg at all. Defaults to ``DEFAULT_USD_SOFR_TENORS``.
 
     Raises ``ValueError`` for a caller-input problem (empty/duplicate/
     malformed tenor). Raises ``BLIBloombergDapiError`` for every
@@ -340,7 +400,7 @@ def load_bloomberg_usd_sofr_option_discount_curve(
         if tenor in seen_tenors:
             raise ValueError(f"duplicate tenor {tenor!r} in tenors")
         seen_tenors.add(tenor)
-        tenor_to_year_fraction(tenor)  # fail closed on a malformed tenor label
+        _validate_bloomberg_tenor_label(tenor)  # fail closed on a malformed tenor label
 
     try:
         import blpapi
@@ -489,7 +549,7 @@ def load_bloomberg_usd_sofr_option_discount_curve(
 
     curve_points: list[BLICurvePoint] = []
     evidence: list[BloombergDiscountFactorEvidence] = []
-    node_maturities: list[tuple[float, str, date]] = []
+    node_maturities: list[tuple[int, str, date]] = []
 
     for tenor in tenors:
         zero_security = zero_rate_tickers[tenor]
@@ -526,8 +586,8 @@ def load_bloomberg_usd_sofr_option_discount_curve(
                 "Z and D do not evidence the same curve node"
             )
 
-        year_fraction = tenor_to_year_fraction(tenor)
-        node_maturities.append((year_fraction, tenor, zero_maturity_date))
+        order_key = _validate_bloomberg_tenor_label(tenor)
+        node_maturities.append((order_key, tenor, zero_maturity_date))
 
         curve_points.append(
             BLICurvePoint(
@@ -557,7 +617,7 @@ def load_bloomberg_usd_sofr_option_discount_curve(
     seen_maturity_dates: dict[date, str] = {}
     previous_maturity_date: date | None = None
     previous_tenor: str | None = None
-    for _year_fraction, tenor, maturity_date in ordered:
+    for _order_key, tenor, maturity_date in ordered:
         if maturity_date in seen_maturity_dates:
             raise BLIBloombergDapiError(
                 f"Bloomberg DAPI returned the same MATURITY {maturity_date.isoformat()!r} "

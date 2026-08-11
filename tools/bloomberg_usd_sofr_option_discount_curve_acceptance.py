@@ -5,9 +5,11 @@ Bounded, read-only workstation diagnostic CLI -- **not** part of the
 production pricing path, and never imported by it. Calls the production
 loader directly, ``src/shiori_pricing_lab/data/bloomberg_option_discount_
 curve.py::load_bloomberg_usd_sofr_option_discount_curve``, with its default
-tenor set -- ``DEFAULT_USD_SOFR_TENORS``, the 29-tenor workstation-verified
-Curve #490 universe (Issue #165 full-curve expansion; see that module's own
-docstring for the ``"1W"``/``"2W"``/``"3W"`` exclusion).
+tenor set -- ``DEFAULT_USD_SOFR_TENORS``, the full 32-tenor
+workstation-verified Curve #490 universe, ``"1W"``/``"2W"``/``"3W"``
+included (Issue #165 tenor decoupling; see that module's own docstring for
+how acquisition-label validation/order is kept separate from
+``pricing/bli_curve_tenor.py``).
 
 **Purpose.** Let Eddy run the production ingestion path once on his own
 Bloomberg workstation and see, side by side: each generated curve node's
