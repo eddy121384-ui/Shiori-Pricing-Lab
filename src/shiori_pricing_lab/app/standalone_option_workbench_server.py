@@ -53,7 +53,13 @@ the browser holds whichever case is currently active and resends it):
   ``/api/base``/``/api/price``. Any decode, parse, or schema/builder failure
   returns HTTP 400 with ``{"error": "..."}``. The uploaded bytes are never
   written to disk and no client-supplied file path is ever read or echoed
-  back -- only the file's content matters.
+  back -- only the file's content matters. **Issue #171:** a case with no
+  manually-entered ``curve_points`` gets the live Bloomberg Curve #490
+  Option Discount Curve injected before pricing (see
+  ``inject_live_option_discount_curve_if_absent``); a case that already
+  carries explicit curve nodes is priced exactly as before, and a Bloomberg
+  or same-as-of failure returns HTTP 400 with no manual/sample/stale
+  fallback.
 - ``POST /api/case/price`` -- body is ``{"case": <full case>, "overlay":
   <6-field dict>}``. Applies the overlay to a fresh copy of the given
   ``case`` (never the bundled one) and prices it, returning the display
@@ -66,7 +72,12 @@ the browser holds whichever case is currently active and resends it):
   typed builder accepts the draft, and ``{"ready": false, "error": "..."}``
   -- also HTTP 200 -- when it does not, carrying that exception's own
   message verbatim. This is what decides whether the browser's Price button
-  is enabled, so a merely non-blank form can never enable it.
+  is enabled, so a merely non-blank form can never enable it. **Issue #171:**
+  an empty ``curve_points`` (the live-Workbench-flow shape) is validated
+  against a wide, non-Bloomberg placeholder curve instead of the real
+  production one (see ``_validation_only_placeholder_curve_points``) --
+  still no Bloomberg call and no clock read here; the real curve is only
+  fetched, and only actually enforced, when the trader clicks Price.
 - ``POST /api/export/json`` / ``POST /api/export/markdown`` -- body is
   ``{"display": <the already-computed display dict>}``. Returns
   ``{"content": <text>, "filename": ..., "mime": ...}`` where ``content`` is
@@ -90,18 +101,22 @@ the browser holds whichever case is currently active and resends it):
   instead of assembling one. Any validation, date, Bloomberg DAPI, or builder
   failure returns HTTP 400 with ``{"error": "..."}`` -- the case's own
   previous bond quote is never used as a fallback, and this route reprices
-  fresh from Bloomberg every call (no cache, no polling).
+  fresh from Bloomberg every call (no cache, no polling). **Issue #171:**
+  the overlaid case gets the same live Curve #490 injection as ``POST
+  /api/case`` above, applied before the bond-quote refresh.
 
-**Trader-draft revision.** ``GET /api/base`` and ``POST /api/case`` are kept
-unchanged for automated regression and developer use only -- the trader-facing
-``index.html``/``script.js`` no longer calls either on load or expose a
-"Load Case JSON" control. The normal trader workflow now starts with no
-active case at all; a successful ``POST /api/bloomberg/bond`` lookup below
-seeds an in-memory draft client-side (the bundled synthetic base case is
-never copied into it), and completing that draft still goes through
-``POST /api/case`` (reused, unmodified) once the trader has filled in every
-required field, since that route already validates and prices a full case
-dict exactly like this one.
+**Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
+regression and developer use only -- the trader-facing ``index.html``/
+``script.js`` no longer calls it on load or expose a "Load Case JSON"
+control. The normal trader workflow now starts with no active case at all;
+a successful ``POST /api/bloomberg/bond`` lookup below seeds an in-memory
+draft client-side (the bundled synthetic base case is never copied into it,
+and its ``curve_points`` start empty), and completing that draft still goes
+through ``POST /api/case`` once the trader has filled in every required
+field other than the Option Discount Curve, since that route already
+validates and prices a full case dict exactly like this one -- now also
+injecting the live production curve (Issue #171) rather than requiring the
+trader to key it manually.
 
 **Instrument-first Bloomberg lookup.** One more stateless route:
 
@@ -202,6 +217,7 @@ reprices from it, so results are always reproducible from
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -364,7 +380,16 @@ DEFAULT_PORT = 8765
 # is a real Bloomberg value instead of always None. A stale -v15 process
 # would still answer the route but every SWAP (Par Rate) cell would read
 # unavailable even though the loader now exists.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v16"
+#
+# Bumped to -v17 for Issue #171's live Option Discount Curve wiring: POST
+# /api/case and POST /api/case/bloomberg now inject the live Curve #490
+# curve whenever the trader has entered no manual nodes, and the served
+# script.js no longer blocks Price on an empty curve editor -- it treats
+# zero manually-entered nodes as "will be sourced live from Bloomberg" and
+# blocks only on a genuinely incomplete manual override. A stale -v16
+# process would still require the trader to type curve nodes by hand, and a
+# stale -v16 page would gate Price on that same now-removed requirement.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v17"
 
 
 def load_base_case() -> dict:
@@ -411,6 +436,130 @@ def price_overlay_case(overlay: dict) -> dict:
     return display
 
 
+# --- Issue #171: live Bloomberg Option Discount Curve wiring --------------------
+#
+# Wires the existing production Curve #490 loader
+# (``load_bloomberg_usd_sofr_option_discount_curve``, Issue #165/#166) directly
+# into the normal Bloomberg-backed Workbench pricing routes (``POST /api/case``,
+# ``POST /api/case/bloomberg``) so a Trader no longer has to key Option Discount
+# Curve nodes manually. This performs no curve construction, bootstrap, or
+# rate-basis conversion of its own -- it only places the loader's own
+# ``BLICurvePoint`` rows (``OPTION_DISCOUNT_CURVE`` / ``CONTINUOUS_ZERO_RATE``,
+# Bloomberg's own ``MATURITY`` preserved verbatim) into the same
+# ``curve_points`` case-envelope field ``build_request_from_standalone_option_case``
+# already parses -- the exact same contract a trader's manually-typed node or a
+# test fixture already uses, never a second/parallel curve representation.
+#
+# **Trigger: an empty ``curve_points`` list only.** A fresh trader draft
+# (``buildInitialDraftFromBloomberg`` in script.js) always starts with
+# ``curve_points: []`` -- the manual node editor is optional, not required --
+# so an empty list is exactly the live-Workbench-flow signal: the trader
+# supplied no override, so the verified Bloomberg production curve is used.
+# Any case that already carries explicit curve nodes (a manual trader
+# override, or an existing deterministic/API test fixture) is left completely
+# untouched: this is what keeps every pre-#171 test and every pre-#171
+# fixture-based route call byte-for-byte unchanged, and it is also what keeps
+# a manual override from being silently discarded once the trader has
+# deliberately entered one.
+#
+# **RED-gate same-as-of contract (Issue #171 explicit audit requirement).**
+# Curve #490 is a live, point-in-time observation with no historical query --
+# there is no way to ask it for "the curve as of last Tuesday". Downstream,
+# ``pricing/bli_zero_curve_nodes.py`` already prices a Bloomberg-sourced
+# ``maturity_date`` row using the *request's* ``valuation_date`` as the curve's
+# ``as_of_date`` (Issue #165 P1 follow-up, unchanged here) -- so pairing a
+# curve fetched *now* with a ``valuation_date`` that is not *today* would
+# silently misdate every discount factor the curve produces, exactly the
+# failure mode Issue #171 named as a stop condition. This module already has
+# an approved precedent for exactly this class of problem:
+# ``price_standalone_option_case_with_bloomberg_quote`` requires its freshly
+# acquired bond quote's acquisition date to equal ``valuation_date`` (the
+# existing, unmodified ``pricing_timestamp.date() != valuation_date`` builder
+# invariant). ``_require_valuation_date_matches_today`` below applies that
+# same acquisition-date-must-equal-valuation_date discipline to the live
+# curve fetch, using the same platform clock read
+# (``_shiori_acquisition_now``) already defined in this module -- it never
+# invents a curve date, never substitutes the system date for
+# ``valuation_date``, and never weakens the existing explicit-date node
+# contract; it only refuses to pair *today's* curve with a *different*
+# ``valuation_date``, failing closed with a clear message rather than pricing
+# silently against a mismatched as-of.
+#
+# **Fail closed.** Both ``load_bloomberg_usd_sofr_option_discount_curve`` and
+# ``_require_valuation_date_matches_today`` raise on any problem
+# (``BLIBloombergDapiError`` / ``ValueError``) -- neither is caught here, so
+# the existing HTTP handlers' own broad ``except Exception`` -> HTTP 400
+# already used by every other error case in these two routes reports it, and
+# pricing never proceeds with old/manual/sample/stale curve data.
+
+
+def _require_valuation_date_matches_today(valuation_date: object) -> None:
+    """Raise ``ValueError`` unless ``valuation_date`` is today's local date.
+
+    See the module-level "RED-gate same-as-of contract" note above. Reads the
+    clock exactly once, via :func:`_shiori_acquisition_now` (this module's
+    own, already-reviewed platform-clock seam -- monkeypatched directly by
+    tests, so no real clock is read in CI). ``valuation_date`` is compared as
+    a plain string; a missing/non-string value simply fails the equality
+    check and is reported the same way, since the envelope parser rejects a
+    missing ``valuation_date`` on its own regardless.
+    """
+
+    today = _shiori_acquisition_now().date().isoformat()
+    if valuation_date != today:
+        raise ValueError(
+            "live Bloomberg Option Discount Curve pricing requires valuation_date "
+            f"({valuation_date!r}) to equal today's date ({today!r}) -- Bloomberg "
+            "Curve #490 is a live, point-in-time observation with no historical "
+            "query, so it cannot be paired with a different valuation_date; enter "
+            "Option Discount Curve nodes manually to price a non-current "
+            "valuation_date"
+        )
+
+
+def _live_option_discount_curve_points_as_dicts() -> list[dict]:
+    """Fetch the live Curve #490 zero-rate nodes as case-JSON-shaped dicts.
+
+    Calls the existing, unmodified ``load_bloomberg_usd_sofr_option_discount_curve``
+    exactly once, with its own default (full 32-tenor) universe -- never a
+    caller-narrowed subset. ``dataclasses.asdict`` round-trips each returned
+    ``BLICurvePoint`` into exactly the same field-name shape
+    ``build_request_from_standalone_option_case`` already parses
+    ``curve_points`` rows into via ``BLICurvePoint(**point)`` -- the same
+    typed contract a manually-typed node or a JSON fixture already uses, not
+    a second representation. Every field -- ``curve_purpose``,
+    ``rate_basis``, Bloomberg's own ``maturity_date``, source system,
+    provenance -- is preserved exactly as the loader returned it; this
+    function performs no filtering, conversion, or reordering of its own
+    (the loader itself already sorts and validates its returned tuple).
+    """
+
+    result = load_bloomberg_usd_sofr_option_discount_curve()
+    return [asdict(point) for point in result.curve_points]
+
+
+def inject_live_option_discount_curve_if_absent(case: dict) -> dict:
+    """Return ``case`` unchanged, or a copy with a live Curve #490 curve injected.
+
+    Triggered only when ``case["curve_points"]`` is falsy (missing or an
+    empty list) -- exactly the state of a fresh trader draft, and never the
+    state of a case that already carries explicit curve nodes (a manual
+    trader override, or an existing deterministic/API fixture), which is
+    returned completely untouched. See the module-level Issue #171 note
+    above for the full trigger/fail-closed rationale.
+
+    Raises whatever ``_require_valuation_date_matches_today`` or
+    ``load_bloomberg_usd_sofr_option_discount_curve`` itself raises -- never
+    caught or remapped here, and never any fallback to manual/sample/stale
+    curve data.
+    """
+
+    if case.get("curve_points"):
+        return case
+    _require_valuation_date_matches_today(case.get("valuation_date"))
+    return {**case, "curve_points": _live_option_discount_curve_points_as_dicts()}
+
+
 # --- Issue #138: Case JSON load and explicit-case pricing -----------------------
 
 
@@ -439,8 +588,17 @@ def price_uploaded_case(case: dict) -> dict:
     context extraction raise for a schema problem (missing/unknown
     top-level key, invalid nested field, no matching reference-data
     record, ...); never caught or remapped here.
+
+    **Issue #171:** before pricing, ``case`` passes through
+    :func:`inject_live_option_discount_curve_if_absent` -- a case with no
+    manually-entered ``curve_points`` gets the live Curve #490 curve injected
+    (fail-closed on any Bloomberg problem); a case that already carries
+    explicit curve nodes is priced exactly as before. The returned ``case``
+    reflects whichever happened, so a caller adopting it (as the trader-draft
+    browser flow does) sees the curve that was actually priced.
     """
 
+    case = inject_live_option_discount_curve_if_absent(case)
     _, _, display = price_standalone_option_case(case)
     return {
         "case": case,
@@ -448,6 +606,45 @@ def price_uploaded_case(case: dict) -> dict:
         "context": extract_standalone_option_case_context(case),
         "display": display,
     }
+
+
+def _validation_only_placeholder_curve_points(case: dict) -> list[dict]:
+    """Return a wide, deliberately fake curve for :func:`validate_case`'s
+    structural check only -- see that function's Issue #171 docstring note
+    for the full rationale. Never Bloomberg-sourced, never returned to a
+    caller, and never used to price anything: it exists only so the real
+    typed builder's ``curve_points`` non-empty check does not itself decide
+    readiness for the live Workbench flow, whose ``curve_points`` is
+    legitimately empty until the live curve is fetched at actual Price time.
+
+    Spans ``1D`` to ``50Y`` -- comfortably wider than the real 32-tenor
+    Curve #490 universe (``1W``-``50Y``) -- so it never itself becomes the
+    reason a structurally sound draft reads not-ready. ``currency`` is read
+    from ``case["bond_option"]["currency"]`` (the required standalone curve
+    purpose gate in ``bli_standalone_option_request.py`` requires the
+    Option Discount Curve in the *product's own* currency); a case whose
+    ``bond_option`` is not yet a well-formed mapping gets no placeholder at
+    all, so the original, more relevant build error surfaces unchanged.
+    """
+
+    bond_option = case.get("bond_option")
+    currency = bond_option.get("currency") if isinstance(bond_option, dict) else None
+    if not isinstance(currency, str) or not currency:
+        return []
+    return [
+        {
+            "curve_id": "SHIORI_VALIDATION_ONLY_PLACEHOLDER_CURVE",
+            "curve_name": "SHIORI_VALIDATION_ONLY_PLACEHOLDER_CURVE",
+            "currency": currency,
+            "curve_purpose": "OPTION_DISCOUNT_CURVE",
+            "tenor": tenor,
+            "rate": 0.03,
+            "rate_basis": "CONTINUOUS_ZERO_RATE",
+            "source_system": "SHIORI_VALIDATION_ONLY_PLACEHOLDER",
+            "status": "ACTIVE",
+        }
+        for tenor in ("1D", "50Y")
+    ]
 
 
 def validate_case(case: dict) -> dict:
@@ -468,9 +665,22 @@ def validate_case(case: dict) -> dict:
     ``{"ready": False, "error": <that exception's own message>}`` -- verbatim,
     never reinterpreted or replaced with a friendlier guess, so the browser
     shows the reviewed contract's own words.
+
+    **Issue #171:** an empty ``curve_points`` is the expected shape of a
+    live-Bloomberg-pending draft (the real curve is only fetched, from
+    Bloomberg, at actual Price time -- see
+    :func:`inject_live_option_discount_curve_if_absent`), so it must not by
+    itself make this readiness check fail. When ``case["curve_points"]`` is
+    empty, a copy with :func:`_validation_only_placeholder_curve_points`
+    substituted is what is actually built and discarded here -- the
+    caller's own ``case`` is never mutated, this route still makes no
+    Bloomberg call and reads no clock, and a case that already carries
+    explicit curve nodes is validated exactly as before.
     """
 
     try:
+        if isinstance(case, dict) and not case.get("curve_points"):
+            case = {**case, "curve_points": _validation_only_placeholder_curve_points(case)}
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -522,9 +732,17 @@ def price_case_with_bloomberg_quote(
     a blank security, invalid quote side, envelope/date problem, or
     Bloomberg DAPI failure -- never caught or remapped here, and the case's
     original bond quote is never used as a fallback.
+
+    **Issue #171:** the overlaid case also passes through
+    :func:`inject_live_option_discount_curve_if_absent`, exactly like
+    :func:`price_uploaded_case` -- see that function's docstring. This runs
+    before the bond-quote refresh below, so a live-curve same-as-of failure
+    (see ``_require_valuation_date_matches_today``) is reported without ever
+    calling the Bloomberg bond-quote loader.
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
+    overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case, bloomberg_security=bloomberg_security, quote_side=quote_side
     )

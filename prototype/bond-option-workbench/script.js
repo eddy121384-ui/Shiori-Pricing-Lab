@@ -257,11 +257,13 @@
     "EQUIVALENT_PRICE_VOL returned BAD_FLD. There is no confirmed " +
     "ReferenceData route for a direct price volatility on these securities.";
   const EVIDENCE_DISCOUNTING =
-    "Issue #149 / docs/bloomberg_ovme_source_mapping.md: no approved Bloomberg " +
-    "sourcing or curve-construction methodology exists. MMkt, repo, FTP, par and " +
-    "swap rates must not be relabelled as continuous zero rates, and the SWDF " +
-    "S490 stripped-zero route is only PARTIALLY_CONFIRMED, with compounding, " +
-    "interpolation and date treatment unverified.";
+    "Issue #165/#171: Bloomberg Curve #490's S0490Z continuous-zero-rate ticker " +
+    "is the approved live source, used automatically -- S0490D (discount factor) " +
+    "is cross-check evidence only and USOSFR* par/swap rates are Markets display " +
+    "only; neither ever enters pricing. A manual override, if entered, still " +
+    "requires genuine continuous zero rates: MMkt, repo, FTP, par and swap rates " +
+    "must not be relabelled as continuous zero rates, and the SWDF S490 " +
+    "stripped-zero route remains only PARTIALLY_CONFIRMED and unused.";
   const EVIDENCE_BOND_REFERENCE =
     "Issue #149 workstation run: DAY_CNT_DES = ACT/ACT, DAY_CNT = 1, " +
     "SECURITY_TYP distinguishes US GOVERNMENT / UK GILT STOCK, CPN_TYP = FIXED " +
@@ -882,18 +884,21 @@
       locator: "#curve-rows .curve-tenor-input",
       revealAdvanced: true,
       unresolved: {
-        title: "Option Discount Curve has no approved Bloomberg source",
+        title: "Manual Option Discount Curve override is incomplete",
         missing:
-          "Continuous-zero-rate nodes covering the Reporting Date and the Option " +
-          "Settlement Date.",
+          "Either no manual override (Bloomberg's live Curve #490 is used " +
+          "automatically), or a complete manual override: continuous-zero-rate " +
+          "nodes covering the Reporting Date and the Option Settlement Date.",
         why:
-          "No approved Bloomberg sourcing or curve-construction methodology " +
-          "exists for the Option Discount Curve.",
+          "A manual override that has been started but not finished blocks " +
+          "pricing rather than being silently dropped or silently completed " +
+          "with the live curve instead.",
         evidence: EVIDENCE_DISCOUNTING,
         next:
-          "Open Advanced and enter genuine continuously-compounded zero rates. " +
-          "Shiori interpolates in range only and never bootstraps, converts or " +
-          "extrapolates a curve.",
+          "Finish the manual override (genuine continuously-compounded zero " +
+          "rates; Shiori interpolates in range only and never bootstraps, " +
+          "converts or extrapolates a curve), or remove every row so the live " +
+          "Bloomberg Curve #490 is used instead.",
       },
     },
     {
@@ -1686,10 +1691,24 @@
           "decimal continuous zero rate.",
       };
     }
+    // Issue #171: no manual override entered at all is not a blocker -- the
+    // live Bloomberg USD SOFR Option Discount Curve (Curve #490) is sourced
+    // automatically, server-side, at Price/Refresh time (never reconstructed
+    // here from anything this page displays). A failed live acquisition is
+    // reported by that request itself; this coverage check only ever gates a
+    // manual override the trader has started but not finished.
+    if (nodes.length === 0) {
+      return {
+        state: "covered",
+        message:
+          "No manual override entered -- Bloomberg's live USD SOFR Option Discount " +
+          "Curve (Curve #490) is sourced automatically when you price.",
+      };
+    }
     if (nodes.length < 2) {
       return {
         state: "blocking",
-        message: `At least 2 valid curve nodes are required; ${nodes.length} entered.`,
+        message: `At least 2 valid manual override nodes are required; ${nodes.length} entered.`,
       };
     }
 
@@ -2930,9 +2949,10 @@
       "BAD_FLD. YIELD_VOL is not a substitute and no yield-to-price conversion is " +
       "approved, so neither is offered here.",
     discounting:
-      "Not sourced. No approved Bloomberg sourcing or curve-construction " +
-      "methodology exists for the Option Discount Curve. MMkt, repo, FTP, par and " +
-      "swap rates must not be entered as continuous zero rates.",
+      "Sourced automatically from Bloomberg's live USD SOFR Option Discount Curve " +
+      "(S0490Z, Curve #490) unless a manual override is entered in Advanced. " +
+      "MMkt, repo, FTP, par and swap rates must not be entered as continuous " +
+      "zero rates.",
   };
 
   function renderMarketReview(unresolvedIds) {

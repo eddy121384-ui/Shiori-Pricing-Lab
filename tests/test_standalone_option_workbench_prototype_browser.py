@@ -43,11 +43,24 @@ import os
 import threading
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 
+from shiori_pricing_lab.app import standalone_option_workbench_server as server_module
 from shiori_pricing_lab.app.standalone_option_workbench_server import create_server
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLICurvePoint,
+    BLICurvePurpose,
+    BLICurveRateBasis,
+    BLIMarketDataStatus,
+)
+from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError
+from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+    BloombergUsdSofrOptionDiscountCurveResult,
+)
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
+from shiori_pricing_lab.products.enums import Currency
 
 # Issue #157: the UST Advanced-field profile derives its coupon date and its
 # settlement roll from QuantLib, so tests that assert an auto-filled value need
@@ -1099,19 +1112,47 @@ def test_missing_direct_price_vol_states_the_real_bloomberg_answer(server_url, p
 
 
 @_PLAYWRIGHT_SKIP
-def test_missing_discounting_states_the_unapproved_methodology(server_url, page) -> None:
+def test_discounting_is_resolved_automatically_with_no_manual_curve_override(
+    server_url, page
+) -> None:
+    """Issue #171: leaving the Option Discount Curve editor untouched (the
+    normal live Bloomberg flow) is not a blocker -- the live Curve #490
+    curve is sourced automatically, server-side, at Price time."""
+
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
     _fill_trade_group(page)
     _fill_market_review(page)
     page.wait_for_timeout(150)
 
+    assert "discounting-review" not in _unresolved_group_ids(page)
+    assert page.inner_text("#discounting-review-status") == "Reviewed"
+    note = page.inner_text("#discounting-sourcing-note")
+    assert "Sourced automatically" in note
+    assert "Curve #490" in note
+
+
+@_PLAYWRIGHT_SKIP
+def test_incomplete_manual_curve_override_states_the_requirement(server_url, page) -> None:
+    """A manual override that has been started but not finished still blocks
+    pricing -- it is never silently dropped in favor of the live curve, and
+    never silently completed with it either."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response())
+    _fill_trade_group(page)
+    _fill_market_review(page)
+    page.click("#advanced-head")
+    _set_curve_nodes(page, (("1M", "0.0374"),))
+    page.wait_for_timeout(150)
+
     assert page.inner_text("#unresolved-title") == (
-        "Option Discount Curve has no approved Bloomberg source"
+        "Manual Option Discount Curve override is incomplete"
     )
     evidence = page.inner_text("#unresolved-evidence")
+    assert "S0490Z" in evidence
+    assert "Curve #490" in evidence
     assert "MMkt, repo, FTP, par and swap rates must not be relabelled" in evidence
-    assert "SWDF" in evidence
     assert "never bootstraps, converts or extrapolates" in page.inner_text("#unresolved-next")
     assert _is_disabled(page, "#price-btn")
     assert page.inner_text("#discounting-review-status") == "Trader override required"
@@ -1146,12 +1187,15 @@ def test_unresolved_go_to_button_opens_advanced_and_focuses_the_control(
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
     _fill_trade_group(page)
     _fill_market_review(page)
-    _fill_advanced_overrides(page, curve_nodes=())
+    # One node is an incomplete manual override (Issue #171: zero nodes is
+    # resolved automatically via the live Bloomberg curve, so this test uses
+    # one node to keep discounting-review the blocking group).
+    _fill_advanced_overrides(page, curve_nodes=(("1M", "0.0374"),))
     page.wait_for_timeout(150)
 
     assert _is_actually_hidden(page, "advanced-body")
     assert page.inner_text("#unresolved-title") == (
-        "Option Discount Curve has no approved Bloomberg source"
+        "Manual Option Discount Curve override is incomplete"
     )
     page.click("#unresolved-goto-btn")
     page.wait_for_timeout(150)
@@ -1473,15 +1517,22 @@ def test_malformed_acquisition_timestamp_is_flagged_rather_than_silently_repaire
 
 
 @_PLAYWRIGHT_SKIP
-def test_curve_needs_at_least_two_valid_nodes(server_url, page) -> None:
+def test_curve_needs_at_least_two_valid_nodes_once_an_override_is_started(
+    server_url, page
+) -> None:
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
     page.click("#advanced-head")
 
-    assert "At least 2 valid curve nodes are required" in page.inner_text("#curve-coverage")
+    # Issue #171: zero manual nodes is resolved automatically -- Bloomberg's
+    # live Curve #490 is sourced at Price time, so this is not a blocker.
+    assert "No manual override entered" in page.inner_text("#curve-coverage")
+    assert page.eval_on_selector("#curve-coverage", "el => el.classList.contains('is-covered')")
 
+    # Starting a manual override with only one node is an incomplete
+    # override, and still blocks exactly as before.
     _set_curve_nodes(page, [("1M", "0.0374")])
-    assert "At least 2 valid curve nodes are required; 1 entered" in page.inner_text(
+    assert "At least 2 valid manual override nodes are required; 1 entered" in page.inner_text(
         "#curve-coverage"
     )
     assert _is_disabled(page, "#price-btn")
@@ -1531,6 +1582,189 @@ def test_insufficient_curve_coverage_blocks_pricing_with_the_exact_range(
     _set_curve_nodes(page, [("1M", "0.0374"), ("1Y", "0.0374")])
     _wait_for_price_enabled(page)
     assert page.eval_on_selector("#curve-coverage", "el => el.classList.contains('is-covered')")
+
+
+# --- Issue #171: live Bloomberg Curve #490 wiring -----------------------------
+#
+# These two tests are the acceptance-criteria headline for Issue #171: proving
+# end-to-end, through a real Price click and the real reviewed pricing engine,
+# that (a) a Trader who never touches the Option Discount Curve editor still
+# gets a genuine result sourced from the live production loader, and (b) a
+# loader failure blocks pricing clearly rather than falling back to anything.
+#
+# The server under test runs in-process (a background thread, not a
+# subprocess -- see the ``server_url`` fixture), so the Python-level loader
+# and clock seams this module already exposes for exactly this purpose
+# (``load_bloomberg_usd_sofr_option_discount_curve``, ``_shiori_acquisition_now``)
+# are monkeypatched directly; no real blpapi/Bloomberg Terminal is ever
+# involved. The Bloomberg *bond* lookup is still mocked at the browser network
+# layer via ``page.route`` (the existing, established pattern), so only the
+# curve loader/clock are new Python-level seams here.
+
+# The acquisition timestamp the fake bond lookup below reports -- its literal
+# date (2026-07-01, regardless of offset) becomes the draft's valuation_date
+# via representedLocalCalendarDate. The fake curve's node maturities and the
+# fixed server clock below are both built around this same date so the
+# RED-gate same-as-of check (_require_valuation_date_matches_today) passes.
+_LIVE_CURVE_ACQUIRED_AT_ISO = "2026-07-01T16:05:00+00:00"
+_LIVE_CURVE_VALUATION_DATE = "2026-07-01"
+_LIVE_CURVE_SERVER_CLOCK = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _fake_live_option_discount_curve_points() -> tuple[BLICurvePoint, ...]:
+    """Two Curve #490-shaped nodes bracketing the browser tests' fixed
+    reporting/settlement date (2026-10-21, see ``_fill_advanced_overrides``),
+    with the exact ``OPTION_DISCOUNT_CURVE``/``CONTINUOUS_ZERO_RATE`` contract
+    and an explicit Bloomberg-style ``maturity_date`` the loader itself
+    produces -- shape only, not real market data."""
+
+    def _point(tenor: str, maturity_date: str, rate: float) -> BLICurvePoint:
+        return BLICurvePoint(
+            curve_id="USD_SOFR_OPTION_DISCOUNT_CURVE",
+            curve_name="USD SOFR Option Discount Curve (Bloomberg Curve #490)",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor=tenor,
+            rate=rate,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date=maturity_date,
+        )
+
+    return (
+        _point("1M", "2026-08-01", 0.030),
+        _point("1Y", "2027-01-01", 0.032),
+    )
+
+
+def _install_fake_option_discount_curve_loader(monkeypatch, *, error=None, points=None):
+    """Monkeypatch this module's own loader seam; returns the list of ``tenors``
+    arguments the fake was called with, so a test can assert call count."""
+
+    calls: list = []
+
+    def fake_loader(tenors=None):
+        calls.append(tenors)
+        if error is not None:
+            raise error
+        return BloombergUsdSofrOptionDiscountCurveResult(
+            curve_points=(
+                points if points is not None else _fake_live_option_discount_curve_points()
+            ),
+            discount_factor_evidence=(),
+        )
+
+    monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_option_discount_curve", fake_loader)
+    return calls
+
+
+def _install_fixed_curve_server_clock(monkeypatch, now: datetime = _LIVE_CURVE_SERVER_CLOCK):
+    monkeypatch.setattr(server_module, "_shiori_acquisition_now", lambda: now)
+
+
+@_PLAYWRIGHT_SKIP
+def test_live_curve_success_prices_without_any_manual_curve_entry(
+    server_url, page, monkeypatch
+) -> None:
+    """Acceptance criterion C: a Trader using the normal live Bloomberg flow
+    is not asked to manually type Option Discount Curve nodes when Curve
+    #490 succeeds -- this goes all the way through a real Price click and
+    the real reviewed engine, so a passing premium here is a genuine result."""
+
+    calls = _install_fake_option_discount_curve_loader(monkeypatch)
+    _install_fixed_curve_server_clock(monkeypatch)
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(acquired_at=_LIVE_CURVE_ACQUIRED_AT_ISO),
+    )
+    _complete_draft(page, curve_nodes=())
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().valuation_date") == (
+        _LIVE_CURVE_VALUATION_DATE
+    )
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points") == []
+    _wait_for_price_enabled(page)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    assert len(calls) == 1
+    price_total = page.inner_text("#price-total")
+    assert price_total not in ("—", "")
+    assert float(price_total) > 0
+
+    # The curve that actually priced is the live loader's own rows, adopted
+    # into the draft verbatim -- never reconstructed or guessed at.
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert len(draft["curve_points"]) == 2
+    assert {point["tenor"] for point in draft["curve_points"]} == {"1M", "1Y"}
+    for point in draft["curve_points"]:
+        assert point["curve_purpose"] == "OPTION_DISCOUNT_CURVE"
+        assert point["rate_basis"] == "CONTINUOUS_ZERO_RATE"
+        assert point["source_system"] == "BLOOMBERG_DAPI"
+        assert point["maturity_date"] is not None
+
+
+@_PLAYWRIGHT_SKIP
+def test_live_curve_failure_blocks_pricing_with_no_fallback(
+    server_url, page, monkeypatch
+) -> None:
+    """Requirement 4: a live Curve #490 failure must surface a clear blocking
+    error -- never a silent manual/sample/stale fallback."""
+
+    _install_fake_option_discount_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Bloomberg terminal not logged in")
+    )
+    _install_fixed_curve_server_clock(monkeypatch)
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(acquired_at=_LIVE_CURVE_ACQUIRED_AT_ISO),
+    )
+    _complete_draft(page, curve_nodes=())
+    _wait_for_price_enabled(page)
+
+    page.click("#price-btn")
+    _wait_until(
+        lambda: "Bloomberg terminal not logged in" in page.inner_text("#pricing-error-banner")
+    )
+
+    assert page.inner_text("#status-text") == "Pricing failed"
+    assert page.inner_text("#price-total") == "—"
+    assert page.inner_text("#greek-delta") == "—"
+
+
+@_PLAYWRIGHT_SKIP
+def test_live_curve_same_as_of_mismatch_blocks_pricing_clearly(
+    server_url, page, monkeypatch
+) -> None:
+    """RED-gate regression: a valuation_date that does not match today must
+    never be silently paired with the live (necessarily current) curve."""
+
+    calls = _install_fake_option_discount_curve_loader(monkeypatch)
+    # The server's "today" is one day after the draft's valuation_date.
+    _install_fixed_curve_server_clock(monkeypatch, datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC))
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(acquired_at=_LIVE_CURVE_ACQUIRED_AT_ISO),
+    )
+    _complete_draft(page, curve_nodes=())
+    _wait_for_price_enabled(page)
+
+    page.click("#price-btn")
+    _wait_until(lambda: "valuation_date" in page.inner_text("#pricing-error-banner"))
+
+    assert "today" in page.inner_text("#pricing-error-banner")
+    assert page.inner_text("#status-text") == "Pricing failed"
+    assert page.inner_text("#price-total") == "—"
+    # The mismatch is caught before the Bloomberg curve loader is ever
+    # called -- no acquisition happens for a request that cannot use it.
+    assert calls == []
 
 
 # --- Credit spread contract rules --------------------------------------------
@@ -3811,7 +4045,12 @@ def test_the_eight_fields_no_longer_block_a_trader_who_never_opens_advanced(
 ) -> None:
     """Acceptance criterion 2, the headline product check: the two Advanced
     technical groups resolve themselves, so what is left outstanding is only
-    the genuinely unresolved market input this PR is forbidden to fabricate."""
+    the genuinely unresolved market input this PR is forbidden to fabricate.
+
+    Issue #171: the Option Discount Curve is no longer that one remaining
+    market input either -- it is now sourced live from Bloomberg Curve #490
+    automatically, so a trader who never opens Advanced has nothing left
+    outstanding at all."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
@@ -3826,9 +4065,7 @@ def test_the_eight_fields_no_longer_block_a_trader_who_never_opens_advanced(
     outstanding = _unresolved_group_ids(page)
     assert "advanced-bond-reference" not in outstanding
     assert "advanced-timing" not in outstanding
-    # Only the Option Discount Curve is left, which #157 explicitly does not
-    # fill: it is the one remaining market input, not a technical field.
-    assert outstanding == ["discounting-review"]
+    assert outstanding == []
 
 
 @_PLAYWRIGHT_SKIP
@@ -3836,7 +4073,15 @@ def test_the_eight_fields_no_longer_block_a_trader_who_never_opens_advanced(
 def test_forward_vol_and_discounting_are_never_given_a_fabricated_default(
     server_url, page
 ) -> None:
-    """Acceptance criterion 9: this PR fills technical fields only."""
+    """Acceptance criterion 9: this PR fills technical fields only.
+
+    Forward and volatility have no approved Bloomberg source at all, so they
+    stay blank and blocking. Discounting (Issue #171) is different: it *does*
+    have an approved live Bloomberg source, so leaving it untouched is a
+    genuine, non-fabricated resolution (the live curve is fetched server-side,
+    fresh, when the trader actually prices) -- not a client-side default. The
+    client-side draft's own ``curve_points`` stays empty either way, proving
+    nothing was fabricated here in the browser."""
 
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
@@ -3851,8 +4096,9 @@ def test_forward_vol_and_discounting_are_never_given_a_fabricated_default(
     assert draft["volatility_input"]["volatility"] is None
     assert draft["curve_points"] == []
     outstanding = _unresolved_group_ids(page)
-    for group in ("forward-review", "vol-review", "discounting-review"):
+    for group in ("forward-review", "vol-review"):
         assert group in outstanding
+    assert "discounting-review" not in outstanding
     assert page.input_value("#forward-price-input") == ""
     assert page.input_value("#volatility-input") == ""
 
@@ -4848,7 +5094,10 @@ def test_a_real_ust_auto_fills_all_eight_advanced_fields_without_opening_advance
     outstanding = _unresolved_group_ids(page)
     assert "advanced-bond-reference" not in outstanding
     assert "advanced-timing" not in outstanding
-    assert outstanding == ["discounting-review"]
+    # Issue #171: the Option Discount Curve is sourced live from Bloomberg
+    # automatically now, so it is no longer the one remaining outstanding
+    # group either.
+    assert outstanding == []
 
     # Criterion 4: every value still says where it came from.
     assert _field_provenance(page) == {

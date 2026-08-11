@@ -566,6 +566,284 @@ def test_api_case_bloomberg_rejects_blank_security(server_url: str, monkeypatch)
     assert calls == []
 
 
+# --- Issue #171: live Option Discount Curve wiring (/api/case, /api/case/bloomberg) ---
+#
+# Deterministic: the production Curve #490 loader and this module's own
+# platform-clock seam are both monkeypatched directly (the same pattern the
+# Bloomberg quote-refresh tests above already use for their own loader/
+# clock seams) -- no real blpapi/network/system clock anywhere in this
+# section, and CI never needs a live Bloomberg Terminal.
+
+_LIVE_CURVE_VALUATION_DATE = "2026-07-01"
+_LIVE_CURVE_CLOCK = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _fake_live_option_discount_curve_result(points=None):
+    from shiori_pricing_lab.data.bli_snapshot import (
+        BLICurvePoint,
+        BLICurvePurpose,
+        BLICurveRateBasis,
+        BLIMarketDataStatus,
+    )
+    from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+        BloombergUsdSofrOptionDiscountCurveResult,
+    )
+    from shiori_pricing_lab.products.enums import Currency
+
+    def _point(tenor: str, maturity_date: str, rate: float) -> BLICurvePoint:
+        return BLICurvePoint(
+            curve_id="USD_SOFR_OPTION_DISCOUNT_CURVE",
+            curve_name="USD SOFR Option Discount Curve (Bloomberg Curve #490)",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor=tenor,
+            rate=rate,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date=maturity_date,
+        )
+
+    # Brackets the example case's reporting_date/option_settlement_date
+    # (2026-10-01) relative to its valuation_date (2026-07-01).
+    default_points = (
+        _point("1M", "2026-08-01", 0.030),
+        _point("1Y", "2027-01-01", 0.032),
+    )
+    return BloombergUsdSofrOptionDiscountCurveResult(
+        curve_points=points if points is not None else default_points,
+        discount_factor_evidence=(),
+    )
+
+
+def _install_fake_live_curve_loader(monkeypatch, *, error=None, points=None):
+    calls: list = []
+
+    def fake_loader(tenors=None):
+        calls.append(tenors)
+        if error is not None:
+            raise error
+        return _fake_live_option_discount_curve_result(points=points)
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", fake_loader
+    )
+    return calls
+
+
+def _install_fixed_curve_clock(monkeypatch, now: datetime = _LIVE_CURVE_CLOCK):
+    monkeypatch.setattr(server_module, "_shiori_acquisition_now", lambda: now)
+
+
+def _case_with_empty_curve_points() -> dict:
+    case = json.loads(_example_case_bytes())
+    case["curve_points"] = []
+    assert case["valuation_date"] == _LIVE_CURVE_VALUATION_DATE
+    return case
+
+
+# --- Unit-level: inject_live_option_discount_curve_if_absent --------------------
+
+
+def test_inject_live_curve_leaves_a_case_with_manual_nodes_untouched(monkeypatch) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = json.loads(_example_case_bytes())
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+
+
+def test_inject_live_curve_injects_the_loaders_own_rows_when_curve_points_is_empty(
+    monkeypatch,
+) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is not case
+    assert case["curve_points"] == []  # the caller's own mapping is never mutated
+    assert len(calls) == 1
+    assert calls[0] is None  # the loader's own full default (32-tenor) universe
+    assert [point["tenor"] for point in result["curve_points"]] == ["1M", "1Y"]
+    for point in result["curve_points"]:
+        assert point["curve_purpose"] == "OPTION_DISCOUNT_CURVE"
+        assert point["rate_basis"] == "CONTINUOUS_ZERO_RATE"
+        assert point["source_system"] == "BLOOMBERG_DAPI"
+        assert point["maturity_date"] is not None
+    # Every other envelope field is carried through unchanged.
+    unchanged = {k: v for k, v in result.items() if k != "curve_points"}
+    assert unchanged == {k: v for k, v in case.items() if k != "curve_points"}
+
+
+def test_inject_live_curve_rejects_a_valuation_date_that_is_not_today(monkeypatch) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch, datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC))
+    case = _case_with_empty_curve_points()
+
+    with pytest.raises(ValueError, match="today's date"):
+        server_module.inject_live_option_discount_curve_if_absent(case)
+    assert calls == []
+
+
+def test_inject_live_curve_propagates_a_bloomberg_failure_with_no_fallback(monkeypatch) -> None:
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Bloomberg terminal not logged in")
+    )
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    with pytest.raises(BLIBloombergDapiError, match="Bloomberg terminal not logged in"):
+        server_module.inject_live_option_discount_curve_if_absent(case)
+
+
+# --- POST /api/case ---------------------------------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_injects_the_live_curve_and_prices_when_curve_points_is_empty(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_bytes(f"{server_url}/api/case", json.dumps(case).encode("utf-8"))
+    assert status == 200
+    assert payload["display"]["status"] == "SUCCESS"
+    assert [point["tenor"] for point in payload["case"]["curve_points"]] == ["1M", "1Y"]
+    for point in payload["case"]["curve_points"]:
+        assert point["source_system"] == "BLOOMBERG_DAPI"
+
+    injected_case = server_module.inject_live_option_discount_curve_if_absent(case)
+    _, _, expected_display = price_standalone_option_case(injected_case)
+    assert payload["display"] == expected_display
+
+
+@_QUANTLIB_SKIP
+def test_api_case_never_calls_the_live_curve_loader_when_curve_points_is_supplied(
+    server_url: str, monkeypatch
+) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case_bytes = _example_case_bytes()
+
+    status, payload = _post_bytes(f"{server_url}/api/case", case_bytes)
+    assert status == 200
+    assert calls == []
+    original_case = json.loads(case_bytes)
+    assert payload["case"]["curve_points"] == original_case["curve_points"]
+
+
+def test_api_case_live_curve_failure_returns_400_with_no_fallback(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Bloomberg terminal not logged in")
+    )
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_bytes(f"{server_url}/api/case", json.dumps(case).encode("utf-8"))
+    assert status == 400
+    assert "Bloomberg terminal not logged in" in payload["error"]
+
+
+def test_api_case_live_curve_same_as_of_mismatch_returns_400_and_never_calls_the_loader(
+    server_url: str, monkeypatch
+) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch, datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC))
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_bytes(f"{server_url}/api/case", json.dumps(case).encode("utf-8"))
+    assert status == 400
+    assert "today" in payload["error"]
+    assert calls == []
+
+
+# --- POST /api/case/bloomberg ------------------------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_bloomberg_also_injects_the_live_curve_when_curve_points_is_empty(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    overlay = extract_standalone_option_case_overlay(case)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": overlay,
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+    assert status == 200
+    assert [point["tenor"] for point in payload["case"]["curve_points"]] == ["1M", "1Y"]
+    for point in payload["case"]["curve_points"]:
+        assert point["source_system"] == "BLOOMBERG_DAPI"
+
+
+@_QUANTLIB_SKIP
+def test_api_case_bloomberg_never_calls_the_live_curve_loader_when_curve_points_is_supplied(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_bloomberg_loader(monkeypatch)
+    _install_fixed_clock(monkeypatch)
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = json.loads(_example_case_bytes())
+    overlay = extract_standalone_option_case_overlay(case)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": overlay,
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+    assert status == 200
+    assert calls == []
+
+
+def test_api_case_bloomberg_live_curve_failure_never_calls_the_bond_quote_loader(
+    server_url: str, monkeypatch
+) -> None:
+    quote_calls = _install_fake_bloomberg_loader(monkeypatch)
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("curve terminal not logged in")
+    )
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    overlay = extract_standalone_option_case_overlay(case)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": overlay,
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+    assert status == 400
+    assert "curve terminal not logged in" in payload["error"]
+    # The same-as-of failure is reported before the bond-quote loader is ever
+    # called -- no live quote acquisition happens for a request that cannot
+    # use it.
+    assert quote_calls == []
+
+
 # --- Instrument-first Bloomberg lookup: /api/bloomberg/bond ----------------------
 
 
@@ -1253,6 +1531,27 @@ def test_validate_case_reports_standalone_eligibility_rejection() -> None:
     assert result["ready"] is False
     assert "FOUND_INELIGIBLE" in result["error"]
     assert "callable" in result["error"]
+
+
+def test_validate_case_reports_ready_for_the_live_workbench_flows_empty_curve_points() -> None:
+    """Issue #171: an empty curve_points is the expected shape of a
+    live-Bloomberg-pending draft -- it must not itself make the Price gate
+    stay closed, and this makes no Bloomberg call to prove it (no loader is
+    monkeypatched here at all)."""
+
+    case = {**load_base_case(), "curve_points": []}
+    assert server_module.validate_case(case) == {"ready": True, "error": None}
+    # The caller's own mapping is never mutated by the placeholder swap.
+    assert case["curve_points"] == []
+
+
+def test_validate_case_still_catches_an_unrelated_defect_with_empty_curve_points() -> None:
+    """The placeholder swap must not mask a real, unrelated problem."""
+
+    case = {**load_base_case(), "curve_points": [], "bond_option": {}}
+    result = server_module.validate_case(case)
+    assert result["ready"] is False
+    assert "curve_points" not in result["error"]
 
 
 def test_api_case_validate_returns_ready_for_a_valid_case(server_url: str) -> None:
