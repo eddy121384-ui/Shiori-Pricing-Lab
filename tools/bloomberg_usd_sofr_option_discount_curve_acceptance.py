@@ -5,10 +5,9 @@ Bounded, read-only workstation diagnostic CLI -- **not** part of the
 production pricing path, and never imported by it. Calls the production
 loader directly, ``src/shiori_pricing_lab/data/bloomberg_option_discount_
 curve.py::load_bloomberg_usd_sofr_option_discount_curve``, with its default
-tenor set (``"1Y"``, ``"2Y"``) -- exactly the two tenors round 11's own
-diagnostic probe (``tools/bloomberg_curve_ticker_last_price_probe.py``)
-already confirmed acquisition for against the same two default tickers
-(``S0490Z 2Y BLC2 Curncy``, ``S0490D 1Y BLC2 Curncy``).
+tenor set -- ``DEFAULT_USD_SOFR_TENORS``, the 29-tenor workstation-verified
+Curve #490 universe (Issue #165 full-curve expansion; see that module's own
+docstring for the ``"1W"``/``"2W"``/``"3W"`` exclusion).
 
 **Purpose.** Let Eddy run the production ingestion path once on his own
 Bloomberg workstation and see, side by side: each generated curve node's
@@ -16,12 +15,11 @@ Bloomberg workstation and see, side by side: each generated curve node's
 the inverse of the loader's own percent-to-decimal conversion, so no
 extra Bloomberg field is requested here), each tenor's preserved
 discount-factor evidence and its own raw ``LAST_PRICE``, and the node's
-own authoritative date. Eddy can then compare these against what round
-11's probe already showed him for the same two default tickers, and
-against terminal Curve #490 / SWDF directly. **This script asserts no
-such match itself** -- it only surfaces the values for Eddy's own manual
-acceptance judgment, the same discipline every prior round in this issue
-has followed.
+own authoritative date. Eddy can then compare selected short/belly/
+long-end nodes against terminal Curve #490 / SWDF directly. **This script
+asserts no such match itself** -- it only surfaces the values for Eddy's
+own manual acceptance judgment, the same discipline every prior round in
+this issue has followed.
 
 **Compact full-curve table.** The written Markdown report leads with one
 row per tenor -- tenor, ``Z`` security, ``D`` security, authoritative node
@@ -266,10 +264,9 @@ def render_markdown(data: dict) -> str:
     lines.append("## Status")
     lines.append("")
     lines.append(
-        "Compare each node's zero rate / discount factor / node maturity above "
-        "against terminal Curve #490 / SWDF and against round 11's own probe "
-        "output for the same default tickers. This script asserts no match itself "
-        "-- that judgment is Eddy's."
+        "Compare selected short / belly / long-end nodes' zero rate / discount "
+        "factor / node maturity above against terminal Curve #490 / SWDF. This "
+        "script asserts no match itself -- that judgment is Eddy's."
     )
 
     return "\n".join(lines)
@@ -304,8 +301,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated tenor labels to request, explicitly supplied -- never "
-            f"generated or guessed. Default: {','.join(DEFAULT_USD_SOFR_TENORS)} (the "
-            "production loader's own default, and round 11's already-confirmed pair)."
+            "generated or guessed. Default: the production loader's own "
+            f"{len(DEFAULT_USD_SOFR_TENORS)}-tenor workstation-verified default "
+            f"({','.join(DEFAULT_USD_SOFR_TENORS)})."
         ),
     )
     parser.add_argument(

@@ -46,12 +46,46 @@ reference curve, a repo curve, and any OIS bootstrap are all out of scope
 here and require a separate, later slice.
 
 **Explicit tenor set, never guessed.** ``tenors`` is a caller-supplied
-sequence of tenor labels (default: ``DEFAULT_USD_SOFR_TENORS``, exactly
-the two tenors round 11 already confirmed acquisition for -- ``"1Y"``,
-``"2Y"``). This module never generates, extrapolates, or guesses a tenor;
-every tenor requested is exactly one the caller named, validated against
-the existing, reviewed ``pricing/bli_curve_tenor.py::
-tenor_to_year_fraction`` grammar before any Bloomberg request is sent.
+sequence of tenor labels (default: ``DEFAULT_USD_SOFR_TENORS``). This
+module never generates, extrapolates, or guesses a tenor; every tenor
+requested is exactly one Eddy named, validated against the existing,
+reviewed ``pricing/bli_curve_tenor.py::tenor_to_year_fraction`` grammar
+before any Bloomberg request is sent.
+
+**Full-curve tenor universe (Issue #165 full-curve expansion, applying
+Eddy's workstation-verified evidence).** Eddy supplied Bloomberg's own
+Curve #490 Curve Construction export naming its full tenor universe.
+That export's ``USOSFR*`` rows are the *construction* route's OIS swap
+*input* instruments -- never ingested or referenced by this module, only
+read as evidence for which tenor labels the curve actually has. Of the
+32 tenors that export names, ``DEFAULT_USD_SOFR_TENORS`` below carries
+**29**: every ``M``/``Y`` tenor, using ``"1Y"`` rather than the export's
+``"12 MO"`` spelling (Eddy separately, directly confirmed
+``S0490Z 1Y BLC2 Curncy``/``S0490D 1Y BLC2 Curncy`` resolve -- that proven
+spelling is kept, never replaced with a derived ``"12M"``).
+
+**Deliberately excluded from the default for now: ``"1W"``/``"2W"``/
+``"3W"``.** Eddy's export confirms Curve #490 has three week-denominated
+short-end tenors, but ``pricing/bli_curve_tenor.py::tenor_to_year_fraction``
+-- the existing, shared, previously-reviewed curve-coordinate parser this
+loader calls to validate every tenor *before any Bloomberg request is
+sent*, and that every other consumer of ``BLICurvePoint.tenor`` in this
+codebase also relies on -- explicitly does not accept week tenors (see
+that module's own docstring: "no other tenor vocabulary (week tenors,
+...)"). Setting the default to include them as-is would make the
+loader's own default raise immediately, before ever reaching Bloomberg.
+This module does not invent a workaround (e.g. silently substituting
+``"7D"``, which is both an unconfirmed Bloomberg ticker spelling and a
+mismatch between the requested security and the stored ``tenor``) and
+does not silently extend the shared parser's own vocabulary on this
+loader's behalf -- extending week-tenor support in
+``tenor_to_year_fraction`` is a separate, not-yet-authorized decision
+that touches every other consumer of that module, not just this one.
+A caller who explicitly passes ``tenors=("1W", ...)`` today gets the
+same ``ValueError: unsupported tenor label`` this loader has always
+raised for any tenor ``tenor_to_year_fraction`` rejects -- this is not a
+new restriction, only the still-open reason the *default* cannot include
+them yet either.
 
 **Fields requested: exactly ``LAST_PRICE`` and ``MATURITY``, for both the
 ``Z`` and ``D`` synthetic security at every requested tenor**, in one
@@ -178,9 +212,47 @@ USD_SOFR_CURVE_ID = "USD_SOFR_OPTION_DISCOUNT_CURVE"
 USD_SOFR_CURVE_NAME = "USD SOFR Option Discount Curve (Bloomberg Curve #490)"
 USD_SOFR_SOURCE_SYSTEM = "BLOOMBERG_DAPI"
 
-# Eddy's own two round-11-confirmed tenors -- not a guessed/generated set.
-# Override with an explicit tenors= argument for any other tenor.
-DEFAULT_USD_SOFR_TENORS: tuple[str, ...] = ("1Y", "2Y")
+# Eddy's own workstation-verified Curve #490 tenor universe (Bloomberg's
+# Curve Construction export), 29 of its 32 tenors -- every M/Y tenor,
+# "1Y" kept in place of the export's "12 MO" spelling (Eddy directly
+# confirmed the "1Y" ticker spelling resolves; never replaced with a
+# derived "12M"). "1W"/"2W"/"3W" are deliberately not in this default --
+# see the module docstring's "Deliberately excluded" section: the shared
+# tenor_to_year_fraction parser does not accept week tenors yet, and this
+# module does not silently extend that parser or substitute a guessed
+# spelling on its behalf. Override with an explicit tenors= argument for
+# any other tenor (that parser's own grammar still applies to it).
+DEFAULT_USD_SOFR_TENORS: tuple[str, ...] = (
+    "1M",
+    "2M",
+    "3M",
+    "4M",
+    "5M",
+    "6M",
+    "7M",
+    "8M",
+    "9M",
+    "10M",
+    "11M",
+    "1Y",
+    "18M",
+    "2Y",
+    "3Y",
+    "4Y",
+    "5Y",
+    "6Y",
+    "7Y",
+    "8Y",
+    "9Y",
+    "10Y",
+    "12Y",
+    "15Y",
+    "20Y",
+    "25Y",
+    "30Y",
+    "40Y",
+    "50Y",
+)
 
 # Testable seam for the whole-request deadline, mirroring
 # bloomberg_bond_quote.py's own `_monotonic` pattern -- this module's own
