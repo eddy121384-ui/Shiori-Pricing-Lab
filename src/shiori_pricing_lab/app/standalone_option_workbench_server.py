@@ -238,7 +238,11 @@ from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     apply_standalone_option_case_overlay,
     extract_standalone_option_case_overlay,
 )
-from shiori_pricing_lab.data._validation import _parse_iso_date, _require_finite_number
+from shiori_pricing_lab.data._validation import (
+    _parse_iso_date,
+    _require_finite_number,
+    _require_non_blank,
+)
 from shiori_pricing_lab.data.bloomberg_bond_quote import (
     BLIBloombergDapiError,
     load_bloomberg_bond_identity_and_quote,
@@ -598,18 +602,24 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
     -- i.e. ``curve_points`` is not a genuine manual/fixture override but a
     prior live Curve #490 acquisition the browser adopted (see the
     module-level Issue #171 note above), safe and expected to be re-fetched
-    fresh on every call. ``curve_points`` that is not a non-empty list of
-    dicts (including the fresh-draft ``[]``), or any row missing, disagreeing
-    on even one fixed field, or carrying a ``rate``/``maturity_date``
-    ``BLICurvePoint`` itself would reject (Codex P2 review of PR #172,
-    round 3: ``rate`` must be an actual finite number and ``maturity_date``
-    a real ``YYYY-MM-DD`` calendar date, checked with the exact same
-    ``_require_finite_number``/``_parse_iso_date`` validators
-    ``BLICurvePoint.__post_init__`` itself uses -- otherwise a malformed row
-    satisfying every other field could still be misclassified as a trusted
-    echo and silently discarded rather than reaching that constructor's own
-    error), is never this shape -- it is left alone and reaches the
-    builder's own, more specific validation unchanged.
+    fresh on every call.
+
+    Every one of the three per-row fields ``BLICurvePoint.__post_init__``
+    itself validates (``tenor`` via ``_require_non_blank``, ``rate`` via
+    ``_require_finite_number``, ``maturity_date`` via ``_parse_iso_date``) is
+    checked here with those exact same validators (Codex P2 review of PR
+    #172, rounds 3-4: a whitespace-only ``tenor``, a non-finite ``rate``, or
+    a non-ISO ``maturity_date`` each independently satisfied an earlier,
+    narrower version of this predicate and would have been misclassified as
+    a trusted echo). A row this predicate accepts is therefore guaranteed to
+    also construct successfully via ``BLICurvePoint(**point)`` -- there is no
+    field left that the constructor checks and this predicate does not.
+
+    ``curve_points`` that is not a non-empty list of dicts (including the
+    fresh-draft ``[]``), or any row missing, disagreeing on even one fixed
+    field, or failing any one of these three checks, is never this shape --
+    it is left alone and reaches the builder's own, more specific validation
+    unchanged.
     """
 
     if not isinstance(curve_points, list) or not curve_points:
@@ -619,9 +629,8 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
             return False
         if any(point.get(key) != value for key, value in _LIVE_CURVE_POINT_FIXED_FIELDS.items()):
             return False
-        if not isinstance(point.get("tenor"), str) or not point["tenor"]:
-            return False
         try:
+            _require_non_blank(point.get("tenor"), "tenor")
             _require_finite_number(point.get("rate"), "rate")
             _parse_iso_date(point.get("maturity_date"), "maturity_date")
         except ValueError:

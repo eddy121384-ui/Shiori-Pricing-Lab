@@ -812,6 +812,29 @@ def test_inject_live_curve_does_not_discard_a_row_with_a_non_finite_rate(monkeyp
         server_module.build_request_from_standalone_option_case(case)
 
 
+def test_inject_live_curve_does_not_discard_a_row_with_a_blank_tenor(monkeypatch) -> None:
+    """Codex P2 review of PR #172, round 4: a whitespace-only ``tenor`` is
+    truthy in Python, so a truthiness check alone would still misclassify
+    this row -- checked with the exact same ``_require_non_blank`` validator
+    ``BLICurvePoint`` itself uses."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    malformed_point = {
+        **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+        "tenor": " ",
+        "rate": 0.03,
+        "maturity_date": "2027-01-01",
+    }
+    case = {**json.loads(_example_case_bytes()), "curve_points": [malformed_point]}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(ValueError, match="tenor"):
+        server_module.build_request_from_standalone_option_case(case)
+
+
 def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:
     """Codex P2 review of PR #172, round 2: the live loader can only ever
     supply USD, so a non-USD draft with no manual curve must not read as
