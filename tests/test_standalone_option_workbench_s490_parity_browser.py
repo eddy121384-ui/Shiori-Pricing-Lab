@@ -22,6 +22,7 @@ the sibling browser-test files: locally, missing Playwright is a skip; in CI
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import threading
@@ -60,6 +61,7 @@ from test_standalone_option_workbench_prototype_browser import (  # noqa: E402
     _load_bloomberg_bond,
     _treasury_lookup_response,
     _wait_for_price_enabled,
+    _wait_for_refresh_enabled,
 )
 
 _PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
@@ -387,6 +389,44 @@ def test_a_bloomberg_curve_failure_surfaces_on_the_panel_not_a_silent_blank(
         lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
     )
     assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+
+
+def test_a_failed_bloomberg_refresh_hides_the_panel_until_a_successful_retry(
+    server_url, page
+) -> None:
+    # Codex P1 review of PR #174: latestBuilderReady alone (the gate the
+    # panel used to rely on exclusively) does not prove the sourced quote
+    # is still live -- a failed Refresh Bloomberg sets sourcedQuoteInvalidated
+    # and disowns the displayed quote while leaving currentDraft.bond_quote
+    # holding the now-stale spot price, and builder validation keeps
+    # re-succeeding regardless (same reasoning that already gates Price
+    # itself via canPrice). The panel must hide, not silently recompute a
+    # Forward from that disowned quote, until a real retry restores it.
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
+    assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+
+    # The race Codex's review named: builder (re-)validation succeeds again
+    # on the untouched draft alone -- Refresh re-enabling is the same
+    # observable signal syncDraftGating uses for that -- while the sourced
+    # quote is still the one this refresh just disowned. The panel must
+    # still be showing the quote-invalidated reason, not silently recompute.
+    _wait_for_refresh_enabled(page)
+    assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+    assert "Refresh Bloomberg" in page.text_content("#s490-parity-status")
+    page.unroute("**/api/case/bloomberg")
 
 
 def test_a_manual_curve_override_on_the_ticket_never_leaks_into_the_s490_panel(

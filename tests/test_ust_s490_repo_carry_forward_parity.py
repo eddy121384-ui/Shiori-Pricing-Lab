@@ -417,6 +417,27 @@ def test_an_interim_coupon_horizon_is_reported_not_priced():
     assert "RepoCarryInterimCouponUnsupportedError" in row["error"]
 
 
+@requires_quantlib
+def test_a_run_where_every_horizon_fails_is_reported_as_an_error_at_the_run_level():
+    # Codex P2 review of PR #174: main()'s exit code is driven by
+    # report.status alone (0 for "ok", 1 otherwise) -- a run that computed
+    # zero funding/forward numbers must not exit 0 and pass as usable
+    # parity evidence just because each individual horizon failure was
+    # caught and reported on its own row. Two different failure modes
+    # (interim coupon, outside the curve's node range), so this is not one
+    # coincidentally-the-only-horizon case.
+    report = parity.run_parity(
+        case=_load_base_case(),
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        horizons=_horizons("2026-12-20", "2032-07-01"),
+        inject_curve=_inject_synthetic_curve,
+    )
+
+    assert [row["status"] for row in report.horizons] == ["error", "error"]
+    assert report.status == "error"
+    assert report.error is not None
+
+
 def test_a_failed_curve_acquisition_fails_the_whole_run_with_no_horizons():
     def _fail(case: dict) -> dict:
         raise RuntimeError("Bloomberg DAPI session failed to start")

@@ -3489,16 +3489,29 @@
   // function's own comment for why this is read rather than recomputed.
   let latestBuilderReady = false;
 
-  // Two distinct "nothing to show" reasons, not both collapsed onto the same
+  // Three distinct "nothing to show" reasons, not collapsed onto the same
   // `null` -- a genuine transition between them (finishing the ticket while
   // Spot Settlement Date is still blank, or vice versa) has to still count
   // as a key change, or maybeRefreshS490Parity's own guard would wrongly
   // treat it as a no-op and leave the wrong status message on screen.
   const S490_PARITY_KEY_NOT_READY = "__S490_NOT_READY__";
   const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
+  const S490_PARITY_KEY_QUOTE_INVALIDATED = "__S490_QUOTE_INVALIDATED__";
 
   function s490ParityKey() {
     if (!latestBuilderReady || !currentDraft) return S490_PARITY_KEY_NOT_READY;
+    // Codex P1 review of PR #174: latestBuilderReady alone does not mean the
+    // sourced quote this route would price from is still live -- a failed
+    // Bloomberg refresh sets sourcedQuoteInvalidated (or a side change can
+    // make the sourced quote mismatch the ticket's selected side) while
+    // leaving currentDraft.bond_quote holding the now-disowned old price,
+    // and builder validation keeps re-succeeding regardless (see
+    // syncDraftGating's own comment on why). This mirrors canPrice's own
+    // gate there exactly, because this route reads that same disowned
+    // bond_quote.clean_price_per_100.
+    if (sourcedQuoteInvalidated || sourcedQuoteSideMismatch()) {
+      return S490_PARITY_KEY_QUOTE_INVALIDATED;
+    }
     const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
     if (!isValidIsoDate(spotSettlementDate)) return S490_PARITY_KEY_NO_SPOT_DATE;
     // The whole draft, not a hand-picked subset of its fields: this section
@@ -3528,8 +3541,11 @@
         : !latestBuilderReady
           ? "Complete the ticket above (Instrument, Trade, Market inputs) to see the S490 " +
             "repo-carry Forward."
-          : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
-            "ticket's Expiry.";
+          : sourcedQuoteInvalidated || sourcedQuoteSideMismatch()
+            ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
+              "before the S490 repo-carry Forward can be resolved."
+            : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+              "ticket's Expiry.";
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
@@ -3557,7 +3573,11 @@
     if (key === lastS490ParityKey) return;
     lastS490ParityKey = key;
 
-    if (key === S490_PARITY_KEY_NOT_READY || key === S490_PARITY_KEY_NO_SPOT_DATE) {
+    if (
+      key === S490_PARITY_KEY_NOT_READY ||
+      key === S490_PARITY_KEY_NO_SPOT_DATE ||
+      key === S490_PARITY_KEY_QUOTE_INVALIDATED
+    ) {
       s490ParityGeneration++; // invalidate any outstanding answer
       s490ParityResult = null;
       s490ParityError = null;

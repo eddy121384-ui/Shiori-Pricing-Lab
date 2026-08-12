@@ -277,8 +277,14 @@ def run_parity(
 
     A failure that affects the whole run (the Bloomberg curve acquisition,
     the same-as-of gate, an invalid case, a missing spot clean price)
-    returns ``status="error"`` with no horizon rows; a failure affecting one
-    horizon only is reported on that horizon's own row.
+    returns ``status="error"`` with no horizon rows. A failure affecting one
+    horizon only is reported on that horizon's own row, and the run-level
+    ``status`` stays ``"ok"`` as long as at least one horizon resolved
+    (Codex P2 review of PR #174) -- but if every requested horizon errored,
+    the run itself is ``status="error"`` too (with those rows still
+    attached, each carrying its own ``error``), since a report computing
+    zero funding/forward numbers must never exit 0 as usable parity
+    evidence.
     """
 
     generated_at = _utc_now()
@@ -333,6 +339,22 @@ def run_parity(
         )
         for horizon in horizons
     )
+
+    # Codex P2 review of PR #174: a run-level "ok" used to be reported even
+    # when every horizon (a malformed shared spot_settlement_date, or all
+    # requested dates invalid/out of range) came back "error" -- main()'s
+    # exit code is driven by this field, so that let a report computing zero
+    # funding/forward numbers exit 0 and pass as usable parity evidence.
+    # Partial success is preserved: only a *zero*-success run is downgraded,
+    # never a run where at least one horizon actually resolved.
+    if rows and not any(row["status"] == "ok" for row in rows):
+        return ParityReport(
+            generated_at=generated_at,
+            status="error",
+            error="No horizon produced a usable result -- see each horizon's own \"error\" field.",
+            case=case_summary,
+            horizons=rows,
+        )
 
     return ParityReport(
         generated_at=generated_at,
