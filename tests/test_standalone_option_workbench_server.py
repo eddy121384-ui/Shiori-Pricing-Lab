@@ -17,7 +17,7 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -616,6 +616,42 @@ def _fake_live_option_discount_curve_result(points=None):
     )
 
 
+def _full_default_tenor_curve_points(base_date: date = date(2026, 7, 1)) -> tuple:
+    """32 rows, one per ``DEFAULT_USD_SOFR_TENORS`` label in order -- the
+    exact collection shape ``_is_previously_injected_live_curve`` (Codex P2
+    review of PR #172, round 6) requires before recognizing a "previously
+    injected" curve, since this injector always calls the loader with its
+    own full default universe. Only used by the tests that specifically
+    exercise that recognition; every other test keeps the small two-tenor
+    ``_fake_live_option_discount_curve_result`` default, which deliberately
+    does *not* match this shape."""
+
+    from shiori_pricing_lab.data.bli_snapshot import (
+        BLICurvePoint,
+        BLICurvePurpose,
+        BLICurveRateBasis,
+        BLIMarketDataStatus,
+    )
+    from shiori_pricing_lab.data.bloomberg_option_discount_curve import DEFAULT_USD_SOFR_TENORS
+    from shiori_pricing_lab.products.enums import Currency
+
+    return tuple(
+        BLICurvePoint(
+            curve_id="USD_SOFR_OPTION_DISCOUNT_CURVE",
+            curve_name="USD SOFR Option Discount Curve (Bloomberg Curve #490)",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor=tenor,
+            rate=0.03,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date=(base_date + timedelta(days=30 * (index + 1))).isoformat(),
+        )
+        for index, tenor in enumerate(DEFAULT_USD_SOFR_TENORS)
+    )
+
+
 def _install_fake_live_curve_loader(monkeypatch, *, error=None, points=None):
     calls: list = []
 
@@ -689,16 +725,20 @@ def test_inject_live_curve_refetches_a_previously_injected_curve_on_a_second_cal
     the same-as-of gate. Every row this injector itself writes carries the
     loader's own ``curve_id``, so it must be recognized and refreshed."""
 
-    calls = _install_fake_live_curve_loader(monkeypatch)
+    full_tenor_points = _full_default_tenor_curve_points()
+    calls = _install_fake_live_curve_loader(monkeypatch, points=full_tenor_points)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
 
     first = server_module.inject_live_option_discount_curve_if_absent(case)
     assert len(calls) == 1
+    assert len(first["curve_points"]) == 32  # the loader's own full default universe
 
     second = server_module.inject_live_option_discount_curve_if_absent(first)
     assert len(calls) == 2  # refetched, not silently treated as a manual override
-    assert [point["tenor"] for point in second["curve_points"]] == ["1M", "1Y"]
+    assert [point["tenor"] for point in second["curve_points"]] == [
+        point.tenor for point in full_tenor_points
+    ]
 
 
 def test_inject_live_curve_still_enforces_the_same_as_of_gate_on_a_second_call(
@@ -708,7 +748,9 @@ def test_inject_live_curve_still_enforces_the_same_as_of_gate_on_a_second_call(
     past valuation_date -- e.g. a ticket left open across a date boundary
     must not silently reuse a curve acquired on the (now stale) prior day."""
 
-    calls = _install_fake_live_curve_loader(monkeypatch)
+    calls = _install_fake_live_curve_loader(
+        monkeypatch, points=_full_default_tenor_curve_points()
+    )
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
     first = server_module.inject_live_option_discount_curve_if_absent(case)
@@ -908,6 +950,39 @@ def test_inject_live_curve_rechecks_the_valuation_date_after_the_loader_returns(
 
     with pytest.raises(ValueError, match="today's date"):
         server_module.inject_live_option_discount_curve_if_absent(case)
+
+
+def test_inject_live_curve_honors_an_explicit_subset_sharing_the_fingerprint(
+    monkeypatch,
+) -> None:
+    """Codex P2 review of PR #172, round 6: matching every per-row check is
+    still not enough -- this injector only ever calls the loader with its
+    own full default (32-tenor) universe, so a genuine echo of its prior
+    output always has exactly that many rows in that order. A caller-
+    supplied collection of only a few rows that individually satisfy every
+    per-row fingerprint check (e.g. two constructor-valid rows) is not that
+    shape and must be honored as a deliberate explicit-subset override, not
+    discarded and replaced with a fresh live fetch."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    two_row_points = [
+        {
+            **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+            "tenor": tenor,
+            "rate": 0.03,
+            "maturity_date": maturity,
+        }
+        for tenor, maturity in (("1M", "2026-08-01"), ("1Y", "2027-01-01"))
+    ]
+    case = {**json.loads(_example_case_bytes()), "curve_points": two_row_points}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    # A genuine, well-formed explicit subset still builds successfully --
+    # this is the honored override, not a masked schema error.
+    server_module.build_request_from_standalone_option_case(case)
 
 
 def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:

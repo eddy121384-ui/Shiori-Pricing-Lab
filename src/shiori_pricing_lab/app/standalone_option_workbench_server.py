@@ -249,6 +249,7 @@ from shiori_pricing_lab.data.bloomberg_bond_quote import (
     parse_bond_identifier,
 )
 from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+    DEFAULT_USD_SOFR_TENORS,
     USD_SOFR_CURVE_ID,
     USD_SOFR_CURVE_NAME,
     USD_SOFR_SOURCE_SYSTEM,
@@ -632,14 +633,33 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
     successfully via ``BLICurvePoint(**point)`` -- there is no field, value,
     or key left that the constructor checks and this predicate does not.
 
+    Every check above is per-row; it says nothing about whether
+    ``curve_points`` as a *collection* is this injector's own output. This
+    injector only ever calls the loader with its own default (full 32-tenor)
+    universe (see ``_live_option_discount_curve_points_as_dicts``), and that
+    loader "never returns a partial curve" (its own module docstring) -- so
+    a genuine echo of this injector's prior output always carries exactly
+    ``DEFAULT_USD_SOFR_TENORS``' 32 tenor labels, in that same acquisition
+    order, no more and no fewer. ``curve_points``' own tenor sequence must
+    match that exactly (Codex P2 review of PR #172, round 6: a caller-
+    supplied collection of only a few otherwise constructor-valid rows
+    sharing this fingerprint satisfied every per-row check above and would
+    have been misclassified as a trusted echo of the full acquisition,
+    discarding what may have been a deliberate explicit-subset override).
+
     ``curve_points`` that is not a non-empty list of dicts (including the
-    fresh-draft ``[]``), or any row missing, disagreeing on even one fixed
-    field, or failing any one of these three checks, is never this shape --
-    it is left alone and reaches the builder's own, more specific validation
-    unchanged.
+    fresh-draft ``[]``), whose tenor sequence does not exactly equal
+    ``DEFAULT_USD_SOFR_TENORS``, or any row missing, disagreeing on even one
+    fixed field, or failing any one of the three per-field checks, is never
+    this shape -- it is left alone and reaches the builder's own, more
+    specific validation unchanged.
     """
 
     if not isinstance(curve_points, list) or not curve_points:
+        return False
+    if [point.get("tenor") if isinstance(point, dict) else None for point in curve_points] != list(
+        DEFAULT_USD_SOFR_TENORS
+    ):
         return False
     for point in curve_points:
         if not isinstance(point, dict):

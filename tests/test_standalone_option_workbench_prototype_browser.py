@@ -43,7 +43,7 @@ import os
 import threading
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -1638,6 +1638,38 @@ def _fake_live_option_discount_curve_points() -> tuple[BLICurvePoint, ...]:
     )
 
 
+def _full_default_tenor_curve_points(
+    base_date: date = date(2026, 7, 1),
+) -> tuple[BLICurvePoint, ...]:
+    """32 rows, one per the loader's own ``DEFAULT_USD_SOFR_TENORS`` label in
+    order -- the exact collection shape the server's
+    ``_is_previously_injected_live_curve`` (Codex P2 review of PR #172,
+    round 6) requires before recognizing a "previously injected" curve on a
+    second Price click, since the server injector always calls the loader
+    with its own full default universe. Only used by the test that
+    specifically exercises a second Price click; every other test keeps the
+    small two-tenor ``_fake_live_option_discount_curve_points`` default,
+    which deliberately does not match this shape."""
+
+    from shiori_pricing_lab.data.bloomberg_option_discount_curve import DEFAULT_USD_SOFR_TENORS
+
+    return tuple(
+        BLICurvePoint(
+            curve_id="USD_SOFR_OPTION_DISCOUNT_CURVE",
+            curve_name="USD SOFR Option Discount Curve (Bloomberg Curve #490)",
+            currency=Currency.USD,
+            curve_purpose=BLICurvePurpose.OPTION_DISCOUNT_CURVE,
+            tenor=tenor,
+            rate=0.03,
+            rate_basis=BLICurveRateBasis.CONTINUOUS_ZERO_RATE,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            maturity_date=(base_date + timedelta(days=30 * (index + 1))).isoformat(),
+        )
+        for index, tenor in enumerate(DEFAULT_USD_SOFR_TENORS)
+    )
+
+
 def _install_fake_option_discount_curve_loader(monkeypatch, *, error=None, points=None):
     """Monkeypatch this module's own loader seam; returns the list of ``tenors``
     arguments the fake was called with, so a test can assert call count."""
@@ -1779,7 +1811,9 @@ def test_a_second_price_reacquires_the_live_curve_rather_than_reusing_the_first(
     trader had supplied a manual override), and must never falsely record
     that Bloomberg-sourced curve as a trader override in the provenance log."""
 
-    calls = _install_fake_option_discount_curve_loader(monkeypatch)
+    calls = _install_fake_option_discount_curve_loader(
+        monkeypatch, points=_full_default_tenor_curve_points()
+    )
     _install_fixed_curve_server_clock(monkeypatch)
 
     page.goto(f"{server_url}/")
@@ -1793,7 +1827,9 @@ def test_a_second_price_reacquires_the_live_curve_rather_than_reusing_the_first(
     page.click("#price-btn")
     _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
     assert len(calls) == 1
-    assert len(page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")) == 2
+    # The loader's own full default (32-tenor) universe -- the exact shape
+    # the second click below must recognize as its own prior output.
+    assert len(page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")) == 32
 
     # The live-sourced curve must never be logged as a trader override --
     # the provenance panel is reserved for genuinely hand-entered values.
@@ -1805,7 +1841,7 @@ def test_a_second_price_reacquires_the_live_curve_rather_than_reusing_the_first(
     page.click("#price-btn")
     _wait_until(lambda: len(calls) == 2)
     assert page.inner_text("#status-text") == "Draft priced"
-    assert len(page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")) == 2
+    assert len(page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")) == 32
     provenance_paths = {record["path"] for record in _override_provenance(page)}
     assert "curve_points" not in provenance_paths
 
