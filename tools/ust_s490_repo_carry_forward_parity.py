@@ -45,8 +45,12 @@ Treasury ticks (32nds).
   injector ``app/standalone_option_workbench_server.inject_live_option_
   discount_curve_if_absent``, which calls the production Curve #490 loader
   and applies the same same-as-of RED gate (a live curve is only ever
-  paired with a ``valuation_date`` equal to today). A case that already
-  carries manual curve nodes is used exactly as supplied, untouched;
+  paired with a ``valuation_date`` equal to today). That injector leaves a
+  case carrying manual/fixture curve nodes untouched, so before reporting
+  anything this script separately requires every curve row it is about to
+  read to carry the production loader's own curve identity -- a parity
+  report is never produced from manual, fixture, or sample rates (see the
+  production-curve gate below);
 - the funding transformation is
   ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``,
   under whichever of its two labeled prototype methods ``--funding-method``
@@ -80,6 +84,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 
 from shiori_pricing_lab.app.standalone_option_workbench import (
@@ -87,6 +92,10 @@ from shiori_pricing_lab.app.standalone_option_workbench import (
 )
 from shiori_pricing_lab.app.standalone_option_workbench_server import (
     inject_live_option_discount_curve_if_absent,
+)
+from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
+    USD_SOFR_CURVE_ID,
+    USD_SOFR_SOURCE_SYSTEM,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
     repo_carry_forward_clean_price,
@@ -113,6 +122,55 @@ _TREASURY_PLUS_EIGHTHS = 4
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+# --- production-curve gate (Codex P1 review of PR #174) ----------------------------
+#
+# The Issue #171 injector deliberately leaves a case that already carries
+# explicit curve nodes completely untouched -- a manual trader override, an
+# uploaded fixture, or the repository's own bundled sanitized-synthetic
+# example all price exactly as supplied. That is correct for pricing, but it
+# means the documented command above could otherwise produce a
+# confident-looking "S490 parity" report whose funding was actually derived
+# from synthetic or hand-typed rates, which would be fabricated Bloomberg
+# evidence (AGENTS.md rule 6) and could invalidate this issue's acceptance.
+#
+# So before a single number is reported, every curve row the funding
+# resolver will actually read is checked against the production Curve #490
+# loader's own published identity constants -- imported from that loader,
+# never re-spelled here. A row that does not match fails the whole run with
+# a message naming what was found instead.
+#
+# ``require_production_curve=False`` exists only as a test seam (the same
+# kind as ``inject_curve`` / ``build_request`` above) and is deliberately
+# **not** exposed on the CLI: there is no command-line way to produce a
+# parity report from a non-production curve. Even when a caller disables the
+# gate in-process, the report still stamps
+# ``curve_provenance = NON_PRODUCTION_CURVE__NOT_S490_ACCEPTANCE_EVIDENCE``
+# and the rendered Markdown leads with that warning, so such a report can
+# never be mistaken for acceptance evidence.
+PRODUCTION_CURVE_PROVENANCE = "PRODUCTION_CURVE_490"
+NON_PRODUCTION_CURVE_PROVENANCE = "NON_PRODUCTION_CURVE__NOT_S490_ACCEPTANCE_EVIDENCE"
+
+
+def classify_curve_provenance(curve_points) -> str:
+    """Return the provenance verdict for the rows funding will be read from.
+
+    ``PRODUCTION_CURVE_PROVENANCE`` only when there is at least one row and
+    **every** row carries both the production Curve #490 loader's own
+    ``curve_id`` and its own ``source_system``; otherwise
+    ``NON_PRODUCTION_CURVE_PROVENANCE``. No partial or majority verdict
+    exists -- one foreign row is enough to make the whole curve
+    non-production.
+    """
+
+    points = tuple(curve_points)
+    if not points:
+        return NON_PRODUCTION_CURVE_PROVENANCE
+    for point in points:
+        if point.curve_id != USD_SOFR_CURVE_ID or point.source_system != USD_SOFR_SOURCE_SYSTEM:
+            return NON_PRODUCTION_CURVE_PROVENANCE
+    return PRODUCTION_CURVE_PROVENANCE
 
 
 def format_price_as_treasury_fraction(price_per_100: float) -> str:
@@ -176,6 +234,13 @@ def parse_horizon_argument(raw: str) -> ParityHorizon:
     Treasury quote string such as ``"99-16+"`` is deliberately not accepted
     here: this script does not own a second quote parser). Raises
     ``ValueError`` for an empty date or an unparseable price.
+
+    ``float()`` alone accepts ``nan`` / ``inf`` / ``1e999`` (Codex P2 review
+    of PR #174), which would record a non-finite residual and write
+    non-standard ``NaN``/``Infinity`` tokens into the JSON report -- a
+    malformed entry masquerading as a supplied Bloomberg observation. Every
+    parsed price is therefore also required to be finite before a horizon is
+    constructed at all.
     """
 
     date_text, separator, price_text = raw.partition("=")
@@ -195,6 +260,12 @@ def parse_horizon_argument(raw: str) -> ParityHorizon:
             f"--horizon {raw!r} has an OVME forward {price_text!r} that is not a decimal "
             "price per 100 (for example 99.828125)"
         ) from exc
+    if not isfinite(observed):
+        raise ValueError(
+            f"--horizon {raw!r} has an OVME forward {price_text!r} that is not a finite "
+            "decimal price per 100 (for example 99.828125) -- a non-finite value is never "
+            "recorded as an observed Bloomberg number"
+        )
     return ParityHorizon(
         forward_settlement_date=date_text,
         observed_ovme_forward_clean_price_per_100=observed,
@@ -276,6 +347,7 @@ def run_parity(
     spot_settlement_date: str,
     horizons: tuple[ParityHorizon, ...],
     method: S490FundingMethod | str = DEFAULT_S490_FUNDING_METHOD,
+    require_production_curve: bool = True,
     inject_curve=inject_live_option_discount_curve_if_absent,
     build_request=build_request_from_standalone_option_case,
 ) -> ParityReport:
@@ -285,11 +357,14 @@ def run_parity(
     (defaults: the real, unmodified production functions) so this
     report-building/CLI logic is testable without ``blpapi`` -- the same
     seam ``bloomberg_usd_sofr_par_rate_curve_acceptance.py`` already uses.
+    ``require_production_curve`` is the third such seam and is likewise not
+    a CLI option -- see the production-curve gate note above.
 
     A failure that affects the whole run (the Bloomberg curve acquisition,
-    the same-as-of gate, an invalid case, a missing spot clean price)
-    returns ``status="error"`` with no horizon rows; a failure affecting one
-    horizon only is reported on that horizon's own row.
+    the same-as-of gate, an invalid case, a missing spot clean price, a
+    curve that is not the production Curve #490 acquisition) returns
+    ``status="error"`` with no horizon rows; a failure affecting one horizon
+    only is reported on that horizon's own row.
     """
 
     generated_at = _utc_now()
@@ -303,6 +378,22 @@ def run_parity(
                 "bond_quote.clean_price_per_100 must be present -- a yield-only quote "
                 "carries no spot clean price for the repo-carry forward to start from"
             )
+        curve_provenance = classify_curve_provenance(request.market_data_snapshot.curve_points)
+        if require_production_curve and curve_provenance != PRODUCTION_CURVE_PROVENANCE:
+            found = sorted(
+                {
+                    f"{point.curve_id}/{point.source_system}"
+                    for point in request.market_data_snapshot.curve_points
+                }
+            )
+            raise ValueError(
+                "the case was priced against a curve that is not the production Bloomberg "
+                f"Curve #490 acquisition (expected every row to carry curve_id "
+                f"{USD_SOFR_CURVE_ID!r} and source_system {USD_SOFR_SOURCE_SYSTEM!r}, found "
+                f"{found}) -- an S490 parity report is never produced from manual, fixture, "
+                "or sample curve rates; clear the case's curve_points so the live production "
+                "curve is acquired, or run against a case priced from it"
+            )
     except Exception as exc:  # noqa: BLE001 -- surfaced verbatim in the report
         return ParityReport(
             generated_at=generated_at,
@@ -314,6 +405,7 @@ def run_parity(
 
     snapshot = request.market_data_snapshot
     case_summary = {
+        "curve_provenance": curve_provenance,
         "s490_funding_method": str(method),
         "snapshot_id": snapshot.snapshot_id,
         "underlying_isin": request.resolved_bond_reference_data.isin,
@@ -416,6 +508,15 @@ def render_markdown(data: dict) -> str:
     if data["error"]:
         lines.append(f"Error: {data['error']}")
     lines.append("")
+
+    if data["case"].get("curve_provenance") == NON_PRODUCTION_CURVE_PROVENANCE:
+        lines.append(
+            f"**{NON_PRODUCTION_CURVE_PROVENANCE}** -- the funding below was derived from "
+            "curve rows that are not the production Bloomberg Curve #490 acquisition. "
+            "This report is not S490 acceptance evidence and must not be compared with "
+            "OVME F as though it were."
+        )
+        lines.append("")
 
     if data["case"]:
         lines.append("## Case")
