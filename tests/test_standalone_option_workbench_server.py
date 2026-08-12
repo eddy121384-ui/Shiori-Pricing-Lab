@@ -764,6 +764,54 @@ def test_inject_live_curve_does_not_discard_a_row_that_only_reuses_the_curve_id(
         server_module.build_request_from_standalone_option_case(case)
 
 
+def test_inject_live_curve_does_not_discard_a_row_with_a_malformed_maturity_date(
+    monkeypatch,
+) -> None:
+    """Codex P2 review of PR #172, round 3: matching every fixed field is not
+    enough by itself -- a row satisfying the fingerprint but carrying a
+    ``maturity_date`` ``BLICurvePoint`` itself would reject (a non-ISO
+    string) must still reach that constructor's real error, checked with
+    the exact same ``_parse_iso_date`` validator, rather than being
+    misclassified as a trusted echo and silently discarded."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    malformed_point = {
+        **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+        "tenor": "1Y",
+        "rate": 0.03,
+        "maturity_date": "not-a-date",
+    }
+    case = {**json.loads(_example_case_bytes()), "curve_points": [malformed_point]}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(ValueError, match="maturity_date"):
+        server_module.build_request_from_standalone_option_case(case)
+
+
+def test_inject_live_curve_does_not_discard_a_row_with_a_non_finite_rate(monkeypatch) -> None:
+    """Same as above, for ``rate`` -- checked with the exact same
+    ``_require_finite_number`` validator ``BLICurvePoint`` itself uses."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    malformed_point = {
+        **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+        "tenor": "1Y",
+        "rate": float("nan"),
+        "maturity_date": "2027-01-01",
+    }
+    case = {**json.loads(_example_case_bytes()), "curve_points": [malformed_point]}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(ValueError, match="rate"):
+        server_module.build_request_from_standalone_option_case(case)
+
+
 def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:
     """Codex P2 review of PR #172, round 2: the live loader can only ever
     supply USD, so a non-USD draft with no manual curve must not read as
