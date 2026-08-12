@@ -470,12 +470,18 @@ def price_overlay_case(overlay: dict) -> dict:
 # same-as-of check entirely (Codex P1 review of PR #172), silently reusing a
 # stale curve and never re-checking it against a possibly-rolled-over
 # ``valuation_date``. ``_is_previously_injected_live_curve`` closes this by
-# recognizing this injector's own output -- every row it writes carries the
-# loader's own ``curve_id`` (``USD_SOFR_CURVE_ID``), which the manual editor
-# never writes (its rows always carry the distinct
-# ``SHIORI_MANUAL_OPTION_DISCOUNT_CURVE`` id) -- and re-fetching fresh from
-# Bloomberg every time, exactly like every other live Bloomberg call in this
-# module (no cache, no polling, no stale reuse).
+# recognizing this injector's own output -- every row it writes matches a
+# full fixed-field fingerprint (``_LIVE_CURVE_POINT_FIXED_FIELDS``: this
+# injector's own ``curve_id``, ``curve_name``, ``currency``,
+# ``curve_purpose``, ``rate_basis``, ``source_system``, ``status``), never
+# just its ``curve_id`` alone (Codex P2 review of PR #172, round 2 -- a
+# single shared token let a malformed or deliberately caller-supplied row
+# using only that id slip past as a "previously injected" match instead of
+# reaching the builder's own missing-field schema error). The manual editor
+# never writes this fingerprint at all (its rows always carry the distinct
+# ``SHIORI_MANUAL_OPTION_DISCOUNT_CURVE`` id and no ``maturity_date``) --
+# and re-fetching fresh from Bloomberg every time, exactly like every other
+# live Bloomberg call in this module (no cache, no polling, no stale reuse).
 #
 # A case that already carries explicit *manual* curve nodes (a trader
 # override, or an existing deterministic/API test fixture) is left completely
@@ -560,19 +566,57 @@ def _live_option_discount_curve_points_as_dicts() -> list[dict]:
     return [asdict(point) for point in result.curve_points]
 
 
+# Every fixed (never-varying-per-tenor) field the loader itself writes on
+# every row it returns (see load_bloomberg_usd_sofr_option_discount_curve).
+# Codex P2 review of PR #172, round 2: matching on curve_id alone let a
+# malformed or deliberately caller-supplied row using that one id slip
+# through as "previously injected" and be silently discarded -- e.g.
+# ``[{"curve_id": "USD_SOFR_OPTION_DISCOUNT_CURVE"}]`` would have been
+# treated as a stale echo instead of reaching the builder's real
+# missing-field schema error. Requiring every one of these fields to match
+# exactly is a full fingerprint of this injector's own output, not a single
+# reusable token -- a row that matches every field this precisely either
+# genuinely came from this injector, or is a caller deliberately
+# constructing something indistinguishable from it, for which refetching
+# the real live curve is the safe outcome, never a masked schema error.
+_LIVE_CURVE_POINT_FIXED_FIELDS: dict[str, str] = {
+    "curve_id": USD_SOFR_CURVE_ID,
+    "curve_name": USD_SOFR_CURVE_NAME,
+    "currency": "USD",
+    "curve_purpose": "OPTION_DISCOUNT_CURVE",
+    "rate_basis": "CONTINUOUS_ZERO_RATE",
+    "source_system": USD_SOFR_SOURCE_SYSTEM,
+    "status": "ACTIVE",
+}
+
+
 def _is_previously_injected_live_curve(curve_points: object) -> bool:
-    """True when every row of ``curve_points`` carries this injector's own
-    ``curve_id`` -- i.e. ``curve_points`` is not a genuine manual/fixture
-    override but a prior live Curve #490 acquisition the browser adopted
-    (see the module-level Issue #171 note above), safe and expected to be
-    re-fetched fresh on every call. ``curve_points`` that is not a non-empty
-    list of dicts (including the fresh-draft ``[]``) is never this shape.
+    """True when every row of ``curve_points`` matches this injector's own
+    full field fingerprint (``_LIVE_CURVE_POINT_FIXED_FIELDS``, plus a
+    genuinely present ``tenor``/``rate``/``maturity_date``) -- i.e.
+    ``curve_points`` is not a genuine manual/fixture override but a prior
+    live Curve #490 acquisition the browser adopted (see the module-level
+    Issue #171 note above), safe and expected to be re-fetched fresh on
+    every call. ``curve_points`` that is not a non-empty list of dicts
+    (including the fresh-draft ``[]``), or any row missing or disagreeing on
+    even one fixed field, is never this shape -- it is left alone and
+    reaches the builder's own, more specific validation unchanged.
     """
 
-    return bool(curve_points) and isinstance(curve_points, list) and all(
-        isinstance(point, dict) and point.get("curve_id") == USD_SOFR_CURVE_ID
-        for point in curve_points
-    )
+    if not isinstance(curve_points, list) or not curve_points:
+        return False
+    for point in curve_points:
+        if not isinstance(point, dict):
+            return False
+        if any(point.get(key) != value for key, value in _LIVE_CURVE_POINT_FIXED_FIELDS.items()):
+            return False
+        if not isinstance(point.get("tenor"), str) or not point["tenor"]:
+            return False
+        if not isinstance(point.get("rate"), int | float) or isinstance(point.get("rate"), bool):
+            return False
+        if not isinstance(point.get("maturity_date"), str) or not point["maturity_date"]:
+            return False
+    return True
 
 
 def inject_live_option_discount_curve_if_absent(case: dict) -> dict:
@@ -666,11 +710,24 @@ def _validation_only_placeholder_curve_points(case: dict) -> list[dict]:
     Option Discount Curve in the *product's own* currency); a case whose
     ``bond_option`` is not yet a well-formed mapping gets no placeholder at
     all, so the original, more relevant build error surfaces unchanged.
+
+    **Gated on USD (Codex P2 review of PR #172, round 2).** The live
+    ``inject_live_option_discount_curve_if_absent`` can only ever inject a
+    USD curve (the loader itself is USD SOFR only), so certifying
+    ``ready: True`` for a non-USD draft with empty ``curve_points`` would be
+    a false positive -- ``/api/case`` would still reject that same draft for
+    lacking a matching-currency Option Discount Curve. A non-USD currency
+    gets no placeholder either, so the real ``curve_points must not be
+    empty`` error reports ``ready: False``, exactly matching what a real
+    Price attempt would do (and exactly mirroring script.js's own
+    ``LIVE_CURVE_CURRENCY`` gate on the browser side).
     """
 
     bond_option = case.get("bond_option")
     currency = bond_option.get("currency") if isinstance(bond_option, dict) else None
     if not isinstance(currency, str) or not currency:
+        return []
+    if currency != "USD":
         return []
     return [
         {

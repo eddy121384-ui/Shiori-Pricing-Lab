@@ -740,6 +740,49 @@ def test_inject_live_curve_never_substitutes_for_a_malformed_curve_points_value(
         server_module.build_request_from_standalone_option_case(case)
 
 
+def test_inject_live_curve_does_not_discard_a_row_that_only_reuses_the_curve_id(
+    monkeypatch,
+) -> None:
+    """Codex P2 review of PR #172, round 2: matching on curve_id alone would
+    let a malformed (or deliberately caller-supplied) row using only that
+    one id be silently discarded and replaced with a live curve, masking
+    the real missing-field schema error a genuinely malformed row should
+    raise. The full fixed-field fingerprint must not match a row missing
+    every other field."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = {
+        **json.loads(_example_case_bytes()),
+        "curve_points": [{"curve_id": "USD_SOFR_OPTION_DISCOUNT_CURVE"}],
+    }
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(TypeError):
+        server_module.build_request_from_standalone_option_case(case)
+
+
+def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:
+    """Codex P2 review of PR #172, round 2: the live loader can only ever
+    supply USD, so a non-USD draft with no manual curve must not read as
+    ready -- /api/case would reject that same draft for lacking a
+    matching-currency Option Discount Curve."""
+
+    case = {**load_base_case(), "curve_points": []}
+    case["bond_option"] = {**case["bond_option"], "currency": "EUR"}
+    case["bond_quote"] = {**case["bond_quote"], "currency": "EUR"}
+    case["bond_reference_data_universe"][0] = {
+        **case["bond_reference_data_universe"][0],
+        "currency": "EUR",
+    }
+
+    result = server_module.validate_case(case)
+    assert result["ready"] is False
+    assert "curve_points must not be empty" in result["error"]
+
+
 def test_api_case_never_substitutes_a_live_curve_for_a_malformed_curve_points_value(
     server_url: str, monkeypatch
 ) -> None:
