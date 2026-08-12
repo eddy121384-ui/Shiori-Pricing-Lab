@@ -1044,6 +1044,45 @@ def test_inject_live_curve_honors_a_collection_with_reversed_maturity_dates(
     assert calls == []
 
 
+def test_inject_live_curve_refetches_a_shape_identical_edited_echo(monkeypatch) -> None:
+    """Codex P2 review of PR #172, round 8: this pins down a documented,
+    accepted boundary rather than a bug -- see
+    ``_is_previously_injected_live_curve``'s own "Known, accepted boundary"
+    docstring note. A caller that takes exactly the shape a prior live
+    price returned and edits one ``rate`` value produces something still
+    indistinguishable, by shape alone, from a genuine echo; no route in
+    this codebase can produce that exact shape any other way (a real
+    manual override always carries the distinct
+    ``SHIORI_MANUAL_OPTION_DISCOUNT_CURVE`` id), so it is re-fetched fresh
+    from Bloomberg rather than honored -- the safe direction, since the
+    result is still genuine live data, never a fabricated or stale value."""
+
+    full_tenor_points = _full_default_tenor_curve_points()
+    calls = _install_fake_live_curve_loader(monkeypatch, points=full_tenor_points)
+    _install_fixed_curve_clock(monkeypatch)
+    edited_rates = [point.rate for point in full_tenor_points]
+    edited_rates[0] += 0.0001  # the caller's one deliberate edit
+    edited_points = [
+        {
+            **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+            "tenor": point.tenor,
+            "rate": rate,
+            "maturity_date": point.maturity_date,
+        }
+        for point, rate in zip(full_tenor_points, edited_rates, strict=True)
+    ]
+    case = {**json.loads(_example_case_bytes()), "curve_points": edited_points}
+    assert edited_rates != [point.rate for point in full_tenor_points]
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert len(calls) == 1
+    assert result is not case
+    assert [point["rate"] for point in result["curve_points"]] == [
+        point.rate for point in full_tenor_points
+    ]
+
+
 def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:
     """Codex P2 review of PR #172, round 2: the live loader can only ever
     supply USD, so a non-USD draft with no manual curve must not read as

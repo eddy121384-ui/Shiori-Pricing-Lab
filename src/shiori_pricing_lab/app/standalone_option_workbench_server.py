@@ -664,6 +664,30 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
     even one fixed field, or failing any one of the three per-field checks,
     is never this shape -- it is left alone and reaches the builder's own,
     more specific validation unchanged.
+
+    **Known, accepted boundary (Codex P2 review of PR #172, round 8).**
+    This predicate matches *shape*, not provenance: it cannot tell "this is
+    a genuine echo of my own prior output" apart from "this is a value a
+    caller deliberately constructed that happens to be shape-identical to
+    one" -- e.g. a caller who takes exactly the 32 rows a prior live price
+    returned and edits one ``rate``, then reposts the case, produces
+    something this predicate still accepts, and it is treated as a stale
+    echo and re-fetched rather than honored as that one edited value. This
+    is a deliberate trade-off, not an oversight: no route in this codebase
+    can produce that shape any other way (the browser's manual editor
+    always writes ``CURVE_ID`` = ``SHIORI_MANUAL_OPTION_DISCOUNT_CURVE``,
+    never this loader's own ``curve_id``, so a real trader override is
+    never shape-identical to an acquisition), and the only way to close it
+    completely -- an explicit, out-of-band provenance marker the browser
+    round-trips outside ``curve_points`` itself -- would add a new field to
+    the shared case-envelope schema ``standalone_option_workbench.py``
+    already validates strictly (unknown top-level keys are rejected
+    outright), which is a bigger surface than this wiring slice's own scope
+    (Issue #171: "Do not create a parallel pricing-input schema or second
+    curve representation"). Failing toward a fresh, genuine Bloomberg
+    acquisition is also the safe direction: the worst outcome of this
+    boundary is pricing with real live data instead of a caller-supplied
+    value that exactly impersonates it, never the reverse.
     """
 
     if not isinstance(curve_points, list) or not curve_points:
