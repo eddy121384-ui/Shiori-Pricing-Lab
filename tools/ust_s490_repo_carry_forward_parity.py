@@ -100,19 +100,14 @@ from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
     S490FundingMethod,
     resolve_s490_repo_carry_funding,
 )
+from shiori_pricing_lab.pricing.bli_treasury_price_format import (
+    TREASURY_32NDS_PER_POINT,
+    format_price_as_treasury_fraction,
+)
 
 DEFAULT_OUTPUT_DIRNAME = "shiori_ust_s490_repo_carry_forward_parity_output"
 MARKDOWN_FILENAME = "ust_s490_repo_carry_forward_parity.md"
 JSON_FILENAME = "ust_s490_repo_carry_forward_parity.json"
-
-# Treasury price display (Issue #161's own trader-desk convention, applied
-# in the opposite direction). ``script.js::parseTreasuryQuote`` already
-# reads "98-16" / "98-16+" / "98-164" into a decimal per 100; this is that
-# same convention rendered back out, so a number Eddy compares against OVME
-# reads the way his screen does.
-_TREASURY_32NDS_PER_POINT = 32
-_TREASURY_EIGHTHS_PER_32ND = 8
-_TREASURY_PLUS_EIGHTHS = 4
 
 
 def _utc_now() -> str:
@@ -168,40 +163,6 @@ def _acquire_production_curve(case: dict, inject_curve) -> tuple[dict, int]:
     supplied = case.get("curve_points")
     discarded = len(supplied) if isinstance(supplied, list) else 0
     return inject_curve({**case, "curve_points": []}), discarded
-
-
-def format_price_as_treasury_fraction(price_per_100: float) -> str:
-    """Return ``price_per_100`` as a Treasury quote string, e.g. ``"98-16+"``.
-
-    The inverse of the existing ``parseTreasuryQuote`` convention in
-    ``prototype/bond-option-workbench/script.js`` (Issue #161): a handle,
-    two 32nds digits, then an optional sub-32nd -- ``"+"`` for a half 32nd,
-    otherwise a digit counting eighths of a 32nd.
-
-    **This is a rounded display, never a pricing value.** A derived forward
-    is an arbitrary decimal, so it is rounded to the nearest eighth of a
-    32nd (1/256 of a point) to be displayable at all; every report this
-    script writes carries the exact decimal alongside it, and every
-    residual is computed from the decimal, never from this string. A
-    negative price (not a thing this prototype produces, but not worth
-    silently mis-rendering) is returned with a leading ``-`` on the
-    magnitude.
-    """
-
-    sign = "-" if price_per_100 < 0 else ""
-    magnitude = abs(float(price_per_100))
-    total_eighths = round(magnitude * _TREASURY_32NDS_PER_POINT * _TREASURY_EIGHTHS_PER_32ND)
-    eighths_per_point = _TREASURY_32NDS_PER_POINT * _TREASURY_EIGHTHS_PER_32ND
-    handle, remainder = divmod(total_eighths, eighths_per_point)
-    thirty_seconds, eighths = divmod(remainder, _TREASURY_EIGHTHS_PER_32ND)
-
-    if eighths == 0:
-        tail = ""
-    elif eighths == _TREASURY_PLUS_EIGHTHS:
-        tail = "+"
-    else:
-        tail = str(eighths)
-    return f"{sign}{handle}-{thirty_seconds:02d}{tail}"
 
 
 @dataclass(frozen=True)
@@ -334,7 +295,7 @@ def _horizon_result(
     if observed is not None:
         residual = forward.forward_clean_price_per_100 - observed
         row["residual_decimal_per_100"] = residual
-        row["residual_treasury_ticks_32nds"] = residual * _TREASURY_32NDS_PER_POINT
+        row["residual_treasury_ticks_32nds"] = residual * TREASURY_32NDS_PER_POINT
     return row
 
 

@@ -133,6 +133,17 @@
     greekVega: document.getElementById("greek-vega"),
     greekTheta: document.getElementById("greek-theta"),
 
+    // S490 repo-carry Forward parity (Issue #173/#174 prototype)
+    s490SpotSettlementDate: document.getElementById("s490-spot-settlement-date-input"),
+    s490ParityStatus: document.getElementById("s490-parity-status"),
+    s490ParityFields: document.getElementById("s490-parity-fields"),
+    s490ParityMethodRow: document.getElementById("s490-parity-method-row"),
+    s490FundingRate: document.getElementById("s490-funding-rate"),
+    s490CarryFactor: document.getElementById("s490-carry-factor"),
+    s490ForwardDecimal: document.getElementById("s490-forward-decimal"),
+    s490ForwardFraction: document.getElementById("s490-forward-fraction"),
+    s490FundingMethod: document.getElementById("s490-funding-method"),
+
     // Advanced
     advancedHead: document.getElementById("advanced-head"),
     advancedBody: document.getElementById("advanced-body"),
@@ -2438,6 +2449,15 @@
     // to +08:00" are the same event by construction -- there is nowhere else
     // for a re-render or a validation pass to reach it from.
     els.expiryOffset.value = DEFAULT_EXPIRY_UTC_OFFSET;
+    // The S490 parity panel's own Spot Settlement Date (Issue #174) is not
+    // part of MANUAL_TEXT_INPUTS -- editing it must never invalidate a
+    // pending Price/Refresh, so it is blanked explicitly here instead of
+    // through that shared array. Its displayed result/error are not reset
+    // here directly: syncDraftGating's own maybeRefreshS490Parity call,
+    // right after every caller of this function, already clears them the
+    // instant currentDraft becomes null (a fresh ticket) or this field goes
+    // blank.
+    els.s490SpotSettlementDate.value = "";
     // Two blank rows: the minimum the curve contract needs, offered ready to
     // fill. They are structure only -- a blank row is never a node.
     clearCurveRows();
@@ -3270,6 +3290,12 @@
       scheduleBuilderValidation();
     }
     const builderReady = draftComplete && profileReady && builderValidation.state === "ready";
+    // Read by maybeRefreshS490Parity below, and by the Spot Settlement Date
+    // field's own separate "input" listener -- both need this exact same
+    // "the real typed builder would accept this draft" answer Price itself
+    // is gated on, without recomputing draftComplete/profileReady/
+    // builderValidation.state a second time.
+    latestBuilderReady = builderReady;
     // A pending lookup names a *different* bond than the one backing this
     // draft. Both actions begin by invalidating that lookup, so leaving them
     // live would let a click silently cancel the trader's Load and then price
@@ -3326,6 +3352,14 @@
         "builder accepts the draft.";
       els.unresolvedAlso.textContent = "Nothing else is outstanding.";
     }
+
+    // Every state change this function already reacts to -- a fresh Bloomberg
+    // load, a form edit, a profile answer, a completed Price/Refresh, Clear --
+    // ends here, so this one call site is enough to satisfy Issue #174's own
+    // requirement ("change Expiry, Shiori automatically recomputes") without
+    // a second edit-tracking mechanism. See the function's own doc comment
+    // for why it is idempotent and safe to call this often.
+    maybeRefreshS490Parity();
   }
 
   // --- Request generation / abort tracking ---------------------------------
@@ -3418,6 +3452,138 @@
       inFlightBloombergController.abort();
       inFlightBloombergController = null;
     }
+  }
+
+  // --- S490 repo-carry Forward parity (Issue #173/#174) ---------------------
+  //
+  // Read-only parity/testing display only: reuses POST /api/case/s490-repo-carry
+  // unchanged, which itself reuses the existing #171 live Curve #490
+  // acquisition, the #173 funding resolver and repo-carry Forward primitive.
+  // No repo rate is ever typed in here, no OVME value is ever hard-coded, and
+  // this section never writes into currentDraft or the existing explicit
+  // Forward Clean Price input -- it is a side display, entirely separate from
+  // the single-slot Price/Refresh run-request machine above.
+  //
+  // Trigger: whichever of Expiry, the Spot Settlement Date field, the loaded
+  // bond, the curve, or any other draft input last changed. Rather than wire
+  // a second edit-tracking mechanism, this reads `latestBuilderReady`
+  // (syncDraftGating's own "the real typed builder would accept this draft"
+  // answer, recomputed on every state change already) and its own key
+  // fingerprints the whole draft plus the Spot Settlement Date field, so a
+  // call after an unrelated state change that changed nothing relevant is a
+  // cheap no-op.
+
+  let s490ParityGeneration = 0;
+  // Never a real key's own value (see s490ParityKey below), so the very
+  // first call after page load is guaranteed to actually render once,
+  // rather than being mistaken for "nothing changed" against an initial
+  // guess.
+  let lastS490ParityKey;
+  let s490ParityResult = null;
+  let s490ParityError = null;
+  // Mirrors syncDraftGating's own `builderReady` local -- see that
+  // function's own comment for why this is read rather than recomputed.
+  let latestBuilderReady = false;
+
+  // Two distinct "nothing to show" reasons, not both collapsed onto the same
+  // `null` -- a genuine transition between them (finishing the ticket while
+  // Spot Settlement Date is still blank, or vice versa) has to still count
+  // as a key change, or maybeRefreshS490Parity's own guard would wrongly
+  // treat it as a no-op and leave the wrong status message on screen.
+  const S490_PARITY_KEY_NOT_READY = "__S490_NOT_READY__";
+  const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
+
+  function s490ParityKey() {
+    if (!latestBuilderReady || !currentDraft) return S490_PARITY_KEY_NOT_READY;
+    const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
+    if (!isValidIsoDate(spotSettlementDate)) return S490_PARITY_KEY_NO_SPOT_DATE;
+    // The whole draft, not a hand-picked subset of its fields: this section
+    // has to recompute for any change that could affect the funding or the
+    // forward (a curve override, the bond's own schedule fields, the spot
+    // quote, Expiry, ...), and enumerating exactly which ones matter would
+    // duplicate logic that already lives in the reviewed Python resolver.
+    return JSON.stringify(currentDraft) + "|" + spotSettlementDate;
+  }
+
+  function renderS490Parity() {
+    if (s490ParityError !== null) {
+      els.s490ParityStatus.textContent = s490ParityError;
+      els.s490ParityStatus.classList.add("is-invalid");
+      els.s490ParityFields.hidden = true;
+      els.s490ParityMethodRow.hidden = true;
+      return;
+    }
+    if (s490ParityResult === null) {
+      els.s490ParityStatus.textContent = !latestBuilderReady
+        ? "Complete the ticket above (Instrument, Trade, Market inputs) to see the S490 " +
+          "repo-carry Forward."
+        : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+          "ticket's Expiry.";
+      els.s490ParityStatus.classList.remove("is-invalid");
+      els.s490ParityFields.hidden = true;
+      els.s490ParityMethodRow.hidden = true;
+      return;
+    }
+    els.s490ParityStatus.textContent = "";
+    els.s490ParityStatus.classList.remove("is-invalid");
+    els.s490ParityFields.hidden = false;
+    els.s490ParityMethodRow.hidden = false;
+    const funding = s490ParityResult.funding;
+    els.s490FundingRate.textContent =
+      (funding.derived_repo_rate_decimal * 100).toFixed(6) + "%";
+    els.s490CarryFactor.textContent = funding.carry_factor.toFixed(10);
+    els.s490ForwardDecimal.textContent = s490ParityResult.forward_clean_price_per_100.toFixed(6);
+    els.s490ForwardFraction.textContent = s490ParityResult.forward_clean_price_treasury_fraction;
+    els.s490FundingMethod.textContent = funding.method;
+  }
+
+  // Idempotent and cheap to call after any state change: it recomputes its
+  // own key first and returns immediately unless that key actually changed,
+  // exactly like the existing `refreshAdvancedProfile`'s own `lastAdvancedProfileKey`
+  // guard.
+  async function maybeRefreshS490Parity() {
+    const key = s490ParityKey();
+    if (key === lastS490ParityKey) return;
+    lastS490ParityKey = key;
+
+    if (key === S490_PARITY_KEY_NOT_READY || key === S490_PARITY_KEY_NO_SPOT_DATE) {
+      s490ParityGeneration++; // invalidate any outstanding answer
+      s490ParityResult = null;
+      s490ParityError = null;
+      renderS490Parity();
+      return;
+    }
+
+    const requestCase = currentDraft;
+    const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
+    const generation = ++s490ParityGeneration;
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/case/s490-repo-carry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ case: requestCase, spot_settlement_date: spotSettlementDate }),
+      });
+      payload = await response.json();
+    } catch (err) {
+      if (generation !== s490ParityGeneration) return;
+      s490ParityResult = null;
+      s490ParityError = "S490 parity request failed: " + err.message;
+      renderS490Parity();
+      return;
+    }
+    if (generation !== s490ParityGeneration) return;
+    if (!response.ok) {
+      s490ParityResult = null;
+      s490ParityError = payload.error || "S490 parity request failed.";
+      renderS490Parity();
+      return;
+    }
+    s490ParityResult = payload.s490_repo_carry;
+    s490ParityError = null;
+    renderS490Parity();
   }
 
   // --- Whole-run state reset ------------------------------------------------
@@ -4023,6 +4189,12 @@
     }
   });
   els.unresolvedGotoBtn.addEventListener("click", revealUnresolvedFocus);
+
+  // Deliberately its own listener, not part of MANUAL_TEXT_INPUTS: this
+  // field is not part of the priced case, so an edit here must never
+  // invalidate an in-flight Price/Refresh the way applyManualInputsToDraft
+  // does for every real ticket field (Issue #174).
+  els.s490SpotSettlementDate.addEventListener("input", maybeRefreshS490Parity);
 
   els.priceBtn.addEventListener("click", priceCurrentDraft);
   els.clearBtn.addEventListener("click", clearDraft);

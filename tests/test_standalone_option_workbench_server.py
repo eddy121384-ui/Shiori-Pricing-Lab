@@ -1279,6 +1279,302 @@ def test_api_case_bloomberg_live_curve_failure_never_calls_the_bond_quote_loader
     assert quote_calls == []
 
 
+# --- POST /api/case/s490-repo-carry: S490 repo-carry Forward parity (Issue #173/#174) --
+#
+# The Workbench parity/testing panel: Expiry-driven, no manual repo input,
+# reusing the exact same live Curve #490 acquisition path
+# (inject_live_option_discount_curve_if_absent) every other route in this
+# module already uses, and the already-reviewed #173 funding resolver /
+# repo-carry primitive. Does not touch Black-76, the existing explicit
+# forward_clean_price_input override path, or price_standalone_option_case.
+
+_S490_SPOT_SETTLEMENT_DATE = "2026-07-02"
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_matches_a_direct_call_to_the_resolver(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 200
+    expected = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+    # JSON has no tuple type -- round-trip the direct-call result exactly
+    # like the HTTP response was, so a dataclass field that is a tuple
+    # (curve_ids, curve_evaluations, ...) compares as the list it becomes on
+    # the wire, matching every other "matches a direct call" test in this
+    # file.
+    assert payload == json.loads(json.dumps(expected))
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_injects_the_live_curve_when_curve_points_is_empty(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 200
+    assert [point["tenor"] for point in payload["case"]["curve_points"]] == ["1M", "1Y"]
+    for point in payload["case"]["curve_points"]:
+        assert point["source_system"] == "BLOOMBERG_DAPI"
+    funding = payload["s490_repo_carry"]["funding"]
+    assert funding["curve_ids"] == ["USD_SOFR_OPTION_DISCOUNT_CURVE"]
+    assert funding["source_systems"] == ["BLOOMBERG_DAPI"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_never_calls_the_live_curve_loader_when_curve_points_is_supplied(
+    server_url: str, monkeypatch
+) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = json.loads(_example_case_bytes())
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 200
+    assert calls == []
+    assert payload["case"]["curve_points"] == case["curve_points"]
+
+
+def test_api_s490_repo_carry_live_curve_failure_returns_400_with_no_fallback(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Bloomberg terminal not logged in")
+    )
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status == 400
+    assert "Bloomberg terminal not logged in" in payload["error"]
+
+
+def test_api_s490_repo_carry_same_as_of_mismatch_returns_400_and_never_calls_the_loader(
+    server_url: str, monkeypatch
+) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch, datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC))
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status == 400
+    assert "today" in payload["error"]
+    assert calls == []
+
+
+def test_api_s490_repo_carry_rejects_missing_required_keys(server_url: str) -> None:
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": {}},
+    )
+    assert status == 400
+    assert "spot_settlement_date" in payload["error"]
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status == 400
+    assert "'case'" in payload["error"]
+
+
+def test_api_s490_repo_carry_rejects_malformed_json_body(server_url: str) -> None:
+    status, payload = _post_bytes(f"{server_url}/api/case/s490-repo-carry", b"not json")
+    assert status == 400
+    assert "invalid JSON body" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_rejects_a_malformed_spot_settlement_date(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": "13/11/2026"},
+    )
+    assert status == 400
+    assert "spot_settlement_date" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_rejects_a_yield_only_quote_with_no_fabricated_spot_price(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["bond_quote"] = {
+        **case["bond_quote"],
+        "clean_price_per_100": None,
+        "yield_value": 0.031,
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status == 400
+    assert "clean_price_per_100" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_reports_an_interim_coupon_horizon_rather_than_a_wrong_forward(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    # The example bond's next coupon after spot settlement is 2026-12-15;
+    # moving Expiry past it (with the dependent dates/timestamp kept
+    # coherent) lands the horizon on Case B, which this repo-carry
+    # primitive explicitly refuses rather than silently mis-pricing.
+    case["bond_option"]["expiry_date"] = "2026-12-20"
+    case["expiry_timestamp"] = "2026-12-20T16:00:00Z"
+    case["forward_settlement_date"] = "2026-12-21"
+    case["option_settlement_date"] = "2026-12-21"
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status == 400
+    assert "no-interim-coupon" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_recomputes_when_expiry_changes(
+    server_url: str, monkeypatch
+) -> None:
+    # Issue #174's own acceptance condition: changing Expiry alone -- with no
+    # curve, quote, or repo rate ever touched by the trader -- changes the
+    # reported S490 Forward.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    case_a = _case_with_empty_curve_points()
+    status_a, payload_a = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case_a, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status_a == 200
+
+    case_b = _case_with_empty_curve_points()
+    case_b["bond_option"]["expiry_date"] = "2026-08-15"
+    case_b["expiry_timestamp"] = "2026-08-15T16:00:00Z"
+
+    status_b, payload_b = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case_b, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status_b == 200
+
+    result_a = payload_a["s490_repo_carry"]
+    result_b = payload_b["s490_repo_carry"]
+    assert result_a["funding"]["forward_settlement_date"] == "2026-09-29"
+    assert result_b["funding"]["forward_settlement_date"] == "2026-08-15"
+    assert result_a["funding"]["repo_term_days"] != result_b["funding"]["repo_term_days"]
+    assert result_a["forward_clean_price_per_100"] != result_b["forward_clean_price_per_100"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_response_carries_every_required_display_field(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+    assert status == 200
+    result = payload["s490_repo_carry"]
+    # Every field the Workbench panel displays (Issue #174 requirements):
+    # funding/repo rate, carry factor, Forward Clean Price decimal and
+    # Treasury fraction, and the funding method used.
+    assert isinstance(result["funding"]["derived_repo_rate_decimal"], float)
+    assert isinstance(result["funding"]["carry_factor"], float)
+    assert isinstance(result["forward_clean_price_per_100"], float)
+    assert isinstance(result["forward_clean_price_treasury_fraction"], str)
+    assert result["funding"]["method"]
+    assert result["forward"]["carry_factor"] == result["funding"]["carry_factor"]
+
+
+# --- Unit-level: resolve_s490_repo_carry_parity ------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_resolve_s490_repo_carry_parity_reuses_the_forward_settlement_date_as_expiry(
+    monkeypatch,
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    result = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+
+    # tF is bond_option.expiry_date, never the separate, existing
+    # forward_settlement_date field (which the explicit-forward path owns).
+    assert case["bond_option"]["expiry_date"] == "2026-09-29"
+    assert case["forward_settlement_date"] == "2026-10-01"
+    assert result["s490_repo_carry"]["funding"]["forward_settlement_date"] == "2026-09-29"
+
+
+@_QUANTLIB_SKIP
+def test_resolve_s490_repo_carry_parity_never_reads_the_explicit_forward_override(
+    monkeypatch,
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["forward_clean_price_input"]["forward_clean_price_per_100"] = 12345.0
+
+    result = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+
+    forward = result["s490_repo_carry"]["forward_clean_price_per_100"]
+    assert forward != 12345.0
+    assert 90 < forward < 110
+
+
+def test_resolve_s490_repo_carry_parity_raises_for_a_yield_only_quote(monkeypatch) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["bond_quote"] = {**case["bond_quote"], "clean_price_per_100": None}
+
+    with pytest.raises(ValueError, match="clean_price_per_100"):
+        server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+
+
 # --- Instrument-first Bloomberg lookup: /api/bloomberg/bond ----------------------
 
 

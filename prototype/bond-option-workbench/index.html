@@ -260,6 +260,41 @@
           </div>
         </div>
 
+        <!-- ---- S490 repo-carry Forward parity (Issue #173/#174 prototype) ---- -->
+        <div class="card s490-parity">
+          <div class="card-head">
+            <div class="card-title">S490 Repo-Carry Forward &mdash; parity / testing</div>
+          </div>
+          <div class="card-body" id="s490-parity-body">
+          <div class="form-row"><label>Spot Settlement Date</label>
+            <div>
+              <input class="control" id="s490-spot-settlement-date-input" type="date">
+            </div>
+          </div>
+          <div class="fixed-route-note">
+            Forward settlement (tF) is this ticket's own <strong>Expiry</strong> &mdash; change
+            Expiry above and this section recomputes. Funding comes from the live Bloomberg
+            Curve #490 / S490 acquisition Shiori already uses for pricing; no repo rate is
+            ever typed in, and no OVME value is hard-coded. This is a parity/testing display
+            only: it does not replace the explicit Forward Clean Price input above, and it
+            never feeds Black-76.
+          </div>
+          <div class="derived-source" id="s490-parity-status">
+            Complete the ticket above (Instrument, Trade, Market inputs) to see the S490
+            repo-carry Forward.
+          </div>
+          <div class="pr-row r1" id="s490-parity-fields" hidden>
+            <div class="pr-cell"><div class="p-lbl">S490 Funding Rate</div><div class="p-val" id="s490-funding-rate">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Carry Factor</div><div class="p-val" id="s490-carry-factor">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Forward Clean (Decimal)</div><div class="p-val teal" id="s490-forward-decimal">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Forward Clean (Treasury)</div><div class="p-val teal" id="s490-forward-fraction">&mdash;</div></div>
+          </div>
+          <div class="pr-row r2" id="s490-parity-method-row" hidden>
+            <div class="pr-cell"><div class="p-lbl">S490 Funding Method</div><div class="p-val" id="s490-funding-method">&mdash;</div></div>
+          </div>
+          </div>
+        </div>
+
         <!-- ---- 3. Market inputs: review ---- -->
         <div class="card wide-card market-review">
           <div class="card-head">

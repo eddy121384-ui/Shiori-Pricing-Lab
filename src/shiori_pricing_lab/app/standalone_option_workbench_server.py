@@ -105,6 +105,28 @@ the browser holds whichever case is currently active and resends it):
   the overlaid case gets the same live Curve #490 injection as ``POST
   /api/case`` above, applied before the bond-quote refresh.
 
+**S490 repo-carry Forward parity (Issue #173/#174).** One more stateless,
+read-only route -- see :func:`resolve_s490_repo_carry_parity` for the full
+contract:
+
+- ``POST /api/case/s490-repo-carry`` -- body is ``{"case": <full case>,
+  "spot_settlement_date": "YYYY-MM-DD"}``. Injects the live Curve #490
+  curve exactly like ``POST /api/case`` (same-as-of gate included, and a
+  case already carrying manual curve nodes is left untouched), then
+  resolves the S490 funding and repo-carry Forward for the case's own
+  ``bond_option.expiry_date`` -- Expiry is the one field a trader changes
+  to see a new Forward; the existing explicit ``forward_settlement_date``
+  and ``forward_clean_price_input`` fields are read by nothing here.
+  Returns ``{"case": <the case actually priced, curve included>,
+  "s490_repo_carry": {"funding": {...}, "forward": {...},
+  "forward_clean_price_per_100": <float>,
+  "forward_clean_price_treasury_fraction": <str>}}`` on HTTP 200. Any
+  validation, date, Bloomberg DAPI, curve-range, or interim-coupon failure
+  returns HTTP 400 with ``{"error": "..."}``. This is a parity/testing
+  display only: it prices nothing through Black-76 and writes nothing into
+  the case it returns beyond the same live curve every other route already
+  injects.
+
 **Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
 regression and developer use only -- the trader-facing ``index.html``/
 ``script.js`` no longer calls it on load or expose a "Load Case JSON"
@@ -266,6 +288,13 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     convention_profile_candidates,
     get_convention_profile,
 )
+from shiori_pricing_lab.pricing.bli_repo_carry_forward import repo_carry_forward_clean_price
+from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
+    resolve_s490_repo_carry_funding,
+)
+from shiori_pricing_lab.pricing.bli_treasury_price_format import (
+    format_price_as_treasury_fraction,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BASE_CASE_PATH = PROJECT_ROOT / "examples" / "standalone_option_case.json"
@@ -395,7 +424,14 @@ DEFAULT_PORT = 8765
 # blocks only on a genuinely incomplete manual override. A stale -v16
 # process would still require the trader to type curve nodes by hand, and a
 # stale -v16 page would gate Price on that same now-removed requirement.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v17"
+#
+# Bumped to -v18 for Issue #174's S490 repo-carry Forward parity panel:
+# POST /api/case/s490-repo-carry is a new route, and the served page gained
+# a small read-only Trade-card section that auto-recomputes it whenever
+# Expiry (or any other ticket input) changes and a Spot Settlement Date is
+# entered. A stale -v17 process would 404 the new route and the panel would
+# show nothing but a transport-error status forever.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v18"
 
 
 def load_base_case() -> dict:
@@ -963,6 +999,100 @@ def price_case_with_bloomberg_quote(
     return {"case": priced_case, "display": display}
 
 
+def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dict:
+    """Resolve one Issue #173/#174 S490 repo-carry Forward for ``case``'s own Expiry.
+
+    Parity/testing display only -- not a pricing route, and it does not
+    touch the existing explicit ``forward_clean_price_input`` override
+    contract or any Black-76/discounting/volatility path. Composes,
+    unmodified:
+
+    - :func:`inject_live_option_discount_curve_if_absent` (Issue #171) for
+      the S490 curve -- the exact same production acquisition path
+      ``POST /api/case``/``POST /api/case/bloomberg`` already use, same-as-of
+      RED gate included. A case already carrying manual curve nodes is
+      priced from those nodes untouched, exactly like every other route in
+      this module -- this route asks for no manual repo input of its own,
+      and introduces no second curve-acquisition rule;
+    - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
+      (Issue #173) for the funding, under its own default prototype method;
+    - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
+      (Issue #173) for the forward.
+
+    **The forward settlement date (``tF``) is ``bond_option.expiry_date``.**
+    Per Issue #174's own instruction ("change Expiry -> Shiori automatically
+    recomputes"), Expiry is the one ticket field a trader changes to see a
+    new S490 Forward -- the existing, separate ``forward_settlement_date``
+    field (which feeds the *other*, explicit-forward pricing path) is not
+    read here. ``spot_settlement_date`` (``tS``) is the one genuinely new
+    input this route needs: repo-carry has no spot settlement date anywhere
+    in the existing case schema, and this repository never derives a
+    settlement date from a lag or calendar, so it must be typed, exactly
+    like every other settlement date already on this ticket.
+
+    No repo rate is ever read from ``case`` or from the caller -- the only
+    caller-supplied number this route consumes beyond the case itself is
+    ``spot_settlement_date``.
+
+    Returns ``{"case": <the case actually priced, live curve included>,
+    "s490_repo_carry": {...}}``. ``case`` mirrors the same "adopt what was
+    actually priced" contract every other live-curve route in this module
+    already returns, so a client that calls this route also picks up the
+    freshly acquired curve for its next Price click. ``s490_repo_carry``
+    carries the funding resolver's and forward primitive's own fields
+    (``dataclasses.asdict``, nested under ``funding``/``forward``) plus two
+    convenience top-level fields:``forward_clean_price_per_100`` and
+    ``forward_clean_price_treasury_fraction``.
+
+    Raises ``ValueError`` if ``bond_quote.clean_price_per_100`` is absent (a
+    yield-only quote carries no spot clean price to start from), or
+    whatever the composed functions raise (Bloomberg failure, same-as-of
+    mismatch, curve node range, an interim coupon in ``(tS, tF]``, a
+    malformed ``spot_settlement_date``, ...) -- never caught or remapped
+    here; the HTTP handler maps every failure to HTTP 400 exactly like
+    every other route in this module.
+    """
+
+    priced_case = inject_live_option_discount_curve_if_absent(case)
+    request = build_request_from_standalone_option_case(priced_case)
+
+    spot_clean_price = request.market_data_snapshot.bond_quote.clean_price_per_100
+    if spot_clean_price is None:
+        raise ValueError(
+            "bond_quote.clean_price_per_100 must be present -- a yield-only quote "
+            "carries no spot clean price for the S490 repo-carry Forward to start from"
+        )
+
+    forward_settlement_date = request.bond_option.expiry_date
+
+    funding = resolve_s490_repo_carry_funding(
+        request.market_data_snapshot.curve_points,
+        currency=request.bond_option.currency,
+        curve_as_of_date=request.valuation_date,
+        spot_settlement_date=spot_settlement_date,
+        forward_settlement_date=forward_settlement_date,
+    )
+    forward = repo_carry_forward_clean_price(
+        bond=request.resolved_bond_reference_data,
+        spot_clean_price_per_100=spot_clean_price,
+        spot_settlement_date=spot_settlement_date,
+        forward_settlement_date=forward_settlement_date,
+        repo_rate_decimal=funding.derived_repo_rate_decimal,
+    )
+
+    return {
+        "case": priced_case,
+        "s490_repo_carry": {
+            "funding": asdict(funding),
+            "forward": asdict(forward),
+            "forward_clean_price_per_100": forward.forward_clean_price_per_100,
+            "forward_clean_price_treasury_fraction": format_price_as_treasury_fraction(
+                forward.forward_clean_price_per_100
+            ),
+        },
+    }
+
+
 def _shiori_acquisition_now() -> datetime:
     """Return one offset-aware Shiori acquisition timestamp via the platform clock.
 
@@ -1338,6 +1468,31 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, display)
 
+    def _handle_api_case_s490_repo_carry(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        required_keys = {"case", "spot_settlement_date"}
+        if not isinstance(body, dict) or not required_keys.issubset(body):
+            self._write_json(
+                400,
+                {
+                    "error": (
+                        "request body must be a JSON object with 'case' and "
+                        "'spot_settlement_date'"
+                    )
+                },
+            )
+            return
+        try:
+            payload = resolve_s490_repo_carry_parity(body["case"], body["spot_settlement_date"])
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
     def _handle_api_bloomberg_bond(self, raw_body: bytes) -> None:
         try:
             body = json.loads(raw_body)
@@ -1433,6 +1588,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/case/price": _handle_api_case_price,
         "/api/case/validate": _handle_api_case_validate,
         "/api/case/bloomberg": _handle_api_case_bloomberg,
+        "/api/case/s490-repo-carry": _handle_api_case_s490_repo_carry,
         "/api/bloomberg/bond": _handle_api_bloomberg_bond,
         "/api/bond/advanced-profile": _handle_api_bond_advanced_profile,
         "/api/bond/convention-profile/candidates": _handle_api_bond_profile_candidates,
