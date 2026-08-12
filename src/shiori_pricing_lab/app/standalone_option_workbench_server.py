@@ -647,12 +647,23 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
     have been misclassified as a trusted echo of the full acquisition,
     discarding what may have been a deliberate explicit-subset override).
 
+    The loader also guarantees its own returned ``MATURITY`` strictly
+    increases from one tenor to the next in that same order (one of its own
+    fail-closed conditions, see its module docstring) -- so a genuine echo
+    of a prior injection has strictly increasing ``maturity_date`` values in
+    row order too. A collection with a repeated or reversed date cannot be
+    this loader's output (Codex P2 review of PR #172, round 7: the tenor-
+    sequence check alone still accepted such a collection, since duplicate/
+    reversed dates are individually still valid ISO dates), so that
+    invariant is checked here as well.
+
     ``curve_points`` that is not a non-empty list of dicts (including the
     fresh-draft ``[]``), whose tenor sequence does not exactly equal
-    ``DEFAULT_USD_SOFR_TENORS``, or any row missing, disagreeing on even one
-    fixed field, or failing any one of the three per-field checks, is never
-    this shape -- it is left alone and reaches the builder's own, more
-    specific validation unchanged.
+    ``DEFAULT_USD_SOFR_TENORS``, whose ``maturity_date`` values do not
+    strictly increase in that same order, or any row missing, disagreeing on
+    even one fixed field, or failing any one of the three per-field checks,
+    is never this shape -- it is left alone and reaches the builder's own,
+    more specific validation unchanged.
     """
 
     if not isinstance(curve_points, list) or not curve_points:
@@ -661,6 +672,7 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
         DEFAULT_USD_SOFR_TENORS
     ):
         return False
+    previous_maturity_date = None
     for point in curve_points:
         if not isinstance(point, dict):
             return False
@@ -671,9 +683,12 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
         try:
             _require_non_blank(point.get("tenor"), "tenor")
             _require_finite_number(point.get("rate"), "rate")
-            _parse_iso_date(point.get("maturity_date"), "maturity_date")
+            maturity_date = _parse_iso_date(point.get("maturity_date"), "maturity_date")
         except ValueError:
             return False
+        if previous_maturity_date is not None and maturity_date <= previous_maturity_date:
+            return False
+        previous_maturity_date = maturity_date
     return True
 
 

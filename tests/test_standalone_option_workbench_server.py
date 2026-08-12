@@ -985,6 +985,65 @@ def test_inject_live_curve_honors_an_explicit_subset_sharing_the_fingerprint(
     server_module.build_request_from_standalone_option_case(case)
 
 
+def test_inject_live_curve_honors_a_collection_with_a_duplicate_maturity_date(
+    monkeypatch,
+) -> None:
+    """Codex P2 review of PR #172, round 7: matching the tenor sequence is
+    still not enough -- the loader also guarantees strictly increasing
+    ``MATURITY`` from one tenor to the next (one of its own fail-closed
+    conditions). A collection with all 32 expected tenors and fixed fields,
+    but every row sharing one repeated ``maturity_date`` instead of that
+    strictly increasing sequence, cannot be this loader's own output and
+    must not be discarded as a trusted echo."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    full_tenor_points = _full_default_tenor_curve_points()
+    duplicated_points = [
+        {
+            **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+            "tenor": point.tenor,
+            "rate": point.rate,
+            # Every row repeats the very first row's own maturity_date,
+            # instead of the loader's own strictly increasing sequence.
+            "maturity_date": full_tenor_points[0].maturity_date,
+        }
+        for point in full_tenor_points
+    ]
+    case = {**json.loads(_example_case_bytes()), "curve_points": duplicated_points}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+
+
+def test_inject_live_curve_honors_a_collection_with_reversed_maturity_dates(
+    monkeypatch,
+) -> None:
+    """Same as above, for a collection whose maturity_date values are
+    individually valid and distinct but run in reverse (decreasing) order
+    instead of the loader's own strictly increasing sequence."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    full_tenor_points = _full_default_tenor_curve_points()
+    reversed_maturities = [point.maturity_date for point in reversed(full_tenor_points)]
+    reversed_points = [
+        {
+            **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+            "tenor": point.tenor,
+            "rate": point.rate,
+            "maturity_date": maturity_date,
+        }
+        for point, maturity_date in zip(full_tenor_points, reversed_maturities, strict=True)
+    ]
+    case = {**json.loads(_example_case_bytes()), "curve_points": reversed_points}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+
+
 def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:
     """Codex P2 review of PR #172, round 2: the live loader can only ever
     supply USD, so a non-USD draft with no manual curve must not read as
