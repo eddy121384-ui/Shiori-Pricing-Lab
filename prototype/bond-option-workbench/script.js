@@ -883,22 +883,50 @@
       resolved: (draft) => computeCurveCoverage(draft).state === "covered",
       locator: "#curve-rows .curve-tenor-input",
       revealAdvanced: true,
-      unresolved: {
-        title: "Manual Option Discount Curve override is incomplete",
-        missing:
-          "Either no manual override (Bloomberg's live Curve #490 is used " +
-          "automatically), or a complete manual override: continuous-zero-rate " +
-          "nodes covering the Reporting Date and the Option Settlement Date.",
-        why:
-          "A manual override that has been started but not finished blocks " +
-          "pricing rather than being silently dropped or silently completed " +
-          "with the live curve instead.",
-        evidence: EVIDENCE_DISCOUNTING,
-        next:
-          "Finish the manual override (genuine continuously-compounded zero " +
-          "rates; Shiori interpolates in range only and never bootstraps, " +
-          "converts or extrapolates a curve), or remove every row so the live " +
-          "Bloomberg Curve #490 is used instead.",
+      // Issue #171 / Codex P2 review of PR #172: two structurally different
+      // reasons can land a trader here, and each needs its own honest
+      // explanation -- a currency the live loader cannot serve at all (it is
+      // USD SOFR only) is not the same problem as a manual override the
+      // trader started but did not finish, so this is a function of the
+      // current draft rather than one fixed panel.
+      unresolved: () => {
+        const draft = currentDraft || { bond_option: {} };
+        const currency = draft.bond_option && draft.bond_option.currency;
+        const hasNoManualNodes = readCurveNodesFromRows().length === 0;
+        if (hasNoManualNodes && currency !== LIVE_CURVE_CURRENCY) {
+          return {
+            title: "Option Discount Curve has no automatic source for this currency",
+            missing:
+              "Manual continuous-zero-rate nodes covering the Reporting Date and " +
+              "the Option Settlement Date.",
+            why:
+              `Bloomberg's live Option Discount Curve (Curve #490) is USD SOFR ` +
+              `only; ${currency || "this currency"} has no automatic source.`,
+            evidence: EVIDENCE_DISCOUNTING,
+            next:
+              "Open Advanced and enter genuine continuously-compounded zero " +
+              "rates for this currency. Shiori interpolates in range only and " +
+              "never bootstraps, converts or extrapolates a curve.",
+          };
+        }
+        return {
+          title: "Manual Option Discount Curve override is incomplete",
+          missing:
+            "Either no manual override (Bloomberg's live Curve #490 is used " +
+            "automatically for a USD draft), or a complete manual override: " +
+            "continuous-zero-rate nodes covering the Reporting Date and the " +
+            "Option Settlement Date.",
+          why:
+            "A manual override that has been started but not finished blocks " +
+            "pricing rather than being silently dropped or silently completed " +
+            "with the live curve instead.",
+          evidence: EVIDENCE_DISCOUNTING,
+          next:
+            "Finish the manual override (genuine continuously-compounded zero " +
+            "rates; Shiori interpolates in range only and never bootstraps, " +
+            "converts or extrapolates a curve), or remove every row so the live " +
+            "Bloomberg Curve #490 is used instead.",
+        };
       },
     },
     {
@@ -1557,6 +1585,13 @@
   // OVME MMkt/repo rate is relabelled as a continuous zero rate.
 
   const CURVE_ID = "SHIORI_MANUAL_OPTION_DISCOUNT_CURVE";
+  // Mirrors data/bloomberg_option_discount_curve.py's USD_SOFR_CURVE_ID and
+  // USD_SOFR_BLOOMBERG_CURVE_NUMBER's own currency exactly (Issue #171) --
+  // the live loader's own curve_id (never written by this manual editor,
+  // whose rows always carry CURVE_ID above) and the one currency it can ever
+  // produce a curve for.
+  const LIVE_CURVE_ID = "USD_SOFR_OPTION_DISCOUNT_CURVE";
+  const LIVE_CURVE_CURRENCY = "USD";
   // Mirrors pricing/bli_curve_tenor.py's _TENOR_SHAPE exactly.
   const TENOR_SHAPE = /^([1-9][0-9]*)([DMY])$/;
 
@@ -1691,18 +1726,33 @@
           "decimal continuous zero rate.",
       };
     }
-    // Issue #171: no manual override entered at all is not a blocker -- the
-    // live Bloomberg USD SOFR Option Discount Curve (Curve #490) is sourced
-    // automatically, server-side, at Price/Refresh time (never reconstructed
-    // here from anything this page displays). A failed live acquisition is
-    // reported by that request itself; this coverage check only ever gates a
-    // manual override the trader has started but not finished.
+    // Issue #171: no manual override entered at all is not a blocker for a
+    // USD draft -- the live Bloomberg USD SOFR Option Discount Curve (Curve
+    // #490) is sourced automatically, server-side, at Price/Refresh time
+    // (never reconstructed here from anything this page displays). A failed
+    // live acquisition is reported by that request itself; this coverage
+    // check only ever gates a manual override the trader has started but not
+    // finished. The live loader is explicitly USD-only (Codex P2 review of
+    // PR #172), so a non-USD draft (e.g. a registered EUR profile such as
+    // GERMAN_GOVT) still needs a genuine manual curve -- claiming automatic
+    // coverage for it would enable Price only for the server to reject the
+    // mismatched-currency curve it actually injects.
     if (nodes.length === 0) {
+      const draftCurrency = draft.bond_option && draft.bond_option.currency;
+      if (draftCurrency === LIVE_CURVE_CURRENCY) {
+        return {
+          state: "covered",
+          message:
+            "No manual override entered -- Bloomberg's live USD SOFR Option " +
+            "Discount Curve (Curve #490) is sourced automatically when you price.",
+        };
+      }
       return {
-        state: "covered",
+        state: "blocking",
         message:
-          "No manual override entered -- Bloomberg's live USD SOFR Option Discount " +
-          "Curve (Curve #490) is sourced automatically when you price.",
+          `The live Bloomberg Option Discount Curve is USD-only (Curve #490); ` +
+          `${draftCurrency || "this currency"} has no automatic source. Enter Option ` +
+          "Discount Curve nodes manually.",
       };
     }
     if (nodes.length < 2) {
@@ -2173,11 +2223,25 @@
     {
       path: "curve_points",
       label: "Option Discount Curve nodes",
-      reason: "No approved Bloomberg sourcing or curve-construction methodology exists.",
-      read: (draft) =>
-        (draft.curve_points || []).length === 0
-          ? null
-          : draft.curve_points.map((point) => `${point.tenor}=${point.rate}`).join(", "),
+      reason: "Trader-entered manual override of the live Bloomberg Curve #490.",
+      // Issue #171 / Codex P1 review of PR #172: a live-priced draft's
+      // curve_points is no longer always a trader override -- POST /api/case
+      // echoes back whichever curve it actually priced with, so after one
+      // successful live-priced run currentDraft.curve_points holds Bloomberg's
+      // own rows. Stamping those as MANUAL_TRADER_ENTRY/TRADER_OVERRIDE (with
+      // the obsolete "no approved Bloomberg sourcing" reason) would falsely
+      // describe verified Bloomberg data as hand-typed, in both the on-screen
+      // provenance panel and the exported run. The live loader's own rows are
+      // distinguished by their curve_id (LIVE_CURVE_ID, never written by this
+      // page's manual editor -- see readCurveNodesFromRows) and excluded here
+      // exactly like any other genuinely Bloomberg-sourced field: not present
+      // in this override log at all.
+      read: (draft) => {
+        const points = draft.curve_points || [];
+        if (points.length === 0) return null;
+        if (points.every((point) => point.curve_id === LIVE_CURVE_ID)) return null;
+        return points.map((point) => `${point.tenor}=${point.rate}`).join(", ");
+      },
     },
     {
       path: "bond_reference_data_universe.0.day_count",

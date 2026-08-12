@@ -450,12 +450,34 @@ def price_overlay_case(overlay: dict) -> dict:
 # already parses -- the exact same contract a trader's manually-typed node or a
 # test fixture already uses, never a second/parallel curve representation.
 #
-# **Trigger: an empty ``curve_points`` list only.** A fresh trader draft
+# **Trigger: an actual empty ``curve_points`` list, or a curve this same
+# injector previously produced.** A fresh trader draft
 # (``buildInitialDraftFromBloomberg`` in script.js) always starts with
 # ``curve_points: []`` -- the manual node editor is optional, not required --
 # so an empty list is exactly the live-Workbench-flow signal: the trader
 # supplied no override, so the verified Bloomberg production curve is used.
-# Any case that already carries explicit curve nodes (a manual trader
+# The check is exact-empty-list, not falsy (Codex P2 review of PR #172): a
+# malformed non-list value (``null``, ``""``, ``{}``, ...) is never silently
+# treated as "no override" -- it is left for the existing, more specific
+# ``curve_points must be a JSON array`` schema error to report.
+#
+# ``POST /api/case`` echoes back whichever curve it actually priced with
+# (Issue #143's existing "adopt the priced case" contract), so after one
+# successful live-priced request the browser's own ``currentDraft.curve_points``
+# is no longer empty -- it now holds the *previous* live acquisition. Without
+# further care a second Price/Refresh click would then read as "the trader
+# already supplied an override" and skip both the loader and the RED-gate
+# same-as-of check entirely (Codex P1 review of PR #172), silently reusing a
+# stale curve and never re-checking it against a possibly-rolled-over
+# ``valuation_date``. ``_is_previously_injected_live_curve`` closes this by
+# recognizing this injector's own output -- every row it writes carries the
+# loader's own ``curve_id`` (``USD_SOFR_CURVE_ID``), which the manual editor
+# never writes (its rows always carry the distinct
+# ``SHIORI_MANUAL_OPTION_DISCOUNT_CURVE`` id) -- and re-fetching fresh from
+# Bloomberg every time, exactly like every other live Bloomberg call in this
+# module (no cache, no polling, no stale reuse).
+#
+# A case that already carries explicit *manual* curve nodes (a trader
 # override, or an existing deterministic/API test fixture) is left completely
 # untouched: this is what keeps every pre-#171 test and every pre-#171
 # fixture-based route call byte-for-byte unchanged, and it is also what keeps
@@ -538,15 +560,33 @@ def _live_option_discount_curve_points_as_dicts() -> list[dict]:
     return [asdict(point) for point in result.curve_points]
 
 
+def _is_previously_injected_live_curve(curve_points: object) -> bool:
+    """True when every row of ``curve_points`` carries this injector's own
+    ``curve_id`` -- i.e. ``curve_points`` is not a genuine manual/fixture
+    override but a prior live Curve #490 acquisition the browser adopted
+    (see the module-level Issue #171 note above), safe and expected to be
+    re-fetched fresh on every call. ``curve_points`` that is not a non-empty
+    list of dicts (including the fresh-draft ``[]``) is never this shape.
+    """
+
+    return bool(curve_points) and isinstance(curve_points, list) and all(
+        isinstance(point, dict) and point.get("curve_id") == USD_SOFR_CURVE_ID
+        for point in curve_points
+    )
+
+
 def inject_live_option_discount_curve_if_absent(case: dict) -> dict:
     """Return ``case`` unchanged, or a copy with a live Curve #490 curve injected.
 
-    Triggered only when ``case["curve_points"]`` is falsy (missing or an
-    empty list) -- exactly the state of a fresh trader draft, and never the
-    state of a case that already carries explicit curve nodes (a manual
-    trader override, or an existing deterministic/API fixture), which is
-    returned completely untouched. See the module-level Issue #171 note
-    above for the full trigger/fail-closed rationale.
+    Triggered when ``case["curve_points"]`` is exactly an empty list, or is
+    entirely rows this same injector previously produced (see
+    ``_is_previously_injected_live_curve`` and the module-level Issue #171
+    note above for why a repeat trigger is required) -- never for any other
+    value, including a malformed non-list (left for the existing
+    ``curve_points must be a JSON array`` schema error to report) or a case
+    that already carries explicit manual curve nodes (a manual trader
+    override, or an existing deterministic/API fixture), which is returned
+    completely untouched.
 
     Raises whatever ``_require_valuation_date_matches_today`` or
     ``load_bloomberg_usd_sofr_option_discount_curve`` itself raises -- never
@@ -554,7 +594,8 @@ def inject_live_option_discount_curve_if_absent(case: dict) -> dict:
     curve data.
     """
 
-    if case.get("curve_points"):
+    curve_points = case.get("curve_points")
+    if curve_points != [] and not _is_previously_injected_live_curve(curve_points):
         return case
     _require_valuation_date_matches_today(case.get("valuation_date"))
     return {**case, "curve_points": _live_option_discount_curve_points_as_dicts()}
@@ -671,15 +712,19 @@ def validate_case(case: dict) -> dict:
     Bloomberg, at actual Price time -- see
     :func:`inject_live_option_discount_curve_if_absent`), so it must not by
     itself make this readiness check fail. When ``case["curve_points"]`` is
-    empty, a copy with :func:`_validation_only_placeholder_curve_points`
-    substituted is what is actually built and discarded here -- the
-    caller's own ``case`` is never mutated, this route still makes no
-    Bloomberg call and reads no clock, and a case that already carries
-    explicit curve nodes is validated exactly as before.
+    exactly an empty list (never a malformed non-list value -- Codex P2
+    review of PR #172: that is left for the real ``curve_points must be a
+    JSON array`` schema error to report), a copy with
+    :func:`_validation_only_placeholder_curve_points` substituted is what is
+    actually built and discarded here -- the caller's own ``case`` is never
+    mutated, this route still makes no Bloomberg call and reads no clock,
+    and a case that already carries explicit curve nodes (manual or a prior
+    live acquisition -- either is already a real, structurally valid curve)
+    is validated exactly as before.
     """
 
     try:
-        if isinstance(case, dict) and not case.get("curve_points"):
+        if isinstance(case, dict) and case.get("curve_points") == []:
             case = {**case, "curve_points": _validation_only_placeholder_curve_points(case)}
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001

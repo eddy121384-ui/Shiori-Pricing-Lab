@@ -679,6 +679,79 @@ def test_inject_live_curve_injects_the_loaders_own_rows_when_curve_points_is_emp
     assert unchanged == {k: v for k, v in case.items() if k != "curve_points"}
 
 
+def test_inject_live_curve_refetches_a_previously_injected_curve_on_a_second_call(
+    monkeypatch,
+) -> None:
+    """Codex P1 review of PR #172: ``POST /api/case`` echoes back whichever
+    curve it priced with, so a second Price call sends back the *previous*
+    live acquisition as ``curve_points`` -- this must not read as "the
+    trader already supplied a manual override" and skip both the loader and
+    the same-as-of gate. Every row this injector itself writes carries the
+    loader's own ``curve_id``, so it must be recognized and refreshed."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    first = server_module.inject_live_option_discount_curve_if_absent(case)
+    assert len(calls) == 1
+
+    second = server_module.inject_live_option_discount_curve_if_absent(first)
+    assert len(calls) == 2  # refetched, not silently treated as a manual override
+    assert [point["tenor"] for point in second["curve_points"]] == ["1M", "1Y"]
+
+
+def test_inject_live_curve_still_enforces_the_same_as_of_gate_on_a_second_call(
+    monkeypatch,
+) -> None:
+    """The same re-fetch must still fail closed if the clock has since moved
+    past valuation_date -- e.g. a ticket left open across a date boundary
+    must not silently reuse a curve acquired on the (now stale) prior day."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    first = server_module.inject_live_option_discount_curve_if_absent(case)
+    assert len(calls) == 1
+
+    _install_fixed_curve_clock(monkeypatch, datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC))
+    with pytest.raises(ValueError, match="today's date"):
+        server_module.inject_live_option_discount_curve_if_absent(first)
+    assert len(calls) == 1  # the loader is never reached once the gate fails
+
+
+@pytest.mark.parametrize("malformed_curve_points", [None, "", {}, 0, "not-a-list"])
+def test_inject_live_curve_never_substitutes_for_a_malformed_curve_points_value(
+    monkeypatch, malformed_curve_points
+) -> None:
+    """Codex P2 review of PR #172: only an actual empty list is "no override
+    supplied" -- a malformed non-list value must reach the existing, more
+    specific ``curve_points must be a JSON array`` schema error instead of
+    being silently replaced with a live curve."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = {**json.loads(_example_case_bytes()), "curve_points": malformed_curve_points}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(ValueError, match="curve_points must be a JSON array"):
+        server_module.build_request_from_standalone_option_case(case)
+
+
+def test_api_case_never_substitutes_a_live_curve_for_a_malformed_curve_points_value(
+    server_url: str, monkeypatch
+) -> None:
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = {**json.loads(_example_case_bytes()), "curve_points": None}
+
+    status, payload = _post_bytes(f"{server_url}/api/case", json.dumps(case).encode("utf-8"))
+    assert status == 400
+    assert "curve_points must be a JSON array" in payload["error"]
+    assert calls == []
+
+
 def test_inject_live_curve_rejects_a_valuation_date_that_is_not_today(monkeypatch) -> None:
     calls = _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch, datetime(2026, 7, 2, 9, 0, 0, tzinfo=UTC))
@@ -1552,6 +1625,20 @@ def test_validate_case_still_catches_an_unrelated_defect_with_empty_curve_points
     result = server_module.validate_case(case)
     assert result["ready"] is False
     assert "curve_points" not in result["error"]
+
+
+@pytest.mark.parametrize("malformed_curve_points", [None, "", {}, 0, "not-a-list"])
+def test_validate_case_never_substitutes_the_placeholder_for_a_malformed_value(
+    malformed_curve_points,
+) -> None:
+    """Codex P2 review of PR #172: only an actual empty list gets the
+    validation-only placeholder -- a malformed non-list value must still be
+    reported by the real ``curve_points must be a JSON array`` schema error."""
+
+    case = {**load_base_case(), "curve_points": malformed_curve_points}
+    result = server_module.validate_case(case)
+    assert result["ready"] is False
+    assert "curve_points must be a JSON array" in result["error"]
 
 
 def test_api_case_validate_returns_ready_for_a_valid_case(server_url: str) -> None:

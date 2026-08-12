@@ -1767,6 +1767,73 @@ def test_live_curve_same_as_of_mismatch_blocks_pricing_clearly(
     assert calls == []
 
 
+@_PLAYWRIGHT_SKIP
+def test_a_second_price_reacquires_the_live_curve_rather_than_reusing_the_first(
+    server_url, page, monkeypatch
+) -> None:
+    """Codex P1 review of PR #172: ``POST /api/case`` echoes back whichever
+    curve it priced with, so after one successful live-priced run
+    ``currentDraft.curve_points`` is no longer empty -- it holds the
+    *previous* live acquisition. A second Price click must still refetch
+    fresh from Bloomberg (never treat the prior acquisition as though the
+    trader had supplied a manual override), and must never falsely record
+    that Bloomberg-sourced curve as a trader override in the provenance log."""
+
+    calls = _install_fake_option_discount_curve_loader(monkeypatch)
+    _install_fixed_curve_server_clock(monkeypatch)
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(acquired_at=_LIVE_CURVE_ACQUIRED_AT_ISO),
+    )
+    _complete_draft(page, curve_nodes=())
+    _wait_for_price_enabled(page)
+
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    assert len(calls) == 1
+    assert len(page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")) == 2
+
+    # The live-sourced curve must never be logged as a trader override --
+    # the provenance panel is reserved for genuinely hand-entered values.
+    provenance_paths = {record["path"] for record in _override_provenance(page)}
+    assert "curve_points" not in provenance_paths
+
+    # A second Price click, with no intervening edit, must still reach the
+    # loader again -- not silently reuse the first call's now-embedded rows.
+    page.click("#price-btn")
+    _wait_until(lambda: len(calls) == 2)
+    assert page.inner_text("#status-text") == "Draft priced"
+    assert len(page.evaluate("() => window.__shioriTestGetCurrentDraft().curve_points")) == 2
+    provenance_paths = {record["path"] for record in _override_provenance(page)}
+    assert "curve_points" not in provenance_paths
+
+
+@_PLAYWRIGHT_SKIP
+def test_discounting_requires_a_manual_curve_for_a_non_usd_draft(server_url, page) -> None:
+    """Codex P2 review of PR #172: the live loader is USD SOFR only, so a
+    non-USD draft with no manual nodes must not read as automatically
+    covered -- Price would otherwise enable only for the server to reject
+    the mismatched-currency curve it actually injects."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(currency="EUR"), profile=None)
+    page.wait_for_timeout(150)
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["bond_option"]["currency"] == "EUR"
+    assert draft["curve_points"] == []
+
+    assert "discounting-review" in _unresolved_group_ids(page)
+    assert page.inner_text("#discounting-review-status") == "Trader override required"
+    page.click("#advanced-head")
+    assert "USD-only" in page.inner_text("#curve-coverage") or "USD SOFR" in page.inner_text(
+        "#curve-coverage"
+    )
+    assert page.eval_on_selector("#curve-coverage", "el => el.classList.contains('is-blocking')")
+
+
 # --- Credit spread contract rules --------------------------------------------
 
 
