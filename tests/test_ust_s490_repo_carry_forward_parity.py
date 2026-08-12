@@ -95,10 +95,11 @@ def _inject_synthetic_curve(case: dict) -> dict:
 def _with_production_identity_curve(case: dict) -> dict:
     """The same synthetic rates, stamped with the production curve identity.
 
-    Used only to exercise the production-curve gate's *passing* branch and
-    the CLI happy path. The rates are still the obviously-synthetic ones
-    above -- this fixture asserts nothing about any real Bloomberg value; it
-    only carries the two identity fields the gate checks.
+    An adversarial fixture only: it exists to prove that stamping the
+    production loader's public ``curve_id``/``source_system`` onto hand-built
+    rows buys a caller nothing, because the supplied curve is discarded
+    rather than inspected. The rates are still the obviously-synthetic ones
+    above, and nothing here claims any real Bloomberg value.
     """
 
     points = [
@@ -182,103 +183,94 @@ def test_a_non_finite_ovme_number_is_refused_before_a_horizon_exists(bad):
         parity.parse_horizon_argument(f"2026-11-13={bad}")
 
 
-# --- the production-curve gate ------------------------------------------------------
+# --- forced live acquisition --------------------------------------------------------
 
 
-def test_only_rows_carrying_the_production_curve_identity_count_as_production():
-    from shiori_pricing_lab.app.standalone_option_workbench import (
-        build_request_from_standalone_option_case,
-    )
+def test_the_curve_the_case_supplies_is_always_cleared_before_acquisition():
+    # Codex P1 review round 2: row metadata (curve_id/source_system) is
+    # ordinary case JSON and can be stamped by any caller, so it can never
+    # prove an acquisition happened. The supplied curve is therefore not
+    # inspected at all -- it is cleared, which is exactly what makes the
+    # Issue #171 injector's own empty-list trigger fire.
+    seen: list[object] = []
 
-    production = build_request_from_standalone_option_case(
-        _with_production_identity_curve(_load_base_case())
-    )
-    assert (
-        parity.classify_curve_provenance(production.market_data_snapshot.curve_points)
-        == parity.PRODUCTION_CURVE_PROVENANCE
-    )
+    def _record(case: dict) -> dict:
+        seen.append(case["curve_points"])
+        return _inject_synthetic_curve(case)
 
-    synthetic = build_request_from_standalone_option_case(
-        _inject_synthetic_curve(_load_base_case())
-    )
-    assert (
-        parity.classify_curve_provenance(synthetic.market_data_snapshot.curve_points)
-        == parity.NON_PRODUCTION_CURVE_PROVENANCE
-    )
+    supplied = _with_production_identity_curve(_load_base_case())
+    acquired, discarded = parity._acquire_production_curve(supplied, _record)
 
-    # One foreign row is enough -- there is no majority verdict.
-    mixed_case = _with_production_identity_curve(_load_base_case())
-    mixed_case["curve_points"][2] = {
-        **mixed_case["curve_points"][2],
-        "source_system": "SHIORI_MANUAL_OPTION_DISCOUNT_CURVE",
-    }
-    mixed = build_request_from_standalone_option_case(mixed_case)
-    assert (
-        parity.classify_curve_provenance(mixed.market_data_snapshot.curve_points)
-        == parity.NON_PRODUCTION_CURVE_PROVENANCE
-    )
-
-
-def test_an_empty_curve_is_never_classified_as_production():
-    assert parity.classify_curve_provenance(()) == parity.NON_PRODUCTION_CURVE_PROVENANCE
+    assert seen == [[]]
+    assert discarded == len(supplied["curve_points"])
+    assert acquired["curve_points"] != supplied["curve_points"]
 
 
 @requires_quantlib
-def test_a_manual_or_fixture_curve_blocks_the_whole_run_by_default():
-    report = parity.run_parity(
-        case=_load_base_case(),
+def test_curve_rows_stamped_with_the_production_identity_still_cannot_be_used():
+    # The exact scenario Codex round 2 named: a case that labels hand-built
+    # rows as the production curve. Those rows must not reach the funding
+    # resolver at all, so the reported funding is identical to the run whose
+    # case carried an obviously-foreign curve.
+    poisoned = _with_production_identity_curve(_load_base_case())
+    poisoned["curve_points"] = [
+        {**point, "rate": 0.99} for point in poisoned["curve_points"]
+    ]
+
+    from_poisoned = parity.run_parity(
+        case=poisoned,
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
-        horizons=_horizons(*THREE_HORIZONS),
+        horizons=_horizons(THREE_HORIZONS[1]),
         inject_curve=_inject_synthetic_curve,
     )
-    assert report.status == "error"
-    assert "not the production Bloomberg Curve #490 acquisition" in report.error
-    assert USD_SOFR_CURVE_ID in report.error
-    assert report.horizons == ()
+    from_clean = parity.run_parity(
+        case=_load_base_case(),
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        horizons=_horizons(THREE_HORIZONS[1]),
+        inject_curve=_inject_synthetic_curve,
+    )
+
+    assert from_poisoned.status == "ok"
+    assert from_poisoned.horizons[0]["funding"] == from_clean.horizons[0]["funding"]
+    assert from_poisoned.case["curve_acquisition"] == parity.CURVE_ACQUISITION_CONTRACT
 
 
 @requires_quantlib
-def test_a_production_identity_curve_passes_the_gate_and_is_stamped_as_such():
+def test_the_report_counts_and_announces_the_discarded_case_curve():
     report = parity.run_parity(
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(THREE_HORIZONS[1]),
-        inject_curve=_with_production_identity_curve,
-    )
-    assert report.status == "ok"
-    assert report.case["curve_provenance"] == parity.PRODUCTION_CURVE_PROVENANCE
-    assert report.horizons[0]["status"] == "ok", report.horizons[0]["error"]
-
-
-@requires_quantlib
-def test_a_gate_disabled_run_is_stamped_and_warned_about_as_non_evidence():
-    report = parity.run_parity(
-        case=_load_base_case(),
-        spot_settlement_date=SPOT_SETTLEMENT_DATE,
-        horizons=_horizons(THREE_HORIZONS[1]),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
-    assert report.status == "ok"
-    assert report.case["curve_provenance"] == parity.NON_PRODUCTION_CURVE_PROVENANCE
+    # The bundled example carries two sample curve nodes.
+    assert report.case["case_curve_points_discarded"] == 2
 
     markdown = parity.render_markdown(parity.build_report(report))
-    assert parity.NON_PRODUCTION_CURVE_PROVENANCE in markdown
-    assert "not S490 acceptance evidence" in markdown
+    assert "carried 2 curve node(s). They were discarded" in markdown
 
 
-def test_the_production_curve_gate_is_on_by_default_and_is_not_a_cli_option():
-    # There must be no command-line way to produce a parity report from a
-    # non-production curve; the seam exists for tests only.
-    import inspect
+@requires_quantlib
+def test_a_case_with_no_curve_nodes_reports_nothing_discarded():
+    case = {**_load_base_case(), "curve_points": []}
+    report = parity.run_parity(
+        case=case,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        horizons=_horizons(THREE_HORIZONS[1]),
+        inject_curve=_inject_synthetic_curve,
+    )
+    assert report.case["case_curve_points_discarded"] == 0
+    assert "were discarded" not in parity.render_markdown(parity.build_report(report))
 
-    signature = inspect.signature(parity.run_parity)
-    assert signature.parameters["require_production_curve"].default is True
 
+def test_there_is_no_cli_option_that_supplies_or_preserves_a_curve():
+    # The acquisition is the only way curve values enter this script, and
+    # nothing reachable from the command line changes that.
     source = Path(parity.__file__).read_text(encoding="utf-8")
     assert "add_argument" in source
     assert "require-production-curve" not in source
     assert "allow-non-production-curve" not in source
+    assert "curve-from-case" not in source
 
 
 # --- the parity run -----------------------------------------------------------------
@@ -290,7 +282,6 @@ def test_three_horizons_each_re_derive_funding_and_a_forward():
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(*THREE_HORIZONS),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
 
@@ -325,7 +316,6 @@ def test_the_residual_is_the_derived_forward_minus_the_supplied_ovme_forward():
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(f"{THREE_HORIZONS[1]}={observed}"),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
 
@@ -373,7 +363,6 @@ def test_the_forward_is_exactly_the_two_reviewed_primitives_composed():
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(THREE_HORIZONS[1]),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
     assert report.horizons[0]["forward_clean_price_per_100"] == pytest.approx(
@@ -388,7 +377,6 @@ def test_the_selected_funding_method_is_passed_through_and_reported():
         spot_settlement_date="2026-07-12",  # inside the curve, so both methods evaluate
         horizons=_horizons(THREE_HORIZONS[2]),
         method=S490FundingMethod.FORWARD_FORWARD_DF_RATIO,
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
     assert report.case["s490_funding_method"] == S490FundingMethod.FORWARD_FORWARD_DF_RATIO.value
@@ -407,7 +395,6 @@ def test_one_bad_horizon_is_reported_on_its_own_row_and_the_others_still_price()
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(THREE_HORIZONS[0], "2032-07-01", THREE_HORIZONS[1]),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
 
@@ -423,7 +410,6 @@ def test_an_interim_coupon_horizon_is_reported_not_priced():
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons("2026-12-20"),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
     row = report.horizons[0]
@@ -456,7 +442,6 @@ def test_a_yield_only_quote_blocks_the_run_rather_than_inventing_a_spot_price():
         case=case,
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(THREE_HORIZONS[0]),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
     assert report.status == "error"
@@ -472,7 +457,6 @@ def test_the_markdown_report_shows_both_residual_units_and_names_the_method(tmp_
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         horizons=_horizons(f"{THREE_HORIZONS[0]}=101.0", THREE_HORIZONS[1]),
-        require_production_curve=False,
         inject_curve=_inject_synthetic_curve,
     )
     data = parity.build_report(report)
@@ -538,52 +522,68 @@ def test_an_unreadable_case_file_exits_without_calling_bloomberg(tmp_path, monke
     assert exit_code == 2
 
 
-def test_the_live_curve_injector_is_what_the_run_reaches_for_by_default():
-    # Proves the Issue #171 production injector is the wiring, without
-    # making a Bloomberg call to do it.
-    import inspect
+def test_an_unsubstituted_run_reaches_the_live_production_injector(monkeypatch):
+    # The default is resolved at call time from this module's own global, so
+    # every real run goes through the Issue #171 production injector. Proved
+    # by substituting that global, not by making a Bloomberg call.
+    calls: list[dict] = []
 
-    default = inspect.signature(parity.run_parity).parameters["inject_curve"].default
-    assert default is parity.inject_live_option_discount_curve_if_absent
+    def _record(case: dict) -> dict:
+        calls.append(case)
+        raise RuntimeError("stopped after the production injector was reached")
+
+    monkeypatch.setattr(parity, "inject_live_option_discount_curve_if_absent", _record)
+    report = parity.run_parity(
+        case=_load_base_case(),
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        horizons=_horizons(THREE_HORIZONS[0]),
+    )
+
+    assert len(calls) == 1
+    assert "stopped after the production injector was reached" in report.error
 
 
 @requires_quantlib
-def test_the_cli_refuses_a_case_priced_from_manual_or_fixture_curve_rates(tmp_path, capsys):
-    # The bundled example's own curve nodes are sample data, so the real
-    # injector leaves them untouched and the production-curve gate stops the
-    # run before a single "S490" number is reported (Codex P1 review).
+def test_the_cli_reports_a_failed_acquisition_and_exits_one(tmp_path):
+    # No terminal, no report: the CLI never falls back to the case's own
+    # curve values when the acquisition fails.
+    def _fail(case: dict) -> dict:
+        raise RuntimeError("Bloomberg DAPI session failed to start")
+
     case_path = tmp_path / "case.json"
     case_path.write_text(json.dumps(_load_base_case()), encoding="utf-8")
 
-    exit_code = parity.main(
-        [
-            "--case",
-            str(case_path),
-            "--spot-settlement-date",
-            SPOT_SETTLEMENT_DATE,
-            "--horizon",
-            THREE_HORIZONS[1],
-            "--output-dir",
-            str(tmp_path / "out"),
-        ]
-    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(parity, "inject_live_option_discount_curve_if_absent", _fail)
+        exit_code = parity.main(
+            [
+                "--case",
+                str(case_path),
+                "--spot-settlement-date",
+                SPOT_SETTLEMENT_DATE,
+                "--horizon",
+                THREE_HORIZONS[1],
+                "--output-dir",
+                str(tmp_path / "out"),
+            ]
+        )
 
     assert exit_code == 1
     written = json.loads((tmp_path / "out" / parity.JSON_FILENAME).read_text(encoding="utf-8"))
     assert written["status"] == "error"
-    assert "not the production Bloomberg Curve #490 acquisition" in written["error"]
+    assert "Bloomberg DAPI session failed to start" in written["error"]
     assert written["horizons"] == []
 
 
 @requires_quantlib
-def test_the_cli_writes_both_reports_and_exits_zero(tmp_path, capsys):
-    # A case whose rows carry the production curve identity passes the gate,
-    # so the real injector leaves it untouched and no Bloomberg call is
-    # made -- the same "a case with explicit nodes is used exactly as
-    # supplied" contract Issue #171 established.
+def test_the_cli_writes_both_reports_and_exits_zero(tmp_path, capsys, monkeypatch):
+    # The case file carries the bundled example's own two sample curve
+    # nodes; they are discarded and the curve is acquired for this run.
     case_path = tmp_path / "case.json"
-    case_path.write_text(
-        json.dumps(_with_production_identity_curve(_load_base_case())), encoding="utf-8"
+    case_path.write_text(json.dumps(_load_base_case()), encoding="utf-8")
+
+    monkeypatch.setattr(
+        parity, "inject_live_option_discount_curve_if_absent", _inject_synthetic_curve
     )
 
     exit_code = parity.main(
@@ -609,4 +609,6 @@ def test_the_cli_writes_both_reports_and_exits_zero(tmp_path, capsys):
     )
     assert written["status"] == "ok"
     assert len(written["horizons"]) == 3
+    assert written["case"]["curve_acquisition"] == parity.CURVE_ACQUISITION_CONTRACT
+    assert written["case"]["case_curve_points_discarded"] == 2
     assert "UST S490 repo-carry forward vs OVME F parity" in capsys.readouterr().out

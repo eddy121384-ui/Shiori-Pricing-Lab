@@ -41,16 +41,15 @@ Treasury ticks (32nds).
   currency are resolved exactly as the Workbench itself resolves them --
   this script contains no case parser, schema, or bond-matching rule of
   its own;
-- the S490 curve is acquired by the existing, unmodified Issue #171
-  injector ``app/standalone_option_workbench_server.inject_live_option_
-  discount_curve_if_absent``, which calls the production Curve #490 loader
-  and applies the same same-as-of RED gate (a live curve is only ever
-  paired with a ``valuation_date`` equal to today). That injector leaves a
-  case carrying manual/fixture curve nodes untouched, so before reporting
-  anything this script separately requires every curve row it is about to
-  read to carry the production loader's own curve identity -- a parity
-  report is never produced from manual, fixture, or sample rates (see the
-  production-curve gate below);
+- the S490 curve is **always acquired fresh for this run** by the existing,
+  unmodified Issue #171 injector ``app/standalone_option_workbench_server.
+  inject_live_option_discount_curve_if_absent``, which calls the production
+  Curve #490 loader and applies the same same-as-of RED gate (a live curve
+  is only ever paired with a ``valuation_date`` equal to today). Any curve
+  nodes the case file carried are **discarded** and counted in the report,
+  never inspected and trusted: a parity report is never derived from
+  supplied curve values, whatever they claim to be (see the
+  forced-acquisition note below);
 - the funding transformation is
   ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``,
   under whichever of its two labeled prototype methods ``--funding-method``
@@ -93,10 +92,6 @@ from shiori_pricing_lab.app.standalone_option_workbench import (
 from shiori_pricing_lab.app.standalone_option_workbench_server import (
     inject_live_option_discount_curve_if_absent,
 )
-from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
-    USD_SOFR_CURVE_ID,
-    USD_SOFR_SOURCE_SYSTEM,
-)
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
     repo_carry_forward_clean_price,
 )
@@ -124,53 +119,55 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
-# --- production-curve gate (Codex P1 review of PR #174) ----------------------------
+# --- forced live acquisition (Codex P1 review of PR #174, rounds 1-2) --------------
 #
 # The Issue #171 injector deliberately leaves a case that already carries
 # explicit curve nodes completely untouched -- a manual trader override, an
 # uploaded fixture, or the repository's own bundled sanitized-synthetic
-# example all price exactly as supplied. That is correct for pricing, but it
-# means the documented command above could otherwise produce a
-# confident-looking "S490 parity" report whose funding was actually derived
-# from synthetic or hand-typed rates, which would be fabricated Bloomberg
-# evidence (AGENTS.md rule 6) and could invalidate this issue's acceptance.
+# example all price exactly as supplied. That is correct for *pricing*, but
+# it means this script could otherwise report a confident-looking "S490
+# parity" whose funding was actually derived from synthetic or hand-typed
+# rates: fabricated Bloomberg evidence (AGENTS.md rule 6), which would
+# invalidate this issue's acceptance.
 #
-# So before a single number is reported, every curve row the funding
-# resolver will actually read is checked against the production Curve #490
-# loader's own published identity constants -- imported from that loader,
-# never re-spelled here. A row that does not match fails the whole run with
-# a message naming what was found instead.
+# Round 1 of this review answered that by checking each row's ``curve_id`` /
+# ``source_system`` against the production loader's own published constants.
+# Round 2 correctly rejected that answer: those strings are ordinary case
+# JSON, so any caller can stamp them onto hand-typed rows and be classified
+# as production. Row metadata can never prove an acquisition happened.
 #
-# ``require_production_curve=False`` exists only as a test seam (the same
-# kind as ``inject_curve`` / ``build_request`` above) and is deliberately
-# **not** exposed on the CLI: there is no command-line way to produce a
-# parity report from a non-production curve. Even when a caller disables the
-# gate in-process, the report still stamps
-# ``curve_provenance = NON_PRODUCTION_CURVE__NOT_S490_ACCEPTANCE_EVIDENCE``
-# and the rendered Markdown leads with that warning, so such a report can
-# never be mistaken for acceptance evidence.
-PRODUCTION_CURVE_PROVENANCE = "PRODUCTION_CURVE_490"
-NON_PRODUCTION_CURVE_PROVENANCE = "NON_PRODUCTION_CURVE__NOT_S490_ACCEPTANCE_EVIDENCE"
+# So this script does not classify the supplied curve at all -- it
+# **replaces** it. ``_acquire_production_curve`` clears ``curve_points``
+# before handing the case to the Issue #171 injector, whose own trigger is
+# an exactly-empty list, so the injector always performs a fresh production
+# Curve #490 acquisition (with its same-as-of RED gate applied both before
+# and after the round trip) and the rows the funding resolver reads are, by
+# construction, the ones that acquisition just returned. Whatever curve
+# nodes the case file carried are discarded and counted in the report; they
+# cannot influence a single reported number, no matter what they claim to
+# be.
+#
+# The acquisition itself is still the ``inject_curve`` callable -- the one
+# injectable seam this script's tests substitute, exactly like
+# ``bloomberg_usd_sofr_par_rate_curve_acceptance.py``'s own ``load=``. That
+# is a test seam, not a data path: nothing reachable from the CLI can supply
+# curve values.
+CURVE_ACQUISITION_CONTRACT = "LIVE_PRODUCTION_CURVE_490_ACQUIRED_THIS_RUN"
 
 
-def classify_curve_provenance(curve_points) -> str:
-    """Return the provenance verdict for the rows funding will be read from.
+def _acquire_production_curve(case: dict, inject_curve) -> tuple[dict, int]:
+    """Return ``(case priced from a freshly acquired curve, rows discarded)``.
 
-    ``PRODUCTION_CURVE_PROVENANCE`` only when there is at least one row and
-    **every** row carries both the production Curve #490 loader's own
-    ``curve_id`` and its own ``source_system``; otherwise
-    ``NON_PRODUCTION_CURVE_PROVENANCE``. No partial or majority verdict
-    exists -- one foreign row is enough to make the whole curve
-    non-production.
+    Clears ``curve_points`` first so the Issue #171 injector's own
+    empty-list trigger always fires -- see the note above for why a supplied
+    curve is replaced rather than inspected. Raises whatever the injector
+    raises (a Bloomberg failure, the same-as-of gate); nothing is caught
+    here.
     """
 
-    points = tuple(curve_points)
-    if not points:
-        return NON_PRODUCTION_CURVE_PROVENANCE
-    for point in points:
-        if point.curve_id != USD_SOFR_CURVE_ID or point.source_system != USD_SOFR_SOURCE_SYSTEM:
-            return NON_PRODUCTION_CURVE_PROVENANCE
-    return PRODUCTION_CURVE_PROVENANCE
+    supplied = case.get("curve_points")
+    discarded = len(supplied) if isinstance(supplied, list) else 0
+    return inject_curve({**case, "curve_points": []}), discarded
 
 
 def format_price_as_treasury_fraction(price_per_100: float) -> str:
@@ -347,52 +344,41 @@ def run_parity(
     spot_settlement_date: str,
     horizons: tuple[ParityHorizon, ...],
     method: S490FundingMethod | str = DEFAULT_S490_FUNDING_METHOD,
-    require_production_curve: bool = True,
-    inject_curve=inject_live_option_discount_curve_if_absent,
+    inject_curve=None,
     build_request=build_request_from_standalone_option_case,
 ) -> ParityReport:
     """Run the whole expiry-driven parity pass and return its report.
 
-    ``inject_curve`` and ``build_request`` are injectable callables
-    (defaults: the real, unmodified production functions) so this
+    The curve is always **acquired fresh** for this run and whatever curve
+    nodes ``case`` carried are discarded -- see the forced-acquisition note
+    above for why a supplied curve is never inspected and trusted.
+
+    ``inject_curve`` and ``build_request`` are injectable callables so this
     report-building/CLI logic is testable without ``blpapi`` -- the same
     seam ``bloomberg_usd_sofr_par_rate_curve_acceptance.py`` already uses.
-    ``require_production_curve`` is the third such seam and is likewise not
-    a CLI option -- see the production-curve gate note above.
+    ``inject_curve`` defaults to ``None`` and is then resolved to this
+    module's own ``inject_live_option_discount_curve_if_absent`` at call
+    time (not bound at import time), so the real production injector is
+    what every unsubstituted call reaches.
 
     A failure that affects the whole run (the Bloomberg curve acquisition,
-    the same-as-of gate, an invalid case, a missing spot clean price, a
-    curve that is not the production Curve #490 acquisition) returns
-    ``status="error"`` with no horizon rows; a failure affecting one horizon
-    only is reported on that horizon's own row.
+    the same-as-of gate, an invalid case, a missing spot clean price)
+    returns ``status="error"`` with no horizon rows; a failure affecting one
+    horizon only is reported on that horizon's own row.
     """
 
     generated_at = _utc_now()
+    if inject_curve is None:
+        inject_curve = inject_live_option_discount_curve_if_absent
 
     try:
-        priced_case = inject_curve(case)
+        priced_case, discarded_curve_point_count = _acquire_production_curve(case, inject_curve)
         request = build_request(priced_case)
         spot_clean_price = request.market_data_snapshot.bond_quote.clean_price_per_100
         if spot_clean_price is None:
             raise ValueError(
                 "bond_quote.clean_price_per_100 must be present -- a yield-only quote "
                 "carries no spot clean price for the repo-carry forward to start from"
-            )
-        curve_provenance = classify_curve_provenance(request.market_data_snapshot.curve_points)
-        if require_production_curve and curve_provenance != PRODUCTION_CURVE_PROVENANCE:
-            found = sorted(
-                {
-                    f"{point.curve_id}/{point.source_system}"
-                    for point in request.market_data_snapshot.curve_points
-                }
-            )
-            raise ValueError(
-                "the case was priced against a curve that is not the production Bloomberg "
-                f"Curve #490 acquisition (expected every row to carry curve_id "
-                f"{USD_SOFR_CURVE_ID!r} and source_system {USD_SOFR_SOURCE_SYSTEM!r}, found "
-                f"{found}) -- an S490 parity report is never produced from manual, fixture, "
-                "or sample curve rates; clear the case's curve_points so the live production "
-                "curve is acquired, or run against a case priced from it"
             )
     except Exception as exc:  # noqa: BLE001 -- surfaced verbatim in the report
         return ParityReport(
@@ -405,7 +391,8 @@ def run_parity(
 
     snapshot = request.market_data_snapshot
     case_summary = {
-        "curve_provenance": curve_provenance,
+        "curve_acquisition": CURVE_ACQUISITION_CONTRACT,
+        "case_curve_points_discarded": discarded_curve_point_count,
         "s490_funding_method": str(method),
         "snapshot_id": snapshot.snapshot_id,
         "underlying_isin": request.resolved_bond_reference_data.isin,
@@ -509,12 +496,13 @@ def render_markdown(data: dict) -> str:
         lines.append(f"Error: {data['error']}")
     lines.append("")
 
-    if data["case"].get("curve_provenance") == NON_PRODUCTION_CURVE_PROVENANCE:
+    discarded = data["case"].get("case_curve_points_discarded")
+    if discarded:
         lines.append(
-            f"**{NON_PRODUCTION_CURVE_PROVENANCE}** -- the funding below was derived from "
-            "curve rows that are not the production Bloomberg Curve #490 acquisition. "
-            "This report is not S490 acceptance evidence and must not be compared with "
-            "OVME F as though it were."
+            f"Note: the case file carried {discarded} curve node(s). They were discarded "
+            "and the curve below was acquired fresh from the production Curve #490 "
+            "loader for this run -- a parity report is never derived from supplied "
+            "curve values."
         )
         lines.append("")
 
