@@ -3481,6 +3481,10 @@
   let lastS490ParityKey;
   let s490ParityResult = null;
   let s490ParityError = null;
+  // True only while a request is genuinely in flight (Codex P2 review of
+  // PR #174) -- distinguishes "computing" from both "not ready" and
+  // "ready but no date entered" in renderS490Parity's own status text.
+  let s490ParityPending = false;
   // Mirrors syncDraftGating's own `builderReady` local -- see that
   // function's own comment for why this is read rather than recomputed.
   let latestBuilderReady = false;
@@ -3514,11 +3518,18 @@
       return;
     }
     if (s490ParityResult === null) {
-      els.s490ParityStatus.textContent = !latestBuilderReady
-        ? "Complete the ticket above (Instrument, Trade, Market inputs) to see the S490 " +
-          "repo-carry Forward."
-        : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
-          "ticket's Expiry.";
+      // Codex P2 review of PR #174: a request in flight is its own status,
+      // distinct from both "not ready" and "done" -- shown here so a slow
+      // Bloomberg round trip is never mistaken for the previous date's
+      // still-displayed numbers (which maybeRefreshS490Parity already
+      // clears before this render runs).
+      els.s490ParityStatus.textContent = s490ParityPending
+        ? "Resolving S490 funding and Forward…"
+        : !latestBuilderReady
+          ? "Complete the ticket above (Instrument, Trade, Market inputs) to see the S490 " +
+            "repo-carry Forward."
+          : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+            "ticket's Expiry.";
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
@@ -3550,6 +3561,7 @@
       s490ParityGeneration++; // invalidate any outstanding answer
       s490ParityResult = null;
       s490ParityError = null;
+      s490ParityPending = false;
       renderS490Parity();
       return;
     }
@@ -3557,6 +3569,16 @@
     const requestCase = currentDraft;
     const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
     const generation = ++s490ParityGeneration;
+
+    // Codex P2 review of PR #174: clear the previous date's result (and any
+    // previous error) before awaiting the fetch, so a slow round trip never
+    // leaves the old date's funding/Forward on screen looking like it
+    // belongs to the date just typed. Rendered synchronously, before the
+    // first `await`, so there is no visible gap where stale numbers remain.
+    s490ParityResult = null;
+    s490ParityError = null;
+    s490ParityPending = true;
+    renderS490Parity();
 
     let response;
     let payload;
@@ -3569,12 +3591,14 @@
       payload = await response.json();
     } catch (err) {
       if (generation !== s490ParityGeneration) return;
+      s490ParityPending = false;
       s490ParityResult = null;
       s490ParityError = "S490 parity request failed: " + err.message;
       renderS490Parity();
       return;
     }
     if (generation !== s490ParityGeneration) return;
+    s490ParityPending = false;
     if (!response.ok) {
       s490ParityResult = null;
       s490ParityError = payload.error || "S490 parity request failed.";

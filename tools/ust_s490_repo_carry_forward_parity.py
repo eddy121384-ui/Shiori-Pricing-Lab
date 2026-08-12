@@ -41,15 +41,16 @@ Treasury ticks (32nds).
   currency are resolved exactly as the Workbench itself resolves them --
   this script contains no case parser, schema, or bond-matching rule of
   its own;
-- the S490 curve is **always acquired fresh for this run** by the existing,
-  unmodified Issue #171 injector ``app/standalone_option_workbench_server.
-  inject_live_option_discount_curve_if_absent``, which calls the production
-  Curve #490 loader and applies the same same-as-of RED gate (a live curve
-  is only ever paired with a ``valuation_date`` equal to today). Any curve
-  nodes the case file carried are **discarded** and counted in the report,
-  never inspected and trusted: a parity report is never derived from
-  supplied curve values, whatever they claim to be (see the
-  forced-acquisition note below);
+- the S490 curve is **always acquired fresh for this run** by
+  ``app/standalone_option_workbench_server.acquire_production_curve_490_for_s490_parity``
+  (shared with the Issue #174 Workbench parity route -- see that
+  function's own module-level note for why a supplied curve is discarded
+  rather than inspected and trusted), which itself calls the existing,
+  unmodified Issue #171 injector ``inject_live_option_discount_curve_if_absent``
+  against an emptied ``curve_points``, so the production Curve #490 loader
+  and its same-as-of RED gate (a live curve is only ever paired with a
+  ``valuation_date`` equal to today) always run. Any curve nodes the case
+  file carried are discarded and counted in the report;
 - the funding transformation is
   ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``,
   under whichever of its two labeled prototype methods ``--funding-method``
@@ -90,6 +91,8 @@ from shiori_pricing_lab.app.standalone_option_workbench import (
     build_request_from_standalone_option_case,
 )
 from shiori_pricing_lab.app.standalone_option_workbench_server import (
+    S490_CURVE_ACQUISITION_CONTRACT,
+    acquire_production_curve_490_for_s490_parity,
     inject_live_option_discount_curve_if_absent,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
@@ -112,57 +115,6 @@ JSON_FILENAME = "ust_s490_repo_carry_forward_parity.json"
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
-
-
-# --- forced live acquisition (Codex P1 review of PR #174, rounds 1-2) --------------
-#
-# The Issue #171 injector deliberately leaves a case that already carries
-# explicit curve nodes completely untouched -- a manual trader override, an
-# uploaded fixture, or the repository's own bundled sanitized-synthetic
-# example all price exactly as supplied. That is correct for *pricing*, but
-# it means this script could otherwise report a confident-looking "S490
-# parity" whose funding was actually derived from synthetic or hand-typed
-# rates: fabricated Bloomberg evidence (AGENTS.md rule 6), which would
-# invalidate this issue's acceptance.
-#
-# Round 1 of this review answered that by checking each row's ``curve_id`` /
-# ``source_system`` against the production loader's own published constants.
-# Round 2 correctly rejected that answer: those strings are ordinary case
-# JSON, so any caller can stamp them onto hand-typed rows and be classified
-# as production. Row metadata can never prove an acquisition happened.
-#
-# So this script does not classify the supplied curve at all -- it
-# **replaces** it. ``_acquire_production_curve`` clears ``curve_points``
-# before handing the case to the Issue #171 injector, whose own trigger is
-# an exactly-empty list, so the injector always performs a fresh production
-# Curve #490 acquisition (with its same-as-of RED gate applied both before
-# and after the round trip) and the rows the funding resolver reads are, by
-# construction, the ones that acquisition just returned. Whatever curve
-# nodes the case file carried are discarded and counted in the report; they
-# cannot influence a single reported number, no matter what they claim to
-# be.
-#
-# The acquisition itself is still the ``inject_curve`` callable -- the one
-# injectable seam this script's tests substitute, exactly like
-# ``bloomberg_usd_sofr_par_rate_curve_acceptance.py``'s own ``load=``. That
-# is a test seam, not a data path: nothing reachable from the CLI can supply
-# curve values.
-CURVE_ACQUISITION_CONTRACT = "LIVE_PRODUCTION_CURVE_490_ACQUIRED_THIS_RUN"
-
-
-def _acquire_production_curve(case: dict, inject_curve) -> tuple[dict, int]:
-    """Return ``(case priced from a freshly acquired curve, rows discarded)``.
-
-    Clears ``curve_points`` first so the Issue #171 injector's own
-    empty-list trigger always fires -- see the note above for why a supplied
-    curve is replaced rather than inspected. Raises whatever the injector
-    raises (a Bloomberg failure, the same-as-of gate); nothing is caught
-    here.
-    """
-
-    supplied = case.get("curve_points")
-    discarded = len(supplied) if isinstance(supplied, list) else 0
-    return inject_curve({**case, "curve_points": []}), discarded
 
 
 @dataclass(frozen=True)
@@ -311,8 +263,9 @@ def run_parity(
     """Run the whole expiry-driven parity pass and return its report.
 
     The curve is always **acquired fresh** for this run and whatever curve
-    nodes ``case`` carried are discarded -- see the forced-acquisition note
-    above for why a supplied curve is never inspected and trusted.
+    nodes ``case`` carried are discarded -- see
+    ``acquire_production_curve_490_for_s490_parity``'s own module-level
+    note for why a supplied curve is never inspected and trusted.
 
     ``inject_curve`` and ``build_request`` are injectable callables so this
     report-building/CLI logic is testable without ``blpapi`` -- the same
@@ -333,7 +286,9 @@ def run_parity(
         inject_curve = inject_live_option_discount_curve_if_absent
 
     try:
-        priced_case, discarded_curve_point_count = _acquire_production_curve(case, inject_curve)
+        priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(
+            case, inject_curve
+        )
         request = build_request(priced_case)
         spot_clean_price = request.market_data_snapshot.bond_quote.clean_price_per_100
         if spot_clean_price is None:
@@ -352,7 +307,7 @@ def run_parity(
 
     snapshot = request.market_data_snapshot
     case_summary = {
-        "curve_acquisition": CURVE_ACQUISITION_CONTRACT,
+        "curve_acquisition": S490_CURVE_ACQUISITION_CONTRACT,
         "case_curve_points_discarded": discarded_curve_point_count,
         "s490_funding_method": str(method),
         "snapshot_id": snapshot.snapshot_id,

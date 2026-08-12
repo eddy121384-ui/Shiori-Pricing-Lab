@@ -1282,11 +1282,16 @@ def test_api_case_bloomberg_live_curve_failure_never_calls_the_bond_quote_loader
 # --- POST /api/case/s490-repo-carry: S490 repo-carry Forward parity (Issue #173/#174) --
 #
 # The Workbench parity/testing panel: Expiry-driven, no manual repo input,
-# reusing the exact same live Curve #490 acquisition path
-# (inject_live_option_discount_curve_if_absent) every other route in this
-# module already uses, and the already-reviewed #173 funding resolver /
-# repo-carry primitive. Does not touch Black-76, the existing explicit
+# reusing the already-reviewed #173 funding resolver / repo-carry
+# primitive. Does not touch Black-76, the existing explicit
 # forward_clean_price_input override path, or price_standalone_option_case.
+#
+# Unlike every pricing route in this module, this route does NOT leave a
+# case's own manual curve_points untouched -- it always acquires a fresh
+# production Curve #490 via acquire_production_curve_490_for_s490_parity
+# (Codex P1 review of PR #174), discarding whatever the case carried, so
+# the "S490 Funding Rate" this panel displays can never be silently derived
+# from a manual override entered for Black-76 pricing.
 
 _S490_SPOT_SETTLEMENT_DATE = "2026-07-02"
 
@@ -1334,14 +1339,24 @@ def test_api_s490_repo_carry_injects_the_live_curve_when_curve_points_is_empty(
     funding = payload["s490_repo_carry"]["funding"]
     assert funding["curve_ids"] == ["USD_SOFR_OPTION_DISCOUNT_CURVE"]
     assert funding["source_systems"] == ["BLOOMBERG_DAPI"]
+    result = payload["s490_repo_carry"]
+    assert result["curve_acquisition"] == server_module.S490_CURVE_ACQUISITION_CONTRACT
+    assert result["case_curve_points_discarded"] == 0
 
 
 @_QUANTLIB_SKIP
-def test_api_s490_repo_carry_never_calls_the_live_curve_loader_when_curve_points_is_supplied(
+def test_api_s490_repo_carry_always_calls_the_live_curve_loader_even_when_curve_points_is_supplied(
     server_url: str, monkeypatch
 ) -> None:
+    # Codex P1 review of PR #174: a case's own manual curve_points (a
+    # legitimate override for Black-76 pricing) must never become the
+    # silent source of a number this panel presents as Bloomberg-derived
+    # S490 funding. Unlike every pricing route in this module, this one
+    # always re-acquires, discarding whatever the case carried.
     calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
     case = json.loads(_example_case_bytes())
+    assert case["curve_points"] != []
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
@@ -1349,8 +1364,12 @@ def test_api_s490_repo_carry_never_calls_the_live_curve_loader_when_curve_points
     )
 
     assert status == 200
-    assert calls == []
-    assert payload["case"]["curve_points"] == case["curve_points"]
+    assert len(calls) == 1
+    assert payload["case"]["curve_points"] != case["curve_points"]
+    assert [point["tenor"] for point in payload["case"]["curve_points"]] == ["1M", "1Y"]
+    result = payload["s490_repo_carry"]
+    assert result["curve_acquisition"] == server_module.S490_CURVE_ACQUISITION_CONTRACT
+    assert result["case_curve_points_discarded"] == len(case["curve_points"])
 
 
 def test_api_s490_repo_carry_live_curve_failure_returns_400_with_no_fallback(

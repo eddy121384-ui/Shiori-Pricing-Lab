@@ -199,7 +199,7 @@ def test_the_curve_the_case_supplies_is_always_cleared_before_acquisition():
         return _inject_synthetic_curve(case)
 
     supplied = _with_production_identity_curve(_load_base_case())
-    acquired, discarded = parity._acquire_production_curve(supplied, _record)
+    acquired, discarded = parity.acquire_production_curve_490_for_s490_parity(supplied, _record)
 
     assert seen == [[]]
     assert discarded == len(supplied["curve_points"])
@@ -232,7 +232,7 @@ def test_curve_rows_stamped_with_the_production_identity_still_cannot_be_used():
 
     assert from_poisoned.status == "ok"
     assert from_poisoned.horizons[0]["funding"] == from_clean.horizons[0]["funding"]
-    assert from_poisoned.case["curve_acquisition"] == parity.CURVE_ACQUISITION_CONTRACT
+    assert from_poisoned.case["curve_acquisition"] == parity.S490_CURVE_ACQUISITION_CONTRACT
 
 
 @requires_quantlib
@@ -609,6 +609,6 @@ def test_the_cli_writes_both_reports_and_exits_zero(tmp_path, capsys, monkeypatc
     )
     assert written["status"] == "ok"
     assert len(written["horizons"]) == 3
-    assert written["case"]["curve_acquisition"] == parity.CURVE_ACQUISITION_CONTRACT
+    assert written["case"]["curve_acquisition"] == parity.S490_CURVE_ACQUISITION_CONTRACT
     assert written["case"]["case_curve_points_discarded"] == 2
     assert "UST S490 repo-carry forward vs OVME F parity" in capsys.readouterr().out

@@ -288,6 +288,46 @@ def test_changing_the_spot_settlement_date_alone_also_recomputes(server_url, pag
     )
 
 
+def test_a_slow_recompute_never_shows_the_previous_dates_stale_numbers(server_url, page) -> None:
+    # Codex P2 review of PR #174: during a slow round trip the fields must
+    # already be hidden (and the old numbers gone), not still showing the
+    # previous Spot Settlement Date's own funding/Forward under the new
+    # date. Delays the second request server-side (route.continue_() after a
+    # sleep, on Playwright's own dispatch thread) rather than holding the
+    # route object on the Python test thread and polling a plain list --
+    # the polling loop below makes no Playwright call at all, so it would
+    # never pump the event dispatch that delivers a held route to a plain
+    # Python-side handler in the first place.
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    stale_forward = page.text_content("#s490-forward-decimal")
+
+    def _delay_then_continue(route):
+        time.sleep(1.0)
+        route.continue_()
+
+    page.route("**/api/case/s490-repo-carry", _delay_then_continue)
+    page.fill("#s490-spot-settlement-date-input", "2026-09-01")
+
+    # The panel clears synchronously, before the fetch for the new date even
+    # starts (see maybeRefreshS490Parity), so this is true well within the
+    # artificial 1s delay above -- comfortably before the delayed response
+    # can possibly have arrived.
+    _wait_until(lambda: page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    assert "Resolving" in page.text_content("#s490-parity-status")
+
+    # And once the delayed response arrives, the new date's own numbers
+    # appear -- the recompute itself still completes, this test only proves
+    # the previous date's numbers were never shown in between.
+    _wait_until(
+        lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+        and page.text_content("#s490-forward-decimal") != stale_forward,
+        timeout=15.0,
+    )
+    page.unroute("**/api/case/s490-repo-carry")
+
+
 def test_editing_the_spot_settlement_date_never_invalidates_an_in_flight_price(
     server_url, page
 ) -> None:
@@ -330,25 +370,60 @@ def test_clear_blanks_the_spot_settlement_date_and_resets_the_panel(server_url, 
 def test_a_bloomberg_curve_failure_surfaces_on_the_panel_not_a_silent_blank(
     server_url, page, monkeypatch
 ) -> None:
+    # _load_and_complete_ust's own default advanced overrides give the
+    # ticket genuine manual curve nodes (for its Black-76 pricing) -- the
+    # panel's own route forces a fresh acquisition regardless (see the next
+    # test), so that manual curve must not shield this failure from
+    # surfacing here either.
     def _fail(tenors=None):
         raise server_module.BLIBloombergDapiError("Bloomberg terminal not logged in")
 
     monkeypatch.setattr(server_module, "load_bloomberg_usd_sofr_option_discount_curve", _fail)
 
-    # curve_nodes=() leaves the manual editor's own two structural blank
-    # rows in place -- zero genuine nodes, the same "will be sourced live
-    # from Bloomberg" signal Issue #171 established -- so this ticket's
-    # own curve_points is empty and the live loader (faked to fail, above)
-    # is what the panel's own request actually reaches.
-    page.goto(f"{server_url}/")
-    response = _treasury_lookup_response(acquired_at="2026-08-12T20:00:00+08:00")
-    _load_bloomberg_bond(page, response=response)
-    _complete_draft(page, curve_nodes=())
-    _wait_for_price_enabled(page)
-
+    _load_and_complete_ust(page, server_url)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
 
     _wait_until(
         lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
     )
     assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+
+
+def test_a_manual_curve_override_on_the_ticket_never_leaks_into_the_s490_panel(
+    server_url, page
+) -> None:
+    # Codex P1 review of PR #174: a manual Option Discount Curve override is
+    # a legitimate, supported thing to enter for Black-76 pricing -- it must
+    # never become the silent source of a number this panel presents as
+    # "S490 Funding Rate". _load_and_complete_ust's own default advanced
+    # overrides already give this ticket two manual nodes of its own
+    # (curve_id SHIORI_MANUAL_OPTION_DISCOUNT_CURVE); the panel's own
+    # response must show the live curve's provenance regardless.
+    responses = []
+    page.on(
+        "response",
+        lambda response: responses.append(response)
+        if "/api/case/s490-repo-carry" in response.url
+        else None,
+    )
+
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    _wait_until(lambda: len(responses) >= 1)
+
+    body = responses[-1].json()
+    funding = body["s490_repo_carry"]["funding"]
+    assert funding["curve_ids"] == ["USD_SOFR_OPTION_DISCOUNT_CURVE"]
+    assert funding["source_systems"] == ["BLOOMBERG_DAPI"]
+    assert (
+        body["s490_repo_carry"]["curve_acquisition"]
+        == "LIVE_PRODUCTION_CURVE_490_ACQUIRED_THIS_RUN"
+    )
+    # The ticket's own manual override really was present and really was
+    # discarded, not merely absent to begin with.
+    assert body["s490_repo_carry"]["case_curve_points_discarded"] == 2
+    assert all(
+        point["curve_id"] == "USD_SOFR_OPTION_DISCOUNT_CURVE"
+        for point in body["case"]["curve_points"]
+    )

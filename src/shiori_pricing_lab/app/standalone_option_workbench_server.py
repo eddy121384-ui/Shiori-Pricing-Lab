@@ -110,22 +110,24 @@ read-only route -- see :func:`resolve_s490_repo_carry_parity` for the full
 contract:
 
 - ``POST /api/case/s490-repo-carry`` -- body is ``{"case": <full case>,
-  "spot_settlement_date": "YYYY-MM-DD"}``. Injects the live Curve #490
-  curve exactly like ``POST /api/case`` (same-as-of gate included, and a
-  case already carrying manual curve nodes is left untouched), then
-  resolves the S490 funding and repo-carry Forward for the case's own
+  "spot_settlement_date": "YYYY-MM-DD"}``. **Always acquires a fresh live
+  Curve #490** (same-as-of gate included) and discards whatever
+  ``curve_points`` the case carried, even a genuine manual trader override
+  -- unlike ``POST /api/case``, which leaves manual curve nodes untouched
+  for pricing (see :func:`acquire_production_curve_490_for_s490_parity`
+  for why this route cannot share that leniency). Resolves the S490
+  funding and repo-carry Forward for the case's own
   ``bond_option.expiry_date`` -- Expiry is the one field a trader changes
   to see a new Forward; the existing explicit ``forward_settlement_date``
   and ``forward_clean_price_input`` fields are read by nothing here.
-  Returns ``{"case": <the case actually priced, curve included>,
-  "s490_repo_carry": {"funding": {...}, "forward": {...},
+  Returns ``{"case": <the case actually priced, freshly acquired curve
+  included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
-  "forward_clean_price_treasury_fraction": <str>}}`` on HTTP 200. Any
+  "forward_clean_price_treasury_fraction": <str>, "curve_acquisition":
+  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Any
   validation, date, Bloomberg DAPI, curve-range, or interim-coupon failure
   returns HTTP 400 with ``{"error": "..."}``. This is a parity/testing
-  display only: it prices nothing through Black-76 and writes nothing into
-  the case it returns beyond the same live curve every other route already
-  injects.
+  display only: it prices nothing through Black-76.
 
 **Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
 regression and developer use only -- the trader-facing ``index.html``/
@@ -793,6 +795,61 @@ def inject_live_option_discount_curve_if_absent(case: dict) -> dict:
     return {**case, "curve_points": live_curve_points}
 
 
+# --- S490 forced live acquisition (Issue #173 CLI, Issue #174 Workbench route) ---
+#
+# The injector above deliberately leaves a case that already carries
+# explicit curve nodes completely untouched -- a manual trader override, an
+# uploaded fixture, or the bundled sanitized-synthetic example all price
+# exactly as supplied. That is correct for *pricing* (every route above this
+# one relies on it), but it is the wrong contract for the S490 repo-carry
+# Forward: that number is presented as "S490 Funding Rate" / "sourced from
+# the live Bloomberg Curve #490 acquisition", and a case carrying manual
+# nodes would silently derive it from hand-typed rates instead --
+# fabricated Bloomberg evidence (AGENTS.md rule 6), and misleading on a
+# ticket where the trader deliberately entered a manual curve override for
+# Black-76 pricing (a legitimate, supported thing to do) without meaning to
+# affect this separate parity display.
+#
+# Codex review of PR #174 (Issue #173's CLI tool, rounds 1-2) already
+# established -- and rejected -- the alternative: checking each row's
+# ``curve_id``/``source_system`` against the production loader's own
+# published constants. Those are ordinary case JSON; any caller can stamp
+# them onto hand-typed rows. Row metadata can never prove an acquisition
+# happened, so this does not classify the supplied curve at all -- it
+# **replaces** it. Clearing ``curve_points`` first makes the injector's own
+# empty-list trigger always fire, so a fresh production Curve #490
+# acquisition always runs (with its same-as-of RED gate applied both before
+# and after the round trip) and the rows the S490 funding resolver reads
+# are, by construction, the ones that acquisition just returned. Whatever
+# curve nodes the case carried are discarded and counted; they cannot
+# influence a single reported S490 number, no matter what they claim to be.
+#
+# Used by both ``resolve_s490_repo_carry_parity`` below (the Workbench
+# route) and ``tools/ust_s490_repo_carry_forward_parity.py`` (the CLI) --
+# one implementation, not two.
+S490_CURVE_ACQUISITION_CONTRACT = "LIVE_PRODUCTION_CURVE_490_ACQUIRED_THIS_RUN"
+
+
+def acquire_production_curve_490_for_s490_parity(
+    case: dict, inject_curve=inject_live_option_discount_curve_if_absent
+) -> tuple[dict, int]:
+    """Return ``(case priced from a freshly acquired Curve #490, rows discarded)``.
+
+    Clears ``curve_points`` first so :func:`inject_live_option_discount_curve_if_absent`'s
+    own empty-list trigger always fires -- see the module-level note above
+    for why a supplied curve is replaced rather than inspected or trusted.
+    ``inject_curve`` defaults to that same production injector and is an
+    injectable seam only for the CLI tool's own tests (no ``blpapi``
+    available there); the Workbench route below never overrides it. Raises
+    whatever the injector raises (a Bloomberg failure, the same-as-of
+    gate); nothing is caught here.
+    """
+
+    supplied = case.get("curve_points")
+    discarded = len(supplied) if isinstance(supplied, list) else 0
+    return inject_curve({**case, "curve_points": []}), discarded
+
+
 # --- Issue #138: Case JSON load and explicit-case pricing -----------------------
 
 
@@ -1007,13 +1064,17 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     contract or any Black-76/discounting/volatility path. Composes,
     unmodified:
 
-    - :func:`inject_live_option_discount_curve_if_absent` (Issue #171) for
-      the S490 curve -- the exact same production acquisition path
-      ``POST /api/case``/``POST /api/case/bloomberg`` already use, same-as-of
-      RED gate included. A case already carrying manual curve nodes is
-      priced from those nodes untouched, exactly like every other route in
-      this module -- this route asks for no manual repo input of its own,
-      and introduces no second curve-acquisition rule;
+    - :func:`acquire_production_curve_490_for_s490_parity` for the S490
+      curve. **This route always acquires a fresh production Curve #490,
+      discarding whatever ``curve_points`` the case carried** -- unlike
+      every pricing route in this module, which leaves a case's own manual
+      curve nodes untouched. A ticket may legitimately carry a manual curve
+      override for its Black-76 pricing; that override must never silently
+      become the source of a number this panel presents as "S490 Funding
+      Rate" (Codex P1 review of PR #174). See that function's own module-
+      level note for why classifying the supplied curve's row metadata
+      instead (an earlier, rejected answer to this same problem on the CLI
+      tool) does not work;
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
@@ -1034,15 +1095,23 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     caller-supplied number this route consumes beyond the case itself is
     ``spot_settlement_date``.
 
-    Returns ``{"case": <the case actually priced, live curve included>,
-    "s490_repo_carry": {...}}``. ``case`` mirrors the same "adopt what was
-    actually priced" contract every other live-curve route in this module
-    already returns, so a client that calls this route also picks up the
-    freshly acquired curve for its next Price click. ``s490_repo_carry``
-    carries the funding resolver's and forward primitive's own fields
-    (``dataclasses.asdict``, nested under ``funding``/``forward``) plus two
-    convenience top-level fields:``forward_clean_price_per_100`` and
-    ``forward_clean_price_treasury_fraction``.
+    Returns ``{"case": <the case actually priced, freshly acquired curve
+    included>, "s490_repo_carry": {...}}``. ``case`` mirrors the same
+    "adopt what was actually priced" contract every other live-curve route
+    in this module already returns -- here that means the browser's own
+    ``currentDraft.curve_points`` is replaced by whatever this route just
+    acquired, even if the trader had a manual override on screen; the
+    browser never resends this route's own response back into a Price
+    click (see the panel's own script.js wiring), so that adoption never
+    silently overwrites a trader's manual pricing override with a live
+    curve. ``s490_repo_carry`` carries the funding resolver's and forward
+    primitive's own fields (``dataclasses.asdict``, nested under
+    ``funding``/``forward``), two convenience top-level fields
+    (``forward_clean_price_per_100``, ``forward_clean_price_treasury_fraction``),
+    plus ``curve_acquisition`` (always
+    ``S490_CURVE_ACQUISITION_CONTRACT``) and ``case_curve_points_discarded``
+    (how many rows, if any, the case's own ``curve_points`` carried before
+    being replaced).
 
     Raises ``ValueError`` if ``bond_quote.clean_price_per_100`` is absent (a
     yield-only quote carries no spot clean price to start from), or
@@ -1053,7 +1122,7 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     every other route in this module.
     """
 
-    priced_case = inject_live_option_discount_curve_if_absent(case)
+    priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
     request = build_request_from_standalone_option_case(priced_case)
 
     spot_clean_price = request.market_data_snapshot.bond_quote.clean_price_per_100
@@ -1089,6 +1158,8 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
             "forward_clean_price_treasury_fraction": format_price_as_treasury_fraction(
                 forward.forward_clean_price_per_100
             ),
+            "curve_acquisition": S490_CURVE_ACQUISITION_CONTRACT,
+            "case_curve_points_discarded": discarded_curve_point_count,
         },
     }
 
