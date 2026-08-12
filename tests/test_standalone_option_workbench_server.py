@@ -835,6 +835,81 @@ def test_inject_live_curve_does_not_discard_a_row_with_a_blank_tenor(monkeypatch
         server_module.build_request_from_standalone_option_case(case)
 
 
+def test_inject_live_curve_does_not_discard_a_row_with_an_unexpected_key(monkeypatch) -> None:
+    """Codex P2 review of PR #172, round 5: a row matching every fixed field
+    and passing every per-field validator still must not be trusted if it
+    carries one key BLICurvePoint's constructor does not accept -- that key
+    set has to match exactly, or the row is left for the constructor's own
+    real ``TypeError`` (unexpected keyword argument)."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    malformed_point = {
+        **server_module._LIVE_CURVE_POINT_FIXED_FIELDS,
+        "tenor": "1Y",
+        "rate": 0.03,
+        "maturity_date": "2027-01-01",
+        "surprise_key": "unexpected",
+    }
+    case = {**json.loads(_example_case_bytes()), "curve_points": [malformed_point]}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(TypeError):
+        server_module.build_request_from_standalone_option_case(case)
+
+
+def test_inject_live_curve_does_not_discard_a_row_missing_an_expected_key(monkeypatch) -> None:
+    """Same as above, for a row missing one of BLICurvePoint's required keys
+    despite otherwise matching every fixed field."""
+
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    malformed_point = {
+        k: v for k, v in server_module._LIVE_CURVE_POINT_FIXED_FIELDS.items() if k != "status"
+    }
+    malformed_point.update(tenor="1Y", rate=0.03, maturity_date="2027-01-01")
+    case = {**json.loads(_example_case_bytes()), "curve_points": [malformed_point]}
+
+    result = server_module.inject_live_option_discount_curve_if_absent(case)
+
+    assert result is case
+    assert calls == []
+    with pytest.raises(TypeError):
+        server_module.build_request_from_standalone_option_case(case)
+
+
+def test_inject_live_curve_rechecks_the_valuation_date_after_the_loader_returns(
+    monkeypatch,
+) -> None:
+    """Codex P2 review of PR #172, round 5: a single pre-fetch clock read
+    leaves a midnight-rollover race -- a request that passes the gate before
+    the (possibly slow) Bloomberg round-trip, but whose valuation_date no
+    longer matches "today" by the time the loader actually returns, must
+    still fail closed rather than silently price a curve acquired on a
+    different calendar day than the one it was validated against."""
+
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+
+    def fake_loader(tenors=None):
+        # Simulate the clock rolling over to the next day while the
+        # Bloomberg round-trip was in flight.
+        monkeypatch.setattr(
+            server_module,
+            "_shiori_acquisition_now",
+            lambda: datetime(2026, 7, 2, 0, 0, 5, tzinfo=UTC),
+        )
+        return _fake_live_option_discount_curve_result()
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", fake_loader
+    )
+
+    with pytest.raises(ValueError, match="today's date"):
+        server_module.inject_live_option_discount_curve_if_absent(case)
+
+
 def test_validate_case_reports_not_ready_for_a_non_usd_drafts_empty_curve_points() -> None:
     """Codex P2 review of PR #172, round 2: the live loader can only ever
     supply USD, so a non-USD draft with no manual curve must not read as

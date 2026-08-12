@@ -593,6 +593,18 @@ _LIVE_CURVE_POINT_FIXED_FIELDS: dict[str, str] = {
     "source_system": USD_SOFR_SOURCE_SYSTEM,
     "status": "ACTIVE",
 }
+# Exactly BLICurvePoint's own field names (Codex P2 review of PR #172,
+# round 5): the seven fixed fields above plus the three that vary per row.
+# A row carrying any key outside this set -- or missing one inside it --
+# would raise TypeError from BLICurvePoint(**point) (an unexpected keyword
+# argument, for an extra key) even after matching every fixed value and
+# passing every per-field validator, so the key set itself must match
+# exactly before a row is trusted as an echoed acquisition.
+_LIVE_CURVE_POINT_EXPECTED_KEYS = frozenset(_LIVE_CURVE_POINT_FIXED_FIELDS) | {
+    "tenor",
+    "rate",
+    "maturity_date",
+}
 
 
 def _is_previously_injected_live_curve(curve_points: object) -> bool:
@@ -611,9 +623,14 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
     #172, rounds 3-4: a whitespace-only ``tenor``, a non-finite ``rate``, or
     a non-ISO ``maturity_date`` each independently satisfied an earlier,
     narrower version of this predicate and would have been misclassified as
-    a trusted echo). A row this predicate accepts is therefore guaranteed to
-    also construct successfully via ``BLICurvePoint(**point)`` -- there is no
-    field left that the constructor checks and this predicate does not.
+    a trusted echo). The row's own key set must also match
+    ``_LIVE_CURVE_POINT_EXPECTED_KEYS`` exactly -- no missing key and no
+    extra one (Codex P2 review of PR #172, round 5: an otherwise-matching
+    row carrying one unexpected key still satisfied every check above, even
+    though ``BLICurvePoint(**point)`` raises ``TypeError`` for that key). A
+    row this predicate accepts is therefore guaranteed to also construct
+    successfully via ``BLICurvePoint(**point)`` -- there is no field, value,
+    or key left that the constructor checks and this predicate does not.
 
     ``curve_points`` that is not a non-empty list of dicts (including the
     fresh-draft ``[]``), or any row missing, disagreeing on even one fixed
@@ -626,6 +643,8 @@ def _is_previously_injected_live_curve(curve_points: object) -> bool:
         return False
     for point in curve_points:
         if not isinstance(point, dict):
+            return False
+        if point.keys() != _LIVE_CURVE_POINT_EXPECTED_KEYS:
             return False
         if any(point.get(key) != value for key, value in _LIVE_CURVE_POINT_FIXED_FIELDS.items()):
             return False
@@ -655,13 +674,28 @@ def inject_live_option_discount_curve_if_absent(case: dict) -> dict:
     ``load_bloomberg_usd_sofr_option_discount_curve`` itself raises -- never
     caught or remapped here, and never any fallback to manual/sample/stale
     curve data.
+
+    **Checked before *and* after the Bloomberg call (Codex P2 review of PR
+    #172, round 5).** A single pre-fetch clock read leaves a real
+    midnight-rollover race: a request starting at 23:59:59 could pass the
+    gate against *today*, then have the Bloomberg round-trip itself cross
+    into the next calendar day before returning, silently pricing a curve
+    acquired tomorrow against yesterday's ``valuation_date`` -- precisely
+    the mismatched-as-of failure this gate exists to prevent. Re-running the
+    same check immediately after the loader returns, with a fresh clock
+    read, closes that window: the acquisition is only ever accepted while
+    both the moment it was requested *and* the moment it completed still
+    agree with ``valuation_date``.
     """
 
     curve_points = case.get("curve_points")
     if curve_points != [] and not _is_previously_injected_live_curve(curve_points):
         return case
-    _require_valuation_date_matches_today(case.get("valuation_date"))
-    return {**case, "curve_points": _live_option_discount_curve_points_as_dicts()}
+    valuation_date = case.get("valuation_date")
+    _require_valuation_date_matches_today(valuation_date)
+    live_curve_points = _live_option_discount_curve_points_as_dicts()
+    _require_valuation_date_matches_today(valuation_date)
+    return {**case, "curve_points": live_curve_points}
 
 
 # --- Issue #138: Case JSON load and explicit-case pricing -----------------------
