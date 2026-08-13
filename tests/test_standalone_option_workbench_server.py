@@ -1361,6 +1361,63 @@ def test_api_s490_repo_carry_rejects_a_missing_expiry_date(
     assert "expiry_date" in payload["error"]
 
 
+def test_api_s490_repo_carry_rejects_a_bond_quote_isin_mismatch(
+    server_url: str, monkeypatch
+) -> None:
+    # Codex P1 review of PR #174, round 6: removing
+    # build_request_from_standalone_option_case also removed
+    # BLIStandaloneBondOptionRequest's own coherence check that bond_quote
+    # genuinely describes the same security bond_option resolved to
+    # (require_exact_isin_match). This route re-checks it directly instead
+    # of pulling in the full envelope.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_only_s490_inputs()
+    case["bond_quote"] = {**case["bond_quote"], "isin": "US91282CLJ89"}
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 400
+    assert "bond_quote.isin" in payload["error"]
+
+
+def test_api_s490_repo_carry_rejects_a_bond_quote_currency_mismatch(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_only_s490_inputs()
+    case["bond_quote"] = {**case["bond_quote"], "currency": "EUR"}
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 400
+    assert "bond_quote.currency" in payload["error"]
+
+
+def test_api_s490_repo_carry_rejects_a_bond_option_currency_mismatch_with_the_resolved_bond(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_only_s490_inputs()
+    case["bond_option"] = {**case["bond_option"], "currency": "EUR"}
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 400
+    assert "bond_option currency" in payload["error"]
+
+
 @_QUANTLIB_SKIP
 def test_api_s490_repo_carry_matches_a_direct_call_to_the_resolver(
     server_url: str, monkeypatch

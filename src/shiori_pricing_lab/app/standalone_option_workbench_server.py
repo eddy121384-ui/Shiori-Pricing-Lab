@@ -302,6 +302,7 @@ from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
 from shiori_pricing_lab.pricing.bli_treasury_price_format import (
     format_price_as_treasury_fraction,
 )
+from shiori_pricing_lab.products.enums import Currency, coerce_enum
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BASE_CASE_PATH = PROJECT_ROOT / "examples" / "standalone_option_case.json"
@@ -1138,16 +1139,29 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     (how many rows, if any, the case's own ``curve_points`` carried before
     being replaced).
 
+    **Coherence checks restored without the full builder (Codex P1 review of
+    PR #174, round 6).** The removed ``BLIStandaloneBondOptionRequest``
+    construction enforced that ``bond_quote`` genuinely describes the same
+    security ``bond_option``/``resolved_bond_reference_data`` resolved to --
+    exact ISIN match (``require_exact_isin_match``) and matching currency in
+    both directions. Reading ``bond_quote``/``bond_option`` as independent
+    dict lookups dropped that for free, so this route re-checks the same
+    three coherence facts directly (``bond_option.currency`` against
+    ``resolved_bond_reference_data.currency``, ``bond_quote.isin`` against
+    ``resolved_bond_reference_data.isin``, ``bond_quote.currency`` against
+    ``bond_option.currency``) -- without pulling in the full envelope's other
+    thirteen keys.
+
     Raises ``ValueError`` if ``bond_option`` / ``bond_reference_data_universe``
     / ``bond_quote`` / ``curve_points`` are missing or malformed, if
-    ``bond_option.expiry_date`` is absent, or if
-    ``bond_quote.clean_price_per_100`` is absent (a yield-only quote carries
-    no spot clean price to start from); or whatever the composed functions
-    raise (Bloomberg failure, same-as-of mismatch, bond NOT_FOUND /
-    FOUND_INELIGIBLE, curve node range, an interim coupon in ``(tS, tF]``, a
-    malformed ``spot_settlement_date``, ...) -- never caught or remapped
-    here; the HTTP handler maps every failure to HTTP 400 exactly like
-    every other route in this module.
+    ``bond_option.expiry_date`` is absent, if any of the three coherence
+    checks above fails, or if ``bond_quote.clean_price_per_100`` is absent (a
+    yield-only quote carries no spot clean price to start from); or whatever
+    the composed functions raise (Bloomberg failure, same-as-of mismatch,
+    bond NOT_FOUND / FOUND_INELIGIBLE, curve node range, an interim coupon in
+    ``(tS, tF]``, a malformed ``spot_settlement_date``, ...) -- never caught
+    or remapped here; the HTTP handler maps every failure to HTTP 400 exactly
+    like every other route in this module.
     """
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
@@ -1161,7 +1175,7 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
             "bond_option.expiry_date must be present -- Expiry is the one ticket "
             "field this route needs to resolve a forward settlement date"
         )
-    currency = bond_option.get("currency")
+    currency = coerce_enum(bond_option.get("currency"), Currency, "bond_option.currency")
 
     universe_raw = priced_case.get("bond_reference_data_universe")
     if not isinstance(universe_raw, list):
@@ -1175,11 +1189,28 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     resolved_bond_reference_data = resolve_standalone_bond_reference_by_isin(
         bond_option.get("underlying_isin"), bond_reference_data_universe
     )
+    if currency is not resolved_bond_reference_data.currency:
+        raise ValueError(
+            f"bond_option currency ({currency.value}) does not match "
+            "resolved_bond_reference_data.currency "
+            f"({resolved_bond_reference_data.currency.value})"
+        )
 
     bond_quote_raw = priced_case.get("bond_quote")
     if not isinstance(bond_quote_raw, dict):
         raise ValueError("bond_quote must be a JSON object")
-    spot_clean_price = BLIBondQuote(**bond_quote_raw).clean_price_per_100
+    bond_quote = BLIBondQuote(**bond_quote_raw)
+    if bond_quote.isin != resolved_bond_reference_data.isin:
+        raise ValueError(
+            f"bond_quote.isin ({bond_quote.isin!r}) does not exactly match "
+            f"resolved_bond_reference_data.isin ({resolved_bond_reference_data.isin!r})"
+        )
+    if bond_quote.currency is not currency:
+        raise ValueError(
+            f"bond_quote.currency ({bond_quote.currency.value}) does not match "
+            f"bond_option currency ({currency.value})"
+        )
+    spot_clean_price = bond_quote.clean_price_per_100
     if spot_clean_price is None:
         raise ValueError(
             "bond_quote.clean_price_per_100 must be present -- a yield-only quote "
