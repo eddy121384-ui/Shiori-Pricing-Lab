@@ -133,6 +133,18 @@
     greekVega: document.getElementById("greek-vega"),
     greekTheta: document.getElementById("greek-theta"),
 
+    // S490 repo-carry Forward parity (Issue #173/#174 prototype)
+    s490SpotSettlementDate: document.getElementById("s490-spot-settlement-date-input"),
+    s490ParityStatus: document.getElementById("s490-parity-status"),
+    s490ParityRetryBtn: document.getElementById("s490-parity-retry-btn"),
+    s490ParityFields: document.getElementById("s490-parity-fields"),
+    s490ParityMethodRow: document.getElementById("s490-parity-method-row"),
+    s490FundingRate: document.getElementById("s490-funding-rate"),
+    s490CarryFactor: document.getElementById("s490-carry-factor"),
+    s490ForwardDecimal: document.getElementById("s490-forward-decimal"),
+    s490ForwardFraction: document.getElementById("s490-forward-fraction"),
+    s490FundingMethod: document.getElementById("s490-funding-method"),
+
     // Advanced
     advancedHead: document.getElementById("advanced-head"),
     advancedBody: document.getElementById("advanced-body"),
@@ -826,7 +838,7 @@
     },
     {
       id: "forward-review",
-      label: "Forward",
+      label: "Forward (Trader Override)",
       advanced: false,
       resolved: (draft) =>
         present(draft.forward_clean_price_input.forward_clean_price_per_100),
@@ -2438,6 +2450,15 @@
     // to +08:00" are the same event by construction -- there is nowhere else
     // for a re-render or a validation pass to reach it from.
     els.expiryOffset.value = DEFAULT_EXPIRY_UTC_OFFSET;
+    // The S490 parity panel's own Spot Settlement Date (Issue #174) is not
+    // part of MANUAL_TEXT_INPUTS -- editing it must never invalidate a
+    // pending Price/Refresh, so it is blanked explicitly here instead of
+    // through that shared array. Its displayed result/error are not reset
+    // here directly: syncDraftGating's own maybeRefreshS490Parity call,
+    // right after every caller of this function, already clears them the
+    // instant currentDraft becomes null (a fresh ticket) or this field goes
+    // blank.
+    els.s490SpotSettlementDate.value = "";
     // Two blank rows: the minimum the curve contract needs, offered ready to
     // fill. They are structure only -- a blank row is never a node.
     clearCurveRows();
@@ -3326,6 +3347,14 @@
         "builder accepts the draft.";
       els.unresolvedAlso.textContent = "Nothing else is outstanding.";
     }
+
+    // Every state change this function already reacts to -- a fresh Bloomberg
+    // load, a form edit, a profile answer, a completed Price/Refresh, Clear --
+    // ends here, so this one call site is enough to satisfy Issue #174's own
+    // requirement ("change Expiry, Shiori automatically recomputes") without
+    // a second edit-tracking mechanism. See the function's own doc comment
+    // for why it is idempotent and safe to call this often.
+    maybeRefreshS490Parity();
   }
 
   // --- Request generation / abort tracking ---------------------------------
@@ -3418,6 +3447,243 @@
       inFlightBloombergController.abort();
       inFlightBloombergController = null;
     }
+  }
+
+  // --- S490 repo-carry Forward parity (Issue #173/#174) ---------------------
+  //
+  // Read-only parity/testing display only: reuses POST /api/case/s490-repo-carry
+  // unchanged, which itself reuses the existing #171 live Curve #490
+  // acquisition, the #173 funding resolver and repo-carry Forward primitive.
+  // No repo rate is ever typed in here, no OVME value is ever hard-coded, and
+  // this section never writes into currentDraft or the existing explicit
+  // Forward Clean Price input -- it is a side display, entirely separate from
+  // the single-slot Price/Refresh run-request machine above.
+  //
+  // Trigger: whichever of Expiry, the Spot Settlement Date field, the loaded
+  // bond, the curve, or any other draft input last changed. Its own key
+  // fingerprints the whole draft plus the Spot Settlement Date field, so a
+  // call after an unrelated state change that changed nothing relevant is a
+  // cheap no-op.
+  //
+  // **Readiness is deliberately its own, narrower gate (Issue #174 round
+  // 6) -- not `latestBuilderReady`.** That flag answers "would the full
+  // typed Black-76 builder accept this draft", which requires Call/Put,
+  // Buy/Sell, Strike, Notional, Volatility and the manual Forward override
+  // too -- none of which POST /api/case/s490-repo-carry reads (see that
+  // route's own module-level note for exactly which six inputs it does
+  // read). Gating this section on full builder readiness made the S490
+  // Forward wait on trade/market inputs it never uses -- a circular
+  // dependency this section does not need. `s490ReadinessGate` below checks
+  // only what the route actually requires: the same "instrument" WORKFLOW_GROUPS
+  // entry Price itself relies on (a Bloomberg-loaded bond with a live,
+  // un-invalidated, correctly-sided quote) plus Expiry's own date -- not
+  // the separate `expiry_timestamp`/UTC-offset pair, which this route never
+  // reads either.
+  const INSTRUMENT_WORKFLOW_GROUP = WORKFLOW_GROUPS.find(
+    (group) => group.id === "instrument"
+  );
+
+  function s490ReadinessGate() {
+    if (currentDraft === null) return "no-draft";
+    if (!INSTRUMENT_WORKFLOW_GROUP.resolved(currentDraft)) {
+      return sourcedQuoteInvalidated || sourcedQuoteSideMismatch()
+        ? "quote-invalidated"
+        : "no-draft";
+    }
+    if (!present(currentDraft.bond_option.expiry_date)) return "no-expiry";
+    return "ready";
+  }
+
+  let s490ParityGeneration = 0;
+  // Never a real key's own value (see s490ParityKey below), so the very
+  // first call after page load is guaranteed to actually render once,
+  // rather than being mistaken for "nothing changed" against an initial
+  // guess.
+  let lastS490ParityKey;
+  let s490ParityResult = null;
+  let s490ParityError = null;
+  // True only while a request is genuinely in flight (Codex P2 review of
+  // PR #174) -- distinguishes "computing" from both "not ready" and
+  // "ready but no date entered" in renderS490Parity's own status text.
+  let s490ParityPending = false;
+
+  // Four distinct "nothing to show" reasons, not collapsed onto the same
+  // `null` -- a genuine transition between any two of them (finishing
+  // Expiry while Spot Settlement Date is still blank, or vice versa) has to
+  // still count as a key change, or maybeRefreshS490Parity's own guard
+  // would wrongly treat it as a no-op and leave the wrong status message on
+  // screen.
+  const S490_PARITY_KEY_NOT_READY = "__S490_NOT_READY__";
+  const S490_PARITY_KEY_NO_EXPIRY = "__S490_NO_EXPIRY__";
+  const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
+  const S490_PARITY_KEY_QUOTE_INVALIDATED = "__S490_QUOTE_INVALIDATED__";
+
+  // Codex P2 review of PR #174, round 7: POST /api/case/s490-repo-carry
+  // reads exactly bond_option.underlying_isin/currency/expiry_date,
+  // bond_reference_data_universe, bond_quote, and valuation_date (see that
+  // route's own module-level note) -- curve_points is discarded and
+  // replaced by a fresh acquisition regardless of what it held, and every
+  // Trade/Market field (Strike, Notional, Volatility, the manual Forward
+  // override) is never read at all. Fingerprinting the whole draft meant
+  // every one of those unrelated edits re-triggered a real Bloomberg Curve
+  // #490 acquisition whose result was immediately discarded by generation
+  // fencing -- wasted DAPI calls a trader typing into Strike would never
+  // expect. This reads only what the route actually consumes.
+  function s490RelevantFingerprint(draft) {
+    return JSON.stringify({
+      bond_option: {
+        underlying_isin: draft.bond_option.underlying_isin,
+        currency: draft.bond_option.currency,
+        expiry_date: draft.bond_option.expiry_date,
+      },
+      bond_reference_data_universe: draft.bond_reference_data_universe,
+      bond_quote: draft.bond_quote,
+      valuation_date: draft.valuation_date,
+    });
+  }
+
+  function s490ParityKey() {
+    const gate = s490ReadinessGate();
+    if (gate === "no-draft") return S490_PARITY_KEY_NOT_READY;
+    if (gate === "quote-invalidated") return S490_PARITY_KEY_QUOTE_INVALIDATED;
+    if (gate === "no-expiry") return S490_PARITY_KEY_NO_EXPIRY;
+    const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
+    if (!isValidIsoDate(spotSettlementDate)) return S490_PARITY_KEY_NO_SPOT_DATE;
+    return s490RelevantFingerprint(currentDraft) + "|" + spotSettlementDate;
+  }
+
+  function renderS490Parity() {
+    if (s490ParityError !== null) {
+      els.s490ParityStatus.textContent = s490ParityError;
+      els.s490ParityStatus.classList.add("is-invalid");
+      // Codex P2 review of PR #174, round 7: a failed request (a transient
+      // fetch/Bloomberg error) otherwise latches lastS490ParityKey to the
+      // failed inputs -- with the fingerprint now narrowed to just what the
+      // route reads (see s490RelevantFingerprint above), nothing the trader
+      // can still edit at this readiness level would ever change that key,
+      // so without an explicit retry there would be no way back short of
+      // touching Expiry or Spot Settlement Date again.
+      els.s490ParityRetryBtn.hidden = false;
+      els.s490ParityFields.hidden = true;
+      els.s490ParityMethodRow.hidden = true;
+      return;
+    }
+    els.s490ParityRetryBtn.hidden = true;
+    if (s490ParityResult === null) {
+      // Codex P2 review of PR #174: a request in flight is its own status,
+      // distinct from both "not ready" and "done" -- shown here so a slow
+      // Bloomberg round trip is never mistaken for the previous date's
+      // still-displayed numbers (which maybeRefreshS490Parity already
+      // clears before this render runs).
+      const gate = s490ReadinessGate();
+      els.s490ParityStatus.textContent = s490ParityPending
+        ? "Resolving S490 funding and Forward…"
+        : gate === "no-draft"
+          ? "Bloomberg Load a supported bond to see the S490 repo-carry Forward."
+          : gate === "quote-invalidated"
+            ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
+              "before the S490 repo-carry Forward can be resolved."
+            : gate === "no-expiry"
+              ? "Enter Expiry to see the S490 repo-carry Forward for this bond."
+              : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+                "ticket's Expiry.";
+      els.s490ParityStatus.classList.remove("is-invalid");
+      els.s490ParityFields.hidden = true;
+      els.s490ParityMethodRow.hidden = true;
+      return;
+    }
+    els.s490ParityStatus.textContent = "";
+    els.s490ParityStatus.classList.remove("is-invalid");
+    els.s490ParityFields.hidden = false;
+    els.s490ParityMethodRow.hidden = false;
+    const funding = s490ParityResult.funding;
+    els.s490FundingRate.textContent =
+      (funding.derived_repo_rate_decimal * 100).toFixed(6) + "%";
+    els.s490CarryFactor.textContent = funding.carry_factor.toFixed(10);
+    els.s490ForwardDecimal.textContent = s490ParityResult.forward_clean_price_per_100.toFixed(6);
+    els.s490ForwardFraction.textContent = s490ParityResult.forward_clean_price_treasury_fraction;
+    els.s490FundingMethod.textContent = funding.method;
+  }
+
+  // Idempotent and cheap to call after any state change: it recomputes its
+  // own key first and returns immediately unless that key actually changed,
+  // exactly like the existing `refreshAdvancedProfile`'s own `lastAdvancedProfileKey`
+  // guard.
+  async function maybeRefreshS490Parity() {
+    const key = s490ParityKey();
+    if (key === lastS490ParityKey) return;
+    lastS490ParityKey = key;
+
+    if (
+      key === S490_PARITY_KEY_NOT_READY ||
+      key === S490_PARITY_KEY_NO_EXPIRY ||
+      key === S490_PARITY_KEY_NO_SPOT_DATE ||
+      key === S490_PARITY_KEY_QUOTE_INVALIDATED
+    ) {
+      s490ParityGeneration++; // invalidate any outstanding answer
+      s490ParityResult = null;
+      s490ParityError = null;
+      s490ParityPending = false;
+      renderS490Parity();
+      return;
+    }
+
+    const requestCase = currentDraft;
+    const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
+    const generation = ++s490ParityGeneration;
+
+    // Codex P2 review of PR #174: clear the previous date's result (and any
+    // previous error) before awaiting the fetch, so a slow round trip never
+    // leaves the old date's funding/Forward on screen looking like it
+    // belongs to the date just typed. Rendered synchronously, before the
+    // first `await`, so there is no visible gap where stale numbers remain.
+    s490ParityResult = null;
+    s490ParityError = null;
+    s490ParityPending = true;
+    renderS490Parity();
+
+    let response;
+    let payload;
+    try {
+      response = await fetch("/api/case/s490-repo-carry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ case: requestCase, spot_settlement_date: spotSettlementDate }),
+      });
+      payload = await response.json();
+    } catch (err) {
+      if (generation !== s490ParityGeneration) return;
+      s490ParityPending = false;
+      s490ParityResult = null;
+      s490ParityError = "S490 parity request failed: " + err.message;
+      renderS490Parity();
+      return;
+    }
+    if (generation !== s490ParityGeneration) return;
+    s490ParityPending = false;
+    if (!response.ok) {
+      s490ParityResult = null;
+      s490ParityError = payload.error || "S490 parity request failed.";
+      renderS490Parity();
+      return;
+    }
+    s490ParityResult = payload.s490_repo_carry;
+    s490ParityError = null;
+    renderS490Parity();
+  }
+
+  // Explicit retry after a failed S490 request (Codex P2 review of PR #174,
+  // round 7). maybeRefreshS490Parity's own guard skips the fetch entirely
+  // when s490ParityKey() has not changed since lastS490ParityKey -- exactly
+  // what a failed request otherwise leaves behind, since none of the inputs
+  // still editable at this readiness level (Strike, Notional, Volatility,
+  // the manual Forward override, ...) are part of that key any more.
+  // Resetting lastS490ParityKey to the sentinel it starts as forces the very
+  // next call to treat the current key as new, without touching Expiry or
+  // Spot Settlement Date.
+  function retryS490Parity() {
+    lastS490ParityKey = undefined;
+    maybeRefreshS490Parity();
   }
 
   // --- Whole-run state reset ------------------------------------------------
@@ -4023,6 +4289,18 @@
     }
   });
   els.unresolvedGotoBtn.addEventListener("click", revealUnresolvedFocus);
+
+  // Deliberately its own listener, not part of MANUAL_TEXT_INPUTS: this
+  // field is not part of the priced case, so an edit here must never
+  // invalidate an in-flight Price/Refresh the way applyManualInputsToDraft
+  // does for every real ticket field (Issue #174).
+  els.s490SpotSettlementDate.addEventListener("input", maybeRefreshS490Parity);
+
+  // Codex P2 review of PR #174, round 7: retryS490Parity below is the
+  // explicit escape hatch for a failed request -- see renderS490Parity's
+  // own comment on why nothing else the trader can still edit would ever
+  // change s490ParityKey's now-narrowed fingerprint.
+  els.s490ParityRetryBtn.addEventListener("click", retryS490Parity);
 
   els.priceBtn.addEventListener("click", priceCurrentDraft);
   els.clearBtn.addEventListener("click", clearDraft);

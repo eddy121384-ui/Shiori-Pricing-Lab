@@ -93,6 +93,75 @@ from shiori_pricing_lab.reference_data.fixtures import SYNTHETIC_BOND_FIXTURES
 from shiori_pricing_lab.reference_data.resolution import DuplicateBondReferenceDataError
 
 
+def resolve_standalone_bond_reference_by_isin(
+    underlying_isin: str,
+    bond_reference_data_universe: Iterable[StandaloneBondReferenceData],
+    *,
+    bond_reference_source_name: str | None = None,
+) -> StandaloneBondReferenceData:
+    """Resolve one eligible standalone bond reference record by exact ISIN.
+
+    Extracted from :func:`build_bli_standalone_option_request` (Issue #174)
+    so a caller that needs only the resolved bond -- not a full
+    ``BLIStandaloneBondOptionRequest`` requiring a complete option-terms
+    object (strike/notional/option_type/position, none of which this
+    match/eligibility logic reads) -- can reuse the identical behavior
+    rather than re-deriving it. ``build_bli_standalone_option_request``
+    below now calls this function too; this is a pure extraction and does
+    not change that function's behavior.
+
+    Exact ISIN match only, no normalization or fallback.
+    ``bond_reference_source_name`` is an audit/source label only and never
+    affects matching.
+
+    Raises :class:`ValueError` with ``NOT_FOUND`` or ``FOUND_INELIGIBLE``
+    when exact standalone resolution cannot produce one safe resolved
+    record, and
+    :class:`shiori_pricing_lab.reference_data.resolution.DuplicateBondReferenceDataError`
+    unchanged if ``bond_reference_data_universe`` contains more than one
+    record sharing ``underlying_isin``.
+    """
+
+    source_name = bond_reference_source_name
+    if source_name is None:
+        source_name = (
+            "SYNTHETIC_BOND_FIXTURES"
+            if bond_reference_data_universe is SYNTHETIC_BOND_FIXTURES
+            else "caller_supplied_fixtures"
+        )
+    universe = tuple(bond_reference_data_universe)
+    if not all(
+        isinstance(record, (BondReferenceData, BLIStandaloneBondReferenceData))
+        for record in universe
+    ):
+        raise TypeError(
+            "bond_reference_data_universe records must be BondReferenceData or "
+            "BLIStandaloneBondReferenceData"
+        )
+    matches = [record for record in universe if record.isin == underlying_isin]
+    if len(matches) > 1:
+        raise DuplicateBondReferenceDataError(
+            f"{len(matches)} bond reference-data records in {source_name} share isin "
+            f"{underlying_isin!r} -- duplicate ISIN is a fixture data-integrity bug"
+        )
+    if not matches:
+        raise ValueError(
+            f"cannot build BLIStandaloneBondOptionRequest for underlying_isin "
+            f"{underlying_isin!r}: NOT_FOUND (no bond reference data found in "
+            f"{source_name})"
+        )
+    resolved_bond_reference_data = matches[0]
+    eligibility = is_standalone_bond_reference_data_eligible(
+        resolved_bond_reference_data
+    )
+    if not eligibility.eligible:
+        raise ValueError(
+            f"cannot build BLIStandaloneBondOptionRequest for underlying_isin "
+            f"{underlying_isin!r}: FOUND_INELIGIBLE ({'; '.join(eligibility.reasons)})"
+        )
+    return resolved_bond_reference_data
+
+
 def build_bli_standalone_option_request(
     *,
     bond_option: StandaloneBondOption,
@@ -158,44 +227,11 @@ def build_bli_standalone_option_request(
             "bond_option must be a BondOption or BLIStandaloneBondOptionTerms"
         )
 
-    underlying_isin = bond_option.underlying_isin
-    source_name = bond_reference_source_name
-    if source_name is None:
-        source_name = (
-            "SYNTHETIC_BOND_FIXTURES"
-            if bond_reference_data_universe is SYNTHETIC_BOND_FIXTURES
-            else "caller_supplied_fixtures"
-        )
-    universe = tuple(bond_reference_data_universe)
-    if not all(
-        isinstance(record, (BondReferenceData, BLIStandaloneBondReferenceData))
-        for record in universe
-    ):
-        raise TypeError(
-            "bond_reference_data_universe records must be BondReferenceData or "
-            "BLIStandaloneBondReferenceData"
-        )
-    matches = [record for record in universe if record.isin == underlying_isin]
-    if len(matches) > 1:
-        raise DuplicateBondReferenceDataError(
-            f"{len(matches)} bond reference-data records in {source_name} share isin "
-            f"{underlying_isin!r} -- duplicate ISIN is a fixture data-integrity bug"
-        )
-    if not matches:
-        raise ValueError(
-            f"cannot build BLIStandaloneBondOptionRequest for underlying_isin "
-            f"{underlying_isin!r}: NOT_FOUND (no bond reference data found in "
-            f"{source_name})"
-        )
-    resolved_bond_reference_data = matches[0]
-    eligibility = is_standalone_bond_reference_data_eligible(
-        resolved_bond_reference_data
+    resolved_bond_reference_data = resolve_standalone_bond_reference_by_isin(
+        bond_option.underlying_isin,
+        bond_reference_data_universe,
+        bond_reference_source_name=bond_reference_source_name,
     )
-    if not eligibility.eligible:
-        raise ValueError(
-            f"cannot build BLIStandaloneBondOptionRequest for underlying_isin "
-            f"{underlying_isin!r}: FOUND_INELIGIBLE ({'; '.join(eligibility.reasons)})"
-        )
 
     market_data_snapshot = BLIMarketDataSnapshot(
         valuation_date=valuation_date,
