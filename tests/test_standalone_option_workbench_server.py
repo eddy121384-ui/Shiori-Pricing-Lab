@@ -1296,6 +1296,71 @@ def test_api_case_bloomberg_live_curve_failure_never_calls_the_bond_quote_loader
 _S490_SPOT_SETTLEMENT_DATE = "2026-07-02"
 
 
+def _case_with_only_s490_inputs() -> dict:
+    """A case shaped like the browser's own ``currentDraft`` immediately
+    after a Bloomberg bond load plus an Expiry entry -- ``option_type``,
+    ``position``, ``strike_price``, ``notional``, ``volatility``, and the
+    manual Forward override are all still ``null``, exactly as
+    ``syncDraftGating`` leaves them before the trader has touched the
+    Trade/Market groups (Issue #174 round 6: S490 derivation must not wait
+    for that).
+    """
+
+    case = _case_with_empty_curve_points()
+    case["bond_option"] = {
+        **case["bond_option"],
+        "option_type": None,
+        "position": None,
+        "strike_price": None,
+        "notional": None,
+    }
+    case["volatility_input"] = {**case["volatility_input"], "volatility": None}
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": None,
+    }
+    return case
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_resolves_with_trade_and_market_inputs_still_blank(
+    server_url: str, monkeypatch
+) -> None:
+    # Issue #174 round 6: the S490 Forward must be derivable from a
+    # Bloomberg-loaded bond plus Expiry and Spot Settlement Date alone, with
+    # no full Black-76 pricing-builder readiness required.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_only_s490_inputs()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 200
+    result = payload["s490_repo_carry"]
+    assert isinstance(result["forward_clean_price_per_100"], float)
+    assert isinstance(result["funding"]["derived_repo_rate_decimal"], float)
+
+
+def test_api_s490_repo_carry_rejects_a_missing_expiry_date(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_only_s490_inputs()
+    case["bond_option"] = {**case["bond_option"], "expiry_date": None}
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+    )
+
+    assert status == 400
+    assert "expiry_date" in payload["error"]
+
+
 @_QUANTLIB_SKIP
 def test_api_s490_repo_carry_matches_a_direct_call_to_the_resolver(
     server_url: str, monkeypatch

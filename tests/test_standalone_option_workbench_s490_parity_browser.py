@@ -58,7 +58,9 @@ if _TESTS_DIR not in sys.path:
 
 from test_standalone_option_workbench_prototype_browser import (  # noqa: E402
     _complete_draft,
+    _is_disabled,
     _load_bloomberg_bond,
+    _set_expiry,
     _treasury_lookup_response,
     _wait_for_price_enabled,
     _wait_for_refresh_enabled,
@@ -206,14 +208,17 @@ def test_panel_shows_a_resting_hint_before_a_bond_is_loaded(server_url, page) ->
     assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
 
 
-def test_panel_asks_for_the_ticket_to_be_completed_before_a_spot_date_helps(
-    server_url, page
-) -> None:
+def test_panel_asks_for_expiry_before_a_spot_date_helps(server_url, page) -> None:
+    # Issue #174 round 6: a Bloomberg-loaded bond alone is enough for the
+    # instrument-readiness gate (no Call/Put, Strike, Notional, Volatility,
+    # or manual Forward required) -- but Expiry is a genuine, still-needed
+    # S490 input, so entering only the Spot Settlement Date must not be
+    # enough either.
     page.goto(f"{server_url}/")
     response = _treasury_lookup_response(acquired_at="2026-08-12T20:00:00+08:00")
     _load_bloomberg_bond(page, response=response)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
-    assert "Complete the ticket" in page.text_content("#s490-parity-status")
+    assert "Expiry" in page.text_content("#s490-parity-status")
     assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
 
 
@@ -250,6 +255,36 @@ def test_entering_a_spot_settlement_date_resolves_and_displays_every_required_fi
     assert funding_method == "S490_TERM_RATE_FROM_CURVE_AS_OF__SIMPLE_ACT360__PROTOTYPE"
     # No repo rate control of any kind exists on this ticket.
     assert page.query_selector("input[id*='repo-rate']") is None
+
+
+def test_expiry_and_spot_settlement_date_alone_resolve_with_forward_vol_strike_notional_blank(
+    server_url, page
+) -> None:
+    # Issue #174 round 6 acceptance test: Bloomberg-loaded bond + Expiry +
+    # Spot Settlement Date, with Call/Put, Buy/Sell, Strike, Notional,
+    # Volatility, and the manual Forward override all still blank, must
+    # still display the S490-derived Forward -- full Black-76
+    # pricing-builder readiness (and therefore Price itself) is not
+    # required, and is not reached by this test.
+    page.goto(f"{server_url}/")
+    response = _treasury_lookup_response(acquired_at="2026-08-12T20:00:00+08:00")
+    _load_bloomberg_bond(page, response=response)
+    _set_expiry(page)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    assert float(page.text_content("#s490-forward-decimal")) > 0.0
+    assert page.text_content("#s490-forward-fraction") != "—"
+    # Confirms the blank fields really were blank -- this is not a false
+    # positive from a draft that happened to already be complete.
+    assert page.query_selector("#option-type-toggle .opt.on") is None
+    assert page.query_selector("#position-toggle .opt.on") is None
+    assert page.input_value("#strike-price-input") == ""
+    assert page.input_value("#notional-input") == ""
+    assert page.input_value("#volatility-input") == ""
+    assert page.input_value("#forward-price-input") == ""
+    assert _is_disabled(page, "#price-btn")
 
 
 def test_changing_expiry_alone_recomputes_the_forward_with_no_button_click(

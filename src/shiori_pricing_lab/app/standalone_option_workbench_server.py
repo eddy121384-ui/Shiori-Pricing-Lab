@@ -267,6 +267,11 @@ from shiori_pricing_lab.data._validation import (
     _require_finite_number,
     _require_non_blank,
 )
+from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLICurvePoint
+from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
+from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
+    resolve_standalone_bond_reference_by_isin,
+)
 from shiori_pricing_lab.data.bloomberg_bond_quote import (
     BLIBloombergDapiError,
     load_bloomberg_bond_identity_and_quote,
@@ -1075,10 +1080,30 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
       level note for why classifying the supplied curve's row metadata
       instead (an earlier, rejected answer to this same problem on the CLI
       tool) does not work;
+    - :func:`shiori_pricing_lab.data.bli_standalone_option_request_builder.
+      resolve_standalone_bond_reference_by_isin` for the resolved bond
+      (Issue #96's own exact-ISIN match/eligibility logic, unmodified);
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
       (Issue #173) for the forward.
+
+    **Deliberately does not call ``build_request_from_standalone_option_case``
+    (Issue #174 round 6).** That builder requires a *complete* pricing
+    case -- ``option_type``, ``position``, ``strike_price``, ``notional``,
+    ``volatility_input``, ``forward_clean_price_input``, and six more
+    top-level keys this route reads none of -- so gating this route on it
+    made the S490 Forward wait for full Black-76 readiness, even though the
+    derivation touches none of those fields. This route instead reads
+    exactly the six inputs it needs directly off ``case``: the resolved
+    bond (via ``bond_option.underlying_isin`` against
+    ``bond_reference_data_universe``), the live spot clean quote
+    (``bond_quote``), ``valuation_date``, ``spot_settlement_date`` (the
+    caller argument), ``bond_option.expiry_date``, and the freshly acquired
+    Curve #490. A Bloomberg-loaded bond alone already supplies the first
+    three; only Expiry and Spot Settlement Date remain genuinely trader-
+    entered. No strike, notional, volatility, option type, position, or
+    manual Forward override is read, required, or affected.
 
     **The forward settlement date (``tF``) is ``bond_option.expiry_date``.**
     Per Issue #174's own instruction ("change Expiry -> Shiori automatically
@@ -1113,39 +1138,71 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     (how many rows, if any, the case's own ``curve_points`` carried before
     being replaced).
 
-    Raises ``ValueError`` if ``bond_quote.clean_price_per_100`` is absent (a
-    yield-only quote carries no spot clean price to start from), or
-    whatever the composed functions raise (Bloomberg failure, same-as-of
-    mismatch, curve node range, an interim coupon in ``(tS, tF]``, a
+    Raises ``ValueError`` if ``bond_option`` / ``bond_reference_data_universe``
+    / ``bond_quote`` / ``curve_points`` are missing or malformed, if
+    ``bond_option.expiry_date`` is absent, or if
+    ``bond_quote.clean_price_per_100`` is absent (a yield-only quote carries
+    no spot clean price to start from); or whatever the composed functions
+    raise (Bloomberg failure, same-as-of mismatch, bond NOT_FOUND /
+    FOUND_INELIGIBLE, curve node range, an interim coupon in ``(tS, tF]``, a
     malformed ``spot_settlement_date``, ...) -- never caught or remapped
     here; the HTTP handler maps every failure to HTTP 400 exactly like
     every other route in this module.
     """
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
-    request = build_request_from_standalone_option_case(priced_case)
 
-    spot_clean_price = request.market_data_snapshot.bond_quote.clean_price_per_100
+    bond_option = priced_case.get("bond_option")
+    if not isinstance(bond_option, dict):
+        raise ValueError("bond_option must be a JSON object")
+    expiry_date = bond_option.get("expiry_date")
+    if not expiry_date:
+        raise ValueError(
+            "bond_option.expiry_date must be present -- Expiry is the one ticket "
+            "field this route needs to resolve a forward settlement date"
+        )
+    currency = bond_option.get("currency")
+
+    universe_raw = priced_case.get("bond_reference_data_universe")
+    if not isinstance(universe_raw, list):
+        raise ValueError(
+            "bond_reference_data_universe must be a JSON array of "
+            "BLIStandaloneBondReferenceData objects"
+        )
+    bond_reference_data_universe = [
+        BLIStandaloneBondReferenceData(**record) for record in universe_raw
+    ]
+    resolved_bond_reference_data = resolve_standalone_bond_reference_by_isin(
+        bond_option.get("underlying_isin"), bond_reference_data_universe
+    )
+
+    bond_quote_raw = priced_case.get("bond_quote")
+    if not isinstance(bond_quote_raw, dict):
+        raise ValueError("bond_quote must be a JSON object")
+    spot_clean_price = BLIBondQuote(**bond_quote_raw).clean_price_per_100
     if spot_clean_price is None:
         raise ValueError(
             "bond_quote.clean_price_per_100 must be present -- a yield-only quote "
             "carries no spot clean price for the S490 repo-carry Forward to start from"
         )
 
-    forward_settlement_date = request.bond_option.expiry_date
+    curve_points_raw = priced_case.get("curve_points")
+    if not isinstance(curve_points_raw, list):
+        raise ValueError("curve_points must be a JSON array of BLICurvePoint objects")
+    curve_points = [BLICurvePoint(**point) for point in curve_points_raw]
 
     funding = resolve_s490_repo_carry_funding(
-        request.market_data_snapshot.curve_points,
-        currency=request.bond_option.currency,
-        curve_as_of_date=request.valuation_date,
+        curve_points,
+        currency=currency,
+        curve_as_of_date=priced_case.get("valuation_date"),
         spot_settlement_date=spot_settlement_date,
-        forward_settlement_date=forward_settlement_date,
+        forward_settlement_date=expiry_date,
     )
     forward = repo_carry_forward_clean_price(
-        bond=request.resolved_bond_reference_data,
+        bond=resolved_bond_reference_data,
         spot_clean_price_per_100=spot_clean_price,
         spot_settlement_date=spot_settlement_date,
-        forward_settlement_date=forward_settlement_date,
+        forward_settlement_date=expiry_date,
         repo_rate_decimal=funding.derived_repo_rate_decimal,
     )
 

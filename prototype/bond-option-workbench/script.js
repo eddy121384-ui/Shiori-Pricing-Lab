@@ -837,7 +837,7 @@
     },
     {
       id: "forward-review",
-      label: "Forward",
+      label: "Forward (Trader Override)",
       advanced: false,
       resolved: (draft) =>
         present(draft.forward_clean_price_input.forward_clean_price_per_100),
@@ -3290,12 +3290,6 @@
       scheduleBuilderValidation();
     }
     const builderReady = draftComplete && profileReady && builderValidation.state === "ready";
-    // Read by maybeRefreshS490Parity below, and by the Spot Settlement Date
-    // field's own separate "input" listener -- both need this exact same
-    // "the real typed builder would accept this draft" answer Price itself
-    // is gated on, without recomputing draftComplete/profileReady/
-    // builderValidation.state a second time.
-    latestBuilderReady = builderReady;
     // A pending lookup names a *different* bond than the one backing this
     // draft. Both actions begin by invalidating that lookup, so leaving them
     // live would let a click silently cancel the trader's Load and then price
@@ -3465,13 +3459,39 @@
   // the single-slot Price/Refresh run-request machine above.
   //
   // Trigger: whichever of Expiry, the Spot Settlement Date field, the loaded
-  // bond, the curve, or any other draft input last changed. Rather than wire
-  // a second edit-tracking mechanism, this reads `latestBuilderReady`
-  // (syncDraftGating's own "the real typed builder would accept this draft"
-  // answer, recomputed on every state change already) and its own key
+  // bond, the curve, or any other draft input last changed. Its own key
   // fingerprints the whole draft plus the Spot Settlement Date field, so a
   // call after an unrelated state change that changed nothing relevant is a
   // cheap no-op.
+  //
+  // **Readiness is deliberately its own, narrower gate (Issue #174 round
+  // 6) -- not `latestBuilderReady`.** That flag answers "would the full
+  // typed Black-76 builder accept this draft", which requires Call/Put,
+  // Buy/Sell, Strike, Notional, Volatility and the manual Forward override
+  // too -- none of which POST /api/case/s490-repo-carry reads (see that
+  // route's own module-level note for exactly which six inputs it does
+  // read). Gating this section on full builder readiness made the S490
+  // Forward wait on trade/market inputs it never uses -- a circular
+  // dependency this section does not need. `s490ReadinessGate` below checks
+  // only what the route actually requires: the same "instrument" WORKFLOW_GROUPS
+  // entry Price itself relies on (a Bloomberg-loaded bond with a live,
+  // un-invalidated, correctly-sided quote) plus Expiry's own date -- not
+  // the separate `expiry_timestamp`/UTC-offset pair, which this route never
+  // reads either.
+  const INSTRUMENT_WORKFLOW_GROUP = WORKFLOW_GROUPS.find(
+    (group) => group.id === "instrument"
+  );
+
+  function s490ReadinessGate() {
+    if (currentDraft === null) return "no-draft";
+    if (!INSTRUMENT_WORKFLOW_GROUP.resolved(currentDraft)) {
+      return sourcedQuoteInvalidated || sourcedQuoteSideMismatch()
+        ? "quote-invalidated"
+        : "no-draft";
+    }
+    if (!present(currentDraft.bond_option.expiry_date)) return "no-expiry";
+    return "ready";
+  }
 
   let s490ParityGeneration = 0;
   // Never a real key's own value (see s490ParityKey below), so the very
@@ -3485,33 +3505,23 @@
   // PR #174) -- distinguishes "computing" from both "not ready" and
   // "ready but no date entered" in renderS490Parity's own status text.
   let s490ParityPending = false;
-  // Mirrors syncDraftGating's own `builderReady` local -- see that
-  // function's own comment for why this is read rather than recomputed.
-  let latestBuilderReady = false;
 
-  // Three distinct "nothing to show" reasons, not collapsed onto the same
-  // `null` -- a genuine transition between them (finishing the ticket while
-  // Spot Settlement Date is still blank, or vice versa) has to still count
-  // as a key change, or maybeRefreshS490Parity's own guard would wrongly
-  // treat it as a no-op and leave the wrong status message on screen.
+  // Four distinct "nothing to show" reasons, not collapsed onto the same
+  // `null` -- a genuine transition between any two of them (finishing
+  // Expiry while Spot Settlement Date is still blank, or vice versa) has to
+  // still count as a key change, or maybeRefreshS490Parity's own guard
+  // would wrongly treat it as a no-op and leave the wrong status message on
+  // screen.
   const S490_PARITY_KEY_NOT_READY = "__S490_NOT_READY__";
+  const S490_PARITY_KEY_NO_EXPIRY = "__S490_NO_EXPIRY__";
   const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
   const S490_PARITY_KEY_QUOTE_INVALIDATED = "__S490_QUOTE_INVALIDATED__";
 
   function s490ParityKey() {
-    if (!latestBuilderReady || !currentDraft) return S490_PARITY_KEY_NOT_READY;
-    // Codex P1 review of PR #174: latestBuilderReady alone does not mean the
-    // sourced quote this route would price from is still live -- a failed
-    // Bloomberg refresh sets sourcedQuoteInvalidated (or a side change can
-    // make the sourced quote mismatch the ticket's selected side) while
-    // leaving currentDraft.bond_quote holding the now-disowned old price,
-    // and builder validation keeps re-succeeding regardless (see
-    // syncDraftGating's own comment on why). This mirrors canPrice's own
-    // gate there exactly, because this route reads that same disowned
-    // bond_quote.clean_price_per_100.
-    if (sourcedQuoteInvalidated || sourcedQuoteSideMismatch()) {
-      return S490_PARITY_KEY_QUOTE_INVALIDATED;
-    }
+    const gate = s490ReadinessGate();
+    if (gate === "no-draft") return S490_PARITY_KEY_NOT_READY;
+    if (gate === "quote-invalidated") return S490_PARITY_KEY_QUOTE_INVALIDATED;
+    if (gate === "no-expiry") return S490_PARITY_KEY_NO_EXPIRY;
     const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
     if (!isValidIsoDate(spotSettlementDate)) return S490_PARITY_KEY_NO_SPOT_DATE;
     // The whole draft, not a hand-picked subset of its fields: this section
@@ -3536,16 +3546,18 @@
       // Bloomberg round trip is never mistaken for the previous date's
       // still-displayed numbers (which maybeRefreshS490Parity already
       // clears before this render runs).
+      const gate = s490ReadinessGate();
       els.s490ParityStatus.textContent = s490ParityPending
         ? "Resolving S490 funding and Forward…"
-        : !latestBuilderReady
-          ? "Complete the ticket above (Instrument, Trade, Market inputs) to see the S490 " +
-            "repo-carry Forward."
-          : sourcedQuoteInvalidated || sourcedQuoteSideMismatch()
+        : gate === "no-draft"
+          ? "Bloomberg Load a supported bond to see the S490 repo-carry Forward."
+          : gate === "quote-invalidated"
             ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
               "before the S490 repo-carry Forward can be resolved."
-            : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
-              "ticket's Expiry.";
+            : gate === "no-expiry"
+              ? "Enter Expiry to see the S490 repo-carry Forward for this bond."
+              : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+                "ticket's Expiry.";
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
@@ -3575,6 +3587,7 @@
 
     if (
       key === S490_PARITY_KEY_NOT_READY ||
+      key === S490_PARITY_KEY_NO_EXPIRY ||
       key === S490_PARITY_KEY_NO_SPOT_DATE ||
       key === S490_PARITY_KEY_QUOTE_INVALIDATED
     ) {

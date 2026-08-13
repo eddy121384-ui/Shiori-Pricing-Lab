@@ -260,10 +260,10 @@
           </div>
         </div>
 
-        <!-- ---- S490 repo-carry Forward parity (Issue #173/#174 prototype) ---- -->
+        <!-- ---- Shiori Derived Forward: S490 repo-carry parity (Issue #173/#174 prototype) ---- -->
         <div class="card s490-parity">
           <div class="card-head">
-            <div class="card-title">S490 Repo-Carry Forward &mdash; parity / testing</div>
+            <div class="card-title">Shiori Derived Forward &mdash; S490 repo-carry, parity / testing</div>
           </div>
           <div class="card-body" id="s490-parity-body">
           <div class="form-row"><label>Spot Settlement Date</label>
@@ -273,21 +273,21 @@
           </div>
           <div class="fixed-route-note">
             Forward settlement (tF) is this ticket's own <strong>Expiry</strong> &mdash; change
-            Expiry above and this section recomputes. Funding comes from the live Bloomberg
-            Curve #490 / S490 acquisition Shiori already uses for pricing; no repo rate is
-            ever typed in, and no OVME value is hard-coded. This is a parity/testing display
-            only: it does not replace the explicit Forward Clean Price input above, and it
-            never feeds Black-76.
+            Expiry above and this section recomputes automatically from a Bloomberg-loaded bond,
+            its live spot quote, and a fresh live Bloomberg Curve #490 / S490 acquisition; no
+            repo rate is ever typed in, and no OVME value is hard-coded. Strike, Notional,
+            Volatility and the Trader Override Forward below are not required and are not read
+            here. This is a parity/testing display only: it does not write into the Trader
+            Override Forward input below, and it does not yet feed Black-76 pricing.
           </div>
           <div class="derived-source" id="s490-parity-status">
-            Complete the ticket above (Instrument, Trade, Market inputs) to see the S490
-            repo-carry Forward.
+            Bloomberg Load a supported bond to see the S490 repo-carry Forward.
           </div>
           <div class="pr-row r1" id="s490-parity-fields" hidden>
             <div class="pr-cell"><div class="p-lbl">S490 Funding Rate</div><div class="p-val" id="s490-funding-rate">&mdash;</div></div>
             <div class="pr-cell"><div class="p-lbl">Carry Factor</div><div class="p-val" id="s490-carry-factor">&mdash;</div></div>
-            <div class="pr-cell"><div class="p-lbl">Forward Clean (Decimal)</div><div class="p-val teal" id="s490-forward-decimal">&mdash;</div></div>
-            <div class="pr-cell"><div class="p-lbl">Forward Clean (Treasury)</div><div class="p-val teal" id="s490-forward-fraction">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Shiori Derived Forward (Decimal)</div><div class="p-val teal" id="s490-forward-decimal">&mdash;</div></div>
+            <div class="pr-cell"><div class="p-lbl">Shiori Derived Forward (Treasury)</div><div class="p-val teal" id="s490-forward-fraction">&mdash;</div></div>
           </div>
           <div class="pr-row r2" id="s490-parity-method-row" hidden>
             <div class="pr-cell"><div class="p-lbl">S490 Funding Method</div><div class="p-val" id="s490-funding-method">&mdash;</div></div>
@@ -305,7 +305,7 @@
 
             <div class="review-row" data-workflow-group="forward-review">
               <div class="review-head">
-                <span class="review-name">Forward</span>
+                <span class="review-name">Forward (Trader Override)</span>
                 <span class="review-status" id="forward-review-status">&mdash;</span>
               </div>
               <div class="review-control">
@@ -315,6 +315,12 @@
               </div>
               <div class="review-note" id="forward-sourcing-note">&mdash;</div>
               <div class="review-provenance" id="forward-provenance">&mdash;</div>
+              <div class="review-note">
+                Optional. Shiori's own S490-derived Forward (from a Bloomberg-loaded bond,
+                Expiry and Spot Settlement Date) is shown separately above and is never written
+                here automatically -- this field only ever holds a value you type, and Black-76
+                only ever prices from what is entered here.
+              </div>
             </div>
 
             <div class="review-row" data-workflow-group="vol-review">
