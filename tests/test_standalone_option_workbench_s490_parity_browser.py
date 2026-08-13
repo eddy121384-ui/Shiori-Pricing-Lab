@@ -287,6 +287,80 @@ def test_expiry_and_spot_settlement_date_alone_resolve_with_forward_vol_strike_n
     assert _is_disabled(page, "#price-btn")
 
 
+def test_editing_strike_notional_volatility_or_manual_forward_does_not_retrigger_s490(
+    server_url, page
+) -> None:
+    # Codex P2 review of PR #174, round 7: none of these fields are read by
+    # POST /api/case/s490-repo-carry (curve_points is discarded regardless,
+    # and Strike/Notional/Volatility/the manual Forward override are never
+    # read at all), so editing them once the panel already has a result
+    # must not launch another Bloomberg Curve #490 acquisition whose answer
+    # is only thrown away.
+    calls = []
+    page.on(
+        "request",
+        lambda req: calls.append(req) if "/api/case/s490-repo-carry" in req.url else None,
+    )
+    page.goto(f"{server_url}/")
+    response = _treasury_lookup_response(acquired_at="2026-08-12T20:00:00+08:00")
+    _load_bloomberg_bond(page, response=response)
+    _set_expiry(page)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    assert len(calls) == 1
+
+    page.fill("#strike-price-input", "99.5")
+    page.fill("#notional-input", "1000000")
+    page.fill("#volatility-input", "0.18")
+    page.fill("#forward-price-input", "101.3")
+    page.wait_for_timeout(500)
+
+    assert len(calls) == 1
+
+
+def test_a_failed_request_can_be_retried_via_the_retry_button(server_url, page) -> None:
+    # Codex P2 review of PR #174, round 7: a transient failure must not
+    # leave the panel permanently stuck -- lastS490ParityKey latches to the
+    # failed attempt's now-narrowed fingerprint, and nothing still editable
+    # at this readiness level (Strike, Notional, Volatility, the manual
+    # Forward override) is part of that key any more, so an explicit retry
+    # is the only way back.
+    page.goto(f"{server_url}/")
+    response = _treasury_lookup_response(acquired_at="2026-08-12T20:00:00+08:00")
+    _load_bloomberg_bond(page, response=response)
+    _set_expiry(page)
+
+    attempts = {"n": 0}
+
+    def route_s490(route):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            route.fulfill(
+                status=400,
+                content_type="application/json",
+                body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+            )
+        else:
+            route.continue_()
+
+    page.route("**/api/case/s490-repo-carry", route_s490)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+
+    _wait_until(
+        lambda: "Bloomberg DAPI session failed to start"
+        in page.text_content("#s490-parity-status")
+    )
+    assert not page.eval_on_selector("#s490-parity-retry-btn", "el => el.hidden")
+    assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+
+    page.click("#s490-parity-retry-btn")
+
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    assert attempts["n"] == 2
+    assert page.eval_on_selector("#s490-parity-retry-btn", "el => el.hidden")
+    page.unroute("**/api/case/s490-repo-carry")
+
+
 def test_changing_expiry_alone_recomputes_the_forward_with_no_button_click(
     server_url, page
 ) -> None:

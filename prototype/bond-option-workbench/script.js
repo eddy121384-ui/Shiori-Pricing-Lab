@@ -136,6 +136,7 @@
     // S490 repo-carry Forward parity (Issue #173/#174 prototype)
     s490SpotSettlementDate: document.getElementById("s490-spot-settlement-date-input"),
     s490ParityStatus: document.getElementById("s490-parity-status"),
+    s490ParityRetryBtn: document.getElementById("s490-parity-retry-btn"),
     s490ParityFields: document.getElementById("s490-parity-fields"),
     s490ParityMethodRow: document.getElementById("s490-parity-method-row"),
     s490FundingRate: document.getElementById("s490-funding-rate"),
@@ -3517,6 +3518,30 @@
   const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
   const S490_PARITY_KEY_QUOTE_INVALIDATED = "__S490_QUOTE_INVALIDATED__";
 
+  // Codex P2 review of PR #174, round 7: POST /api/case/s490-repo-carry
+  // reads exactly bond_option.underlying_isin/currency/expiry_date,
+  // bond_reference_data_universe, bond_quote, and valuation_date (see that
+  // route's own module-level note) -- curve_points is discarded and
+  // replaced by a fresh acquisition regardless of what it held, and every
+  // Trade/Market field (Strike, Notional, Volatility, the manual Forward
+  // override) is never read at all. Fingerprinting the whole draft meant
+  // every one of those unrelated edits re-triggered a real Bloomberg Curve
+  // #490 acquisition whose result was immediately discarded by generation
+  // fencing -- wasted DAPI calls a trader typing into Strike would never
+  // expect. This reads only what the route actually consumes.
+  function s490RelevantFingerprint(draft) {
+    return JSON.stringify({
+      bond_option: {
+        underlying_isin: draft.bond_option.underlying_isin,
+        currency: draft.bond_option.currency,
+        expiry_date: draft.bond_option.expiry_date,
+      },
+      bond_reference_data_universe: draft.bond_reference_data_universe,
+      bond_quote: draft.bond_quote,
+      valuation_date: draft.valuation_date,
+    });
+  }
+
   function s490ParityKey() {
     const gate = s490ReadinessGate();
     if (gate === "no-draft") return S490_PARITY_KEY_NOT_READY;
@@ -3524,22 +3549,26 @@
     if (gate === "no-expiry") return S490_PARITY_KEY_NO_EXPIRY;
     const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
     if (!isValidIsoDate(spotSettlementDate)) return S490_PARITY_KEY_NO_SPOT_DATE;
-    // The whole draft, not a hand-picked subset of its fields: this section
-    // has to recompute for any change that could affect the funding or the
-    // forward (a curve override, the bond's own schedule fields, the spot
-    // quote, Expiry, ...), and enumerating exactly which ones matter would
-    // duplicate logic that already lives in the reviewed Python resolver.
-    return JSON.stringify(currentDraft) + "|" + spotSettlementDate;
+    return s490RelevantFingerprint(currentDraft) + "|" + spotSettlementDate;
   }
 
   function renderS490Parity() {
     if (s490ParityError !== null) {
       els.s490ParityStatus.textContent = s490ParityError;
       els.s490ParityStatus.classList.add("is-invalid");
+      // Codex P2 review of PR #174, round 7: a failed request (a transient
+      // fetch/Bloomberg error) otherwise latches lastS490ParityKey to the
+      // failed inputs -- with the fingerprint now narrowed to just what the
+      // route reads (see s490RelevantFingerprint above), nothing the trader
+      // can still edit at this readiness level would ever change that key,
+      // so without an explicit retry there would be no way back short of
+      // touching Expiry or Spot Settlement Date again.
+      els.s490ParityRetryBtn.hidden = false;
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
       return;
     }
+    els.s490ParityRetryBtn.hidden = true;
     if (s490ParityResult === null) {
       // Codex P2 review of PR #174: a request in flight is its own status,
       // distinct from both "not ready" and "done" -- shown here so a slow
@@ -3641,6 +3670,20 @@
     s490ParityResult = payload.s490_repo_carry;
     s490ParityError = null;
     renderS490Parity();
+  }
+
+  // Explicit retry after a failed S490 request (Codex P2 review of PR #174,
+  // round 7). maybeRefreshS490Parity's own guard skips the fetch entirely
+  // when s490ParityKey() has not changed since lastS490ParityKey -- exactly
+  // what a failed request otherwise leaves behind, since none of the inputs
+  // still editable at this readiness level (Strike, Notional, Volatility,
+  // the manual Forward override, ...) are part of that key any more.
+  // Resetting lastS490ParityKey to the sentinel it starts as forces the very
+  // next call to treat the current key as new, without touching Expiry or
+  // Spot Settlement Date.
+  function retryS490Parity() {
+    lastS490ParityKey = undefined;
+    maybeRefreshS490Parity();
   }
 
   // --- Whole-run state reset ------------------------------------------------
@@ -4252,6 +4295,12 @@
   // invalidate an in-flight Price/Refresh the way applyManualInputsToDraft
   // does for every real ticket field (Issue #174).
   els.s490SpotSettlementDate.addEventListener("input", maybeRefreshS490Parity);
+
+  // Codex P2 review of PR #174, round 7: retryS490Parity below is the
+  // explicit escape hatch for a failed request -- see renderS490Parity's
+  // own comment on why nothing else the trader can still edit would ever
+  // change s490ParityKey's now-narrowed fingerprint.
+  els.s490ParityRetryBtn.addEventListener("click", retryS490Parity);
 
   els.priceBtn.addEventListener("click", priceCurrentDraft);
   els.clearBtn.addEventListener("click", clearDraft);
