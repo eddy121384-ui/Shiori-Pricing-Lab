@@ -277,31 +277,75 @@ def test_a_case_a_horizon_says_no_interim_coupon_and_still_shows_the_full_trace(
     assert "Interim coupon " not in trace
 
 
+# A UST-shaped bond whose semi-annual grid lands on 15 March / 15 September,
+# so its in-window coupon (2026-09-15) is a Tuesday. The default fixture's own
+# grid is 31 January / 31 July, and *both* of its in-range coupons
+# (2027-01-31, 2027-07-31) fall on a weekend -- which the payment-date guard
+# now refuses outright, so a resolving Case B needs a weekday-coupon bond.
+# Fixture shape, not market data, exactly like the fixture it overrides.
+_WEEKDAY_COUPON_BOND_MASTER = {
+    "coupon": 0.0375,
+    "coupon_frequency": "SEMI_ANNUAL",
+    "issue_date": "2021-09-15",
+    "maturity_date": "2031-09-15",
+    "first_coupon_date": "2022-03-15",
+    "callable_flag": False,
+    "sinkable_flag": False,
+}
+
+
 def test_an_interim_coupon_expiry_resolves_and_names_the_coupon_on_the_panel(
     server_url, page
 ) -> None:
-    # Issue #175 Case B, driven exactly as a trader would: the same ticket,
-    # with Expiry moved past this bond's 2027-01-31 coupon. Before this
-    # slice that produced an unsupported-case error status; it must now
-    # resolve, name the coupon, and show its carry in the trace.
-    _load_and_complete_ust(page, server_url)
+    # Issue #175 Case B, driven exactly as a trader would. Before this slice
+    # an in-window coupon produced an unsupported-case error status; it must
+    # now resolve, name the coupon, and show its carry in the trace.
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master=_WEEKDAY_COUPON_BOND_MASTER,
+            acquired_at="2026-08-12T20:00:00+08:00",
+        ),
+    )
+    # This bond's own last coupon before maturity, not the default fixture's.
+    _complete_draft(page, last_coupon_date="2031-03-15")
+    _set_expiry(page)  # default 2026-10-20, past the 2026-09-15 coupon
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
-    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
-    case_a_forward = page.text_content("#s490-forward-decimal")
 
-    _set_expiry(page, local="2027-02-15T17:20")
-
-    _wait_until(lambda: page.text_content("#s490-forward-decimal") != case_a_forward)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
 
     assert page.text_content("#s490-parity-status") == ""
-    # 3.75% semi-annual = 1.875 per 100, paid 31 January.
-    assert page.text_content("#s490-interim-coupon-summary") == "2027-01-31 · 1.875000"
+    # 3.75% semi-annual = 1.875 per 100, paid 15 September (a Tuesday).
+    assert page.text_content("#s490-interim-coupon-summary") == "2026-09-15 · 1.875000"
     trace = page.text_content("#s490-parity-trace-body")
-    assert "Interim coupon 2027-01-31" in trace
+    assert "Interim coupon 2026-09-15" in trace
     assert "days to Expiry" in trace
     assert "PROTOTYPE" in trace  # the coupon-treatment label, never hidden
     assert float(page.text_content("#s490-forward-decimal")) > 0.0
+
+
+def test_a_weekend_scheduled_coupon_fails_closed_on_the_panel_rather_than_guessing(
+    server_url, page
+) -> None:
+    # Codex P1 review of PR #176: the default fixture's next coupon
+    # (2027-01-31) is a Sunday, so it is not paid on that date and this
+    # repository has no calendar to say when it is. The panel must surface
+    # that refusal, not a confident-looking Forward derived from a nominal
+    # date. This is the same class as Issue #175's own acceptance coupon
+    # (2026-10-31, a Saturday).
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    _set_expiry(page, local="2027-02-15T17:20")
+
+    _wait_until(lambda: page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    status = page.text_content("#s490-parity-status")
+    assert "Sunday" in status
+    assert "unadjusted" in status
+    # No number is left on screen next to a refusal.
+    assert page.eval_on_selector("#s490-parity-trace", "el => el.hidden")
 
 
 def test_expiry_and_spot_settlement_date_alone_resolve_with_forward_vol_strike_notional_blank(

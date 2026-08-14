@@ -34,7 +34,11 @@ OVME F number as supplied, the decimal residual, and the residual in
 Treasury ticks (32nds). Since Issue #175 a horizon whose repo term contains
 a coupon (Case B) is reported the same way rather than refused, with the
 coupon-treatment label and every interim coupon's own date, amount,
-reinvestment term and carried value shown alongside the transition.
+reinvestment term and carried value shown alongside the transition -- unless
+that coupon is scheduled on a weekend, in which case the horizon fails
+closed, because the coupon schedule this repository holds is unadjusted and
+the actual payment date is an unresolved methodology question rather than a
+value to assume (see ``pricing/bli_repo_carry_forward.py``'s own RED note).
 
 **Where every number comes from -- pure composition, no new math here.**
 
@@ -197,8 +201,8 @@ def _horizon_result(
 
     Returns one flat dict per horizon. A failure affecting only this
     horizon (a date outside the curve's node range, a window reaching the
-    bond's maturity date, a malformed date) is captured as this row's own
-    ``status``/``error`` so
+    bond's maturity date, an interim coupon scheduled on a weekend, a
+    malformed date) is captured as this row's own ``status``/``error`` so
     the remaining horizons in the same run still report -- Issue #173 asks
     for the residual to be reported, never hidden, and a run covering three
     expiries should not lose two of them to one bad third.

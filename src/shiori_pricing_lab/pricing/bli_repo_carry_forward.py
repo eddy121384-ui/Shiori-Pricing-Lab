@@ -126,6 +126,41 @@ which that adapter slice does not implement), and a resulting non-positive
 forward dirty price raises rather than producing a forward clean price from
 it.
 
+**RED, unresolved: the coupon *payment* date (Codex P1 review of PR #176).**
+``coupon_flows_before`` returns the bond's **unadjusted** schedule dates --
+``bli_quantlib_bond_adapter`` generates them with ``ql.NullCalendar()``, by
+design, and this repository holds no business-day calendar of any kind. That
+is correct and already approved for **accrued interest**, where accrual
+conventionally stops on the nominal date. It is *not* established for **cash
+receipt**, which is what a reinvestment leg needs: a US Treasury coupon whose
+scheduled date is not a business day is paid on the next business day (with
+no additional interest), so the nominal date and the cash-receipt date are
+different dates being used for different purposes.
+
+Treating the nominal date as the receipt date changes two things:
+
+- *how long the coupon is reinvested* -- small (two days on a 2.00 coupon at
+  3.77% is ~4.2e-04 per 100, ~0.013 of a 32nd); and
+- *whether the coupon is in the window at all* -- **not** small. If ``tF``
+  falls strictly between the scheduled date and the actual payment date, one
+  reading subtracts the whole coupon and the other subtracts nothing: on a
+  2.00 coupon that is ~64 ticks.
+
+No first-party evidence in this repository says which date Bloomberg's FPA
+forward uses, and resolving it needs a US government securities holiday
+calendar -- a data source this repository has deliberately never had and
+Issue #175 did not authorise. **So this module does not choose.** A coupon
+whose scheduled payment date is provably not a business day raises
+:class:`RepoCarryInterimCouponPaymentDateUnresolvedError` rather than
+carrying it under a guessed convention.
+
+That guard is **deliberately partial, and must not be read as validation**:
+weekends are detectable from the date alone, holidays are not. A coupon
+scheduled on a weekday that happens to be a market holiday (Veterans Day,
+Independence Day, ...) still carries from its nominal date, and is still
+exposed to exactly the same unresolved question. The guard removes the
+provable half of the exposure and names the rest; it does not close it.
+
 **Composition, not reimplementation.** Accrued interest at both settlement
 dates comes from the already-reviewed
 ``pricing/bli_quantlib_bond_adapter.accrued_interest_per_100``; the interim
@@ -174,6 +209,24 @@ REPO_COMPOUNDING_CONVENTION = "SIMPLE"
 INTERIM_COUPON_TREATMENT = (
     "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"
 )
+
+# Saturday/Sunday as ``date.weekday()`` reports them. The only class of
+# non-business day this repository can determine from a date alone -- see the
+# module docstring's RED note for why that is a partial guard and not a
+# validation, and for what it deliberately does not decide.
+_WEEKEND_WEEKDAYS = (5, 6)
+
+
+class RepoCarryInterimCouponPaymentDateUnresolvedError(ValueError):
+    """An interim coupon's scheduled date is provably not a business day.
+
+    ``coupon_flows_before`` returns unadjusted ``NullCalendar`` schedule
+    dates. Using one as a *cash-receipt* date -- which a reinvestment leg
+    requires -- is an unresolved convention in this repository, and it can
+    change whether the coupon is in ``(tS, tF]`` at all, not merely how long
+    it is reinvested. Raised instead of carrying the coupon from a date it
+    may not actually be paid on. See the module docstring's RED note.
+    """
 
 
 def _require_finite(value: object, field_name: str) -> float:
@@ -281,6 +334,12 @@ def reinvest_interim_coupon_to_forward_settlement(
     *after* ``forward_settlement_date`` raises ``ValueError``: such a coupon
     is not inside the repo term at all and never reaches this function from
     :func:`repo_carry_forward_clean_price`, whose window is ``(tS, tF]``.
+
+    Raises :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` when
+    ``payment_date`` falls on a weekend -- the coupon is then provably not
+    received on that date, and this repository has no approved calendar to
+    say when it is received instead (see the module docstring's RED note,
+    including why that guard is partial and says nothing about holidays).
     """
 
     amount = _require_finite(amount_per_100, "amount_per_100")
@@ -291,6 +350,18 @@ def reinvest_interim_coupon_to_forward_settlement(
             f"payment_date ({payment_date!r}) must not be after forward_settlement_date "
             f"({forward_settlement_date!r}) -- a coupon paid after the forward settlement "
             "date is not an interim coupon of this repo term"
+        )
+    if payment.weekday() in _WEEKEND_WEEKDAYS:
+        raise RepoCarryInterimCouponPaymentDateUnresolvedError(
+            f"interim coupon scheduled on {payment_date!r} falls on a "
+            f"{payment.strftime('%A')}, so it is not paid on that date -- the coupon "
+            "schedule this repository holds is unadjusted (NullCalendar), it has no "
+            "business-day calendar to resolve the actual payment date, and no first-party "
+            "evidence says which date Bloomberg's FPA forward reinvests from. Carrying "
+            "the coupon from its nominal date would change how long it is reinvested and, "
+            "when the forward settlement date falls between the two dates, whether the "
+            "coupon is subtracted at all. This is an unresolved methodology decision, not "
+            "a value to assume"
         )
 
     term_days = (forward - payment).days
@@ -366,12 +437,14 @@ def repo_carry_forward_clean_price(
     empty coupon set and is arithmetically unchanged from Case A.
 
     Raises :class:`TypeError` for a ``bond`` the accrual adapter does not
-    accept, and :class:`ValueError` for a non-finite/non-positive spot clean
+    accept, :class:`ValueError` for a non-finite/non-positive spot clean
     price, a non-positive repo term, or a forward dirty price that is not
-    positive after the interim coupons are subtracted. Every other error
-    propagates unchanged from the composed helpers -- notably
-    ``BLIBondMaturityCashflowUnsupportedError`` when the window reaches the
-    bond's maturity date.
+    positive after the interim coupons are subtracted, and
+    :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` when an interim
+    coupon is scheduled on a weekend (the module docstring's RED note).
+    Every other error propagates unchanged from the composed helpers --
+    notably ``BLIBondMaturityCashflowUnsupportedError`` when the window
+    reaches the bond's maturity date.
     """
 
     spot_clean = _require_finite(spot_clean_price_per_100, "spot_clean_price_per_100")

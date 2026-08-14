@@ -17,6 +17,9 @@ Bloomberg, OVME, or market observation of any kind appears in this file.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import date
+
 import pytest
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle_fixtures import SYNTHETIC_BLI_MVP_INPUT_BUNDLE
@@ -30,6 +33,7 @@ from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
     INTERIM_COUPON_TREATMENT,
     REPO_COMPOUNDING_CONVENTION,
     REPO_DAY_COUNT_CONVENTION,
+    RepoCarryInterimCouponPaymentDateUnresolvedError,
     carry_factor_from_simple_repo_rate,
     reinvest_interim_coupon_to_forward_settlement,
     repo_carry_forward_clean_price,
@@ -350,16 +354,16 @@ def test_a_horizon_reaching_maturity_is_still_refused_by_the_coupon_adapter():
 
 def test_one_coupon_reinvestment_leg_is_the_same_one_plus_r_t_factor():
     coupon = reinvest_interim_coupon_to_forward_settlement(
-        payment_date="2026-10-31",
+        payment_date="2026-10-30",
         amount_per_100=2.0,
         forward_settlement_date="2026-11-11",
         repo_rate_decimal=0.04,
     )
-    assert coupon.reinvestment_term_days == 11
-    assert coupon.reinvestment_term_year_fraction == pytest.approx(11 / 360.0)
+    assert coupon.reinvestment_term_days == 12
+    assert coupon.reinvestment_term_year_fraction == pytest.approx(12 / 360.0)
     assert coupon.reinvestment_factor == pytest.approx(
         carry_factor_from_simple_repo_rate(
-            repo_rate_decimal=0.04, repo_term_year_fraction=11 / 360.0
+            repo_rate_decimal=0.04, repo_term_year_fraction=12 / 360.0
         )
     )
     assert coupon.forward_value_per_100 == pytest.approx(2.0 * coupon.reinvestment_factor)
@@ -379,13 +383,15 @@ def test_the_coupon_leg_is_not_annex_as_df_ratio_and_the_gap_is_bounded():
     """
 
     repo_rate = 0.0377
-    # T 4 04/30/32 with tS 2026-08-14, tF 2026-11-11, coupon 2026-10-31.
+    # Issue #175's acceptance shape (tS 2026-08-14, tF 2026-11-11), with the
+    # coupon on the nearest weekday -- its own scheduled 2026-10-31 is a
+    # Saturday and is refused outright by the guard above.
     term_year_fraction = 89 / 360.0
-    coupon_year_fraction = 78 / 360.0
+    coupon_year_fraction = 77 / 360.0
     amount = 2.0
 
     coupon = reinvest_interim_coupon_to_forward_settlement(
-        payment_date="2026-10-31",
+        payment_date="2026-10-30",
         amount_per_100=amount,
         forward_settlement_date="2026-11-11",
         repo_rate_decimal=repo_rate,
@@ -405,9 +411,89 @@ def test_the_coupon_leg_is_not_annex_as_df_ratio_and_the_gap_is_bounded():
         * (term_year_fraction - coupon_year_fraction)
         / (1.0 + repo_rate * coupon_year_fraction)
     )
-    # Under a thousandth of a 32nd -- far below OVME F's own quarter-tick
+    # Around a thousandth of a 32nd -- far below OVME F's own quarter-tick
     # display granularity, so parity cannot decide between the two readings.
-    assert gap * 32.0 < 0.001
+    assert gap * 32.0 < 0.002
+
+
+@pytest.mark.parametrize(
+    "weekend_date, day_name",
+    [("2026-10-31", "Saturday"), ("2027-01-31", "Sunday")],
+)
+def test_a_coupon_scheduled_on_a_weekend_fails_closed_rather_than_guessing(
+    weekend_date, day_name
+):
+    """Codex P1 review of PR #176.
+
+    ``coupon_flows_before`` returns unadjusted ``NullCalendar`` schedule
+    dates. A coupon scheduled on a weekend is provably not paid that day,
+    and this repository has no calendar to say when it is -- so it is
+    refused rather than reinvested from a date it is not received on. Both
+    dates here are real: 2026-10-31 is Issue #175's own acceptance coupon.
+    """
+
+    assert date.fromisoformat(weekend_date).strftime("%A") == day_name
+    with pytest.raises(
+        RepoCarryInterimCouponPaymentDateUnresolvedError, match=day_name
+    ):
+        reinvest_interim_coupon_to_forward_settlement(
+            payment_date=weekend_date,
+            amount_per_100=2.0,
+            forward_settlement_date="2027-03-01",
+            repo_rate_decimal=0.0377,
+        )
+
+
+@requires_quantlib
+def test_the_whole_forward_fails_closed_when_any_interim_coupon_is_on_a_weekend():
+    # The guard cannot be reached only through the per-coupon helper: a
+    # bond whose schedule lands on a weekend must fail the forward itself,
+    # not silently drop or carry that coupon.
+    weekend_coupon_bond = replace(
+        SYNTHETIC_BOND,
+        issue_date="2025-06-12",
+        first_coupon_date="2025-12-12",
+        last_coupon_date="2029-12-12",
+        maturity_date="2030-06-12",
+    )
+    (flow,) = coupon_flows_before(
+        weekend_coupon_bond,
+        after_date=SPOT_SETTLEMENT_DATE,
+        on_or_before_date=CASE_B_FORWARD_DATE,
+    )
+    assert flow.payment_date == "2026-12-12"
+    assert date.fromisoformat(flow.payment_date).strftime("%A") == "Saturday"
+
+    with pytest.raises(RepoCarryInterimCouponPaymentDateUnresolvedError):
+        repo_carry_forward_clean_price(
+            bond=weekend_coupon_bond,
+            spot_clean_price_per_100=99.5,
+            spot_settlement_date=SPOT_SETTLEMENT_DATE,
+            forward_settlement_date=CASE_B_FORWARD_DATE,
+            repo_rate_decimal=0.0375,
+        )
+
+
+@requires_quantlib
+def test_a_case_a_horizon_on_the_same_bond_is_untouched_by_the_weekend_guard():
+    # Case A has no coupon in the window at all, so the unresolved payment
+    # date question does not arise and the forward still resolves.
+    weekend_coupon_bond = replace(
+        SYNTHETIC_BOND,
+        issue_date="2025-06-12",
+        first_coupon_date="2025-12-12",
+        last_coupon_date="2029-12-12",
+        maturity_date="2030-06-12",
+    )
+    result = repo_carry_forward_clean_price(
+        bond=weekend_coupon_bond,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=CASE_A_FORWARD_DATES[0],
+        repo_rate_decimal=0.0375,
+    )
+    assert result.interim_coupons == ()
+    assert result.forward_clean_price_per_100 > 0
 
 
 def test_a_coupon_after_the_forward_settlement_date_is_refused():
