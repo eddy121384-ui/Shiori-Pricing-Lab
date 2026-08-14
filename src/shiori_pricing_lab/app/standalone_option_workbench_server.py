@@ -105,12 +105,19 @@ the browser holds whichever case is currently active and resends it):
   the overlaid case gets the same live Curve #490 injection as ``POST
   /api/case`` above, applied before the bond-quote refresh.
 
-**S490 repo-carry Forward parity (Issue #173/#174).** One more stateless,
-read-only route -- see :func:`resolve_s490_repo_carry_parity` for the full
-contract:
+**S490 repo-carry Forward parity (Issues #173/#174/#175).** One more
+stateless, read-only route -- see :func:`resolve_s490_repo_carry_parity` for
+the full contract:
 
 - ``POST /api/case/s490-repo-carry`` -- body is ``{"case": <full case>,
-  "spot_settlement_date": "YYYY-MM-DD"}``. **Always acquires a fresh live
+  "spot_settlement_date": "YYYY-MM-DD", "convention_profile": <str|null>}``.
+  ``convention_profile`` is the trader's own selection, passed as browser
+  state exactly like ``POST /api/bond/advanced-profile`` treats it, and is
+  never defaulted or inferred here. It is read for one purpose: only the
+  ``UST`` selection asserts the Federal Reserve coupon-payment convention
+  Issue #175 approved for Treasuries, so an interim-coupon expiry on any
+  other selection fails closed in the primitive rather than having a UST
+  convention applied to it. Case A is unaffected either way. **Always acquires a fresh live
   Curve #490** (same-as-of gate included) and discards whatever
   ``curve_points`` the case carried, even a genuine manual trader override
   -- unlike ``POST /api/case``, which leaves manual curve nodes untouched
@@ -124,8 +131,14 @@ contract:
   included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
   "forward_clean_price_treasury_fraction": <str>, "curve_acquisition":
-  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Any
-  validation, date, Bloomberg DAPI, curve-range, or interim-coupon failure
+  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Since Issue
+  #175 ``forward`` also carries the primitive's interim-coupon fields
+  (``interim_coupons``, ``interim_coupon_forward_value_per_100``,
+  ``interim_coupon_treatment``, ``carried_spot_dirty_price_per_100``), so a
+  coupon scheduled in ``(spot settlement, Expiry]`` is carried to Expiry
+  from its own Federal Reserve payment date rather than refused, and each
+  coupon's scheduled date, payment date, roll and reinvestment leg reach the
+  response. Any validation, date, Bloomberg DAPI, or curve-range failure
   returns HTTP 400 with ``{"error": "..."}``. This is a parity/testing
   display only: it prices nothing through Black-76.
 
@@ -292,6 +305,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     SUPPORTED_CONVENTION_PROFILE_NAMES,
+    UST_CONVENTION_PROFILE,
     convention_profile_candidates,
     get_convention_profile,
 )
@@ -301,6 +315,9 @@ from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
 )
 from shiori_pricing_lab.pricing.bli_treasury_price_format import (
     format_price_as_treasury_fraction,
+)
+from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
+    UST_COUPON_PAYMENT_ROLL_CONVENTION,
 )
 from shiori_pricing_lab.products.enums import Currency, coerce_enum
 
@@ -439,7 +456,16 @@ DEFAULT_PORT = 8765
 # Expiry (or any other ticket input) changes and a Spot Settlement Date is
 # entered. A stale -v17 process would 404 the new route and the panel would
 # show nothing but a transport-error status forever.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v18"
+#
+# Bumped to -v19 for Issue #175's interim-coupon (Case B) support: an expiry
+# with a coupon in the window now resolves instead of failing closed, the
+# S490 repo-carry response carries the per-coupon trace (scheduled date,
+# Federal Reserve payment date, roll, reinvestment leg) and the
+# coupon-treatment label, and the served page gained the interim-coupon
+# summary plus the collapsible derivation trace that read them. A stale -v18
+# process would still refuse every interim-coupon horizon, and a stale -v18
+# page would render neither.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v19"
 
 
 def load_base_case() -> dict:
@@ -1062,8 +1088,10 @@ def price_case_with_bloomberg_quote(
     return {"case": priced_case, "display": display}
 
 
-def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dict:
-    """Resolve one Issue #173/#174 S490 repo-carry Forward for ``case``'s own Expiry.
+def resolve_s490_repo_carry_parity(
+    case: dict, spot_settlement_date: str, convention_profile: str | None = None
+) -> dict:
+    """Resolve one Issue #173/#174/#175 S490 repo-carry Forward for ``case``'s own Expiry.
 
     Parity/testing display only -- not a pricing route, and it does not
     touch the existing explicit ``forward_clean_price_input`` override
@@ -1087,7 +1115,20 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
-      (Issue #173) for the forward.
+      (Issues #173/#175) for the forward, including its interim-coupon
+      (Case B) carry. A coupon scheduled in ``(spot_settlement_date,
+      expiry_date]`` is carried to Expiry from its own Federal Reserve
+      payment date and netted off, so such an expiry returns HTTP 200 with
+      the per-coupon trace on ``forward.interim_coupons`` -- it is not a
+      refusal. **This route reads no coupon schedule, resolves no payment
+      calendar and selects no coupon treatment of its own**: the primitive
+      resolves the coupons from the same resolved bond reference data this
+      route already passes it, rolls each date through
+      ``pricing/bli_ust_coupon_payment_date``, and the whole trace reaches
+      the response through the same ``dataclasses.asdict`` as every other
+      forward field. Issue #175 required no new S490 transformation, so the
+      funding resolver and its default method are byte-for-byte the ones
+      Case A already used.
 
     **Deliberately does not call ``build_request_from_standalone_option_case``
     (Issue #174 round 6).** That builder requires a *complete* pricing
@@ -1158,10 +1199,10 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     checks above fails, or if ``bond_quote.clean_price_per_100`` is absent (a
     yield-only quote carries no spot clean price to start from); or whatever
     the composed functions raise (Bloomberg failure, same-as-of mismatch,
-    bond NOT_FOUND / FOUND_INELIGIBLE, curve node range, an interim coupon in
-    ``(tS, tF]``, a malformed ``spot_settlement_date``, ...) -- never caught
-    or remapped here; the HTTP handler maps every failure to HTTP 400 exactly
-    like every other route in this module.
+    bond NOT_FOUND / FOUND_INELIGIBLE, curve node range, a window reaching
+    the bond's maturity date, a malformed ``spot_settlement_date``, ...) --
+    never caught or remapped here; the HTTP handler maps every failure to
+    HTTP 400 exactly like every other route in this module.
     """
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
@@ -1222,6 +1263,22 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
         raise ValueError("curve_points must be a JSON array of BLICurvePoint objects")
     curve_points = [BLICurvePoint(**point) for point in curve_points_raw]
 
+    # Issue #175 / Codex P1: the Federal Reserve coupon-payment convention is
+    # approved for US Treasuries only, and neither this route nor the
+    # primitive can tell a Treasury from a USD corporate bullet on reference
+    # data alone -- this repository deliberately never infers issuer
+    # classification (Issues #157/#161). `convention_profile` is therefore
+    # required *browser state*, exactly as POST /api/bond/advanced-profile
+    # already treats it: the trader's own selection, never defaulted or
+    # guessed here. Only the UST selection asserts the UST payment
+    # convention; anything else leaves it unset and the primitive fails
+    # closed on any interim coupon while Case A is unaffected.
+    interim_coupon_payment_convention = (
+        UST_COUPON_PAYMENT_ROLL_CONVENTION
+        if convention_profile == UST_CONVENTION_PROFILE.name
+        else None
+    )
+
     funding = resolve_s490_repo_carry_funding(
         curve_points,
         currency=currency,
@@ -1235,6 +1292,7 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
         spot_settlement_date=spot_settlement_date,
         forward_settlement_date=expiry_date,
         repo_rate_decimal=funding.derived_repo_rate_decimal,
+        interim_coupon_payment_convention=interim_coupon_payment_convention,
     )
 
     return {
@@ -1646,7 +1704,11 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            payload = resolve_s490_repo_carry_parity(body["case"], body["spot_settlement_date"])
+            payload = resolve_s490_repo_carry_parity(
+                body["case"],
+                body["spot_settlement_date"],
+                body.get("convention_profile"),
+            )
         except Exception as exc:  # noqa: BLE001
             self._write_json(400, {"error": str(exc)})
             return

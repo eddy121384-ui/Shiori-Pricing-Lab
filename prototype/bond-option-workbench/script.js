@@ -144,6 +144,9 @@
     s490ForwardDecimal: document.getElementById("s490-forward-decimal"),
     s490ForwardFraction: document.getElementById("s490-forward-fraction"),
     s490FundingMethod: document.getElementById("s490-funding-method"),
+    s490InterimCouponSummary: document.getElementById("s490-interim-coupon-summary"),
+    s490ParityTrace: document.getElementById("s490-parity-trace"),
+    s490ParityTraceBody: document.getElementById("s490-parity-trace-body"),
 
     // Advanced
     advancedHead: document.getElementById("advanced-head"),
@@ -3539,6 +3542,10 @@
       bond_reference_data_universe: draft.bond_reference_data_universe,
       bond_quote: draft.bond_quote,
       valuation_date: draft.valuation_date,
+      // Issue #175: the route now reads the selected convention profile, so
+      // changing it must re-trigger -- it can turn an interim-coupon expiry
+      // from a refusal into a Forward and back.
+      convention_profile: selectedConventionProfile,
     });
   }
 
@@ -3566,6 +3573,7 @@
       els.s490ParityRetryBtn.hidden = false;
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
+      els.s490ParityTrace.hidden = true;
       return;
     }
     els.s490ParityRetryBtn.hidden = true;
@@ -3590,19 +3598,110 @@
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
+      els.s490ParityTrace.hidden = true;
       return;
     }
     els.s490ParityStatus.textContent = "";
     els.s490ParityStatus.classList.remove("is-invalid");
     els.s490ParityFields.hidden = false;
     els.s490ParityMethodRow.hidden = false;
+    els.s490ParityTrace.hidden = false;
     const funding = s490ParityResult.funding;
+    const forward = s490ParityResult.forward;
     els.s490FundingRate.textContent =
       (funding.derived_repo_rate_decimal * 100).toFixed(6) + "%";
     els.s490CarryFactor.textContent = funding.carry_factor.toFixed(10);
     els.s490ForwardDecimal.textContent = s490ParityResult.forward_clean_price_per_100.toFixed(6);
     els.s490ForwardFraction.textContent = s490ParityResult.forward_clean_price_treasury_fraction;
     els.s490FundingMethod.textContent = funding.method;
+    els.s490InterimCouponSummary.textContent = interimCouponSummary(forward);
+    renderS490Trace(funding, forward);
+  }
+
+  // Issue #175: the trader-facing row shows only what a trader needs at a
+  // glance -- whether a coupon is being carried, and which one. A single
+  // coupon (the common UST case) names its own actual payment date and
+  // amount; more than one falls back to a count plus the total carried
+  // value, with every individual coupon still listed in the trace below.
+  function interimCouponSummary(forward) {
+    const coupons = forward.interim_coupons;
+    if (coupons.length === 0) return "None in window";
+    if (coupons.length === 1) {
+      return `${coupons[0].payment_date} · ${coupons[0].amount_per_100.toFixed(6)}`;
+    }
+    return (
+      `${coupons.length} coupons · ` +
+      `${forward.interim_coupon_forward_value_per_100.toFixed(6)} at Expiry`
+    );
+  }
+
+  // Every step Issue #175 requires to be traceable, in the order the
+  // derivation performs them. Kept behind the <details> element so the
+  // methodology labels and the per-coupon carry never crowd the four
+  // numbers above.
+  function renderS490Trace(funding, forward) {
+    const lines = [
+      ["Spot Clean", forward.spot_clean_price_per_100.toFixed(6)],
+      [
+        `Spot AI (${forward.spot_settlement_date})`,
+        forward.accrued_interest_at_spot_settlement_per_100.toFixed(6),
+      ],
+      ["Spot Dirty", forward.spot_dirty_price_per_100.toFixed(6)],
+      [
+        "S490 funding",
+        `${(funding.derived_repo_rate_decimal * 100).toFixed(6)}% · ` +
+          `${funding.repo_day_count_convention} · ` +
+          `${forward.repo_compounding_convention} · ` +
+          `${funding.repo_term_days} days · ${funding.source_representation}`,
+      ],
+      [
+        "Carried Spot Dirty",
+        `${forward.spot_dirty_price_per_100.toFixed(6)} × ` +
+          `${forward.carry_factor.toFixed(10)} = ` +
+          `${forward.carried_spot_dirty_price_per_100.toFixed(6)}`,
+      ],
+      ["Coupon treatment", forward.interim_coupon_treatment],
+    ];
+    forward.interim_coupons.forEach((coupon) => {
+      lines.push([
+        `Interim coupon ${coupon.scheduled_payment_date}`,
+        `paid ${coupon.payment_date}` +
+          (coupon.payment_roll_days > 0
+            ? ` (rolled ${coupon.payment_roll_days}d, ${coupon.payment_calendar})`
+            : "") +
+          ` · ${coupon.amount_per_100.toFixed(6)} × ` +
+          `${coupon.reinvestment_factor.toFixed(10)} ` +
+          `(${coupon.reinvestment_term_days} days to Expiry) = ` +
+          `${coupon.forward_value_per_100.toFixed(6)}`,
+      ]);
+    });
+    lines.push(
+      [
+        "Interim coupons at Expiry",
+        forward.interim_coupon_forward_value_per_100.toFixed(6),
+      ],
+      ["Forward Dirty", forward.forward_dirty_price_per_100.toFixed(6)],
+      [
+        `Forward AI (${forward.forward_settlement_date})`,
+        forward.accrued_interest_at_forward_settlement_per_100.toFixed(6),
+      ],
+      ["Forward Clean", forward.forward_clean_price_per_100.toFixed(6)],
+      ["Curve acquisition", s490ParityResult.curve_acquisition],
+      ["Curve ids", funding.curve_ids.join(", ")],
+      ["Source systems", funding.source_systems.join(", ")]
+    );
+
+    els.s490ParityTraceBody.innerHTML = "";
+    lines.forEach(([key, value]) => {
+      const line = document.createElement("div");
+      line.className = "s490-trace-line";
+      const label = document.createElement("span");
+      label.className = "s490-trace-key";
+      label.textContent = key;
+      line.appendChild(label);
+      line.appendChild(document.createTextNode(value));
+      els.s490ParityTraceBody.appendChild(line);
+    });
   }
 
   // Idempotent and cheap to call after any state change: it recomputes its
@@ -3648,7 +3747,16 @@
       response = await fetch("/api/case/s490-repo-carry", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ case: requestCase, spot_settlement_date: spotSettlementDate }),
+        // convention_profile is the trader's own selection, sent as browser
+        // state exactly as the profile route already receives it. The server
+        // reads it only to decide whether the UST Federal Reserve
+        // coupon-payment convention may be asserted for an interim coupon
+        // (Issue #175); it never defaults or infers one.
+        body: JSON.stringify({
+          case: requestCase,
+          spot_settlement_date: spotSettlementDate,
+          convention_profile: selectedConventionProfile,
+        }),
       });
       payload = await response.json();
     } catch (err) {

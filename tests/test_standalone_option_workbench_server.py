@@ -49,6 +49,7 @@ from shiori_pricing_lab.app.standalone_option_workbench_server import (
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLIMarketDataStatus, BLIQuoteBasis
 from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
+from shiori_pricing_lab.pricing.bli_repo_carry_forward import INTERIM_COUPON_TREATMENT
 from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 
 _QUANTLIB_SKIP = pytest.mark.skipif(
@@ -1587,16 +1588,17 @@ def test_api_s490_repo_carry_rejects_a_yield_only_quote_with_no_fabricated_spot_
 
 
 @_QUANTLIB_SKIP
-def test_api_s490_repo_carry_reports_an_interim_coupon_horizon_rather_than_a_wrong_forward(
+def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every_flow(
     server_url: str, monkeypatch
 ) -> None:
+    # Issue #175 Case B: the example bond's next coupon after spot settlement
+    # is 2026-12-15, so moving Expiry past it (with the dependent
+    # dates/timestamp kept coherent) lands the horizon on Case B. It resolves,
+    # and the coupon's scheduled date, Federal Reserve payment date and carry
+    # are all in the response.
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
-    # The example bond's next coupon after spot settlement is 2026-12-15;
-    # moving Expiry past it (with the dependent dates/timestamp kept
-    # coherent) lands the horizon on Case B, which this repo-carry
-    # primitive explicitly refuses rather than silently mis-pricing.
     case["bond_option"]["expiry_date"] = "2026-12-20"
     case["expiry_timestamp"] = "2026-12-20T16:00:00Z"
     case["forward_settlement_date"] = "2026-12-21"
@@ -1604,10 +1606,108 @@ def test_api_s490_repo_carry_reports_an_interim_coupon_horizon_rather_than_a_wro
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        {
+            "case": case,
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+            # The trader's own selection: only UST asserts the Federal
+            # Reserve coupon-payment convention (Issue #175, Codex P1).
+            "convention_profile": "UST",
+        },
     )
+    assert status == 200
+    forward = payload["s490_repo_carry"]["forward"]
+    (coupon,) = forward["interim_coupons"]
+    assert coupon["scheduled_payment_date"] == "2026-12-15"
+    # A Tuesday and a Federal Reserve business day, so no roll.
+    assert coupon["payment_date"] == "2026-12-15"
+    assert coupon["payment_roll_days"] == 0
+    assert coupon["payment_calendar"] == "US_FEDERAL_RESERVE"
+    assert coupon["reinvestment_term_days"] == 5
+    assert forward["interim_coupon_forward_value_per_100"] == pytest.approx(
+        coupon["amount_per_100"] * coupon["reinvestment_factor"]
+    )
+    assert forward["interim_coupon_treatment"] == INTERIM_COUPON_TREATMENT
+    # The coupon is genuinely netted off, not merely reported alongside.
+    assert forward["forward_dirty_price_per_100"] == pytest.approx(
+        forward["carried_spot_dirty_price_per_100"]
+        - forward["interim_coupon_forward_value_per_100"]
+    )
+
+
+@_QUANTLIB_SKIP
+@pytest.mark.parametrize("selected", [None, "US_CORPORATE"])
+def test_api_s490_repo_carry_refuses_an_interim_coupon_without_the_ust_selection(
+    server_url: str, monkeypatch, selected
+) -> None:
+    # Codex P1 review of PR #176: the Federal Reserve coupon-payment
+    # convention is approved for US Treasuries only, and neither this route
+    # nor the primitive can tell a Treasury from a USD corporate bullet on
+    # reference data alone. Without the trader's UST selection the interim
+    # coupon fails closed rather than borrowing a UST convention.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["bond_option"]["expiry_date"] = "2026-12-20"
+    case["expiry_timestamp"] = "2026-12-20T16:00:00Z"
+    case["forward_settlement_date"] = "2026-12-21"
+    case["option_settlement_date"] = "2026-12-21"
+
+    body = {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE}
+    if selected is not None:
+        body["convention_profile"] = selected
+
+    status, payload = _post_json(f"{server_url}/api/case/s490-repo-carry", body)
     assert status == 400
-    assert "no-interim-coupon" in payload["error"]
+    assert "US Treasuries" in payload["error"]
+    assert "2026-12-15" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_prices_a_case_a_horizon_without_any_selection(
+    server_url: str, monkeypatch
+) -> None:
+    # The gate is only ever consulted when a coupon is in the window, so a
+    # coupon-free horizon still resolves with no convention_profile at all --
+    # Case A is untouched by it.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {
+            "case": _case_with_empty_curve_points(),
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+        },
+    )
+    assert status == 200
+    assert payload["s490_repo_carry"]["forward"]["interim_coupons"] == []
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_reports_no_interim_coupon_for_a_case_a_horizon(
+    server_url: str, monkeypatch
+) -> None:
+    # Case A regression: the same route on a coupon-free horizon reports an
+    # empty coupon set worth exactly nothing, and its forward dirty price is
+    # still the single-factor carry.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {
+            "case": _case_with_empty_curve_points(),
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+        },
+    )
+    assert status == 200
+    forward = payload["s490_repo_carry"]["forward"]
+    assert forward["interim_coupons"] == []
+    assert forward["interim_coupon_forward_value_per_100"] == 0.0
+    assert (
+        forward["forward_dirty_price_per_100"]
+        == forward["carried_spot_dirty_price_per_100"]
+    )
 
 
 @_QUANTLIB_SKIP

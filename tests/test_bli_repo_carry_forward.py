@@ -1,4 +1,4 @@
-"""Tests for `pricing/bli_repo_carry_forward.py` (Issue #173).
+"""Tests for `pricing/bli_repo_carry_forward.py` (Issues #173, #175).
 
 Two layers, following `test_bli_forward_clean_price.py`'s own precedent:
 
@@ -17,33 +17,47 @@ Bloomberg, OVME, or market observation of any kind appears in this file.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import date
+
 import pytest
 
 from shiori_pricing_lab.data.bli_mvp_input_bundle_fixtures import SYNTHETIC_BLI_MVP_INPUT_BUNDLE
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
+    BLIBondMaturityCashflowUnsupportedError,
     accrued_interest_per_100,
     coupon_flows_before,
     is_quantlib_available,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
+    INTERIM_COUPON_TREATMENT,
+    RepoCarryInterimCouponConventionError,
     REPO_COMPOUNDING_CONVENTION,
     REPO_DAY_COUNT_CONVENTION,
-    RepoCarryInterimCouponUnsupportedError,
     carry_factor_from_simple_repo_rate,
     repo_carry_forward_clean_price,
     repo_term_days,
     repo_term_year_fraction,
+)
+from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
+    UST_COUPON_PAYMENT_ROLL_CONVENTION,
+    resolve_ust_coupon_payment_date,
 )
 
 SYNTHETIC_BOND = SYNTHETIC_BLI_MVP_INPUT_BUNDLE.resolved_bond_reference_data
 
 # The shared synthetic bullet pays semi-annual coupons on 15 June / 15
 # December, so a window starting 2026-08-13 stays coupon-free up to
-# 2026-12-14 and picks up exactly one coupon by 2027-02-16. Both facts are
-# asserted from `coupon_flows_before` below rather than assumed.
+# 2026-12-14, picks up exactly one coupon by 2027-02-16, and two by
+# 2027-07-15. Every one of those facts is asserted from `coupon_flows_before`
+# below rather than assumed.
 SPOT_SETTLEMENT_DATE = "2026-08-13"
 CASE_A_FORWARD_DATES = ("2026-09-15", "2026-11-13", "2026-12-01")
 CASE_B_FORWARD_DATE = "2027-02-16"
+CASE_B_TWO_COUPON_FORWARD_DATE = "2027-07-15"
+# A coupon paid exactly on the forward settlement date -- the zero-term
+# boundary of the reinvestment leg.
+CASE_B_COUPON_ON_FORWARD_DATE = "2026-12-15"
 
 requires_quantlib = pytest.mark.skipif(
     not is_quantlib_available(), reason="QuantLib is not installed in this environment"
@@ -183,20 +197,263 @@ def test_a_longer_horizon_carries_further_at_the_same_repo_rate():
 
 
 @requires_quantlib
-def test_an_interim_coupon_fails_closed_instead_of_returning_a_wrong_forward():
-    # Case B is explicitly out of Issue #173's scope; the single carry
-    # factor does not model the coupon or its reinvestment leg.
-    assert coupon_flows_before(
+def test_a_case_a_horizon_carries_no_coupon_and_subtracts_exactly_nothing():
+    result = repo_carry_forward_clean_price(
+        bond=SYNTHETIC_BOND,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=CASE_A_FORWARD_DATES[1],
+        repo_rate_decimal=0.0375,
+    )
+    assert result.interim_coupons == ()
+    assert result.interim_coupon_forward_value_per_100 == 0.0
+    # Case A is the same code path over an empty coupon set, not a second
+    # formula: the carried spot dirty price is the whole forward dirty price.
+    assert result.forward_dirty_price_per_100 == result.carried_spot_dirty_price_per_100
+    assert result.interim_coupon_treatment == INTERIM_COUPON_TREATMENT
+
+
+# --- Case B: coupons scheduled in (tS, tF] (Issue #175) ---------------------------
+#
+# Eddy's Issue #175 RED decision (convention B): the scheduled date selects
+# which coupons are interim; the *actual* Federal Reserve payment date drives
+# how long each is reinvested, with no additional coupon interest for the roll.
+
+
+@requires_quantlib
+@pytest.mark.parametrize(
+    "forward_date, expected_coupon_count",
+    [
+        (CASE_B_COUPON_ON_FORWARD_DATE, 1),
+        (CASE_B_FORWARD_DATE, 1),
+        (CASE_B_TWO_COUPON_FORWARD_DATE, 2),
+    ],
+)
+def test_every_interim_coupon_is_carried_from_its_payment_date_and_subtracted(
+    forward_date, expected_coupon_count
+):
+    repo_rate = 0.0375
+
+    result = repo_carry_forward_clean_price(
+        bond=SYNTHETIC_BOND,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=forward_date,
+        repo_rate_decimal=repo_rate,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
+    )
+
+    # The coupon set is the composed adapter's own answer for (tS, tF],
+    # selected on the scheduled date, never a schedule this module rebuilt.
+    expected_flows = coupon_flows_before(
         SYNTHETIC_BOND,
         after_date=SPOT_SETTLEMENT_DATE,
-        on_or_before_date=CASE_B_FORWARD_DATE,
+        on_or_before_date=forward_date,
     )
-    with pytest.raises(RepoCarryInterimCouponUnsupportedError, match="no-interim-coupon"):
+    assert len(expected_flows) == expected_coupon_count
+    assert [coupon.scheduled_payment_date for coupon in result.interim_coupons] == [
+        flow.payment_date for flow in expected_flows
+    ]
+
+    expected_total = 0.0
+    for coupon, flow in zip(result.interim_coupons, expected_flows, strict=True):
+        # The payment date is the shared resolver's own answer, and the roll
+        # never changes the amount (Eddy: "no additional coupon interest").
+        expected_payment = resolve_ust_coupon_payment_date(flow.payment_date)
+        assert coupon.payment_date == expected_payment.payment_date
+        assert coupon.payment_roll_days == expected_payment.roll_days
+        assert coupon.payment_calendar == expected_payment.payment_calendar
+        assert coupon.payment_roll_convention == expected_payment.roll_convention
+        assert coupon.amount_per_100 == flow.amount_per_100
+
+        expected_term_days = (
+            date.fromisoformat(forward_date)
+            - date.fromisoformat(expected_payment.payment_date)
+        ).days
+        expected_factor = 1.0 + repo_rate * expected_term_days / 360.0
+        assert coupon.reinvestment_term_days == expected_term_days
+        assert coupon.reinvestment_factor == pytest.approx(expected_factor)
+        assert coupon.forward_value_per_100 == pytest.approx(
+            flow.amount_per_100 * expected_factor
+        )
+        expected_total += flow.amount_per_100 * expected_factor
+
+    expected_spot_dirty = 99.5 + accrued_interest_per_100(
+        SYNTHETIC_BOND, as_of_date=SPOT_SETTLEMENT_DATE
+    )
+    expected_carried = expected_spot_dirty * (
+        1.0 + repo_rate * repo_term_days(SPOT_SETTLEMENT_DATE, forward_date) / 360.0
+    )
+    expected_forward_dirty = expected_carried - expected_total
+
+    assert result.interim_coupon_treatment == INTERIM_COUPON_TREATMENT
+    assert result.interim_coupon_forward_value_per_100 == pytest.approx(expected_total)
+    assert result.carried_spot_dirty_price_per_100 == pytest.approx(expected_carried)
+    assert result.forward_dirty_price_per_100 == pytest.approx(expected_forward_dirty)
+    assert result.forward_clean_price_per_100 == pytest.approx(
+        expected_forward_dirty
+        - accrued_interest_per_100(SYNTHETIC_BOND, as_of_date=forward_date)
+    )
+
+
+@requires_quantlib
+def test_a_coupon_scheduled_on_a_business_day_is_paid_that_day_and_does_not_roll():
+    result = repo_carry_forward_clean_price(
+        bond=SYNTHETIC_BOND,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=CASE_B_COUPON_ON_FORWARD_DATE,
+        repo_rate_decimal=0.0375,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
+    )
+    (coupon,) = result.interim_coupons
+    # 2026-12-15 is a Tuesday and a Federal Reserve business day, and it is
+    # also the forward date -- so zero roll and zero reinvestment term.
+    assert coupon.scheduled_payment_date == CASE_B_COUPON_ON_FORWARD_DATE
+    assert coupon.payment_date == CASE_B_COUPON_ON_FORWARD_DATE
+    assert coupon.payment_roll_days == 0
+    assert coupon.reinvestment_term_days == 0
+    assert coupon.reinvestment_factor == 1.0
+    assert coupon.forward_value_per_100 == coupon.amount_per_100
+
+
+@requires_quantlib
+def test_a_weekend_coupon_rolls_forward_and_is_reinvested_for_fewer_days():
+    # The 2026-12-12 grid puts a Saturday coupon inside the window: it is
+    # still entitled and still worth its face amount, but the cash lands on
+    # the following Monday, so it earns two days less carry.
+    weekend_coupon_bond = replace(
+        SYNTHETIC_BOND,
+        issue_date="2025-06-12",
+        first_coupon_date="2025-12-12",
+        last_coupon_date="2029-12-12",
+        maturity_date="2030-06-12",
+    )
+    result = repo_carry_forward_clean_price(
+        bond=weekend_coupon_bond,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=CASE_B_FORWARD_DATE,
+        repo_rate_decimal=0.0375,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
+    )
+    (coupon,) = result.interim_coupons
+    assert coupon.scheduled_payment_date == "2026-12-12"
+    assert date.fromisoformat(coupon.scheduled_payment_date).strftime("%A") == "Saturday"
+    assert coupon.payment_date == "2026-12-14"
+    assert coupon.payment_roll_days == 2
+    assert coupon.amount_per_100 == 1.625  # unchanged by the roll
+    unrolled_term = (
+        date.fromisoformat(CASE_B_FORWARD_DATE) - date.fromisoformat("2026-12-12")
+    ).days
+    assert coupon.reinvestment_term_days == unrolled_term - 2
+
+
+@requires_quantlib
+def test_a_coupon_paid_after_the_forward_date_is_still_entitled_and_discounted():
+    """The cliff Issue #175 identified, resolved rather than dropped.
+
+    A coupon scheduled on or before tF whose cash rolls past tF is still the
+    holder's -- its scheduled date is in the window -- so it must still be
+    subtracted, valued at tF by the same 1 + r*t factor over a *negative*
+    term. Dropping it instead would move the forward by the coupon's whole
+    face amount.
+    """
+
+    weekend_coupon_bond = replace(
+        SYNTHETIC_BOND,
+        issue_date="2025-06-12",
+        first_coupon_date="2025-12-12",
+        last_coupon_date="2029-12-12",
+        maturity_date="2030-06-12",
+    )
+    result = repo_carry_forward_clean_price(
+        bond=weekend_coupon_bond,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        # The Saturday coupon's cash lands 2026-12-14, two days after this.
+        forward_settlement_date="2026-12-12",
+        repo_rate_decimal=0.0375,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
+    )
+    (coupon,) = result.interim_coupons
+    assert coupon.payment_date == "2026-12-14"
+    assert coupon.reinvestment_term_days == -2
+    assert coupon.reinvestment_factor < 1.0
+    assert coupon.forward_value_per_100 < coupon.amount_per_100
+    # Still subtracted -- not silently dropped.
+    assert result.interim_coupon_forward_value_per_100 == pytest.approx(
+        coupon.forward_value_per_100
+    )
+    assert result.forward_dirty_price_per_100 < result.carried_spot_dirty_price_per_100
+
+
+@requires_quantlib
+@pytest.mark.parametrize("asserted", [None, "US_CORPORATE_SOMETHING", ""])
+def test_an_interim_coupon_without_the_approved_convention_fails_closed(asserted):
+    """Codex P1 review of PR #176.
+
+    Eddy approved the Federal Reserve coupon-payment roll for US Treasuries
+    specifically, and nothing in this bond's reference data establishes that
+    it is one -- ``US_CORPORATE`` is a registered profile covering the same
+    USD semi-annual shape. So the convention is the caller's assertion to
+    make, never this module's assumption.
+    """
+
+    with pytest.raises(RepoCarryInterimCouponConventionError, match="US Treasuries"):
         repo_carry_forward_clean_price(
             bond=SYNTHETIC_BOND,
             spot_clean_price_per_100=99.5,
             spot_settlement_date=SPOT_SETTLEMENT_DATE,
             forward_settlement_date=CASE_B_FORWARD_DATE,
+            repo_rate_decimal=0.0375,
+            interim_coupon_payment_convention=asserted,
+        )
+
+
+@requires_quantlib
+def test_case_a_never_needs_a_coupon_payment_convention():
+    # The assertion is only ever consulted when a coupon is actually in the
+    # window, so Case A is unaffected by the gate -- no caller of the
+    # coupon-free path has to know about it.
+    result = repo_carry_forward_clean_price(
+        bond=SYNTHETIC_BOND,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=CASE_A_FORWARD_DATES[1],
+        repo_rate_decimal=0.0375,
+    )
+    assert result.interim_coupons == ()
+    assert result.forward_clean_price_per_100 > 0
+
+
+@requires_quantlib
+def test_a_coupon_paid_on_the_spot_settlement_date_is_not_an_interim_coupon():
+    # The window is half-open at tS: that coupon is not received by the
+    # forward buyer, and the spot dirty price on its own payment date
+    # already carries zero accrued interest.
+    result = repo_carry_forward_clean_price(
+        bond=SYNTHETIC_BOND,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=CASE_B_COUPON_ON_FORWARD_DATE,
+        forward_settlement_date=CASE_B_FORWARD_DATE,
+        repo_rate_decimal=0.0375,
+    )
+    assert result.interim_coupons == ()
+    assert result.accrued_interest_at_spot_settlement_per_100 == 0.0
+
+
+@requires_quantlib
+def test_a_horizon_reaching_maturity_is_still_refused_by_the_coupon_adapter():
+    # Coupon-at-maturity combines with principal redemption, which the
+    # composed adapter slice does not implement -- Case B does not change
+    # that boundary.
+    with pytest.raises(BLIBondMaturityCashflowUnsupportedError):
+        repo_carry_forward_clean_price(
+            bond=SYNTHETIC_BOND,
+            spot_clean_price_per_100=99.5,
+            spot_settlement_date=SPOT_SETTLEMENT_DATE,
+            forward_settlement_date="2030-06-15",
             repo_rate_decimal=0.0375,
         )
 

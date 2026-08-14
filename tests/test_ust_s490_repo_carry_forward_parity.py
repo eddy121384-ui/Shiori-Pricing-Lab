@@ -405,7 +405,10 @@ def test_one_bad_horizon_is_reported_on_its_own_row_and_the_others_still_price()
 
 
 @requires_quantlib
-def test_an_interim_coupon_horizon_is_reported_not_priced():
+def test_an_interim_coupon_horizon_is_priced_and_reports_every_coupon_flow():
+    # Issue #175 Case B: the bundled bond's 2026-12-15 coupon falls inside
+    # this repo term, resolves, and its scheduled date, Federal Reserve
+    # payment date and carry all reach the row and the rendered Markdown.
     report = parity.run_parity(
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
@@ -413,8 +416,39 @@ def test_an_interim_coupon_horizon_is_reported_not_priced():
         inject_curve=_inject_synthetic_curve,
     )
     row = report.horizons[0]
-    assert row["status"] == "error"
-    assert "RepoCarryInterimCouponUnsupportedError" in row["error"]
+    assert row["status"] == "ok"
+    forward = row["forward"]
+    (coupon,) = forward["interim_coupons"]
+    assert coupon["scheduled_payment_date"] == "2026-12-15"
+    assert coupon["payment_date"] == "2026-12-15"
+    assert coupon["reinvestment_term_days"] == 5
+    assert forward["forward_dirty_price_per_100"] == pytest.approx(
+        forward["carried_spot_dirty_price_per_100"]
+        - forward["interim_coupon_forward_value_per_100"]
+    )
+
+    markdown = parity.render_markdown(parity.build_report(report))
+    assert forward["interim_coupon_treatment"] in markdown
+    assert "interim coupon scheduled 2026-12-15 paid 2026-12-15" in markdown
+
+
+@requires_quantlib
+def test_a_case_a_horizon_reports_no_interim_coupon_and_says_so():
+    report = parity.run_parity(
+        case=_load_base_case(),
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        horizons=_horizons(THREE_HORIZONS[0]),
+        inject_curve=_inject_synthetic_curve,
+    )
+    row = report.horizons[0]
+    assert row["status"] == "ok"
+    # ``asdict`` keeps the primitive's own tuple in the in-memory report; it
+    # becomes a JSON array only in the written artifact.
+    assert row["forward"]["interim_coupons"] == ()
+    assert row["forward"]["interim_coupon_forward_value_per_100"] == 0.0
+
+    markdown = parity.render_markdown(parity.build_report(report))
+    assert "interim coupons: none scheduled in" in markdown
 
 
 @requires_quantlib
@@ -424,12 +458,12 @@ def test_a_run_where_every_horizon_fails_is_reported_as_an_error_at_the_run_leve
     # zero funding/forward numbers must not exit 0 and pass as usable
     # parity evidence just because each individual horizon failure was
     # caught and reported on its own row. Two different failure modes
-    # (interim coupon, outside the curve's node range), so this is not one
-    # coincidentally-the-only-horizon case.
+    # (outside the curve's node range, a malformed forward date), so this is
+    # not one coincidentally-the-only-horizon case.
     report = parity.run_parity(
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
-        horizons=_horizons("2026-12-20", "2032-07-01"),
+        horizons=_horizons("2032-07-01", "20/12/2026"),
         inject_curve=_inject_synthetic_curve,
     )
 
