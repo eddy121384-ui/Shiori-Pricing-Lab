@@ -21,8 +21,9 @@ uses -- that is exactly::
     Forward Clean(tF) = Forward Dirty(tF) - AI(tF)
 
 where ``coupon_date_i`` runs over every coupon paid in ``(tS, tF]``. Case A
-(no such coupon) is the empty sum, so the two cases are one formula and one
-code path, not two -- see "Interim coupons" below.
+(no such coupon) is the empty sum. **The coupon sum is currently unreachable
+from this function**: every horizon containing a coupon fails closed on an
+unresolved payment date -- see "Interim coupons" and the RED note below.
 
 **This module derives no funding rate of its own.** ``repo_rate_decimal``
 is a caller input; where it comes from (a Bloomberg Curve #490 / S490
@@ -56,9 +57,11 @@ carried verbatim onto every returned result, and never inferred:
 
 **Interim coupons (Issue #175, Case B).** Issue #173's first validation was
 the no-interim-coupon case, and this module originally refused any coupon in
-``(tS, tF]`` outright. It no longer does: a coupon paid inside the repo term
-is carried to ``tF`` and subtracted from the termination amount, per
-``INTERIM_COUPON_TREATMENT`` below.
+``(tS, tF]`` outright, on the grounds that the coupon's reinvestment leg was
+not modelled. That leg is now modelled -- the treatment below -- but the
+refusal stands for a different and narrower reason: the *date* the coupon is
+received is unresolved. See the RED note below for what that blocks and what
+it does not.
 
 - ``INTERIM_COUPON_TREATMENT =
   "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"``
@@ -149,17 +152,30 @@ Treating the nominal date as the receipt date changes two things:
 No first-party evidence in this repository says which date Bloomberg's FPA
 forward uses, and resolving it needs a US government securities holiday
 calendar -- a data source this repository has deliberately never had and
-Issue #175 did not authorise. **So this module does not choose.** A coupon
-whose scheduled payment date is provably not a business day raises
-:class:`RepoCarryInterimCouponPaymentDateUnresolvedError` rather than
-carrying it under a guessed convention.
+Issue #175 did not authorise. **So this module does not choose.** Any coupon
+scheduled in ``(tS, tF]`` raises
+:class:`RepoCarryInterimCouponPaymentDateUnresolvedError` rather than being
+carried under a guessed payment date.
 
-That guard is **deliberately partial, and must not be read as validation**:
-weekends are detectable from the date alone, holidays are not. A coupon
-scheduled on a weekday that happens to be a market holiday (Veterans Day,
-Independence Day, ...) still carries from its nominal date, and is still
-exposed to exactly the same unresolved question. The guard removes the
-provable half of the exposure and names the rest; it does not close it.
+**Why the refusal is total rather than weekend-only** (Codex P1 review of
+PR #176, second round -- its answer was right and replaced this module's
+first one). An earlier revision refused only coupons scheduled on a weekend,
+on the grounds that weekends are the one non-business-day class determinable
+from a date alone. That was the wrong trade: a coupon scheduled on a weekday
+US government-securities holiday (Veterans Day, Columbus Day, ...) is
+equally not paid on its nominal date, is undetectable without the very
+calendar this repository lacks, and would have been carried silently -- so a
+partial guard did not reduce the exposure so much as disguise it, and it
+implied the dates that passed had been validated when they had not. When the
+methodology is unresolved, fail closed for the whole class.
+
+**What is blocked is the payment date, not the carry.** The carry
+arithmetic is fully implemented and directly tested in
+:func:`reinvest_interim_coupon_to_forward_settlement`, which takes an actual
+receipt date as an explicit argument, exactly like every other date in this
+module. Unblocking is one decision (which convention, and where an approved
+calendar or a reviewed per-coupon payment date comes from) followed by
+passing that date in -- not a re-derivation.
 
 **Composition, not reimplementation.** Accrued interest at both settlement
 dates comes from the already-reviewed
@@ -210,22 +226,16 @@ INTERIM_COUPON_TREATMENT = (
     "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"
 )
 
-# Saturday/Sunday as ``date.weekday()`` reports them. The only class of
-# non-business day this repository can determine from a date alone -- see the
-# module docstring's RED note for why that is a partial guard and not a
-# validation, and for what it deliberately does not decide.
-_WEEKEND_WEEKDAYS = (5, 6)
-
-
 class RepoCarryInterimCouponPaymentDateUnresolvedError(ValueError):
-    """An interim coupon's scheduled date is provably not a business day.
+    """A coupon falls in ``(tS, tF]`` and its actual payment date is unknown.
 
     ``coupon_flows_before`` returns unadjusted ``NullCalendar`` schedule
     dates. Using one as a *cash-receipt* date -- which a reinvestment leg
     requires -- is an unresolved convention in this repository, and it can
     change whether the coupon is in ``(tS, tF]`` at all, not merely how long
-    it is reinvested. Raised instead of carrying the coupon from a date it
-    may not actually be paid on. See the module docstring's RED note.
+    it is reinvested. Raised for **every** interim coupon, not only ones
+    whose scheduled date is obviously not a business day: see the module
+    docstring's RED note for why a partial guard was the wrong answer.
     """
 
 
@@ -335,11 +345,12 @@ def reinvest_interim_coupon_to_forward_settlement(
     is not inside the repo term at all and never reaches this function from
     :func:`repo_carry_forward_clean_price`, whose window is ``(tS, tF]``.
 
-    Raises :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` when
-    ``payment_date`` falls on a weekend -- the coupon is then provably not
-    received on that date, and this repository has no approved calendar to
-    say when it is received instead (see the module docstring's RED note,
-    including why that guard is partial and says nothing about holidays).
+    ``payment_date`` is the date the coupon cash is **actually received**;
+    this function neither derives nor validates it. It is deliberately still
+    public and directly tested while
+    :func:`repo_carry_forward_clean_price` refuses to reach it (the module
+    docstring's RED note): the carry arithmetic is implemented and verified,
+    and what is blocked is the separate question of which date to pass.
     """
 
     amount = _require_finite(amount_per_100, "amount_per_100")
@@ -350,18 +361,6 @@ def reinvest_interim_coupon_to_forward_settlement(
             f"payment_date ({payment_date!r}) must not be after forward_settlement_date "
             f"({forward_settlement_date!r}) -- a coupon paid after the forward settlement "
             "date is not an interim coupon of this repo term"
-        )
-    if payment.weekday() in _WEEKEND_WEEKDAYS:
-        raise RepoCarryInterimCouponPaymentDateUnresolvedError(
-            f"interim coupon scheduled on {payment_date!r} falls on a "
-            f"{payment.strftime('%A')}, so it is not paid on that date -- the coupon "
-            "schedule this repository holds is unadjusted (NullCalendar), it has no "
-            "business-day calendar to resolve the actual payment date, and no first-party "
-            "evidence says which date Bloomberg's FPA forward reinvests from. Carrying "
-            "the coupon from its nominal date would change how long it is reinvested and, "
-            "when the forward settlement date falls between the two dates, whether the "
-            "coupon is subtracted at all. This is an unresolved methodology decision, not "
-            "a value to assume"
         )
 
     term_days = (forward - payment).days
@@ -454,19 +453,29 @@ def repo_carry_forward_clean_price(
     term_days = repo_term_days(spot_settlement_date, forward_settlement_date)
     term_year_fraction = term_days / REPO_DAY_COUNT_BASIS_DAYS
 
-    interim_coupons = tuple(
-        reinvest_interim_coupon_to_forward_settlement(
-            payment_date=flow.payment_date,
-            amount_per_100=flow.amount_per_100,
-            forward_settlement_date=forward_settlement_date,
-            repo_rate_decimal=repo_rate_decimal,
-        )
-        for flow in coupon_flows_before(
-            bond,
-            after_date=spot_settlement_date,
-            on_or_before_date=forward_settlement_date,
-        )
+    scheduled_interim_coupons = coupon_flows_before(
+        bond,
+        after_date=spot_settlement_date,
+        on_or_before_date=forward_settlement_date,
     )
+    if scheduled_interim_coupons:
+        raise RepoCarryInterimCouponPaymentDateUnresolvedError(
+            f"{len(scheduled_interim_coupons)} coupon(s) are scheduled in "
+            f"({spot_settlement_date}, {forward_settlement_date}] on "
+            + ", ".join(flow.payment_date for flow in scheduled_interim_coupons)
+            + " -- those are the bond's *unadjusted* schedule dates (NullCalendar), not "
+            "the dates the coupon cash is actually received. This repository holds no "
+            "business-day calendar to resolve the actual payment dates, and no "
+            "first-party evidence says which date Bloomberg's FPA forward reinvests "
+            "from. The choice changes how long each coupon is reinvested and -- when the "
+            "forward settlement date falls between a coupon's scheduled and actual "
+            "payment date -- whether that coupon is subtracted at all. That is an "
+            "unresolved methodology decision (Issue #175 RED), not a value to assume. "
+            "The carry itself is implemented and tested in "
+            "reinvest_interim_coupon_to_forward_settlement; only the payment date is "
+            "blocked"
+        )
+    interim_coupons: tuple[RepoCarryInterimCoupon, ...] = ()
     interim_coupon_forward_value = sum(
         (coupon.forward_value_per_100 for coupon in interim_coupons), 0.0
     )
