@@ -33,7 +33,8 @@ already carried by the existing display contract (Issue #97 §"never
 fabricating a replacement value").
 
 **Markdown.** ``render_standalone_run_as_markdown`` renders the sections
-Context / Pricing / Greeks / Live Bloomberg Quote / Benchmark / Comparison /
+Context / Pricing / Greeks / Effective Forward / Live Bloomberg Quote /
+Benchmark / Comparison /
 Calibration / Assumptions / Excluded Components / Errors / Solver
 Diagnostics -- all but Context/Pricing/Greeks/Assumptions/Excluded
 Components are included only when the corresponding data is actually present in
@@ -92,6 +93,18 @@ to. The browser attaches this key to the display dict it sends to the export
 routes; no pricing function produces it, and a run without overrides exports
 exactly as before.
 
+**Effective Forward (Issue #177).** JSON export needs no change --
+``json.dumps(display, ...)`` already serializes an ``"effective_forward"``
+key verbatim if the display dict carries one, including the whole nested
+``shiori_derived_forward`` S490/carry/interim-coupon trace. Markdown export
+adds one conditional ``## Effective Forward`` section, included only when
+that key is present, naming the Forward source, the effective Forward, both
+candidates, and any derivation error a Trader Forward Override carried the
+run past. ``Pricing`` also gains a ``Forward source`` line, which is
+``not available`` for any display dict predating that field. A run outside
+the two Issue #177 Forward modes carries no ``effective_forward`` key and
+exports exactly as before.
+
 **No system clock, no quote ID, no version, no hidden metadata.** Neither
 function reads the clock or generates an identifier; the only content is
 what ``display`` already carries.
@@ -147,6 +160,8 @@ _PRICING_FIELDS = (
     ("Model fair premium per 100", "model_fair_premium_per_100"),
     ("Total notional model fair premium", "total_notional_model_fair_premium"),
     ("Forward clean price per 100", "forward_clean_price_per_100"),
+    # Issue #177: which source produced the Forward this run priced from.
+    ("Forward source", "forward_source"),
     ("Black-76 PV per 100", "black76_pv_per_100"),
     ("Effective reporting-date discount factor", "effective_reporting_date_discount_factor"),
     ("Time to expiry (years)", "time_to_expiry_year_fraction"),
@@ -282,6 +297,40 @@ _LIVE_BLOOMBERG_QUOTE_DISCLAIMER = (
     "refreshed -- curve, forward, volatility, credit-spread, and other market "
     "inputs remain from the case JSON. This is a current-run mixed-provenance "
     "calculation, not a historical replay."
+)
+
+# Issue #177. Exactly the keys the workbench bridge's own
+# ``effective_forward`` section carries (see
+# ``app/standalone_option_workbench_server.apply_effective_forward_to_case``),
+# so an exported run answers, on its own: which Forward was priced, where it
+# came from, what the other candidate was, and -- when the derivation failed
+# while a Trader Forward Override carried the run -- why. The full
+# ``shiori_derived_forward`` S490/carry/coupon trace is deliberately not
+# flattened into labelled lines here: it is a nested structure of the Issue
+# #173/#175 primitives' own fields, already exported verbatim by the JSON
+# export, and re-labelling it in Markdown would be a second, drifting copy of
+# their contracts.
+_EFFECTIVE_FORWARD_FIELDS = (
+    ("Forward source", "forward_source"),
+    ("Effective forward clean price per 100", "effective_forward_clean_price_per_100"),
+    (
+        "Shiori Derived S490 forward clean price per 100",
+        "shiori_derived_forward_clean_price_per_100",
+    ),
+    ("Trader Forward Override per 100", "trader_forward_override_per_100"),
+    ("Shiori Derived forward error", "shiori_derived_forward_error"),
+    ("Spot settlement date (tS)", "spot_settlement_date"),
+    ("Convention profile", "convention_profile"),
+)
+
+_EFFECTIVE_FORWARD_DISCLAIMER = (
+    "The effective Forward is what Black-76 actually priced from. Shiori's own "
+    "S490 repo-carry derivation is the default source; a Trader Forward Override "
+    "is used only when the trader explicitly entered one, and then takes "
+    "precedence. Both candidates are shown so the two can always be compared. No "
+    "Forward is ever substituted from spot, a previous run, zero repo or flat "
+    "carry: when the derived source is in use and unavailable, no run is produced "
+    "at all."
 )
 
 _TRADER_OVERRIDE_PROVENANCE_FIELDS = (
@@ -538,6 +587,16 @@ def render_standalone_run_as_markdown(display: dict) -> str:
         lines.append(f"- **{label}:** {_fmt(display.get(key))}")
     lines.extend(_render_field_lines("Greeks units", display.get("greeks_units")))
     lines.append("")
+
+    effective_forward = display.get("effective_forward")
+    if effective_forward is not None:
+        lines.append("## Effective Forward")
+        lines.append("")
+        lines.append(f"> {_EFFECTIVE_FORWARD_DISCLAIMER}")
+        lines.append("")
+        for label, key in _EFFECTIVE_FORWARD_FIELDS:
+            lines.append(f"- **{label}:** {_fmt(effective_forward.get(key))}")
+        lines.append("")
 
     if "live_bloomberg_quote" in display:
         lines.append("## Live Bloomberg Quote")

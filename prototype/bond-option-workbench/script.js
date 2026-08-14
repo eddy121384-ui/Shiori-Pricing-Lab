@@ -111,6 +111,10 @@
     forwardReviewStatus: document.getElementById("forward-review-status"),
     forwardSourcingNote: document.getElementById("forward-sourcing-note"),
     forwardProvenance: document.getElementById("forward-provenance"),
+    // Issue #177: the single Forward field's own source line and the control
+    // that hands it back to the derivation.
+    forwardSourceLine: document.getElementById("forward-source-line"),
+    forwardUseDerivedBtn: document.getElementById("forward-use-derived-btn"),
     volatility: document.getElementById("volatility-input"),
     volatilityBasis: document.getElementById("volatility-basis-select"),
     volReviewStatus: document.getElementById("vol-review-status"),
@@ -380,6 +384,41 @@
   let conventionProfileOverridden = false;
   let conventionProfileGeneration = 0;
   let conventionProfileTransportError = null;
+
+  // --- Issue #177: the single Forward field's two sources -------------------
+  //
+  // The main Forward field is now filled by Shiori's own S490 repo-carry
+  // derivation by default, and the trader takes it over by typing into it.
+  // There is deliberately no second Forward input anywhere on the page and no
+  // second override model in the case envelope: the mode is carried by the
+  // existing `forward_clean_price_input.source_system` field, using the two
+  // canonical tokens the server's own selection module publishes
+  // (pricing/bli_effective_forward.py).
+  //
+  // These two strings are the only place this file names them. They are
+  // duplicated from Python for the same reason every other contract string on
+  // this page is (a static page cannot import Python), and are asserted
+  // against the server's own values by the route tests.
+  const SHIORI_DERIVED_FORWARD_SOURCE = "SHIORI_DERIVED_S490";
+  const TRADER_FORWARD_OVERRIDE_SOURCE = "TRADER_FORWARD_OVERRIDE";
+
+  // True from the moment the trader edits the Forward field until Reset / Use
+  // Shiori Derived, a Clear, or a new bond load. Only the trader's own typing
+  // ever sets it: every programmatic write to that field goes through
+  // `writeDerivedForwardIntoField` below, which sets `.value` directly and
+  // therefore fires no `input` event.
+  let traderForwardOverrideActive = false;
+  // The current Shiori Derived Forward and, when it could not be derived, the
+  // reason -- both straight off the S490 section's own last answer. Kept even
+  // while an override is active: that is exactly the comparison value a
+  // trader with an override wants to see.
+  let shioriDerivedForward = null;
+  let shioriDerivedForwardError = null;
+  // One-shot: Reset / Use Shiori Derived asks for an immediate reprice, but
+  // the draft only becomes priceable once the asynchronous typed-builder
+  // validation has answered. `syncDraftGating` fires the reprice at the first
+  // moment Price is genuinely enabled, and clears this flag.
+  let repriceOnceForwardIsPriceable = false;
 
   // What each market-independent provenance tier means, in the trader's own
   // terms. The tier string itself always comes from the server.
@@ -841,11 +880,18 @@
     },
     {
       id: "forward-review",
-      label: "Forward (Trader Override)",
+      label: "Forward",
       advanced: false,
       resolved: (draft) =>
         present(draft.forward_clean_price_input.forward_clean_price_per_100),
-      locator: "#forward-price-input",
+      // Issue #177: in the default derived mode the field is filled by the
+      // derivation, so the place a trader can actually act is the S490
+      // section's own Spot Settlement Date -- pointing them at the read-only
+      // Forward field instead would be pointing at the symptom.
+      locator: () =>
+        traderForwardOverrideActive || inputNormalization.forward.error !== null
+          ? "#forward-price-input"
+          : "#s490-spot-settlement-date-input",
       unresolved: () =>
         inputNormalization.forward.error !== null
           ? {
@@ -858,19 +904,36 @@
                 "formats as the strike and normalizes to decimal per 100; Shiori will " +
                 "not guess at a quote it cannot read.",
             }
-          : {
-              title: "Forward clean price cannot be sourced from Bloomberg",
-              missing: "The forward clean price, per 100, at forward settlement.",
-              why:
-                "OPT_UNDL_FORWARD_PX is the only candidate route and it is not " +
-                "applicable to a cash bond on the current DAPI route.",
-              evidence: EVIDENCE_FORWARD,
-              next:
-                "Enter the forward clean price you are pricing against, as a decimal or " +
-                "a Treasury quote (98-16+, 99-032). It is recorded as a trader override " +
-                "with provenance. Shiori will not reconstruct a forward from spot price, " +
-                "repo, FTP, MMkt or any par rate.",
-            },
+          : shioriDerivedForwardError !== null
+            ? {
+                title: "Shiori's derived Forward could not be resolved",
+                missing: "The forward clean price, per 100, at forward settlement.",
+                why: shioriDerivedForwardError,
+                evidence: EVIDENCE_FORWARD,
+                next:
+                  "This ticket's Forward source is Shiori's own S490 repo-carry " +
+                  "derivation, and it failed for the reason above — so pricing is " +
+                  "blocked rather than run against a spot price, a previous Forward, " +
+                  "zero repo or flat carry. Fix what the message names (or press Retry " +
+                  "in the Shiori Derived Forward section), or enter your own Forward " +
+                  "here to price from an explicit Trader Forward Override instead.",
+              }
+            : {
+                title: "Shiori's derived Forward is not available yet",
+                missing: "The forward clean price, per 100, at forward settlement.",
+                why:
+                  "The Forward is derived from the Bloomberg-loaded bond, its live spot " +
+                  "quote, this ticket's Expiry and a Spot Settlement Date — and one of " +
+                  "those is still outstanding, so there is nothing to fill this field " +
+                  "with yet.",
+                evidence: EVIDENCE_FORWARD,
+                next:
+                  "Complete Expiry and the Spot Settlement Date in the Shiori Derived " +
+                  "Forward section; the Forward fills itself and Black-76 prices from " +
+                  "it. You can also type your own Forward here at any time — that " +
+                  "becomes a Trader Forward Override and takes precedence until you " +
+                  "press Reset / Use Shiori Derived.",
+              },
     },
     {
       id: "vol-review",
@@ -2220,8 +2283,18 @@
     {
       path: "forward_clean_price_input.forward_clean_price_per_100",
       label: "Forward Clean Price (per 100)",
-      reason: "Bloomberg OPT_UNDL_FORWARD_PX returned BAD_FLD for cash bonds on this route.",
-      read: (draft) => draft.forward_clean_price_input.forward_clean_price_per_100,
+      reason:
+        "Entered by the trader as a Trader Forward Override, taking over from Shiori's " +
+        "own S490 repo-carry derived Forward.",
+      // Issue #177: the Forward is no longer a trader entry by construction --
+      // by default it is Shiori's own derived value, which is verified,
+      // traceable data and must not be logged as something the trader had to
+      // supply (exactly the reasoning the live curve rows below already
+      // follow). Only a genuine Trader Forward Override is recorded here.
+      read: (draft) =>
+        traderForwardOverrideActive
+          ? draft.forward_clean_price_input.forward_clean_price_per_100
+          : null,
     },
     {
       path: "volatility_input.volatility",
@@ -2382,9 +2455,17 @@
             `Bloomberg acquisition ${record.run_acquired_at || "not available"}`
         : "Provenance: not entered yet — nothing is recorded until you enter a value.";
     };
-    els.forwardProvenance.textContent = stamp(
-      "forward_clean_price_input.forward_clean_price_per_100"
-    );
+    // Issue #177: only a Trader Forward Override is an override, so only that
+    // carries an override stamp. In the default derived mode there is nothing
+    // for the trader to have overridden, and saying "not entered yet" would
+    // misdescribe a Forward Shiori derived and priced -- the derivation's own
+    // provenance is the S490 section's trace and the run's `effective_forward`
+    // section, not this log.
+    els.forwardProvenance.textContent = traderForwardOverrideActive
+      ? stamp("forward_clean_price_input.forward_clean_price_per_100")
+      : "Provenance: SHIORI_DERIVED_S490 — derived by Shiori from the live Bloomberg " +
+        "spot quote and a live Curve #490 / S490 acquisition; see the derivation trace " +
+        "in the Shiori Derived Forward section above.";
     els.volProvenance.textContent = stamp("volatility_input.volatility");
     els.discountingProvenance.textContent = stamp("curve_points");
   }
@@ -2542,6 +2623,13 @@
     // computed from inputs the trader has already changed.
     invalidatePendingPriceRequest();
     invalidatePendingBloombergRequest();
+    // Same reasoning for the reprice Reset / Use Shiori Derived queued
+    // (Issue #177): it is a request to reprice *that* action's ticket. Once
+    // the trader edits anything else, firing it later would be an unasked-for
+    // Price on a ticket they are still working on. `useShioriDerivedForward`
+    // sets the flag after its own call to this function, so its own reprice
+    // is never the one cancelled here.
+    repriceOnceForwardIsPriceable = false;
 
     // Issue #161: the three trader-format numeric fields are normalized once,
     // here, and only their canonical numbers reach the draft. A malformed
@@ -2611,6 +2699,20 @@
     currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
     currentDraft.forward_clean_price_input.forward_clean_price_per_100 =
       inputNormalization.forward.value;
+    // Issue #177: which of the two sources this run's Forward came from,
+    // carried on the existing explicit-forward contract's own source_system
+    // field rather than a second override model. The server re-resolves the
+    // effective Forward from this same field on every priced run, so this is
+    // the one place the browser states the mode.
+    currentDraft.forward_clean_price_input.source_system = traderForwardOverrideActive
+      ? TRADER_FORWARD_OVERRIDE_SOURCE
+      : SHIORI_DERIVED_FORWARD_SOURCE;
+    // The two derivation inputs the case carries for the server (Issue #177).
+    // Spot Settlement Date is a real pricing input now that the derived
+    // Forward is the Black-76 default, so it is read into the draft here with
+    // every other trader-entered value -- not left as panel-local state.
+    currentDraft.spot_settlement_date = textOrNull(els.s490SpotSettlementDate.value);
+    currentDraft.convention_profile = selectedConventionProfile;
 
     currentDraft.curve_points = readCurveNodesFromRows();
 
@@ -2722,9 +2824,17 @@
         // The contract requires the forward's side to equal the spot side, so
         // it is mirrored mechanically rather than asked for twice.
         quote_side: bond.quote_side,
-        source_system: MANUAL_SOURCE_SYSTEM,
+        // Issue #177: a fresh ticket starts in Shiori-derived Forward mode --
+        // that is the default source now, and the trader opts out of it by
+        // typing into the Forward field, not into it by leaving one blank.
+        source_system: SHIORI_DERIVED_FORWARD_SOURCE,
         status: "ACTIVE",
       },
+      // Issue #177 optional envelope keys: inputs to the Forward derivation,
+      // not to the typed pricing request. Filled by applyManualInputsToDraft
+      // from the Spot Settlement Date field and the Convention Profile picker.
+      spot_settlement_date: null,
+      convention_profile: null,
       curve_points: [],
       volatility_input: {
         volatility: null,
@@ -3027,11 +3137,21 @@
   // --- Market review rows ---------------------------------------------------
 
   const REVIEW_SOURCING_NOTES = {
+    // Issue #177: still not sourced *from Bloomberg as a forward price* --
+    // OPT_UNDL_FORWARD_PX remains BAD_FLD for a cash bond on this route, and
+    // nothing here reads a vendor forward. What changed is that Shiori now
+    // derives the default Forward itself, deterministically, from the live
+    // spot quote and the live S490 repo/carry curve (Issues #173/#175), which
+    // is a derivation with a full trace rather than a reconstruction from
+    // FTP, MMkt or a par rate.
     forward:
-      "Not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a cash bond " +
-      "on this DAPI route (BAD_FLD for both the UST and the Gilt test securities, " +
-      "with the confirmed OP046 / OP188 overrides applied). Shiori does not " +
-      "reconstruct a forward from spot, repo, FTP, MMkt or a par rate.",
+      "Derived, not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a " +
+      "cash bond on this DAPI route (BAD_FLD for both the UST and the Gilt test " +
+      "securities, with the confirmed OP046 / OP188 overrides applied), so the " +
+      "Forward defaults to Shiori's own S490 repo-carry derivation from the live " +
+      "spot quote — traced in full in the Shiori Derived Forward section above — " +
+      "and a value you type here overrides it. Shiori still never reconstructs a " +
+      "forward from FTP, MMkt or a par rate.",
     vol:
       "Not sourced. Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned " +
       "BAD_FLD. YIELD_VOL is not a substitute and no yield-to-price conversion is " +
@@ -3158,7 +3278,11 @@
     const group = unresolvedFocusGroup;
     if (!group) return;
     if (group.revealAdvanced) setAdvancedCollapsed(false);
-    const target = document.querySelector(group.locator);
+    // A locator may be a function of current state (Issue #177: which control
+    // a trader can actually act on for the Forward depends on whether the
+    // derivation or an override owns it), exactly as `unresolved` already may.
+    const locator = typeof group.locator === "function" ? group.locator() : group.locator;
+    const target = document.querySelector(locator);
     if (!target) return;
     if (!target.matches("input, select, button, textarea, [tabindex]")) {
       target.setAttribute("tabindex", "-1");
@@ -3358,6 +3482,16 @@
     // a second edit-tracking mechanism. See the function's own doc comment
     // for why it is idempotent and safe to call this often.
     maybeRefreshS490Parity();
+
+    // Issue #177: Reset / Use Shiori Derived asks for an immediate reprice,
+    // but the draft only becomes priceable once the asynchronous typed-builder
+    // validation has answered -- so the request waits here for the first
+    // moment Price is genuinely enabled. One-shot: the flag is cleared before
+    // the call, so a pricing failure never re-arms itself into a loop.
+    if (repriceOnceForwardIsPriceable && canPrice) {
+      repriceOnceForwardIsPriceable = false;
+      priceCurrentDraft();
+    }
   }
 
   // --- Request generation / abort tracking ---------------------------------
@@ -3559,7 +3693,17 @@
     return s490RelevantFingerprint(currentDraft) + "|" + spotSettlementDate;
   }
 
+  // Issue #177: the panel render and the effective-Forward sync are one
+  // event. Every existing call site already calls `renderS490Parity`, so
+  // wrapping it here is what makes "the derived Forward changed" and "the
+  // main Forward field changed" the same moment by construction, with no
+  // second trigger to keep in step.
   function renderS490Parity() {
+    renderS490ParityPanel();
+    syncEffectiveForwardFromDerivation();
+  }
+
+  function renderS490ParityPanel() {
     if (s490ParityError !== null) {
       els.s490ParityStatus.textContent = s490ParityError;
       els.s490ParityStatus.classList.add("is-invalid");
@@ -3794,6 +3938,116 @@
     maybeRefreshS490Parity();
   }
 
+  // --- Issue #177: the effective Forward on the main ticket ------------------
+  //
+  // One field, two sources. `syncEffectiveForwardFromDerivation` is called
+  // after every S490 panel render (see `renderS490Parity`), which is the same
+  // set of moments the derivation itself can change at: a new Expiry, a new
+  // Spot Settlement Date, a new bond, a new quote, a new convention profile, a
+  // failed request, a retry.
+  //
+  // While no override is active, the field simply *is* the current derived
+  // Forward: a derived value writes it, and anything else (not ready, no date
+  // yet, in flight, failed) blanks it. Blanking rather than leaving the last
+  // number is the fail-closed half of Issue #177 -- the previous inputs' F
+  // must never sit in the field looking like this ticket's F, and a blank
+  // field closes the existing typed-builder gate so Price is disabled until a
+  // real Forward exists again.
+  //
+  // While an override *is* active the field is never touched here at all; only
+  // the comparison line below it updates. That is Issue #177's "a Bloomberg /
+  // S490 refresh must not silently overwrite an active override".
+
+  function derivedForwardFieldText() {
+    // Full precision, not the panel's 6-decimal display rounding: this exact
+    // string is what the trader prices from and what the case carries, so a
+    // rounded one would put a number in the field that is not the number
+    // Black-76 uses.
+    return shioriDerivedForward === null ? "" : String(shioriDerivedForward);
+  }
+
+  function syncEffectiveForwardFromDerivation() {
+    shioriDerivedForward =
+      s490ParityResult === null ? null : s490ParityResult.forward_clean_price_per_100;
+    shioriDerivedForwardError = s490ParityError;
+
+    if (currentDraft !== null && !traderForwardOverrideActive) {
+      const text = derivedForwardFieldText();
+      // Only when it genuinely changes: applyManualInputsToDraft invalidates
+      // any in-flight Price/Refresh, so re-writing an identical value would
+      // cancel runs for no reason on every unrelated render.
+      if (els.forwardPrice.value !== text) {
+        els.forwardPrice.value = text;
+        applyManualInputsToDraft();
+      }
+    }
+    renderForwardSource();
+  }
+
+  // The trader's own edit is the only thing that starts an override. Wired
+  // ahead of the generic MANUAL_TEXT_INPUTS handler so the flag is already set
+  // by the time applyManualInputsToDraft stamps the draft's Forward source.
+  function markTraderForwardOverride() {
+    if (traderForwardOverrideActive) return;
+    traderForwardOverrideActive = true;
+    renderForwardSource();
+  }
+
+  // Reset / Use Shiori Derived: hand the field back to the derivation and
+  // reprice. Issue #177 requires the effective Forward to become the *current*
+  // derived Forward immediately, which is exactly what dropping the flag and
+  // re-running the sync does -- no cached "value at the time the override
+  // started" is kept or restored anywhere.
+  function useShioriDerivedForward() {
+    if (!traderForwardOverrideActive) return;
+    traderForwardOverrideActive = false;
+    els.forwardPrice.value = derivedForwardFieldText();
+    applyManualInputsToDraft();
+    renderForwardSource();
+    // Only meaningful once a run exists to be replaced; on an unpriced ticket
+    // the trader still presses Price themselves, exactly as before.
+    if (currentDisplay !== null) {
+      repriceOnceForwardIsPriceable = true;
+      syncDraftGating();
+    }
+  }
+
+  function renderForwardSource() {
+    els.forwardUseDerivedBtn.hidden = !traderForwardOverrideActive;
+    if (currentDraft === null) {
+      els.forwardSourceLine.textContent = "—";
+      els.forwardSourceLine.classList.remove("is-invalid");
+      return;
+    }
+    const derivedText =
+      shioriDerivedForward !== null
+        ? shioriDerivedForward.toFixed(6)
+        : shioriDerivedForwardError !== null
+          ? `unavailable — ${shioriDerivedForwardError}`
+          : "not derived yet";
+    if (traderForwardOverrideActive) {
+      els.forwardSourceLine.textContent =
+        `Forward source: TRADER_FORWARD_OVERRIDE — Black-76 prices from the value in ` +
+        `this field. Current Shiori Derived Forward: ${derivedText}. A Bloomberg or S490 ` +
+        `refresh will not overwrite this override.`;
+      els.forwardSourceLine.classList.remove("is-invalid");
+      return;
+    }
+    if (shioriDerivedForward === null) {
+      els.forwardSourceLine.textContent =
+        `Forward source: SHIORI_DERIVED_S490 — no Forward is available (${derivedText}), ` +
+        `so pricing is blocked. Nothing is substituted; enter your own Forward to price ` +
+        `from an explicit override instead.`;
+      els.forwardSourceLine.classList.add("is-invalid");
+      return;
+    }
+    els.forwardSourceLine.textContent =
+      `Forward source: SHIORI_DERIVED_S490 — filled automatically from the S490 ` +
+      `repo-carry derivation above and re-derived server-side on every Price and ` +
+      `Bloomberg refresh.`;
+    els.forwardSourceLine.classList.remove("is-invalid");
+  }
+
   // --- Whole-run state reset ------------------------------------------------
   //
   // Requirement: Refresh Bloomberg, Clear and a second lookup must each fully
@@ -3811,6 +4065,16 @@
     overrideProvenance = new Map();
     sourcedQuoteInvalidated = false;
     setCurrentDisplay(null);
+
+    // Issue #177: the Forward source belongs to the bond that was loaded, not
+    // to the page. A Clear, a failed refresh or a different security must not
+    // leave the next ticket silently carrying the previous one's override, its
+    // derived Forward, its derivation error, or a queued reprice.
+    traderForwardOverrideActive = false;
+    shioriDerivedForward = null;
+    shioriDerivedForwardError = null;
+    repriceOnceForwardIsPriceable = false;
+    renderForwardSource();
 
     // The whole profile lifecycle goes with the draft. Bumping the generation
     // and releasing the key permanently voids any answer still outstanding, so
@@ -4377,6 +4641,12 @@
     control.addEventListener("input", mark);
     control.addEventListener("change", mark);
   });
+  // Issue #177: registered before the generic handler below, so the override
+  // flag is already set by the time applyManualInputsToDraft stamps the
+  // draft's Forward source_system from it. Only a real trader edit reaches
+  // this -- every programmatic write to this field sets `.value` directly and
+  // fires no `input` event.
+  els.forwardPrice.addEventListener("input", markTraderForwardOverride);
   MANUAL_TEXT_INPUTS().forEach((input) => {
     input.addEventListener("input", applyManualInputsToDraft);
   });
@@ -4398,11 +4668,20 @@
   });
   els.unresolvedGotoBtn.addEventListener("click", revealUnresolvedFocus);
 
-  // Deliberately its own listener, not part of MANUAL_TEXT_INPUTS: this
-  // field is not part of the priced case, so an edit here must never
-  // invalidate an in-flight Price/Refresh the way applyManualInputsToDraft
-  // does for every real ticket field (Issue #174).
-  els.s490SpotSettlementDate.addEventListener("input", maybeRefreshS490Parity);
+  // Issue #177 changed what this field is. Under Issue #174 it drove a
+  // read-only parity panel, was not part of the priced case, and therefore
+  // deliberately did *not* invalidate an in-flight Price/Refresh. Now the
+  // derived Forward it feeds is the Black-76 default and the date itself is
+  // carried on the case as `spot_settlement_date`, so it is an ordinary
+  // pricing input and goes through the same read-into-draft path as every
+  // other one -- including that invalidation, whose whole purpose is to stop
+  // a response describing a case the trader has since moved away from being
+  // adopted. `applyManualInputsToDraft` ends in `syncDraftGating`, which is
+  // what re-triggers the derivation itself.
+  els.s490SpotSettlementDate.addEventListener("input", applyManualInputsToDraft);
+
+  // Reset / Use Shiori Derived (Issue #177).
+  els.forwardUseDerivedBtn.addEventListener("click", useShioriDerivedForward);
 
   // Codex P2 review of PR #174, round 7: retryS490Parity below is the
   // explicit escape hatch for a failed request -- see renderS490Parity's
@@ -4468,6 +4747,10 @@
   window.__shioriTestSelectedConventionProfile = () => selectedConventionProfile;
   window.__shioriTestConventionProfileCandidates = () => conventionProfileCandidates;
   window.__shioriTestConventionProfileOverridden = () => conventionProfileOverridden;
+  // Issue #177 effective-Forward state, read-only.
+  window.__shioriTestTraderForwardOverrideActive = () => traderForwardOverrideActive;
+  window.__shioriTestShioriDerivedForward = () => shioriDerivedForward;
+  window.__shioriTestShioriDerivedForwardError = () => shioriDerivedForwardError;
   // Read-only generation fence for browser tests (no production behavior
   // depends on this accessor existing). `conventionProfileGeneration` is
   // bumped exactly twice per successful Bloomberg Load -- once by

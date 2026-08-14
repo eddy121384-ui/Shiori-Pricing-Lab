@@ -141,6 +141,7 @@ second side, override, or fallback. This slice adds no forward, repo,
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
@@ -197,8 +198,26 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
         "option_settlement_date",
     }
 )
+# ``spot_settlement_date`` / ``convention_profile`` (Issue #177) are inputs to
+# the *derivation that produces* ``forward_clean_price_input``, not to the
+# pricing request itself: the S490 repo-carry Forward's repo term starts at an
+# explicit spot settlement date (tS), and the approved coupon-payment
+# convention for an interim coupon is the trader's own asserted convention
+# profile (Issue #175). Both are deliberately optional and deliberately **not**
+# forwarded to ``build_bli_standalone_option_request`` below -- the reviewed
+# typed request contract is unchanged by Issue #177, and every pre-#177 case,
+# fixture and saved envelope stays valid exactly as written. They live on the
+# envelope rather than being passed beside it so that a saved or re-sent case
+# reproduces its own Forward from the case alone, instead of depending on live
+# browser state; the wiring that reads them is
+# ``app/standalone_option_workbench_server.apply_effective_forward_to_case``.
 _OPTIONAL_TOP_LEVEL_KEYS = frozenset(
-    {"deposit_rate_observation", "bond_reference_source_name"}
+    {
+        "deposit_rate_observation",
+        "bond_reference_source_name",
+        "spot_settlement_date",
+        "convention_profile",
+    }
 )
 _ALLOWED_TOP_LEVEL_KEYS = _REQUIRED_TOP_LEVEL_KEYS | _OPTIONAL_TOP_LEVEL_KEYS
 
@@ -439,6 +458,14 @@ def prepare_standalone_display(
         "model_fair_premium_per_100": assumptions.get("black76_pv_per_100"),
         "total_notional_model_fair_premium": result.pv,
         "forward_clean_price_per_100": assumptions.get("forward_clean_price_per_100"),
+        # Issue #177: which source produced the Forward this run priced from.
+        # A verbatim read of the request snapshot's own explicit forward
+        # input -- never derived, defaulted or reinterpreted here -- so it is
+        # present on a FAILED result too (that snapshot exists either way),
+        # and a pre-#177 case simply reports its own existing label unchanged.
+        "forward_source": snapshot.forward_clean_price_input.source_system
+        if snapshot.forward_clean_price_input is not None
+        else None,
         "black76_pv_per_100": assumptions.get("black76_pv_per_100"),
         "effective_reporting_date_discount_factor": assumptions.get(
             "effective_reporting_date_discount_factor"
@@ -804,6 +831,7 @@ def price_standalone_option_case_with_bloomberg_quote(
     *,
     bloomberg_security: str,
     quote_side: TreasuryFTPQuoteSide,
+    case_transform: Callable[[dict], dict] | None = None,
 ) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, BLIBondQuote, dict, dict]:
     """Price ``case`` with its ``bond_quote`` replaced by one live Bloomberg quote.
 
@@ -846,7 +874,26 @@ def price_standalone_option_case_with_bloomberg_quote(
     two substitutions, and a copy that drifts from what was priced is exactly
     the class of defect that produces a displayed or exported run describing
     inputs the engine never saw. It is the same dict this function passed to
-    :func:`price_standalone_option_case`, not a rebuild of it. Raises ``ValueError`` for
+    :func:`price_standalone_option_case`, not a rebuild of it.
+
+    **``case_transform`` (Issue #177).** An optional, bounded seam applied to
+    the copied envelope **after** the live quote and acquisition timestamp
+    are substituted and **before** it is priced; its return value is what is
+    both priced and returned, so the "the returned case is the case that was
+    priced" invariant above holds unchanged. It exists for exactly one
+    caller-side concern this function must not itself own: an input that is a
+    function of the *live* quote and therefore cannot be resolved before the
+    substitution. Today that is the effective Forward
+    (``app/standalone_option_workbench_server.apply_effective_forward_to_case``),
+    whose S490 repo-carry derivation starts from the spot clean price this
+    function has just replaced -- resolving it beforehand would price the new
+    spot against a Forward derived from the old one. This module supplies no
+    transform of its own, adds no default, and performs no forward, repo or
+    pricing-methodology logic here or anywhere else; ``None`` (the default)
+    is byte-for-byte the pre-#177 behaviour. Whatever the transform raises
+    propagates unchanged, before pricing.
+
+    Raises ``ValueError`` for
     envelope/input/date problems, propagates ``BLIBloombergDapiError``
     unchanged on any Bloomberg failure (the original ``bond_quote`` is
     never used as a fallback), and propagates every nested schema/builder
@@ -874,6 +921,8 @@ def price_standalone_option_case_with_bloomberg_quote(
         "bond_quote": asdict(live_quote),
         "pricing_timestamp": acquired_at,
     }
+    if case_transform is not None:
+        bloomberg_case = case_transform(bloomberg_case)
     request, result, display = price_standalone_option_case(
         bloomberg_case, retrieved_at=acquired_at
     )

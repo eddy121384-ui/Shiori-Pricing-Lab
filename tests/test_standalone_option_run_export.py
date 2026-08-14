@@ -940,3 +940,97 @@ def test_override_section_does_not_mutate_the_display_dict():
     render_standalone_run_as_markdown(display)
     render_standalone_run_as_json(display)
     assert json.dumps(display, sort_keys=True) == before
+
+
+# --- Issue #177: effective Forward provenance in the exported run ---------------
+
+
+def _effective_forward_fixture(**overrides) -> dict:
+    """The bridge's own ``effective_forward`` section shape (test-local
+    synthetic data only) -- see
+    ``app/standalone_option_workbench_server.apply_effective_forward_to_case``."""
+
+    return {
+        "forward_source": "SHIORI_DERIVED_S490",
+        "effective_forward_clean_price_per_100": 100.5,
+        "shiori_derived_forward_clean_price_per_100": 100.5,
+        "trader_forward_override_per_100": None,
+        "shiori_derived_forward_error": None,
+        "spot_settlement_date": "2026-07-02",
+        "convention_profile": "UST",
+        "shiori_derived_forward": {
+            "funding": {"method": "TERM_RATE_FROM_CURVE_AS_OF"},
+            "forward": {"repo_day_count_convention": "ACT/360"},
+        },
+        **overrides,
+    }
+
+
+def test_json_export_includes_the_effective_forward_section_verbatim():
+    effective = _effective_forward_fixture()
+    display = _synthetic_price_only_display(effective_forward=effective)
+
+    json_text = render_standalone_run_as_json(display)
+
+    # Including the whole nested S490 derivation trace, unflattened.
+    assert json.loads(json_text)["effective_forward"] == effective
+
+
+def test_markdown_export_includes_a_conditional_effective_forward_section():
+    effective = _effective_forward_fixture()
+    display = _synthetic_price_only_display(effective_forward=effective)
+
+    md = render_standalone_run_as_markdown(display)
+
+    assert "## Effective Forward" in md
+    assert "- **Forward source:** SHIORI_DERIVED_S490" in md
+    assert "- **Effective forward clean price per 100:** 100.5" in md
+    assert "- **Shiori Derived S490 forward clean price per 100:** 100.5" in md
+    assert "- **Trader Forward Override per 100:** not available" in md
+    assert "- **Spot settlement date (tS):** 2026-07-02" in md
+    assert "- **Convention profile:** UST" in md
+    assert md.index("## Pricing") < md.index("## Effective Forward")
+
+
+def test_markdown_export_effective_forward_section_reports_an_active_override():
+    effective = _effective_forward_fixture(
+        forward_source="TRADER_FORWARD_OVERRIDE",
+        effective_forward_clean_price_per_100=97.75,
+        trader_forward_override_per_100=97.75,
+        shiori_derived_forward_clean_price_per_100=None,
+        shiori_derived_forward_error="BLIBloombergDapiError: Curve #490 unavailable",
+    )
+    display = _synthetic_price_only_display(effective_forward=effective)
+
+    md = render_standalone_run_as_markdown(display)
+
+    section = md.split("## Effective Forward")[1].split("\n## ")[0]
+    assert "- **Forward source:** TRADER_FORWARD_OVERRIDE" in section
+    assert "- **Trader Forward Override per 100:** 97.75" in section
+    assert "- **Shiori Derived S490 forward clean price per 100:** not available" in section
+    # The derivation's real failure reason survives into the exported run.
+    assert (
+        "- **Shiori Derived forward error:** BLIBloombergDapiError: Curve #490 unavailable"
+        in section
+    )
+
+
+def test_markdown_export_omits_the_effective_forward_section_for_a_legacy_run():
+    md = render_standalone_run_as_markdown(_synthetic_price_only_display())
+
+    assert "## Effective Forward" not in md
+
+
+def test_markdown_pricing_section_reports_the_forward_source():
+    display = _synthetic_price_only_display(forward_source="SHIORI_DERIVED_S490")
+
+    md = render_standalone_run_as_markdown(display)
+
+    assert "- **Forward source:** SHIORI_DERIVED_S490" in md
+
+
+def test_markdown_pricing_section_reports_an_absent_forward_source_as_not_available():
+    md = render_standalone_run_as_markdown(_synthetic_price_only_display())
+
+    section = md.split("## Pricing")[1].split("\n## ")[0]
+    assert "- **Forward source:** not available" in section

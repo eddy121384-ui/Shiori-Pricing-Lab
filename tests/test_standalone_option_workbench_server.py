@@ -2854,3 +2854,499 @@ def test_api_advanced_profile_makes_no_bloomberg_call_and_reads_no_clock(monkeyp
 
     payload = server_module.resolve_bond_advanced_profile(dict(_PROFILE_BODY))
     assert payload["supported"] is True
+
+
+# --- Issue #177: the effective Forward Black-76 actually prices from ------------
+#
+# Before Issue #177 the Forward was whatever number the case carried. Now the
+# Shiori Derived S490 repo-carry Forward is the default source for the
+# approved UST path, a typed Forward is an explicit Trader Forward Override,
+# and both are resolved server-side on every priced run -- see
+# `apply_effective_forward_to_case`'s own module-level note for why that has
+# to happen after a Bloomberg refresh substitutes its fresh spot quote.
+
+_DERIVED_FORWARD_SOURCE = "SHIORI_DERIVED_S490"
+_TRADER_FORWARD_OVERRIDE_SOURCE = "TRADER_FORWARD_OVERRIDE"
+
+# The example bond pays semi-annual coupons on 15 June / 15 December, so a
+# window from 2026-07-02 to the case's own 2026-09-29 expiry carries no
+# coupon at all: Case A, the no-interim-coupon horizon Issue #173/#174
+# established.
+_CASE_A_SPOT_SETTLEMENT_DATE = "2026-07-02"
+
+
+def _derived_forward_case() -> dict:
+    """The example case in Shiori-derived Forward mode (Case A).
+
+    Exactly the browser's own post-#177 draft shape: an empty
+    ``curve_points`` (the live Curve #490 is injected at Price time), the
+    Forward source set to the derived token, and the two Issue #177 optional
+    envelope keys carrying the derivation's own inputs. The Forward number
+    the case arrives with is deliberately left at the example's own 101.3 --
+    every test below asserts the priced run replaced it.
+    """
+
+    case = _case_with_empty_curve_points()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "source_system": _DERIVED_FORWARD_SOURCE,
+    }
+    case["spot_settlement_date"] = _CASE_A_SPOT_SETTLEMENT_DATE
+    case["convention_profile"] = "UST"
+    return case
+
+
+def _expected_derived_forward(case: dict) -> float:
+    """The Forward the unmodified S490 route derives for ``case``."""
+
+    return server_module.resolve_s490_repo_carry_parity(
+        case, case["spot_settlement_date"], case.get("convention_profile")
+    )["s490_repo_carry"]["forward_clean_price_per_100"]
+
+
+# --- Case A: derived Forward as the Black-76 default ---------------------------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_prices_case_a_from_the_shiori_derived_forward_by_default(
+    server_url: str, monkeypatch
+) -> None:
+    # Issue #177's core acceptance: Bloomberg Load -> no Forward typed ->
+    # the Forward appears and Black-76 prices from it.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    expected_forward = _expected_derived_forward(case)
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["display"]["status"] == "SUCCESS"
+    # The number Black-76 actually priced from, not the one the case carried.
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(
+        expected_forward
+    )
+    assert payload["display"]["forward_clean_price_per_100"] != 101.3
+    assert payload["display"]["forward_source"] == _DERIVED_FORWARD_SOURCE
+    assert payload["display"]["assumptions"]["forward_clean_price_source_system"] == (
+        _DERIVED_FORWARD_SOURCE
+    )
+    # And the case the caller adopts carries the same authoritative number.
+    assert payload["case"]["forward_clean_price_input"][
+        "forward_clean_price_per_100"
+    ] == pytest.approx(expected_forward)
+    assert payload["case"]["forward_clean_price_input"]["source_system"] == (
+        _DERIVED_FORWARD_SOURCE
+    )
+
+
+@_QUANTLIB_SKIP
+def test_api_case_reports_the_full_effective_forward_provenance(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    expected_forward = _expected_derived_forward(case)
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    effective = payload["display"]["effective_forward"]
+    # Issue #177's four provenance questions, answerable off the run alone.
+    assert effective["forward_source"] == _DERIVED_FORWARD_SOURCE
+    assert effective["effective_forward_clean_price_per_100"] == pytest.approx(
+        expected_forward
+    )
+    assert effective["shiori_derived_forward_clean_price_per_100"] == pytest.approx(
+        expected_forward
+    )
+    assert effective["trader_forward_override_per_100"] is None
+    assert effective["shiori_derived_forward_error"] is None
+    assert effective["spot_settlement_date"] == _CASE_A_SPOT_SETTLEMENT_DATE
+    assert effective["convention_profile"] == "UST"
+    # The Issue #173/#175 trace survives verbatim rather than being reduced
+    # to a single number.
+    trace = effective["shiori_derived_forward"]
+    assert trace["funding"]["method"]
+    assert trace["forward"]["repo_day_count_convention"] == "ACT/360"
+    assert trace["forward"]["interim_coupons"] == []
+    assert trace["curve_acquisition"] == server_module.S490_CURVE_ACQUISITION_CONTRACT
+
+
+# --- Case B: an interim coupon, all the way through to Black-76 ----------------
+#
+# An end-of-month April/October UST-shaped grid, so the coupon scheduled on
+# Saturday 2026-10-31 is actually paid on Monday 2026-11-02 -- the exact
+# scheduled-date-selects / payment-date-carries split Issue #175 approved,
+# now proven to reach the priced Forward rather than only the parity panel.
+
+_CASE_B_SPOT_SETTLEMENT_DATE = "2026-07-02"
+_CASE_B_EXPIRY_DATE = "2026-12-15"
+_CASE_B_SCHEDULED_COUPON_DATE = "2026-10-31"
+_CASE_B_PAID_COUPON_DATE = "2026-11-02"
+
+
+def _case_b_derived_forward_case() -> dict:
+    case = _derived_forward_case()
+    case["bond_reference_data_universe"] = [
+        {
+            **case["bond_reference_data_universe"][0],
+            "coupon": 0.04,
+            "issue_date": "2025-04-30",
+            "first_coupon_date": "2025-10-31",
+            "last_coupon_date": "2031-10-31",
+            "maturity_date": "2032-04-30",
+        }
+    ]
+    case["bond_option"] = {**case["bond_option"], "expiry_date": _CASE_B_EXPIRY_DATE}
+    case["expiry_timestamp"] = f"{_CASE_B_EXPIRY_DATE}T16:00:00Z"
+    case["spot_settlement_date"] = _CASE_B_SPOT_SETTLEMENT_DATE
+    # Both settlement dates must stay on or after the new expiry.
+    case["forward_settlement_date"] = "2026-12-17"
+    case["option_settlement_date"] = "2026-12-17"
+    return case
+
+
+@_QUANTLIB_SKIP
+def test_api_case_prices_case_b_from_the_shiori_derived_forward_by_default(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_b_derived_forward_case()
+    expected_forward = _expected_derived_forward(case)
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["display"]["status"] == "SUCCESS"
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(
+        expected_forward
+    )
+    assert payload["display"]["forward_source"] == _DERIVED_FORWARD_SOURCE
+
+    # The whole Issue #175 chain, on the run that was actually priced.
+    (coupon,) = payload["display"]["effective_forward"]["shiori_derived_forward"][
+        "forward"
+    ]["interim_coupons"]
+    assert coupon["scheduled_payment_date"] == _CASE_B_SCHEDULED_COUPON_DATE
+    assert coupon["payment_date"] == _CASE_B_PAID_COUPON_DATE
+    assert coupon["payment_roll_days"] == 2
+    assert coupon["payment_calendar"] == "US_FEDERAL_RESERVE"
+
+
+@_QUANTLIB_SKIP
+def test_api_case_fails_closed_for_case_b_on_a_non_ust_convention_selection(
+    server_url: str, monkeypatch
+) -> None:
+    # The UST Federal Reserve payment convention is asserted by the trader's
+    # own profile selection and never inferred (Issue #175 / Codex P1 review
+    # of PR #176). Promoting the derivation to the pricing path must not
+    # quietly widen that: an interim coupon on any other selection blocks
+    # the run instead of pricing a differently-carried Forward.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_b_derived_forward_case()
+    case["convention_profile"] = "US_CORPORATE"
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "RepoCarryInterimCouponConventionError" in payload["error"]
+    assert "no effective Forward is available" in payload["error"]
+
+
+# --- Fail closed --------------------------------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_fails_closed_when_the_derivation_fails_and_never_prices_a_stale_forward(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Curve #490 session failed")
+    )
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    # The real Bloomberg reason survives verbatim, and the case's own leftover
+    # 101.3 was never priced as a substitute. (This particular failure is
+    # reported by the existing live-curve injection, which runs first and is
+    # equally fatal; the derivation's own failures are covered by
+    # test_api_case_fails_closed_for_case_b_on_a_non_ust_convention_selection,
+    # where the curve resolves and only the Forward does not.)
+    assert payload["error"] == "Curve #490 session failed"
+    assert "display" not in payload
+
+
+@_QUANTLIB_SKIP
+def test_api_case_fails_closed_when_a_derived_case_carries_no_spot_settlement_date(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    del case["spot_settlement_date"]
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "spot_settlement_date" in payload["error"]
+
+
+def test_api_case_validate_blocks_a_derived_case_with_no_spot_settlement_date(
+    server_url: str,
+) -> None:
+    # The Price gate itself has to close, not just the priced run: the
+    # readiness check owns the one precondition of the derivation that is a
+    # pure offline fact. Still no Bloomberg call and no clock read here.
+    case = _derived_forward_case()
+    case["spot_settlement_date"] = None
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is False
+    assert "spot_settlement_date" in payload["error"]
+
+
+def test_api_case_validate_accepts_a_derived_case_that_carries_one(
+    server_url: str,
+) -> None:
+    status, payload = _post_json(f"{server_url}/api/case/validate", _derived_forward_case())
+
+    assert status == 200
+    assert payload["ready"] is True
+    assert payload["error"] is None
+
+
+def test_api_case_validate_does_not_require_a_spot_settlement_date_for_an_override(
+    server_url: str,
+) -> None:
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+    del case["spot_settlement_date"]
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is True
+
+
+# --- Trader Forward Override --------------------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_prices_an_active_trader_forward_override_verbatim(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    derived = _expected_derived_forward(case)
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(97.75)
+    assert payload["display"]["forward_source"] == _TRADER_FORWARD_OVERRIDE_SOURCE
+    effective = payload["display"]["effective_forward"]
+    assert effective["trader_forward_override_per_100"] == pytest.approx(97.75)
+    # The derived Forward is still resolved and reported beside it, so the
+    # trader can compare the two without dropping the override.
+    assert effective["shiori_derived_forward_clean_price_per_100"] == pytest.approx(
+        derived
+    )
+    assert effective["effective_forward_clean_price_per_100"] == pytest.approx(97.75)
+
+
+@_QUANTLIB_SKIP
+def test_an_active_override_still_prices_when_the_derivation_fails(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Curve #490 session failed")
+    )
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+    # A manual curve override, so the option discounting itself does not
+    # depend on the failing live acquisition -- only the derived comparison
+    # value does.
+    case["curve_points"] = json.loads(_example_case_bytes())["curve_points"]
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(97.75)
+    effective = payload["display"]["effective_forward"]
+    assert effective["forward_source"] == _TRADER_FORWARD_OVERRIDE_SOURCE
+    assert effective["shiori_derived_forward_clean_price_per_100"] is None
+    assert "Curve #490 session failed" in effective["shiori_derived_forward_error"]
+
+
+# --- Legacy / explicit-forward cases are untouched -----------------------------
+
+
+@_QUANTLIB_SKIP
+def test_a_case_outside_the_two_issue_177_forward_modes_is_priced_exactly_as_before(
+    server_url: str, monkeypatch
+) -> None:
+    # The bundled example carries SANITIZED_SYNTHETIC_MARKET_SOURCE, which is
+    # neither Issue #177 token -- no derivation is attempted, no Bloomberg
+    # call is made for it, and no effective_forward section appears.
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = json.loads(_example_case_bytes())
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(101.3)
+    assert payload["display"]["forward_source"] == "SANITIZED_SYNTHETIC_MARKET_SOURCE"
+    assert "effective_forward" not in payload["display"]
+    assert calls == []
+
+
+def test_apply_effective_forward_to_case_leaves_an_unrecognized_source_untouched(
+    monkeypatch,
+) -> None:
+    def _fail(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a legacy explicit-forward case must not be re-derived")
+
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _fail)
+    case = json.loads(_example_case_bytes())
+
+    result, provenance = server_module.apply_effective_forward_to_case(case)
+
+    assert result is case
+    assert provenance is None
+
+
+# --- Refresh Bloomberg: the derived Forward follows the new spot ----------------
+
+
+def _install_fake_bloomberg_loader_with_clean_price(monkeypatch, clean_price: float):
+    def fake_loader(*, security, isin, quote_side):
+        return BLIBondQuote(
+            isin=isin,
+            currency=Currency.USD,
+            price_type=BLIQuoteBasis.PRICE,
+            quote_side=TreasuryFTPQuoteSide.MID,
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            clean_price_per_100=clean_price,
+            accrued_interest_per_100=0.42,
+        )
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", fake_loader)
+
+
+@_QUANTLIB_SKIP
+def test_api_case_bloomberg_rederives_the_forward_from_the_freshly_acquired_spot(
+    server_url: str, monkeypatch
+) -> None:
+    # The defect this ordering exists to prevent: the browser's Forward was
+    # derived from the *previous* spot, so pricing the newly acquired one
+    # against it would silently use a stale F. The refresh must re-derive
+    # after the substitution -- see apply_effective_forward_to_case's own
+    # module note.
+    refreshed_spot = 103.5
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, refreshed_spot)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    case = _derived_forward_case()
+    stale_forward = _expected_derived_forward(case)
+    # What the derivation would give once the refreshed quote is in place.
+    refreshed_case = {
+        **case,
+        "bond_quote": {**case["bond_quote"], "clean_price_per_100": refreshed_spot},
+    }
+    expected_forward = _expected_derived_forward(refreshed_case)
+    assert expected_forward != pytest.approx(stale_forward)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(
+        expected_forward
+    )
+    assert payload["display"]["forward_source"] == _DERIVED_FORWARD_SOURCE
+    # The returned case is still the exact envelope that was priced.
+    assert payload["case"]["forward_clean_price_input"][
+        "forward_clean_price_per_100"
+    ] == pytest.approx(expected_forward)
+    assert payload["case"]["bond_quote"]["clean_price_per_100"] == refreshed_spot
+
+
+@_QUANTLIB_SKIP
+def test_api_case_bloomberg_never_overwrites_an_active_trader_forward_override(
+    server_url: str, monkeypatch
+) -> None:
+    # Issue #177: "while an override is active, a Bloomberg refresh must not
+    # silently overwrite it" -- the refresh still updates the derived
+    # comparison value from the new spot, and still prices the override.
+    refreshed_spot = 103.5
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, refreshed_spot)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+    refreshed_case = {
+        **case,
+        "bond_quote": {**case["bond_quote"], "clean_price_per_100": refreshed_spot},
+    }
+    expected_derived = _expected_derived_forward(refreshed_case)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(97.75)
+    assert payload["display"]["forward_source"] == _TRADER_FORWARD_OVERRIDE_SOURCE
+    assert payload["case"]["forward_clean_price_input"][
+        "forward_clean_price_per_100"
+    ] == pytest.approx(97.75)
+    effective = payload["display"]["effective_forward"]
+    assert effective["trader_forward_override_per_100"] == pytest.approx(97.75)
+    assert effective["shiori_derived_forward_clean_price_per_100"] == pytest.approx(
+        expected_derived
+    )
