@@ -57,17 +57,29 @@ carried verbatim onto every returned result, and never inferred:
 a coupon falls inside the repo term. Extending the FPA structure to do so is
 straightforward -- each coupon reduces the termination amount, carried from
 its own payment date -- but it needs the date on which the coupon cash is
-**actually received**, and this repository cannot supply one:
+**actually received**, and no approved convention here supplies one:
 
-``coupon_flows_before`` returns the bond's **unadjusted** schedule dates
-(``bli_quantlib_bond_adapter`` generates them with ``ql.NullCalendar()``, by
-design, and no business-day calendar exists anywhere here). That is correct
-and already approved for **accrued interest**, where accrual conventionally
-stops on the nominal date. It is *not* established for **cash receipt**: a
-US Treasury coupon scheduled on a non-business day is paid on the next
-business day, so the nominal date and the receipt date are different dates
-serving different purposes, and only the first use is covered by existing
-approval.
+``coupon_flows_before`` returns the bond's **unadjusted** schedule dates --
+``bli_quantlib_bond_adapter`` generates them with ``ql.NullCalendar()``, by
+design. That is correct and already approved for **accrued interest**, where
+accrual conventionally stops on the nominal date. It is *not* established
+for **cash receipt**: a US Treasury coupon scheduled on a non-business day is
+paid on the next business day, so the nominal date and the receipt date are
+different dates serving different purposes, and only the first use is covered
+by existing approval.
+
+**A calendar does exist, and that is precisely why this is a decision rather
+than a gap** (Codex P2 review of PR #176 -- an earlier revision of this note
+wrongly claimed the repository held none).
+``pricing/bli_bond_convention_profile.py`` registers
+``CALENDAR_US_SIFMA`` (QuantLib's ``UnitedStates(GovernmentBond)``) and the
+reviewed UST profile names it as ``settlement_calendar``;
+``advance_settlement_business_days`` already rolls settlement dates with it,
+holidays included. But that calendar is scoped to **settlement** rolling.
+Reusing it to resolve **coupon payment** dates is neither approved nor wired,
+and doing so silently would be exactly the kind of methodology inference
+AGENTS.md rule 7 forbids. So the missing piece is an approved coupon-payment
+convention and its wiring, not a holiday table.
 
 Two conventions are therefore in play -- (A) the unadjusted scheduled date,
 (B) the actual next-business-day payment date -- and the choice is not
@@ -79,15 +91,15 @@ cosmetic:
   between the two dates: on a 2.00 coupon, ~64 ticks.
 
 No first-party evidence in this repository says which date Bloomberg's FPA
-forward uses, and resolving it needs a US government securities holiday
-calendar that Issue #175 did not authorise. **So this module does not
-choose, and does not compute.** Every coupon scheduled in ``(tS, tF]``
+forward uses, and Issue #175 did not authorise extending the UST profile's
+settlement calendar to coupon payments. **So this module does not choose,
+and does not compute.** Every coupon scheduled in ``(tS, tF]``
 raises :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` -- weekday
-coupons included, because a weekday market holiday is equally not a payment
-date and is equally undetectable without that calendar. A partial
-(weekend-only) guard was tried and rejected: it left the dangerous half of
-the exposure in place while implying that the dates which passed had been
-validated.
+coupons included, since a weekday market holiday is equally not a payment
+date and this module reads no calendar to tell one from an ordinary weekday.
+A partial (weekend-only) guard was tried and rejected: it left the dangerous
+half of the exposure in place while implying that the dates which passed had
+been validated.
 
 The reinvestment *rate* would be a second, much smaller question if this one
 were settled (reinvest at the same term repo rate, which a zero ``Repo
@@ -294,15 +306,16 @@ def repo_carry_forward_clean_price(
             f"({spot_settlement_date}, {forward_settlement_date}] on "
             + ", ".join(flow.payment_date for flow in scheduled_interim_coupons)
             + " -- those are the bond's *unadjusted* schedule dates (NullCalendar), not "
-            "the dates the coupon cash is actually received. This repository holds no "
-            "business-day calendar to resolve the actual payment dates, and no "
-            "first-party evidence says which date Bloomberg's FPA forward reinvests "
-            "from. The choice changes how long each coupon is reinvested and -- when the "
-            "forward settlement date falls between a coupon's scheduled and actual "
-            "payment date -- whether that coupon is subtracted at all. That is an "
-            "unresolved methodology decision (Issue #175 RED), not a value to assume. "
-            "Extending the FPA structure to carry the coupon is straightforward; "
-            "the blocked input is the date, not the arithmetic"
+            "the dates the coupon cash is actually received. No approved coupon-payment "
+            "convention exists here: the UST convention profile's US_SIFMA calendar is "
+            "scoped to settlement rolling, reusing it for coupon payment dates is not "
+            "approved or wired, and no first-party evidence says which date Bloomberg's "
+            "FPA forward reinvests from. The choice changes how long each coupon is "
+            "reinvested and -- when the forward settlement date falls between a coupon's "
+            "scheduled and actual payment date -- whether that coupon is subtracted at "
+            "all. That is an unresolved methodology decision (Issue #175 RED), not a "
+            "value to assume. Extending the FPA structure to carry the coupon is "
+            "straightforward; the blocked input is the date, not the arithmetic"
         )
     accrued_at_spot = accrued_interest_per_100(bond, as_of_date=spot_settlement_date)
     accrued_at_forward = accrued_interest_per_100(bond, as_of_date=forward_settlement_date)

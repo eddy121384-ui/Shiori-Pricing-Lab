@@ -212,12 +212,13 @@ def test_a_case_a_horizon_carries_no_coupon_and_subtracts_exactly_nothing():
 
 # --- Case B: coupons in (tS, tF] are refused, pending the payment date ------------
 #
-# Issue #175 RED (Codex P1 review of PR #176, second round): the coupon dates
-# this repository holds are unadjusted NullCalendar schedule dates, not
-# cash-receipt dates, and it has no calendar to resolve them. The carry
-# arithmetic below is implemented and is tested directly against
-# reinvest_interim_coupon_to_forward_settlement; what these tests pin is that
-# it is never reached from a bond's own schedule.
+# Issue #175 RED: the coupon dates this repository holds are unadjusted
+# NullCalendar schedule dates, not cash-receipt dates, and no approved
+# coupon-payment convention exists to resolve them. No interim-coupon carry
+# is implemented anywhere -- the earlier revision's arithmetic was deleted
+# with its unapproved public entry point (Codex P1 review of PR #176) -- so
+# what these tests pin is the refusal itself, and that it fires for every
+# in-window coupon rather than a detectable subset.
 
 
 @requires_quantlib
