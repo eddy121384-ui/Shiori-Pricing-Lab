@@ -129,9 +129,13 @@ the full contract:
   weekday as much as a weekend -- fails closed in the primitive, because
   the coupon dates this repository holds are unadjusted schedule dates
   rather than cash-receipt dates (Issue #175 RED; see that module's own
-  note). Such a horizon returns HTTP 400 and surfaces on the panel as an
-  error naming the coupon, never as a Forward. Any validation, date,
-  Bloomberg DAPI, or curve-range failure returns HTTP 400 with
+  note). Such a horizon returns HTTP 400 and never a Forward. **Which**
+  error it reports depends on ordering: this route acquires the live curve
+  and resolves the S490 funding before it reaches the forward primitive, so
+  a Case B horizon that also hits a Bloomberg failure or falls outside the
+  curve's node range reports that failure instead, and the coupon is named
+  only once acquisition and funding have both succeeded. Any validation,
+  date, Bloomberg DAPI, or curve-range failure returns HTTP 400 with
   ``{"error": "..."}`` the same way. This is a parity/testing display only:
   it prices nothing through Black-76.
 
@@ -1106,7 +1110,12 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
       because the coupon dates this repository holds are unadjusted schedule
       dates rather than cash-receipt dates (Issue #175 RED; see that
       module's own note). A Case B expiry therefore raises and the handler
-      returns HTTP 400 naming the coupon. **This route reads no coupon
+      returns HTTP 400. That refusal is reached only after the curve
+      acquisition and funding resolution above have succeeded, so a Case B
+      expiry which also fails one of those reports the earlier failure
+      instead -- the coupon guard is deliberately not hoisted ahead of them,
+      since doing so would reorder an already-reviewed route for a message
+      preference rather than a correctness gain. **This route reads no coupon
       schedule and selects no coupon treatment of its own** -- the refusal,
       like the coupon resolution behind it, belongs entirely to the
       primitive, from the same resolved bond reference data this route
