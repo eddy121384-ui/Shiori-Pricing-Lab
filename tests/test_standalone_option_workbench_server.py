@@ -1345,13 +1345,17 @@ def test_api_s490_repo_carry_resolves_with_trade_and_market_inputs_still_blank(
     assert isinstance(result["funding"]["derived_repo_rate_decimal"], float)
 
 
-def test_api_s490_repo_carry_rejects_a_missing_expiry_date(
+def test_api_s490_repo_carry_rejects_a_missing_forward_settlement_date(
     server_url: str, monkeypatch
 ) -> None:
+    # Codex P1 review of PR #178: tF is the case's own forward_settlement_date
+    # (the date the reviewed pricing contract defines the forward clean price
+    # at), not bond_option.expiry_date -- so that is the field this route now
+    # requires, and it fails closed rather than falling back to Expiry.
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_only_s490_inputs()
-    case["bond_option"] = {**case["bond_option"], "expiry_date": None}
+    case["forward_settlement_date"] = None
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
@@ -1359,7 +1363,7 @@ def test_api_s490_repo_carry_rejects_a_missing_expiry_date(
     )
 
     assert status == 400
-    assert "expiry_date" in payload["error"]
+    assert "forward_settlement_date" in payload["error"]
 
 
 def test_api_s490_repo_carry_rejects_a_bond_quote_isin_mismatch(
@@ -1622,7 +1626,9 @@ def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every
     assert coupon["payment_date"] == "2026-12-15"
     assert coupon["payment_roll_days"] == 0
     assert coupon["payment_calendar"] == "US_FEDERAL_RESERVE"
-    assert coupon["reinvestment_term_days"] == 5
+    # Reinvested to tF = forward_settlement_date (2026-12-21), not to Expiry
+    # (2026-12-20) -- Codex P1 review of PR #178.
+    assert coupon["reinvestment_term_days"] == 6
     assert forward["interim_coupon_forward_value_per_100"] == pytest.approx(
         coupon["amount_per_100"] * coupon["reinvestment_factor"]
     )
@@ -1727,9 +1733,16 @@ def test_api_s490_repo_carry_recomputes_when_expiry_changes(
     )
     assert status_a == 200
 
+    # Codex P1 review of PR #178: tF is the forward settlement date, which on
+    # the Workbench the convention profile re-derives from Expiry -- so an
+    # Expiry change reaches this route as a forward-settlement change, exactly
+    # as modelled here. The acceptance is unchanged: the trader touches no
+    # curve, quote or repo rate, and the reported Forward moves.
     case_b = _case_with_empty_curve_points()
     case_b["bond_option"]["expiry_date"] = "2026-08-15"
     case_b["expiry_timestamp"] = "2026-08-15T16:00:00Z"
+    case_b["forward_settlement_date"] = "2026-08-17"
+    case_b["option_settlement_date"] = "2026-08-17"
 
     status_b, payload_b = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
@@ -1739,8 +1752,8 @@ def test_api_s490_repo_carry_recomputes_when_expiry_changes(
 
     result_a = payload_a["s490_repo_carry"]
     result_b = payload_b["s490_repo_carry"]
-    assert result_a["funding"]["forward_settlement_date"] == "2026-09-29"
-    assert result_b["funding"]["forward_settlement_date"] == "2026-08-15"
+    assert result_a["funding"]["forward_settlement_date"] == "2026-10-01"
+    assert result_b["funding"]["forward_settlement_date"] == "2026-08-17"
     assert result_a["funding"]["repo_term_days"] != result_b["funding"]["repo_term_days"]
     assert result_a["forward_clean_price_per_100"] != result_b["forward_clean_price_per_100"]
 
@@ -1774,20 +1787,29 @@ def test_api_s490_repo_carry_response_carries_every_required_display_field(
 
 
 @_QUANTLIB_SKIP
-def test_resolve_s490_repo_carry_parity_reuses_the_forward_settlement_date_as_expiry(
+def test_resolve_s490_repo_carry_parity_carries_to_the_cases_forward_settlement_date(
     monkeypatch,
 ) -> None:
+    # Codex P1 review of PR #178, reversing Issue #174's choice along with the
+    # premise it rested on. #174 derived at Expiry because this route fed a
+    # read-only parity panel and explicitly not "the other, explicit-forward
+    # pricing path". Issue #177 makes it that pricing path, and the reviewed
+    # pricing contract defines the explicit forward clean price at
+    # request.forward_settlement_date -- resolve_standalone_option_pricing_inputs
+    # converts it to dirty with AI(forward_settlement_date). Carrying to Expiry
+    # instead would net off AI(expiry) and add back AI(forward settlement),
+    # pairing a clean price and an accrual struck at two different dates.
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
 
     result = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
 
-    # tF is bond_option.expiry_date, never the separate, existing
-    # forward_settlement_date field (which the explicit-forward path owns).
+    # The two dates genuinely differ on this case, so this is a real check.
     assert case["bond_option"]["expiry_date"] == "2026-09-29"
     assert case["forward_settlement_date"] == "2026-10-01"
-    assert result["s490_repo_carry"]["funding"]["forward_settlement_date"] == "2026-09-29"
+    assert result["s490_repo_carry"]["funding"]["forward_settlement_date"] == "2026-10-01"
+    assert result["s490_repo_carry"]["forward"]["forward_settlement_date"] == "2026-10-01"
 
 
 @_QUANTLIB_SKIP
@@ -3350,3 +3372,123 @@ def test_api_case_bloomberg_never_overwrites_an_active_trader_forward_override(
     assert effective["shiori_derived_forward_clean_price_per_100"] == pytest.approx(
         expected_derived
     )
+
+
+# --- Codex P1 review of PR #178: the derived Forward and the accrued interest
+# --- Black-76 pairs it with must be struck at the same date -------------------
+#
+# `resolve_standalone_option_pricing_inputs` converts the explicit forward
+# clean price to dirty with AI(request.forward_settlement_date). If the
+# derivation carried the spot to Expiry instead, the priced forward dirty
+# price would be
+#     [ForwardDirty(expiry) - AI(expiry)] + AI(forward settlement)
+# which is neither date's dirty forward -- the forward Black-76 sees is
+# shifted by the accrual between them. These two dates differ in the ordinary
+# profile-derived workflow, so this is the normal case, not an edge one.
+
+
+def _unequal_settlement_derived_case() -> dict:
+    case = _derived_forward_case()
+    # The example case already carries expiry 2026-09-29 with forward
+    # settlement 2026-10-01; asserted here so this test cannot silently
+    # degrade into an equal-dates one.
+    assert case["bond_option"]["expiry_date"] != case["forward_settlement_date"]
+    return case
+
+
+@_QUANTLIB_SKIP
+def test_the_priced_dirty_forward_equals_the_derivations_own_dirty_forward(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _unequal_settlement_derived_case()
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assumptions = payload["display"]["assumptions"]
+    derived = payload["display"]["effective_forward"]["shiori_derived_forward"]["forward"]
+
+    # Same date on both sides of the clean/dirty conversion...
+    assert derived["forward_settlement_date"] == case["forward_settlement_date"]
+    assert assumptions["forward_settlement_date"] == case["forward_settlement_date"]
+    # ...so the engine's own accrued interest is the derivation's own, and the
+    # dirty forward Black-76 priced is exactly the one the derivation produced.
+    assert assumptions["accrued_interest_at_forward_settlement_per_100"] == pytest.approx(
+        derived["accrued_interest_at_forward_settlement_per_100"]
+    )
+    assert assumptions["forward_dirty_price_per_100"] == pytest.approx(
+        derived["forward_dirty_price_per_100"]
+    )
+    assert assumptions["forward_clean_price_per_100"] == pytest.approx(
+        derived["forward_clean_price_per_100"]
+    )
+
+
+@_QUANTLIB_SKIP
+def test_a_forward_derived_at_expiry_would_not_match_and_is_not_what_is_priced(
+    server_url: str, monkeypatch
+) -> None:
+    # The regression's teeth: prove the two candidate tF choices genuinely
+    # differ on this case, and that the priced run took the settlement-date
+    # one. Without this, the test above would still pass if both dates
+    # happened to give the same number.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _unequal_settlement_derived_case()
+    at_expiry_case = {**case, "forward_settlement_date": case["bond_option"]["expiry_date"]}
+    forward_at_expiry = _expected_derived_forward(at_expiry_case)
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    priced = payload["display"]["forward_clean_price_per_100"]
+    assert priced != pytest.approx(forward_at_expiry)
+    assert priced == pytest.approx(_expected_derived_forward(case))
+
+
+# --- Codex P2 review of PR #178: a declared override that cannot be used -------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_refuses_a_declared_override_that_is_not_a_usable_price(
+    server_url: str, monkeypatch
+) -> None:
+    # A saved case or direct API request declaring TRADER_FORWARD_OVERRIDE
+    # with a zero/negative/non-finite/malformed override must be refused on
+    # that source's own terms -- never silently re-sourced to the derived
+    # Forward, which would change the run's own stated Forward source.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 0.0,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "this run's Forward source is TRADER_FORWARD_OVERRIDE" in payload["error"]
+    assert "never silently replaced by the Shiori Derived S490 Forward" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_a_declared_override_with_no_value_at_all_is_refused_not_re_sourced(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": None,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "this run's Forward source is TRADER_FORWARD_OVERRIDE" in payload["error"]

@@ -542,8 +542,17 @@ def _fill_advanced_overrides(
     last_coupon_date: str = "2030-07-31",
     curve_nodes=(("1M", "0.0374"), ("1Y", "0.0374")),
     leave_open: bool = False,
+    settlement_dates: bool = True,
 ) -> None:
-    """Fill everything that lives inside the collapsed Advanced section."""
+    """Fill everything that lives inside the collapsed Advanced section.
+
+    ``settlement_dates=False`` leaves the forward/option settlement dates to
+    the selected convention profile instead of typing them. Typing them marks
+    them as trader overrides, which the profile then (correctly) stops
+    re-deriving when Expiry changes -- so a test that asserts an
+    Expiry-driven consequence of the *forward settlement date* has to let the
+    profile own them, exactly as the real trader flow does.
+    """
 
     if _is_actually_hidden(page, "advanced-body"):
         page.click("#advanced-head")
@@ -553,8 +562,9 @@ def _fill_advanced_overrides(
     page.fill("#last-coupon-date-input", last_coupon_date)
     page.select_option("#bond-status-select", "ACTIVE")
     page.fill("#reporting-date-input", "2026-10-21")
-    page.fill("#forward-settlement-date-input", "2026-10-21")
-    page.fill("#option-settlement-date-input", "2026-10-21")
+    if settlement_dates:
+        page.fill("#forward-settlement-date-input", "2026-10-21")
+        page.fill("#option-settlement-date-input", "2026-10-21")
     _set_curve_nodes(page, curve_nodes)
     if not leave_open:
         page.click("#advanced-head")

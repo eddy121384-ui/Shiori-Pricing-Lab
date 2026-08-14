@@ -177,7 +177,7 @@ def page():
         browser.close()
 
 
-def _load_and_complete_ust(page, server_url: str) -> None:
+def _load_and_complete_ust(page, server_url: str, *, settlement_dates: bool = True) -> None:
     """One real bond, loaded and completed through the real controls.
 
     ``acquired_at`` is pinned to the same fixed clock the curve loader/RED
@@ -194,7 +194,7 @@ def _load_and_complete_ust(page, server_url: str) -> None:
     # 2026-10-20, forward/option settlement 2026-10-21) all fall safely
     # after this fixture's valuation_date (2026-08-12) and within the fake
     # curve's own 1Y node range.
-    _complete_draft(page)
+    _complete_draft(page, settlement_dates=settlement_dates)
     _wait_for_price_enabled(page)
 
 
@@ -288,7 +288,12 @@ def test_an_interim_coupon_expiry_resolves_and_shows_the_federal_reserve_roll(
     # with Expiry moved past this bond's 2027-01-31 coupon. That coupon is a
     # Sunday, so Eddy's convention B rolls its cash to Monday 2027-02-01 --
     # the panel must resolve, name the coupon, and show the roll in the trace.
-    _load_and_complete_ust(page, server_url)
+    #
+    # The convention profile owns the settlement dates here (Codex P1 review
+    # of PR #178): tF is the forward settlement date, and typing it by hand
+    # would correctly stop Expiry from re-deriving it -- which is exactly the
+    # chain this test is about.
+    _load_and_complete_ust(page, server_url, settlement_dates=False)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
     case_a_forward = page.text_content("#s490-forward-decimal")
@@ -427,15 +432,17 @@ def test_changing_expiry_alone_recomputes_the_forward_with_no_button_click(
     server_url, page
 ) -> None:
     # Issue #174's own acceptance condition, driven through the real page.
-    _load_and_complete_ust(page, server_url)
+    # Since Codex's P1 review of PR #178 the Forward is carried to the forward
+    # settlement date, which the convention profile re-derives from Expiry --
+    # so the settlement dates are left to the profile rather than typed, and
+    # this still proves that changing Expiry alone moves the Forward.
+    _load_and_complete_ust(page, server_url, settlement_dates=False)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
     before_forward = page.text_content("#s490-forward-decimal")
     before_rate = page.text_content("#s490-funding-rate")
 
-    # Stays before the manually entered forward/option settlement dates
-    # (2026-10-21, _fill_advanced_overrides' own default), which Expiry never
-    # touches, and stays inside the fake curve's 1Y node range.
+    # Stays inside the fake curve's 1Y node range.
     page.fill("#expiry-datetime-input", "2026-09-15T17:20")
 
     _wait_until(
@@ -672,7 +679,9 @@ def test_a_manual_curve_override_on_the_ticket_never_leaks_into_the_s490_panel(
 # hands it back.
 
 
-def _load_and_complete_ust_without_typing_a_forward(page, server_url: str) -> None:
+def _load_and_complete_ust_without_typing_a_forward(
+    page, server_url: str, *, settlement_dates: bool = True
+) -> None:
     """The Issue #177 trader flow: complete the whole ticket **except** the
     Forward, then enter the Spot Settlement Date and let the derivation fill
     it. Deliberately not ``_complete_draft``, which types a Forward (and so
@@ -684,13 +693,29 @@ def _load_and_complete_ust_without_typing_a_forward(page, server_url: str) -> No
     ))
     _fill_trade_group(page)
     page.fill("#volatility-input", "0.03395")
-    _fill_advanced_overrides(page)
+    _fill_advanced_overrides(page, settlement_dates=settlement_dates)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
 
 
 def _derived_forward_in_field(page) -> float:
     return float(page.input_value("#forward-price-input"))
+
+
+def _forward_field_settled_on_a_new_value(page, previous: float) -> bool:
+    """True once the field holds a usable number other than ``previous``.
+
+    The field is deliberately blanked while a re-derivation is in flight
+    (Issue #177 fail-closed: the previous inputs' Forward must not sit there
+    looking like this ticket's), so a predicate that just parses the field
+    races against that blank window and raises ``ValueError`` out of
+    ``_wait_until``. This waits for the settled state instead.
+    """
+
+    value = page.input_value("#forward-price-input")
+    if not value:
+        return False
+    return float(value) != previous
 
 
 def test_the_derivation_fills_the_forward_field_and_black76_prices_from_it(
@@ -729,11 +754,15 @@ def test_the_derivation_fills_the_forward_field_and_black76_prices_from_it(
 def test_changing_expiry_moves_the_forward_field_with_the_derivation(
     server_url, page
 ) -> None:
-    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    # Settlement dates left to the convention profile, so Expiry genuinely
+    # drives tF -- see the note on the Issue #174 recompute test above.
+    _load_and_complete_ust_without_typing_a_forward(
+        page, server_url, settlement_dates=False
+    )
     first = _derived_forward_in_field(page)
 
     _set_expiry(page, local="2026-11-20T17:20")
-    _wait_until(lambda: _derived_forward_in_field(page) != first)
+    _wait_until(lambda: _forward_field_settled_on_a_new_value(page, first))
 
     assert _derived_forward_in_field(page) == pytest.approx(
         float(page.text_content("#s490-forward-decimal")), abs=5e-7
@@ -746,7 +775,9 @@ def test_typing_a_forward_becomes_a_trader_override_that_a_refresh_never_overwri
 ) -> None:
     # Issue #177's override acceptance: the trader takes the field over, a
     # fresh derivation keeps updating beside it, and the override survives.
-    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _load_and_complete_ust_without_typing_a_forward(
+        page, server_url, settlement_dates=False
+    )
     derived_before = float(page.text_content("#s490-forward-decimal"))
 
     page.fill("#forward-price-input", "97.75")

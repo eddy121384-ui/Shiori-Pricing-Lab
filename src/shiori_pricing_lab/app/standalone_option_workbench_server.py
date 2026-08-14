@@ -124,9 +124,13 @@ the full contract:
   for pricing (see :func:`acquire_production_curve_490_for_s490_parity`
   for why this route cannot share that leniency). Resolves the S490
   funding and repo-carry Forward for the case's own
-  ``bond_option.expiry_date`` -- Expiry is the one field a trader changes
-  to see a new Forward; the existing explicit ``forward_settlement_date``
-  and ``forward_clean_price_input`` fields are read by nothing here.
+  ``forward_settlement_date`` -- the date the bond forward settles, and
+  therefore the date the reviewed pricing contract defines the forward
+  clean price at (Codex P1 review of PR #178; Issue #174 derived at Expiry
+  instead, on a premise Issue #177 removed -- see
+  :func:`resolve_s490_repo_carry_parity`). Changing Expiry still recomputes
+  it, through the convention profile that fills forward settlement.
+  ``forward_clean_price_input`` is read by nothing here.
   Returns ``{"case": <the case actually priced, freshly acquired curve
   included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
@@ -329,7 +333,6 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     EFFECTIVE_FORWARD_SOURCES,
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
-    TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     forward_clean_price_input_dict,
     select_effective_forward,
 )
@@ -1238,11 +1241,12 @@ def resolve_s490_repo_carry_parity(
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
       (Issues #173/#175) for the forward, including its interim-coupon
       (Case B) carry. A coupon scheduled in ``(spot_settlement_date,
-      expiry_date]`` is carried to Expiry from its own Federal Reserve
-      payment date and netted off, so such an expiry returns HTTP 200 with
-      the per-coupon trace on ``forward.interim_coupons`` -- it is not a
-      refusal. **This route reads no coupon schedule, resolves no payment
-      calendar and selects no coupon treatment of its own**: the primitive
+      forward_settlement_date]`` is carried to that settlement date from its
+      own Federal Reserve payment date and netted off, so such a horizon
+      returns HTTP 200 with the per-coupon trace on
+      ``forward.interim_coupons`` -- it is not a refusal. **This route reads
+      no coupon schedule, resolves no payment calendar and selects no coupon
+      treatment of its own**: the primitive
       resolves the coupons from the same resolved bond reference data this
       route already passes it, rolls each date through
       ``pricing/bli_ust_coupon_payment_date``, and the whole trace reaches
@@ -1262,22 +1266,45 @@ def resolve_s490_repo_carry_parity(
     bond (via ``bond_option.underlying_isin`` against
     ``bond_reference_data_universe``), the live spot clean quote
     (``bond_quote``), ``valuation_date``, ``spot_settlement_date`` (the
-    caller argument), ``bond_option.expiry_date``, and the freshly acquired
+    caller argument), ``forward_settlement_date``, and the freshly acquired
     Curve #490. A Bloomberg-loaded bond alone already supplies the first
-    three; only Expiry and Spot Settlement Date remain genuinely trader-
-    entered. No strike, notional, volatility, option type, position, or
+    three; ``forward_settlement_date`` comes from the selected convention
+    profile as soon as Expiry is entered, so only Expiry and Spot Settlement
+    Date remain genuinely trader-entered. No strike, notional, volatility, option type, position, or
     manual Forward override is read, required, or affected.
 
-    **The forward settlement date (``tF``) is ``bond_option.expiry_date``.**
-    Per Issue #174's own instruction ("change Expiry -> Shiori automatically
-    recomputes"), Expiry is the one ticket field a trader changes to see a
-    new S490 Forward -- the existing, separate ``forward_settlement_date``
-    field (which feeds the *other*, explicit-forward pricing path) is not
-    read here. ``spot_settlement_date`` (``tS``) is the one genuinely new
-    input this route needs: repo-carry has no spot settlement date anywhere
-    in the existing case schema, and this repository never derives a
-    settlement date from a lag or calendar, so it must be typed, exactly
-    like every other settlement date already on this ticket.
+    **The forward settlement date (``tF``) is the case's own
+    ``forward_settlement_date`` (Codex P1 review of PR #178).** Issue #174
+    derived at ``bond_option.expiry_date`` instead, on the explicit premise
+    that this route fed a read-only parity panel and *not* "the other,
+    explicit-forward pricing path". Issue #177 removes that premise: this
+    derivation now produces the Forward Black-76 prices from, and the
+    reviewed pricing contract defines that number at
+    ``request.forward_settlement_date`` -- ``resolve_standalone_option_pricing_inputs``
+    converts the explicit forward clean price to dirty using
+    ``AI(request.forward_settlement_date)``. Deriving a clean price at Expiry
+    (i.e. netting off ``AI(expiry)``) and then adding back
+    ``AI(forward_settlement_date)`` would pair a clean price and an accrual
+    struck at two different dates, shifting the forward the option prices
+    against by the accrual between them -- and those two dates differ in the
+    ordinary workflow, where the convention profile derives forward
+    settlement as Expiry plus the bond's settlement lag. Since Black-76,
+    the accrual convention and the pricing-input contract are all out of
+    scope for Issue #177, the wiring is what has to agree with them.
+
+    Expiry-driven recomputation is preserved rather than lost: on the
+    Workbench ``forward_settlement_date`` is itself filled from the selected
+    convention profile the moment Expiry changes, so changing Expiry still
+    moves this Forward -- it now does so through the date that actually
+    governs the bond forward, instead of past it. A trader who overrides
+    forward settlement by hand gets a Forward for the settlement date they
+    stated, which is the point of the field.
+
+    ``spot_settlement_date`` (``tS``) remains the one genuinely new input
+    this route needs: repo-carry has no spot settlement date anywhere in the
+    existing case schema, and this repository never derives a settlement date
+    from a lag or calendar, so it must be typed, exactly like every other
+    settlement date already on this ticket.
 
     No repo rate is ever read from ``case`` or from the caller -- the only
     caller-supplied number this route consumes beyond the case itself is
@@ -1316,7 +1343,7 @@ def resolve_s490_repo_carry_parity(
 
     Raises ``ValueError`` if ``bond_option`` / ``bond_reference_data_universe``
     / ``bond_quote`` / ``curve_points`` are missing or malformed, if
-    ``bond_option.expiry_date`` is absent, if any of the three coherence
+    ``forward_settlement_date`` is absent, if any of the three coherence
     checks above fails, or if ``bond_quote.clean_price_per_100`` is absent (a
     yield-only quote carries no spot clean price to start from); or whatever
     the composed functions raise (Bloomberg failure, same-as-of mismatch,
@@ -1331,11 +1358,15 @@ def resolve_s490_repo_carry_parity(
     bond_option = priced_case.get("bond_option")
     if not isinstance(bond_option, dict):
         raise ValueError("bond_option must be a JSON object")
-    expiry_date = bond_option.get("expiry_date")
-    if not expiry_date:
+    forward_settlement_date = priced_case.get("forward_settlement_date")
+    if not forward_settlement_date:
         raise ValueError(
-            "bond_option.expiry_date must be present -- Expiry is the one ticket "
-            "field this route needs to resolve a forward settlement date"
+            "forward_settlement_date must be present -- it is the date the bond "
+            "forward settles (tF), and therefore the date this derivation carries "
+            "the spot to. On the Workbench it is filled from the selected "
+            "convention profile once Expiry is entered; this repository never "
+            "derives a settlement date from a lag, weekend, holiday or "
+            "business-day convention"
         )
     currency = coerce_enum(bond_option.get("currency"), Currency, "bond_option.currency")
 
@@ -1405,13 +1436,13 @@ def resolve_s490_repo_carry_parity(
         currency=currency,
         curve_as_of_date=priced_case.get("valuation_date"),
         spot_settlement_date=spot_settlement_date,
-        forward_settlement_date=expiry_date,
+        forward_settlement_date=forward_settlement_date,
     )
     forward = repo_carry_forward_clean_price(
         bond=resolved_bond_reference_data,
         spot_clean_price_per_100=spot_clean_price,
         spot_settlement_date=spot_settlement_date,
-        forward_settlement_date=expiry_date,
+        forward_settlement_date=forward_settlement_date,
         repo_rate_decimal=funding.derived_repo_rate_decimal,
         interim_coupon_payment_convention=interim_coupon_payment_convention,
     )
@@ -1502,8 +1533,12 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
       (funding, carry, per-coupon interim carry, curve ids, source systems)
       is carried onto the provenance payload;
     - the selection itself is
-      ``pricing/bli_effective_forward.select_effective_forward`` -- an
-      override wins, otherwise the derived Forward is the default;
+      ``pricing/bli_effective_forward.select_effective_forward``, told which
+      source this case declared. It never infers the source from which
+      number happens to be present, in either direction (Codex P2 review of
+      PR #178): a case declaring ``TRADER_FORWARD_OVERRIDE`` with an
+      unusable override is refused rather than silently priced from the
+      derived Forward under an override label;
     - the winning number is written back as a freshly constructed
       ``BLIForwardCleanPriceInput`` stamped with its own source token,
       preserving the case's own ``quote_side`` (the request contract still
@@ -1555,14 +1590,10 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
             "and this repository never derives one from a settlement lag or calendar"
         )
 
-    override = (
-        forward_input.get("forward_clean_price_per_100")
-        if forward_source == TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE
-        else None
-    )
     effective = select_effective_forward(
+        requested_forward_source=forward_source,
         shiori_derived_forward_clean_price_per_100=derived_forward,
-        trader_forward_override_per_100=override,
+        trader_forward_override_per_100=forward_input.get("forward_clean_price_per_100"),
         shiori_derived_forward_error=derived_error,
     )
 

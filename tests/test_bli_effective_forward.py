@@ -20,6 +20,7 @@ from shiori_pricing_lab.pricing.bli_effective_forward import (
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     ForwardSourceUnavailableError,
+    TraderForwardOverrideInvalidError,
     forward_clean_price_input_dict,
     select_effective_forward,
 )
@@ -39,7 +40,10 @@ def test_the_two_canonical_forward_sources_are_exactly_the_published_pair() -> N
 
 
 def test_the_derived_forward_is_the_default_source_when_no_override_is_active() -> None:
-    effective = select_effective_forward(shiori_derived_forward_clean_price_per_100=99.25)
+    effective = select_effective_forward(
+        requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+        shiori_derived_forward_clean_price_per_100=99.25,
+    )
 
     assert effective.forward_source == SHIORI_DERIVED_S490_FORWARD_SOURCE
     assert effective.forward_clean_price_per_100 == 99.25
@@ -49,7 +53,10 @@ def test_the_derived_forward_is_the_default_source_when_no_override_is_active() 
 
 
 def test_an_int_derived_forward_is_carried_as_a_float() -> None:
-    effective = select_effective_forward(shiori_derived_forward_clean_price_per_100=100)
+    effective = select_effective_forward(
+        requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+        shiori_derived_forward_clean_price_per_100=100,
+    )
 
     assert isinstance(effective.forward_clean_price_per_100, float)
     assert effective.forward_clean_price_per_100 == 100.0
@@ -58,8 +65,9 @@ def test_an_int_derived_forward_is_carried_as_a_float() -> None:
 # --- Trader Forward Override wins ----------------------------------------
 
 
-def test_an_override_wins_over_the_derived_forward_and_still_carries_it() -> None:
+def test_a_declared_override_wins_over_the_derived_forward_and_still_carries_it() -> None:
     effective = select_effective_forward(
+        requested_forward_source=TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
         shiori_derived_forward_clean_price_per_100=99.25,
         trader_forward_override_per_100=98.5,
     )
@@ -77,6 +85,7 @@ def test_an_override_prices_even_when_the_derivation_failed_and_keeps_the_reason
     # Override, price under the existing override contract" -- a failed
     # derivation is recorded, not raised, in that mode.
     effective = select_effective_forward(
+        requested_forward_source=TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
         shiori_derived_forward_clean_price_per_100=None,
         trader_forward_override_per_100=98.5,
         shiori_derived_forward_error="BLIBloombergDapiError: Curve #490 unavailable",
@@ -95,18 +104,55 @@ def test_an_override_prices_even_when_the_derivation_failed_and_keeps_the_reason
     "not_an_override",
     [None, 0, 0.0, -1.0, float("nan"), float("inf"), "98.5", True, False, [], {}],
 )
-def test_a_value_that_is_not_a_usable_price_is_not_an_override(not_an_override: object) -> None:
-    # Anything that is not a finite, strictly positive real number is "no
-    # override", never a silent zero/blank/string-coerced Forward. ``True``
-    # is finite and positive as an int and is rejected explicitly.
+def test_a_declared_override_that_is_not_a_usable_price_is_refused(
+    not_an_override: object,
+) -> None:
+    # Codex P2 review of PR #178: once the run declares TRADER_FORWARD_OVERRIDE,
+    # an unusable override is an error on that source's own terms -- it is
+    # never silently replaced by the perfectly usable derived Forward, which
+    # would quietly change the run's own stated Forward source. ``True`` is
+    # finite and positive as an int and is rejected explicitly.
+    with pytest.raises(TraderForwardOverrideInvalidError) as excinfo:
+        select_effective_forward(
+            requested_forward_source=TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
+            shiori_derived_forward_clean_price_per_100=99.25,
+            trader_forward_override_per_100=not_an_override,
+        )
+
+    assert "TRADER_FORWARD_OVERRIDE" in str(excinfo.value)
+    assert "never" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "ignored_override",
+    [None, 0, 0.0, -1.0, float("nan"), 98.5, "98.5", True],
+)
+def test_an_override_value_is_ignored_entirely_under_the_derived_source(
+    ignored_override: object,
+) -> None:
+    # In derived mode the number the case carries is the *previous* derived
+    # value, replaced on every run -- presence never promotes it to an
+    # override.
     effective = select_effective_forward(
+        requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
         shiori_derived_forward_clean_price_per_100=99.25,
-        trader_forward_override_per_100=not_an_override,
+        trader_forward_override_per_100=ignored_override,
     )
 
     assert effective.forward_source == SHIORI_DERIVED_S490_FORWARD_SOURCE
     assert effective.forward_clean_price_per_100 == 99.25
     assert effective.trader_forward_override_per_100 is None
+
+
+@pytest.mark.parametrize("bad_source", ["", None, "MANUAL_TRADER_ENTRY", "shiori_derived_s490"])
+def test_an_unrecognized_requested_source_is_never_mapped_onto_a_default(
+    bad_source: object,
+) -> None:
+    with pytest.raises(ValueError, match="requested_forward_source"):
+        select_effective_forward(
+            requested_forward_source=bad_source,
+            shiori_derived_forward_clean_price_per_100=99.25,
+        )
 
 
 # --- Fail closed ----------------------------------------------------------
@@ -116,12 +162,13 @@ def test_a_value_that_is_not_a_usable_price_is_not_an_override(not_an_override: 
     "unusable_derived",
     [None, 0, 0.0, -1.0, float("nan"), float("inf"), "99.25", True, False],
 )
-def test_no_override_and_no_usable_derived_forward_fails_closed(
+def test_the_derived_source_with_no_usable_derived_forward_fails_closed(
     unusable_derived: object,
 ) -> None:
     with pytest.raises(ForwardSourceUnavailableError) as excinfo:
         select_effective_forward(
-            shiori_derived_forward_clean_price_per_100=unusable_derived
+            requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+            shiori_derived_forward_clean_price_per_100=unusable_derived,
         )
 
     message = str(excinfo.value)
@@ -138,6 +185,7 @@ def test_the_fail_closed_error_preserves_the_derivations_own_reason() -> None:
     # is never replaced by a generic "forward missing".
     with pytest.raises(ForwardSourceUnavailableError) as excinfo:
         select_effective_forward(
+            requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
             shiori_derived_forward_clean_price_per_100=None,
             shiori_derived_forward_error=(
                 "BLIBondMaturityCashflowUnsupportedError: the window reaches maturity"
@@ -148,16 +196,21 @@ def test_the_fail_closed_error_preserves_the_derivations_own_reason() -> None:
     assert "the window reaches maturity" in str(excinfo.value)
 
 
-def test_select_effective_forward_with_no_arguments_at_all_fails_closed() -> None:
+def test_select_effective_forward_with_no_candidates_at_all_fails_closed() -> None:
     with pytest.raises(ForwardSourceUnavailableError):
-        select_effective_forward()
+        select_effective_forward(
+            requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE
+        )
 
 
 # --- The forward input the pricing chain actually reads -------------------
 
 
 def test_forward_clean_price_input_dict_stamps_the_derived_source() -> None:
-    effective = select_effective_forward(shiori_derived_forward_clean_price_per_100=99.25)
+    effective = select_effective_forward(
+        requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+        shiori_derived_forward_clean_price_per_100=99.25,
+    )
 
     payload = forward_clean_price_input_dict(effective, quote_side="MID")
 
@@ -174,6 +227,7 @@ def test_forward_clean_price_input_dict_stamps_the_derived_source() -> None:
 
 def test_forward_clean_price_input_dict_stamps_the_override_source() -> None:
     effective = select_effective_forward(
+        requested_forward_source=TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
         shiori_derived_forward_clean_price_per_100=99.25,
         trader_forward_override_per_100=98.5,
     )
@@ -188,7 +242,10 @@ def test_forward_clean_price_input_dict_stamps_the_override_source() -> None:
 def test_forward_clean_price_input_dict_defers_quote_side_validation_to_the_typed_contract() -> (
     None
 ):
-    effective = select_effective_forward(shiori_derived_forward_clean_price_per_100=99.25)
+    effective = select_effective_forward(
+        requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+        shiori_derived_forward_clean_price_per_100=99.25,
+    )
 
     with pytest.raises(ValueError):
         forward_clean_price_input_dict(effective, quote_side="NOT_A_SIDE")
@@ -199,7 +256,8 @@ def test_a_derived_forward_that_is_finite_and_positive_is_never_rounded() -> Non
     # trader sees in the ticket has to be the number Black-76 prices from.
     derived = 100.09895833333334
     effective = select_effective_forward(
-        shiori_derived_forward_clean_price_per_100=derived
+        requested_forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+        shiori_derived_forward_clean_price_per_100=derived,
     )
 
     assert effective.forward_clean_price_per_100 == derived

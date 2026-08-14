@@ -272,11 +272,14 @@
             </div>
           </div>
           <div class="fixed-route-note">
-            Forward settlement (tF) is this ticket's own <strong>Expiry</strong> &mdash; change
-            Expiry above and this section recomputes automatically from a Bloomberg-loaded bond,
-            its live spot quote, and a fresh live Bloomberg Curve #490 / S490 acquisition; no
-            repo rate is ever typed in, and no OVME value is hard-coded. A coupon scheduled
-            between Spot Settlement and Expiry is carried to Expiry from its actual
+            Forward settlement (tF) is this ticket's own <strong>Forward Settlement Date</strong>
+            &mdash; the date the bond forward settles, and the date Black-76 pairs this clean
+            price with its accrued interest. Change <strong>Expiry</strong> above and the
+            convention profile re-derives that date, so this section recomputes automatically
+            from a Bloomberg-loaded bond, its live spot quote, and a fresh live Bloomberg
+            Curve #490 / S490 acquisition; no repo rate is ever typed in, and no OVME value is
+            hard-coded. A coupon scheduled
+            between Spot Settlement and forward settlement is carried to it from its actual
             <strong>Federal Reserve payment date</strong> and netted off the forward &mdash;
             open the trace below for the per-coupon detail. Strike, Notional and
             Volatility are not required and are not read here.

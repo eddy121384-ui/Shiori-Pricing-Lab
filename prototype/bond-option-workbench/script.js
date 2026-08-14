@@ -3627,7 +3627,12 @@
         ? "quote-invalidated"
         : "no-draft";
     }
-    if (!present(currentDraft.bond_option.expiry_date)) return "no-expiry";
+    // Codex P1 review of PR #178: tF is the bond forward's own settlement
+    // date, not Expiry -- see resolve_s490_repo_carry_parity's own note for
+    // why. Expiry is still what the trader enters: the convention profile
+    // derives forward settlement from it, so this stays "waiting on Expiry"
+    // in the normal flow, one step further down the same chain.
+    if (!present(currentDraft.forward_settlement_date)) return "no-expiry";
     return "ready";
   }
 
@@ -3671,8 +3676,15 @@
       bond_option: {
         underlying_isin: draft.bond_option.underlying_isin,
         currency: draft.bond_option.currency,
-        expiry_date: draft.bond_option.expiry_date,
       },
+      // Codex P1 review of PR #178: tF is forward_settlement_date, so that is
+      // what the route reads and what has to re-trigger it. bond_option.
+      // expiry_date is deliberately no longer in this fingerprint -- the
+      // route does not read it, and on this page an Expiry change reaches
+      // here as the convention profile's re-derived forward settlement date
+      // anyway, so keeping both would re-fire the derivation twice for one
+      // edit (and once for an Expiry change the profile has not answered yet).
+      forward_settlement_date: draft.forward_settlement_date,
       bond_reference_data_universe: draft.bond_reference_data_universe,
       bond_quote: draft.bond_quote,
       valuation_date: draft.valuation_date,
@@ -3736,9 +3748,11 @@
             ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
               "before the S490 repo-carry Forward can be resolved."
             : gate === "no-expiry"
-              ? "Enter Expiry to see the S490 repo-carry Forward for this bond."
+              ? "Enter Expiry to see the S490 repo-carry Forward for this bond — it sets " +
+                "this ticket's Forward Settlement Date, which is the date the Forward is " +
+                "carried to."
               : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
-                "ticket's Expiry.";
+                "ticket's Forward Settlement Date.";
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
