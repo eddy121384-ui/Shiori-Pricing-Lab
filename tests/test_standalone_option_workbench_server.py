@@ -3471,8 +3471,11 @@ def test_api_case_refuses_a_declared_override_that_is_not_a_usable_price(
     status, payload = _post_json(f"{server_url}/api/case", case)
 
     assert status == 400
-    assert "this run's Forward source is TRADER_FORWARD_OVERRIDE" in payload["error"]
-    assert "never silently replaced by the Shiori Derived S490 Forward" in payload["error"]
+    # The reviewed BLIForwardCleanPriceInput contract's own words, verbatim --
+    # an explicitly declared override is validated as the observation it
+    # claims to be (Codex P2 review of PR #178, round 2), rather than being
+    # pre-screened and reported in this wiring's own terms.
+    assert payload["error"] == "forward_clean_price_per_100 must be positive, got 0.0"
 
 
 @_QUANTLIB_SKIP
@@ -3491,4 +3494,95 @@ def test_a_declared_override_with_no_value_at_all_is_refused_not_re_sourced(
     status, payload = _post_json(f"{server_url}/api/case", case)
 
     assert status == 400
-    assert "this run's Forward source is TRADER_FORWARD_OVERRIDE" in payload["error"]
+    assert payload["error"] == "forward_clean_price_per_100 must be a finite number, got None"
+
+
+# --- Codex P2 review of PR #178, round 2: an override is validated as the
+# --- observation it claims to be, and never rebuilt into a different one -------
+
+
+@pytest.mark.parametrize("inactive_status", ["STALE", "INVALID", "MISSING"])
+def test_api_case_still_rejects_a_non_active_trader_forward_override(
+    server_url: str, monkeypatch, inactive_status: str
+) -> None:
+    # A saved case or direct API request can carry a perfectly valid override
+    # number whose observation status is not ACTIVE. BLIForwardCleanPriceInput
+    # rejects every non-active observation, and promoting one to ACTIVE while
+    # rebuilding it would silently turn data the contract disowns into usable
+    # market data.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a rejected override must not cost a Bloomberg call")
+
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    case = _derived_forward_case()
+    # Manual curve nodes, so the live-curve injector (which runs first and is
+    # unrelated to this rejection) is a no-op here and the two stubs above
+    # genuinely prove the override costs no Bloomberg call.
+    case["curve_points"] = json.loads(_example_case_bytes())["curve_points"]
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+        "status": inactive_status,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "forward_clean_price_input" in payload["error"]
+    assert inactive_status in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_an_active_override_is_priced_from_its_own_input_untouched(
+    server_url: str, monkeypatch
+) -> None:
+    # The other half: a valid override's own input is carried through
+    # verbatim -- same quote side, same status, same source token, same
+    # number -- never rebuilt into a fresh one.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+    supplied_input = dict(case["forward_clean_price_input"])
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["case"]["forward_clean_price_input"] == supplied_input
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(97.75)
+
+
+def test_apply_effective_forward_to_case_returns_an_override_case_unchanged(
+    monkeypatch,
+) -> None:
+    # Unit-level counterpart, with the derivation stubbed so this asserts the
+    # identity of the returned case rather than any Bloomberg behaviour.
+    monkeypatch.setattr(
+        server_module,
+        "resolve_s490_repo_carry_parity",
+        lambda case, spot, profile=None: {
+            "s490_repo_carry": {"forward_clean_price_per_100": 101.0}
+        },
+    )
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    result, provenance = server_module.apply_effective_forward_to_case(case)
+
+    assert result is case
+    assert provenance["forward_source"] == _TRADER_FORWARD_OVERRIDE_SOURCE
+    assert provenance["effective_forward_clean_price_per_100"] == pytest.approx(97.75)
+    # The derived Forward is still resolved beside it for comparison.
+    assert provenance["shiori_derived_forward_clean_price_per_100"] == pytest.approx(101.0)

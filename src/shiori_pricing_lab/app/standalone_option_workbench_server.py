@@ -301,7 +301,11 @@ from shiori_pricing_lab.data._validation import (
     _require_finite_number,
     _require_non_blank,
 )
-from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLICurvePoint
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLIBondQuote,
+    BLICurvePoint,
+    BLIForwardCleanPriceInput,
+)
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
 from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
     resolve_standalone_bond_reference_by_isin,
@@ -333,6 +337,7 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     EFFECTIVE_FORWARD_SOURCES,
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
+    TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     forward_clean_price_input_dict,
     select_effective_forward,
 )
@@ -1539,10 +1544,14 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
       PR #178): a case declaring ``TRADER_FORWARD_OVERRIDE`` with an
       unusable override is refused rather than silently priced from the
       derived Forward under an override label;
-    - the winning number is written back as a freshly constructed
-      ``BLIForwardCleanPriceInput`` stamped with its own source token,
-      preserving the case's own ``quote_side`` (the request contract still
-      requires it to equal the spot side, and still enforces that itself).
+    - in derived mode the winning number is written back as a freshly
+      constructed ``BLIForwardCleanPriceInput`` stamped with its own source
+      token, preserving the case's own ``quote_side`` (the request contract
+      still requires it to equal the spot side, and still enforces that
+      itself). In override mode the case's own input is left **exactly** as
+      supplied and is instead validated as the reviewed contract defines it,
+      before any Bloomberg call -- see the two inline notes below for why
+      rebuilding it is the wrong move there.
 
     **Fail closed.** In Shiori-derived mode a derivation failure -- a missing
     ``spot_settlement_date``, a Bloomberg/curve/coupon-window failure, an
@@ -1562,6 +1571,19 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
     forward_source = forward_input.get("source_system")
     if forward_source not in EFFECTIVE_FORWARD_SOURCES:
         return case, None
+
+    is_trader_override = forward_source == TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE
+    if is_trader_override:
+        # Codex P2 review of PR #178, round 2. An override is the trader's own
+        # explicit forward observation, and it is carried through verbatim --
+        # so every rule the reviewed ``BLIForwardCleanPriceInput`` contract has
+        # about such an observation must still apply to it, ``status``
+        # included. Constructing it here does exactly that, and does it
+        # *before* any Bloomberg call, so a rejected override never costs a
+        # DAPI round trip. The result is deliberately discarded: this is a
+        # validation, not a rewrite -- see the `effective_case` note below for
+        # why an override's own input is never rebuilt.
+        BLIForwardCleanPriceInput(**forward_input)
 
     spot_settlement_date = case.get("spot_settlement_date")
     convention_profile = case.get("convention_profile")
@@ -1597,12 +1619,28 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         shiori_derived_forward_error=derived_error,
     )
 
-    effective_case = {
-        **case,
-        "forward_clean_price_input": forward_clean_price_input_dict(
-            effective, quote_side=forward_input.get("quote_side")
-        ),
-    }
+    # An override's own ``forward_clean_price_input`` is left exactly as
+    # supplied (Codex P2 review of PR #178, round 2). It already is the
+    # explicit forward observation this run prices from, already carries its
+    # own quote side, status and source token, and was validated above as the
+    # reviewed contract defines it -- rebuilding it could only lose or
+    # overwrite one of those, which is precisely how a non-ACTIVE observation
+    # was being promoted to ACTIVE. Only the derived Forward is written, and
+    # only because it genuinely is a new observation Shiori has just computed:
+    # the value it replaces is the *previous* derivation, whose own status
+    # describes a number being discarded. That mirrors how a Bloomberg refresh
+    # already replaces ``bond_quote`` wholesale rather than merging it
+    # field-by-field with the quote it supersedes.
+    effective_case = (
+        case
+        if is_trader_override
+        else {
+            **case,
+            "forward_clean_price_input": forward_clean_price_input_dict(
+                effective, quote_side=forward_input.get("quote_side")
+            ),
+        }
+    )
     provenance = {
         "forward_source": effective.forward_source,
         "effective_forward_clean_price_per_100": effective.forward_clean_price_per_100,
