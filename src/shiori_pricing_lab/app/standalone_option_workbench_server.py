@@ -125,16 +125,18 @@ the full contract:
   "forward_clean_price_per_100": <float>,
   "forward_clean_price_treasury_fraction": <str>, "curve_acquisition":
   <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Since Issue
-  #175 a coupon paid in ``(spot settlement, Expiry]`` is carried rather than
-  refused, and ``forward`` carries the whole per-coupon trace
+  #175 ``forward`` also carries the primitive's interim-coupon fields
   (``interim_coupons``, ``interim_coupon_forward_value_per_100``,
-  ``interim_coupon_treatment``) the primitive produced -- **except** a
-  coupon scheduled on a weekend, which the primitive still fails closed on
-  (its actual payment date is unresolved; see that module's RED note) and
-  which therefore surfaces on the panel as an error rather than a Forward.
-  Any validation, date, Bloomberg DAPI, or curve-range failure returns HTTP
-  400 with ``{"error": "..."}``. This is a parity/testing display only: it
-  prices nothing through Black-76.
+  ``interim_coupon_treatment``). **``interim_coupons`` is always empty in
+  practice**: any coupon scheduled in ``(spot settlement, Expiry]`` -- on a
+  weekday as much as a weekend -- fails closed in the primitive, because
+  the coupon dates this repository holds are unadjusted schedule dates
+  rather than cash-receipt dates (Issue #175 RED; see that module's own
+  note). Such a horizon returns HTTP 400 and surfaces on the panel as an
+  error naming the coupon, never as a Forward. Any validation, date,
+  Bloomberg DAPI, or curve-range failure returns HTTP 400 with
+  ``{"error": "..."}`` the same way. This is a parity/testing display only:
+  it prices nothing through Black-76.
 
 **Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
 regression and developer use only -- the trader-facing ``index.html``/

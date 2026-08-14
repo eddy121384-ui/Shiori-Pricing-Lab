@@ -430,20 +430,27 @@ def repo_carry_forward_clean_price(
     Composes ``coupon_flows_before`` over ``(spot_settlement_date,
     forward_settlement_date]`` and ``accrued_interest_per_100`` at both
     explicit settlement dates, then applies the FPA structure in the module
-    docstring -- including one reinvestment leg per interim coupon, so a
-    coupon inside the repo term is carried rather than refused (Issue #175,
-    Case B). A horizon with no such coupon is the same code path over an
-    empty coupon set and is arithmetically unchanged from Case A.
+    docstring.
+
+    **Case A only, as things stand.** ``interim_coupons`` on the returned
+    result is therefore always empty: **every** coupon scheduled in
+    ``(spot_settlement_date, forward_settlement_date]`` raises
+    :class:`RepoCarryInterimCouponPaymentDateUnresolvedError`, weekday
+    coupons included, because the date this repository holds for a coupon is
+    an unadjusted schedule date rather than a cash-receipt date (the module
+    docstring's RED note). No caller can obtain a carried Case B result from
+    this function. The reinvestment arithmetic that would produce one is
+    implemented and tested in
+    :func:`reinvest_interim_coupon_to_forward_settlement`, which takes an
+    actual receipt date as an explicit argument.
 
     Raises :class:`TypeError` for a ``bond`` the accrual adapter does not
-    accept, :class:`ValueError` for a non-finite/non-positive spot clean
+    accept, and :class:`ValueError` for a non-finite/non-positive spot clean
     price, a non-positive repo term, or a forward dirty price that is not
-    positive after the interim coupons are subtracted, and
-    :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` when an interim
-    coupon is scheduled on a weekend (the module docstring's RED note).
-    Every other error propagates unchanged from the composed helpers --
-    notably ``BLIBondMaturityCashflowUnsupportedError`` when the window
-    reaches the bond's maturity date.
+    positive. Every other error propagates unchanged from the composed
+    helpers -- notably ``BLIBondMaturityCashflowUnsupportedError`` when the
+    window reaches the bond's maturity date, which is raised by
+    ``coupon_flows_before`` before the interim-coupon refusal above.
     """
 
     spot_clean = _require_finite(spot_clean_price_per_100, "spot_clean_price_per_100")
