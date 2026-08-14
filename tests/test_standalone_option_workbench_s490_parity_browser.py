@@ -1239,3 +1239,61 @@ def test_a_quote_side_change_leaves_the_derived_ticket_refreshable(
     assert _is_disabled(page, "#price-btn")
     _wait_for_refresh_enabled(page)
     assert _derived_forward_in_field(page) == pytest.approx(forward_before, abs=5e-7)
+
+
+# --- Codex P2 review of PR #178, round 11 -------------------------------------
+
+
+def test_a_successful_refresh_satisfies_a_queued_reset_reprice(server_url, page) -> None:
+    # After a Quote Side change on a completed override run, Reset can only
+    # queue its reprice -- Price is blocked and Refresh Bloomberg & Price is
+    # the one available action. That refresh already prices the derived
+    # Forward, so it must satisfy the queued reprice rather than be followed
+    # by an unasked-for second run that reacquires Curve #490, can land on a
+    # different Forward, and drops the refresh's own quote provenance.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["source_system"]
+        == "TRADER_FORWARD_OVERRIDE"
+    )
+
+    # The side change disowns the sourced quote: Price is blocked, Refresh is
+    # the way back.
+    page.click('#bond-quote-side-toggle .opt[data-value="BID"]')
+    _wait_for_refresh_enabled(page)
+    assert _is_disabled(page, "#price-btn")
+
+    page.click("#forward-use-derived-btn")
+    assert page.evaluate("() => window.__shioriTestRepriceQueued()") is True
+
+    priced = []
+
+    def _observe_price(route):
+        priced.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/case", _observe_price)
+    page.click("#bloomberg-refresh-btn")
+
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_quote"][
+            "quote_side"
+        ]
+        == "BID"
+        and page.evaluate("() => window.__shioriTestRepriceQueued()") is False
+    )
+    # Give any spurious queued reprice every chance to fire before asserting.
+    page.wait_for_timeout(600)
+
+    assert priced == []
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    page.unroute("**/api/case")

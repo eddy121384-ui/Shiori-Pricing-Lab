@@ -3951,6 +3951,21 @@
     renderS490Parity();
   }
 
+  // A completed run satisfies any reprice Reset / Use Shiori Derived had
+  // queued (Codex P2 review of PR #178, round 11). Reset queues a reprice
+  // when the ticket is not priceable yet -- and after a Quote Side change on
+  // a completed override run, the only available action *is* Refresh
+  // Bloomberg & Price. That refresh already prices the derived Forward, so
+  // leaving the flag set made `syncDraftGating` immediately launch a second
+  // `POST /api/case` on top of it: a run the trader never asked for, which
+  // reacquires Curve #490, can land on a different Forward, and replaces the
+  // refreshed display with one carrying no `live_bloomberg_quote` section at
+  // all -- silently discarding the quote-acquisition provenance of the very
+  // action that was taken.
+  function markQueuedRepriceSatisfied() {
+    repriceOnceForwardIsPriceable = false;
+  }
+
   // Codex P1 review of PR #178, round 6: adopt the derivation the completed
   // run actually priced with, rather than letting the panel re-derive.
   //
@@ -4486,6 +4501,7 @@
     }
 
     currentDraft = payload.case;
+    markQueuedRepriceSatisfied();
     renderContext(payload.context);
     setTradeFormFromDraft(currentDraft);
     adoptDerivationFromPricedRun(payload.display);
@@ -4605,6 +4621,7 @@
 
     // The refresh succeeded, so the sourced state is trustworthy again.
     sourcedQuoteInvalidated = false;
+    markQueuedRepriceSatisfied();
     setDerivedFormFromDraft();
     setTradeFormFromDraft(currentDraft);
     adoptDerivationFromPricedRun(display);
