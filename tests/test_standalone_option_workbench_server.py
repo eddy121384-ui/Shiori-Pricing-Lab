@@ -4100,3 +4100,86 @@ def test_validate_and_price_agree_for_a_usable_forward_with_a_discarded_status(
     # The whole observation was discarded, stale status and stale number alike.
     assert price_payload["case"]["forward_clean_price_input"]["status"] == "ACTIVE"
     assert price_payload["display"]["forward_clean_price_per_100"] != pytest.approx(99.5)
+
+
+# --- Codex P2 review of PR #178, round 10: readiness mirrors what pricing
+# --- reconstructs, member for member ------------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_validate_and_price_agree_for_a_derived_case_with_an_extra_forward_member(
+    server_url: str, monkeypatch
+) -> None:
+    # The derived path discards the whole stored observation and builds a
+    # fresh one, so an extra member on it is simply not part of what gets
+    # priced -- readiness must not refuse a case Price handles.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "note": "a member no reviewed contract declares",
+    }
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, True)
+    assert price_status == 200
+    assert price_payload["display"]["status"] == "SUCCESS"
+    # The extra member reached neither the priced input nor the echoed case.
+    assert "note" not in price_payload["case"]["forward_clean_price_input"]
+
+
+@_QUANTLIB_SKIP
+def test_validate_and_price_agree_when_a_derived_case_omits_the_forward_quote_side(
+    server_url: str, monkeypatch
+) -> None:
+    # The agreement has to hold in both directions: quote_side is genuinely
+    # reused by the derived path, so a case omitting it must be refused by
+    # readiness *and* by pricing -- readiness is not merely more permissive.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        key: value
+        for key, value in case["forward_clean_price_input"].items()
+        if key != "quote_side"
+    }
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, False)
+    assert "quote_side" in validate_payload["error"]
+    assert price_status == 400
+    assert "quote_side" in price_payload["error"]
+
+
+def test_an_override_with_an_extra_forward_member_is_refused_by_both(
+    server_url: str, monkeypatch
+) -> None:
+    # An override is the priced value and is validated as itself, so an extra
+    # member is refused -- by readiness and by pricing alike.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a malformed override must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+        "note": "a member no reviewed contract declares",
+    }
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, False)
+    assert "note" in validate_payload["error"]
+    assert price_status == 400
+    assert "note" in price_payload["error"]

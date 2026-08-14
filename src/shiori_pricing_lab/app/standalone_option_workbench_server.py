@@ -1156,23 +1156,41 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
         return None
     if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
         return None
-    # Both discarded fields are normalized, and they are normalized
-    # independently (Codex P2 review of PR #178, round 9). An earlier version
-    # returned early whenever the *number* was usable, which left an
-    # inactive `status` on a case whose whole observation the pricing path
-    # discards anyway -- so a derived case carrying a perfectly good prior
-    # Forward alongside STALE/INVALID/MISSING still read not-ready while
-    # Price succeeded. A usable number is still kept rather than replaced:
-    # where a real value exists, validating the real one is strictly better
-    # evidence than validating a stand-in.
+    # Built from exactly the four fields the pricing path reconstructs, never
+    # spread from the supplied object (Codex P2 review of PR #178, round 10).
+    # In derived mode `apply_effective_forward_to_case` *discards* the whole
+    # incoming observation and builds a fresh BLIForwardCleanPriceInput from
+    # the derived number plus the case's own quote side -- so an extra member
+    # on the stored input (`{"note": ...}` on a saved or hand-written case) is
+    # simply not part of what gets priced. Spreading it through here made the
+    # constructor reject it and readiness answer not-ready for a case Price
+    # handles perfectly well.
+    #
+    # This shape is therefore the same object `forward_clean_price_input_dict`
+    # produces, with one deliberate difference: a usable stored number is kept
+    # rather than replaced, because where a real value exists, validating the
+    # real one is strictly better evidence than validating a stand-in.
+    #
+    # The two fields the derived path genuinely reuses are still read straight
+    # off the supplied input and are still validated by the constructor:
+    # `quote_side` (which the request contract requires to equal the spot
+    # side) and `source_system`. A case that omits either fails here exactly
+    # as it fails at pricing time, so the agreement holds in both directions
+    # -- readiness is not merely more permissive, it is the same answer.
+    #
+    # Both discarded fields are normalized, and independently (Codex P2 review
+    # of PR #178, round 9): an earlier version returned early whenever the
+    # *number* was usable, leaving an inactive `status` in place on an
+    # observation the pricing path discards anyway.
     forward_value = forward_input.get("forward_clean_price_per_100")
     return {
-        **forward_input,
         "forward_clean_price_per_100": (
             forward_value
             if is_usable_forward_clean_price(forward_value)
             else _VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100
         ),
+        "quote_side": forward_input.get("quote_side"),
+        "source_system": forward_input.get("source_system"),
         "status": "ACTIVE",
     }
 
