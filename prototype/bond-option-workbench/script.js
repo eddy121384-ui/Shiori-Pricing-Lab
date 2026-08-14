@@ -3688,10 +3688,14 @@
       bond_reference_data_universe: draft.bond_reference_data_universe,
       bond_quote: draft.bond_quote,
       valuation_date: draft.valuation_date,
-      // Issue #175: the route now reads the selected convention profile, so
-      // changing it must re-trigger -- it can turn an interim-coupon expiry
-      // from a refusal into a Forward and back.
-      convention_profile: selectedConventionProfile,
+      // Issue #175: the route reads the selected convention profile, so
+      // changing it must re-trigger -- it can turn an interim-coupon horizon
+      // from a refusal into a Forward and back. Read off the draft rather
+      // than the browser-state variable (Codex P2 review of PR #178, round
+      // 3): the draft is what POST /api/case prices from, so reading the
+      // same field here is what makes the panel's derivation and the priced
+      // run structurally incapable of disagreeing about the methodology.
+      convention_profile: draft.convention_profile,
     });
   }
 
@@ -3905,15 +3909,17 @@
       response = await fetch("/api/case/s490-repo-carry", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // convention_profile is the trader's own selection, sent as browser
-        // state exactly as the profile route already receives it. The server
-        // reads it only to decide whether the UST Federal Reserve
-        // coupon-payment convention may be asserted for an interim coupon
-        // (Issue #175); it never defaults or infers one.
+        // convention_profile is the trader's own selection. The server reads
+        // it only to decide whether the UST Federal Reserve coupon-payment
+        // convention may be asserted for an interim coupon (Issue #175); it
+        // never defaults or infers one. Sent from the case being derived
+        // from, not from the browser-state variable, so this panel can never
+        // report a Forward derived under a different methodology from the
+        // one Price would use (Codex P2 review of PR #178, round 3).
         body: JSON.stringify({
           case: requestCase,
           spot_settlement_date: spotSettlementDate,
-          convention_profile: selectedConventionProfile,
+          convention_profile: requestCase.convention_profile,
         }),
       });
       payload = await response.json();
@@ -4739,6 +4745,23 @@
     advancedProfileTransportError = null;
     lastAdvancedProfileKey = null;
     applyAdvancedProfileFields({ fields: [] });
+    // Codex P2 review of PR #178, round 3. Since Issue #177 the selected
+    // profile is a real pricing input carried on the case
+    // (`convention_profile`): it decides whether the approved UST Federal
+    // Reserve coupon-payment convention may be asserted for an interim
+    // coupon, and therefore whether the server can derive this ticket's
+    // Forward at all. `applyAdvancedProfileFields` above only reaches
+    // `applyManualInputsToDraft` when one of the eight profile-owned
+    // *controls* actually moved -- so on a ticket where the trader has
+    // already overridden all eight, nothing moved, the draft kept the
+    // previous selection, and the S490 panel (which reads browser state)
+    // would derive under the new profile while Price sent the old one. This
+    // call is unconditional for exactly that reason, and goes through the
+    // same single form-to-draft path every other ticket input uses, so the
+    // selection change also invalidates any in-flight Price/Refresh -- their
+    // responses describe a case priced under a methodology the trader has
+    // moved away from.
+    applyManualInputsToDraft();
     renderConventionProfilePicker();
     renderFieldProvenance();
     renderAdvancedProfileStatus();

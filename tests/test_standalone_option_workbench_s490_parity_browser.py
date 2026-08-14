@@ -916,3 +916,54 @@ def test_clear_drops_the_trader_forward_override(server_url, page) -> None:
     assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
     assert page.input_value("#forward-price-input") == ""
     assert page.eval_on_selector("#forward-use-derived-btn", "el => el.hidden")
+
+
+# --- Codex P2 review of PR #178, round 3: the selected convention profile
+# --- must reach the priced case, not just the panel ---------------------------
+
+
+def _draft_convention_profile(page):
+    return page.evaluate("() => window.__shioriTestGetCurrentDraft().convention_profile")
+
+
+def test_changing_the_convention_profile_reaches_the_priced_case(server_url, page) -> None:
+    # `_load_and_complete_ust` types all eight profile-owned Advanced controls,
+    # so every one of them is a trader override -- which is exactly the state
+    # where `applyAdvancedProfileFields` sees no control move and therefore
+    # never reached `applyManualInputsToDraft`. The panel reads the selection
+    # from the case now, but the real point is that the case itself must carry
+    # the trader's current choice: an interim-coupon ticket that derives a
+    # Forward under a newly selected UST profile must not then fail at Price
+    # time under the previous one.
+    _load_and_complete_ust(page, server_url)
+    assert _draft_convention_profile(page) == "UST"
+    assert page.evaluate("() => window.__shioriTestTraderOverriddenPaths().length") == 8
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    assert page.evaluate("() => window.__shioriTestSelectedConventionProfile()") == (
+        "US_CORPORATE"
+    )
+
+
+def test_the_s490_panel_derives_under_the_same_profile_the_case_carries(
+    server_url, page
+) -> None:
+    # One source of truth: whatever the panel sends is read off the same case
+    # field Price sends, so the two cannot report different methodologies.
+    requests = []
+    page.on(
+        "request",
+        lambda request: requests.append(request.post_data)
+        if "/api/case/s490-repo-carry" in request.url
+        else None,
+    )
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    _wait_until(lambda: len(requests) > 0)
+    body = json.loads(requests[-1])
+    assert body["convention_profile"] == _draft_convention_profile(page)
+    assert body["case"]["convention_profile"] == body["convention_profile"]
