@@ -12,6 +12,7 @@ the HTTP layer.
 
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 import urllib.error
@@ -3269,7 +3270,10 @@ def _install_fake_bloomberg_loader_with_clean_price(monkeypatch, clean_price: fl
             isin=isin,
             currency=Currency.USD,
             price_type=BLIQuoteBasis.PRICE,
-            quote_side=TreasuryFTPQuoteSide.MID,
+            # Echoes the requested side, as the real loader does -- a fake that
+            # always answered MID would make a BID refresh look like a
+            # contract violation that the production path never produces.
+            quote_side=TreasuryFTPQuoteSide(quote_side),
             source_system="BLOOMBERG_DAPI",
             status=BLIMarketDataStatus.ACTIVE,
             clean_price_per_100=clean_price,
@@ -3618,13 +3622,18 @@ def test_a_derived_mode_refresh_reports_what_it_actually_re_sourced(
 
     assert status == 200
     live_quote = payload["display"]["live_bloomberg_quote"]
+    # The derivation's own forced Curve #490 acquisition is a separate live
+    # fetch from the option-discounting one, and is listed as such (Codex P1
+    # review of PR #178, round 12).
     assert live_quote["refreshed_inputs"] == [
         "BOND_QUOTE",
         "LIVE_OPTION_DISCOUNT_CURVE",
+        "LIVE_S490_REPO_CARRY_CURVE",
         "SHIORI_DERIVED_FORWARD",
     ]
     assert live_quote["refreshed_scope"] == (
-        "BOND_QUOTE_AND_LIVE_OPTION_DISCOUNT_CURVE_AND_SHIORI_DERIVED_FORWARD"
+        "BOND_QUOTE_AND_LIVE_OPTION_DISCOUNT_CURVE_AND_LIVE_S490_REPO_CARRY_CURVE"
+        "_AND_SHIORI_DERIVED_FORWARD"
     )
     assert live_quote["other_market_inputs"] == "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
 
@@ -3658,8 +3667,19 @@ def test_an_override_mode_refresh_does_not_claim_the_forward_was_re_sourced(
 
     assert status == 200
     live_quote = payload["display"]["live_bloomberg_quote"]
-    assert live_quote["refreshed_inputs"] == ["BOND_QUOTE", "LIVE_OPTION_DISCOUNT_CURVE"]
-    assert "SHIORI_DERIVED_FORWARD" not in live_quote["refreshed_scope"]
+    # An override run still re-derives the comparison value from the refreshed
+    # spot, over its own fresh Curve #490 -- both are market inputs this run
+    # re-sourced, even though Black-76 priced neither (Codex P1 review of PR
+    # #178, round 12). The *effective* Forward is still not claimed as
+    # refreshed: it is the trader's own, untouched.
+    assert live_quote["refreshed_inputs"] == [
+        "BOND_QUOTE",
+        "LIVE_OPTION_DISCOUNT_CURVE",
+        "LIVE_S490_REPO_CARRY_CURVE",
+        "SHIORI_DERIVED_FORWARD_COMPARISON",
+    ]
+    assert "_AND_SHIORI_DERIVED_FORWARD_AND" not in live_quote["refreshed_scope"]
+    assert not live_quote["refreshed_scope"].endswith("_AND_SHIORI_DERIVED_FORWARD")
 
 
 @_QUANTLIB_SKIP
@@ -4183,3 +4203,197 @@ def test_an_override_with_an_extra_forward_member_is_refused_by_both(
     assert "note" in validate_payload["error"]
     assert price_status == 400
     assert "note" in price_payload["error"]
+
+
+# --- Codex review of PR #178, round 12 ----------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_a_failed_derivation_claims_no_s490_acquisition_on_an_override_refresh(
+    server_url: str, monkeypatch
+) -> None:
+    # P1's boundary: an acquisition is claimed only when the derivation's own
+    # trace proves it happened. A derivation that failed may not have got that
+    # far, so nothing is claimed -- and the reason is on effective_forward.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+    # A manual curve, so option discounting succeeds while the derivation's
+    # own forced acquisition is the thing that fails.
+    case["curve_points"] = json.loads(_example_case_bytes())["curve_points"]
+    _install_fake_live_curve_loader(
+        monkeypatch, error=BLIBloombergDapiError("Curve #490 session failed")
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert "refreshed_inputs" not in live_quote
+    assert live_quote["refreshed_scope"] == "BOND_QUOTE_ONLY"
+    assert "Curve #490 session failed" in (
+        payload["display"]["effective_forward"]["shiori_derived_forward_error"]
+    )
+
+
+@pytest.mark.parametrize(
+    "forward_source",
+    [_DERIVED_FORWARD_SOURCE, _TRADER_FORWARD_OVERRIDE_SOURCE],
+)
+def test_a_forward_quote_side_mismatch_is_refused_before_any_bloomberg_call(
+    server_url: str, monkeypatch, forward_source: str
+) -> None:
+    # P2: the forward's side is carried through to what is priced in both
+    # modes, and the request contract requires it to equal the spot side --
+    # a fact about the case alone, so it must not cost a DAPI request nor be
+    # reportable as a Bloomberg failure.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a quote-side mismatch must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    assert case["bond_quote"]["quote_side"] == "MID"
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": forward_source,
+        "quote_side": "BID",
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "one coherent observation side" in payload["error"]
+
+
+def test_an_invalid_forward_quote_side_is_refused_before_any_bloomberg_call(
+    server_url: str, monkeypatch
+) -> None:
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("an invalid quote side must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "quote_side": "NOT_A_SIDE",
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "quote_side" in payload["error"]
+
+
+def test_the_quote_side_pre_flight_leaves_a_legacy_case_alone(monkeypatch) -> None:
+    # Scoped to the two Issue #177 modes: a legacy explicit forward keeps
+    # whatever the builder already said about it, mismatch included.
+    case = json.loads(_example_case_bytes())
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "quote_side": "BID",
+    }
+
+    # No raise: this pre-flight does not govern a legacy case.
+    server_module.require_coherent_forward_quote_side(case)
+
+
+def test_every_pricing_route_runs_the_same_deterministic_pre_flight() -> None:
+    # The structural guard against a route picking up some checks and missing
+    # others -- which is how POST /api/case/price came to bypass the slice.
+    source = inspect.getsource(server_module)
+    for function_name in (
+        "def price_uploaded_case(",
+        "def price_explicit_case_with_overlay(",
+        "def price_case_with_bloomberg_quote(",
+    ):
+        start = source.index(function_name)
+        end = source.index("\ndef ", start + 1)
+        assert "validate_deterministic_forward_inputs(" in source[start:end], function_name
+
+
+@_QUANTLIB_SKIP
+def test_a_refresh_may_pre_set_the_forward_side_to_the_side_it_is_about_to_source(
+    server_url: str, monkeypatch
+) -> None:
+    # The quote-side pre-flight must not compare against a bond_quote that is
+    # about to be replaced. A refresh onto a new side deliberately mirrors the
+    # forward's side *before* the request -- mirroring it afterwards could
+    # never run -- so the case's own superseded side is not the one that will
+    # be priced. The coherence the request contract requires is enforced by
+    # that contract, after the substitution, against the quote actually used.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    assert case["bond_quote"]["quote_side"] == "MID"
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "quote_side": "BID",
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "BID",
+        },
+    )
+
+    assert status == 200
+    assert payload["case"]["bond_quote"]["quote_side"] == "BID"
+    assert payload["case"]["forward_clean_price_input"]["quote_side"] == "BID"
+
+
+def test_a_refresh_still_refuses_an_invalid_forward_quote_side(
+    server_url: str, monkeypatch
+) -> None:
+    # The half that stays true regardless of which quote is priced.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("an invalid quote side must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _must_not_be_called)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "quote_side": "NOT_A_SIDE",
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 400
+    assert "quote_side" in payload["error"]

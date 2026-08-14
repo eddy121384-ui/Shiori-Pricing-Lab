@@ -352,7 +352,7 @@ from shiori_pricing_lab.pricing.bli_treasury_price_format import (
 from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
     UST_COUPON_PAYMENT_ROLL_CONVENTION,
 )
-from shiori_pricing_lab.products.enums import Currency, coerce_enum
+from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide, coerce_enum
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BASE_CASE_PATH = PROJECT_ROOT / "examples" / "standalone_option_case.json"
@@ -979,8 +979,7 @@ def price_uploaded_case(case: dict) -> dict:
     # Before the live-curve fetch, so an input this run cannot price under is
     # refused for its own deterministic reason rather than behind a Bloomberg
     # failure -- see the two validators' own docstrings.
-    validate_declared_trader_forward_override(case)
-    require_usable_spot_settlement_date_for_derived_forward(case)
+    validate_deterministic_forward_inputs(case)
     case = inject_live_option_discount_curve_if_absent(case)
     case, effective_forward = apply_effective_forward_to_case(case)
     _, _, display = price_standalone_option_case(case)
@@ -1109,6 +1108,7 @@ def validate_case(case: dict) -> dict:
         if placeholder_forward is not None:
             case = {**case, "forward_clean_price_input": placeholder_forward}
         require_usable_spot_settlement_date_for_derived_forward(case)
+        require_coherent_forward_quote_side(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -1195,6 +1195,108 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
     }
 
 
+def _require_valid_forward_quote_side(case: object) -> TreasuryFTPQuoteSide | None:
+    """Coerce an Issue #177 Forward's own ``quote_side``, or return ``None``.
+
+    The half of the side contract that is true regardless of which bond quote
+    ends up being priced: the value has to be a real ``TreasuryFTPQuoteSide``.
+    Returns ``None`` (checking nothing) for a case outside the two Issue #177
+    modes or without a forward input.
+    """
+
+    if not isinstance(case, dict):
+        return None
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return None
+    if forward_input.get("source_system") not in EFFECTIVE_FORWARD_SOURCES:
+        return None
+    return coerce_enum(
+        forward_input.get("quote_side"),
+        TreasuryFTPQuoteSide,
+        "forward_clean_price_input.quote_side",
+    )
+
+
+def require_coherent_forward_quote_side(case: object) -> None:
+    """Raise unless an Issue #177 Forward's quote side is valid and matches spot.
+
+    Pure and offline -- coerces two enum values and compares them. A no-op for
+    a case outside the two Issue #177 modes, whose forward input this wiring
+    never touches.
+
+    Both modes carry the forward's ``quote_side`` through to what is priced:
+    the derived path *reuses* it on the input it reconstructs, and an override
+    keeps its own. Either way the reviewed request contract requires it to
+    equal the spot ``bond_quote.quote_side`` -- one coherent observation side,
+    no substitution -- and either way that is a fact about the case alone.
+
+    Checked here, ahead of every Bloomberg call, for the reason
+    :func:`validate_declared_trader_forward_override` already is (Codex P2
+    review of PR #178, round 12): left to the typed builder it surfaced only
+    *after* the live S490 acquisition and, on ``POST /api/case``, after the
+    Option Discount Curve fetch too -- so an outage could report a Bloomberg
+    failure in place of a guaranteed local rejection, and even a successful
+    rejection cost DAPI requests it never needed.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") not in EFFECTIVE_FORWARD_SOURCES:
+        return
+    bond_quote = case.get("bond_quote")
+    if not isinstance(bond_quote, dict):
+        # Not this check's business: the envelope parser reports it on its own.
+        return
+    forward_side = _require_valid_forward_quote_side(case)
+    if forward_side is None:
+        return
+    spot_side = coerce_enum(
+        bond_quote.get("quote_side"), TreasuryFTPQuoteSide, "bond_quote.quote_side"
+    )
+    if forward_side is not spot_side:
+        raise ValueError(
+            f"forward_clean_price_input.quote_side ({forward_side.value}) must equal "
+            f"bond_quote.quote_side ({spot_side.value}) -- one coherent observation "
+            "side, no substitution"
+        )
+
+
+def validate_deterministic_forward_inputs(
+    case: object, *, bond_quote_is_final: bool = True
+) -> None:
+    """Run every Issue #177 Forward-input refusal that needs no Bloomberg call.
+
+    One named pre-flight, called by all three pricing routes, so a route
+    cannot pick up some of these checks and miss others -- which is exactly
+    how ``POST /api/case/price`` came to bypass the whole slice (Codex P1
+    review of PR #178, round 9). Each individual check is a no-op for the
+    modes it does not govern, so this is safe to call unconditionally, and
+    every one of them reads only the case: no network, no clock.
+
+    ``bond_quote_is_final=False`` for ``POST /api/case/bloomberg``, whose
+    whole purpose is to replace ``bond_quote`` with a freshly acquired one.
+    A caller there deliberately sets the forward's ``quote_side`` to the side
+    it is *about* to source -- the browser mirrors it before the request
+    precisely because mirroring it afterwards could never run -- so the
+    case's own, superseded ``bond_quote.quote_side`` is not the side that
+    will be priced, and comparing against it would reject a correct request.
+    The forward side's own validity is still checked; the coherence the
+    request contract requires is enforced by that contract, after the
+    substitution, against the quote that was actually used.
+    """
+
+    validate_declared_trader_forward_override(case)
+    require_usable_spot_settlement_date_for_derived_forward(case)
+    if bond_quote_is_final:
+        require_coherent_forward_quote_side(case)
+    else:
+        _require_valid_forward_quote_side(case)
+
+
 def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
     """Raise ``ValueError`` unless a derived-Forward case carries a usable ``tS``.
 
@@ -1267,8 +1369,7 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
     # Same order as every other pricing route: the deterministic, entirely
     # local refusals run before anything can reach Bloomberg.
-    validate_declared_trader_forward_override(overlaid_case)
-    require_usable_spot_settlement_date_for_derived_forward(overlaid_case)
+    validate_deterministic_forward_inputs(overlaid_case)
     overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
     _, _, display = price_standalone_option_case(overlaid_case)
     if effective_forward is not None:
@@ -1333,8 +1434,7 @@ def price_case_with_bloomberg_quote(
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
     # Same ordering as POST /api/case: the deterministic checks run before any
     # Bloomberg call, curve or quote.
-    validate_declared_trader_forward_override(overlaid_case)
-    require_usable_spot_settlement_date_for_derived_forward(overlaid_case)
+    validate_deterministic_forward_inputs(overlaid_case, bond_quote_is_final=False)
     curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection
@@ -1358,12 +1458,27 @@ def price_case_with_bloomberg_quote(
     effective_forward = captured.get("effective_forward")
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
+    # The derivation forces its own fresh production Curve #490 acquisition
+    # whenever it runs -- including in override mode, where it produces the
+    # comparison value beside the priced override (Codex P1 review of PR #178,
+    # round 12). Its own trace is the proof it happened: that trace carries
+    # `curve_acquisition = LIVE_PRODUCTION_CURVE_490_ACQUIRED_THIS_RUN`. When
+    # the derivation *failed* no acquisition is claimed -- it may not have got
+    # that far -- and the reason is already on `effective_forward`.
+    derived_trace_present = (
+        effective_forward is not None and effective_forward["shiori_derived_forward"] is not None
+    )
     display = _with_accurate_refresh_scope(
         display,
         live_curve_acquired=live_curve_acquired,
+        s490_curve_acquired=derived_trace_present,
         derived_forward_replaced=(
             effective_forward is not None
             and effective_forward["forward_source"] == SHIORI_DERIVED_S490_FORWARD_SOURCE
+        ),
+        derived_forward_comparison_refreshed=(
+            derived_trace_present
+            and effective_forward["forward_source"] != SHIORI_DERIVED_S490_FORWARD_SOURCE
         ),
     )
     return {"case": priced_case, "display": display}
@@ -1391,13 +1506,26 @@ def price_case_with_bloomberg_quote(
 # never has to parse a compound label.
 _REFRESHED_INPUT_BOND_QUOTE = "BOND_QUOTE"
 _REFRESHED_INPUT_OPTION_DISCOUNT_CURVE = "LIVE_OPTION_DISCOUNT_CURVE"
+# The derivation's own forced acquisition, which is a *separate* live Curve
+# #490 fetch from the option-discounting one (see
+# acquire_production_curve_490_for_s490_parity for why it cannot share it).
+_REFRESHED_INPUT_S490_CURVE = "LIVE_S490_REPO_CARRY_CURVE"
 _REFRESHED_INPUT_DERIVED_FORWARD = "SHIORI_DERIVED_FORWARD"
+# The derived Forward when it is *not* what was priced: an override run still
+# re-derives it from the refreshed spot as the comparison value on screen, so
+# it is a market input this run re-sourced even though Black-76 did not use it.
+_REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON = "SHIORI_DERIVED_FORWARD_COMPARISON"
 _OTHER_MARKET_INPUTS_UNCHANGED = "CASE_JSON_UNCHANGED"
 _OTHER_MARKET_INPUTS_EXCEPT_REFRESHED = "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
 
 
 def _with_accurate_refresh_scope(
-    display: dict, *, live_curve_acquired: bool, derived_forward_replaced: bool
+    display: dict,
+    *,
+    live_curve_acquired: bool,
+    s490_curve_acquired: bool,
+    derived_forward_replaced: bool,
+    derived_forward_comparison_refreshed: bool,
 ) -> dict:
     """Return ``display`` with its live-quote refresh scope corrected.
 
@@ -1413,8 +1541,12 @@ def _with_accurate_refresh_scope(
     refreshed = [_REFRESHED_INPUT_BOND_QUOTE]
     if live_curve_acquired:
         refreshed.append(_REFRESHED_INPUT_OPTION_DISCOUNT_CURVE)
+    if s490_curve_acquired:
+        refreshed.append(_REFRESHED_INPUT_S490_CURVE)
     if derived_forward_replaced:
         refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD)
+    if derived_forward_comparison_refreshed:
+        refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON)
     if refreshed == [_REFRESHED_INPUT_BOND_QUOTE]:
         # Genuinely quote-only: returned completely untouched, so a legacy
         # (manual-curve, explicit-forward) refresh is still byte-for-byte the
