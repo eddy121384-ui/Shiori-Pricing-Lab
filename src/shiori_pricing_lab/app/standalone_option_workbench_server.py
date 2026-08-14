@@ -105,9 +105,9 @@ the browser holds whichever case is currently active and resends it):
   the overlaid case gets the same live Curve #490 injection as ``POST
   /api/case`` above, applied before the bond-quote refresh.
 
-**S490 repo-carry Forward parity (Issue #173/#174).** One more stateless,
-read-only route -- see :func:`resolve_s490_repo_carry_parity` for the full
-contract:
+**S490 repo-carry Forward parity (Issues #173/#174/#175).** One more
+stateless, read-only route -- see :func:`resolve_s490_repo_carry_parity` for
+the full contract:
 
 - ``POST /api/case/s490-repo-carry`` -- body is ``{"case": <full case>,
   "spot_settlement_date": "YYYY-MM-DD"}``. **Always acquires a fresh live
@@ -124,10 +124,14 @@ contract:
   included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
   "forward_clean_price_treasury_fraction": <str>, "curve_acquisition":
-  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Any
-  validation, date, Bloomberg DAPI, curve-range, or interim-coupon failure
-  returns HTTP 400 with ``{"error": "..."}``. This is a parity/testing
-  display only: it prices nothing through Black-76.
+  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Since Issue
+  #175 a coupon paid in ``(spot settlement, Expiry]`` is carried rather than
+  refused, and ``forward`` carries the whole per-coupon trace
+  (``interim_coupons``, ``interim_coupon_forward_value_per_100``,
+  ``interim_coupon_treatment``) the primitive produced. Any validation,
+  date, Bloomberg DAPI, or curve-range failure returns HTTP 400 with
+  ``{"error": "..."}``. This is a parity/testing display only: it prices
+  nothing through Black-76.
 
 **Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
 regression and developer use only -- the trader-facing ``index.html``/
@@ -439,7 +443,14 @@ DEFAULT_PORT = 8765
 # Expiry (or any other ticket input) changes and a Spot Settlement Date is
 # entered. A stale -v17 process would 404 the new route and the panel would
 # show nothing but a transport-error status forever.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v18"
+#
+# Bumped to -v19 for Issue #175's interim-coupon (Case B) support: the
+# S490 repo-carry response now carries the per-coupon carry trace and the
+# coupon-treatment label, and the served page gained the interim-coupon
+# summary plus the collapsible derivation trace that read them. A stale
+# -v18 process would still refuse every interim-coupon horizon outright,
+# and a stale -v18 page would render neither new field.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v19"
 
 
 def load_base_case() -> dict:
@@ -1063,7 +1074,7 @@ def price_case_with_bloomberg_quote(
 
 
 def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dict:
-    """Resolve one Issue #173/#174 S490 repo-carry Forward for ``case``'s own Expiry.
+    """Resolve one Issue #173/#174/#175 S490 repo-carry Forward for ``case``'s own Expiry.
 
     Parity/testing display only -- not a pricing route, and it does not
     touch the existing explicit ``forward_clean_price_input`` override
@@ -1087,7 +1098,15 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
-      (Issue #173) for the forward.
+      (Issues #173/#175) for the forward, including its own interim-coupon
+      (Case B) carry. **This route selects no coupon treatment and reads no
+      coupon schedule of its own**: the primitive resolves the coupons in
+      ``(spot_settlement_date, expiry_date]`` from the same resolved bond
+      reference data this route already passes it, and the whole per-coupon
+      trace reaches the response through the same ``dataclasses.asdict``
+      as every other forward field. Issue #175 required no new S490
+      transformation, so the funding resolver and its default method are
+      byte-for-byte the ones Case A already used.
 
     **Deliberately does not call ``build_request_from_standalone_option_case``
     (Issue #174 round 6).** That builder requires a *complete* pricing
@@ -1158,10 +1177,10 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     checks above fails, or if ``bond_quote.clean_price_per_100`` is absent (a
     yield-only quote carries no spot clean price to start from); or whatever
     the composed functions raise (Bloomberg failure, same-as-of mismatch,
-    bond NOT_FOUND / FOUND_INELIGIBLE, curve node range, an interim coupon in
-    ``(tS, tF]``, a malformed ``spot_settlement_date``, ...) -- never caught
-    or remapped here; the HTTP handler maps every failure to HTTP 400 exactly
-    like every other route in this module.
+    bond NOT_FOUND / FOUND_INELIGIBLE, curve node range, a window reaching
+    the bond's maturity date, a malformed ``spot_settlement_date``, ...) --
+    never caught or remapped here; the HTTP handler maps every failure to
+    HTTP 400 exactly like every other route in this module.
     """
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)

@@ -1,4 +1,4 @@
-"""Bloomberg FPA repo-carry forward primitive (Issue #173, prototype).
+"""Bloomberg FPA repo-carry forward primitive (Issue #173/#175, prototype).
 
 Scope: one deterministic primitive that rebuilds a UST forward clean price
 from a spot quote and an explicit repo/carry funding rate, exactly as
@@ -16,7 +16,13 @@ uses -- that is exactly::
     Spot Dirty(tS)    = Spot Clean(tS) + AI(tS)
     Carry Factor      = 1 + repo_rate_decimal x (days(tS, tF) / 360)
     Forward Dirty(tF) = Spot Dirty(tS) x Carry Factor
+                        - SUM_i Coupon_i x (1 + repo_rate_decimal
+                                            x (days(coupon_date_i, tF) / 360))
     Forward Clean(tF) = Forward Dirty(tF) - AI(tF)
+
+where ``coupon_date_i`` runs over every coupon paid in ``(tS, tF]``. Case A
+(no such coupon) is the empty sum, so the two cases are one formula and one
+code path, not two -- see "Interim coupons" below.
 
 **This module derives no funding rate of its own.** ``repo_rate_decimal``
 is a caller input; where it comes from (a Bloomberg Curve #490 / S490
@@ -48,21 +54,66 @@ carried verbatim onto every returned result, and never inferred:
   unexplained adjustment to force agreement. Nothing in this module
   adjusts, calibrates, or tunes anything.
 
-**Case A only, fail closed.** Issue #173's first validation is explicitly
-the no-interim-coupon case. A coupon paid in ``(tS, tF]`` would make the
-single-factor carry above wrong (the coupon's own reinvestment leg is not
-modelled here), so this module refuses that case outright via
-:class:`RepoCarryInterimCouponUnsupportedError` rather than returning a
-silently wrong forward. Case B is a separate, later, separately-approved
-slice.
+**Interim coupons (Issue #175, Case B).** Issue #173's first validation was
+the no-interim-coupon case, and this module originally refused any coupon in
+``(tS, tF]`` outright. It no longer does: a coupon paid inside the repo term
+is carried to ``tF`` and subtracted from the termination amount, per
+``INTERIM_COUPON_TREATMENT`` below.
+
+- ``INTERIM_COUPON_TREATMENT =
+  "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"``
+  -- the holder of a repo-financed long position receives ``Coupon_i`` on
+  its payment date, reinvests it at the same funding rate to ``tF``, and
+  that accumulated value reduces what is owed at termination. The
+  reinvestment factor is the *same* ``1 + r x t`` FPA factor applied over
+  each coupon's own shorter ACT/360 term ``days(coupon_date_i, tF) / 360``;
+  a coupon paid exactly on ``tF`` therefore has a term of zero days, a
+  factor of exactly ``1.0``, and reduces the termination amount by its face
+  amount alone.
+
+**Why this is not a free choice, and what is still an assumption.**
+Bloomberg's FPA Help text quoted above states the single-factor invoice
+carry and is silent on interim coupons, so it does not settle this on its
+own. What settles the *structure* is this repository's own already-approved
+forward construction: Annex A SS A.5.2, implemented in
+``pricing/bli_forward_clean_price.py``, subtracts the PV of every coupon in
+the window from spot dirty and then divides by the terminal discount factor.
+Under a single simple funding rate that is algebraically the same statement
+as the sum above -- discounting a coupon back to ``tS`` and then carrying the
+whole balance to ``tF`` at one rate is carrying that coupon from its own
+payment date to ``tF`` at that rate. So Case B reuses a coupon convention
+this repository already holds rather than introducing a second one.
+
+The residual assumption is the *reinvestment rate*, not the structure: this
+module reinvests at the same repo rate it funds at, which is what a zero
+``Repo Spread`` implies and what the Annex A equivalence above requires. The
+only materially different reading is not reinvesting the coupon at all
+(equivalently, a zero reinvestment rate), which is the degenerate case of
+the same formula rather than an independent market convention. Every
+per-coupon term and factor is exposed on the result
+(:class:`RepoCarryInterimCoupon`), so that alternative is recoverable from
+the trace without this module implementing, selecting between, or tuning
+anything. Nothing here is calibrated to an observed OVME number.
+
+**Boundaries this module still refuses.** The coupon window is exactly
+``(tS, tF]`` -- half-open at ``tS``, because a coupon paid on the spot
+settlement date is not received by the forward buyer and the spot dirty
+price on that date already carries zero accrued interest. The composed
+``coupon_flows_before`` continues to refuse a window reaching
+``maturity_date`` (coupon-at-maturity combines with principal redemption,
+which that adapter slice does not implement), and a resulting non-positive
+forward dirty price raises rather than producing a forward clean price from
+it.
 
 **Composition, not reimplementation.** Accrued interest at both settlement
 dates comes from the already-reviewed
-``pricing/bli_quantlib_bond_adapter.accrued_interest_per_100``; the
-interim-coupon check uses that same module's ``coupon_flows_before``. Date
-parsing is ``data/_validation._parse_iso_date``. Every error those helpers
-raise (irregular coupon grid, ex-dividend window, maturity cashflow in the
-window, QuantLib not installed, ...) propagates unchanged.
+``pricing/bli_quantlib_bond_adapter.accrued_interest_per_100``; the interim
+coupon dates and amounts come from that same module's
+``coupon_flows_before`` -- this module builds no second coupon schedule and
+computes no coupon amount of its own. Date parsing is
+``data/_validation._parse_iso_date``. Every error those helpers raise
+(irregular coupon grid, ex-dividend window, maturity cashflow in the window,
+QuantLib not installed, ...) propagates unchanged.
 
 **Not in this module.** No Black-76, no option discounting, no volatility,
 no curve construction, interpolation, or bootstrap, no repo-rate
@@ -94,14 +145,14 @@ REPO_DAY_COUNT_CONVENTION = "ACT/360"
 REPO_DAY_COUNT_BASIS_DAYS = 360.0
 REPO_COMPOUNDING_CONVENTION = "SIMPLE"
 
-
-class RepoCarryInterimCouponUnsupportedError(ValueError):
-    """A coupon is paid in ``(spot settlement, forward settlement]``.
-
-    Issue #173's first validation is the no-interim-coupon case (Case A)
-    only. Raised instead of returning a forward whose single carry factor
-    silently ignores the coupon and its reinvestment.
-    """
+# How a coupon paid inside the repo term reaches the forward date -- named
+# once and carried verbatim onto every result, including Case A results
+# (where it is the treatment that would have applied, over an empty set of
+# coupons). See the module docstring for the evidence behind it and for what
+# part of it remains an Issue #175 prototype assumption.
+INTERIM_COUPON_TREATMENT = (
+    "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"
+)
 
 
 def _require_finite(value: object, field_name: str) -> float:
@@ -169,14 +220,90 @@ def carry_factor_from_simple_repo_rate(
 
 
 @dataclass(frozen=True)
+class RepoCarryInterimCoupon:
+    """One coupon paid in ``(tS, tF]``, carried to the forward date.
+
+    ``payment_date``/``amount_per_100`` are the composed
+    ``coupon_flows_before`` flow's own values, echoed verbatim -- this
+    module never recomputes a coupon amount. The remaining fields are this
+    coupon's own reinvestment leg under ``INTERIM_COUPON_TREATMENT``:
+    ``reinvestment_term_days`` actual calendar days from the payment date to
+    the forward settlement date (zero for a coupon paid on ``tF``),
+    ``reinvestment_factor`` the ``1 + r x t`` factor over that ACT/360 term,
+    and ``forward_value_per_100`` their product -- the amount by which this
+    one coupon reduces the termination invoice amount.
+    """
+
+    payment_date: str
+    amount_per_100: float
+    reinvestment_term_days: int
+    reinvestment_term_year_fraction: float
+    reinvestment_factor: float
+    forward_value_per_100: float
+
+
+def reinvest_interim_coupon_to_forward_settlement(
+    *,
+    payment_date: str,
+    amount_per_100: float,
+    forward_settlement_date: str,
+    repo_rate_decimal: float,
+) -> RepoCarryInterimCoupon:
+    """Carry one interim coupon from ``payment_date`` to ``forward_settlement_date``.
+
+    Applies ``INTERIM_COUPON_TREATMENT``: the same
+    :func:`carry_factor_from_simple_repo_rate` FPA factor the whole position
+    is carried by, over this coupon's own shorter ACT/360 term. A payment
+    date equal to the forward settlement date is the zero-term case
+    (factor exactly ``1.0``), not an error -- a coupon paid on ``tF`` is
+    still received, it simply earns nothing afterwards. A payment date
+    *after* ``forward_settlement_date`` raises ``ValueError``: such a coupon
+    is not inside the repo term at all and never reaches this function from
+    :func:`repo_carry_forward_clean_price`, whose window is ``(tS, tF]``.
+    """
+
+    amount = _require_finite(amount_per_100, "amount_per_100")
+    payment = _parse_iso_date(payment_date, "payment_date")
+    forward = _parse_iso_date(forward_settlement_date, "forward_settlement_date")
+    if payment > forward:
+        raise ValueError(
+            f"payment_date ({payment_date!r}) must not be after forward_settlement_date "
+            f"({forward_settlement_date!r}) -- a coupon paid after the forward settlement "
+            "date is not an interim coupon of this repo term"
+        )
+
+    term_days = (forward - payment).days
+    term_year_fraction = term_days / REPO_DAY_COUNT_BASIS_DAYS
+    reinvestment_factor = carry_factor_from_simple_repo_rate(
+        repo_rate_decimal=repo_rate_decimal,
+        repo_term_year_fraction=term_year_fraction,
+    )
+    return RepoCarryInterimCoupon(
+        payment_date=payment_date,
+        amount_per_100=amount,
+        reinvestment_term_days=term_days,
+        reinvestment_term_year_fraction=term_year_fraction,
+        reinvestment_factor=reinvestment_factor,
+        forward_value_per_100=amount * reinvestment_factor,
+    )
+
+
+@dataclass(frozen=True)
 class RepoCarryForward:
     """Every traceable step of one FPA repo-carry forward calculation.
 
     Issue #173 requires the spot clean -> spot dirty -> carry -> forward
     dirty -> forward clean transition to be individually inspectable, so
     every intermediate value is a field here rather than a discarded local.
-    ``repo_day_count_convention`` / ``repo_compounding_convention`` carry
-    this module's own named constants verbatim.
+    ``repo_day_count_convention`` / ``repo_compounding_convention`` /
+    ``interim_coupon_treatment`` carry this module's own named constants
+    verbatim.
+
+    ``interim_coupons`` is every coupon paid in ``(tS, tF]``, in payment-date
+    order, each with its own reinvestment leg; it is empty for Case A, where
+    ``interim_coupon_forward_value_per_100`` is then exactly ``0.0`` and
+    ``forward_dirty_price_per_100`` is unchanged from the single-factor
+    carry.
     """
 
     spot_settlement_date: str
@@ -190,6 +317,10 @@ class RepoCarryForward:
     repo_term_days: int
     repo_term_year_fraction: float
     carry_factor: float
+    carried_spot_dirty_price_per_100: float
+    interim_coupon_treatment: str
+    interim_coupons: tuple[RepoCarryInterimCoupon, ...]
+    interim_coupon_forward_value_per_100: float
     forward_dirty_price_per_100: float
     accrued_interest_at_forward_settlement_per_100: float
     forward_clean_price_per_100: float
@@ -205,15 +336,21 @@ def repo_carry_forward_clean_price(
 ) -> RepoCarryForward:
     """Return the FPA repo-carry forward for ``bond`` at ``forward_settlement_date``.
 
-    Composes ``accrued_interest_per_100`` at both explicit settlement dates
-    and applies the four lines of the FPA structure in the module docstring.
+    Composes ``coupon_flows_before`` over ``(spot_settlement_date,
+    forward_settlement_date]`` and ``accrued_interest_per_100`` at both
+    explicit settlement dates, then applies the FPA structure in the module
+    docstring -- including one reinvestment leg per interim coupon, so a
+    coupon inside the repo term is carried rather than refused (Issue #175,
+    Case B). A horizon with no such coupon is the same code path over an
+    empty coupon set and is arithmetically unchanged from Case A.
+
     Raises :class:`TypeError` for a ``bond`` the accrual adapter does not
-    accept, :class:`ValueError` for a non-finite/non-positive spot clean
-    price or a non-positive repo term, and
-    :class:`RepoCarryInterimCouponUnsupportedError` when a coupon is paid in
-    ``(spot_settlement_date, forward_settlement_date]`` (Case A only -- see
-    the module docstring). Every other error propagates unchanged from the
-    composed helpers.
+    accept, and :class:`ValueError` for a non-finite/non-positive spot clean
+    price, a non-positive repo term, or a forward dirty price that is not
+    positive after the interim coupons are subtracted. Every other error
+    propagates unchanged from the composed helpers -- notably
+    ``BLIBondMaturityCashflowUnsupportedError`` when the window reaches the
+    bond's maturity date.
     """
 
     spot_clean = _require_finite(spot_clean_price_per_100, "spot_clean_price_per_100")
@@ -223,19 +360,22 @@ def repo_carry_forward_clean_price(
     term_days = repo_term_days(spot_settlement_date, forward_settlement_date)
     term_year_fraction = term_days / REPO_DAY_COUNT_BASIS_DAYS
 
-    interim_coupons = coupon_flows_before(
-        bond,
-        after_date=spot_settlement_date,
-        on_or_before_date=forward_settlement_date,
-    )
-    if interim_coupons:
-        raise RepoCarryInterimCouponUnsupportedError(
-            f"{len(interim_coupons)} coupon(s) are paid in ({spot_settlement_date}, "
-            f"{forward_settlement_date}] "
-            f"(first on {interim_coupons[0].payment_date}) -- Issue #173's repo-carry "
-            "forward prototype implements the no-interim-coupon case only; the "
-            "coupon and its reinvestment leg are not modelled by this single carry factor"
+    interim_coupons = tuple(
+        reinvest_interim_coupon_to_forward_settlement(
+            payment_date=flow.payment_date,
+            amount_per_100=flow.amount_per_100,
+            forward_settlement_date=forward_settlement_date,
+            repo_rate_decimal=repo_rate_decimal,
         )
+        for flow in coupon_flows_before(
+            bond,
+            after_date=spot_settlement_date,
+            on_or_before_date=forward_settlement_date,
+        )
+    )
+    interim_coupon_forward_value = sum(
+        (coupon.forward_value_per_100 for coupon in interim_coupons), 0.0
+    )
 
     accrued_at_spot = accrued_interest_per_100(bond, as_of_date=spot_settlement_date)
     accrued_at_forward = accrued_interest_per_100(bond, as_of_date=forward_settlement_date)
@@ -245,7 +385,15 @@ def repo_carry_forward_clean_price(
         repo_rate_decimal=repo_rate_decimal,
         repo_term_year_fraction=term_year_fraction,
     )
-    forward_dirty = spot_dirty * carry_factor
+    carried_spot_dirty = spot_dirty * carry_factor
+    forward_dirty = carried_spot_dirty - interim_coupon_forward_value
+    if not forward_dirty > 0:
+        raise ValueError(
+            f"forward dirty price must be positive, got {forward_dirty!r} from carried spot "
+            f"dirty {carried_spot_dirty!r} less {len(interim_coupons)} interim coupon(s) "
+            f"worth {interim_coupon_forward_value!r} at {forward_settlement_date!r} -- no "
+            "forward clean price is produced from a non-positive termination amount"
+        )
     forward_clean = forward_dirty - accrued_at_forward
 
     return RepoCarryForward(
@@ -260,6 +408,10 @@ def repo_carry_forward_clean_price(
         repo_term_days=term_days,
         repo_term_year_fraction=term_year_fraction,
         carry_factor=carry_factor,
+        carried_spot_dirty_price_per_100=carried_spot_dirty,
+        interim_coupon_treatment=INTERIM_COUPON_TREATMENT,
+        interim_coupons=interim_coupons,
+        interim_coupon_forward_value_per_100=interim_coupon_forward_value,
         forward_dirty_price_per_100=forward_dirty,
         accrued_interest_at_forward_settlement_per_100=accrued_at_forward,
         forward_clean_price_per_100=forward_clean,

@@ -328,10 +328,21 @@ html, body {
    hidden, so they never hit this; the S490 parity rows are (Issue #174),
    so they need the same explicit override. */
 #s490-parity-fields[hidden],
-#s490-parity-method-row[hidden] {
+#s490-parity-method-row[hidden],
+#s490-parity-trace[hidden] {
   display: none;
 }
 .s490-parity .derived-source { margin-top: 4px; margin-bottom: 4px; }
+/* Issue #175: the methodology/derivation detail lives behind a native
+   <details> so the trader-facing rows above stay to four numbers and one
+   coupon summary, while the full Spot Clean -> ... -> Forward Clean trace,
+   the coupon treatment label and every interim coupon's own carry stay one
+   click away rather than absent. */
+.s490-trace { margin-top: 12px; border-top: 1px solid #eef0f4; padding-top: 10px; }
+.s490-trace > summary { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
+.s490-trace-body { margin-top: 8px; display: grid; row-gap: 5px; }
+.s490-trace-line { font-size: 12.5px; color: var(--muted-2); }
+.s490-trace-line .s490-trace-key { color: var(--muted); margin-right: 8px; }
 /* ---------- Bloomberg Bond Master (Advanced, read-only) ---------- */
 .collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
 /* auto-fit rather than a fixed column count: this grid holds five blocks

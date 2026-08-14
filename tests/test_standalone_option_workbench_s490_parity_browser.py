@@ -1,5 +1,5 @@
 """Browser-driven regression tests for the S490 repo-carry Forward parity
-panel (Issue #173/#174).
+panel (Issues #173, #174, #175).
 
 Exercises script.js's own wiring -- the panel's readiness gate, that
 changing Expiry alone (with no button click) recomputes it, that it
@@ -255,6 +255,53 @@ def test_entering_a_spot_settlement_date_resolves_and_displays_every_required_fi
     assert funding_method == "S490_TERM_RATE_FROM_CURVE_AS_OF__SIMPLE_ACT360__PROTOTYPE"
     # No repo rate control of any kind exists on this ticket.
     assert page.query_selector("input[id*='repo-rate']") is None
+
+
+def test_a_case_a_horizon_says_no_interim_coupon_and_still_shows_the_full_trace(
+    server_url, page
+) -> None:
+    # Issue #175: the default expiry (2026-10-20) is before this bond's next
+    # coupon (31 January), so the panel must say so plainly rather than
+    # leaving the new field blank -- and the collapsible trace is present
+    # either way.
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    assert page.text_content("#s490-interim-coupon-summary") == "None in window"
+    assert not page.eval_on_selector("#s490-parity-trace", "el => el.hidden")
+    trace = page.text_content("#s490-parity-trace-body")
+    assert "Forward Clean" in trace
+    assert "Coupon treatment" in trace
+    assert "Interim coupon " not in trace
+
+
+def test_an_interim_coupon_expiry_resolves_and_names_the_coupon_on_the_panel(
+    server_url, page
+) -> None:
+    # Issue #175 Case B, driven exactly as a trader would: the same ticket,
+    # with Expiry moved past this bond's 2027-01-31 coupon. Before this
+    # slice that produced an unsupported-case error status; it must now
+    # resolve, name the coupon, and show its carry in the trace.
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    case_a_forward = page.text_content("#s490-forward-decimal")
+
+    _set_expiry(page, local="2027-02-15T17:20")
+
+    _wait_until(lambda: page.text_content("#s490-forward-decimal") != case_a_forward)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    assert page.text_content("#s490-parity-status") == ""
+    # 3.75% semi-annual = 1.875 per 100, paid 31 January.
+    assert page.text_content("#s490-interim-coupon-summary") == "2027-01-31 · 1.875000"
+    trace = page.text_content("#s490-parity-trace-body")
+    assert "Interim coupon 2027-01-31" in trace
+    assert "days to Expiry" in trace
+    assert "PROTOTYPE" in trace  # the coupon-treatment label, never hidden
+    assert float(page.text_content("#s490-forward-decimal")) > 0.0
 
 
 def test_expiry_and_spot_settlement_date_alone_resolve_with_forward_vol_strike_notional_blank(
