@@ -71,29 +71,50 @@ is carried to ``tF`` and subtracted from the termination amount, per
   factor of exactly ``1.0``, and reduces the termination amount by its face
   amount alone.
 
-**Why this is not a free choice, and what is still an assumption.**
+**Why this treatment, and exactly how far the supporting precedent goes.**
 Bloomberg's FPA Help text quoted above states the single-factor invoice
 carry and is silent on interim coupons, so it does not settle this on its
-own. What settles the *structure* is this repository's own already-approved
-forward construction: Annex A SS A.5.2, implemented in
-``pricing/bli_forward_clean_price.py``, subtracts the PV of every coupon in
-the window from spot dirty and then divides by the terminal discount factor.
-Under a single simple funding rate that is algebraically the same statement
-as the sum above -- discounting a coupon back to ``tS`` and then carrying the
-whole balance to ``tF`` at one rate is carrying that coupon from its own
-payment date to ``tF`` at that rate. So Case B reuses a coupon convention
-this repository already holds rather than introducing a second one.
+own. The nearest supporting precedent is this repository's own
+already-approved forward construction, Annex A SS A.5.2 in
+``pricing/bli_forward_clean_price.py``, which subtracts the PV of every
+in-window coupon from spot dirty and then divides by the terminal discount
+factor. It supports the *shape* of the sum above -- an in-window coupon
+reduces the termination value, carried from its own payment date -- and
+nothing more. **It is not an exact algebraic equivalence, and this module
+does not claim one** (Codex P2 review of PR #176, which was correct):
 
-The residual assumption is the *reinvestment rate*, not the structure: this
-module reinvests at the same repo rate it funds at, which is what a zero
-``Repo Spread`` implies and what the Annex A equivalence above requires. The
-only materially different reading is not reinvesting the coupon at all
-(equivalently, a zero reinvestment rate), which is the degenerate case of
-the same formula rather than an independent market convention. Every
-per-coupon term and factor is exposed on the result
-(:class:`RepoCarryInterimCoupon`), so that alternative is recoverable from
-the trace without this module implementing, selecting between, or tuning
-anything. Nothing here is calibrated to an observed OVME number.
+- Under *continuous* compounding of one flat rate the two coincide exactly,
+  because ``exp(r x tF) / exp(r x t_i) == exp(r x (tF - t_i))``.
+- Under the ``SIMPLE`` convention this module actually uses they do not.
+  Annex A's ratio is ``(1 + r x T) / (1 + r x t_i)``; this module's factor is
+  ``1 + r x (T - t_i)``. They differ by the second-order cross term
+  ``r^2 x t_i x (T - t_i) / (1 + r x t_i)`` -- this module's coupon value is
+  always the slightly larger of the two at a positive rate, so its forward
+  clean price is always the slightly lower one. The size is pinned by a
+  deterministic test rather than described: at Issue #175's own acceptance
+  horizon it is ~1.9e-05 per 100, ~0.0006 of a 32nd.
+- On a *non-flat* curve they diverge for a second, independent reason:
+  Annex A discounts each coupon at the curve's own factor for that coupon
+  date, whereas this module applies one term repo rate to every leg and
+  never evaluates a curve at all.
+
+That second difference is deliberate and is the reason this module is not
+"Annex A restated". An FPA repo-carry forward *is* a single-repo-rate
+structure -- one ``Repo Rate`` for the term, ``Repo Spread = 0 bp`` -- so
+reinvesting an interim coupon at that same term rate is the reading internal
+to the structure being modelled. Evaluating a curve per coupon date would be
+the Annex A discounting construction instead, would require a new S490
+transformation, and would break this module's own rule that it takes a
+scalar rate and never touches a curve. Neither is chosen here on parity
+evidence, because at these horizons parity cannot distinguish them.
+
+**So the reinvestment rate is a labeled prototype assumption**, exposed
+rather than argued away: every per-coupon term and factor is on the result
+(:class:`RepoCarryInterimCoupon`), so both alternative readings -- Annex A's
+DF ratio, or no reinvestment at all (the degenerate zero-rate case) -- are
+recoverable from the trace by inspection, without this module implementing,
+selecting between, or tuning anything. Nothing here is calibrated to an
+observed OVME number.
 
 **Boundaries this module still refuses.** The coupon window is exactly
 ``(tS, tF]`` -- half-open at ``tS``, because a coupon paid on the spot

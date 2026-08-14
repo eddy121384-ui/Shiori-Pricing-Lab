@@ -365,6 +365,51 @@ def test_one_coupon_reinvestment_leg_is_the_same_one_plus_r_t_factor():
     assert coupon.forward_value_per_100 == pytest.approx(2.0 * coupon.reinvestment_factor)
 
 
+def test_the_coupon_leg_is_not_annex_as_df_ratio_and_the_gap_is_bounded():
+    """Pin how far this treatment sits from the Annex A SS A.5.2 precedent.
+
+    Codex P2 review of PR #176: the module docstring originally claimed the
+    two were algebraically equivalent. They are not under the ``SIMPLE``
+    convention -- Annex A's ratio is ``(1 + r*T) / (1 + r*t_i)`` while this
+    module's factor is ``1 + r*(T - t_i)``, differing by a second-order
+    cross term. This pins the direction (this module's coupon value is the
+    larger, so its forward clean price is the lower) and the magnitude at
+    Issue #175's own acceptance horizon, so the difference is a measured,
+    reviewable number rather than a description.
+    """
+
+    repo_rate = 0.0377
+    # T 4 04/30/32 with tS 2026-08-14, tF 2026-11-11, coupon 2026-10-31.
+    term_year_fraction = 89 / 360.0
+    coupon_year_fraction = 78 / 360.0
+    amount = 2.0
+
+    coupon = reinvest_interim_coupon_to_forward_settlement(
+        payment_date="2026-10-31",
+        amount_per_100=amount,
+        forward_settlement_date="2026-11-11",
+        repo_rate_decimal=repo_rate,
+    )
+    annex_style_value = (
+        amount
+        * (1.0 + repo_rate * term_year_fraction)
+        / (1.0 + repo_rate * coupon_year_fraction)
+    )
+
+    assert coupon.forward_value_per_100 > annex_style_value
+    gap = coupon.forward_value_per_100 - annex_style_value
+    assert gap == pytest.approx(
+        amount
+        * repo_rate**2
+        * coupon_year_fraction
+        * (term_year_fraction - coupon_year_fraction)
+        / (1.0 + repo_rate * coupon_year_fraction)
+    )
+    # Under a thousandth of a 32nd -- far below OVME F's own quarter-tick
+    # display granularity, so parity cannot decide between the two readings.
+    assert gap * 32.0 < 0.001
+
+
 def test_a_coupon_after_the_forward_settlement_date_is_refused():
     with pytest.raises(ValueError, match="must not be after forward_settlement_date"):
         reinvest_interim_coupon_to_forward_settlement(
