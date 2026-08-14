@@ -257,45 +257,56 @@ def test_entering_a_spot_settlement_date_resolves_and_displays_every_required_fi
     assert page.query_selector("input[id*='repo-rate']") is None
 
 
-def test_a_case_a_horizon_shows_the_full_derivation_trace(server_url, page) -> None:
-    # Issue #175: the default expiry (2026-10-20) is before this bond's next
-    # coupon, so it resolves -- and every step Issue #175 asks to be
-    # traceable is one click away rather than absent from the panel.
-    _load_and_complete_ust(page, server_url)
-    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
-
-    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
-
-    assert not page.eval_on_selector("#s490-parity-trace", "el => el.hidden")
-    trace = page.text_content("#s490-parity-trace-body")
-    for step in ("Spot Clean", "Spot AI", "Spot Dirty", "Carry", "Forward Dirty",
-                 "Forward AI", "Forward Clean", "S490 funding", "Curve acquisition"):
-        assert step in trace
-    # No interim-coupon row exists at all: a Case B forward is never produced.
-    assert "Interim coupon" not in trace
-
-
-def test_an_interim_coupon_expiry_fails_closed_on_the_panel_rather_than_guessing(
+def test_a_case_a_horizon_says_no_interim_coupon_and_still_shows_the_full_trace(
     server_url, page
 ) -> None:
-    # Issue #175 RED (Codex P1 review of PR #176): the default fixture's next
-    # coupon is 2027-01-31, and the date this repository holds for it is an
-    # unadjusted schedule date, not a cash-receipt date. The panel must
-    # surface that refusal -- naming the coupon -- rather than a
-    # confident-looking Forward derived from a nominal date. This is the same
-    # class as Issue #175's own acceptance coupon (2026-10-31).
+    # Issue #175: the default expiry (2026-10-20) is before this bond's next
+    # coupon, so the panel says so plainly rather than leaving the field
+    # blank -- and every step Issue #175 asks to be traceable is one click
+    # away rather than absent.
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    assert page.text_content("#s490-interim-coupon-summary") == "None in window"
+    assert not page.eval_on_selector("#s490-parity-trace", "el => el.hidden")
+    trace = page.text_content("#s490-parity-trace-body")
+    for step in ("Spot Clean", "Spot AI", "Spot Dirty", "Carried Spot Dirty",
+                 "Coupon treatment", "Forward Dirty", "Forward AI", "Forward Clean",
+                 "S490 funding", "Curve acquisition"):
+        assert step in trace
+    assert "Interim coupon " not in trace
+
+
+def test_an_interim_coupon_expiry_resolves_and_shows_the_federal_reserve_roll(
+    server_url, page
+) -> None:
+    # Issue #175 Case B, driven exactly as a trader would: the same ticket,
+    # with Expiry moved past this bond's 2027-01-31 coupon. That coupon is a
+    # Sunday, so Eddy's convention B rolls its cash to Monday 2027-02-01 --
+    # the panel must resolve, name the coupon, and show the roll in the trace.
     _load_and_complete_ust(page, server_url)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    case_a_forward = page.text_content("#s490-forward-decimal")
 
     _set_expiry(page, local="2027-02-15T17:20")
 
-    _wait_until(lambda: page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
-    status = page.text_content("#s490-parity-status")
-    assert "2027-01-31" in status
-    assert "unadjusted" in status
-    # No number is left on screen next to a refusal.
-    assert page.eval_on_selector("#s490-parity-trace", "el => el.hidden")
+    _wait_until(lambda: page.text_content("#s490-forward-decimal") != case_a_forward)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    assert page.text_content("#s490-parity-status") == ""
+    # 3.75% semi-annual = 1.875 per 100; the summary names the date the cash
+    # actually arrives, not the scheduled Sunday.
+    assert page.text_content("#s490-interim-coupon-summary") == "2027-02-01 · 1.875000"
+    trace = page.text_content("#s490-parity-trace-body")
+    assert "Interim coupon 2027-01-31" in trace
+    assert "paid 2027-02-01" in trace
+    assert "rolled 1d, US_FEDERAL_RESERVE" in trace
+    assert "days to Expiry" in trace
+    assert "PROTOTYPE" in trace  # the coupon-treatment label, never hidden
+    assert float(page.text_content("#s490-forward-decimal")) > 0.0
 
 
 def test_expiry_and_spot_settlement_date_alone_resolve_with_forward_vol_strike_notional_blank(
@@ -466,8 +477,16 @@ def test_a_slow_recompute_never_shows_the_previous_dates_stale_numbers(server_ur
     # starts (see maybeRefreshS490Parity), so this is true well within the
     # artificial 1s delay above -- comfortably before the delayed response
     # can possibly have arrived.
-    _wait_until(lambda: page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
-    assert "Resolving" in page.text_content("#s490-parity-status")
+    #
+    # Waits on the pending *status* rather than on the hidden fields, then
+    # reads the fields from that same observation. renderS490Parity sets both
+    # in one synchronous pass, so either is a valid trigger -- but polling the
+    # fields and then reading the status in a second call leaves a window in
+    # which the delayed response can land between the two, flipping the status
+    # back to "" and failing a test whose subject is not timing at all. Seen
+    # once on a loaded CI runner.
+    _wait_until(lambda: "Resolving" in page.text_content("#s490-parity-status"))
+    assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
 
     # And once the delayed response arrives, the new date's own numbers
     # appear -- the recompute itself still completes, this test only proves

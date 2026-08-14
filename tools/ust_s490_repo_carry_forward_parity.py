@@ -33,14 +33,11 @@ transition, the forward as a decimal **and** as a Treasury fraction, the
 OVME F number as supplied, the decimal residual, and the residual in
 Treasury ticks (32nds).
 
-**Every Case B horizon currently fails closed** (Issue #175 RED). A horizon
-whose repo term contains any coupon at all -- on a weekday as much as a
-weekend -- is reported as that horizon's own error, because the coupon
-schedule this repository holds is unadjusted and the actual payment date is
-an unresolved methodology question rather than a value to assume (see
-``pricing/bli_repo_carry_forward.py``'s own RED note). Only coupon-free
-(Case A) horizons produce a forward, so a run whose horizons all contain
-coupons reports no parity at all -- by design, not by failure.
+**Interim-coupon (Case B) horizons report too** (Issue #175). A horizon whose
+repo term contains a coupon is reported the same way as any other, with the
+coupon-treatment label and, per coupon, its scheduled date, its Federal
+Reserve payment date and roll, its reinvestment term and factor, and its
+carried value at the forward date.
 
 **Where every number comes from -- pure composition, no new math here.**
 
@@ -203,8 +200,8 @@ def _horizon_result(
 
     Returns one flat dict per horizon. A failure affecting only this
     horizon (a date outside the curve's node range, a window reaching the
-    bond's maturity date, any interim coupon at all, a malformed date) is
-    captured as this row's own ``status``/``error`` so
+    bond's maturity date, a malformed date) is captured as this row's own
+    ``status``/``error`` so
     the remaining horizons in the same run still report -- Issue #173 asks
     for the residual to be reported, never hidden, and a run covering three
     expiries should not lose two of them to one bad third.
@@ -395,6 +392,7 @@ _PARITY_TABLE_HEADERS = (
     "Carry factor",
     "Shiori forward",
     "Shiori (32nds)",
+    "Coupons in term",
     "OVME F",
     "Residual",
     "Residual (ticks)",
@@ -416,11 +414,14 @@ def _parity_table_row(row: dict) -> tuple[str, ...]:
             "error",
             "error",
             "error",
+            "error",
             _cell(row["observed_ovme_forward_clean_price_per_100"], 6),
             "error",
             "error",
         )
     funding = row["funding"]
+    forward = row["forward"]
+    interim_coupons = forward["interim_coupons"]
     return (
         row["forward_settlement_date"],
         str(funding["repo_term_days"]),
@@ -428,6 +429,12 @@ def _parity_table_row(row: dict) -> tuple[str, ...]:
         _cell(funding["carry_factor"], 10),
         _cell(row["forward_clean_price_per_100"], 6),
         row["forward_clean_price_treasury_fraction"],
+        (
+            "none"
+            if not interim_coupons
+            else f"{len(interim_coupons)} "
+            f"({_cell(forward['interim_coupon_forward_value_per_100'], 6)})"
+        ),
         _cell(row["observed_ovme_forward_clean_price_per_100"], 6),
         _cell(row["residual_decimal_per_100"], 6),
         _cell(row["residual_treasury_ticks_32nds"], 4),
@@ -515,9 +522,37 @@ def render_markdown(data: dict) -> str:
                 f"= spot dirty {forward['spot_dirty_price_per_100']}"
             )
             lines.append(
-                f"spot dirty x carry factor = forward dirty "
-                f"{forward['forward_dirty_price_per_100']}"
+                f"spot dirty x carry factor = carried spot dirty "
+                f"{forward['carried_spot_dirty_price_per_100']}"
             )
+            lines.append(f"interim coupon treatment: {forward['interim_coupon_treatment']}")
+            if forward["interim_coupons"]:
+                for coupon in forward["interim_coupons"]:
+                    lines.append(
+                        f"interim coupon scheduled {coupon['scheduled_payment_date']} paid "
+                        f"{coupon['payment_date']} (rolled {coupon['payment_roll_days']} day(s), "
+                        f"{coupon['payment_calendar']}, {coupon['payment_roll_convention']}): "
+                        f"{coupon['amount_per_100']} per 100 x reinvestment factor "
+                        f"{coupon['reinvestment_factor']} over "
+                        f"{coupon['reinvestment_term_days']} days "
+                        f"({coupon['reinvestment_term_year_fraction']}, "
+                        f"{funding['repo_day_count_convention']}) "
+                        f"= {coupon['forward_value_per_100']} at "
+                        f"{forward['forward_settlement_date']}"
+                    )
+                lines.append(
+                    f"carried spot dirty - interim coupons "
+                    f"{forward['interim_coupon_forward_value_per_100']} = forward dirty "
+                    f"{forward['forward_dirty_price_per_100']}"
+                )
+            else:
+                lines.append(
+                    "interim coupons: none scheduled in "
+                    f"({forward['spot_settlement_date']}, "
+                    f"{forward['forward_settlement_date']}] -- forward dirty "
+                    f"{forward['forward_dirty_price_per_100']} is the carried spot dirty "
+                    "price unchanged"
+                )
             lines.append(
                 f"forward dirty - AI({forward['forward_settlement_date']}) "
                 f"{forward['accrued_interest_at_forward_settlement_per_100']} "

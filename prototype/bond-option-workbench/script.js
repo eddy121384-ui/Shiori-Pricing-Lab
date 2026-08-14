@@ -144,6 +144,7 @@
     s490ForwardDecimal: document.getElementById("s490-forward-decimal"),
     s490ForwardFraction: document.getElementById("s490-forward-fraction"),
     s490FundingMethod: document.getElementById("s490-funding-method"),
+    s490InterimCouponSummary: document.getElementById("s490-interim-coupon-summary"),
     s490ParityTrace: document.getElementById("s490-parity-trace"),
     s490ParityTraceBody: document.getElementById("s490-parity-trace-body"),
 
@@ -3609,7 +3610,25 @@
     els.s490ForwardDecimal.textContent = s490ParityResult.forward_clean_price_per_100.toFixed(6);
     els.s490ForwardFraction.textContent = s490ParityResult.forward_clean_price_treasury_fraction;
     els.s490FundingMethod.textContent = funding.method;
+    els.s490InterimCouponSummary.textContent = interimCouponSummary(forward);
     renderS490Trace(funding, forward);
+  }
+
+  // Issue #175: the trader-facing row shows only what a trader needs at a
+  // glance -- whether a coupon is being carried, and which one. A single
+  // coupon (the common UST case) names its own actual payment date and
+  // amount; more than one falls back to a count plus the total carried
+  // value, with every individual coupon still listed in the trace below.
+  function interimCouponSummary(forward) {
+    const coupons = forward.interim_coupons;
+    if (coupons.length === 0) return "None in window";
+    if (coupons.length === 1) {
+      return `${coupons[0].payment_date} · ${coupons[0].amount_per_100.toFixed(6)}`;
+    }
+    return (
+      `${coupons.length} coupons · ` +
+      `${forward.interim_coupon_forward_value_per_100.toFixed(6)} at Expiry`
+    );
   }
 
   // Every step Issue #175 requires to be traceable, in the order the
@@ -3632,9 +3651,30 @@
           `${funding.repo_term_days} days · ${funding.source_representation}`,
       ],
       [
-        "Carry",
+        "Carried Spot Dirty",
         `${forward.spot_dirty_price_per_100.toFixed(6)} × ` +
-          `${forward.carry_factor.toFixed(10)}`,
+          `${forward.carry_factor.toFixed(10)} = ` +
+          `${forward.carried_spot_dirty_price_per_100.toFixed(6)}`,
+      ],
+      ["Coupon treatment", forward.interim_coupon_treatment],
+    ];
+    forward.interim_coupons.forEach((coupon) => {
+      lines.push([
+        `Interim coupon ${coupon.scheduled_payment_date}`,
+        `paid ${coupon.payment_date}` +
+          (coupon.payment_roll_days > 0
+            ? ` (rolled ${coupon.payment_roll_days}d, ${coupon.payment_calendar})`
+            : "") +
+          ` · ${coupon.amount_per_100.toFixed(6)} × ` +
+          `${coupon.reinvestment_factor.toFixed(10)} ` +
+          `(${coupon.reinvestment_term_days} days to Expiry) = ` +
+          `${coupon.forward_value_per_100.toFixed(6)}`,
+      ]);
+    });
+    lines.push(
+      [
+        "Interim coupons at Expiry",
+        forward.interim_coupon_forward_value_per_100.toFixed(6),
       ],
       ["Forward Dirty", forward.forward_dirty_price_per_100.toFixed(6)],
       [
@@ -3644,8 +3684,8 @@
       ["Forward Clean", forward.forward_clean_price_per_100.toFixed(6)],
       ["Curve acquisition", s490ParityResult.curve_acquisition],
       ["Curve ids", funding.curve_ids.join(", ")],
-      ["Source systems", funding.source_systems.join(", ")],
-    ];
+      ["Source systems", funding.source_systems.join(", ")]
+    );
 
     els.s490ParityTraceBody.innerHTML = "";
     lines.forEach(([key, value]) => {

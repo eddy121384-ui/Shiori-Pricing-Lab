@@ -124,20 +124,16 @@ the full contract:
   included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
   "forward_clean_price_treasury_fraction": <str>, "curve_acquisition":
-  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. **Case A
-  only**: any coupon scheduled in ``(spot settlement, Expiry]`` -- on a
-  weekday as much as a weekend -- fails closed in the primitive, because
-  the coupon dates this repository holds are unadjusted schedule dates
-  rather than cash-receipt dates (Issue #175 RED; see that module's own
-  note). Such a horizon returns HTTP 400 and never a Forward. **Which**
-  error it reports depends on ordering: this route acquires the live curve
-  and resolves the S490 funding before it reaches the forward primitive, so
-  a Case B horizon that also hits a Bloomberg failure or falls outside the
-  curve's node range reports that failure instead, and the coupon is named
-  only once acquisition and funding have both succeeded. Any validation,
-  date, Bloomberg DAPI, or curve-range failure returns HTTP 400 with
-  ``{"error": "..."}`` the same way. This is a parity/testing display only:
-  it prices nothing through Black-76.
+  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Since Issue
+  #175 ``forward`` also carries the primitive's interim-coupon fields
+  (``interim_coupons``, ``interim_coupon_forward_value_per_100``,
+  ``interim_coupon_treatment``, ``carried_spot_dirty_price_per_100``), so a
+  coupon scheduled in ``(spot settlement, Expiry]`` is carried to Expiry
+  from its own Federal Reserve payment date rather than refused, and each
+  coupon's scheduled date, payment date, roll and reinvestment leg reach the
+  response. Any validation, date, Bloomberg DAPI, or curve-range failure
+  returns HTTP 400 with ``{"error": "..."}``. This is a parity/testing
+  display only: it prices nothing through Black-76.
 
 **Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
 regression and developer use only -- the trader-facing ``index.html``/
@@ -450,12 +446,14 @@ DEFAULT_PORT = 8765
 # entered. A stale -v17 process would 404 the new route and the panel would
 # show nothing but a transport-error status forever.
 #
-# Bumped to -v19 for Issue #175. **Not** Case B support: an interim-coupon
-# horizon is still refused (Issue #175 RED -- the coupon payment date is
-# unresolved), so the executable surface is unchanged. What changed is the
-# served page, which gained a collapsible derivation trace over the Case A
-# response's existing fields, and the refusal's own error text. A stale
-# -v18 page would render no trace at all.
+# Bumped to -v19 for Issue #175's interim-coupon (Case B) support: an expiry
+# with a coupon in the window now resolves instead of failing closed, the
+# S490 repo-carry response carries the per-coupon trace (scheduled date,
+# Federal Reserve payment date, roll, reinvestment leg) and the
+# coupon-treatment label, and the served page gained the interim-coupon
+# summary plus the collapsible derivation trace that read them. A stale -v18
+# process would still refuse every interim-coupon horizon, and a stale -v18
+# page would render neither.
 API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v19"
 
 
