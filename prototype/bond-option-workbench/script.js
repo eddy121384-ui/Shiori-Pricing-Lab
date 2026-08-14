@@ -3791,9 +3791,15 @@
     if (coupons.length === 1) {
       return `${coupons[0].payment_date} · ${coupons[0].amount_per_100.toFixed(6)}`;
     }
+    // Codex P2 review of PR #178, round 5: the carry horizon is the forward
+    // settlement date, which is not Expiry whenever the bond settles on a
+    // lag -- naming Expiry here would describe a different horizon from the
+    // deterministic calculation Black-76 actually prices from. The date
+    // itself is unambiguous, so it is what is shown.
     return (
       `${coupons.length} coupons · ` +
-      `${forward.interim_coupon_forward_value_per_100.toFixed(6)} at Expiry`
+      `${forward.interim_coupon_forward_value_per_100.toFixed(6)} at ` +
+      `${forward.forward_settlement_date}`
     );
   }
 
@@ -3833,13 +3839,14 @@
             : "") +
           ` · ${coupon.amount_per_100.toFixed(6)} × ` +
           `${coupon.reinvestment_factor.toFixed(10)} ` +
-          `(${coupon.reinvestment_term_days} days to Expiry) = ` +
+          `(${coupon.reinvestment_term_days} days to ` +
+          `${forward.forward_settlement_date}) = ` +
           `${coupon.forward_value_per_100.toFixed(6)}`,
       ]);
     });
     lines.push(
       [
-        "Interim coupons at Expiry",
+        `Interim coupons at ${forward.forward_settlement_date}`,
         forward.interim_coupon_forward_value_per_100.toFixed(6),
       ],
       ["Forward Dirty", forward.forward_dirty_price_per_100.toFixed(6)],
@@ -3998,10 +4005,26 @@
       // cancel runs for no reason on every unrelated render.
       if (els.forwardPrice.value !== text) {
         els.forwardPrice.value = text;
-        applyManualInputsToDraft();
+        applyDerivedForwardToDraft();
       }
     }
     renderForwardSource();
+  }
+
+  // Reading the derived Forward into the draft is a *programmatic
+  // synchronization*, not a trader edit -- and the two differ in exactly one
+  // way that matters (Codex P2 review of PR #178, round 5).
+  // `applyManualInputsToDraft` cancels any reprice queued by Reset / Use
+  // Shiori Derived, on the correct reasoning that a trader who edits
+  // something else has moved on from the ticket that reprice was for. This
+  // path is not that: when Reset is pressed while the derivation is still in
+  // flight or has failed, the queued reprice is waiting for precisely this
+  // update to arrive, so letting it cancel itself would mean the promised
+  // "Reset reprices immediately" silently never happens.
+  function applyDerivedForwardToDraft() {
+    const queuedReprice = repriceOnceForwardIsPriceable;
+    applyManualInputsToDraft();
+    repriceOnceForwardIsPriceable = queuedReprice;
   }
 
   // The trader's own edit is the only thing that starts an override. Wired
@@ -4788,6 +4811,7 @@
   window.__shioriTestTraderForwardOverrideActive = () => traderForwardOverrideActive;
   window.__shioriTestShioriDerivedForward = () => shioriDerivedForward;
   window.__shioriTestShioriDerivedForwardError = () => shioriDerivedForwardError;
+  window.__shioriTestRepriceQueued = () => repriceOnceForwardIsPriceable;
   // Read-only generation fence for browser tests (no production behavior
   // depends on this accessor existing). `conventionProfileGeneration` is
   // bumped exactly twice per successful Bloomberg Load -- once by

@@ -311,7 +311,9 @@ def test_an_interim_coupon_expiry_resolves_and_shows_the_federal_reserve_roll(
     assert "Interim coupon 2027-01-31" in trace
     assert "paid 2027-02-01" in trace
     assert "rolled 1d, US_FEDERAL_RESERVE" in trace
-    assert "days to Expiry" in trace
+    # Codex P2 review of PR #178, round 5: the carry horizon is the forward
+    # settlement date, and the trace names it rather than Expiry.
+    assert "days to " in trace
     assert "PROTOTYPE" in trace  # the coupon-treatment label, never hidden
     assert float(page.text_content("#s490-forward-decimal")) > 0.0
 
@@ -967,3 +969,157 @@ def test_the_s490_panel_derives_under_the_same_profile_the_case_carries(
     body = json.loads(requests[-1])
     assert body["convention_profile"] == _draft_convention_profile(page)
     assert body["case"]["convention_profile"] == body["convention_profile"]
+
+
+# --- Codex P2 review of PR #178, round 5 --------------------------------------
+
+
+def test_reset_still_reprices_when_the_derivation_lands_after_the_reset(
+    server_url, page
+) -> None:
+    # Reset is pressed while the derivation is failed, so the field is blank
+    # and the ticket is not priceable yet. The queued reprice has to survive
+    # until the retried derivation arrives -- the programmatic write that
+    # brings it must not cancel the very action that was waiting for it.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+
+    # Break the derivation, then move an input it depends on so the panel
+    # actually fails and the derived Forward becomes unavailable.
+    page.route(
+        "**/api/case/s490-repo-carry",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg terminal not logged in"}),
+        ),
+    )
+    page.fill("#s490-spot-settlement-date-input", "2026-08-14")
+    _wait_until(
+        lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
+    )
+
+    # Reset now: the override is dropped, but there is no derived Forward to
+    # take its place yet, so the reprice can only be queued.
+    page.click("#forward-use-derived-btn")
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    assert page.input_value("#forward-price-input") == ""
+
+    # Count real pricing calls from here on: the status text still reads
+    # "Draft priced" from the first run, so it proves nothing about whether a
+    # *new* one happened. Observed through `page.route` rather than
+    # `page.on("request")` -- a plain event handler only runs while a
+    # Playwright call is pumping the connection, and `_wait_until`'s predicate
+    # makes none, so it would never fire.
+    priced = []
+
+    def _observe_price(route):
+        priced.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/case", _observe_price)
+
+    assert page.evaluate("() => window.__shioriTestRepriceQueued()") is True
+
+    # The derivation recovers and lands.
+    page.unroute("**/api/case/s490-repo-carry")
+    page.click("#s490-parity-retry-btn")
+
+    # The queued reprice fires on its own -- no second Price click. The
+    # predicate deliberately makes a Playwright call: `_wait_until` sleeps in
+    # Python, and a sync-API route handler only runs while the connection is
+    # being pumped, so a pure `len(priced)` check would poll a list nothing
+    # can ever append to.
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestRepriceQueued()") is False
+        and len(priced) == 1
+    )
+    _wait_until(lambda: page.input_value("#forward-price-input") != "")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+        "forward_clean_price_input"
+    ]["source_system"] == "SHIORI_DERIVED_S490"
+    assert _derived_forward_in_field(page) == pytest.approx(
+        float(page.text_content("#s490-forward-decimal")), abs=5e-7
+    )
+    # One reprice, not a loop.
+    assert len(priced) == 1
+    page.unroute("**/api/case")
+
+
+def test_a_trader_edit_after_reset_still_cancels_the_queued_reprice(
+    server_url, page
+) -> None:
+    # The other half of the same rule: a genuine trader edit means the trader
+    # has moved on from the ticket that reprice was for, so it must still be
+    # cancelled. Proven by pointing Price at a route that would fail loudly.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+    page.route(
+        "**/api/case/s490-repo-carry",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg terminal not logged in"}),
+        ),
+    )
+    page.fill("#s490-spot-settlement-date-input", "2026-08-14")
+    _wait_until(
+        lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
+    )
+    page.click("#forward-use-derived-btn")
+
+    # A real edit, before the derivation recovers.
+    page.fill("#strike-price-input", "99.50")
+    assert (
+        page.evaluate("() => window.__shioriTestGetCurrentDraft().bond_option.strike_price")
+        == 99.5
+    )
+
+    prices = []
+    page.route("**/api/case", lambda route: prices.append(route) or route.abort())
+    page.unroute("**/api/case/s490-repo-carry")
+    page.click("#s490-parity-retry-btn")
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    page.wait_for_timeout(300)
+
+    assert prices == []
+    page.unroute("**/api/case")
+
+
+def test_the_interim_coupon_trace_names_the_forward_settlement_date_not_expiry(
+    server_url, page
+) -> None:
+    # The displayed derivation must describe the horizon the calculation
+    # actually used. Expiry and forward settlement differ here (the profile
+    # derives the latter on the bond's settlement lag), so a label saying
+    # "Expiry" would name a different horizon from the priced one.
+    _load_and_complete_ust(page, server_url, settlement_dates=False)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    case_a_forward = page.text_content("#s490-forward-decimal")
+
+    _set_expiry(page, local="2027-02-15T17:20")
+    _wait_until(lambda: page.text_content("#s490-forward-decimal") != case_a_forward)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    forward_settlement_date = page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().forward_settlement_date"
+    )
+    assert forward_settlement_date != page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_option.expiry_date"
+    )
+    trace = page.text_content("#s490-parity-trace-body")
+    assert f"Interim coupons at {forward_settlement_date}" in trace
+    assert f"days to {forward_settlement_date}" in trace
+    assert "to Expiry" not in trace
+    assert "at Expiry" not in trace
