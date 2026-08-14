@@ -1321,7 +1321,7 @@ def require_coherent_forward_quote_side(case: object, *, spot_quote_side: object
 
 
 def validate_deterministic_forward_inputs(
-    case: object, *, refresh_quote_side: object = None
+    case: object, *, replacement_quote_side: object = None
 ) -> None:
     """Run every Issue #177 Forward-input refusal that needs no Bloomberg call.
 
@@ -1332,24 +1332,32 @@ def validate_deterministic_forward_inputs(
     modes it does not govern, so this is safe to call unconditionally, and
     every one of them reads only the case: no network, no clock.
 
-    ``refresh_quote_side`` is passed by ``POST /api/case/bloomberg``, whose
-    whole purpose is to replace ``bond_quote`` with a freshly acquired one.
-    A caller there deliberately sets the forward's ``quote_side`` to the side
-    it is *about* to source -- the browser mirrors it before the request
-    precisely because mirroring it afterwards could never run -- so the
-    case's own, superseded ``bond_quote.quote_side`` is not the side that
-    will be priced, and comparing against it would reject a correct request.
-    The right comparison on that route is against the side being requested,
-    which the route knows before it calls anything (Codex P2 review of PR
-    #178, round 13): a forward side that disagrees with it is a guaranteed
-    rejection by the request contract after the substitution, so it is
-    refused here rather than after two DAPI round trips.
+    ``replacement_quote_side`` is passed by ``POST /api/case/bloomberg``,
+    whose whole purpose is to replace ``bond_quote`` with a freshly acquired
+    one. It states both that the carried quote is superseded and which side
+    the replacement will be sourced on, and it changes two checks:
+
+    - the forward's ``quote_side`` is compared against *that* side rather
+      than against the carried quote's (Codex P2 review of PR #178, round
+      13). A caller deliberately sets the forward's side to the side it is
+      about to source -- the browser mirrors it before the request precisely
+      because mirroring it afterwards could never run -- so comparing against
+      the superseded side would reject a correct request, while comparing
+      against the requested one catches a guaranteed contract rejection
+      before two DAPI round trips;
+    - the spot clean price is not checked at all (round 15). The carried
+      quote is discarded, and the derivation runs on the replacement, so a
+      yield-only or priceless quote on the way *in* must not block the very
+      refresh that would supply a usable one. Whether the replacement carries
+      a usable price is not knowable until Bloomberg answers, and the
+      derivation reports that with its own reason if it does not.
     """
 
     validate_declared_trader_forward_override(case)
     require_usable_spot_settlement_date_for_derived_forward(case)
-    require_usable_spot_clean_price_for_derived_forward(case)
-    require_coherent_forward_quote_side(case, spot_quote_side=refresh_quote_side)
+    if replacement_quote_side is None:
+        require_usable_spot_clean_price_for_derived_forward(case)
+    require_coherent_forward_quote_side(case, spot_quote_side=replacement_quote_side)
 
 
 def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
@@ -1509,7 +1517,7 @@ def price_case_with_bloomberg_quote(
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
     # Same ordering as POST /api/case: the deterministic checks run before any
     # Bloomberg call, curve or quote.
-    validate_deterministic_forward_inputs(overlaid_case, refresh_quote_side=quote_side)
+    validate_deterministic_forward_inputs(overlaid_case, replacement_quote_side=quote_side)
     curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection

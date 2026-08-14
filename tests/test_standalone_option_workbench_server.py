@@ -4614,3 +4614,75 @@ def test_readiness_runs_exactly_the_same_pre_flight_as_pricing() -> None:
     start = source.index("def validate_case(")
     end = source.index("\ndef ", start + 1)
     assert "validate_deterministic_forward_inputs(" in source[start:end]
+
+
+# --- Codex P2 review of PR #178, round 15 -------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_a_refresh_is_not_blocked_by_the_carried_quotes_missing_clean_price(
+    server_url: str, monkeypatch
+) -> None:
+    # The refresh replaces bond_quote wholesale and derives from the
+    # replacement, so a yield-only quote on the way *in* must not block the
+    # very refresh that supplies a usable one.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["bond_quote"] = {
+        **case["bond_quote"],
+        "clean_price_per_100": None,
+        "yield_value": 0.0412,
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    assert payload["display"]["status"] == "SUCCESS"
+    assert payload["display"]["forward_source"] == _DERIVED_FORWARD_SOURCE
+    # The Forward was derived from the replacement quote, not the carried one.
+    assert payload["case"]["bond_quote"]["clean_price_per_100"] == 103.5
+    refreshed_case = {
+        **case,
+        "bond_quote": {**case["bond_quote"], "clean_price_per_100": 103.5},
+    }
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(
+        _expected_derived_forward(refreshed_case)
+    )
+
+
+def test_the_non_refresh_routes_still_refuse_a_carried_yield_only_quote(
+    server_url: str, monkeypatch
+) -> None:
+    # The skip is scoped to the route that replaces the quote: everywhere
+    # else the carried quote *is* what the derivation runs on.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a yield-only quote must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["bond_quote"] = {**case["bond_quote"], "clean_price_per_100": None}
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+    assert status == 400
+    assert "clean_price_per_100" in payload["error"]
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/price",
+        {"case": case, "overlay": extract_standalone_option_case_overlay(case)},
+    )
+    assert status == 400
+    assert "clean_price_per_100" in payload["error"]
