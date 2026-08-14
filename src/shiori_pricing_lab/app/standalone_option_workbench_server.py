@@ -1103,15 +1103,20 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
-      (Issues #173/#175) for the forward, including its own interim-coupon
-      (Case B) carry. **This route selects no coupon treatment and reads no
-      coupon schedule of its own**: the primitive resolves the coupons in
-      ``(spot_settlement_date, expiry_date]`` from the same resolved bond
-      reference data this route already passes it, and the whole per-coupon
-      trace reaches the response through the same ``dataclasses.asdict``
-      as every other forward field. Issue #175 required no new S490
-      transformation, so the funding resolver and its default method are
-      byte-for-byte the ones Case A already used.
+      (Issues #173/#175) for the forward. **Case A only in practice**: that
+      primitive unconditionally refuses any coupon scheduled in
+      ``(spot_settlement_date, expiry_date]`` -- weekday coupons included --
+      because the coupon dates this repository holds are unadjusted schedule
+      dates rather than cash-receipt dates (Issue #175 RED; see that
+      module's own note). So a Case B expiry raises, the handler returns
+      HTTP 400 naming the coupon, and this route never serializes a carried
+      per-coupon trace: ``forward.interim_coupons`` is always ``[]`` on any
+      HTTP 200. **This route selects no coupon treatment and reads no coupon
+      schedule of its own** -- the refusal, like the coupon resolution
+      behind it, belongs entirely to the primitive, from the same resolved
+      bond reference data this route already passes it. Issue #175 required
+      no new S490 transformation, so the funding resolver and its default
+      method are byte-for-byte the ones Case A already used.
 
     **Deliberately does not call ``build_request_from_standalone_option_case``
     (Issue #174 round 6).** That builder requires a *complete* pricing
