@@ -339,6 +339,7 @@ from shiori_pricing_lab.pricing.bli_effective_forward import (
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     forward_clean_price_input_dict,
+    is_usable_forward_clean_price,
     select_effective_forward,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import repo_carry_forward_clean_price
@@ -1079,6 +1080,14 @@ def validate_case(case: dict) -> dict:
     live acquisition -- either is already a real, structurally valid curve)
     is validated exactly as before.
 
+    **Issue #177: a derived case is not judged on the Forward it discards.**
+    In Shiori-derived mode the pricing route replaces
+    ``forward_clean_price_input`` wholesale, so a case that legitimately
+    carries no usable one still prices; a stand-in is substituted here so
+    this route answers the same question Price will (see
+    :func:`_validation_only_forward_clean_price_input`, which preserves every
+    field the derived path actually reuses).
+
     **Issue #177: the derived-Forward mode's own offline precondition.** A
     case in Shiori-derived Forward mode prices from a Forward this route
     cannot compute (that needs a live Bloomberg acquisition, which this route
@@ -1096,11 +1105,65 @@ def validate_case(case: dict) -> dict:
     try:
         if isinstance(case, dict) and case.get("curve_points") == []:
             case = {**case, "curve_points": _validation_only_placeholder_curve_points(case)}
+        placeholder_forward = _validation_only_forward_clean_price_input(case)
+        if placeholder_forward is not None:
+            case = {**case, "forward_clean_price_input": placeholder_forward}
         require_usable_spot_settlement_date_for_derived_forward(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
     return {"ready": True, "error": None}
+
+
+# Never Bloomberg-sourced, never returned to a caller, and never used to
+# price anything -- the exact same role, and the same never-leaves-this-
+# function guarantee, as `_validation_only_placeholder_curve_points` above.
+_VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100 = 100.0
+
+
+def _validation_only_forward_clean_price_input(case: object) -> dict | None:
+    """Return a stand-in Forward input for a derived case, or ``None``.
+
+    **Why readiness must not judge the Forward a derived run does not use
+    (Codex P2 review of PR #178, round 8).** In Shiori-derived mode
+    :func:`apply_effective_forward_to_case` replaces
+    ``forward_clean_price_input`` wholesale with the freshly derived Forward
+    -- the number the case arrived carrying is the *previous* derivation and
+    is discarded on every run. So a direct or saved-case client that
+    legitimately leaves it ``null`` (or carries a stale zero, or a
+    ``STALE``/``INVALID`` status) prices perfectly well, while this readiness
+    route was handing that same value to the typed builder and answering
+    ``ready: false``. Readiness exists to say what Price will do (Issue #143
+    requirement 5); disagreeing with it for a valid request is the defect.
+
+    So exactly the two fields the derived path discards -- the number and the
+    ``status`` it always rewrites to ``ACTIVE`` -- are substituted here, and
+    **nothing else is**. ``quote_side`` and ``source_system`` are preserved
+    untouched precisely because the derived path *does* reuse them: the
+    request contract still requires the forward's side to equal the spot
+    side, and that check must keep failing a case that gets it wrong.
+
+    Returns ``None`` -- leaving the case exactly as supplied -- for any case
+    that is not in derived mode (a Trader Forward Override *is* the priced
+    value and is validated as itself, as is a legacy explicit forward), and
+    for a derived case whose Forward is already usable, which needs no
+    stand-in. The caller's own ``case`` is never mutated.
+    """
+
+    if not isinstance(case, dict):
+        return None
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return None
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return None
+    if is_usable_forward_clean_price(forward_input.get("forward_clean_price_per_100")):
+        return None
+    return {
+        **forward_input,
+        "forward_clean_price_per_100": _VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100,
+        "status": "ACTIVE",
+    }
 
 
 def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:

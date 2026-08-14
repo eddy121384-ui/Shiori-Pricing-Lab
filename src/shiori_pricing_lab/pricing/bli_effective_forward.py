@@ -114,7 +114,7 @@ class TraderForwardOverrideInvalidError(ValueError):
     """
 
 
-def _is_usable_forward(value: object) -> bool:
+def is_usable_forward_clean_price(value: object) -> bool:
     """True for a finite, strictly positive real number, False otherwise.
 
     Deliberately the same admissibility ``BLIForwardCleanPriceInput``
@@ -123,6 +123,11 @@ def _is_usable_forward(value: object) -> bool:
     no forward" rather than raising out of a constructor. ``bool`` is
     rejected explicitly -- ``True`` is a finite positive ``int`` in Python
     and is never a price.
+
+    Public because the readiness route needs the same rule to decide whether
+    a derived-mode case's Forward is a real value or a placeholder the
+    pricing path is going to replace (Codex P2 review of PR #178, round 8) --
+    one definition of "usable forward clean price", never a second copy.
     """
 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -210,11 +215,11 @@ def select_effective_forward(
             "this function never maps an unrecognized source onto a default one"
         )
 
-    derived_usable = _is_usable_forward(shiori_derived_forward_clean_price_per_100)
+    derived_usable = is_usable_forward_clean_price(shiori_derived_forward_clean_price_per_100)
     derived = float(shiori_derived_forward_clean_price_per_100) if derived_usable else None
 
     if requested_forward_source == TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE:
-        if not _is_usable_forward(trader_forward_override_per_100):
+        if not is_usable_forward_clean_price(trader_forward_override_per_100):
             raise TraderForwardOverrideInvalidError(
                 "this run's Forward source is TRADER_FORWARD_OVERRIDE, but the override "
                 f"({trader_forward_override_per_100!r}) is not a finite, strictly "

@@ -3838,3 +3838,116 @@ def test_a_malformed_spot_settlement_date_does_not_block_an_override_run(
     effective = payload["display"]["effective_forward"]
     assert effective["shiori_derived_forward_clean_price_per_100"] is None
     assert "spot_settlement_date" in effective["shiori_derived_forward_error"]
+
+
+# --- Codex P2 review of PR #178, round 8: readiness must answer the same
+# --- question Price does, for a derived case's discarded Forward --------------
+
+
+@pytest.mark.parametrize("discarded_forward", [None, 0, 0.0, -1.0, "97.75"])
+def test_api_case_validate_accepts_a_derived_case_whose_forward_is_discarded(
+    server_url: str, discarded_forward: object
+) -> None:
+    # The derived path replaces forward_clean_price_input wholesale, so the
+    # value the case arrives with is never priced -- readiness must not refuse
+    # a request that would succeed.
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": discarded_forward,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is True
+    assert payload["error"] is None
+
+
+@pytest.mark.parametrize("discarded_status", ["STALE", "INVALID", "MISSING"])
+def test_api_case_validate_accepts_a_derived_case_whose_forward_status_is_discarded(
+    server_url: str, discarded_status: str
+) -> None:
+    # Same reasoning for `status`: the derived path always rewrites it to
+    # ACTIVE on the input it builds, so it cannot decide readiness either.
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": None,
+        "status": discarded_status,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is True
+
+
+def test_api_case_validate_still_checks_the_fields_the_derived_path_reuses(
+    server_url: str,
+) -> None:
+    # quote_side is *not* discarded -- the derived path preserves it and the
+    # request contract requires it to equal the spot side -- so a case that
+    # gets it wrong must still be refused, stand-in Forward or not.
+    case = _derived_forward_case()
+    assert case["bond_quote"]["quote_side"] == "MID"
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": None,
+        "quote_side": "BID",
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is False
+    assert "quote_side" in payload["error"]
+
+
+def test_api_case_validate_still_refuses_an_override_with_no_usable_forward(
+    server_url: str,
+) -> None:
+    # An override is the priced value, not a discarded one, so it is validated
+    # as itself. No stand-in is ever substituted for it.
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": None,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is False
+    assert "forward_clean_price_per_100" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_validate_and_price_agree_for_a_derived_case_with_no_forward(
+    server_url: str, monkeypatch
+) -> None:
+    # The actual invariant, asserted end to end: the same case that readiness
+    # calls ready is one POST /api/case genuinely prices.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": None,
+    }
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, True)
+    assert price_status == 200
+    assert price_payload["display"]["status"] == "SUCCESS"
+    assert price_payload["display"]["forward_source"] == _DERIVED_FORWARD_SOURCE
+    # And the stand-in never reached the priced run.
+    assert price_payload["display"]["forward_clean_price_per_100"] != pytest.approx(
+        server_module._VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100
+    )
+    assert price_payload["display"]["forward_clean_price_per_100"] == pytest.approx(
+        _expected_derived_forward(case)
+    )
