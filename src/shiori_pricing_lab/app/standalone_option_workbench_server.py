@@ -1102,23 +1102,19 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
-      (Issues #173/#175) for the forward. **Case A only**: that primitive
-      unconditionally refuses any coupon scheduled in
-      ``(spot_settlement_date, expiry_date]`` -- weekday coupons included --
-      because the coupon dates this repository holds are unadjusted schedule
-      dates rather than cash-receipt dates (Issue #175 RED; see that
-      module's own note). A Case B expiry therefore raises and the handler
-      returns HTTP 400. That refusal is reached only after the curve
-      acquisition and funding resolution above have succeeded, so a Case B
-      expiry which also fails one of those reports the earlier failure
-      instead -- the coupon guard is deliberately not hoisted ahead of them,
-      since doing so would reorder an already-reviewed route for a message
-      preference rather than a correctness gain. **This route reads no coupon
-      schedule and selects no coupon treatment of its own** -- the refusal,
-      like the coupon resolution behind it, belongs entirely to the
-      primitive, from the same resolved bond reference data this route
-      already passes it. Issue #175 required no new S490 transformation, so
-      the funding resolver and its default method are byte-for-byte the ones
+      (Issues #173/#175) for the forward, including its interim-coupon
+      (Case B) carry. A coupon scheduled in ``(spot_settlement_date,
+      expiry_date]`` is carried to Expiry from its own Federal Reserve
+      payment date and netted off, so such an expiry returns HTTP 200 with
+      the per-coupon trace on ``forward.interim_coupons`` -- it is not a
+      refusal. **This route reads no coupon schedule, resolves no payment
+      calendar and selects no coupon treatment of its own**: the primitive
+      resolves the coupons from the same resolved bond reference data this
+      route already passes it, rolls each date through
+      ``pricing/bli_ust_coupon_payment_date``, and the whole trace reaches
+      the response through the same ``dataclasses.asdict`` as every other
+      forward field. Issue #175 required no new S490 transformation, so the
+      funding resolver and its default method are byte-for-byte the ones
       Case A already used.
 
     **Deliberately does not call ``build_request_from_standalone_option_case``
