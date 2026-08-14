@@ -33,17 +33,21 @@ from pathlib import Path
 
 import pytest
 
+from shiori_pricing_lab.app import standalone_option_workbench as workbench_module
 from shiori_pricing_lab.app import standalone_option_workbench_server as server_module
 from shiori_pricing_lab.data.bli_snapshot import (
+    BLIBondQuote,
     BLICurvePoint,
     BLICurvePurpose,
     BLICurveRateBasis,
     BLIMarketDataStatus,
+    BLIQuoteBasis,
 )
 from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
     BloombergUsdSofrOptionDiscountCurveResult,
 )
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
+from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 
 # Reuses the sibling browser-test file's own Bloomberg lookup fixture/driving
 # helpers unchanged, rather than a second copy of the same bond-lookup mock
@@ -152,6 +156,28 @@ def server_url(monkeypatch) -> Iterator[str]:
         lambda tenors=None: _fake_curve_result(),
     )
     monkeypatch.setattr(server_module, "_shiori_acquisition_now", lambda: _CLOCK_NOW)
+    # The Bloomberg *quote* seam, so a successful `POST /api/case/bloomberg`
+    # can be driven end to end through the real route (Codex P1 review of PR
+    # #178, round 6). Same two module attributes the server tests already
+    # patch. The refreshed clean price is deliberately different from the
+    # lookup fixture's, so a Forward derived from it is distinguishable.
+    def _fake_bond_quote_loader(*, security, isin, quote_side):
+        return BLIBondQuote(
+            isin=isin,
+            currency=Currency.USD,
+            price_type=BLIQuoteBasis.PRICE,
+            quote_side=TreasuryFTPQuoteSide(quote_side),
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            clean_price_per_100=100.5,
+            accrued_interest_per_100=0.42,
+        )
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _fake_bond_quote_loader)
+    # Offset-aware and fixed, so its own local calendar date is 2026-08-12
+    # regardless of the machine timezone -- the builder requires
+    # pricing_timestamp.date() == valuation_date.
+    monkeypatch.setattr(workbench_module, "_shiori_acquisition_now", lambda: _CLOCK_NOW)
 
     server = server_module.create_server(host="127.0.0.1", port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1123,3 +1149,93 @@ def test_the_interim_coupon_trace_names_the_forward_settlement_date_not_expiry(
     assert f"days to {forward_settlement_date}" in trace
     assert "to Expiry" not in trace
     assert "at Expiry" not in trace
+
+
+# --- Codex P1 review of PR #178, round 6 --------------------------------------
+
+
+def test_a_successful_refresh_keeps_the_forward_its_own_price_used(
+    server_url, page
+) -> None:
+    # The refresh's new spot quote moves the panel's fingerprint, so without
+    # adopting the run's own derivation the panel would fire a second
+    # acquisition -- blanking the server-returned Forward and then replacing
+    # it with a different one, leaving the pricing cards and the Forward field
+    # describing different numbers.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    derivations = []
+
+    def _observe_derivation(route):
+        derivations.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/case/s490-repo-carry", _observe_derivation)
+    page.click("#bloomberg-refresh-btn")
+    # The refreshed quote is the fixture's 100.5, distinct from the lookup's,
+    # so this waits for the refresh to have actually landed.
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_quote"][
+            "clean_price_per_100"
+        ]
+        == 100.5
+    )
+    page.wait_for_timeout(400)
+
+    # No second derivation was requested for the refreshed quote...
+    assert derivations == []
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    priced_forward = draft["forward_clean_price_input"]["forward_clean_price_per_100"]
+    # ...and the field, the panel and the priced case all show that one number.
+    assert _derived_forward_in_field(page) == pytest.approx(priced_forward, abs=5e-7)
+    assert float(page.text_content("#s490-forward-decimal")) == pytest.approx(
+        priced_forward, abs=5e-7
+    )
+    page.unroute("**/api/case/s490-repo-carry")
+
+
+def test_a_failed_refresh_leaves_the_derived_ticket_refreshable(server_url, page) -> None:
+    # The default derived workflow must not be stranded: Refresh is the only
+    # action that can re-source the disowned quote and re-derive the Forward,
+    # so it cannot be gated on the Forward it is going to produce.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    forward_before = _derived_forward_in_field(page)
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
+
+    assert page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()") is True
+    # Price is correctly blocked -- the sourced quote is disowned...
+    assert _is_disabled(page, "#price-btn")
+    # ...but Refresh, the way out, comes back once validation settles.
+    _wait_for_refresh_enabled(page)
+    # The Forward is retained rather than blanked, which is what keeps the
+    # draft complete enough for Refresh to be offered at all.
+    assert _derived_forward_in_field(page) == pytest.approx(forward_before, abs=5e-7)
+    page.unroute("**/api/case/bloomberg")
+
+
+def test_a_quote_side_change_leaves_the_derived_ticket_refreshable(
+    server_url, page
+) -> None:
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    forward_before = _derived_forward_in_field(page)
+
+    page.click('#bond-quote-side-toggle .opt[data-value="BID"]')
+
+    assert _is_disabled(page, "#price-btn")
+    _wait_for_refresh_enabled(page)
+    assert _derived_forward_in_field(page) == pytest.approx(forward_before, abs=5e-7)

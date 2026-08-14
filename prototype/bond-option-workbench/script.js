@@ -3951,6 +3951,38 @@
     renderS490Parity();
   }
 
+  // Codex P1 review of PR #178, round 6: adopt the derivation the completed
+  // run actually priced with, rather than letting the panel re-derive.
+  //
+  // A successful Bloomberg refresh substitutes a new spot quote, which moves
+  // this panel's own fingerprint -- so the `syncDraftGating` at the end of
+  // that flow would start a *second* `/api/case/s490-repo-carry` request, and
+  // its pending render would blank the server-returned Forward and then
+  // replace it with one derived from a separate Curve #490 acquisition. If
+  // the curve moved between the two calls, the pricing cards would be showing
+  // a PV computed from F1 while the Forward field and source line showed F2:
+  // a result and its own stated inputs disagreeing on screen.
+  //
+  // The run's display already carries the exact derivation it priced with,
+  // trace and all (`effective_forward.shiori_derived_forward`), so that is
+  // what the panel shows. Latching `lastS490ParityKey` to the current key is
+  // what stops the redundant refetch -- this state *is* current, and it is
+  // better evidence than a fresh acquisition would be, because it is provably
+  // the one behind the numbers on screen. Any panel request still in flight
+  // is voided by the generation bump.
+  function adoptDerivationFromPricedRun(display) {
+    const effective = display && display.effective_forward;
+    // A run outside the two Issue #177 Forward modes carries no such section
+    // and had no derivation to adopt; the panel keeps whatever it had.
+    if (!effective) return;
+    s490ParityGeneration++;
+    s490ParityPending = false;
+    s490ParityResult = effective.shiori_derived_forward || null;
+    s490ParityError = effective.shiori_derived_forward_error || null;
+    lastS490ParityKey = s490ParityKey();
+    renderS490Parity();
+  }
+
   // Explicit retry after a failed S490 request (Codex P2 review of PR #174,
   // round 7). maybeRefreshS490Parity's own guard skips the fetch entirely
   // when s490ParityKey() has not changed since lastS490ParityKey -- exactly
@@ -3994,6 +4026,26 @@
   }
 
   function syncEffectiveForwardFromDerivation() {
+    // Codex P1 review of PR #178, round 6. A failed Bloomberg refresh, or a
+    // Quote Side change, disowns the sourced quote and gates this panel off
+    // -- and blanking the Forward field for that reason strands the default
+    // derived workflow completely. The empty Forward reopens the
+    // `forward-review` group, `canRefresh` requires every group but
+    // `instrument` to be resolved, and so Refresh -- the *only* action that
+    // can re-source the quote and re-derive the Forward -- goes disabled.
+    // Before Issue #177 a typed Forward simply survived this state and
+    // Refresh stayed available; retaining the derived one restores exactly
+    // that. Nothing is priced from it: `canPrice` already excludes an
+    // invalidated or mis-sided quote, and even a hypothetical Price would be
+    // re-derived server-side rather than using this number. Every other
+    // not-ready reason (no bond, no expiry, no spot settlement date, a failed
+    // derivation) still blanks the field, because in those the inputs
+    // genuinely do not define a Forward.
+    if (s490ReadinessGate() === "quote-invalidated") {
+      renderForwardSource();
+      return;
+    }
+
     shioriDerivedForward =
       s490ParityResult === null ? null : s490ParityResult.forward_clean_price_per_100;
     shioriDerivedForwardError = s490ParityError;
@@ -4436,6 +4488,7 @@
     currentDraft = payload.case;
     renderContext(payload.context);
     setTradeFormFromDraft(currentDraft);
+    adoptDerivationFromPricedRun(payload.display);
     refreshOverrideProvenance();
     renderOverrideProvenance();
     setCurrentDisplay(withOverrideProvenance(payload.display));
@@ -4554,6 +4607,7 @@
     sourcedQuoteInvalidated = false;
     setDerivedFormFromDraft();
     setTradeFormFromDraft(currentDraft);
+    adoptDerivationFromPricedRun(display);
     renderResolvedBondPanel();
     renderBondMaster(resolvedBloombergBond);
     renderRouteMetadata();
