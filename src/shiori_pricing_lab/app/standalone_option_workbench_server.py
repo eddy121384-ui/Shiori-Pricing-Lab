@@ -975,11 +975,11 @@ def price_uploaded_case(case: dict) -> dict:
     section, exactly as before.
     """
 
-    # Before the live-curve fetch, so a declared override this run cannot
-    # price under is refused for its own deterministic reason rather than
-    # behind a Bloomberg failure -- see
-    # :func:`validate_declared_trader_forward_override`.
+    # Before the live-curve fetch, so an input this run cannot price under is
+    # refused for its own deterministic reason rather than behind a Bloomberg
+    # failure -- see the two validators' own docstrings.
     validate_declared_trader_forward_override(case)
+    require_usable_spot_settlement_date_for_derived_forward(case)
     case = inject_live_option_discount_curve_if_absent(case)
     case, effective_forward = apply_effective_forward_to_case(case)
     _, _, display = price_standalone_option_case(case)
@@ -1096,19 +1096,35 @@ def validate_case(case: dict) -> dict:
     try:
         if isinstance(case, dict) and case.get("curve_points") == []:
             case = {**case, "curve_points": _validation_only_placeholder_curve_points(case)}
-        _require_spot_settlement_date_for_derived_forward(case)
+        require_usable_spot_settlement_date_for_derived_forward(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
     return {"ready": True, "error": None}
 
 
-def _require_spot_settlement_date_for_derived_forward(case: object) -> None:
-    """Raise ``ValueError`` for a derived-Forward case with no ``spot_settlement_date``.
+def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
+    """Raise ``ValueError`` unless a derived-Forward case carries a usable ``tS``.
 
-    Pure and offline -- reads two case keys and nothing else. See
-    :func:`validate_case`'s own Issue #177 note for why this one precondition
-    is checked at readiness time while every other derivation outcome is not.
+    Pure and offline -- reads two case keys, parses one date, and does nothing
+    else. See :func:`validate_case`'s own Issue #177 note for why this one
+    precondition is checked at readiness time while every other derivation
+    outcome is not.
+
+    **Presence is not enough (Codex P2 review of PR #178, round 7).** A
+    non-blank but malformed value such as ``"13/11/2026"`` passed an
+    earlier presence-only version of this check, so a direct or saved-case
+    client was told ``ready: true`` for a request that could not possibly
+    price -- and the pricing route then spent a live Curve #490 acquisition
+    before failing on the date. The date is parsed with the same reviewed
+    ``_parse_iso_date`` the derivation itself uses, so readiness answers the
+    same question the run will.
+
+    Called from :func:`validate_case` *and* ahead of the live-curve injector
+    on both pricing routes, for the same reason
+    :func:`validate_declared_trader_forward_override` is: a deterministic,
+    entirely local refusal must never be reported behind -- or masked by -- a
+    Bloomberg failure, nor cost a DAPI request first.
     """
 
     if not isinstance(case, dict):
@@ -1127,6 +1143,7 @@ def _require_spot_settlement_date_for_derived_forward(case: object) -> None:
             "settlement date from a lag, weekend, holiday or business-day convention, "
             "so it has to be entered"
         )
+    _parse_iso_date(spot_settlement_date, "spot_settlement_date")
 
 
 def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
@@ -1198,9 +1215,10 @@ def price_case_with_bloomberg_quote(
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
-    # Same ordering as POST /api/case: the deterministic override check runs
-    # before any Bloomberg call, curve or quote.
+    # Same ordering as POST /api/case: the deterministic checks run before any
+    # Bloomberg call, curve or quote.
     validate_declared_trader_forward_override(overlaid_case)
+    require_usable_spot_settlement_date_for_derived_forward(overlaid_case)
     curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection

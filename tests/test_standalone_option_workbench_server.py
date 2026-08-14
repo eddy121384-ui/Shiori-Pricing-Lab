@@ -3741,3 +3741,100 @@ def test_an_inactive_declared_override_is_refused_before_any_bloomberg_call(
 
     assert status == 400
     assert "STALE" in payload["error"]
+
+
+# --- Codex P2 review of PR #178, round 7: tS must be usable, not merely present
+
+
+@pytest.mark.parametrize(
+    "malformed_spot_settlement_date",
+    ["13/11/2026", "2026-13-11", "2026/07/02", "next Tuesday", "20260702", "   "],
+)
+def test_api_case_validate_rejects_a_malformed_spot_settlement_date(
+    server_url: str, malformed_spot_settlement_date: str
+) -> None:
+    # Presence is not enough: a non-blank but unparsable date would otherwise
+    # report ready and enable Price for a run that cannot possibly succeed.
+    case = _derived_forward_case()
+    case["spot_settlement_date"] = malformed_spot_settlement_date
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is False
+    assert "spot_settlement_date" in payload["error"]
+
+
+def test_api_case_validate_still_accepts_a_well_formed_spot_settlement_date(
+    server_url: str,
+) -> None:
+    status, payload = _post_json(f"{server_url}/api/case/validate", _derived_forward_case())
+
+    assert status == 200
+    assert payload["ready"] is True
+
+
+def test_a_malformed_spot_settlement_date_is_refused_before_any_bloomberg_call(
+    server_url: str, monkeypatch
+) -> None:
+    # The same deterministic refusal must not cost a live Curve #490
+    # acquisition, nor be reported behind a Bloomberg failure.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a malformed spot settlement date must not reach Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    assert case["curve_points"] == []
+    case["spot_settlement_date"] = "13/11/2026"
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "spot_settlement_date" in payload["error"]
+
+
+def test_a_missing_spot_settlement_date_is_also_refused_before_any_bloomberg_call(
+    server_url: str, monkeypatch
+) -> None:
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a missing spot settlement date must not reach Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    del case["spot_settlement_date"]
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "spot_settlement_date" in payload["error"]
+
+
+def test_a_malformed_spot_settlement_date_does_not_block_an_override_run(
+    server_url: str, monkeypatch
+) -> None:
+    # The check is scoped to the derived source: an override run does not use
+    # tS to price, so a stale value on the case must not refuse it. The
+    # derivation still fails for the comparison value, and says why.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["spot_settlement_date"] = "13/11/2026"
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 200
+    assert payload["display"]["forward_clean_price_per_100"] == pytest.approx(97.75)
+    effective = payload["display"]["effective_forward"]
+    assert effective["shiori_derived_forward_clean_price_per_100"] is None
+    assert "spot_settlement_date" in effective["shiori_derived_forward_error"]
