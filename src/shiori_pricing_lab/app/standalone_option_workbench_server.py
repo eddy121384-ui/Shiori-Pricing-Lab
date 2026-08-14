@@ -1218,7 +1218,7 @@ def _require_valid_forward_quote_side(case: object) -> TreasuryFTPQuoteSide | No
     )
 
 
-def require_coherent_forward_quote_side(case: object) -> None:
+def require_coherent_forward_quote_side(case: object, *, spot_quote_side: object = None) -> None:
     """Raise unless an Issue #177 Forward's quote side is valid and matches spot.
 
     Pure and offline -- coerces two enum values and compares them. A no-op for
@@ -1254,19 +1254,33 @@ def require_coherent_forward_quote_side(case: object) -> None:
     forward_side = _require_valid_forward_quote_side(case)
     if forward_side is None:
         return
-    spot_side = coerce_enum(
-        bond_quote.get("quote_side"), TreasuryFTPQuoteSide, "bond_quote.quote_side"
-    )
+    if spot_quote_side is None:
+        spot_side = coerce_enum(
+            bond_quote.get("quote_side"), TreasuryFTPQuoteSide, "bond_quote.quote_side"
+        )
+        spot_side_label = "bond_quote.quote_side"
+    else:
+        # The side this run is about to source, on a route that replaces the
+        # quote (Codex P2 review of PR #178, round 13). Validating *that*
+        # value is the Bloomberg loader's own job and its message is the
+        # reviewed one, so an uncoercible request side is left entirely to it
+        # rather than pre-empted here -- this check only compares two sides
+        # once both are real.
+        try:
+            spot_side = coerce_enum(spot_quote_side, TreasuryFTPQuoteSide, "quote_side")
+        except (TypeError, ValueError):
+            return
+        spot_side_label = "the requested refresh quote_side"
     if forward_side is not spot_side:
         raise ValueError(
             f"forward_clean_price_input.quote_side ({forward_side.value}) must equal "
-            f"bond_quote.quote_side ({spot_side.value}) -- one coherent observation "
+            f"{spot_side_label} ({spot_side.value}) -- one coherent observation "
             "side, no substitution"
         )
 
 
 def validate_deterministic_forward_inputs(
-    case: object, *, bond_quote_is_final: bool = True
+    case: object, *, refresh_quote_side: object = None
 ) -> None:
     """Run every Issue #177 Forward-input refusal that needs no Bloomberg call.
 
@@ -1277,24 +1291,23 @@ def validate_deterministic_forward_inputs(
     modes it does not govern, so this is safe to call unconditionally, and
     every one of them reads only the case: no network, no clock.
 
-    ``bond_quote_is_final=False`` for ``POST /api/case/bloomberg``, whose
+    ``refresh_quote_side`` is passed by ``POST /api/case/bloomberg``, whose
     whole purpose is to replace ``bond_quote`` with a freshly acquired one.
     A caller there deliberately sets the forward's ``quote_side`` to the side
     it is *about* to source -- the browser mirrors it before the request
     precisely because mirroring it afterwards could never run -- so the
     case's own, superseded ``bond_quote.quote_side`` is not the side that
     will be priced, and comparing against it would reject a correct request.
-    The forward side's own validity is still checked; the coherence the
-    request contract requires is enforced by that contract, after the
-    substitution, against the quote that was actually used.
+    The right comparison on that route is against the side being requested,
+    which the route knows before it calls anything (Codex P2 review of PR
+    #178, round 13): a forward side that disagrees with it is a guaranteed
+    rejection by the request contract after the substitution, so it is
+    refused here rather than after two DAPI round trips.
     """
 
     validate_declared_trader_forward_override(case)
     require_usable_spot_settlement_date_for_derived_forward(case)
-    if bond_quote_is_final:
-        require_coherent_forward_quote_side(case)
-    else:
-        _require_valid_forward_quote_side(case)
+    require_coherent_forward_quote_side(case, spot_quote_side=refresh_quote_side)
 
 
 def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
@@ -1434,7 +1447,7 @@ def price_case_with_bloomberg_quote(
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
     # Same ordering as POST /api/case: the deterministic checks run before any
     # Bloomberg call, curve or quote.
-    validate_deterministic_forward_inputs(overlaid_case, bond_quote_is_final=False)
+    validate_deterministic_forward_inputs(overlaid_case, refresh_quote_side=quote_side)
     curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection
@@ -1461,17 +1474,23 @@ def price_case_with_bloomberg_quote(
     # The derivation forces its own fresh production Curve #490 acquisition
     # whenever it runs -- including in override mode, where it produces the
     # comparison value beside the priced override (Codex P1 review of PR #178,
-    # round 12). Its own trace is the proof it happened: that trace carries
-    # `curve_acquisition = LIVE_PRODUCTION_CURVE_490_ACQUIRED_THIS_RUN`. When
-    # the derivation *failed* no acquisition is claimed -- it may not have got
-    # that far -- and the reason is already on `effective_forward`.
+    # round 12). The acquisition is reported by the resolver the moment it
+    # succeeds, so it is recorded even when a later derivation step (carry,
+    # coupon, curve range) then refused -- on an override run that refusal
+    # does not stop the run pricing, and the curve was still genuinely
+    # re-sourced (Codex P2 review of PR #178, round 13). A derivation that
+    # never got past the acquisition claims nothing, and its reason is already
+    # on `effective_forward`.
     derived_trace_present = (
         effective_forward is not None and effective_forward["shiori_derived_forward"] is not None
     )
     display = _with_accurate_refresh_scope(
         display,
         live_curve_acquired=live_curve_acquired,
-        s490_curve_acquired=derived_trace_present,
+        s490_curve_acquired=(
+            effective_forward is not None
+            and effective_forward["shiori_derived_forward_curve_acquired"]
+        ),
         derived_forward_replaced=(
             effective_forward is not None
             and effective_forward["forward_source"] == SHIORI_DERIVED_S490_FORWARD_SOURCE
@@ -1566,7 +1585,11 @@ def _with_accurate_refresh_scope(
 
 
 def resolve_s490_repo_carry_parity(
-    case: dict, spot_settlement_date: str, convention_profile: str | None = None
+    case: dict,
+    spot_settlement_date: str,
+    convention_profile: str | None = None,
+    *,
+    on_curve_acquired=None,
 ) -> dict:
     """Resolve one Issue #173/#174/#175 S490 repo-carry Forward for ``case``'s own Expiry.
 
@@ -1707,6 +1730,15 @@ def resolve_s490_repo_carry_parity(
     """
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
+    # Signalled the instant the acquisition succeeds, before any of the
+    # derivation steps that can still fail after it (Codex P2 review of PR
+    # #178, round 13). A caller reporting what a run re-sourced needs to know
+    # that a live S490 curve *was* fetched even when the carry, coupon or
+    # curve-range step then refused -- which on an override run is a refusal
+    # that does not stop the run pricing. Optional and defaulted to None, so
+    # every existing caller is unaffected.
+    if on_curve_acquired is not None:
+        on_curve_acquired()
 
     bond_option = priced_case.get("bond_option")
     if not isinstance(bond_option, dict):
@@ -1970,10 +2002,19 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
     derived_forward = None
     derived_trace = None
     derived_error = None
+    derived_curve_acquired = False
+
+    def _note_curve_acquired() -> None:
+        nonlocal derived_curve_acquired
+        derived_curve_acquired = True
+
     if isinstance(spot_settlement_date, str) and spot_settlement_date.strip():
         try:
             derived_trace = resolve_s490_repo_carry_parity(
-                case, spot_settlement_date, convention_profile
+                case,
+                spot_settlement_date,
+                convention_profile,
+                on_curve_acquired=_note_curve_acquired,
             )["s490_repo_carry"]
         except Exception as exc:  # noqa: BLE001 -- recorded verbatim, see below
             # Preserved verbatim rather than remapped (Issue #177: "the
@@ -2030,6 +2071,11 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         "shiori_derived_forward_error": effective.shiori_derived_forward_error,
         "spot_settlement_date": spot_settlement_date,
         "convention_profile": convention_profile,
+        # Whether a live production Curve #490 was actually fetched for this
+        # run's derivation -- true even when a later derivation step then
+        # failed, which is exactly the case a refresh's own provenance would
+        # otherwise under-report (Codex P2 review of PR #178, round 13).
+        "shiori_derived_forward_curve_acquired": derived_curve_acquired,
         "shiori_derived_forward": derived_trace,
     }
     return effective_case, provenance

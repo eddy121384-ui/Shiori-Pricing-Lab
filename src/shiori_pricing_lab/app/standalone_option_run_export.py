@@ -329,6 +329,7 @@ _EFFECTIVE_FORWARD_FIELDS = (
     ),
     ("Trader Forward Override per 100", "trader_forward_override_per_100"),
     ("Shiori Derived forward error", "shiori_derived_forward_error"),
+    ("Live S490 curve acquired", "shiori_derived_forward_curve_acquired"),
     ("Spot settlement date (tS)", "spot_settlement_date"),
     ("Convention profile", "convention_profile"),
 )

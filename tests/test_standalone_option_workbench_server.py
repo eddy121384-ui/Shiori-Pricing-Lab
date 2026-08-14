@@ -3572,7 +3572,7 @@ def test_apply_effective_forward_to_case_returns_an_override_case_unchanged(
     monkeypatch.setattr(
         server_module,
         "resolve_s490_repo_carry_parity",
-        lambda case, spot, profile=None: {
+        lambda case, spot, profile=None, **kwargs: {
             "s490_repo_carry": {"forward_clean_price_per_100": 101.0}
         },
     )
@@ -4397,3 +4397,124 @@ def test_a_refresh_still_refuses_an_invalid_forward_quote_side(
 
     assert status == 400
     assert "quote_side" in payload["error"]
+
+
+# --- Codex review of PR #178, round 13 ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "forward_source",
+    [_DERIVED_FORWARD_SOURCE, _TRADER_FORWARD_OVERRIDE_SOURCE],
+)
+def test_a_refresh_refuses_a_forward_side_that_disagrees_with_the_requested_side(
+    server_url: str, monkeypatch, forward_source: str
+) -> None:
+    # The refresh route knows the side it is about to source before it calls
+    # anything, so a forward side disagreeing with it is a guaranteed
+    # rejection by the request contract after the substitution -- refused up
+    # front rather than after two DAPI round trips.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a side mismatch must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _must_not_be_called)
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": forward_source,
+        "quote_side": "MID",
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "BID",
+        },
+    )
+
+    assert status == 400
+    assert "the requested refresh quote_side" in payload["error"]
+    assert "one coherent observation side" in payload["error"]
+
+
+def test_a_refresh_leaves_an_uncoercible_requested_side_to_the_loader(
+    server_url: str, monkeypatch
+) -> None:
+    # Validating the *requested* side is the Bloomberg loader's own job and
+    # its message is the reviewed one, so this pre-flight never pre-empts it.
+    calls: list = []
+
+    def _fake_loader(*, security, isin, quote_side):
+        calls.append(quote_side)
+        raise ValueError("quote_side must be one of BID, MID, OFFER")
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _fake_loader)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "NOT_A_SIDE",
+        },
+    )
+
+    assert status == 400
+    assert calls == ["NOT_A_SIDE"]
+    assert payload["error"] == "quote_side must be one of BID, MID, OFFER"
+
+
+@_QUANTLIB_SKIP
+def test_an_override_refresh_records_the_s490_acquisition_even_when_the_carry_fails(
+    server_url: str, monkeypatch
+) -> None:
+    # The acquisition happens before the carry/coupon/curve-range steps. When
+    # one of those refuses, an override run still prices -- and the live S490
+    # curve was still genuinely re-sourced, so the refresh provenance must say
+    # so rather than claim BOND_QUOTE_ONLY / CASE_JSON_UNCHANGED.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    # Case B window with a non-UST convention selection: the acquisition
+    # succeeds, then the interim-coupon convention assertion refuses.
+    case = _case_b_derived_forward_case()
+    case["convention_profile"] = "US_CORPORATE"
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    effective = payload["display"]["effective_forward"]
+    # The derivation genuinely failed, so there is no comparison value...
+    assert effective["shiori_derived_forward"] is None
+    assert "RepoCarryInterimCouponConventionError" in effective["shiori_derived_forward_error"]
+    # ...but the curve it fetched on the way there is reported.
+    assert effective["shiori_derived_forward_curve_acquired"] is True
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert "LIVE_S490_REPO_CARRY_CURVE" in live_quote["refreshed_inputs"]
+    assert "SHIORI_DERIVED_FORWARD_COMPARISON" not in live_quote["refreshed_inputs"]
+    assert live_quote["other_market_inputs"] == "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
