@@ -975,6 +975,11 @@ def price_uploaded_case(case: dict) -> dict:
     section, exactly as before.
     """
 
+    # Before the live-curve fetch, so a declared override this run cannot
+    # price under is refused for its own deterministic reason rather than
+    # behind a Bloomberg failure -- see
+    # :func:`validate_declared_trader_forward_override`.
+    validate_declared_trader_forward_override(case)
     case = inject_live_option_discount_curve_if_absent(case)
     case, effective_forward = apply_effective_forward_to_case(case)
     _, _, display = price_standalone_option_case(case)
@@ -1193,7 +1198,12 @@ def price_case_with_bloomberg_quote(
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
+    # Same ordering as POST /api/case: the deterministic override check runs
+    # before any Bloomberg call, curve or quote.
+    validate_declared_trader_forward_override(overlaid_case)
+    curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
+    live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection
     # Captured out of the transform rather than returned by it: the workflow's
     # seam is deliberately a plain dict -> dict case rewrite (see its own
     # docstring), so the provenance the same call produces is collected here
@@ -1214,7 +1224,79 @@ def price_case_with_bloomberg_quote(
     effective_forward = captured.get("effective_forward")
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
+    display = _with_accurate_refresh_scope(
+        display,
+        live_curve_acquired=live_curve_acquired,
+        derived_forward_replaced=(
+            effective_forward is not None
+            and effective_forward["forward_source"] == SHIORI_DERIVED_S490_FORWARD_SOURCE
+        ),
+    )
     return {"case": priced_case, "display": display}
+
+
+# What a Bloomberg refresh on this route actually re-sourced. The workflow's
+# own ``prepare_live_bloomberg_quote_display`` states ``BOND_QUOTE_ONLY`` /
+# ``CASE_JSON_UNCHANGED``, which is true of that function -- it substitutes
+# exactly the quote -- but not of this route, which wraps it (Codex P1 review
+# of PR #178, round 4). Two inputs beyond the quote can be re-sourced here
+# before pricing:
+#
+# - the Option Discount Curve, since Issue #171, whenever the case carried no
+#   manual nodes (a pre-#177 inaccuracy in the same sentence, corrected here
+#   rather than left standing beside the new one);
+# - the Forward, since Issue #177, whenever the run's source is the Shiori
+#   derived one -- which is now the *default*, so on an ordinary derived-mode
+#   refresh the quote-only claim is false about the single most important
+#   number on the ticket.
+#
+# Stating otherwise in the display and the exported run would be a provenance
+# claim contradicting the inputs actually priced (AGENTS.md rule 6), so the
+# two fields are corrected here from what this route genuinely did.
+# ``refreshed_inputs`` carries the same fact as an explicit list, so a reader
+# never has to parse a compound label.
+_REFRESHED_INPUT_BOND_QUOTE = "BOND_QUOTE"
+_REFRESHED_INPUT_OPTION_DISCOUNT_CURVE = "LIVE_OPTION_DISCOUNT_CURVE"
+_REFRESHED_INPUT_DERIVED_FORWARD = "SHIORI_DERIVED_FORWARD"
+_OTHER_MARKET_INPUTS_UNCHANGED = "CASE_JSON_UNCHANGED"
+_OTHER_MARKET_INPUTS_EXCEPT_REFRESHED = "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
+
+
+def _with_accurate_refresh_scope(
+    display: dict, *, live_curve_acquired: bool, derived_forward_replaced: bool
+) -> dict:
+    """Return ``display`` with its live-quote refresh scope corrected.
+
+    See the note above for why the workflow's own quote-only labels are not
+    the whole truth on this route. A refresh that genuinely re-sourced
+    nothing but the quote is left byte-for-byte unchanged, so the pre-#171
+    manual-curve path and every existing test keep their exact wording.
+    """
+
+    live_quote = display.get("live_bloomberg_quote")
+    if not isinstance(live_quote, dict):
+        return display
+    refreshed = [_REFRESHED_INPUT_BOND_QUOTE]
+    if live_curve_acquired:
+        refreshed.append(_REFRESHED_INPUT_OPTION_DISCOUNT_CURVE)
+    if derived_forward_replaced:
+        refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD)
+    if refreshed == [_REFRESHED_INPUT_BOND_QUOTE]:
+        # Genuinely quote-only: returned completely untouched, so a legacy
+        # (manual-curve, explicit-forward) refresh is still byte-for-byte the
+        # workflow function's own output, and the presence of
+        # ``refreshed_inputs`` at all means "more than the quote was
+        # re-sourced".
+        return display
+    return {
+        **display,
+        "live_bloomberg_quote": {
+            **live_quote,
+            "refreshed_scope": "_AND_".join(refreshed),
+            "other_market_inputs": _OTHER_MARKET_INPUTS_EXCEPT_REFRESHED,
+            "refreshed_inputs": refreshed,
+        },
+    }
 
 
 def resolve_s490_repo_carry_parity(
@@ -1522,6 +1604,47 @@ def resolve_s490_repo_carry_parity(
 # leaving both reviewed contracts exactly as they are.
 
 
+def validate_declared_trader_forward_override(case: object) -> None:
+    """Validate a declared Trader Forward Override as the observation it claims to be.
+
+    A no-op for every case outside ``TRADER_FORWARD_OVERRIDE`` mode --
+    including the Shiori-derived mode, whose own ``forward_clean_price_input``
+    is about to be replaced wholesale and is therefore not validated as an
+    observation this run stands behind.
+
+    An override, by contrast, is the trader's own explicit forward
+    observation and is carried through verbatim, so every rule the reviewed
+    ``BLIForwardCleanPriceInput`` contract has about such an observation must
+    still apply to it -- the finite/strictly-positive number, the quote-side
+    enum, the non-blank source system, and the ACTIVE-only ``status`` (Codex
+    P2 review of PR #178, round 2: rebuilding the input hard-coded ``ACTIVE``
+    and so promoted a ``STALE``/``INVALID``/``MISSING`` observation into
+    usable market data). Constructing the typed object is exactly that check;
+    the result is deliberately discarded, because this is a validation and
+    never a rewrite.
+
+    **Called before the live-curve injector, not only from inside
+    :func:`apply_effective_forward_to_case`** (Codex P2 review of PR #178,
+    round 4). Both pricing routes fetch the live Option Discount Curve first,
+    so validating only at forward-selection time meant an
+    invalid-or-inactive override on a live-curve draft reached Bloomberg
+    first: a DAPI request wasted on a run that cannot price, and -- worse --
+    a Bloomberg failure reported in place of the deterministic, entirely
+    local reason the run was actually going to be refused for. This check
+    reads two case keys, makes no network call and reads no clock, so running
+    it first costs nothing and always reports the real reason.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE:
+        return
+    BLIForwardCleanPriceInput(**forward_input)
+
+
 def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
     """Return ``(case priced with the effective Forward, provenance payload)``.
 
@@ -1573,17 +1696,7 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         return case, None
 
     is_trader_override = forward_source == TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE
-    if is_trader_override:
-        # Codex P2 review of PR #178, round 2. An override is the trader's own
-        # explicit forward observation, and it is carried through verbatim --
-        # so every rule the reviewed ``BLIForwardCleanPriceInput`` contract has
-        # about such an observation must still apply to it, ``status``
-        # included. Constructing it here does exactly that, and does it
-        # *before* any Bloomberg call, so a rejected override never costs a
-        # DAPI round trip. The result is deliberately discarded: this is a
-        # validation, not a rewrite -- see the `effective_case` note below for
-        # why an override's own input is never rebuilt.
-        BLIForwardCleanPriceInput(**forward_input)
+    validate_declared_trader_forward_override(case)
 
     spot_settlement_date = case.get("spot_settlement_date")
     convention_profile = case.get("convention_profile")

@@ -288,15 +288,25 @@ _LIVE_BLOOMBERG_QUOTE_FIELDS = (
     ("Bloomberg quote observation time", "bloomberg_quote_observation_time"),
     ("Case as-of timestamp", "case_as_of_timestamp"),
     ("Refreshed scope", "refreshed_scope"),
+    ("Refreshed inputs", "refreshed_inputs"),
     ("Other market inputs", "other_market_inputs"),
 )
 
+# Issue #177 / Codex P1 review of PR #178. This used to assert flatly that
+# "only the bond quote was refreshed -- curve, forward, ... remain from the
+# case JSON". That is true of the workflow function alone, but not of the
+# Workbench refresh route wrapping it: since Issue #171 it can also re-source
+# the Option Discount Curve, and since Issue #177 it re-derives the Forward
+# whenever the run's source is the Shiori derived one -- now the default. So
+# the fixed sentence no longer claims what was left unchanged; the run's own
+# "Refreshed scope" / "Refreshed inputs" fields state exactly what was
+# re-sourced, and the disclaimer points at them.
 _LIVE_BLOOMBERG_QUOTE_DISCLAIMER = (
     "Bloomberg quote-observation time is not provided by this DAPI path. "
-    "Acquired at is when Shiori received this quote. Only the bond quote was "
-    "refreshed -- curve, forward, volatility, credit-spread, and other market "
-    "inputs remain from the case JSON. This is a current-run mixed-provenance "
-    "calculation, not a historical replay."
+    "Acquired at is when Shiori received this quote. Refreshed scope and "
+    "Refreshed inputs below state exactly which inputs this run re-sourced; "
+    "every other market input remains from the case JSON. This is a "
+    "current-run mixed-provenance calculation, not a historical replay."
 )
 
 # Issue #177. Exactly the keys the workbench bridge's own

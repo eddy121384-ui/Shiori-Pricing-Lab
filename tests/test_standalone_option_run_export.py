@@ -822,8 +822,15 @@ def test_markdown_export_live_bloomberg_quote_section_states_disclaimer():
     section = md.split("## Live Bloomberg Quote")[1].split("##")[0]
     assert "quote-observation time is not provided" in section
     assert "Acquired at is when Shiori received" in section
-    assert "Only the bond quote was refreshed" in section
+    # Codex P1 review of PR #178: the disclaimer no longer asserts that only
+    # the quote was refreshed -- that stopped being true of the refresh route
+    # once it could re-source the curve (Issue #171) and re-derive the
+    # Forward (Issue #177). It now points at the run's own fields, which
+    # state exactly what was re-sourced.
+    assert "Refreshed scope and Refreshed inputs below state exactly" in section
+    assert "every other market input remains from the case JSON" in section
     assert "mixed-provenance" in section
+    assert "Only the bond quote was refreshed" not in section
 
 
 def test_markdown_export_omits_live_bloomberg_quote_section_when_absent():
@@ -1034,3 +1041,40 @@ def test_markdown_pricing_section_reports_an_absent_forward_source_as_not_availa
 
     section = md.split("## Pricing")[1].split("\n## ")[0]
     assert "- **Forward source:** not available" in section
+
+
+def test_markdown_export_reports_the_refreshed_inputs_when_more_than_the_quote_moved():
+    # Issue #177 derived-mode refresh: the run re-sourced the curve and the
+    # Forward as well as the quote, and the exported artifact has to say so.
+    live_quote = {
+        **_live_bloomberg_quote_fixture(),
+        "refreshed_scope": "BOND_QUOTE_AND_LIVE_OPTION_DISCOUNT_CURVE_AND_SHIORI_DERIVED_FORWARD",
+        "other_market_inputs": "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS",
+        "refreshed_inputs": [
+            "BOND_QUOTE",
+            "LIVE_OPTION_DISCOUNT_CURVE",
+            "SHIORI_DERIVED_FORWARD",
+        ],
+    }
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    md = render_standalone_run_as_markdown(display)
+
+    section = md.split("## Live Bloomberg Quote")[1].split("\n## ")[0]
+    assert "- **Refreshed scope:** " + live_quote["refreshed_scope"] in section
+    assert "SHIORI_DERIVED_FORWARD" in section
+    assert "LIVE_OPTION_DISCOUNT_CURVE" in section
+
+
+def test_markdown_export_reports_a_quote_only_refresh_as_before():
+    live_quote = _live_bloomberg_quote_fixture()
+    display = _synthetic_price_only_display(live_bloomberg_quote=live_quote)
+
+    md = render_standalone_run_as_markdown(display)
+
+    section = md.split("## Live Bloomberg Quote")[1].split("\n## ")[0]
+    assert "- **Refreshed scope:** BOND_QUOTE_ONLY" in section
+    assert "- **Other market inputs:** CASE_JSON_UNCHANGED" in section
+    # Absent rather than fabricated: a genuinely quote-only refresh carries no
+    # refreshed_inputs list at all.
+    assert "- **Refreshed inputs:** not available" in section

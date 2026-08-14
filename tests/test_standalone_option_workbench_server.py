@@ -3586,3 +3586,158 @@ def test_apply_effective_forward_to_case_returns_an_override_case_unchanged(
     assert provenance["effective_forward_clean_price_per_100"] == pytest.approx(97.75)
     # The derived Forward is still resolved beside it for comparison.
     assert provenance["shiori_derived_forward_clean_price_per_100"] == pytest.approx(101.0)
+
+
+# --- Codex review of PR #178, round 4 -----------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_a_derived_mode_refresh_reports_what_it_actually_re_sourced(
+    server_url: str, monkeypatch
+) -> None:
+    # P1: the workflow's own quote-only labels are true of that function but
+    # not of this route, which re-sources the live curve (Issue #171) and
+    # re-derives the Forward (Issue #177) before pricing. Claiming otherwise
+    # in the display and the exported run would contradict the inputs that
+    # were actually priced.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert live_quote["refreshed_inputs"] == [
+        "BOND_QUOTE",
+        "LIVE_OPTION_DISCOUNT_CURVE",
+        "SHIORI_DERIVED_FORWARD",
+    ]
+    assert live_quote["refreshed_scope"] == (
+        "BOND_QUOTE_AND_LIVE_OPTION_DISCOUNT_CURVE_AND_SHIORI_DERIVED_FORWARD"
+    )
+    assert live_quote["other_market_inputs"] == "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
+
+
+@_QUANTLIB_SKIP
+def test_an_override_mode_refresh_does_not_claim_the_forward_was_re_sourced(
+    server_url: str, monkeypatch
+) -> None:
+    # The override is carried through untouched, so it must not appear in the
+    # refreshed list -- only the quote and the live curve moved.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert live_quote["refreshed_inputs"] == ["BOND_QUOTE", "LIVE_OPTION_DISCOUNT_CURVE"]
+    assert "SHIORI_DERIVED_FORWARD" not in live_quote["refreshed_scope"]
+
+
+@_QUANTLIB_SKIP
+def test_a_legacy_manual_curve_refresh_keeps_the_quote_only_contract_byte_for_byte(
+    server_url: str, monkeypatch
+) -> None:
+    # Nothing beyond the quote moved, so the workflow's own labels stand and
+    # no refreshed_inputs key is invented.
+    _install_fake_bloomberg_loader_with_clean_price(monkeypatch, 103.5)
+    _install_fixed_clock(monkeypatch)
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = json.loads(_example_case_bytes())
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": _BLOOMBERG_SECURITY,
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    assert calls == []
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert live_quote["refreshed_scope"] == "BOND_QUOTE_ONLY"
+    assert live_quote["other_market_inputs"] == "CASE_JSON_UNCHANGED"
+    assert "refreshed_inputs" not in live_quote
+
+
+def test_an_invalid_declared_override_is_refused_before_any_bloomberg_call(
+    server_url: str, monkeypatch
+) -> None:
+    # P2: the deterministic, entirely local override refusal must not be
+    # reported behind -- or masked by -- a Bloomberg failure. The case has
+    # empty curve_points, so the live-curve injector would otherwise run
+    # first and fail.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("an invalid override must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    assert case["curve_points"] == []
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": -1.0,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert payload["error"] == "forward_clean_price_per_100 must be positive, got -1.0"
+
+
+def test_an_inactive_declared_override_is_refused_before_any_bloomberg_call(
+    server_url: str, monkeypatch
+) -> None:
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("an inactive override must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+        "status": "STALE",
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case", case)
+
+    assert status == 400
+    assert "STALE" in payload["error"]
