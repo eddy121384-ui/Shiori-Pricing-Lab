@@ -1144,10 +1144,9 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
     side, and that check must keep failing a case that gets it wrong.
 
     Returns ``None`` -- leaving the case exactly as supplied -- for any case
-    that is not in derived mode (a Trader Forward Override *is* the priced
-    value and is validated as itself, as is a legacy explicit forward), and
-    for a derived case whose Forward is already usable, which needs no
-    stand-in. The caller's own ``case`` is never mutated.
+    that is not in derived mode: a Trader Forward Override *is* the priced
+    value and is validated as itself, as is a legacy explicit forward. The
+    caller's own ``case`` is never mutated.
     """
 
     if not isinstance(case, dict):
@@ -1157,11 +1156,23 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
         return None
     if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
         return None
-    if is_usable_forward_clean_price(forward_input.get("forward_clean_price_per_100")):
-        return None
+    # Both discarded fields are normalized, and they are normalized
+    # independently (Codex P2 review of PR #178, round 9). An earlier version
+    # returned early whenever the *number* was usable, which left an
+    # inactive `status` on a case whose whole observation the pricing path
+    # discards anyway -- so a derived case carrying a perfectly good prior
+    # Forward alongside STALE/INVALID/MISSING still read not-ready while
+    # Price succeeded. A usable number is still kept rather than replaced:
+    # where a real value exists, validating the real one is strictly better
+    # evidence than validating a stand-in.
+    forward_value = forward_input.get("forward_clean_price_per_100")
     return {
         **forward_input,
-        "forward_clean_price_per_100": _VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100,
+        "forward_clean_price_per_100": (
+            forward_value
+            if is_usable_forward_clean_price(forward_value)
+            else _VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100
+        ),
         "status": "ACTIVE",
     }
 
@@ -1212,14 +1223,38 @@ def require_usable_spot_settlement_date_for_derived_forward(case: object) -> Non
 def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     """Apply ``overlay`` to a fresh copy of ``case`` (not the bundled one) and price it.
 
-    The explicit-case counterpart of :func:`price_overlay_case`, used once
-    the page has an active case other than the bundled default. Returns the
+    The explicit-case counterpart of :func:`price_overlay_case`. Returns the
     display dict verbatim; raises for a bad overlay key set or invalid
     field value exactly like :func:`price_overlay_case`.
+
+    **Issue #177 / Codex P1 review of PR #178, round 9.** This route resolves
+    the effective Forward through exactly the same
+    :func:`apply_effective_forward_to_case` as ``POST /api/case``, and gains
+    the same ``effective_forward`` display section. It is a documented,
+    reachable pricing endpoint, so leaving it out meant a case declaring
+    ``SHIORI_DERIVED_S490`` was priced from whatever Forward its envelope
+    happened to carry -- a previous, possibly stale derivation -- while the
+    result labelled that number ``SHIORI_DERIVED_S490``. A run must not claim
+    a source that did not produce its F.
+
+    Deliberately *not* changed: this route still does not inject the live
+    Option Discount Curve. That is Issue #171's own decision for the
+    explicit-case path, unrelated to which Forward is priced, and outside
+    this slice. The Forward derivation acquires its own Curve #490 regardless
+    (see :func:`resolve_s490_repo_carry_parity`), so a derived-mode case
+    prices here on exactly the same Forward it would through ``POST
+    /api/case``.
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
+    # Same order as every other pricing route: the deterministic, entirely
+    # local refusals run before anything can reach Bloomberg.
+    validate_declared_trader_forward_override(overlaid_case)
+    require_usable_spot_settlement_date_for_derived_forward(overlaid_case)
+    overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
     _, _, display = price_standalone_option_case(overlaid_case)
+    if effective_forward is not None:
+        display = {**display, "effective_forward": effective_forward}
     return display
 
 

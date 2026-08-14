@@ -3951,3 +3951,152 @@ def test_validate_and_price_agree_for_a_derived_case_with_no_forward(
     assert price_payload["display"]["forward_clean_price_per_100"] == pytest.approx(
         _expected_derived_forward(case)
     )
+
+
+# --- Codex review of PR #178, round 9 -----------------------------------------
+
+
+@_QUANTLIB_SKIP
+def test_api_case_price_resolves_the_effective_forward_like_api_case(
+    server_url: str, monkeypatch
+) -> None:
+    # P1: a documented, reachable pricing endpoint must not price a case
+    # declaring SHIORI_DERIVED_S490 from whatever Forward its envelope
+    # happened to carry while labelling the result SHIORI_DERIVED_S490.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    # This route deliberately does not inject the live Option Discount Curve
+    # (Issue #171's own decision for the explicit-case path), so the case
+    # brings its own -- the realistic shape for a direct client. The Forward
+    # derivation still acquires its own Curve #490 regardless.
+    case["curve_points"] = json.loads(_example_case_bytes())["curve_points"]
+    # A deliberately wrong stored Forward: if it reaches Black-76, the
+    # assertions below fail.
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 12345.0,
+    }
+    expected_forward = _expected_derived_forward(case)
+
+    status, display = _post_json(
+        f"{server_url}/api/case/price",
+        {"case": case, "overlay": extract_standalone_option_case_overlay(case)},
+    )
+
+    assert status == 200
+    assert display["forward_clean_price_per_100"] == pytest.approx(expected_forward)
+    assert display["forward_clean_price_per_100"] != 12345.0
+    assert display["forward_source"] == _DERIVED_FORWARD_SOURCE
+    assert display["effective_forward"]["forward_source"] == _DERIVED_FORWARD_SOURCE
+
+
+@_QUANTLIB_SKIP
+def test_api_case_price_prices_an_override_verbatim(server_url: str, monkeypatch) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["curve_points"] = json.loads(_example_case_bytes())["curve_points"]
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, display = _post_json(
+        f"{server_url}/api/case/price",
+        {"case": case, "overlay": extract_standalone_option_case_overlay(case)},
+    )
+
+    assert status == 200
+    assert display["forward_clean_price_per_100"] == pytest.approx(97.75)
+    assert display["forward_source"] == _TRADER_FORWARD_OVERRIDE_SOURCE
+
+
+def test_api_case_price_refuses_an_invalid_override_before_any_bloomberg_call(
+    server_url: str, monkeypatch
+) -> None:
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("an invalid override must be refused before Bloomberg")
+
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 0.0,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/price",
+        {"case": case, "overlay": extract_standalone_option_case_overlay(case)},
+    )
+
+    assert status == 400
+    assert payload["error"] == "forward_clean_price_per_100 must be positive, got 0.0"
+
+
+@_QUANTLIB_SKIP
+def test_api_case_price_leaves_a_legacy_case_byte_for_byte_unchanged(
+    server_url: str, monkeypatch
+) -> None:
+    # The bundled example is outside the two Issue #177 modes, so this route
+    # still returns exactly what the unmodified pricing function returns.
+    calls = _install_fake_live_curve_loader(monkeypatch)
+    case = json.loads(_example_case_bytes())
+
+    status, display = _post_json(
+        f"{server_url}/api/case/price",
+        {"case": case, "overlay": extract_standalone_option_case_overlay(case)},
+    )
+
+    assert status == 200
+    assert calls == []
+    assert "effective_forward" not in display
+    _, _, expected_display = price_standalone_option_case(case)
+    assert display == json.loads(json.dumps(expected_display))
+
+
+@pytest.mark.parametrize("inactive_status", ["STALE", "INVALID", "MISSING"])
+def test_api_case_validate_accepts_a_usable_derived_forward_with_a_discarded_status(
+    server_url: str, inactive_status: str
+) -> None:
+    # P2: the two discarded fields are normalized independently. A derived
+    # case carrying a perfectly good prior Forward alongside an inactive
+    # status still prices, so readiness must not refuse it.
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 99.5,
+        "status": inactive_status,
+    }
+
+    status, payload = _post_json(f"{server_url}/api/case/validate", case)
+
+    assert status == 200
+    assert payload["ready"] is True
+    assert payload["error"] is None
+
+
+@_QUANTLIB_SKIP
+def test_validate_and_price_agree_for_a_usable_forward_with_a_discarded_status(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 99.5,
+        "status": "STALE",
+    }
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, True)
+    assert price_status == 200
+    assert price_payload["display"]["status"] == "SUCCESS"
+    # The whole observation was discarded, stale status and stale number alike.
+    assert price_payload["case"]["forward_clean_price_input"]["status"] == "ACTIVE"
+    assert price_payload["display"]["forward_clean_price_per_100"] != pytest.approx(99.5)
