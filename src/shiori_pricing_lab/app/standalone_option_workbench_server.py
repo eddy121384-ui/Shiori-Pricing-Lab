@@ -339,7 +339,7 @@ from shiori_pricing_lab.pricing.bli_effective_forward import (
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     forward_clean_price_input_dict,
-    is_usable_forward_clean_price,
+    is_usable_clean_price_per_100,
     select_effective_forward,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import repo_carry_forward_clean_price
@@ -1107,8 +1107,7 @@ def validate_case(case: dict) -> dict:
         placeholder_forward = _validation_only_forward_clean_price_input(case)
         if placeholder_forward is not None:
             case = {**case, "forward_clean_price_input": placeholder_forward}
-        require_usable_spot_settlement_date_for_derived_forward(case)
-        require_coherent_forward_quote_side(case)
+        validate_deterministic_forward_inputs(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -1186,7 +1185,7 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
     return {
         "forward_clean_price_per_100": (
             forward_value
-            if is_usable_forward_clean_price(forward_value)
+            if is_usable_clean_price_per_100(forward_value)
             else _VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100
         ),
         "quote_side": forward_input.get("quote_side"),
@@ -1216,6 +1215,48 @@ def _require_valid_forward_quote_side(case: object) -> TreasuryFTPQuoteSide | No
         TreasuryFTPQuoteSide,
         "forward_clean_price_input.quote_side",
     )
+
+
+def require_usable_spot_clean_price_for_derived_forward(case: object) -> None:
+    """Raise unless a derived-Forward case's spot quote carries a usable price.
+
+    Pure and offline -- reads two case keys. A no-op outside Shiori-derived
+    mode.
+
+    The reviewed request contract deliberately *permits* a yield-only
+    ``bond_quote`` (Issue #94: the standalone path prices from an explicit
+    forward, so it does not need the spot clean price). The S490 derivation
+    does need it -- it is what the repo carry starts from -- and rejects a
+    yield-only quote unconditionally. Before this check that rejection landed
+    only after the live option-discount and S490 curve acquisitions, so
+    readiness reported ``ready: true`` for a run guaranteed to fail and a
+    Bloomberg outage could mask the real, entirely local reason (Codex P2
+    review of PR #178, round 14).
+
+    A non-finite or non-positive price is refused here for the same reason:
+    the carry primitive requires a strictly positive spot clean price, and
+    that is knowable without asking Bloomberg anything.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return
+    bond_quote = case.get("bond_quote")
+    if not isinstance(bond_quote, dict):
+        # The envelope parser and the typed constructors own this.
+        return
+    clean_price = bond_quote.get("clean_price_per_100")
+    if not is_usable_clean_price_per_100(clean_price):
+        raise ValueError(
+            "bond_quote.clean_price_per_100 must be a finite, strictly positive price "
+            f"(got {clean_price!r}) -- this run's Forward source is the Shiori Derived "
+            "S490 repo-carry Forward, whose carry starts from the spot clean price, and "
+            "a yield-only quote carries none for it to start from"
+        )
 
 
 def require_coherent_forward_quote_side(case: object, *, spot_quote_side: object = None) -> None:
@@ -1307,6 +1348,7 @@ def validate_deterministic_forward_inputs(
 
     validate_declared_trader_forward_override(case)
     require_usable_spot_settlement_date_for_derived_forward(case)
+    require_usable_spot_clean_price_for_derived_forward(case)
     require_coherent_forward_quote_side(case, spot_quote_side=refresh_quote_side)
 
 
@@ -1350,7 +1392,27 @@ def require_usable_spot_settlement_date_for_derived_forward(case: object) -> Non
             "settlement date from a lag, weekend, holiday or business-day convention, "
             "so it has to be entered"
         )
-    _parse_iso_date(spot_settlement_date, "spot_settlement_date")
+    spot = _parse_iso_date(spot_settlement_date, "spot_settlement_date")
+    # A well-formed date is still not a usable one if it does not open a repo
+    # window (Codex P2 review of PR #178, round 14). ``repo_term_days``
+    # requires forward settlement strictly after spot settlement -- "a zero or
+    # negative repo term is not a forward" -- and both dates are on the case,
+    # so this is decidable here rather than after two Bloomberg acquisitions.
+    # A missing or malformed ``forward_settlement_date`` is left alone: the
+    # typed builder already requires and validates it, and reporting it twice
+    # in two different voices helps nobody.
+    forward_settlement_date = case.get("forward_settlement_date")
+    try:
+        forward = _parse_iso_date(forward_settlement_date, "forward_settlement_date")
+    except (TypeError, ValueError):
+        return
+    if forward <= spot:
+        raise ValueError(
+            f"forward_settlement_date ({forward_settlement_date!r}) must be strictly "
+            f"after spot_settlement_date ({spot_settlement_date!r}) -- a zero or "
+            "negative repo term is not a forward, so the Shiori Derived S490 "
+            "repo-carry Forward cannot be derived over this window"
+        )
 
 
 def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:

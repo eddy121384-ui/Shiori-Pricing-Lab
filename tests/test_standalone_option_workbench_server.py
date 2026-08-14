@@ -4518,3 +4518,99 @@ def test_an_override_refresh_records_the_s490_acquisition_even_when_the_carry_fa
     assert "LIVE_S490_REPO_CARRY_CURVE" in live_quote["refreshed_inputs"]
     assert "SHIORI_DERIVED_FORWARD_COMPARISON" not in live_quote["refreshed_inputs"]
     assert live_quote["other_market_inputs"] == "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
+
+
+# --- Codex review of PR #178, round 14 ----------------------------------------
+
+
+@pytest.mark.parametrize("unusable_spot", [None, 0, 0.0, -1.0])
+def test_a_derived_case_with_no_usable_spot_clean_price_is_refused_offline(
+    server_url: str, monkeypatch, unusable_spot: object
+) -> None:
+    # The request contract deliberately permits a yield-only bond_quote, but
+    # the S490 carry starts from the spot clean price -- so in derived mode a
+    # quote without one is a guaranteed failure, decidable without asking
+    # Bloomberg anything.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a yield-only quote must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    case["bond_quote"] = {**case["bond_quote"], "clean_price_per_100": unusable_spot}
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, False)
+    assert "clean_price_per_100" in validate_payload["error"]
+    assert price_status == 400
+    assert "clean_price_per_100" in price_payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_an_override_run_still_prices_from_a_yield_only_quote(
+    server_url: str, monkeypatch
+) -> None:
+    # Scoped to the derived source: an override does not price from the spot
+    # clean price, and the request contract permits a yield-only quote, so
+    # such a run must not be refused.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _derived_forward_case()
+    case["bond_quote"] = {
+        **case["bond_quote"],
+        "clean_price_per_100": None,
+        "yield_value": 0.0412,
+    }
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "forward_clean_price_per_100": 97.75,
+        "source_system": _TRADER_FORWARD_OVERRIDE_SOURCE,
+    }
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, True)
+    assert price_status == 200
+    assert price_payload["display"]["forward_clean_price_per_100"] == pytest.approx(97.75)
+
+
+@pytest.mark.parametrize("spot_settlement_date", ["2026-10-01", "2026-10-02", "2026-12-31"])
+def test_a_non_positive_repo_window_is_refused_offline(
+    server_url: str, monkeypatch, spot_settlement_date: str
+) -> None:
+    # repo_term_days requires forward settlement strictly after spot
+    # settlement -- both dates are on the case, so readiness must not report
+    # ready for a window the derivation will refuse.
+    def _must_not_be_called(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a non-positive repo window must be refused before Bloomberg")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _must_not_be_called
+    )
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _must_not_be_called)
+    case = _derived_forward_case()
+    # The example case settles the forward on 2026-10-01.
+    assert case["forward_settlement_date"] == "2026-10-01"
+    case["spot_settlement_date"] = spot_settlement_date
+
+    validate_status, validate_payload = _post_json(f"{server_url}/api/case/validate", case)
+    price_status, price_payload = _post_json(f"{server_url}/api/case", case)
+
+    assert (validate_status, validate_payload["ready"]) == (200, False)
+    assert "strictly after" in validate_payload["error"]
+    assert price_status == 400
+    assert "strictly after" in price_payload["error"]
+
+
+def test_readiness_runs_exactly_the_same_pre_flight_as_pricing() -> None:
+    # The structural guarantee behind rounds 7-14: readiness cannot check a
+    # subset of what pricing refuses, because it calls the same function.
+    source = inspect.getsource(server_module)
+    start = source.index("def validate_case(")
+    end = source.index("\ndef ", start + 1)
+    assert "validate_deterministic_forward_inputs(" in source[start:end]
