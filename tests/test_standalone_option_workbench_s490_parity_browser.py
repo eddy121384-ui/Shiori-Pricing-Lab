@@ -478,15 +478,20 @@ def test_a_slow_recompute_never_shows_the_previous_dates_stale_numbers(server_ur
     # artificial 1s delay above -- comfortably before the delayed response
     # can possibly have arrived.
     #
-    # Waits on the pending *status* rather than on the hidden fields, then
-    # reads the fields from that same observation. renderS490Parity sets both
-    # in one synchronous pass, so either is a valid trigger -- but polling the
-    # fields and then reading the status in a second call leaves a window in
-    # which the delayed response can land between the two, flipping the status
-    # back to "" and failing a test whose subject is not timing at all. Seen
-    # once on a loaded CI runner.
-    _wait_until(lambda: "Resolving" in page.text_content("#s490-parity-status"))
-    assert page.eval_on_selector("#s490-parity-fields", "el => el.hidden")
+    # Both facts are read in ONE page evaluation. renderS490Parity sets the
+    # status and the hidden fields in a single synchronous pass, so the
+    # pending state is only ever coherent when observed atomically: polling
+    # one and then reading the other in a second call leaves a window in
+    # which the artificially delayed response lands between them, and the
+    # test fails on timing rather than on its actual subject. (Both orderings
+    # were tried and both raced -- once on a loaded CI runner, once locally.)
+    _wait_until(
+        lambda: page.evaluate(
+            "() => document.querySelector('#s490-parity-status')"
+            ".textContent.includes('Resolving')"
+            " && document.querySelector('#s490-parity-fields').hidden"
+        )
+    )
 
     # And once the delayed response arrives, the new date's own numbers
     # appear -- the recompute itself still completes, this test only proves

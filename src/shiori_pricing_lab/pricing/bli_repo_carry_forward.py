@@ -69,6 +69,21 @@ it, both carried verbatim onto every result:
   ``UST_COUPON_PAYMENT_ROLL_CONVENTION``. This module resolves no calendar
   and rolls no date itself.
 
+**The payment convention is UST-scoped, so the caller must assert it**
+(Codex P1 review of PR #176). Eddy's Issue #175 decision is explicitly about
+US Treasuries: "對 UST, 若 nominal coupon date 非 Federal Reserve business
+day, roll 到 next Federal Reserve business day". Nothing in
+``StandaloneBondReferenceData`` establishes that a bond *is* a Treasury --
+this repository deliberately refuses to infer issuer classification from
+reference data (Issues #157/#161: ``US_CORPORATE`` is a registered profile
+covering the same USD semi-annual shape, and the Bloomberg field that would
+classify is unconfirmed). Applying a Fedwire coupon roll to a USD corporate
+bullet would therefore be an unapproved methodology extension, so
+``interim_coupon_payment_convention`` is a **required** argument whenever a
+coupon falls in the window: the caller states which approved convention
+applies, and anything other than ``UST_COUPON_PAYMENT_ROLL_CONVENTION``
+raises. Case A never consults it.
+
 **Scheduled date selects; payment date carries.** These are two different
 dates doing two different jobs, and conflating them was Issue #175's whole
 blocker:
@@ -139,6 +154,7 @@ from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
     coupon_flows_before,
 )
 from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
+    UST_COUPON_PAYMENT_ROLL_CONVENTION,
     resolve_ust_coupon_payment_date,
 )
 
@@ -334,6 +350,18 @@ class RepoCarryForward:
     forward_clean_price_per_100: float
 
 
+class RepoCarryInterimCouponConventionError(ValueError):
+    """No approved coupon-payment convention was asserted for this bond.
+
+    Raised when a coupon falls in ``(tS, tF]`` and the caller did not state
+    an ``interim_coupon_payment_convention`` this module recognises. Eddy's
+    Issue #175 payment-date decision is UST-scoped and this repository
+    cannot tell a Treasury from a USD corporate bullet on reference data
+    alone, so the assertion is the caller's to make -- see the module
+    docstring.
+    """
+
+
 def repo_carry_forward_clean_price(
     *,
     bond: StandaloneBondReferenceData,
@@ -341,6 +369,7 @@ def repo_carry_forward_clean_price(
     spot_settlement_date: str,
     forward_settlement_date: str,
     repo_rate_decimal: float,
+    interim_coupon_payment_convention: str | None = None,
 ) -> RepoCarryForward:
     """Return the FPA repo-carry forward for ``bond`` at ``forward_settlement_date``.
 
@@ -361,7 +390,10 @@ def repo_carry_forward_clean_price(
     price, a non-positive repo term, a coupon whose reinvestment factor is
     not positive, or a forward dirty price that is not positive after the
     interim coupons are subtracted. Every other error propagates unchanged
-    from the composed helpers -- notably
+    from the composed helpers. Raises
+    :class:`RepoCarryInterimCouponConventionError` when a coupon falls in the
+    window and ``interim_coupon_payment_convention`` is not the approved UST
+    one -- notably
     ``BLIBondMaturityCashflowUnsupportedError`` when the window reaches the
     bond's maturity date, and
     ``BLICouponPaymentCalendarUnavailableError`` when QuantLib is absent and
@@ -375,6 +407,28 @@ def repo_carry_forward_clean_price(
     term_days = repo_term_days(spot_settlement_date, forward_settlement_date)
     term_year_fraction = term_days / REPO_DAY_COUNT_BASIS_DAYS
 
+    scheduled_interim_coupons = coupon_flows_before(
+        bond,
+        after_date=spot_settlement_date,
+        on_or_before_date=forward_settlement_date,
+    )
+    if (
+        scheduled_interim_coupons
+        and interim_coupon_payment_convention != UST_COUPON_PAYMENT_ROLL_CONVENTION
+    ):
+        raise RepoCarryInterimCouponConventionError(
+            f"{len(scheduled_interim_coupons)} coupon(s) are scheduled in "
+            f"({spot_settlement_date}, {forward_settlement_date}] on "
+            + ", ".join(flow.payment_date for flow in scheduled_interim_coupons)
+            + f", but interim_coupon_payment_convention is "
+            f"{interim_coupon_payment_convention!r}. Carrying an interim coupon needs the "
+            "date its cash is actually paid, and the only approved convention for that is "
+            f"{UST_COUPON_PAYMENT_ROLL_CONVENTION!r}, which Issue #175 approved for US "
+            "Treasuries specifically. Nothing in this bond's reference data establishes "
+            "that it is one -- this repository does not infer issuer classification -- so "
+            "the caller must assert the convention rather than have it assumed"
+        )
+
     interim_coupons = tuple(
         _carry_interim_coupon(
             scheduled_payment_date=flow.payment_date,
@@ -382,11 +436,7 @@ def repo_carry_forward_clean_price(
             forward_settlement_date=forward_settlement_date,
             repo_rate_decimal=repo_rate_decimal,
         )
-        for flow in coupon_flows_before(
-            bond,
-            after_date=spot_settlement_date,
-            on_or_before_date=forward_settlement_date,
-        )
+        for flow in scheduled_interim_coupons
     )
     interim_coupon_forward_value = sum(
         (coupon.forward_value_per_100 for coupon in interim_coupons), 0.0

@@ -31,6 +31,7 @@ from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
     INTERIM_COUPON_TREATMENT,
+    RepoCarryInterimCouponConventionError,
     REPO_COMPOUNDING_CONVENTION,
     REPO_DAY_COUNT_CONVENTION,
     carry_factor_from_simple_repo_rate,
@@ -39,6 +40,7 @@ from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
     repo_term_year_fraction,
 )
 from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
+    UST_COUPON_PAYMENT_ROLL_CONVENTION,
     resolve_ust_coupon_payment_date,
 )
 
@@ -238,6 +240,7 @@ def test_every_interim_coupon_is_carried_from_its_payment_date_and_subtracted(
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         forward_settlement_date=forward_date,
         repo_rate_decimal=repo_rate,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
     )
 
     # The coupon set is the composed adapter's own answer for (tS, tF],
@@ -301,6 +304,7 @@ def test_a_coupon_scheduled_on_a_business_day_is_paid_that_day_and_does_not_roll
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         forward_settlement_date=CASE_B_COUPON_ON_FORWARD_DATE,
         repo_rate_decimal=0.0375,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
     )
     (coupon,) = result.interim_coupons
     # 2026-12-15 is a Tuesday and a Federal Reserve business day, and it is
@@ -331,6 +335,7 @@ def test_a_weekend_coupon_rolls_forward_and_is_reinvested_for_fewer_days():
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
         forward_settlement_date=CASE_B_FORWARD_DATE,
         repo_rate_decimal=0.0375,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
     )
     (coupon,) = result.interim_coupons
     assert coupon.scheduled_payment_date == "2026-12-12"
@@ -369,6 +374,7 @@ def test_a_coupon_paid_after_the_forward_date_is_still_entitled_and_discounted()
         # The Saturday coupon's cash lands 2026-12-14, two days after this.
         forward_settlement_date="2026-12-12",
         repo_rate_decimal=0.0375,
+        interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
     )
     (coupon,) = result.interim_coupons
     assert coupon.payment_date == "2026-12-14"
@@ -380,6 +386,45 @@ def test_a_coupon_paid_after_the_forward_date_is_still_entitled_and_discounted()
         coupon.forward_value_per_100
     )
     assert result.forward_dirty_price_per_100 < result.carried_spot_dirty_price_per_100
+
+
+@requires_quantlib
+@pytest.mark.parametrize("asserted", [None, "US_CORPORATE_SOMETHING", ""])
+def test_an_interim_coupon_without_the_approved_convention_fails_closed(asserted):
+    """Codex P1 review of PR #176.
+
+    Eddy approved the Federal Reserve coupon-payment roll for US Treasuries
+    specifically, and nothing in this bond's reference data establishes that
+    it is one -- ``US_CORPORATE`` is a registered profile covering the same
+    USD semi-annual shape. So the convention is the caller's assertion to
+    make, never this module's assumption.
+    """
+
+    with pytest.raises(RepoCarryInterimCouponConventionError, match="US Treasuries"):
+        repo_carry_forward_clean_price(
+            bond=SYNTHETIC_BOND,
+            spot_clean_price_per_100=99.5,
+            spot_settlement_date=SPOT_SETTLEMENT_DATE,
+            forward_settlement_date=CASE_B_FORWARD_DATE,
+            repo_rate_decimal=0.0375,
+            interim_coupon_payment_convention=asserted,
+        )
+
+
+@requires_quantlib
+def test_case_a_never_needs_a_coupon_payment_convention():
+    # The assertion is only ever consulted when a coupon is actually in the
+    # window, so Case A is unaffected by the gate -- no caller of the
+    # coupon-free path has to know about it.
+    result = repo_carry_forward_clean_price(
+        bond=SYNTHETIC_BOND,
+        spot_clean_price_per_100=99.5,
+        spot_settlement_date=SPOT_SETTLEMENT_DATE,
+        forward_settlement_date=CASE_A_FORWARD_DATES[1],
+        repo_rate_decimal=0.0375,
+    )
+    assert result.interim_coupons == ()
+    assert result.forward_clean_price_per_100 > 0
 
 
 @requires_quantlib

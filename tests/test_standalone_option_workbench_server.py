@@ -1606,7 +1606,13 @@ def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        {
+            "case": case,
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+            # The trader's own selection: only UST asserts the Federal
+            # Reserve coupon-payment convention (Issue #175, Codex P1).
+            "convention_profile": "UST",
+        },
     )
     assert status == 200
     forward = payload["s490_repo_carry"]["forward"]
@@ -1626,6 +1632,55 @@ def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every
         forward["carried_spot_dirty_price_per_100"]
         - forward["interim_coupon_forward_value_per_100"]
     )
+
+
+@_QUANTLIB_SKIP
+@pytest.mark.parametrize("selected", [None, "US_CORPORATE"])
+def test_api_s490_repo_carry_refuses_an_interim_coupon_without_the_ust_selection(
+    server_url: str, monkeypatch, selected
+) -> None:
+    # Codex P1 review of PR #176: the Federal Reserve coupon-payment
+    # convention is approved for US Treasuries only, and neither this route
+    # nor the primitive can tell a Treasury from a USD corporate bullet on
+    # reference data alone. Without the trader's UST selection the interim
+    # coupon fails closed rather than borrowing a UST convention.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["bond_option"]["expiry_date"] = "2026-12-20"
+    case["expiry_timestamp"] = "2026-12-20T16:00:00Z"
+    case["forward_settlement_date"] = "2026-12-21"
+    case["option_settlement_date"] = "2026-12-21"
+
+    body = {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE}
+    if selected is not None:
+        body["convention_profile"] = selected
+
+    status, payload = _post_json(f"{server_url}/api/case/s490-repo-carry", body)
+    assert status == 400
+    assert "US Treasuries" in payload["error"]
+    assert "2026-12-15" in payload["error"]
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_prices_a_case_a_horizon_without_any_selection(
+    server_url: str, monkeypatch
+) -> None:
+    # The gate is only ever consulted when a coupon is in the window, so a
+    # coupon-free horizon still resolves with no convention_profile at all --
+    # Case A is untouched by it.
+    _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {
+            "case": _case_with_empty_curve_points(),
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+        },
+    )
+    assert status == 200
+    assert payload["s490_repo_carry"]["forward"]["interim_coupons"] == []
 
 
 @_QUANTLIB_SKIP

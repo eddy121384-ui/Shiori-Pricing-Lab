@@ -113,6 +113,9 @@ from shiori_pricing_lab.pricing.bli_treasury_price_format import (
     TREASURY_32NDS_PER_POINT,
     format_price_as_treasury_fraction,
 )
+from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
+    UST_COUPON_PAYMENT_ROLL_CONVENTION,
+)
 
 DEFAULT_OUTPUT_DIRNAME = "shiori_ust_s490_repo_carry_forward_parity_output"
 MARKDOWN_FILENAME = "ust_s490_repo_carry_forward_parity.md"
@@ -237,6 +240,12 @@ def _horizon_result(
             spot_settlement_date=spot_settlement_date,
             forward_settlement_date=horizon.forward_settlement_date,
             repo_rate_decimal=funding.derived_repo_rate_decimal,
+            # This tool is the UST S490 parity path by name and by scope, so
+            # it asserts the UST coupon-payment convention Issue #175
+            # approved (Codex P1 review of PR #176: the primitive will not
+            # assume it). Point it at a non-Treasury and any interim-coupon
+            # horizon is reported as that horizon's own error.
+            interim_coupon_payment_convention=UST_COUPON_PAYMENT_ROLL_CONVENTION,
         )
     except Exception as exc:  # noqa: BLE001 -- reported per horizon, never swallowed
         row["status"] = "error"

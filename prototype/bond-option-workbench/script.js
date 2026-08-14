@@ -3542,6 +3542,10 @@
       bond_reference_data_universe: draft.bond_reference_data_universe,
       bond_quote: draft.bond_quote,
       valuation_date: draft.valuation_date,
+      // Issue #175: the route now reads the selected convention profile, so
+      // changing it must re-trigger -- it can turn an interim-coupon expiry
+      // from a refusal into a Forward and back.
+      convention_profile: selectedConventionProfile,
     });
   }
 
@@ -3743,7 +3747,16 @@
       response = await fetch("/api/case/s490-repo-carry", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ case: requestCase, spot_settlement_date: spotSettlementDate }),
+        // convention_profile is the trader's own selection, sent as browser
+        // state exactly as the profile route already receives it. The server
+        // reads it only to decide whether the UST Federal Reserve
+        // coupon-payment convention may be asserted for an interim coupon
+        // (Issue #175); it never defaults or infers one.
+        body: JSON.stringify({
+          case: requestCase,
+          spot_settlement_date: spotSettlementDate,
+          convention_profile: selectedConventionProfile,
+        }),
       });
       payload = await response.json();
     } catch (err) {

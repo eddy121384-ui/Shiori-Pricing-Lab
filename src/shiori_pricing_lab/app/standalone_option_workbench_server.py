@@ -110,7 +110,14 @@ stateless, read-only route -- see :func:`resolve_s490_repo_carry_parity` for
 the full contract:
 
 - ``POST /api/case/s490-repo-carry`` -- body is ``{"case": <full case>,
-  "spot_settlement_date": "YYYY-MM-DD"}``. **Always acquires a fresh live
+  "spot_settlement_date": "YYYY-MM-DD", "convention_profile": <str|null>}``.
+  ``convention_profile`` is the trader's own selection, passed as browser
+  state exactly like ``POST /api/bond/advanced-profile`` treats it, and is
+  never defaulted or inferred here. It is read for one purpose: only the
+  ``UST`` selection asserts the Federal Reserve coupon-payment convention
+  Issue #175 approved for Treasuries, so an interim-coupon expiry on any
+  other selection fails closed in the primitive rather than having a UST
+  convention applied to it. Case A is unaffected either way. **Always acquires a fresh live
   Curve #490** (same-as-of gate included) and discards whatever
   ``curve_points`` the case carried, even a genuine manual trader override
   -- unlike ``POST /api/case``, which leaves manual curve nodes untouched
@@ -298,6 +305,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     SUPPORTED_CONVENTION_PROFILE_NAMES,
+    UST_CONVENTION_PROFILE,
     convention_profile_candidates,
     get_convention_profile,
 )
@@ -307,6 +315,9 @@ from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
 )
 from shiori_pricing_lab.pricing.bli_treasury_price_format import (
     format_price_as_treasury_fraction,
+)
+from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
+    UST_COUPON_PAYMENT_ROLL_CONVENTION,
 )
 from shiori_pricing_lab.products.enums import Currency, coerce_enum
 
@@ -1077,7 +1088,9 @@ def price_case_with_bloomberg_quote(
     return {"case": priced_case, "display": display}
 
 
-def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dict:
+def resolve_s490_repo_carry_parity(
+    case: dict, spot_settlement_date: str, convention_profile: str | None = None
+) -> dict:
     """Resolve one Issue #173/#174/#175 S490 repo-carry Forward for ``case``'s own Expiry.
 
     Parity/testing display only -- not a pricing route, and it does not
@@ -1250,6 +1263,22 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
         raise ValueError("curve_points must be a JSON array of BLICurvePoint objects")
     curve_points = [BLICurvePoint(**point) for point in curve_points_raw]
 
+    # Issue #175 / Codex P1: the Federal Reserve coupon-payment convention is
+    # approved for US Treasuries only, and neither this route nor the
+    # primitive can tell a Treasury from a USD corporate bullet on reference
+    # data alone -- this repository deliberately never infers issuer
+    # classification (Issues #157/#161). `convention_profile` is therefore
+    # required *browser state*, exactly as POST /api/bond/advanced-profile
+    # already treats it: the trader's own selection, never defaulted or
+    # guessed here. Only the UST selection asserts the UST payment
+    # convention; anything else leaves it unset and the primitive fails
+    # closed on any interim coupon while Case A is unaffected.
+    interim_coupon_payment_convention = (
+        UST_COUPON_PAYMENT_ROLL_CONVENTION
+        if convention_profile == UST_CONVENTION_PROFILE.name
+        else None
+    )
+
     funding = resolve_s490_repo_carry_funding(
         curve_points,
         currency=currency,
@@ -1263,6 +1292,7 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
         spot_settlement_date=spot_settlement_date,
         forward_settlement_date=expiry_date,
         repo_rate_decimal=funding.derived_repo_rate_decimal,
+        interim_coupon_payment_convention=interim_coupon_payment_convention,
     )
 
     return {
@@ -1674,7 +1704,11 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            payload = resolve_s490_repo_carry_parity(body["case"], body["spot_settlement_date"])
+            payload = resolve_s490_repo_carry_parity(
+                body["case"],
+                body["spot_settlement_date"],
+                body.get("convention_profile"),
+            )
         except Exception as exc:  # noqa: BLE001
             self._write_json(400, {"error": str(exc)})
             return
