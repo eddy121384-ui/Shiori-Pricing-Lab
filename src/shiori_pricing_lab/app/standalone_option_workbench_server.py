@@ -124,11 +124,8 @@ the full contract:
   included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
   "forward_clean_price_treasury_fraction": <str>, "curve_acquisition":
-  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. Since Issue
-  #175 ``forward`` also carries the primitive's interim-coupon fields
-  (``interim_coupons``, ``interim_coupon_forward_value_per_100``,
-  ``interim_coupon_treatment``). **``interim_coupons`` is always empty in
-  practice**: any coupon scheduled in ``(spot settlement, Expiry]`` -- on a
+  <str>, "case_curve_points_discarded": <int>}}`` on HTTP 200. **Case A
+  only**: any coupon scheduled in ``(spot settlement, Expiry]`` -- on a
   weekday as much as a weekend -- fails closed in the primitive, because
   the coupon dates this repository holds are unadjusted schedule dates
   rather than cash-receipt dates (Issue #175 RED; see that module's own
@@ -449,12 +446,12 @@ DEFAULT_PORT = 8765
 # entered. A stale -v17 process would 404 the new route and the panel would
 # show nothing but a transport-error status forever.
 #
-# Bumped to -v19 for Issue #175's interim-coupon (Case B) support: the
-# S490 repo-carry response now carries the per-coupon carry trace and the
-# coupon-treatment label, and the served page gained the interim-coupon
-# summary plus the collapsible derivation trace that read them. A stale
-# -v18 process would still refuse every interim-coupon horizon outright,
-# and a stale -v18 page would render neither new field.
+# Bumped to -v19 for Issue #175. **Not** Case B support: an interim-coupon
+# horizon is still refused (Issue #175 RED -- the coupon payment date is
+# unresolved), so the executable surface is unchanged. What changed is the
+# served page, which gained a collapsible derivation trace over the Case A
+# response's existing fields, and the refusal's own error text. A stale
+# -v18 page would render no trace at all.
 API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v19"
 
 
@@ -1103,20 +1100,19 @@ def resolve_s490_repo_carry_parity(case: dict, spot_settlement_date: str) -> dic
     - ``pricing/bli_s490_funding_resolver.resolve_s490_repo_carry_funding``
       (Issue #173) for the funding, under its own default prototype method;
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
-      (Issues #173/#175) for the forward. **Case A only in practice**: that
-      primitive unconditionally refuses any coupon scheduled in
+      (Issues #173/#175) for the forward. **Case A only**: that primitive
+      unconditionally refuses any coupon scheduled in
       ``(spot_settlement_date, expiry_date]`` -- weekday coupons included --
       because the coupon dates this repository holds are unadjusted schedule
       dates rather than cash-receipt dates (Issue #175 RED; see that
-      module's own note). So a Case B expiry raises, the handler returns
-      HTTP 400 naming the coupon, and this route never serializes a carried
-      per-coupon trace: ``forward.interim_coupons`` is always ``[]`` on any
-      HTTP 200. **This route selects no coupon treatment and reads no coupon
-      schedule of its own** -- the refusal, like the coupon resolution
-      behind it, belongs entirely to the primitive, from the same resolved
-      bond reference data this route already passes it. Issue #175 required
-      no new S490 transformation, so the funding resolver and its default
-      method are byte-for-byte the ones Case A already used.
+      module's own note). A Case B expiry therefore raises and the handler
+      returns HTTP 400 naming the coupon. **This route reads no coupon
+      schedule and selects no coupon treatment of its own** -- the refusal,
+      like the coupon resolution behind it, belongs entirely to the
+      primitive, from the same resolved bond reference data this route
+      already passes it. Issue #175 required no new S490 transformation, so
+      the funding resolver and its default method are byte-for-byte the ones
+      Case A already used.
 
     **Deliberately does not call ``build_request_from_standalone_option_case``
     (Issue #174 round 6).** That builder requires a *complete* pricing

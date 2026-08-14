@@ -257,24 +257,22 @@ def test_entering_a_spot_settlement_date_resolves_and_displays_every_required_fi
     assert page.query_selector("input[id*='repo-rate']") is None
 
 
-def test_a_case_a_horizon_says_no_interim_coupon_and_still_shows_the_full_trace(
-    server_url, page
-) -> None:
+def test_a_case_a_horizon_shows_the_full_derivation_trace(server_url, page) -> None:
     # Issue #175: the default expiry (2026-10-20) is before this bond's next
-    # coupon (31 January), so the panel must say so plainly rather than
-    # leaving the new field blank -- and the collapsible trace is present
-    # either way.
+    # coupon, so it resolves -- and every step Issue #175 asks to be
+    # traceable is one click away rather than absent from the panel.
     _load_and_complete_ust(page, server_url)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
 
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
 
-    assert page.text_content("#s490-interim-coupon-summary") == "None in window"
     assert not page.eval_on_selector("#s490-parity-trace", "el => el.hidden")
     trace = page.text_content("#s490-parity-trace-body")
-    assert "Forward Clean" in trace
-    assert "Coupon treatment" in trace
-    assert "Interim coupon " not in trace
+    for step in ("Spot Clean", "Spot AI", "Spot Dirty", "Carry", "Forward Dirty",
+                 "Forward AI", "Forward Clean", "S490 funding", "Curve acquisition"):
+        assert step in trace
+    # No interim-coupon row exists at all: a Case B forward is never produced.
+    assert "Interim coupon" not in trace
 
 
 def test_an_interim_coupon_expiry_fails_closed_on_the_panel_rather_than_guessing(

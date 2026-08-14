@@ -29,12 +29,10 @@ from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
     is_quantlib_available,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import (
-    INTERIM_COUPON_TREATMENT,
     REPO_COMPOUNDING_CONVENTION,
     REPO_DAY_COUNT_CONVENTION,
     RepoCarryInterimCouponPaymentDateUnresolvedError,
     carry_factor_from_simple_repo_rate,
-    reinvest_interim_coupon_to_forward_settlement,
     repo_carry_forward_clean_price,
     repo_term_days,
     repo_term_year_fraction,
@@ -201,12 +199,15 @@ def test_a_case_a_horizon_carries_no_coupon_and_subtracts_exactly_nothing():
         forward_settlement_date=CASE_A_FORWARD_DATES[1],
         repo_rate_decimal=0.0375,
     )
-    assert result.interim_coupons == ()
-    assert result.interim_coupon_forward_value_per_100 == 0.0
-    # The carried spot dirty price is the whole forward dirty price -- Case A
-    # is the same code path over an empty coupon set, not a second formula.
-    assert result.forward_dirty_price_per_100 == result.carried_spot_dirty_price_per_100
-    assert result.interim_coupon_treatment == INTERIM_COUPON_TREATMENT
+    assert coupon_flows_before(
+        SYNTHETIC_BOND,
+        after_date=SPOT_SETTLEMENT_DATE,
+        on_or_before_date=CASE_A_FORWARD_DATES[1],
+    ) == ()
+    # The single carry factor is the whole forward dirty price.
+    assert result.forward_dirty_price_per_100 == pytest.approx(
+        result.spot_dirty_price_per_100 * result.carry_factor
+    )
 
 
 # --- Case B: coupons in (tS, tF] are refused, pending the payment date ------------
@@ -285,8 +286,8 @@ def test_a_coupon_paid_on_the_spot_settlement_date_is_not_an_interim_coupon():
         forward_settlement_date=CASE_B_FORWARD_DATE,
         repo_rate_decimal=0.0375,
     )
-    assert result.interim_coupons == ()
     assert result.accrued_interest_at_spot_settlement_per_100 == 0.0
+    assert result.forward_clean_price_per_100 > 0
 
 
 @requires_quantlib
@@ -301,94 +302,6 @@ def test_a_horizon_reaching_maturity_is_still_refused_by_the_coupon_adapter():
             spot_settlement_date=SPOT_SETTLEMENT_DATE,
             forward_settlement_date="2030-06-15",
             repo_rate_decimal=0.0375,
-        )
-
-
-# --- the reinvestment leg on its own (no QuantLib) --------------------------------
-
-
-def test_one_coupon_reinvestment_leg_is_the_same_one_plus_r_t_factor():
-    coupon = reinvest_interim_coupon_to_forward_settlement(
-        payment_date="2026-10-30",
-        amount_per_100=2.0,
-        forward_settlement_date="2026-11-11",
-        repo_rate_decimal=0.04,
-    )
-    assert coupon.reinvestment_term_days == 12
-    assert coupon.reinvestment_term_year_fraction == pytest.approx(12 / 360.0)
-    assert coupon.reinvestment_factor == pytest.approx(
-        carry_factor_from_simple_repo_rate(
-            repo_rate_decimal=0.04, repo_term_year_fraction=12 / 360.0
-        )
-    )
-    assert coupon.forward_value_per_100 == pytest.approx(2.0 * coupon.reinvestment_factor)
-
-
-def test_the_coupon_leg_is_not_annex_as_df_ratio_and_the_gap_is_bounded():
-    """Pin how far this treatment sits from the Annex A SS A.5.2 precedent.
-
-    Codex P2 review of PR #176: the module docstring originally claimed the
-    two were algebraically equivalent. They are not under the ``SIMPLE``
-    convention -- Annex A's ratio is ``(1 + r*T) / (1 + r*t_i)`` while this
-    module's factor is ``1 + r*(T - t_i)``, differing by a second-order
-    cross term. This pins the direction (this module's coupon value is the
-    larger, so its forward clean price is the lower) and the magnitude at
-    Issue #175's own acceptance horizon, so the difference is a measured,
-    reviewable number rather than a description.
-    """
-
-    repo_rate = 0.0377
-    # Issue #175's acceptance shape (tS 2026-08-14, tF 2026-11-11), with the
-    # coupon on the nearest weekday -- its own scheduled 2026-10-31 is a
-    # Saturday and is refused outright by the guard above.
-    term_year_fraction = 89 / 360.0
-    coupon_year_fraction = 77 / 360.0
-    amount = 2.0
-
-    coupon = reinvest_interim_coupon_to_forward_settlement(
-        payment_date="2026-10-30",
-        amount_per_100=amount,
-        forward_settlement_date="2026-11-11",
-        repo_rate_decimal=repo_rate,
-    )
-    annex_style_value = (
-        amount
-        * (1.0 + repo_rate * term_year_fraction)
-        / (1.0 + repo_rate * coupon_year_fraction)
-    )
-
-    assert coupon.forward_value_per_100 > annex_style_value
-    gap = coupon.forward_value_per_100 - annex_style_value
-    assert gap == pytest.approx(
-        amount
-        * repo_rate**2
-        * coupon_year_fraction
-        * (term_year_fraction - coupon_year_fraction)
-        / (1.0 + repo_rate * coupon_year_fraction)
-    )
-    # Around a thousandth of a 32nd -- far below OVME F's own quarter-tick
-    # display granularity, so parity cannot decide between the two readings.
-    assert gap * 32.0 < 0.002
-
-
-def test_a_coupon_after_the_forward_settlement_date_is_refused():
-    with pytest.raises(ValueError, match="must not be after forward_settlement_date"):
-        reinvest_interim_coupon_to_forward_settlement(
-            payment_date="2026-11-12",
-            amount_per_100=2.0,
-            forward_settlement_date="2026-11-11",
-            repo_rate_decimal=0.04,
-        )
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "2.0", None, True])
-def test_a_non_finite_or_non_numeric_coupon_amount_is_refused(bad):
-    with pytest.raises(ValueError, match="amount_per_100 must be a finite number"):
-        reinvest_interim_coupon_to_forward_settlement(
-            payment_date="2026-10-31",
-            amount_per_100=bad,
-            forward_settlement_date="2026-11-11",
-            repo_rate_decimal=0.04,
         )
 
 

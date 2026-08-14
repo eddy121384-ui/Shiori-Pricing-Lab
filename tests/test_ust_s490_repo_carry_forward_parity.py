@@ -430,7 +430,7 @@ def test_an_interim_coupon_horizon_fails_closed_on_the_unresolved_payment_date()
 
 
 @requires_quantlib
-def test_a_case_a_horizon_reports_no_interim_coupon_and_says_so():
+def test_a_case_a_horizon_prices_and_reports_no_interim_coupon_at_all():
     report = parity.run_parity(
         case=_load_base_case(),
         spot_settlement_date=SPOT_SETTLEMENT_DATE,
@@ -439,13 +439,10 @@ def test_a_case_a_horizon_reports_no_interim_coupon_and_says_so():
     )
     row = report.horizons[0]
     assert row["status"] == "ok"
-    # ``asdict`` keeps the primitive's own tuple in the in-memory report; it
-    # becomes a JSON array only in the written artifact.
-    assert row["forward"]["interim_coupons"] == ()
-    assert row["forward"]["interim_coupon_forward_value_per_100"] == 0.0
-
-    markdown = parity.render_markdown(parity.build_report(report))
-    assert "interim coupons: none paid in" in markdown
+    # No interim-coupon fields exist on the result at all -- a Case B forward
+    # is never produced, so there is nothing for them to describe.
+    assert "interim_coupons" not in row["forward"]
+    assert row["forward"]["forward_clean_price_per_100"] > 0
 
 
 @requires_quantlib

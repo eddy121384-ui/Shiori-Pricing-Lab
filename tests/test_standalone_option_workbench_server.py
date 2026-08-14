@@ -1632,11 +1632,9 @@ def test_api_s490_repo_carry_reports_no_interim_coupon_for_a_case_a_horizon(
     )
     assert status == 200
     forward = payload["s490_repo_carry"]["forward"]
-    assert forward["interim_coupons"] == []
-    assert forward["interim_coupon_forward_value_per_100"] == 0.0
-    assert (
-        forward["forward_dirty_price_per_100"]
-        == forward["carried_spot_dirty_price_per_100"]
+    assert "interim_coupons" not in forward
+    assert forward["forward_dirty_price_per_100"] == pytest.approx(
+        forward["spot_dirty_price_per_100"] * forward["carry_factor"]
     )
 
 

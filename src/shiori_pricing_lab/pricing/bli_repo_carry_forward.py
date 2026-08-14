@@ -16,14 +16,11 @@ uses -- that is exactly::
     Spot Dirty(tS)    = Spot Clean(tS) + AI(tS)
     Carry Factor      = 1 + repo_rate_decimal x (days(tS, tF) / 360)
     Forward Dirty(tF) = Spot Dirty(tS) x Carry Factor
-                        - SUM_i Coupon_i x (1 + repo_rate_decimal
-                                            x (days(coupon_date_i, tF) / 360))
     Forward Clean(tF) = Forward Dirty(tF) - AI(tF)
 
-where ``coupon_date_i`` runs over every coupon paid in ``(tS, tF]``. Case A
-(no such coupon) is the empty sum. **The coupon sum is currently unreachable
-from this function**: every horizon containing a coupon fails closed on an
-unresolved payment date -- see "Interim coupons" and the RED note below.
+**Case A only.** A coupon paid in ``(tS, tF]`` would need a further term
+per coupon, and this module refuses that case outright -- see the RED note
+below for why, and for what would be needed to lift it.
 
 **This module derives no funding rate of its own.** ``repo_rate_decimal``
 is a caller input; where it comes from (a Bloomberg Curve #490 / S490
@@ -55,127 +52,50 @@ carried verbatim onto every returned result, and never inferred:
   unexplained adjustment to force agreement. Nothing in this module
   adjusts, calibrates, or tunes anything.
 
-**Interim coupons (Issue #175, Case B).** Issue #173's first validation was
-the no-interim-coupon case, and this module originally refused any coupon in
-``(tS, tF]`` outright, on the grounds that the coupon's reinvestment leg was
-not modelled. That leg is now modelled -- the treatment below -- but the
-refusal stands for a different and narrower reason: the *date* the coupon is
-received is unresolved. See the RED note below for what that blocks and what
-it does not.
+**RED, unresolved: the interim coupon's payment date (Issue #175).** Issue
+#175 asked whether this repo-carry structure still reconstructs OVME F when
+a coupon falls inside the repo term. Extending the FPA structure to do so is
+straightforward -- each coupon reduces the termination amount, carried from
+its own payment date -- but it needs the date on which the coupon cash is
+**actually received**, and this repository cannot supply one:
 
-- ``INTERIM_COUPON_TREATMENT =
-  "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"``
-  -- the holder of a repo-financed long position receives ``Coupon_i`` on
-  its payment date, reinvests it at the same funding rate to ``tF``, and
-  that accumulated value reduces what is owed at termination. The
-  reinvestment factor is the *same* ``1 + r x t`` FPA factor applied over
-  each coupon's own shorter ACT/360 term ``days(coupon_date_i, tF) / 360``;
-  a coupon paid exactly on ``tF`` therefore has a term of zero days, a
-  factor of exactly ``1.0``, and reduces the termination amount by its face
-  amount alone.
+``coupon_flows_before`` returns the bond's **unadjusted** schedule dates
+(``bli_quantlib_bond_adapter`` generates them with ``ql.NullCalendar()``, by
+design, and no business-day calendar exists anywhere here). That is correct
+and already approved for **accrued interest**, where accrual conventionally
+stops on the nominal date. It is *not* established for **cash receipt**: a
+US Treasury coupon scheduled on a non-business day is paid on the next
+business day, so the nominal date and the receipt date are different dates
+serving different purposes, and only the first use is covered by existing
+approval.
 
-**Why this treatment, and exactly how far the supporting precedent goes.**
-Bloomberg's FPA Help text quoted above states the single-factor invoice
-carry and is silent on interim coupons, so it does not settle this on its
-own. The nearest supporting precedent is this repository's own
-already-approved forward construction, Annex A SS A.5.2 in
-``pricing/bli_forward_clean_price.py``, which subtracts the PV of every
-in-window coupon from spot dirty and then divides by the terminal discount
-factor. It supports the *shape* of the sum above -- an in-window coupon
-reduces the termination value, carried from its own payment date -- and
-nothing more. **It is not an exact algebraic equivalence, and this module
-does not claim one** (Codex P2 review of PR #176, which was correct):
+Two conventions are therefore in play -- (A) the unadjusted scheduled date,
+(B) the actual next-business-day payment date -- and the choice is not
+cosmetic:
 
-- Under *continuous* compounding of one flat rate the two coincide exactly,
-  because ``exp(r x tF) / exp(r x t_i) == exp(r x (tF - t_i))``.
-- Under the ``SIMPLE`` convention this module actually uses they do not.
-  Annex A's ratio is ``(1 + r x T) / (1 + r x t_i)``; this module's factor is
-  ``1 + r x (T - t_i)``. They differ by the second-order cross term
-  ``r^2 x t_i x (T - t_i) / (1 + r x t_i)`` -- this module's coupon value is
-  always the slightly larger of the two at a positive rate, so its forward
-  clean price is always the slightly lower one. The size is pinned by a
-  deterministic test rather than described: at Issue #175's own acceptance
-  horizon it is ~1.9e-05 per 100, ~0.0006 of a 32nd.
-- On a *non-flat* curve they diverge for a second, independent reason:
-  Annex A discounts each coupon at the curve's own factor for that coupon
-  date, whereas this module applies one term repo rate to every leg and
-  never evaluates a curve at all.
-
-That second difference is deliberate and is the reason this module is not
-"Annex A restated". An FPA repo-carry forward *is* a single-repo-rate
-structure -- one ``Repo Rate`` for the term, ``Repo Spread = 0 bp`` -- so
-reinvesting an interim coupon at that same term rate is the reading internal
-to the structure being modelled. Evaluating a curve per coupon date would be
-the Annex A discounting construction instead, would require a new S490
-transformation, and would break this module's own rule that it takes a
-scalar rate and never touches a curve. Neither is chosen here on parity
-evidence, because at these horizons parity cannot distinguish them.
-
-**So the reinvestment rate is a labeled prototype assumption**, exposed
-rather than argued away: every per-coupon term and factor is on the result
-(:class:`RepoCarryInterimCoupon`), so both alternative readings -- Annex A's
-DF ratio, or no reinvestment at all (the degenerate zero-rate case) -- are
-recoverable from the trace by inspection, without this module implementing,
-selecting between, or tuning anything. Nothing here is calibrated to an
-observed OVME number.
-
-**Boundaries this module still refuses.** The coupon window is exactly
-``(tS, tF]`` -- half-open at ``tS``, because a coupon paid on the spot
-settlement date is not received by the forward buyer and the spot dirty
-price on that date already carries zero accrued interest. The composed
-``coupon_flows_before`` continues to refuse a window reaching
-``maturity_date`` (coupon-at-maturity combines with principal redemption,
-which that adapter slice does not implement), and a resulting non-positive
-forward dirty price raises rather than producing a forward clean price from
-it.
-
-**RED, unresolved: the coupon *payment* date (Codex P1 review of PR #176).**
-``coupon_flows_before`` returns the bond's **unadjusted** schedule dates --
-``bli_quantlib_bond_adapter`` generates them with ``ql.NullCalendar()``, by
-design, and this repository holds no business-day calendar of any kind. That
-is correct and already approved for **accrued interest**, where accrual
-conventionally stops on the nominal date. It is *not* established for **cash
-receipt**, which is what a reinvestment leg needs: a US Treasury coupon whose
-scheduled date is not a business day is paid on the next business day (with
-no additional interest), so the nominal date and the cash-receipt date are
-different dates being used for different purposes.
-
-Treating the nominal date as the receipt date changes two things:
-
-- *how long the coupon is reinvested* -- small (two days on a 2.00 coupon at
-  3.77% is ~4.2e-04 per 100, ~0.013 of a 32nd); and
-- *whether the coupon is in the window at all* -- **not** small. If ``tF``
-  falls strictly between the scheduled date and the actual payment date, one
-  reading subtracts the whole coupon and the other subtracts nothing: on a
-  2.00 coupon that is ~64 ticks.
+- it changes *how long* each coupon is reinvested: small, ~4.2e-04 per 100
+  (~0.013 of a 32nd) for two days on a 2.00 coupon at 3.77%; and
+- it changes *whether the coupon is in the window at all* when ``tF`` falls
+  between the two dates: on a 2.00 coupon, ~64 ticks.
 
 No first-party evidence in this repository says which date Bloomberg's FPA
 forward uses, and resolving it needs a US government securities holiday
-calendar -- a data source this repository has deliberately never had and
-Issue #175 did not authorise. **So this module does not choose.** Any coupon
-scheduled in ``(tS, tF]`` raises
-:class:`RepoCarryInterimCouponPaymentDateUnresolvedError` rather than being
-carried under a guessed payment date.
+calendar that Issue #175 did not authorise. **So this module does not
+choose, and does not compute.** Every coupon scheduled in ``(tS, tF]``
+raises :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` -- weekday
+coupons included, because a weekday market holiday is equally not a payment
+date and is equally undetectable without that calendar. A partial
+(weekend-only) guard was tried and rejected: it left the dangerous half of
+the exposure in place while implying that the dates which passed had been
+validated.
 
-**Why the refusal is total rather than weekend-only** (Codex P1 review of
-PR #176, second round -- its answer was right and replaced this module's
-first one). An earlier revision refused only coupons scheduled on a weekend,
-on the grounds that weekends are the one non-business-day class determinable
-from a date alone. That was the wrong trade: a coupon scheduled on a weekday
-US government-securities holiday (Veterans Day, Columbus Day, ...) is
-equally not paid on its nominal date, is undetectable without the very
-calendar this repository lacks, and would have been carried silently -- so a
-partial guard did not reduce the exposure so much as disguise it, and it
-implied the dates that passed had been validated when they had not. When the
-methodology is unresolved, fail closed for the whole class.
-
-**What is blocked is the payment date, not the carry.** The carry
-arithmetic is fully implemented and directly tested in
-:func:`reinvest_interim_coupon_to_forward_settlement`, which takes an actual
-receipt date as an explicit argument, exactly like every other date in this
-module. Unblocking is one decision (which convention, and where an approved
-calendar or a reviewed per-coupon payment date comes from) followed by
-passing that date in -- not a re-derivation.
+The reinvestment *rate* would be a second, much smaller question if this one
+were settled (reinvest at the same term repo rate, which a zero ``Repo
+Spread`` implies; the alternatives -- an Annex A SS A.5.2 style per-coupon
+discount-factor ratio, or no reinvestment at all -- differ by ~0.0006 and
+~0.07 of a 32nd respectively, all below OVME F's own quarter-tick display
+granularity). It is recorded here only so the sizing is not lost; nothing in
+this module implements, selects between, or tunes any of them.
 
 **Composition, not reimplementation.** Accrued interest at both settlement
 dates comes from the already-reviewed
@@ -217,14 +137,6 @@ REPO_DAY_COUNT_CONVENTION = "ACT/360"
 REPO_DAY_COUNT_BASIS_DAYS = 360.0
 REPO_COMPOUNDING_CONVENTION = "SIMPLE"
 
-# How a coupon paid inside the repo term reaches the forward date -- named
-# once and carried verbatim onto every result, including Case A results
-# (where it is the treatment that would have applied, over an empty set of
-# coupons). See the module docstring for the evidence behind it and for what
-# part of it remains an Issue #175 prototype assumption.
-INTERIM_COUPON_TREATMENT = (
-    "INTERIM_COUPON_REINVESTED_AT_REPO_RATE_TO_FORWARD_SETTLEMENT__SIMPLE_ACT360__PROTOTYPE"
-)
 
 class RepoCarryInterimCouponPaymentDateUnresolvedError(ValueError):
     """A coupon falls in ``(tS, tF]`` and its actual payment date is unknown.
@@ -304,97 +216,16 @@ def carry_factor_from_simple_repo_rate(
 
 
 @dataclass(frozen=True)
-class RepoCarryInterimCoupon:
-    """One coupon paid in ``(tS, tF]``, carried to the forward date.
-
-    ``payment_date``/``amount_per_100`` are the composed
-    ``coupon_flows_before`` flow's own values, echoed verbatim -- this
-    module never recomputes a coupon amount. The remaining fields are this
-    coupon's own reinvestment leg under ``INTERIM_COUPON_TREATMENT``:
-    ``reinvestment_term_days`` actual calendar days from the payment date to
-    the forward settlement date (zero for a coupon paid on ``tF``),
-    ``reinvestment_factor`` the ``1 + r x t`` factor over that ACT/360 term,
-    and ``forward_value_per_100`` their product -- the amount by which this
-    one coupon reduces the termination invoice amount.
-    """
-
-    payment_date: str
-    amount_per_100: float
-    reinvestment_term_days: int
-    reinvestment_term_year_fraction: float
-    reinvestment_factor: float
-    forward_value_per_100: float
-
-
-def reinvest_interim_coupon_to_forward_settlement(
-    *,
-    payment_date: str,
-    amount_per_100: float,
-    forward_settlement_date: str,
-    repo_rate_decimal: float,
-) -> RepoCarryInterimCoupon:
-    """Carry one interim coupon from ``payment_date`` to ``forward_settlement_date``.
-
-    Applies ``INTERIM_COUPON_TREATMENT``: the same
-    :func:`carry_factor_from_simple_repo_rate` FPA factor the whole position
-    is carried by, over this coupon's own shorter ACT/360 term. A payment
-    date equal to the forward settlement date is the zero-term case
-    (factor exactly ``1.0``), not an error -- a coupon paid on ``tF`` is
-    still received, it simply earns nothing afterwards. A payment date
-    *after* ``forward_settlement_date`` raises ``ValueError``: such a coupon
-    is not inside the repo term at all and never reaches this function from
-    :func:`repo_carry_forward_clean_price`, whose window is ``(tS, tF]``.
-
-    ``payment_date`` is the date the coupon cash is **actually received**;
-    this function neither derives nor validates it. It is deliberately still
-    public and directly tested while
-    :func:`repo_carry_forward_clean_price` refuses to reach it (the module
-    docstring's RED note): the carry arithmetic is implemented and verified,
-    and what is blocked is the separate question of which date to pass.
-    """
-
-    amount = _require_finite(amount_per_100, "amount_per_100")
-    payment = _parse_iso_date(payment_date, "payment_date")
-    forward = _parse_iso_date(forward_settlement_date, "forward_settlement_date")
-    if payment > forward:
-        raise ValueError(
-            f"payment_date ({payment_date!r}) must not be after forward_settlement_date "
-            f"({forward_settlement_date!r}) -- a coupon paid after the forward settlement "
-            "date is not an interim coupon of this repo term"
-        )
-
-    term_days = (forward - payment).days
-    term_year_fraction = term_days / REPO_DAY_COUNT_BASIS_DAYS
-    reinvestment_factor = carry_factor_from_simple_repo_rate(
-        repo_rate_decimal=repo_rate_decimal,
-        repo_term_year_fraction=term_year_fraction,
-    )
-    return RepoCarryInterimCoupon(
-        payment_date=payment_date,
-        amount_per_100=amount,
-        reinvestment_term_days=term_days,
-        reinvestment_term_year_fraction=term_year_fraction,
-        reinvestment_factor=reinvestment_factor,
-        forward_value_per_100=amount * reinvestment_factor,
-    )
-
-
-@dataclass(frozen=True)
 class RepoCarryForward:
     """Every traceable step of one FPA repo-carry forward calculation.
 
     Issue #173 requires the spot clean -> spot dirty -> carry -> forward
     dirty -> forward clean transition to be individually inspectable, so
     every intermediate value is a field here rather than a discarded local.
-    ``repo_day_count_convention`` / ``repo_compounding_convention`` /
-    ``interim_coupon_treatment`` carry this module's own named constants
-    verbatim.
-
-    ``interim_coupons`` is every coupon paid in ``(tS, tF]``, in payment-date
-    order, each with its own reinvestment leg; it is empty for Case A, where
-    ``interim_coupon_forward_value_per_100`` is then exactly ``0.0`` and
-    ``forward_dirty_price_per_100`` is unchanged from the single-factor
-    carry.
+    ``repo_day_count_convention`` / ``repo_compounding_convention`` carry
+    this module's own named constants verbatim. There are no interim-coupon
+    fields: a horizon containing a coupon never produces a result at all
+    (see the module docstring's RED note).
     """
 
     spot_settlement_date: str
@@ -408,10 +239,6 @@ class RepoCarryForward:
     repo_term_days: int
     repo_term_year_fraction: float
     carry_factor: float
-    carried_spot_dirty_price_per_100: float
-    interim_coupon_treatment: str
-    interim_coupons: tuple[RepoCarryInterimCoupon, ...]
-    interim_coupon_forward_value_per_100: float
     forward_dirty_price_per_100: float
     accrued_interest_at_forward_settlement_per_100: float
     forward_clean_price_per_100: float
@@ -432,25 +259,21 @@ def repo_carry_forward_clean_price(
     explicit settlement dates, then applies the FPA structure in the module
     docstring.
 
-    **Case A only, as things stand.** ``interim_coupons`` on the returned
-    result is therefore always empty: **every** coupon scheduled in
-    ``(spot_settlement_date, forward_settlement_date]`` raises
-    :class:`RepoCarryInterimCouponPaymentDateUnresolvedError`, weekday
-    coupons included, because the date this repository holds for a coupon is
-    an unadjusted schedule date rather than a cash-receipt date (the module
-    docstring's RED note). No caller can obtain a carried Case B result from
-    this function. The reinvestment arithmetic that would produce one is
-    implemented and tested in
-    :func:`reinvest_interim_coupon_to_forward_settlement`, which takes an
-    actual receipt date as an explicit argument.
+    **Case A only.** Every coupon scheduled in ``(spot_settlement_date,
+    forward_settlement_date]`` raises
+    :class:`RepoCarryInterimCouponPaymentDateUnresolvedError` -- weekday
+    coupons included -- because the date this repository holds for a coupon
+    is an unadjusted schedule date rather than a cash-receipt date (the
+    module docstring's RED note). No Case B forward is produced by any
+    caller, by any route.
 
     Raises :class:`TypeError` for a ``bond`` the accrual adapter does not
     accept, and :class:`ValueError` for a non-finite/non-positive spot clean
-    price, a non-positive repo term, or a forward dirty price that is not
-    positive. Every other error propagates unchanged from the composed
-    helpers -- notably ``BLIBondMaturityCashflowUnsupportedError`` when the
-    window reaches the bond's maturity date, which is raised by
-    ``coupon_flows_before`` before the interim-coupon refusal above.
+    price or a non-positive repo term. Every other error propagates
+    unchanged from the composed helpers -- notably
+    ``BLIBondMaturityCashflowUnsupportedError`` when the window reaches the
+    bond's maturity date, which ``coupon_flows_before`` raises before the
+    interim-coupon refusal above.
     """
 
     spot_clean = _require_finite(spot_clean_price_per_100, "spot_clean_price_per_100")
@@ -478,15 +301,9 @@ def repo_carry_forward_clean_price(
             "forward settlement date falls between a coupon's scheduled and actual "
             "payment date -- whether that coupon is subtracted at all. That is an "
             "unresolved methodology decision (Issue #175 RED), not a value to assume. "
-            "The carry itself is implemented and tested in "
-            "reinvest_interim_coupon_to_forward_settlement; only the payment date is "
-            "blocked"
+            "Extending the FPA structure to carry the coupon is straightforward; "
+            "the blocked input is the date, not the arithmetic"
         )
-    interim_coupons: tuple[RepoCarryInterimCoupon, ...] = ()
-    interim_coupon_forward_value = sum(
-        (coupon.forward_value_per_100 for coupon in interim_coupons), 0.0
-    )
-
     accrued_at_spot = accrued_interest_per_100(bond, as_of_date=spot_settlement_date)
     accrued_at_forward = accrued_interest_per_100(bond, as_of_date=forward_settlement_date)
 
@@ -495,15 +312,7 @@ def repo_carry_forward_clean_price(
         repo_rate_decimal=repo_rate_decimal,
         repo_term_year_fraction=term_year_fraction,
     )
-    carried_spot_dirty = spot_dirty * carry_factor
-    forward_dirty = carried_spot_dirty - interim_coupon_forward_value
-    if not forward_dirty > 0:
-        raise ValueError(
-            f"forward dirty price must be positive, got {forward_dirty!r} from carried spot "
-            f"dirty {carried_spot_dirty!r} less {len(interim_coupons)} interim coupon(s) "
-            f"worth {interim_coupon_forward_value!r} at {forward_settlement_date!r} -- no "
-            "forward clean price is produced from a non-positive termination amount"
-        )
+    forward_dirty = spot_dirty * carry_factor
     forward_clean = forward_dirty - accrued_at_forward
 
     return RepoCarryForward(
@@ -518,10 +327,6 @@ def repo_carry_forward_clean_price(
         repo_term_days=term_days,
         repo_term_year_fraction=term_year_fraction,
         carry_factor=carry_factor,
-        carried_spot_dirty_price_per_100=carried_spot_dirty,
-        interim_coupon_treatment=INTERIM_COUPON_TREATMENT,
-        interim_coupons=interim_coupons,
-        interim_coupon_forward_value_per_100=interim_coupon_forward_value,
         forward_dirty_price_per_100=forward_dirty,
         accrued_interest_at_forward_settlement_per_100=accrued_at_forward,
         forward_clean_price_per_100=forward_clean,
