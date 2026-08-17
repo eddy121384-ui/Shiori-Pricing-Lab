@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import sys
+from math import isfinite
 from pathlib import Path
 
 import pytest
@@ -427,6 +428,36 @@ def test_a_field_exception_is_recorded_verbatim_and_never_becomes_a_number():
     assert yield_moneyness_by_field(report) == {}
 
 
+def test_a_returned_value_is_sanitized_before_it_reaches_the_report():
+    def _probe(identifier, fields, overrides=None):
+        return [
+            ProbeFieldResult(
+                field=fields[0],
+                status="returned",
+                value="4.10 sourced from host=TRADER-PC01 at 10.20.30.40:8194",
+            )
+        ]
+
+    report = probe_yield_conversion(
+        _coordinate(), ("YAS_BOND_YLD",), describe=_describe_with_overrides, probe=_probe
+    )
+
+    stored = report.probes[0].value
+    assert "TRADER-PC01" not in stored
+    assert "10.20.30.40:8194" not in stored
+
+
+def test_a_non_finite_returned_yield_never_becomes_a_moneyness():
+    def _probe(identifier, fields, overrides=None):
+        return [ProbeFieldResult(field=fields[0], status="returned", value="NaN")]
+
+    report = probe_yield_conversion(
+        _coordinate(), ("YAS_BOND_YLD",), describe=_describe_with_overrides, probe=_probe
+    )
+
+    assert yield_moneyness_by_field(report) == {}
+
+
 def test_a_request_error_is_recorded_per_probe_and_does_not_abort_the_run():
     calls: list[int] = []
 
@@ -469,6 +500,8 @@ def test_kproxy_resolves_only_with_a_supplied_unit_confirmed_katm():
         ({"A": 0.4, "B": 0.5}, 3.85, True, "more than one candidate yield field"),
         ({"A": 0.4}, None, True, "no KATM was supplied"),
         ({"A": 0.4}, 3.85, False, "not confirmed to be quoted in the same unit"),
+        ({"A": 0.4}, float("nan"), True, "not a finite number"),
+        ({"A": 0.4}, float("inf"), True, "not a finite number"),
     ],
 )
 def test_kproxy_refuses_rather_than_guessing(
@@ -479,6 +512,9 @@ def test_kproxy_refuses_rather_than_guessing(
     assert resolution.status == "unresolved"
     assert resolution.kproxy is None
     assert expected_reason_fragment in resolution.reason
+    # A non-finite KATM is never echoed back into the report either, so the
+    # JSON can never carry a non-standard numeric token.
+    assert resolution.katm is None or isfinite(resolution.katm)
 
 
 # --- stage 4: candidate value probes ------------------------------------------------
@@ -503,6 +539,21 @@ def test_candidate_probes_only_use_supplied_identifiers_and_record_every_outcome
         ("USSN0110 Curncy", "PX_LAST", "returned", "72.5"),
         ("USSN0110 Curncy", "MADE_UP_FLD", "absent", None),
     ]
+
+
+def test_candidate_probe_values_are_sanitized_too():
+    def _probe(security, fields, overrides=None):
+        return [
+            ProbeFieldResult(
+                field="DESCRIPTION",
+                status="returned",
+                value=r"grid served from \\TRADER-PC01\share\vcub.csv",
+            )
+        ]
+
+    probes = probe_candidate_values(("USSN0110 Curncy",), ("DESCRIPTION",), probe=_probe)
+
+    assert "TRADER-PC01" not in probes[0].value
 
 
 def test_candidate_probe_request_failure_is_recorded_for_every_field():
@@ -594,6 +645,17 @@ def test_cli_runs_the_offline_coordinate_and_writes_a_report(tmp_path, monkeypat
     assert written["yield_conversion"] is None
     assert written["kproxy"]["status"] == "unresolved"
     assert "Ttenor" in capsys.readouterr().out
+
+
+def test_cli_rejects_a_non_finite_katm(tmp_path, capsys):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--case", str(case_path), "--katm", "nan"])
+
+    assert exit_info.value.code == 2
+    assert "finite number" in capsys.readouterr().err
 
 
 def test_cli_rejects_a_malformed_override(tmp_path, capsys):

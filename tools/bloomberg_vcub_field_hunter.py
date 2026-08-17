@@ -108,6 +108,7 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from math import isfinite
 from pathlib import Path
 
 from bloomberg_curve_discovery_probe import (
@@ -679,7 +680,11 @@ def probe_yield_conversion(
                     settle_override_field=settle_override,
                     settle_override_value=settle_value if settle_override else None,
                     status=result.status,
-                    value=result.value,
+                    # A returned value is Bloomberg-authored text too: a
+                    # text-valued field can carry a host, path or
+                    # credential-shaped string, so it goes through the same
+                    # sanitizer as an error detail before being stored.
+                    value=sanitize_external_text(result.value),
                     detail=sanitize_external_text(result.detail),
                 )
             )
@@ -709,7 +714,13 @@ def probe_yield_conversion(
 
 
 def yield_moneyness_by_field(report: YieldConversionReport) -> dict[str, float]:
-    """`KY - FY` per field, only where that same field returned both, parsed as float."""
+    """`KY - FY` per field, only where that same field returned both, parsed as float.
+
+    A leg Bloomberg returned as `NaN`/`Inf` is dropped rather than parsed:
+    it is not a yield, and letting it through would put a non-standard
+    numeric token in the JSON report and a meaningless moneyness in the
+    coordinate.
+    """
 
     per_field: dict[str, dict[str, float]] = {}
     for probe in report.probes:
@@ -718,6 +729,8 @@ def yield_moneyness_by_field(report: YieldConversionReport) -> dict[str, float]:
         try:
             parsed = float(probe.value)
         except ValueError:
+            continue
+        if not isfinite(parsed):
             continue
         per_field.setdefault(probe.field, {})[probe.role] = parsed
     return {
@@ -789,7 +802,7 @@ def probe_candidate_values(
                     field=result.field,
                     overrides=overrides,
                     status=result.status,
-                    value=result.value,
+                    value=sanitize_external_text(result.value),
                     detail=sanitize_external_text(result.detail),
                 )
             )
@@ -854,6 +867,19 @@ def resolve_kproxy(
         )
 
     field, ky_minus_fy = next(iter(moneyness_by_field.items()))
+    if katm is not None and not isfinite(katm):
+        # A non-finite KATM is not a rate. It is refused outright, and is
+        # not echoed into the report, so the JSON never carries a
+        # non-standard numeric token.
+        return KproxyResolution(
+            status="unresolved",
+            yield_field=field,
+            ky_minus_fy=ky_minus_fy,
+            katm=None,
+            katm_provenance=katm_provenance,
+            kproxy=None,
+            reason="the supplied KATM is not a finite number, so Kproxy cannot be formed",
+        )
     if katm is None:
         reason = "no KATM was supplied, so Kproxy cannot be formed"
     elif not katm_unit_matches_yield_field:
@@ -1111,6 +1137,15 @@ def write_report(data: dict, output_dir: Path) -> tuple[Path, Path]:
 # --- CLI ----------------------------------------------------------------------------
 
 
+def _finite_float(raw: str) -> float:
+    """`float`, minus the `nan`/`inf` spellings `float()` itself accepts."""
+
+    value = float(raw)
+    if not isfinite(value):
+        raise argparse.ArgumentTypeError(f"expected a finite number, got {raw!r}")
+    return value
+
+
 def _parse_override(raw: str) -> tuple[str, str]:
     field, separator, value = raw.partition("=")
     if not separator or not field.strip() or not value.strip():
@@ -1173,7 +1208,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--katm",
-        type=float,
+        type=_finite_float,
         default=None,
         help="Observed reference-swaption ATM par rate for this coordinate",
     )
