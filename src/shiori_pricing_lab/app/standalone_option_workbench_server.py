@@ -124,9 +124,13 @@ the full contract:
   for pricing (see :func:`acquire_production_curve_490_for_s490_parity`
   for why this route cannot share that leniency). Resolves the S490
   funding and repo-carry Forward for the case's own
-  ``bond_option.expiry_date`` -- Expiry is the one field a trader changes
-  to see a new Forward; the existing explicit ``forward_settlement_date``
-  and ``forward_clean_price_input`` fields are read by nothing here.
+  ``forward_settlement_date`` -- the date the bond forward settles, and
+  therefore the date the reviewed pricing contract defines the forward
+  clean price at (Codex P1 review of PR #178; Issue #174 derived at Expiry
+  instead, on a premise Issue #177 removed -- see
+  :func:`resolve_s490_repo_carry_parity`). Changing Expiry still recomputes
+  it, through the convention profile that fills forward settlement.
+  ``forward_clean_price_input`` is read by nothing here.
   Returns ``{"case": <the case actually priced, freshly acquired curve
   included>, "s490_repo_carry": {"funding": {...}, "forward": {...},
   "forward_clean_price_per_100": <float>,
@@ -141,6 +145,23 @@ the full contract:
   response. Any validation, date, Bloomberg DAPI, or curve-range failure
   returns HTTP 400 with ``{"error": "..."}``. This is a parity/testing
   display only: it prices nothing through Black-76.
+
+**Effective Forward for Black-76 (Issue #177).** No new route: the same two
+pricing routes above (``POST /api/case``, ``POST /api/case/bloomberg``) now
+resolve *which* Forward Black-76 prices from, through
+:func:`apply_effective_forward_to_case` -- the Shiori Derived S490
+repo-carry Forward by default, an explicitly typed Trader Forward Override
+when one is active. The mode is read from the existing
+``forward_clean_price_input.source_system`` field (no second override model,
+no second production Forward input), the derivation reuses
+:func:`resolve_s490_repo_carry_parity` unchanged, and both routes' display
+dicts gain an ``effective_forward`` provenance section. ``POST
+/api/case/validate`` gains the one offline precondition of derived mode (an
+explicit ``spot_settlement_date`` on the case). Black-76 itself, the
+discounting chain, the volatility contract, the strike, the notional, the
+payoff direction and every Greek are untouched. See the module-level Issue
+#177 note above :func:`apply_effective_forward_to_case` for the full
+contract, including which cases it deliberately never touches.
 
 **Trader-draft revision.** ``GET /api/base`` is kept unchanged for automated
 regression and developer use only -- the trader-facing ``index.html``/
@@ -280,7 +301,11 @@ from shiori_pricing_lab.data._validation import (
     _require_finite_number,
     _require_non_blank,
 )
-from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote, BLICurvePoint
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLIBondQuote,
+    BLICurvePoint,
+    BLIForwardCleanPriceInput,
+)
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
 from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
     resolve_standalone_bond_reference_by_isin,
@@ -309,6 +334,14 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     convention_profile_candidates,
     get_convention_profile,
 )
+from shiori_pricing_lab.pricing.bli_effective_forward import (
+    EFFECTIVE_FORWARD_SOURCES,
+    SHIORI_DERIVED_S490_FORWARD_SOURCE,
+    TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
+    forward_clean_price_input_dict,
+    is_usable_clean_price_per_100,
+    select_effective_forward,
+)
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import repo_carry_forward_clean_price
 from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
     resolve_s490_repo_carry_funding,
@@ -319,7 +352,7 @@ from shiori_pricing_lab.pricing.bli_treasury_price_format import (
 from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
     UST_COUPON_PAYMENT_ROLL_CONVENTION,
 )
-from shiori_pricing_lab.products.enums import Currency, coerce_enum
+from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide, coerce_enum
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BASE_CASE_PATH = PROJECT_ROOT / "examples" / "standalone_option_case.json"
@@ -465,7 +498,20 @@ DEFAULT_PORT = 8765
 # summary plus the collapsible derivation trace that read them. A stale -v18
 # process would still refuse every interim-coupon horizon, and a stale -v18
 # page would render neither.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v19"
+#
+# Bumped to -v20 for Issue #177's promotion of the Shiori Derived Forward to
+# the Black-76 default: POST /api/case and POST /api/case/bloomberg now
+# resolve the effective Forward server-side (see
+# :func:`apply_effective_forward_to_case`) and their display dicts gained an
+# "effective_forward" section, POST /api/case/validate gained the
+# derived-mode fail-closed gate, the case envelope gained two optional keys
+# (spot_settlement_date, convention_profile), and the served page auto-fills
+# the single main Forward field from the derivation and offers "Use Shiori
+# Derived". A stale -v19 process would silently price whatever number the
+# page last put in that field -- including one derived against a spot quote
+# the refresh has since replaced -- which is precisely the stale-Forward
+# failure this contract exists to prevent.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v20"
 
 
 def load_base_case() -> dict:
@@ -918,10 +964,27 @@ def price_uploaded_case(case: dict) -> dict:
     explicit curve nodes is priced exactly as before. The returned ``case``
     reflects whichever happened, so a caller adopting it (as the trader-draft
     browser flow does) sees the curve that was actually priced.
+
+    **Issue #177:** the case then passes through
+    :func:`apply_effective_forward_to_case`, which resolves the Forward
+    Black-76 actually prices from -- the Shiori Derived S490 repo-carry
+    Forward by default, or an active Trader Forward Override. The returned
+    ``case`` again reflects what was priced (so an adopting caller's Forward
+    field shows the authoritative number rather than its own last guess), and
+    ``display`` gains an ``effective_forward`` provenance section. A case
+    outside the two Issue #177 Forward modes is untouched and gains no such
+    section, exactly as before.
     """
 
+    # Before the live-curve fetch, so an input this run cannot price under is
+    # refused for its own deterministic reason rather than behind a Bloomberg
+    # failure -- see the two validators' own docstrings.
+    validate_deterministic_forward_inputs(case)
     case = inject_live_option_discount_curve_if_absent(case)
+    case, effective_forward = apply_effective_forward_to_case(case)
     _, _, display = price_standalone_option_case(case)
+    if effective_forward is not None:
+        display = {**display, "effective_forward": effective_forward}
     return {
         "case": case,
         "overlay": extract_standalone_option_case_overlay(case),
@@ -1015,28 +1078,385 @@ def validate_case(case: dict) -> dict:
     and a case that already carries explicit curve nodes (manual or a prior
     live acquisition -- either is already a real, structurally valid curve)
     is validated exactly as before.
+
+    **Issue #177: a derived case is not judged on the Forward it discards.**
+    In Shiori-derived mode the pricing route replaces
+    ``forward_clean_price_input`` wholesale, so a case that legitimately
+    carries no usable one still prices; a stand-in is substituted here so
+    this route answers the same question Price will (see
+    :func:`_validation_only_forward_clean_price_input`, which preserves every
+    field the derived path actually reuses).
+
+    **Issue #177: the derived-Forward mode's own offline precondition.** A
+    case in Shiori-derived Forward mode prices from a Forward this route
+    cannot compute (that needs a live Bloomberg acquisition, which this route
+    must never make) -- but one precondition of that derivation is a pure,
+    offline fact: an explicit ``spot_settlement_date`` must be on the case.
+    Without it there is no ``tS``, the derivation cannot run at Price time,
+    and the run would fail closed there. Reporting it here instead is what
+    keeps the Price button disabled until the ticket can actually price,
+    rather than enabled onto a guaranteed failure. Every other derivation
+    outcome stays where it belongs -- at Price time, against real Bloomberg
+    data. A case in Trader-Forward-Override mode, or outside the two Issue
+    #177 modes entirely, is unaffected by this check.
     """
 
     try:
         if isinstance(case, dict) and case.get("curve_points") == []:
             case = {**case, "curve_points": _validation_only_placeholder_curve_points(case)}
+        placeholder_forward = _validation_only_forward_clean_price_input(case)
+        if placeholder_forward is not None:
+            case = {**case, "forward_clean_price_input": placeholder_forward}
+        validate_deterministic_forward_inputs(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
     return {"ready": True, "error": None}
 
 
+# Never Bloomberg-sourced, never returned to a caller, and never used to
+# price anything -- the exact same role, and the same never-leaves-this-
+# function guarantee, as `_validation_only_placeholder_curve_points` above.
+_VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100 = 100.0
+
+
+def _validation_only_forward_clean_price_input(case: object) -> dict | None:
+    """Return a stand-in Forward input for a derived case, or ``None``.
+
+    **Why readiness must not judge the Forward a derived run does not use
+    (Codex P2 review of PR #178, round 8).** In Shiori-derived mode
+    :func:`apply_effective_forward_to_case` replaces
+    ``forward_clean_price_input`` wholesale with the freshly derived Forward
+    -- the number the case arrived carrying is the *previous* derivation and
+    is discarded on every run. So a direct or saved-case client that
+    legitimately leaves it ``null`` (or carries a stale zero, or a
+    ``STALE``/``INVALID`` status) prices perfectly well, while this readiness
+    route was handing that same value to the typed builder and answering
+    ``ready: false``. Readiness exists to say what Price will do (Issue #143
+    requirement 5); disagreeing with it for a valid request is the defect.
+
+    So exactly the two fields the derived path discards -- the number and the
+    ``status`` it always rewrites to ``ACTIVE`` -- are substituted here, and
+    **nothing else is**. ``quote_side`` and ``source_system`` are preserved
+    untouched precisely because the derived path *does* reuse them: the
+    request contract still requires the forward's side to equal the spot
+    side, and that check must keep failing a case that gets it wrong.
+
+    Returns ``None`` -- leaving the case exactly as supplied -- for any case
+    that is not in derived mode: a Trader Forward Override *is* the priced
+    value and is validated as itself, as is a legacy explicit forward. The
+    caller's own ``case`` is never mutated.
+    """
+
+    if not isinstance(case, dict):
+        return None
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return None
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return None
+    # Built from exactly the four fields the pricing path reconstructs, never
+    # spread from the supplied object (Codex P2 review of PR #178, round 10).
+    # In derived mode `apply_effective_forward_to_case` *discards* the whole
+    # incoming observation and builds a fresh BLIForwardCleanPriceInput from
+    # the derived number plus the case's own quote side -- so an extra member
+    # on the stored input (`{"note": ...}` on a saved or hand-written case) is
+    # simply not part of what gets priced. Spreading it through here made the
+    # constructor reject it and readiness answer not-ready for a case Price
+    # handles perfectly well.
+    #
+    # This shape is therefore the same object `forward_clean_price_input_dict`
+    # produces, with one deliberate difference: a usable stored number is kept
+    # rather than replaced, because where a real value exists, validating the
+    # real one is strictly better evidence than validating a stand-in.
+    #
+    # The two fields the derived path genuinely reuses are still read straight
+    # off the supplied input and are still validated by the constructor:
+    # `quote_side` (which the request contract requires to equal the spot
+    # side) and `source_system`. A case that omits either fails here exactly
+    # as it fails at pricing time, so the agreement holds in both directions
+    # -- readiness is not merely more permissive, it is the same answer.
+    #
+    # Both discarded fields are normalized, and independently (Codex P2 review
+    # of PR #178, round 9): an earlier version returned early whenever the
+    # *number* was usable, leaving an inactive `status` in place on an
+    # observation the pricing path discards anyway.
+    forward_value = forward_input.get("forward_clean_price_per_100")
+    return {
+        "forward_clean_price_per_100": (
+            forward_value
+            if is_usable_clean_price_per_100(forward_value)
+            else _VALIDATION_ONLY_PLACEHOLDER_FORWARD_PER_100
+        ),
+        "quote_side": forward_input.get("quote_side"),
+        "source_system": forward_input.get("source_system"),
+        "status": "ACTIVE",
+    }
+
+
+def _require_valid_forward_quote_side(case: object) -> TreasuryFTPQuoteSide | None:
+    """Coerce an Issue #177 Forward's own ``quote_side``, or return ``None``.
+
+    The half of the side contract that is true regardless of which bond quote
+    ends up being priced: the value has to be a real ``TreasuryFTPQuoteSide``.
+    Returns ``None`` (checking nothing) for a case outside the two Issue #177
+    modes or without a forward input.
+    """
+
+    if not isinstance(case, dict):
+        return None
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return None
+    if forward_input.get("source_system") not in EFFECTIVE_FORWARD_SOURCES:
+        return None
+    return coerce_enum(
+        forward_input.get("quote_side"),
+        TreasuryFTPQuoteSide,
+        "forward_clean_price_input.quote_side",
+    )
+
+
+def require_usable_spot_clean_price_for_derived_forward(case: object) -> None:
+    """Raise unless a derived-Forward case's spot quote carries a usable price.
+
+    Pure and offline -- reads two case keys. A no-op outside Shiori-derived
+    mode.
+
+    The reviewed request contract deliberately *permits* a yield-only
+    ``bond_quote`` (Issue #94: the standalone path prices from an explicit
+    forward, so it does not need the spot clean price). The S490 derivation
+    does need it -- it is what the repo carry starts from -- and rejects a
+    yield-only quote unconditionally. Before this check that rejection landed
+    only after the live option-discount and S490 curve acquisitions, so
+    readiness reported ``ready: true`` for a run guaranteed to fail and a
+    Bloomberg outage could mask the real, entirely local reason (Codex P2
+    review of PR #178, round 14).
+
+    A non-finite or non-positive price is refused here for the same reason:
+    the carry primitive requires a strictly positive spot clean price, and
+    that is knowable without asking Bloomberg anything.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return
+    bond_quote = case.get("bond_quote")
+    if not isinstance(bond_quote, dict):
+        # The envelope parser and the typed constructors own this.
+        return
+    clean_price = bond_quote.get("clean_price_per_100")
+    if not is_usable_clean_price_per_100(clean_price):
+        raise ValueError(
+            "bond_quote.clean_price_per_100 must be a finite, strictly positive price "
+            f"(got {clean_price!r}) -- this run's Forward source is the Shiori Derived "
+            "S490 repo-carry Forward, whose carry starts from the spot clean price, and "
+            "a yield-only quote carries none for it to start from"
+        )
+
+
+def require_coherent_forward_quote_side(case: object, *, spot_quote_side: object = None) -> None:
+    """Raise unless an Issue #177 Forward's quote side is valid and matches spot.
+
+    Pure and offline -- coerces two enum values and compares them. A no-op for
+    a case outside the two Issue #177 modes, whose forward input this wiring
+    never touches.
+
+    Both modes carry the forward's ``quote_side`` through to what is priced:
+    the derived path *reuses* it on the input it reconstructs, and an override
+    keeps its own. Either way the reviewed request contract requires it to
+    equal the spot ``bond_quote.quote_side`` -- one coherent observation side,
+    no substitution -- and either way that is a fact about the case alone.
+
+    Checked here, ahead of every Bloomberg call, for the reason
+    :func:`validate_declared_trader_forward_override` already is (Codex P2
+    review of PR #178, round 12): left to the typed builder it surfaced only
+    *after* the live S490 acquisition and, on ``POST /api/case``, after the
+    Option Discount Curve fetch too -- so an outage could report a Bloomberg
+    failure in place of a guaranteed local rejection, and even a successful
+    rejection cost DAPI requests it never needed.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") not in EFFECTIVE_FORWARD_SOURCES:
+        return
+    bond_quote = case.get("bond_quote")
+    if not isinstance(bond_quote, dict):
+        # Not this check's business: the envelope parser reports it on its own.
+        return
+    forward_side = _require_valid_forward_quote_side(case)
+    if forward_side is None:
+        return
+    if spot_quote_side is None:
+        spot_side = coerce_enum(
+            bond_quote.get("quote_side"), TreasuryFTPQuoteSide, "bond_quote.quote_side"
+        )
+        spot_side_label = "bond_quote.quote_side"
+    else:
+        # The side this run is about to source, on a route that replaces the
+        # quote (Codex P2 review of PR #178, round 13). Validating *that*
+        # value is the Bloomberg loader's own job and its message is the
+        # reviewed one, so an uncoercible request side is left entirely to it
+        # rather than pre-empted here -- this check only compares two sides
+        # once both are real.
+        try:
+            spot_side = coerce_enum(spot_quote_side, TreasuryFTPQuoteSide, "quote_side")
+        except (TypeError, ValueError):
+            return
+        spot_side_label = "the requested refresh quote_side"
+    if forward_side is not spot_side:
+        raise ValueError(
+            f"forward_clean_price_input.quote_side ({forward_side.value}) must equal "
+            f"{spot_side_label} ({spot_side.value}) -- one coherent observation "
+            "side, no substitution"
+        )
+
+
+def validate_deterministic_forward_inputs(
+    case: object, *, replacement_quote_side: object = None
+) -> None:
+    """Run every Issue #177 Forward-input refusal that needs no Bloomberg call.
+
+    One named pre-flight, called by all three pricing routes, so a route
+    cannot pick up some of these checks and miss others -- which is exactly
+    how ``POST /api/case/price`` came to bypass the whole slice (Codex P1
+    review of PR #178, round 9). Each individual check is a no-op for the
+    modes it does not govern, so this is safe to call unconditionally, and
+    every one of them reads only the case: no network, no clock.
+
+    ``replacement_quote_side`` is passed by ``POST /api/case/bloomberg``,
+    whose whole purpose is to replace ``bond_quote`` with a freshly acquired
+    one. It states both that the carried quote is superseded and which side
+    the replacement will be sourced on, and it changes two checks:
+
+    - the forward's ``quote_side`` is compared against *that* side rather
+      than against the carried quote's (Codex P2 review of PR #178, round
+      13). A caller deliberately sets the forward's side to the side it is
+      about to source -- the browser mirrors it before the request precisely
+      because mirroring it afterwards could never run -- so comparing against
+      the superseded side would reject a correct request, while comparing
+      against the requested one catches a guaranteed contract rejection
+      before two DAPI round trips;
+    - the spot clean price is not checked at all (round 15). The carried
+      quote is discarded, and the derivation runs on the replacement, so a
+      yield-only or priceless quote on the way *in* must not block the very
+      refresh that would supply a usable one. Whether the replacement carries
+      a usable price is not knowable until Bloomberg answers, and the
+      derivation reports that with its own reason if it does not.
+    """
+
+    validate_declared_trader_forward_override(case)
+    require_usable_spot_settlement_date_for_derived_forward(case)
+    if replacement_quote_side is None:
+        require_usable_spot_clean_price_for_derived_forward(case)
+    require_coherent_forward_quote_side(case, spot_quote_side=replacement_quote_side)
+
+
+def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
+    """Raise ``ValueError`` unless a derived-Forward case carries a usable ``tS``.
+
+    Pure and offline -- reads two case keys, parses one date, and does nothing
+    else. See :func:`validate_case`'s own Issue #177 note for why this one
+    precondition is checked at readiness time while every other derivation
+    outcome is not.
+
+    **Presence is not enough (Codex P2 review of PR #178, round 7).** A
+    non-blank but malformed value such as ``"13/11/2026"`` passed an
+    earlier presence-only version of this check, so a direct or saved-case
+    client was told ``ready: true`` for a request that could not possibly
+    price -- and the pricing route then spent a live Curve #490 acquisition
+    before failing on the date. The date is parsed with the same reviewed
+    ``_parse_iso_date`` the derivation itself uses, so readiness answers the
+    same question the run will.
+
+    Called from :func:`validate_case` *and* ahead of the live-curve injector
+    on both pricing routes, for the same reason
+    :func:`validate_declared_trader_forward_override` is: a deterministic,
+    entirely local refusal must never be reported behind -- or masked by -- a
+    Bloomberg failure, nor cost a DAPI request first.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return
+    spot_settlement_date = case.get("spot_settlement_date")
+    if not isinstance(spot_settlement_date, str) or not spot_settlement_date.strip():
+        raise ValueError(
+            "spot_settlement_date must be present: this run's Forward source is the "
+            "Shiori Derived S490 repo-carry Forward, whose repo term starts at an "
+            "explicit spot settlement date (tS). This repository never derives a "
+            "settlement date from a lag, weekend, holiday or business-day convention, "
+            "so it has to be entered"
+        )
+    spot = _parse_iso_date(spot_settlement_date, "spot_settlement_date")
+    # A well-formed date is still not a usable one if it does not open a repo
+    # window (Codex P2 review of PR #178, round 14). ``repo_term_days``
+    # requires forward settlement strictly after spot settlement -- "a zero or
+    # negative repo term is not a forward" -- and both dates are on the case,
+    # so this is decidable here rather than after two Bloomberg acquisitions.
+    # A missing or malformed ``forward_settlement_date`` is left alone: the
+    # typed builder already requires and validates it, and reporting it twice
+    # in two different voices helps nobody.
+    forward_settlement_date = case.get("forward_settlement_date")
+    try:
+        forward = _parse_iso_date(forward_settlement_date, "forward_settlement_date")
+    except (TypeError, ValueError):
+        return
+    if forward <= spot:
+        raise ValueError(
+            f"forward_settlement_date ({forward_settlement_date!r}) must be strictly "
+            f"after spot_settlement_date ({spot_settlement_date!r}) -- a zero or "
+            "negative repo term is not a forward, so the Shiori Derived S490 "
+            "repo-carry Forward cannot be derived over this window"
+        )
+
+
 def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     """Apply ``overlay`` to a fresh copy of ``case`` (not the bundled one) and price it.
 
-    The explicit-case counterpart of :func:`price_overlay_case`, used once
-    the page has an active case other than the bundled default. Returns the
+    The explicit-case counterpart of :func:`price_overlay_case`. Returns the
     display dict verbatim; raises for a bad overlay key set or invalid
     field value exactly like :func:`price_overlay_case`.
+
+    **Issue #177 / Codex P1 review of PR #178, round 9.** This route resolves
+    the effective Forward through exactly the same
+    :func:`apply_effective_forward_to_case` as ``POST /api/case``, and gains
+    the same ``effective_forward`` display section. It is a documented,
+    reachable pricing endpoint, so leaving it out meant a case declaring
+    ``SHIORI_DERIVED_S490`` was priced from whatever Forward its envelope
+    happened to carry -- a previous, possibly stale derivation -- while the
+    result labelled that number ``SHIORI_DERIVED_S490``. A run must not claim
+    a source that did not produce its F.
+
+    Deliberately *not* changed: this route still does not inject the live
+    Option Discount Curve. That is Issue #171's own decision for the
+    explicit-case path, unrelated to which Forward is priced, and outside
+    this slice. The Forward derivation acquires its own Curve #490 regardless
+    (see :func:`resolve_s490_repo_carry_parity`), so a derived-mode case
+    prices here on exactly the same Forward it would through ``POST
+    /api/case``.
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
+    # Same order as every other pricing route: the deterministic, entirely
+    # local refusals run before anything can reach Bloomberg.
+    validate_deterministic_forward_inputs(overlaid_case)
+    overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
     _, _, display = price_standalone_option_case(overlaid_case)
+    if effective_forward is not None:
+        display = {**display, "effective_forward": effective_forward}
     return display
 
 
@@ -1078,18 +1498,168 @@ def price_case_with_bloomberg_quote(
     before the bond-quote refresh below, so a live-curve same-as-of failure
     (see ``_require_valuation_date_matches_today``) is reported without ever
     calling the Bloomberg bond-quote loader.
+
+    **Issue #177:** the effective Forward is resolved through
+    :func:`apply_effective_forward_to_case` as the workflow's own
+    ``case_transform`` -- i.e. *after* the freshly acquired spot quote has
+    been substituted into the envelope and before it is priced. That ordering
+    is the whole point: the Shiori Derived Forward is a function of the spot
+    clean price, so deriving it from the case's previous quote and pricing
+    the new one against it would be exactly the stale-Forward failure this
+    wiring exists to prevent. A refresh therefore re-derives the default
+    Forward from the quote it just acquired -- and leaves an active Trader
+    Forward Override untouched, which is Issue #177's other explicit
+    requirement. The returned ``case`` is still the exact envelope that was
+    priced, and ``display`` gains the same ``effective_forward`` provenance
+    section :func:`price_uploaded_case` returns.
     """
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
+    # Same ordering as POST /api/case: the deterministic checks run before any
+    # Bloomberg call, curve or quote.
+    validate_deterministic_forward_inputs(overlaid_case, replacement_quote_side=quote_side)
+    curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
+    live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection
+    # Captured out of the transform rather than returned by it: the workflow's
+    # seam is deliberately a plain dict -> dict case rewrite (see its own
+    # docstring), so the provenance the same call produces is collected here
+    # instead of widening that contract.
+    captured: dict = {}
+
+    def _apply_effective_forward(bloomberg_case: dict) -> dict:
+        effective_case, effective_forward = apply_effective_forward_to_case(bloomberg_case)
+        captured["effective_forward"] = effective_forward
+        return effective_case
+
     _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
-        overlaid_case, bloomberg_security=bloomberg_security, quote_side=quote_side
+        overlaid_case,
+        bloomberg_security=bloomberg_security,
+        quote_side=quote_side,
+        case_transform=_apply_effective_forward,
+    )
+    effective_forward = captured.get("effective_forward")
+    if effective_forward is not None:
+        display = {**display, "effective_forward": effective_forward}
+    # The derivation forces its own fresh production Curve #490 acquisition
+    # whenever it runs -- including in override mode, where it produces the
+    # comparison value beside the priced override (Codex P1 review of PR #178,
+    # round 12). The acquisition is reported by the resolver the moment it
+    # succeeds, so it is recorded even when a later derivation step (carry,
+    # coupon, curve range) then refused -- on an override run that refusal
+    # does not stop the run pricing, and the curve was still genuinely
+    # re-sourced (Codex P2 review of PR #178, round 13). A derivation that
+    # never got past the acquisition claims nothing, and its reason is already
+    # on `effective_forward`.
+    derived_trace_present = (
+        effective_forward is not None and effective_forward["shiori_derived_forward"] is not None
+    )
+    display = _with_accurate_refresh_scope(
+        display,
+        live_curve_acquired=live_curve_acquired,
+        s490_curve_acquired=(
+            effective_forward is not None
+            and effective_forward["shiori_derived_forward_curve_acquired"]
+        ),
+        derived_forward_replaced=(
+            effective_forward is not None
+            and effective_forward["forward_source"] == SHIORI_DERIVED_S490_FORWARD_SOURCE
+        ),
+        derived_forward_comparison_refreshed=(
+            derived_trace_present
+            and effective_forward["forward_source"] != SHIORI_DERIVED_S490_FORWARD_SOURCE
+        ),
     )
     return {"case": priced_case, "display": display}
 
 
+# What a Bloomberg refresh on this route actually re-sourced. The workflow's
+# own ``prepare_live_bloomberg_quote_display`` states ``BOND_QUOTE_ONLY`` /
+# ``CASE_JSON_UNCHANGED``, which is true of that function -- it substitutes
+# exactly the quote -- but not of this route, which wraps it (Codex P1 review
+# of PR #178, round 4). Two inputs beyond the quote can be re-sourced here
+# before pricing:
+#
+# - the Option Discount Curve, since Issue #171, whenever the case carried no
+#   manual nodes (a pre-#177 inaccuracy in the same sentence, corrected here
+#   rather than left standing beside the new one);
+# - the Forward, since Issue #177, whenever the run's source is the Shiori
+#   derived one -- which is now the *default*, so on an ordinary derived-mode
+#   refresh the quote-only claim is false about the single most important
+#   number on the ticket.
+#
+# Stating otherwise in the display and the exported run would be a provenance
+# claim contradicting the inputs actually priced (AGENTS.md rule 6), so the
+# two fields are corrected here from what this route genuinely did.
+# ``refreshed_inputs`` carries the same fact as an explicit list, so a reader
+# never has to parse a compound label.
+_REFRESHED_INPUT_BOND_QUOTE = "BOND_QUOTE"
+_REFRESHED_INPUT_OPTION_DISCOUNT_CURVE = "LIVE_OPTION_DISCOUNT_CURVE"
+# The derivation's own forced acquisition, which is a *separate* live Curve
+# #490 fetch from the option-discounting one (see
+# acquire_production_curve_490_for_s490_parity for why it cannot share it).
+_REFRESHED_INPUT_S490_CURVE = "LIVE_S490_REPO_CARRY_CURVE"
+_REFRESHED_INPUT_DERIVED_FORWARD = "SHIORI_DERIVED_FORWARD"
+# The derived Forward when it is *not* what was priced: an override run still
+# re-derives it from the refreshed spot as the comparison value on screen, so
+# it is a market input this run re-sourced even though Black-76 did not use it.
+_REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON = "SHIORI_DERIVED_FORWARD_COMPARISON"
+_OTHER_MARKET_INPUTS_UNCHANGED = "CASE_JSON_UNCHANGED"
+_OTHER_MARKET_INPUTS_EXCEPT_REFRESHED = "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
+
+
+def _with_accurate_refresh_scope(
+    display: dict,
+    *,
+    live_curve_acquired: bool,
+    s490_curve_acquired: bool,
+    derived_forward_replaced: bool,
+    derived_forward_comparison_refreshed: bool,
+) -> dict:
+    """Return ``display`` with its live-quote refresh scope corrected.
+
+    See the note above for why the workflow's own quote-only labels are not
+    the whole truth on this route. A refresh that genuinely re-sourced
+    nothing but the quote is left byte-for-byte unchanged, so the pre-#171
+    manual-curve path and every existing test keep their exact wording.
+    """
+
+    live_quote = display.get("live_bloomberg_quote")
+    if not isinstance(live_quote, dict):
+        return display
+    refreshed = [_REFRESHED_INPUT_BOND_QUOTE]
+    if live_curve_acquired:
+        refreshed.append(_REFRESHED_INPUT_OPTION_DISCOUNT_CURVE)
+    if s490_curve_acquired:
+        refreshed.append(_REFRESHED_INPUT_S490_CURVE)
+    if derived_forward_replaced:
+        refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD)
+    if derived_forward_comparison_refreshed:
+        refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON)
+    if refreshed == [_REFRESHED_INPUT_BOND_QUOTE]:
+        # Genuinely quote-only: returned completely untouched, so a legacy
+        # (manual-curve, explicit-forward) refresh is still byte-for-byte the
+        # workflow function's own output, and the presence of
+        # ``refreshed_inputs`` at all means "more than the quote was
+        # re-sourced".
+        return display
+    return {
+        **display,
+        "live_bloomberg_quote": {
+            **live_quote,
+            "refreshed_scope": "_AND_".join(refreshed),
+            "other_market_inputs": _OTHER_MARKET_INPUTS_EXCEPT_REFRESHED,
+            "refreshed_inputs": refreshed,
+        },
+    }
+
+
 def resolve_s490_repo_carry_parity(
-    case: dict, spot_settlement_date: str, convention_profile: str | None = None
+    case: dict,
+    spot_settlement_date: str,
+    convention_profile: str | None = None,
+    *,
+    on_curve_acquired=None,
 ) -> dict:
     """Resolve one Issue #173/#174/#175 S490 repo-carry Forward for ``case``'s own Expiry.
 
@@ -1117,11 +1687,12 @@ def resolve_s490_repo_carry_parity(
     - ``pricing/bli_repo_carry_forward.repo_carry_forward_clean_price``
       (Issues #173/#175) for the forward, including its interim-coupon
       (Case B) carry. A coupon scheduled in ``(spot_settlement_date,
-      expiry_date]`` is carried to Expiry from its own Federal Reserve
-      payment date and netted off, so such an expiry returns HTTP 200 with
-      the per-coupon trace on ``forward.interim_coupons`` -- it is not a
-      refusal. **This route reads no coupon schedule, resolves no payment
-      calendar and selects no coupon treatment of its own**: the primitive
+      forward_settlement_date]`` is carried to that settlement date from its
+      own Federal Reserve payment date and netted off, so such a horizon
+      returns HTTP 200 with the per-coupon trace on
+      ``forward.interim_coupons`` -- it is not a refusal. **This route reads
+      no coupon schedule, resolves no payment calendar and selects no coupon
+      treatment of its own**: the primitive
       resolves the coupons from the same resolved bond reference data this
       route already passes it, rolls each date through
       ``pricing/bli_ust_coupon_payment_date``, and the whole trace reaches
@@ -1141,22 +1712,45 @@ def resolve_s490_repo_carry_parity(
     bond (via ``bond_option.underlying_isin`` against
     ``bond_reference_data_universe``), the live spot clean quote
     (``bond_quote``), ``valuation_date``, ``spot_settlement_date`` (the
-    caller argument), ``bond_option.expiry_date``, and the freshly acquired
+    caller argument), ``forward_settlement_date``, and the freshly acquired
     Curve #490. A Bloomberg-loaded bond alone already supplies the first
-    three; only Expiry and Spot Settlement Date remain genuinely trader-
-    entered. No strike, notional, volatility, option type, position, or
+    three; ``forward_settlement_date`` comes from the selected convention
+    profile as soon as Expiry is entered, so only Expiry and Spot Settlement
+    Date remain genuinely trader-entered. No strike, notional, volatility, option type, position, or
     manual Forward override is read, required, or affected.
 
-    **The forward settlement date (``tF``) is ``bond_option.expiry_date``.**
-    Per Issue #174's own instruction ("change Expiry -> Shiori automatically
-    recomputes"), Expiry is the one ticket field a trader changes to see a
-    new S490 Forward -- the existing, separate ``forward_settlement_date``
-    field (which feeds the *other*, explicit-forward pricing path) is not
-    read here. ``spot_settlement_date`` (``tS``) is the one genuinely new
-    input this route needs: repo-carry has no spot settlement date anywhere
-    in the existing case schema, and this repository never derives a
-    settlement date from a lag or calendar, so it must be typed, exactly
-    like every other settlement date already on this ticket.
+    **The forward settlement date (``tF``) is the case's own
+    ``forward_settlement_date`` (Codex P1 review of PR #178).** Issue #174
+    derived at ``bond_option.expiry_date`` instead, on the explicit premise
+    that this route fed a read-only parity panel and *not* "the other,
+    explicit-forward pricing path". Issue #177 removes that premise: this
+    derivation now produces the Forward Black-76 prices from, and the
+    reviewed pricing contract defines that number at
+    ``request.forward_settlement_date`` -- ``resolve_standalone_option_pricing_inputs``
+    converts the explicit forward clean price to dirty using
+    ``AI(request.forward_settlement_date)``. Deriving a clean price at Expiry
+    (i.e. netting off ``AI(expiry)``) and then adding back
+    ``AI(forward_settlement_date)`` would pair a clean price and an accrual
+    struck at two different dates, shifting the forward the option prices
+    against by the accrual between them -- and those two dates differ in the
+    ordinary workflow, where the convention profile derives forward
+    settlement as Expiry plus the bond's settlement lag. Since Black-76,
+    the accrual convention and the pricing-input contract are all out of
+    scope for Issue #177, the wiring is what has to agree with them.
+
+    Expiry-driven recomputation is preserved rather than lost: on the
+    Workbench ``forward_settlement_date`` is itself filled from the selected
+    convention profile the moment Expiry changes, so changing Expiry still
+    moves this Forward -- it now does so through the date that actually
+    governs the bond forward, instead of past it. A trader who overrides
+    forward settlement by hand gets a Forward for the settlement date they
+    stated, which is the point of the field.
+
+    ``spot_settlement_date`` (``tS``) remains the one genuinely new input
+    this route needs: repo-carry has no spot settlement date anywhere in the
+    existing case schema, and this repository never derives a settlement date
+    from a lag or calendar, so it must be typed, exactly like every other
+    settlement date already on this ticket.
 
     No repo rate is ever read from ``case`` or from the caller -- the only
     caller-supplied number this route consumes beyond the case itself is
@@ -1195,7 +1789,7 @@ def resolve_s490_repo_carry_parity(
 
     Raises ``ValueError`` if ``bond_option`` / ``bond_reference_data_universe``
     / ``bond_quote`` / ``curve_points`` are missing or malformed, if
-    ``bond_option.expiry_date`` is absent, if any of the three coherence
+    ``forward_settlement_date`` is absent, if any of the three coherence
     checks above fails, or if ``bond_quote.clean_price_per_100`` is absent (a
     yield-only quote carries no spot clean price to start from); or whatever
     the composed functions raise (Bloomberg failure, same-as-of mismatch,
@@ -1206,15 +1800,28 @@ def resolve_s490_repo_carry_parity(
     """
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
+    # Signalled the instant the acquisition succeeds, before any of the
+    # derivation steps that can still fail after it (Codex P2 review of PR
+    # #178, round 13). A caller reporting what a run re-sourced needs to know
+    # that a live S490 curve *was* fetched even when the carry, coupon or
+    # curve-range step then refused -- which on an override run is a refusal
+    # that does not stop the run pricing. Optional and defaulted to None, so
+    # every existing caller is unaffected.
+    if on_curve_acquired is not None:
+        on_curve_acquired()
 
     bond_option = priced_case.get("bond_option")
     if not isinstance(bond_option, dict):
         raise ValueError("bond_option must be a JSON object")
-    expiry_date = bond_option.get("expiry_date")
-    if not expiry_date:
+    forward_settlement_date = priced_case.get("forward_settlement_date")
+    if not forward_settlement_date:
         raise ValueError(
-            "bond_option.expiry_date must be present -- Expiry is the one ticket "
-            "field this route needs to resolve a forward settlement date"
+            "forward_settlement_date must be present -- it is the date the bond "
+            "forward settles (tF), and therefore the date this derivation carries "
+            "the spot to. On the Workbench it is filled from the selected "
+            "convention profile once Expiry is entered; this repository never "
+            "derives a settlement date from a lag, weekend, holiday or "
+            "business-day convention"
         )
     currency = coerce_enum(bond_option.get("currency"), Currency, "bond_option.currency")
 
@@ -1284,13 +1891,13 @@ def resolve_s490_repo_carry_parity(
         currency=currency,
         curve_as_of_date=priced_case.get("valuation_date"),
         spot_settlement_date=spot_settlement_date,
-        forward_settlement_date=expiry_date,
+        forward_settlement_date=forward_settlement_date,
     )
     forward = repo_carry_forward_clean_price(
         bond=resolved_bond_reference_data,
         spot_clean_price_per_100=spot_clean_price,
         spot_settlement_date=spot_settlement_date,
-        forward_settlement_date=expiry_date,
+        forward_settlement_date=forward_settlement_date,
         repo_rate_decimal=funding.derived_repo_rate_decimal,
         interim_coupon_payment_convention=interim_coupon_payment_convention,
     )
@@ -1308,6 +1915,240 @@ def resolve_s490_repo_carry_parity(
             "case_curve_points_discarded": discarded_curve_point_count,
         },
     }
+
+
+# --- Issue #177: the effective Forward Black-76 actually prices from -----------
+#
+# Before Issue #177 the Forward was a required manual trader entry: whatever
+# number reached ``forward_clean_price_input.forward_clean_price_per_100`` was
+# priced, and the S490 repo-carry derivation above was a read-only parity
+# panel beside it. Issue #177 promotes that derivation to the *default*
+# Forward for the approved UST path, leaving a typed Forward as an explicit
+# Trader Forward Override.
+#
+# **The selection is resolved here, server-side, on every priced run --
+# never adopted from whatever the browser last displayed.** That is not
+# defensiveness about the client; it is the only correct place for it.
+# ``POST /api/case/bloomberg`` substitutes a *fresh live spot quote* into the
+# case and prices it in the same request, and the S490 repo-carry Forward is
+# a function of that spot. A Forward carried in from the browser was derived
+# from the *previous* spot, so pricing it against the new one would be
+# exactly the "silently use the last stale Forward" failure Issue #177
+# forbids. Re-deriving after the substitution is what makes Refresh honest.
+#
+# **Which cases this touches, and which it deliberately does not.** The mode
+# is read from the existing ``forward_clean_price_input.source_system`` field
+# -- no new envelope field, no parallel override model (Issue #177's explicit
+# constraint). Only the two canonical Issue #177 tokens
+# (``pricing/bli_effective_forward.py``) select into this wiring:
+# ``SHIORI_DERIVED_S490`` re-derives, ``TRADER_FORWARD_OVERRIDE`` prices the
+# typed number. **Every other value is left completely untouched** -- the
+# bundled synthetic example's ``SANITIZED_SYNTHETIC_MARKET_SOURCE``, an
+# uploaded Case JSON's own label, the pre-#177 ``MANUAL_TRADER_ENTRY``. That
+# is what keeps every pre-#177 case, fixture and test priced byte-for-byte as
+# before, and it is why no case-schema migration exists anywhere in this
+# slice.
+#
+# **The two new envelope keys are inputs to the derivation, not to the
+# request.** ``spot_settlement_date`` (the repo-carry ``tS``) and
+# ``convention_profile`` (which approved coupon-payment convention the trader
+# asserts, Issue #175) are optional top-level case keys
+# (``app/standalone_option_workbench.py``) read only here. Neither is passed
+# to ``build_bli_standalone_option_request``, so the reviewed typed request
+# contract is unchanged; they exist on the envelope so a saved/re-sent case
+# reproduces its own Forward instead of depending on live browser state.
+#
+# **Two live Curve #490 acquisitions per priced run, deliberately.** The
+# derivation goes through :func:`resolve_s490_repo_carry_parity` unchanged,
+# which always forces its own fresh acquisition and discards the case's
+# ``curve_points`` (Codex P1 review of PR #174: a manual curve override
+# entered for Black-76 discounting must never silently become the source of a
+# number presented as the S490 Funding Rate). The option-discounting curve is
+# then resolved separately by the existing
+# :func:`inject_live_option_discount_curve_if_absent`, exactly as before.
+# Sharing one acquisition between the two roles would mean either weakening
+# that refusal or bypassing the injector's own same-as-of gate, so the extra
+# round trip on an explicit Price/Refresh click is the accepted cost of
+# leaving both reviewed contracts exactly as they are.
+
+
+def validate_declared_trader_forward_override(case: object) -> None:
+    """Validate a declared Trader Forward Override as the observation it claims to be.
+
+    A no-op for every case outside ``TRADER_FORWARD_OVERRIDE`` mode --
+    including the Shiori-derived mode, whose own ``forward_clean_price_input``
+    is about to be replaced wholesale and is therefore not validated as an
+    observation this run stands behind.
+
+    An override, by contrast, is the trader's own explicit forward
+    observation and is carried through verbatim, so every rule the reviewed
+    ``BLIForwardCleanPriceInput`` contract has about such an observation must
+    still apply to it -- the finite/strictly-positive number, the quote-side
+    enum, the non-blank source system, and the ACTIVE-only ``status`` (Codex
+    P2 review of PR #178, round 2: rebuilding the input hard-coded ``ACTIVE``
+    and so promoted a ``STALE``/``INVALID``/``MISSING`` observation into
+    usable market data). Constructing the typed object is exactly that check;
+    the result is deliberately discarded, because this is a validation and
+    never a rewrite.
+
+    **Called before the live-curve injector, not only from inside
+    :func:`apply_effective_forward_to_case`** (Codex P2 review of PR #178,
+    round 4). Both pricing routes fetch the live Option Discount Curve first,
+    so validating only at forward-selection time meant an
+    invalid-or-inactive override on a live-curve draft reached Bloomberg
+    first: a DAPI request wasted on a run that cannot price, and -- worse --
+    a Bloomberg failure reported in place of the deterministic, entirely
+    local reason the run was actually going to be refused for. This check
+    reads two case keys, makes no network call and reads no clock, so running
+    it first costs nothing and always reports the real reason.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE:
+        return
+    BLIForwardCleanPriceInput(**forward_input)
+
+
+def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
+    """Return ``(case priced with the effective Forward, provenance payload)``.
+
+    See the module-level Issue #177 note above for the mode contract. A case
+    whose ``forward_clean_price_input.source_system`` is not one of the two
+    canonical Issue #177 tokens is returned **unchanged**, with ``None``
+    provenance -- no derivation is attempted and no Bloomberg call is made.
+
+    For the two Issue #177 modes:
+
+    - the Shiori Derived Forward is resolved through the unmodified
+      :func:`resolve_s490_repo_carry_parity` whenever the case carries a
+      ``spot_settlement_date``, and its whole ``s490_repo_carry`` trace
+      (funding, carry, per-coupon interim carry, curve ids, source systems)
+      is carried onto the provenance payload;
+    - the selection itself is
+      ``pricing/bli_effective_forward.select_effective_forward``, told which
+      source this case declared. It never infers the source from which
+      number happens to be present, in either direction (Codex P2 review of
+      PR #178): a case declaring ``TRADER_FORWARD_OVERRIDE`` with an
+      unusable override is refused rather than silently priced from the
+      derived Forward under an override label;
+    - in derived mode the winning number is written back as a freshly
+      constructed ``BLIForwardCleanPriceInput`` stamped with its own source
+      token, preserving the case's own ``quote_side`` (the request contract
+      still requires it to equal the spot side, and still enforces that
+      itself). In override mode the case's own input is left **exactly** as
+      supplied and is instead validated as the reviewed contract defines it,
+      before any Bloomberg call -- see the two inline notes below for why
+      rebuilding it is the wrong move there.
+
+    **Fail closed.** In Shiori-derived mode a derivation failure -- a missing
+    ``spot_settlement_date``, a Bloomberg/curve/coupon-window failure, an
+    interim coupon on a non-UST convention selection -- raises
+    ``ForwardSourceUnavailableError`` carrying that failure's own text, and
+    nothing is priced. The number the case arrived with is never used as a
+    fallback in that mode; it is replaced on every run, so a stale value left
+    in the envelope cannot survive into a priced result. With a valid Trader
+    Forward Override active, a failed derivation is recorded on the
+    provenance payload and pricing proceeds under the existing override
+    contract.
+    """
+
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return case, None
+    forward_source = forward_input.get("source_system")
+    if forward_source not in EFFECTIVE_FORWARD_SOURCES:
+        return case, None
+
+    is_trader_override = forward_source == TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE
+    validate_declared_trader_forward_override(case)
+
+    spot_settlement_date = case.get("spot_settlement_date")
+    convention_profile = case.get("convention_profile")
+
+    derived_forward = None
+    derived_trace = None
+    derived_error = None
+    derived_curve_acquired = False
+
+    def _note_curve_acquired() -> None:
+        nonlocal derived_curve_acquired
+        derived_curve_acquired = True
+
+    if isinstance(spot_settlement_date, str) and spot_settlement_date.strip():
+        try:
+            derived_trace = resolve_s490_repo_carry_parity(
+                case,
+                spot_settlement_date,
+                convention_profile,
+                on_curve_acquired=_note_curve_acquired,
+            )["s490_repo_carry"]
+        except Exception as exc:  # noqa: BLE001 -- recorded verbatim, see below
+            # Preserved verbatim rather than remapped (Issue #177: "the
+            # Forward source error must keep its real reason"). In derived
+            # mode select_effective_forward re-raises it inside its own
+            # fail-closed message; with an override active it is only
+            # recorded, since the override prices without it.
+            derived_error = f"{type(exc).__name__}: {exc}"
+        else:
+            derived_forward = derived_trace["forward_clean_price_per_100"]
+    else:
+        derived_error = (
+            "spot_settlement_date is missing from the case -- the Shiori Derived "
+            "S490 repo-carry Forward needs an explicit spot settlement date (tS), "
+            "and this repository never derives one from a settlement lag or calendar"
+        )
+
+    effective = select_effective_forward(
+        requested_forward_source=forward_source,
+        shiori_derived_forward_clean_price_per_100=derived_forward,
+        trader_forward_override_per_100=forward_input.get("forward_clean_price_per_100"),
+        shiori_derived_forward_error=derived_error,
+    )
+
+    # An override's own ``forward_clean_price_input`` is left exactly as
+    # supplied (Codex P2 review of PR #178, round 2). It already is the
+    # explicit forward observation this run prices from, already carries its
+    # own quote side, status and source token, and was validated above as the
+    # reviewed contract defines it -- rebuilding it could only lose or
+    # overwrite one of those, which is precisely how a non-ACTIVE observation
+    # was being promoted to ACTIVE. Only the derived Forward is written, and
+    # only because it genuinely is a new observation Shiori has just computed:
+    # the value it replaces is the *previous* derivation, whose own status
+    # describes a number being discarded. That mirrors how a Bloomberg refresh
+    # already replaces ``bond_quote`` wholesale rather than merging it
+    # field-by-field with the quote it supersedes.
+    effective_case = (
+        case
+        if is_trader_override
+        else {
+            **case,
+            "forward_clean_price_input": forward_clean_price_input_dict(
+                effective, quote_side=forward_input.get("quote_side")
+            ),
+        }
+    )
+    provenance = {
+        "forward_source": effective.forward_source,
+        "effective_forward_clean_price_per_100": effective.forward_clean_price_per_100,
+        "shiori_derived_forward_clean_price_per_100": (
+            effective.shiori_derived_forward_clean_price_per_100
+        ),
+        "trader_forward_override_per_100": effective.trader_forward_override_per_100,
+        "shiori_derived_forward_error": effective.shiori_derived_forward_error,
+        "spot_settlement_date": spot_settlement_date,
+        "convention_profile": convention_profile,
+        # Whether a live production Curve #490 was actually fetched for this
+        # run's derivation -- true even when a later derivation step then
+        # failed, which is exactly the case a refresh's own provenance would
+        # otherwise under-report (Codex P2 review of PR #178, round 13).
+        "shiori_derived_forward_curve_acquired": derived_curve_acquired,
+        "shiori_derived_forward": derived_trace,
+    }
+    return effective_case, provenance
 
 
 def _shiori_acquisition_now() -> datetime:

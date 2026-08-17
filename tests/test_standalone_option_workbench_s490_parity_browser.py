@@ -33,17 +33,21 @@ from pathlib import Path
 
 import pytest
 
+from shiori_pricing_lab.app import standalone_option_workbench as workbench_module
 from shiori_pricing_lab.app import standalone_option_workbench_server as server_module
 from shiori_pricing_lab.data.bli_snapshot import (
+    BLIBondQuote,
     BLICurvePoint,
     BLICurvePurpose,
     BLICurveRateBasis,
     BLIMarketDataStatus,
+    BLIQuoteBasis,
 )
 from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
     BloombergUsdSofrOptionDiscountCurveResult,
 )
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
+from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 
 # Reuses the sibling browser-test file's own Bloomberg lookup fixture/driving
 # helpers unchanged, rather than a second copy of the same bond-lookup mock
@@ -58,6 +62,8 @@ if _TESTS_DIR not in sys.path:
 
 from test_standalone_option_workbench_prototype_browser import (  # noqa: E402
     _complete_draft,
+    _fill_advanced_overrides,
+    _fill_trade_group,
     _is_disabled,
     _load_bloomberg_bond,
     _set_expiry,
@@ -150,6 +156,28 @@ def server_url(monkeypatch) -> Iterator[str]:
         lambda tenors=None: _fake_curve_result(),
     )
     monkeypatch.setattr(server_module, "_shiori_acquisition_now", lambda: _CLOCK_NOW)
+    # The Bloomberg *quote* seam, so a successful `POST /api/case/bloomberg`
+    # can be driven end to end through the real route (Codex P1 review of PR
+    # #178, round 6). Same two module attributes the server tests already
+    # patch. The refreshed clean price is deliberately different from the
+    # lookup fixture's, so a Forward derived from it is distinguishable.
+    def _fake_bond_quote_loader(*, security, isin, quote_side):
+        return BLIBondQuote(
+            isin=isin,
+            currency=Currency.USD,
+            price_type=BLIQuoteBasis.PRICE,
+            quote_side=TreasuryFTPQuoteSide(quote_side),
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            clean_price_per_100=100.5,
+            accrued_interest_per_100=0.42,
+        )
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _fake_bond_quote_loader)
+    # Offset-aware and fixed, so its own local calendar date is 2026-08-12
+    # regardless of the machine timezone -- the builder requires
+    # pricing_timestamp.date() == valuation_date.
+    monkeypatch.setattr(workbench_module, "_shiori_acquisition_now", lambda: _CLOCK_NOW)
 
     server = server_module.create_server(host="127.0.0.1", port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -175,7 +203,7 @@ def page():
         browser.close()
 
 
-def _load_and_complete_ust(page, server_url: str) -> None:
+def _load_and_complete_ust(page, server_url: str, *, settlement_dates: bool = True) -> None:
     """One real bond, loaded and completed through the real controls.
 
     ``acquired_at`` is pinned to the same fixed clock the curve loader/RED
@@ -192,7 +220,7 @@ def _load_and_complete_ust(page, server_url: str) -> None:
     # 2026-10-20, forward/option settlement 2026-10-21) all fall safely
     # after this fixture's valuation_date (2026-08-12) and within the fake
     # curve's own 1Y node range.
-    _complete_draft(page)
+    _complete_draft(page, settlement_dates=settlement_dates)
     _wait_for_price_enabled(page)
 
 
@@ -286,7 +314,12 @@ def test_an_interim_coupon_expiry_resolves_and_shows_the_federal_reserve_roll(
     # with Expiry moved past this bond's 2027-01-31 coupon. That coupon is a
     # Sunday, so Eddy's convention B rolls its cash to Monday 2027-02-01 --
     # the panel must resolve, name the coupon, and show the roll in the trace.
-    _load_and_complete_ust(page, server_url)
+    #
+    # The convention profile owns the settlement dates here (Codex P1 review
+    # of PR #178): tF is the forward settlement date, and typing it by hand
+    # would correctly stop Expiry from re-deriving it -- which is exactly the
+    # chain this test is about.
+    _load_and_complete_ust(page, server_url, settlement_dates=False)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
     case_a_forward = page.text_content("#s490-forward-decimal")
@@ -304,7 +337,9 @@ def test_an_interim_coupon_expiry_resolves_and_shows_the_federal_reserve_roll(
     assert "Interim coupon 2027-01-31" in trace
     assert "paid 2027-02-01" in trace
     assert "rolled 1d, US_FEDERAL_RESERVE" in trace
-    assert "days to Expiry" in trace
+    # Codex P2 review of PR #178, round 5: the carry horizon is the forward
+    # settlement date, and the trace names it rather than Expiry.
+    assert "days to " in trace
     assert "PROTOTYPE" in trace  # the coupon-treatment label, never hidden
     assert float(page.text_content("#s490-forward-decimal")) > 0.0
 
@@ -335,7 +370,15 @@ def test_expiry_and_spot_settlement_date_alone_resolve_with_forward_vol_strike_n
     assert page.input_value("#strike-price-input") == ""
     assert page.input_value("#notional-input") == ""
     assert page.input_value("#volatility-input") == ""
-    assert page.input_value("#forward-price-input") == ""
+    # Issue #177: the Forward field is no longer blank here -- it is the one
+    # field the derivation now fills, which is exactly the point. Every
+    # *trade* input above is still blank, so this remains proof that the
+    # derivation does not wait on Black-76 readiness.
+    assert page.input_value("#forward-price-input") == page.text_content(
+        "#s490-forward-decimal"
+    ) or float(page.input_value("#forward-price-input")) == pytest.approx(
+        float(page.text_content("#s490-forward-decimal"))
+    )
     assert _is_disabled(page, "#price-btn")
 
 
@@ -417,15 +460,17 @@ def test_changing_expiry_alone_recomputes_the_forward_with_no_button_click(
     server_url, page
 ) -> None:
     # Issue #174's own acceptance condition, driven through the real page.
-    _load_and_complete_ust(page, server_url)
+    # Since Codex's P1 review of PR #178 the Forward is carried to the forward
+    # settlement date, which the convention profile re-derives from Expiry --
+    # so the settlement dates are left to the profile rather than typed, and
+    # this still proves that changing Expiry alone moves the Forward.
+    _load_and_complete_ust(page, server_url, settlement_dates=False)
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
     before_forward = page.text_content("#s490-forward-decimal")
     before_rate = page.text_content("#s490-funding-rate")
 
-    # Stays before the manually entered forward/option settlement dates
-    # (2026-10-21, _fill_advanced_overrides' own default), which Expiry never
-    # touches, and stays inside the fake curve's 1Y node range.
+    # Stays inside the fake curve's 1Y node range.
     page.fill("#expiry-datetime-input", "2026-09-15T17:20")
 
     _wait_until(
@@ -504,24 +549,35 @@ def test_a_slow_recompute_never_shows_the_previous_dates_stale_numbers(server_ur
     page.unroute("**/api/case/s490-repo-carry")
 
 
-def test_editing_the_spot_settlement_date_never_invalidates_an_in_flight_price(
+def test_editing_the_spot_settlement_date_invalidates_an_in_flight_price(
     server_url, page
 ) -> None:
-    # The Spot Settlement Date field is deliberately not part of
-    # MANUAL_TEXT_INPUTS -- unlike every real ticket field, editing it must
-    # never abort an outstanding Price/Refresh request (Issue #174).
+    # Issue #177 reversed the Issue #174 rule this test used to assert. Under
+    # #174 the Spot Settlement Date drove a read-only panel, was not part of
+    # the priced case, and therefore deliberately did *not* abort an
+    # outstanding Price. It is now a real pricing input -- it is carried on
+    # the case as `spot_settlement_date` and it moves the Forward Black-76
+    # prices from -- so an in-flight response describes a case the trader has
+    # moved away from, and adopting it would show a run priced against a
+    # Forward that is no longer this ticket's. It must be invalidated, like
+    # every other ticket field's edit.
     _load_and_complete_ust(page, server_url)
 
     pending = []
     page.route("**/api/case", lambda route: pending.append(route))
     page.click("#price-btn")
     _wait_until(lambda: len(pending) == 1)
+    # While that run is genuinely outstanding, Price is held.
+    assert _is_disabled(page, "#price-btn")
 
     page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
-    page.wait_for_timeout(150)
 
-    # The original Price request is still the one in flight -- nothing
-    # aborted and re-sent it.
+    # The edit releases the outstanding run (Price becomes available again
+    # once the re-validation settles) rather than leaving it live to be
+    # adopted against the new inputs...
+    _wait_until(lambda: not _is_disabled(page, "#price-btn"))
+    # ...and nothing is silently re-sent in its place: repricing stays the
+    # trader's own explicit click.
     assert len(pending) == 1
     page.unroute("**/api/case")
 
@@ -641,3 +697,603 @@ def test_a_manual_curve_override_on_the_ticket_never_leaks_into_the_s490_panel(
         point["curve_id"] == "USD_SOFR_OPTION_DISCOUNT_CURVE"
         for point in body["case"]["curve_points"]
     )
+
+
+# --- Issue #177: the derived Forward is the Black-76 default -------------------
+#
+# Everything above this point exercises the derivation itself. These exercise
+# what Issue #177 promoted it to: the single main Forward field's default
+# source, the Trader Forward Override that takes it over, and the reset that
+# hands it back.
+
+
+def _load_and_complete_ust_without_typing_a_forward(
+    page, server_url: str, *, settlement_dates: bool = True
+) -> None:
+    """The Issue #177 trader flow: complete the whole ticket **except** the
+    Forward, then enter the Spot Settlement Date and let the derivation fill
+    it. Deliberately not ``_complete_draft``, which types a Forward (and so
+    now exercises the override path instead)."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(page, response=_treasury_lookup_response(
+        acquired_at="2026-08-12T20:00:00+08:00"
+    ))
+    _fill_trade_group(page)
+    page.fill("#volatility-input", "0.03395")
+    _fill_advanced_overrides(page, settlement_dates=settlement_dates)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+
+def _derived_forward_in_field(page) -> float:
+    return float(page.input_value("#forward-price-input"))
+
+
+def _forward_field_settled_on_a_new_value(page, previous: float) -> bool:
+    """True once the field holds a usable number other than ``previous``.
+
+    The field is deliberately blanked while a re-derivation is in flight
+    (Issue #177 fail-closed: the previous inputs' Forward must not sit there
+    looking like this ticket's), so a predicate that just parses the field
+    races against that blank window and raises ``ValueError`` out of
+    ``_wait_until``. This waits for the settled state instead.
+    """
+
+    value = page.input_value("#forward-price-input")
+    if not value:
+        return False
+    return float(value) != previous
+
+
+def test_the_derivation_fills_the_forward_field_and_black76_prices_from_it(
+    server_url, page
+) -> None:
+    # The core Issue #177 acceptance, end to end through the real controls
+    # and the real POST /api/case: the trader never types a Forward, and
+    # Black-76 still prices -- from the derived one.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+
+    assert _derived_forward_in_field(page) == pytest.approx(
+        float(page.text_content("#s490-forward-decimal")), abs=5e-7
+    )
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    assert "SHIORI_DERIVED_S490" in page.text_content("#forward-source-line")
+    # No trader-override log entry: a derived Forward is Shiori's own
+    # verified derivation, not a value the trader had to supply.
+    assert all(
+        record["path"] != "forward_clean_price_input.forward_clean_price_per_100"
+        for record in page.evaluate("() => window.__shioriTestOverrideProvenance()")
+    )
+
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["source_system"] == "SHIORI_DERIVED_S490"
+    assert draft["spot_settlement_date"] == _SPOT_SETTLEMENT_DATE
+    # The priced run's F is the derived Forward, not a leftover manual entry.
+    assert draft["forward_clean_price_input"][
+        "forward_clean_price_per_100"
+    ] == pytest.approx(float(page.text_content("#s490-forward-decimal")), abs=5e-7)
+
+
+def test_changing_expiry_moves_the_forward_field_with_the_derivation(
+    server_url, page
+) -> None:
+    # Settlement dates left to the convention profile, so Expiry genuinely
+    # drives tF -- see the note on the Issue #174 recompute test above.
+    _load_and_complete_ust_without_typing_a_forward(
+        page, server_url, settlement_dates=False
+    )
+    first = _derived_forward_in_field(page)
+
+    _set_expiry(page, local="2026-11-20T17:20")
+    _wait_until(lambda: _forward_field_settled_on_a_new_value(page, first))
+
+    assert _derived_forward_in_field(page) == pytest.approx(
+        float(page.text_content("#s490-forward-decimal")), abs=5e-7
+    )
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+
+
+def test_typing_a_forward_becomes_a_trader_override_that_a_refresh_never_overwrites(
+    server_url, page
+) -> None:
+    # Issue #177's override acceptance: the trader takes the field over, a
+    # fresh derivation keeps updating beside it, and the override survives.
+    _load_and_complete_ust_without_typing_a_forward(
+        page, server_url, settlement_dates=False
+    )
+    derived_before = float(page.text_content("#s490-forward-decimal"))
+
+    page.fill("#forward-price-input", "97.75")
+
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is True
+    assert "TRADER_FORWARD_OVERRIDE" in page.text_content("#forward-source-line")
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["source_system"] == "TRADER_FORWARD_OVERRIDE"
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] == 97.75
+
+    # A real re-derivation (a new Expiry) must move the derived comparison
+    # value and leave the override exactly where the trader put it.
+    _set_expiry(page, local="2026-11-20T17:20")
+    _wait_until(
+        lambda: float(page.text_content("#s490-forward-decimal")) != derived_before
+    )
+    assert page.input_value("#forward-price-input") == "97.75"
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is True
+    # The still-current derived Forward is shown beside it for comparison.
+    assert f"{float(page.text_content('#s490-forward-decimal')):.6f}" in page.text_content(
+        "#forward-source-line"
+    )
+    assert (
+        page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["forward_clean_price_per_100"]
+        == 97.75
+    )
+
+
+def test_reset_use_shiori_derived_returns_the_field_to_the_current_derived_forward(
+    server_url, page
+) -> None:
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["source_system"]
+        == "TRADER_FORWARD_OVERRIDE"
+    )
+    assert not page.eval_on_selector("#forward-use-derived-btn", "el => el.hidden")
+
+    page.click("#forward-use-derived-btn")
+
+    # Immediately back on the *current* derived Forward -- not a cached
+    # "value before the override started".
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    assert _derived_forward_in_field(page) == pytest.approx(
+        float(page.text_content("#s490-forward-decimal")), abs=5e-7
+    )
+    assert page.eval_on_selector("#forward-use-derived-btn", "el => el.hidden")
+    # ...and the run is repriced from it, with no second Price click.
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["source_system"]
+        == "SHIORI_DERIVED_S490"
+    )
+    assert page.inner_text("#status-text") == "Draft priced"
+
+
+def test_a_failed_derivation_blanks_the_forward_field_and_blocks_price(
+    server_url, page, monkeypatch
+) -> None:
+    # Fail closed: no spot clean price, no previous Forward, no residual
+    # number left sitting in the field looking like this ticket's F.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    assert _derived_forward_in_field(page) > 0.0
+
+    page.route(
+        "**/api/case/s490-repo-carry",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg terminal not logged in"}),
+        ),
+    )
+    # Re-trigger through the Spot Settlement Date rather than Expiry: moving
+    # Expiry past this ticket's settlement dates would disable Price for a
+    # second, unrelated reason and this test would stop proving anything.
+    page.fill("#s490-spot-settlement-date-input", "2026-08-14")
+
+    _wait_until(lambda: page.input_value("#forward-price-input") == "")
+    _wait_until(lambda: _is_disabled(page, "#price-btn"))
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] is None
+    # The real reason survives all the way onto the Forward field's own line.
+    assert "Bloomberg terminal not logged in" in page.text_content("#forward-source-line")
+    page.unroute("**/api/case/s490-repo-carry")
+
+
+def test_an_active_override_still_prices_when_the_derivation_fails(
+    server_url, page
+) -> None:
+    # The other half of fail-closed: an explicit override is an explicit
+    # Forward, so it prices under the existing override contract regardless.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    page.fill("#forward-price-input", "97.75")
+
+    page.route(
+        "**/api/case/s490-repo-carry",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg terminal not logged in"}),
+        ),
+    )
+    # Same reasoning as the test above: re-trigger via the Spot Settlement
+    # Date, so the only thing that can hold Price back is the Forward.
+    page.fill("#s490-spot-settlement-date-input", "2026-08-14")
+    _wait_until(
+        lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
+    )
+
+    assert page.input_value("#forward-price-input") == "97.75"
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+    page.unroute("**/api/case/s490-repo-carry")
+
+
+def test_clear_drops_the_trader_forward_override(server_url, page) -> None:
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    page.fill("#forward-price-input", "97.75")
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is True
+
+    page.click("#clear-btn")
+
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    assert page.input_value("#forward-price-input") == ""
+    assert page.eval_on_selector("#forward-use-derived-btn", "el => el.hidden")
+
+
+# --- Codex P2 review of PR #178, round 3: the selected convention profile
+# --- must reach the priced case, not just the panel ---------------------------
+
+
+def _draft_convention_profile(page):
+    return page.evaluate("() => window.__shioriTestGetCurrentDraft().convention_profile")
+
+
+def test_changing_the_convention_profile_reaches_the_priced_case(server_url, page) -> None:
+    # `_load_and_complete_ust` types all eight profile-owned Advanced controls,
+    # so every one of them is a trader override -- which is exactly the state
+    # where `applyAdvancedProfileFields` sees no control move and therefore
+    # never reached `applyManualInputsToDraft`. The panel reads the selection
+    # from the case now, but the real point is that the case itself must carry
+    # the trader's current choice: an interim-coupon ticket that derives a
+    # Forward under a newly selected UST profile must not then fail at Price
+    # time under the previous one.
+    _load_and_complete_ust(page, server_url)
+    assert _draft_convention_profile(page) == "UST"
+    assert page.evaluate("() => window.__shioriTestTraderOverriddenPaths().length") == 8
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    assert page.evaluate("() => window.__shioriTestSelectedConventionProfile()") == (
+        "US_CORPORATE"
+    )
+
+
+def test_the_s490_panel_derives_under_the_same_profile_the_case_carries(
+    server_url, page
+) -> None:
+    # One source of truth: whatever the panel sends is read off the same case
+    # field Price sends, so the two cannot report different methodologies.
+    requests = []
+    page.on(
+        "request",
+        lambda request: requests.append(request.post_data)
+        if "/api/case/s490-repo-carry" in request.url
+        else None,
+    )
+    _load_and_complete_ust(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    _wait_until(lambda: len(requests) > 0)
+    body = json.loads(requests[-1])
+    assert body["convention_profile"] == _draft_convention_profile(page)
+    assert body["case"]["convention_profile"] == body["convention_profile"]
+
+
+# --- Codex P2 review of PR #178, round 5 --------------------------------------
+
+
+def test_reset_still_reprices_when_the_derivation_lands_after_the_reset(
+    server_url, page
+) -> None:
+    # Reset is pressed while the derivation is failed, so the field is blank
+    # and the ticket is not priceable yet. The queued reprice has to survive
+    # until the retried derivation arrives -- the programmatic write that
+    # brings it must not cancel the very action that was waiting for it.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+
+    # Break the derivation, then move an input it depends on so the panel
+    # actually fails and the derived Forward becomes unavailable.
+    page.route(
+        "**/api/case/s490-repo-carry",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg terminal not logged in"}),
+        ),
+    )
+    page.fill("#s490-spot-settlement-date-input", "2026-08-14")
+    _wait_until(
+        lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
+    )
+
+    # Reset now: the override is dropped, but there is no derived Forward to
+    # take its place yet, so the reprice can only be queued.
+    page.click("#forward-use-derived-btn")
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    assert page.input_value("#forward-price-input") == ""
+
+    # Count real pricing calls from here on: the status text still reads
+    # "Draft priced" from the first run, so it proves nothing about whether a
+    # *new* one happened. Observed through `page.route` rather than
+    # `page.on("request")` -- a plain event handler only runs while a
+    # Playwright call is pumping the connection, and `_wait_until`'s predicate
+    # makes none, so it would never fire.
+    priced = []
+
+    def _observe_price(route):
+        priced.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/case", _observe_price)
+
+    assert page.evaluate("() => window.__shioriTestRepriceQueued()") is True
+
+    # The derivation recovers and lands.
+    page.unroute("**/api/case/s490-repo-carry")
+    page.click("#s490-parity-retry-btn")
+
+    # The queued reprice fires on its own -- no second Price click. The
+    # predicate deliberately makes a Playwright call: `_wait_until` sleeps in
+    # Python, and a sync-API route handler only runs while the connection is
+    # being pumped, so a pure `len(priced)` check would poll a list nothing
+    # can ever append to.
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestRepriceQueued()") is False
+        and len(priced) == 1
+    )
+    _wait_until(lambda: page.input_value("#forward-price-input") != "")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+        "forward_clean_price_input"
+    ]["source_system"] == "SHIORI_DERIVED_S490"
+    assert _derived_forward_in_field(page) == pytest.approx(
+        float(page.text_content("#s490-forward-decimal")), abs=5e-7
+    )
+    # One reprice, not a loop.
+    assert len(priced) == 1
+    page.unroute("**/api/case")
+
+
+def test_a_trader_edit_after_reset_still_cancels_the_queued_reprice(
+    server_url, page
+) -> None:
+    # The other half of the same rule: a genuine trader edit means the trader
+    # has moved on from the ticket that reprice was for, so it must still be
+    # cancelled. Proven by pointing Price at a route that would fail loudly.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+    page.route(
+        "**/api/case/s490-repo-carry",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg terminal not logged in"}),
+        ),
+    )
+    page.fill("#s490-spot-settlement-date-input", "2026-08-14")
+    _wait_until(
+        lambda: "Bloomberg terminal not logged in" in page.text_content("#s490-parity-status")
+    )
+    page.click("#forward-use-derived-btn")
+
+    # A real edit, before the derivation recovers.
+    page.fill("#strike-price-input", "99.50")
+    assert (
+        page.evaluate("() => window.__shioriTestGetCurrentDraft().bond_option.strike_price")
+        == 99.5
+    )
+
+    prices = []
+    page.route("**/api/case", lambda route: prices.append(route) or route.abort())
+    page.unroute("**/api/case/s490-repo-carry")
+    page.click("#s490-parity-retry-btn")
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    page.wait_for_timeout(300)
+
+    assert prices == []
+    page.unroute("**/api/case")
+
+
+def test_the_interim_coupon_trace_names_the_forward_settlement_date_not_expiry(
+    server_url, page
+) -> None:
+    # The displayed derivation must describe the horizon the calculation
+    # actually used. Expiry and forward settlement differ here (the profile
+    # derives the latter on the bond's settlement lag), so a label saying
+    # "Expiry" would name a different horizon from the priced one.
+    _load_and_complete_ust(page, server_url, settlement_dates=False)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+    case_a_forward = page.text_content("#s490-forward-decimal")
+
+    _set_expiry(page, local="2027-02-15T17:20")
+    _wait_until(lambda: page.text_content("#s490-forward-decimal") != case_a_forward)
+    _wait_until(lambda: not page.eval_on_selector("#s490-parity-fields", "el => el.hidden"))
+
+    forward_settlement_date = page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().forward_settlement_date"
+    )
+    assert forward_settlement_date != page.evaluate(
+        "() => window.__shioriTestGetCurrentDraft().bond_option.expiry_date"
+    )
+    trace = page.text_content("#s490-parity-trace-body")
+    assert f"Interim coupons at {forward_settlement_date}" in trace
+    assert f"days to {forward_settlement_date}" in trace
+    assert "to Expiry" not in trace
+    assert "at Expiry" not in trace
+
+
+# --- Codex P1 review of PR #178, round 6 --------------------------------------
+
+
+def test_a_successful_refresh_keeps_the_forward_its_own_price_used(
+    server_url, page
+) -> None:
+    # The refresh's new spot quote moves the panel's fingerprint, so without
+    # adopting the run's own derivation the panel would fire a second
+    # acquisition -- blanking the server-returned Forward and then replacing
+    # it with a different one, leaving the pricing cards and the Forward field
+    # describing different numbers.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    derivations = []
+
+    def _observe_derivation(route):
+        derivations.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/case/s490-repo-carry", _observe_derivation)
+    page.click("#bloomberg-refresh-btn")
+    # The refreshed quote is the fixture's 100.5, distinct from the lookup's,
+    # so this waits for the refresh to have actually landed.
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_quote"][
+            "clean_price_per_100"
+        ]
+        == 100.5
+    )
+    page.wait_for_timeout(400)
+
+    # No second derivation was requested for the refreshed quote...
+    assert derivations == []
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    priced_forward = draft["forward_clean_price_input"]["forward_clean_price_per_100"]
+    # ...and the field, the panel and the priced case all show that one number.
+    assert _derived_forward_in_field(page) == pytest.approx(priced_forward, abs=5e-7)
+    assert float(page.text_content("#s490-forward-decimal")) == pytest.approx(
+        priced_forward, abs=5e-7
+    )
+    page.unroute("**/api/case/s490-repo-carry")
+
+
+def test_a_failed_refresh_leaves_the_derived_ticket_refreshable(server_url, page) -> None:
+    # The default derived workflow must not be stranded: Refresh is the only
+    # action that can re-source the disowned quote and re-derive the Forward,
+    # so it cannot be gated on the Forward it is going to produce.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    forward_before = _derived_forward_in_field(page)
+
+    page.route(
+        "**/api/case/bloomberg",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+        ),
+    )
+    page.click("#bloomberg-refresh-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Bloomberg refresh failed")
+
+    assert page.evaluate("() => window.__shioriTestSourcedQuoteInvalidated()") is True
+    # Price is correctly blocked -- the sourced quote is disowned...
+    assert _is_disabled(page, "#price-btn")
+    # ...but Refresh, the way out, comes back once validation settles.
+    _wait_for_refresh_enabled(page)
+    # The Forward is retained rather than blanked, which is what keeps the
+    # draft complete enough for Refresh to be offered at all.
+    assert _derived_forward_in_field(page) == pytest.approx(forward_before, abs=5e-7)
+    page.unroute("**/api/case/bloomberg")
+
+
+def test_a_quote_side_change_leaves_the_derived_ticket_refreshable(
+    server_url, page
+) -> None:
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    forward_before = _derived_forward_in_field(page)
+
+    page.click('#bond-quote-side-toggle .opt[data-value="BID"]')
+
+    assert _is_disabled(page, "#price-btn")
+    _wait_for_refresh_enabled(page)
+    assert _derived_forward_in_field(page) == pytest.approx(forward_before, abs=5e-7)
+
+
+# --- Codex P2 review of PR #178, round 11 -------------------------------------
+
+
+def test_a_successful_refresh_satisfies_a_queued_reset_reprice(server_url, page) -> None:
+    # After a Quote Side change on a completed override run, Reset can only
+    # queue its reprice -- Price is blocked and Refresh Bloomberg & Price is
+    # the one available action. That refresh already prices the derived
+    # Forward, so it must satisfy the queued reprice rather than be followed
+    # by an unasked-for second run that reacquires Curve #490, can land on a
+    # different Forward, and drops the refresh's own quote provenance.
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    page.fill("#forward-price-input", "97.75")
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["source_system"]
+        == "TRADER_FORWARD_OVERRIDE"
+    )
+
+    # The side change disowns the sourced quote: Price is blocked, Refresh is
+    # the way back.
+    page.click('#bond-quote-side-toggle .opt[data-value="BID"]')
+    _wait_for_refresh_enabled(page)
+    assert _is_disabled(page, "#price-btn")
+
+    page.click("#forward-use-derived-btn")
+    assert page.evaluate("() => window.__shioriTestRepriceQueued()") is True
+
+    priced = []
+
+    def _observe_price(route):
+        priced.append(route.request.url)
+        route.continue_()
+
+    page.route("**/api/case", _observe_price)
+    page.click("#bloomberg-refresh-btn")
+
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_quote"][
+            "quote_side"
+        ]
+        == "BID"
+        and page.evaluate("() => window.__shioriTestRepriceQueued()") is False
+    )
+    # Give any spurious queued reprice every chance to fire before asserting.
+    page.wait_for_timeout(600)
+
+    assert priced == []
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    page.unroute("**/api/case")

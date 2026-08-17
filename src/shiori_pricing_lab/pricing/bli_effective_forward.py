@@ -1,0 +1,286 @@
+"""Effective Forward selection for the standalone Black-76 path (Issue #177).
+
+Scope: one deterministic rule deciding **which** forward clean price
+Black-76 actually prices from, and one canonical name for where that number
+came from. Nothing else: no repo/carry derivation, no S490 transformation,
+no coupon schedule, no curve, no Black-76, no discounting, no volatility.
+Every number this module handles has already been produced by somebody
+else.
+
+**The rule, in full**::
+
+    requested source = TRADER_FORWARD_OVERRIDE
+        -> effective F = the override; an unusable override is an error,
+           never a silent fall back to the derived Forward
+    requested source = SHIORI_DERIVED_S490
+        -> effective F = the derived Forward; an unusable one is an error,
+           and no substitute of any kind is produced
+
+**The requested source is authoritative, not inferred (Codex P2 review of
+PR #178).** An earlier shape of this function chose by presence -- "an
+override number is here, so use it" -- which meant a case that explicitly
+declared ``TRADER_FORWARD_OVERRIDE`` but carried a zero, negative,
+non-finite or malformed override silently fell through to the derived
+Forward and priced, quietly changing the run's own stated Forward source.
+The pre-existing ``BLIForwardCleanPriceInput`` contract would have rejected
+that same explicit input outright. So the caller states which source the
+run declared, and an unusable value under a declared source is a refusal on
+that source's own terms -- there is no cross-source fallback in either
+direction.
+
+That third line is the whole point of this module existing. Before Issue
+#177 the Forward was a required manual trader entry, so "no Forward" and
+"the trader has not finished the ticket" were the same state and the
+existing typed contract (``BLIForwardCleanPriceInput`` requires a finite,
+strictly positive number) already refused it. Now the default Forward is
+*derived*, and a derivation can fail for reasons that have nothing to do
+with the ticket being incomplete -- a Bloomberg Curve #490 acquisition
+failure, a same-as-of mismatch, a coupon window reaching the bond's
+maturity, an interim coupon on a non-UST convention selection. In every one
+of those cases there is no honest F, so :func:`select_effective_forward`
+raises :class:`ForwardSourceUnavailableError` carrying the derivation's own
+error text verbatim. It never substitutes the spot clean price, the last
+Forward this ticket happened to hold, a zero-repo/flat-carry forward, or
+any other default -- Issue #177's fail-closed requirement.
+
+**One Forward model, not two (Issue #177 explicit constraint).** There is
+no second override schema here. The already-reviewed
+``data/bli_snapshot.BLIForwardCleanPriceInput`` -- the explicit
+forward-with-provenance contract the OVME-aligned standalone path has
+priced from since Issue #94 -- remains the *only* forward input the pricing
+chain reads, and :func:`forward_clean_price_input_dict` produces exactly
+that object's own field shape by constructing one. What Issue #177 adds is
+solely a canonical vocabulary for its existing free-form ``source_system``
+field, so a priced result can state which of the two sources produced its
+F:
+
+- ``SHIORI_DERIVED_S490`` -- the Issue #173/#175 S490 repo-carry Forward,
+  derived from the live Bloomberg spot quote and a live Curve #490 / S490
+  acquisition for this ticket's own Expiry;
+- ``TRADER_FORWARD_OVERRIDE`` -- a Forward the trader typed, deliberately
+  taking over from the derived default.
+
+Any other ``source_system`` value (a bundled fixture's
+``SANITIZED_SYNTHETIC_MARKET_SOURCE``, an uploaded Case JSON's own label,
+the pre-#177 ``MANUAL_TRADER_ENTRY``) is **not** one of these two modes and
+is deliberately left alone by every caller of this module -- see
+``app/standalone_option_workbench_server.apply_effective_forward_to_case``.
+This module classifies nothing on its own: the caller states which numbers
+it has, and this module only chooses between them.
+
+**No system clock, no network, no I/O.**
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from math import isfinite
+
+from shiori_pricing_lab.data.bli_snapshot import BLIForwardCleanPriceInput
+
+# The two canonical Forward sources. Written verbatim onto every
+# BLIForwardCleanPriceInput this module produces, and therefore onto every
+# priced result's own ``forward_clean_price_source_system`` assumption (see
+# pricing/bli_pricing_engine.py, unchanged by Issue #177).
+SHIORI_DERIVED_S490_FORWARD_SOURCE = "SHIORI_DERIVED_S490"
+TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE = "TRADER_FORWARD_OVERRIDE"
+
+# Exactly the two modes this module arbitrates between. A case whose
+# forward's ``source_system`` is outside this set is a legacy/explicit
+# forward the Issue #177 wiring never touches.
+EFFECTIVE_FORWARD_SOURCES: frozenset[str] = frozenset(
+    {SHIORI_DERIVED_S490_FORWARD_SOURCE, TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE}
+)
+
+
+class ForwardSourceUnavailableError(ValueError):
+    """No effective Forward exists, so pricing must not proceed.
+
+    Raised in Shiori-derived mode when the derivation produced no usable
+    forward clean price. Carries the derivation's own failure text verbatim
+    when there is one -- Issue #177 requires the real reason to survive, not
+    be replaced by a generic "forward missing" message.
+    """
+
+
+class TraderForwardOverrideInvalidError(ValueError):
+    """The run declared a Trader Forward Override that is not a usable price.
+
+    A distinct failure from :class:`ForwardSourceUnavailableError`: nothing
+    is unavailable here, the trader's own explicitly-selected Forward is
+    simply not a finite, strictly positive number. Raised instead of
+    silently pricing the derived Forward under an override label -- see the
+    module docstring's Codex P2 note.
+    """
+
+
+def is_usable_clean_price_per_100(value: object) -> bool:
+    """True for a finite, strictly positive real number, False otherwise.
+
+    Deliberately the same admissibility ``BLIForwardCleanPriceInput``
+    itself enforces (finite and ``> 0``), applied *before* construction so
+    an absent/blank/invalid candidate can be answered as "this source has
+    no forward" rather than raising out of a constructor. ``bool`` is
+    rejected explicitly -- ``True`` is a finite positive ``int`` in Python
+    and is never a price.
+
+    Public because the readiness route needs the same rule twice: to decide
+    whether a derived-mode case's Forward is a real value or a placeholder the
+    pricing path is going to replace (Codex P2 review of PR #178, round 8),
+    and to decide whether the spot ``bond_quote.clean_price_per_100`` the
+    derivation starts from is usable at all (round 14). Named for a clean
+    price per 100 rather than for the forward specifically, because a spot
+    price is not a forward price and the admissibility rule is what the two
+    share -- one definition, never a second copy.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isfinite(value) and value > 0
+
+
+@dataclass(frozen=True)
+class EffectiveForward:
+    """Which forward Black-76 prices from, and what the alternatives were.
+
+    ``forward_clean_price_per_100`` is the effective F itself.
+    ``forward_source`` is the canonical token naming where it came from.
+
+    Both candidates are carried alongside it, always, so a result can
+    answer Issue #177's four provenance questions without recomputing
+    anything:
+
+    - ``shiori_derived_forward_clean_price_per_100`` is the current Shiori
+      Derived Forward, present even while an override is active (that is
+      exactly the comparison value a trader with an override wants), and
+      ``None`` when the derivation produced nothing;
+    - ``trader_forward_override_per_100`` is the override, ``None`` when
+      none is active;
+    - ``shiori_derived_forward_error`` preserves the derivation's own
+      failure text when it failed, ``None`` otherwise. It is populated on a
+      *successful* selection too: an active override prices normally while
+      the derived comparison value is unavailable, and the reason it is
+      unavailable must still be visible rather than silently blank.
+    """
+
+    forward_source: str
+    forward_clean_price_per_100: float
+    shiori_derived_forward_clean_price_per_100: float | None
+    trader_forward_override_per_100: float | None
+    shiori_derived_forward_error: str | None
+
+
+def select_effective_forward(
+    *,
+    requested_forward_source: str,
+    shiori_derived_forward_clean_price_per_100: object = None,
+    trader_forward_override_per_100: object = None,
+    shiori_derived_forward_error: str | None = None,
+) -> EffectiveForward:
+    """Return the effective Forward for this run, or fail closed.
+
+    ``requested_forward_source`` is the source the run itself declared (in
+    practice ``forward_clean_price_input.source_system``) and must be one of
+    :data:`EFFECTIVE_FORWARD_SOURCES`; anything else raises ``ValueError``
+    rather than being mapped to a default. It decides which candidate is
+    the effective Forward -- presence never does, in either direction (see
+    the module docstring's Codex P2 note).
+
+    Under ``TRADER_FORWARD_OVERRIDE`` the override must be a finite,
+    strictly positive number; if it is not, this raises
+    :class:`TraderForwardOverrideInvalidError`. Otherwise the override is
+    the effective Forward: the derived Forward is still carried on the
+    result for comparison, and a derivation that failed does **not** block
+    pricing in that mode -- Issue #177's "if the trader has explicitly
+    enabled a valid Forward Override, price under the existing override
+    contract".
+
+    Under ``SHIORI_DERIVED_S490`` the derived Forward must itself be a
+    finite, strictly positive number. When it is not, this raises
+    :class:`ForwardSourceUnavailableError` carrying
+    ``shiori_derived_forward_error`` verbatim when one was supplied. No
+    fallback of any kind is produced: not the spot clean price, not a
+    previous Forward, not zero repo, not flat carry. Any
+    ``trader_forward_override_per_100`` passed under this source is ignored
+    -- in the wiring it is the *previous* derived value the case happened to
+    carry, and it is replaced on every run rather than trusted.
+
+    Both candidates are plain ``object`` parameters so an absent value
+    (``None``), a blank one, or a malformed one is answered by this
+    function's own rules rather than raising a type error from inside the
+    selection -- the caller's job is to hand over whatever it has, not to
+    pre-validate it.
+    """
+
+    if requested_forward_source not in EFFECTIVE_FORWARD_SOURCES:
+        raise ValueError(
+            f"requested_forward_source must be one of "
+            f"{sorted(EFFECTIVE_FORWARD_SOURCES)}, got {requested_forward_source!r} -- "
+            "this function never maps an unrecognized source onto a default one"
+        )
+
+    derived_usable = is_usable_clean_price_per_100(shiori_derived_forward_clean_price_per_100)
+    derived = float(shiori_derived_forward_clean_price_per_100) if derived_usable else None
+
+    if requested_forward_source == TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE:
+        if not is_usable_clean_price_per_100(trader_forward_override_per_100):
+            raise TraderForwardOverrideInvalidError(
+                "this run's Forward source is TRADER_FORWARD_OVERRIDE, but the override "
+                f"({trader_forward_override_per_100!r}) is not a finite, strictly "
+                "positive forward clean price per 100. An explicitly selected override "
+                "that cannot be used is refused here, exactly as the explicit "
+                "BLIForwardCleanPriceInput contract would refuse it -- it is never "
+                "silently replaced by the Shiori Derived S490 Forward under an "
+                "override label"
+            )
+        override = float(trader_forward_override_per_100)
+        return EffectiveForward(
+            forward_source=TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
+            forward_clean_price_per_100=override,
+            shiori_derived_forward_clean_price_per_100=derived,
+            trader_forward_override_per_100=override,
+            shiori_derived_forward_error=shiori_derived_forward_error,
+        )
+
+    if derived is None:
+        raise ForwardSourceUnavailableError(
+            "no effective Forward is available: the Shiori Derived S490 repo-carry "
+            "Forward is this run's Forward source and it produced no usable forward "
+            "clean price"
+            + (f" -- {shiori_derived_forward_error}" if shiori_derived_forward_error else "")
+            + ". Pricing is blocked rather than falling back to the spot clean price, a "
+            "previous Forward, zero repo, flat carry, or any other default; enter a "
+            "Trader Forward Override to price from an explicit Forward instead"
+        )
+
+    return EffectiveForward(
+        forward_source=SHIORI_DERIVED_S490_FORWARD_SOURCE,
+        forward_clean_price_per_100=derived,
+        shiori_derived_forward_clean_price_per_100=derived,
+        trader_forward_override_per_100=None,
+        shiori_derived_forward_error=shiori_derived_forward_error,
+    )
+
+
+def forward_clean_price_input_dict(effective: EffectiveForward, *, quote_side: object) -> dict:
+    """Return ``effective`` as one case-envelope ``forward_clean_price_input``.
+
+    Constructs the already-reviewed ``BLIForwardCleanPriceInput`` -- so its
+    own finite/strictly-positive, quote-side-enum and ACTIVE-status rules
+    are what validate this value, not a second copy of them here -- and
+    returns its field shape via ``dataclasses.asdict``, exactly the shape
+    ``app/standalone_option_workbench.build_request_from_standalone_option_case``
+    already parses. ``quote_side`` is passed straight through (the request
+    contract requires it to equal the spot ``bond_quote.quote_side``, which
+    that contract itself still enforces); ``status`` is ``ACTIVE`` because
+    an effective Forward that exists at all is an active observation.
+    """
+
+    return asdict(
+        BLIForwardCleanPriceInput(
+            forward_clean_price_per_100=effective.forward_clean_price_per_100,
+            quote_side=quote_side,
+            source_system=effective.forward_source,
+            status="ACTIVE",
+        )
+    )

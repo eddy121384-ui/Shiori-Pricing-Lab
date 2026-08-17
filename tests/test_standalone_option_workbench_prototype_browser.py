@@ -542,8 +542,17 @@ def _fill_advanced_overrides(
     last_coupon_date: str = "2030-07-31",
     curve_nodes=(("1M", "0.0374"), ("1Y", "0.0374")),
     leave_open: bool = False,
+    settlement_dates: bool = True,
 ) -> None:
-    """Fill everything that lives inside the collapsed Advanced section."""
+    """Fill everything that lives inside the collapsed Advanced section.
+
+    ``settlement_dates=False`` leaves the forward/option settlement dates to
+    the selected convention profile instead of typing them. Typing them marks
+    them as trader overrides, which the profile then (correctly) stops
+    re-deriving when Expiry changes -- so a test that asserts an
+    Expiry-driven consequence of the *forward settlement date* has to let the
+    profile own them, exactly as the real trader flow does.
+    """
 
     if _is_actually_hidden(page, "advanced-body"):
         page.click("#advanced-head")
@@ -553,8 +562,9 @@ def _fill_advanced_overrides(
     page.fill("#last-coupon-date-input", last_coupon_date)
     page.select_option("#bond-status-select", "ACTIVE")
     page.fill("#reporting-date-input", "2026-10-21")
-    page.fill("#forward-settlement-date-input", "2026-10-21")
-    page.fill("#option-settlement-date-input", "2026-10-21")
+    if settlement_dates:
+        page.fill("#forward-settlement-date-input", "2026-10-21")
+        page.fill("#option-settlement-date-input", "2026-10-21")
     _set_curve_nodes(page, curve_nodes)
     if not leave_open:
         page.click("#advanced-head")
@@ -897,7 +907,9 @@ def test_deterministic_policy_fields_are_populated_without_asking_the_trader(
     assert draft["bond_option"]["product_id"].startswith("SHIORI-WORKBENCH-")
     assert draft["snapshot_id"].startswith("SHIORI-SNAPSHOT-")
     assert draft["source_system"] == "SHIORI_MANUAL_WORKBENCH"
-    assert draft["forward_clean_price_input"]["source_system"] == "MANUAL_TRADER_ENTRY"
+    # Issue #177: a fresh draft starts in Shiori-derived Forward mode -- that
+    # is the default source now, and the trader opts out of it by typing.
+    assert draft["forward_clean_price_input"]["source_system"] == "SHIORI_DERIVED_S490"
     assert draft["volatility_input"]["source_system"] == "MANUAL_TRADER_ENTRY"
     # The contract requires the forward's side to equal the spot side, so it is
     # mirrored rather than asked for twice.
@@ -1071,11 +1083,17 @@ def test_missing_forward_states_what_why_evidence_and_next_step(server_url, page
     _fill_trade_group(page)
     page.wait_for_timeout(150)
 
+    # Issue #177 changed what is missing here, not that it is explained. The
+    # Forward is no longer a required trader entry -- it is derived by default
+    # -- so the honest answer at this point in the ticket is that the
+    # derivation has not got what it needs yet, and the trader is pointed at
+    # the inputs it is waiting on rather than told to type a Forward.
     assert page.inner_text("#unresolved-title") == (
-        "Forward clean price cannot be sourced from Bloomberg"
+        "Shiori's derived Forward is not available yet"
     )
     assert "forward clean price" in page.inner_text("#unresolved-missing").lower()
-    assert "OPT_UNDL_FORWARD_PX" in page.inner_text("#unresolved-why")
+    why = page.inner_text("#unresolved-why")
+    assert "Spot Settlement Date" in why
     evidence = page.inner_text("#unresolved-evidence")
     assert "BAD_FLD" in evidence
     assert "Field not applicable to security" in evidence
@@ -1083,8 +1101,9 @@ def test_missing_forward_states_what_why_evidence_and_next_step(server_url, page
     # OP131 is named only to say it is never sent -- never defaulted to 0.
     assert "never defaulted to 0" in evidence
     next_step = page.inner_text("#unresolved-next")
-    assert "Enter the forward clean price" in next_step
-    assert "repo" in next_step
+    assert "Spot Settlement Date" in next_step
+    # The override route is still offered, and still named as an override.
+    assert "Trader Forward Override" in next_step
 
     assert _is_disabled(page, "#price-btn")
     assert page.inner_text("#forward-review-status") == "Trader override required"
@@ -1953,12 +1972,18 @@ def test_review_rows_show_provenance_only_once_a_value_is_entered(server_url, pa
     page.goto(f"{server_url}/")
     _load_bloomberg_bond(page, response=_treasury_lookup_response())
 
-    assert "not entered yet" in page.inner_text("#forward-provenance")
+    # Issue #177: the Forward has a source before anything is entered -- it
+    # is Shiori's own derivation by default -- so its provenance line states
+    # that source rather than "not entered yet", which would misdescribe a
+    # value Shiori derives and prices. The volatility is unchanged.
+    assert "SHIORI_DERIVED_S490" in page.inner_text("#forward-provenance")
     assert "not entered yet" in page.inner_text("#vol-provenance")
 
     _fill_market_review(page)
     page.wait_for_timeout(150)
 
+    # Typing one makes it a Trader Forward Override, and only then is it
+    # logged as an override.
     assert "MANUAL_TRADER_ENTRY · TRADER_OVERRIDE" in page.inner_text("#forward-provenance")
     assert "2026-07-20T11:28:00+08:00" in page.inner_text("#vol-provenance")
 
