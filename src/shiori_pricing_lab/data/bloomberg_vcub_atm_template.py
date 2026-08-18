@@ -213,18 +213,6 @@ def _band_edges(centres: Sequence[float], fallback_extent: float) -> tuple[list[
     return boundaries, min(pitches) / 2.0
 
 
-def _local_pitch(centres: Sequence[float], index: int, fallback: float) -> float:
-    """Pitch around band ``index``, used to scale the ambiguity tolerance."""
-
-    if len(centres) == 1:
-        return fallback * 2.0
-    if index == 0:
-        return centres[1] - centres[0]
-    if index == len(centres) - 1:
-        return centres[-1] - centres[-2]
-    return min(centres[index] - centres[index - 1], centres[index + 1] - centres[index])
-
-
 def _assign_band(
     position: float,
     centres: Sequence[float],
@@ -237,20 +225,27 @@ def _assign_band(
     edges entirely. ``ambiguous`` is ``True`` when it sits close enough to a
     boundary that either neighbour is a defensible answer -- the caller must
     refuse it rather than pick one.
+
+    Each boundary is tested against the pitch between **its own** two
+    centres, never against a pitch borrowed from elsewhere on the axis
+    (Codex review, PR #182). On an axis whose bands are not all the same
+    width, a tolerance taken from the assigned band's narrower neighbour is
+    too small at a wide boundary, so a position that is geometrically
+    ambiguous there would be handed a confident cell -- exactly the
+    wrong-cell assignment this module exists to prevent.
     """
 
     if position < centres[0] - outer_half_pitch or position > centres[-1] + outer_half_pitch:
         return None, False
     index = 0
+    ambiguous = False
     for boundary_index, boundary in enumerate(boundaries):
         if position > boundary:
             index = boundary_index + 1
-    pitch = _local_pitch(centres, index, outer_half_pitch)
-    tolerance = pitch * _BOUNDARY_AMBIGUITY_FRACTION
-    for boundary in boundaries:
-        if abs(position - boundary) <= tolerance:
-            return index, True
-    return index, False
+        pitch = centres[boundary_index + 1] - centres[boundary_index]
+        if abs(position - boundary) <= pitch * _BOUNDARY_AMBIGUITY_FRACTION:
+            ambiguous = True
+    return index, ambiguous
 
 
 def _check_pitch_regularity(
@@ -259,16 +254,22 @@ def _check_pitch_regularity(
     if len(centres) < 3:
         return
     pitches = [centres[index + 1] - centres[index] for index in range(len(centres) - 1)]
-    ordered = sorted(pitches)
-    median = ordered[len(ordered) // 2]
-    if median <= 0:
-        return
+    narrowest = min(pitches)
     widest = max(pitches)
-    if widest > median * _PITCH_IRREGULARITY_MULTIPLE:
+    if narrowest <= 0:
+        return
+    # Measured against the *narrowest* gap, not the median (Codex review,
+    # PR #182). A dropped label leaves one gap about twice its neighbours,
+    # and with only two gaps to compare -- a four-label axis that lost one
+    # interior label -- any median is dragged up by the wide gap itself, so
+    # the ratio could never trip. The narrowest gap is the axis's own
+    # unambiguous unit and cannot be inflated by the very anomaly being
+    # looked for.
+    if widest > narrowest * _PITCH_IRREGULARITY_MULTIPLE:
         issues.block(
             code,
-            f"the {axis} spacing is irregular (widest gap {widest:.1f}px against a median of "
-            f"{median:.1f}px), which is what a {axis[:-1]} the reader missed looks like; "
+            f"the {axis} spacing is irregular (widest gap {widest:.1f}px against a narrowest of "
+            f"{narrowest:.1f}px), which is what a {axis[:-1]} the reader missed looks like; "
             "values around that gap could be one band out, so the capture is refused",
         )
 
@@ -575,6 +576,15 @@ def parse_vcub_atm_tokens(
     row_boundaries, row_outer = _band_edges(
         row_centres, max(token.height for token in label_tokens)
     )
+    # Where a row the reader missed at the very top or bottom of the matrix
+    # would have sat: one pitch beyond the outermost resolved band (Codex
+    # review, PR #182). A dropped *edge* label is invisible to the pitch
+    # check -- there is no gap left behind, the axis simply ends early -- so
+    # without this its whole row of values would fall outside every band and
+    # be waved through as page chrome, silently truncating the surface.
+    missing_row_zone = row_outer * 2.0
+    first_row_top_edge = row_centres[0] - row_outer
+    last_row_bottom_edge = row_centres[-1] + row_outer
 
     expiry_labels = tuple(_normalise(token.text) for token in label_tokens)
     tenor_labels = tuple(_normalise(token.text) for token in headers)
@@ -593,7 +603,23 @@ def parse_vcub_atm_tokens(
             token.y_center, row_centres, row_boundaries, row_outer
         )
         if row_index is None:
-            continue  # above or below every matrix row: page chrome, never a cell
+            # Beyond the matrix rows. Ordinary chrome above or below the
+            # table is ignored, but a *number* sitting exactly where the
+            # next row would be is the signature of a dropped edge label,
+            # not chrome, so it fails the capture closed.
+            near_a_missing_edge_row = (
+                first_row_top_edge - missing_row_zone
+                <= token.y_center
+                <= last_row_bottom_edge + missing_row_zone
+            )
+            if near_a_missing_edge_row and _parse_cell_number(token.text)[0] is not None:
+                issues.block(
+                    "NUMERIC_TOKEN_OUTSIDE_ROWS",
+                    f"the number {_normalise(token.text)!r} sits one row beyond the resolved "
+                    "expiry rows, which is where a row label the reader missed would be; it "
+                    "cannot be placed, so the grid may be incomplete",
+                )
+            continue
 
         column_index, column_ambiguous = _assign_band(
             token.x_center, column_centres, column_boundaries, column_outer

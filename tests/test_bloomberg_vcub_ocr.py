@@ -93,6 +93,40 @@ def test_an_unusable_detection_is_noted_and_never_becomes_a_token(detection) -> 
     assert len(notes) == 1
 
 
+@pytest.mark.parametrize("score", [1.5, -0.2, float("nan"), float("inf")])
+def test_a_confidence_outside_zero_to_one_is_dropped_never_clamped(score) -> None:
+    """Codex review, PR #182.
+
+    Clamping turned an impossible score into a fully-trusted 1.0, and a NaN
+    slipped past the floor comparison into VCUBTextToken, where it raised
+    and failed the whole capture instead of dropping one detection.
+    """
+
+    tokens, notes = tokens_from_detections([[_BOX, "85.15", score]])
+
+    assert tokens == ()
+    assert len(notes) == 1
+    assert "confidence outside [0, 1]" in notes[0]
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), float("-inf")])
+def test_a_non_finite_box_coordinate_is_dropped_rather_than_raising(bad) -> None:
+    """Codex review, PR #182: one bad box must cost one token, not the capture."""
+
+    box = [(10.0, 20.0), (bad, 22.0), (90.0, 44.0), (10.0, 42.0)]
+
+    tokens, notes = tokens_from_detections([[box, "3Mo", 0.9]])
+
+    assert tokens == ()
+    assert "non-finite bounding box" in notes[0]
+
+
+def test_a_valid_confidence_is_carried_through_exactly() -> None:
+    (token,), _notes = tokens_from_detections([[_BOX, "3Mo", 1.0]])
+
+    assert token.confidence == 1.0
+
+
 def test_an_empty_detection_list_reads_as_no_tokens() -> None:
     assert tokens_from_detections([]) == ((), ())
 

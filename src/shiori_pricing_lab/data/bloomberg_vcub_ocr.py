@@ -28,6 +28,7 @@ value into a neighbouring cell.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -113,6 +114,23 @@ def tokens_from_detections(
         if not cleaned:
             notes.append(f"detection {index} carried no text and was ignored")
             continue
+        # A reader that answers with a non-finite coordinate, a NaN score, or
+        # a score outside [0, 1] is not behaving like the reader this adapter
+        # was written against (Codex review, PR #182). Such a detection is
+        # dropped with a note rather than clamped into a fully-trusted token
+        # or allowed to reach VCUBTextToken, where it would raise and turn
+        # one bad box into a failed capture instead of one missing token.
+        # A dropped detection is never silent: if it was a header or a row
+        # label, the template's pitch check sees the gap and fails closed.
+        if not all(math.isfinite(value) for point in points for value in point):
+            notes.append(f"{cleaned!r} had a non-finite bounding box and was ignored")
+            continue
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            notes.append(
+                f"{cleaned!r} was read with a confidence outside [0, 1] ({score!r}) and was "
+                "ignored"
+            )
+            continue
         if confidence < min_confidence:
             notes.append(
                 f"{cleaned!r} was read with confidence {confidence:.2f}, below the "
@@ -133,7 +151,7 @@ def tokens_from_detections(
                 top=top,
                 width=right - left,
                 height=bottom - top,
-                confidence=min(max(confidence, 0.0), 1.0),
+                confidence=confidence,
             )
         )
     return tuple(tokens), tuple(notes)

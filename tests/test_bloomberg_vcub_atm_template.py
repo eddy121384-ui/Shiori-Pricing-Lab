@@ -405,6 +405,96 @@ def test_a_dropped_tenor_header_fails_closed_instead_of_shifting_a_column_left()
     assert not capture.can_confirm
 
 
+@pytest.mark.parametrize("dropped_label,row_index", [("1Mo", 0), ("2Yr", 7)])
+def test_a_dropped_edge_row_label_fails_closed_instead_of_truncating_the_grid(
+    dropped_label: str, row_index: int
+) -> None:
+    """Codex review, PR #182.
+
+    A dropped label at the *top* or *bottom* of the axis leaves no gap
+    behind -- the axis simply ends one row early -- so the pitch check
+    cannot see it. Without a guard, that row's values fall outside every
+    band and are waved through as page chrome, producing a silently
+    truncated grid that a trader could confirm.
+    """
+
+    tokens = [
+        token
+        for token in canonical_tokens()
+        if not (
+            token.text == dropped_label
+            and abs(token.x_center - (_ANCHOR_X + 14.0)) < 1.0
+            and abs(token.y_center - _row_y(row_index)) < 1.0
+        )
+    ]
+
+    capture = parse(tokens)
+
+    assert "NUMERIC_TOKEN_OUTSIDE_ROWS" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+def test_a_dropped_interior_label_on_a_four_row_axis_fails_closed() -> None:
+    """Codex review, PR #182.
+
+    With only two gaps left to compare, a median is dragged up by the wide
+    gap itself, so the regularity check has to measure against the narrowest
+    gap instead.
+    """
+
+    kept = {0, 1, 2, 3}
+    tokens = [token for token in metadata_tokens()]
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(TENOR_LABELS):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index in sorted(kept):
+        # The 6Mo label (row 3) is the one the reader missed.
+        if row_index != 3:
+            tokens.append(
+                _token(EXPIRY_LABELS[row_index], _ANCHOR_X + 14.0, _row_y(row_index))
+            )
+        for column_index in range(len(TENOR_LABELS)):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    _row_y(row_index),
+                )
+            )
+
+    capture = parse(tokens)
+
+    assert codes(capture.blocking_errors) != []
+    assert not capture.can_confirm
+
+
+def test_an_unevenly_spaced_axis_still_refuses_a_boundary_straddling_value() -> None:
+    """Codex review, PR #182.
+
+    Each boundary's ambiguity tolerance must come from the pitch between its
+    own two columns. Borrowing a narrower neighbour's pitch shrinks the
+    tolerance at a wide boundary, so a genuinely ambiguous value would be
+    handed a confident cell.
+    """
+
+    narrow, wide = 60.0, 140.0
+    centres = [_FIRST_COLUMN_X, _FIRST_COLUMN_X + narrow, _FIRST_COLUMN_X + narrow + wide]
+    tokens = metadata_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for centre, label in zip(centres, ("1Yr", "2Yr", "3Yr"), strict=True):
+        tokens.append(_token(label, centre, _HEADER_Y))
+    for row_index in range(3):
+        tokens.append(_token(EXPIRY_LABELS[row_index], _ANCHOR_X + 14.0, _row_y(row_index)))
+    # Straddling the wide boundary: 8% of that boundary's own 140px pitch.
+    straddling = (centres[1] + centres[2]) / 2.0 - wide * 0.08
+    tokens.append(_token("81.00", straddling, _row_y(0)))
+
+    capture = parse(tokens)
+
+    assert "CELL_POSITION_AMBIGUOUS" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
 def test_two_values_read_into_one_intersection_fail_closed() -> None:
     tokens = canonical_tokens()
     tokens.append(_token("99.99", _column_x(2) + 2.0, _row_y(1)))
