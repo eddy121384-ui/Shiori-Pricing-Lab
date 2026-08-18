@@ -201,6 +201,43 @@ def test_two_clients_parsing_one_image_never_share_a_review_slot(monkeypatch) ->
     assert second.provenance.source_reference == "clientB.png"
 
 
+def test_an_evicted_capture_id_is_never_handed_to_a_different_capture(monkeypatch) -> None:
+    """Eviction may lose a capture; it must never redirect one.
+
+    The store is capacity-bounded, so an id can fall out of it. Recycling
+    that id for a later capture reintroduces the round-4 failure through the
+    back door: a client holding the old id would confirm a capture it never
+    reviewed. Eviction's one safe outcome is ``get`` raising, which the
+    route answers as 404, and that is what must happen here.
+    """
+
+    reads = iter(
+        [tuple(canonical_tokens())] + [tuple(canonical_tokens()[:-1])] * 8
+    )
+    monkeypatch.setattr(
+        review_module,
+        "read_tokens_from_image_bytes",
+        lambda raw_image, *, engine=None, **kwargs: (next(reads), ()),
+    )
+    store = VCUBCaptureReviewStore(capacity=2)
+
+    mine, reviewed, _ = store.parse_image(
+        source_reference="mine.png", raw_image=b"A", captured_at=_CAPTURED_AT
+    )
+    for other in (b"B", b"C"):
+        store.parse_image(
+            source_reference="other.png", raw_image=other, captured_at=_CAPTURED_AT
+        )
+    reclaimed, _capture, _ = store.parse_image(
+        source_reference="mine.png", raw_image=b"A", captured_at=_CAPTURED_AT
+    )
+
+    assert reclaimed != mine
+    assert reviewed.grid is not None
+    with pytest.raises(KeyError, match="no capture is under review"):
+        store.confirm(mine, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+
 def test_a_concurrent_confirm_and_reject_cannot_both_be_accepted(stub_reader) -> None:
     """Codex review round 3, PR #182.
 

@@ -70,6 +70,11 @@ class VCUBCaptureReviewStore:
             raise ValueError(f"capacity must be at least 1, got {capacity!r}")
         self._capacity = capacity
         self._captures: OrderedDict[str, VCUBATMCapture] = OrderedDict()
+        # Every id this store has ever handed out, including ones whose
+        # capture has since been evicted. An id is never recycled: see
+        # :meth:`_free_identifier`. One 32-character string per parse, which
+        # a workbench session does not accumulate meaningfully.
+        self._issued_identifiers: set[str] = set()
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -125,6 +130,13 @@ class VCUBCaptureReviewStore:
           to OCR output and provenance it never saw (round 4). The reads run
           outside the lock and even ``source_reference`` may differ, so this
           is a real divergence, not a formality.
+        * an id whose capture was *evicted* must not be handed out again
+          either. The store is capacity-bounded, so an id can fall out of
+          it; recycling that id for a different capture reintroduces the
+          same failure through the back door, and turns eviction's one safe
+          outcome -- ``get`` raising, which the route answers as 404 -- into
+          a silent retarget onto a capture nobody reviewed. Eviction may
+          lose a capture; it must never redirect one.
 
         Captures are frozen dataclasses of immutable fields, so ``==`` is an
         exact structural comparison: same provenance, same grid, same issues.
@@ -134,7 +146,9 @@ class VCUBCaptureReviewStore:
         attempt = 0
         while True:
             existing = self._captures.get(identifier)
-            if existing is None or existing == capture:
+            reusable = existing is not None and existing == capture
+            if reusable or identifier not in self._issued_identifiers:
+                self._issued_identifiers.add(identifier)
                 return identifier
             attempt += 1
             identifier = capture_id_for(source_image_sha256, f"{captured_at}#{attempt}")
