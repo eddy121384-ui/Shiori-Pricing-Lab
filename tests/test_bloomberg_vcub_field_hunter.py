@@ -673,6 +673,26 @@ def test_cli_rejects_a_non_finite_katm(tmp_path, capsys):
     assert "finite number" in capsys.readouterr().err
 
 
+def test_cli_rejects_a_non_finite_mktdata_timeout(tmp_path, capsys):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(
+            [
+                "--case",
+                str(case_path),
+                "--mktdata-security",
+                "USSNAC4 Curncy",
+                "--mktdata-timeout",
+                "inf",
+            ]
+        )
+
+    assert exit_info.value.code == 2
+    assert "finite number" in capsys.readouterr().err
+
+
 def test_cli_rejects_a_malformed_override(tmp_path, capsys):
     case_path = tmp_path / "case.json"
     case_path.write_text(json.dumps(_CASE), encoding="utf-8")
@@ -730,6 +750,32 @@ def test_mktdata_refuses_a_non_positive_cap_or_timeout():
         run_mktdata_subscription(
             "USSNAC4 Curncy", timeout_seconds=0, session_runner=lambda *a: ((), None)
         )
+
+
+@pytest.mark.parametrize("bad_timeout", [float("nan"), float("inf"), float("-inf")])
+def test_mktdata_refuses_a_non_finite_timeout(bad_timeout):
+    # `nan <= 0` is False, so a plain positivity check alone would let NaN
+    # through; `inf` would otherwise reach `int(remaining * 1000)` inside
+    # the real session loop and raise `OverflowError` there instead.
+    with pytest.raises(ValueError, match="finite"):
+        run_mktdata_subscription(
+            "USSNAC4 Curncy",
+            timeout_seconds=bad_timeout,
+            session_runner=lambda *a: ((), None),
+        )
+
+
+def test_mktdata_treats_an_empty_subscribe_rejection_as_a_failure_not_timeout():
+    # A caught subscribe-time exception can stringify to "" -- that must
+    # still be recorded as `subscription_failure`, never misread by a
+    # truthiness check as "no rejection happened" and reported as
+    # `timeout_no_data` instead.
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=lambda *a: ([], "")
+    )
+
+    assert report.outcome == "subscription_failure"
+    assert report.subscribe_error == ""
 
 
 def test_mktdata_does_not_subscribe_unless_the_operator_supplies_a_topic(tmp_path):
@@ -1179,10 +1225,12 @@ def test_mktdata_session_cleans_up_even_when_subscribe_raises(monkeypatch):
     assert messages == []
     assert "field list required" in subscribe_error
     session = holder["session"]
-    # Nothing was ever successfully subscribed, so there is nothing to
-    # unsubscribe -- but the session itself must still be stopped.
-    assert session.unsubscribed_with is None
     assert session.stopped is True
+    # `session.subscribe()` raising does not mean nothing was subscribed on
+    # Bloomberg's side -- `subscriptions.add()` ran first -- so the already
+    # try/except-guarded `session.unsubscribe()` is still attempted rather
+    # than skipped, matching the stage-5 "always unsubscribe" guarantee.
+    assert session.unsubscribed_with is not None
 
 
 def test_mktdata_session_hard_message_cap_stops_the_loop(monkeypatch):

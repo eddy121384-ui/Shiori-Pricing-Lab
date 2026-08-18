@@ -1006,7 +1006,10 @@ def _run_mktdata_subscription_session(
             subscriptions.add(topic, ",".join(fields), "", correlation_id)
             session.subscribe(subscriptions)
         except Exception as exc:  # noqa: BLE001 -- a subscribe-time rejection is evidence, not a crash
-            subscriptions = None  # nothing was subscribed -- nothing to unsubscribe
+            # `subscriptions` stays populated (not reset to `None`) so the
+            # `finally` block below still attempts `session.unsubscribe` --
+            # already itself guarded against raising -- rather than relying
+            # on `session.stop()` alone for cleanup on this exit path.
             return messages, str(exc)
 
         deadline = time.monotonic() + timeout_seconds
@@ -1121,9 +1124,14 @@ def run_mktdata_subscription(
         )
     if max_messages <= 0:
         raise ValueError("max_messages must be positive -- a cap of zero forbids any evidence")
-    if timeout_seconds <= 0:
+    if not isfinite(timeout_seconds) or timeout_seconds <= 0:
+        # `nan <= 0` is `False`, so a non-finite value must be checked
+        # explicitly -- and `inf` would otherwise reach
+        # `int(remaining * 1000)` in the session loop and raise
+        # `OverflowError` there instead of failing here with a clear message.
         raise ValueError(
-            "timeout_seconds must be positive -- a timeout of zero forbids any evidence"
+            "timeout_seconds must be a finite, positive number -- a hard timeout cannot "
+            "be zero, negative, NaN or infinite"
         )
 
     session_runner = session_runner or _run_mktdata_subscription_session
@@ -1151,7 +1159,12 @@ def run_mktdata_subscription(
         )
 
     categories = [event.category for event in events]
-    if subscribe_error:
+    if subscribe_error is not None:
+        # A caught subscribe-time exception can stringify to "" (an empty
+        # message is still a rejection); `is not None` -- not truthiness --
+        # is what distinguishes "no rejection happened" from "one happened
+        # and had nothing to say", so an empty string is never misread as
+        # `timeout_no_data`.
         outcome = "subscription_failure"
     elif "subscription_failure" in categories:
         outcome = "subscription_failure"
@@ -1692,7 +1705,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mktdata-timeout",
-        type=float,
+        type=_finite_float,
         default=DEFAULT_MKTDATA_TIMEOUT_SECONDS,
         help=f"Stage 5 hard timeout in seconds (default: {DEFAULT_MKTDATA_TIMEOUT_SECONDS})",
     )
