@@ -39,7 +39,14 @@ which this script refuses to invent::
         --candidate-override "SETTLE_DT=20260915" \\
         --katm 3.85 --katm-unit-matches-yield-field
 
-**The four stages.**
+Stage 5 (the `//blp/mktdata` subscription discovery probe) needs an
+operator-confirmed topic, least-assumptive form first::
+
+    python tools/bloomberg_vcub_field_hunter.py --case my_case.json \\
+        --skip-field-search --skip-yield-conversion \\
+        --mktdata-security "USSNAC4 Curncy"
+
+**The five stages.**
 
 1. *Proxy coordinate* (offline, deterministic, no Bloomberg at all). One
    already-valid standalone option case is parsed by the existing,
@@ -84,6 +91,26 @@ which this script refuses to invent::
    security x field cross product is hard-capped, because Issue #179
    forbids broad brute force.
 
+5. *`//blp/mktdata` subscription discovery probe* -- opt-in, only when
+   `--mktdata-security` is supplied. Tests the remaining hypothesis: is the
+   VCUB cell ticker `USSNAC4` exposed as a market-data/calculated-data
+   *subscription* topic even though stage 4's `ReferenceDataRequest` route
+   above does not expose it? Opens `//blp/mktdata`, subscribes read-only to
+   exactly the operator-supplied topic (never invented), captures a small
+   bounded number of the earliest subscription status/data messages under a
+   hard timeout and a hard message-count cap, unsubscribes and stops the
+   session in every case, and records Bloomberg's own message type and
+   field names/values verbatim -- never ranking, renaming or promoting a
+   returned field because its value happens to resemble `89.15`. If
+   `--mktdata-field` is not supplied, the subscription is sent
+   field-agnostic (Bloomberg's own default field set for the topic, if it
+   has one); if Bloomberg's own `subscribe()` call itself rejects that
+   (e.g. because its API genuinely requires an explicit field list), that
+   rejection is captured verbatim as `subscription_failure` rather than
+   this script inventing a field list to work around it -- see
+   `run_mktdata_subscription`'s own docstring below. This stage assigns no
+   verdict either.
+
 **Deliberately not in this script.** No `sigma_vcub` -> normal yield vol
 -> price vol conversion. No Black-76, no `PRICE_VOL` contract change, no
 vol auto-fill, no surface construction, no interpolation of anything (if
@@ -98,7 +125,15 @@ Reuses `bloomberg_curve_discovery_probe.discover_service` /
 `bloomberg_curve_field_documentation_probe.discover_field_documentation`
 / `bloomberg_input_sourcing_probe.sanitize_external_text` unchanged -- no
 second Bloomberg session, request, or documentation-expansion
-implementation.
+implementation. Stage 5's `//blp/mktdata` session
+(`_run_mktdata_subscription_session`) is new: this repo was audited first
+(every `tools/bloomberg_*.py` module) and had no existing subscription /
+`//blp/mktdata` session helper to reuse -- every other Bloomberg helper here
+is a `//blp/refdata`/`//blp/apiflds` request/response probe, a different
+session shape entirely. It stays inside this developer-tool file rather
+than moving into `src/`, still uses `sanitize_external_text` for every
+Bloomberg-authored string it stores, and remains its own single, bounded
+`//blp/mktdata` implementation -- no second one is added elsewhere.
 """
 
 from __future__ import annotations
@@ -106,6 +141,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from math import isfinite
@@ -809,6 +845,343 @@ def probe_candidate_values(
     return tuple(probes)
 
 
+# --- stage 5: //blp/mktdata subscription discovery probe ----------------------------
+
+_MKTDATA_SERVICE = "//blp/mktdata"
+_MKTDATA_DAPI_HOST = "localhost"
+_MKTDATA_DAPI_PORT = 8194
+
+# Small and bounded, per Issue #179: this is a discovery probe, not a live feed.
+DEFAULT_MKTDATA_TIMEOUT_SECONDS = 10.0
+DEFAULT_MKTDATA_MESSAGE_CAP = 10
+
+# Literal substring markers against Bloomberg's own `msg.messageType()` text --
+# the same marker idiom stage 2's `_is_marker_relevant` already uses, never a
+# semantic read of a field value. `SUBSCRIPTION_DATA` is matched on the
+# `blpapi.Event` type itself, not text, since that is the structural signal
+# Bloomberg's own SDK exposes for "this message carries subscribed field data".
+_MKTDATA_STATUS_CATEGORY_MARKERS: tuple[tuple[str, str], ...] = (
+    ("Failure", "subscription_failure"),
+    ("Terminated", "subscription_terminated"),
+    ("Started", "subscription_started"),
+)
+
+
+@dataclass(frozen=True)
+class RawMktdataMessage:
+    """One captured `//blp/mktdata` message, already reduced to plain Python.
+
+    Bloomberg-native `blpapi` objects never cross out of
+    `_run_mktdata_subscription_session` -- this is the boundary, so
+    `run_mktdata_subscription`'s classification/sanitization/report logic
+    below is deterministic and testable without a live Bloomberg session.
+    """
+
+    event_type: str  # "SUBSCRIPTION_STATUS" | "SUBSCRIPTION_DATA" -- Bloomberg's own blpapi.Event
+    message_type: str  # str(msg.messageType()), Bloomberg's own text, verbatim
+    correlation_id: str | None
+    fields: tuple[tuple[str, str | None], ...]  # (name, raw value) pairs, verbatim, unranked
+    raw_dump: str | None
+
+
+@dataclass(frozen=True)
+class MktdataField:
+    name: str
+    value: str | None
+
+
+@dataclass(frozen=True)
+class MktdataMessageEvent:
+    sequence: int
+    event_type: str
+    message_type: str
+    category: str  # this script's literal-marker bucket, for the report's outcome only
+    correlation_id: str | None
+    fields: tuple[MktdataField, ...]
+    raw_message_dump: str | None
+
+
+@dataclass(frozen=True)
+class MktdataSubscriptionReport:
+    topic: str
+    fields_requested: tuple[str, ...]
+    message_cap: int
+    timeout_seconds: float
+    outcome: str  # "subscription_started" | "subscription_failure" | "subscription_terminated"
+    #             | "data_received" | "timeout_no_data" | "subscription_status_unclassified"
+    subscribe_error: str | None
+    events: tuple[MktdataMessageEvent, ...]
+    blocker_note: str
+
+
+def _mktdata_message_fields(message) -> tuple[tuple[str, str | None], ...]:
+    """Top-level `(name, value)` pairs off one message's own element tree.
+
+    Walks `message.asElement()`'s own `numElements()`/`getElement(index)` --
+    Bloomberg's own generic element-tree API, the same structural trust this
+    repo already places in `securityData`/`fieldData` elsewhere in this
+    file -- and never asks for a field by a mnemonic this script invented. A
+    sub-element that is itself a sequence/array is recorded as its own
+    `str()` dump rather than a guessed scalar, so nothing is silently
+    collapsed or misrepresented. Never raises: a shape this SDK version
+    cannot walk this way just yields fewer fields, never a lost message.
+    """
+
+    try:
+        element = message.asElement()
+        count = element.numElements()
+    except Exception:  # noqa: BLE001 -- structural probe only, never fatal
+        return ()
+
+    fields: list[tuple[str, str | None]] = []
+    for i in range(count):
+        try:
+            sub = element.getElement(i)
+            name = str(sub.name())
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            if sub.numElements() > 0 or sub.numValues() > 1:
+                value = _safe_str(sub)
+            else:
+                value = sub.getValueAsString()
+        except Exception:  # noqa: BLE001
+            value = _safe_str(sub)
+        fields.append((name, value))
+    return tuple(fields)
+
+
+def _run_mktdata_subscription_session(
+    topic: str,
+    fields: tuple[str, ...],
+    max_messages: int,
+    timeout_seconds: float,
+) -> tuple[list[RawMktdataMessage], str | None]:
+    """Open `//blp/mktdata`, subscribe once, drain a bounded window, clean up.
+
+    The one place this file touches a market-data session: start, open
+    service, subscribe, collect up to `max_messages` events within
+    `timeout_seconds`, then *always* unsubscribe and stop -- mirroring
+    `bloomberg_dapi_probe._send_request`'s single-session-per-call shape,
+    the only other Bloomberg session helper this repo has (that one is
+    `//blp/refdata` request/response; there is no existing `//blp/mktdata`
+    subscription helper anywhere in this repo to reuse instead -- confirmed
+    by audit before writing this). `blpapi` is imported lazily, exactly like
+    every other Bloomberg-touching function in this file, so nothing else
+    here needs it installed; tests inject a fake via `sys.modules["blpapi"]`
+    before calling this function, the same technique
+    `tests/test_bloomberg_dapi_probe.py` already uses for `_send_request`.
+
+    Returns the plain-Python messages captured -- Bloomberg-native objects
+    never leave this function -- and a subscribe-time error string if
+    `SubscriptionList.add`/`session.subscribe` itself raised before any
+    event was received. That is exactly the signal Issue #179 asked this
+    probe to surface if Bloomberg's own API requires an explicit field list
+    this call did not supply: a captured rejection, not an invented list.
+    """
+
+    import blpapi
+
+    session_options = blpapi.SessionOptions()
+    session_options.setServerHost(_MKTDATA_DAPI_HOST)
+    session_options.setServerPort(_MKTDATA_DAPI_PORT)
+    session = blpapi.Session(session_options)
+
+    messages: list[RawMktdataMessage] = []
+    subscriptions = None
+
+    try:
+        if not session.start():
+            return messages, (
+                f"Bloomberg DAPI session failed to start against "
+                f"{_MKTDATA_DAPI_HOST}:{_MKTDATA_DAPI_PORT} -- confirm a Bloomberg Terminal "
+                "is running and logged in locally"
+            )
+        if not session.openService(_MKTDATA_SERVICE):
+            return messages, f"Bloomberg DAPI failed to open service {_MKTDATA_SERVICE}"
+
+        subscriptions = blpapi.SubscriptionList()
+        correlation_id = blpapi.CorrelationId(topic)
+        try:
+            subscriptions.add(topic, ",".join(fields), "", correlation_id)
+            session.subscribe(subscriptions)
+        except Exception as exc:  # noqa: BLE001 -- a subscribe-time rejection is evidence, not a crash
+            subscriptions = None  # nothing was subscribed -- nothing to unsubscribe
+            return messages, str(exc)
+
+        deadline = time.monotonic() + timeout_seconds
+        while len(messages) < max_messages:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            event = session.nextEvent(max(1, int(remaining * 1000)))
+            event_type = event.eventType()
+            if event_type == blpapi.Event.TIMEOUT:
+                break
+            if event_type not in (
+                blpapi.Event.SUBSCRIPTION_STATUS,
+                blpapi.Event.SUBSCRIPTION_DATA,
+            ):
+                continue
+            event_type_name = (
+                "SUBSCRIPTION_DATA"
+                if event_type == blpapi.Event.SUBSCRIPTION_DATA
+                else "SUBSCRIPTION_STATUS"
+            )
+            for msg in event:
+                if len(messages) >= max_messages:
+                    break
+                correlation_id_str = None
+                try:
+                    correlation_ids = list(msg.correlationIds())
+                    if correlation_ids:
+                        correlation_id_str = str(correlation_ids[0].value())
+                except Exception:  # noqa: BLE001
+                    correlation_id_str = None
+                messages.append(
+                    RawMktdataMessage(
+                        event_type=event_type_name,
+                        message_type=_safe_str(msg.messageType()) or "",
+                        correlation_id=correlation_id_str,
+                        fields=_mktdata_message_fields(msg),
+                        raw_dump=_safe_str(msg),
+                    )
+                )
+        return messages, None
+    finally:
+        if subscriptions is not None:
+            try:
+                session.unsubscribe(subscriptions)
+            except Exception:  # noqa: BLE001 -- cleanup must never mask evidence already captured
+                pass
+        try:
+            session.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _classify_mktdata_message(event_type: str, message_type: str) -> str:
+    """Bucket one captured message by Bloomberg's own event/message type text.
+
+    `event_type` is Bloomberg's own `blpapi.Event` kind; a `SUBSCRIPTION_DATA`
+    event is always `data_received`. Otherwise this is a literal substring
+    match against Bloomberg's own `msg.messageType()` text -- the same marker
+    idiom stage 2's `_is_marker_relevant` already uses -- never a semantic
+    read of a field value.
+    """
+
+    if event_type == "SUBSCRIPTION_DATA":
+        return "data_received"
+    for marker, category in _MKTDATA_STATUS_CATEGORY_MARKERS:
+        if marker in message_type:
+            return category
+    return "subscription_status_unclassified"
+
+
+def run_mktdata_subscription(
+    topic: str,
+    fields: tuple[str, ...] = (),
+    max_messages: int = DEFAULT_MKTDATA_MESSAGE_CAP,
+    timeout_seconds: float = DEFAULT_MKTDATA_TIMEOUT_SECONDS,
+    session_runner=None,
+) -> MktdataSubscriptionReport:
+    """Run one bounded, read-only `//blp/mktdata` subscription discovery probe.
+
+    Issue #179's remaining hypothesis: is the operator-confirmed VCUB cell
+    ticker exposed as a market-data/calculated-data *subscription* topic even
+    though stage 4's `ReferenceDataRequest` route does not expose it?
+    `topic` and `fields` are exactly what the operator supplied -- this
+    function invents neither an identifier nor a field mnemonic. If `fields`
+    is empty, the subscription is sent field-agnostic, so whatever
+    Bloomberg's own default field set for the topic is (if it has one) is
+    what gets recorded, rather than this repo guessing a field list. If
+    Bloomberg's own `subscribe()` call rejects that -- e.g. because its API
+    genuinely requires an explicit field list -- that rejection is captured
+    verbatim as `subscription_failure`, which is exactly the feasibility
+    delta Issue #179 asked this probe to report rather than paper over with
+    an invented list.
+
+    Every field name and value below is Bloomberg's own, verbatim, sanitized
+    through `sanitize_external_text`; none is renamed, reordered by apparent
+    relevance, or promoted to "the vol" merely because it resembles a number
+    Eddy already saw on the VCUB grid. `session_runner` defaults to
+    `_run_mktdata_subscription_session` and is the seam deterministic
+    offline tests inject through -- mirroring `hunt_vol_fields`'s
+    `send_request` seam elsewhere in this file.
+
+    Raises `ValueError` if `topic` is blank (no topic is ever guessed) or if
+    `max_messages`/`timeout_seconds` is not positive (a cap or timeout of
+    zero would forbid capturing any evidence at all, not bound it).
+    """
+
+    if not topic or not topic.strip():
+        raise ValueError(
+            "run_mktdata_subscription needs an operator-supplied topic/security -- "
+            "none is guessed by this script"
+        )
+    if max_messages <= 0:
+        raise ValueError("max_messages must be positive -- a cap of zero forbids any evidence")
+    if timeout_seconds <= 0:
+        raise ValueError(
+            "timeout_seconds must be positive -- a timeout of zero forbids any evidence"
+        )
+
+    session_runner = session_runner or _run_mktdata_subscription_session
+    raw_messages, subscribe_error = session_runner(topic, fields, max_messages, timeout_seconds)
+
+    # Defense in depth: this script's own hard cap, even if a session runner
+    # (real or injected) somehow returned more messages than it was asked for.
+    raw_messages = list(raw_messages)[:max_messages]
+
+    events: list[MktdataMessageEvent] = []
+    for sequence, raw in enumerate(raw_messages, start=1):
+        events.append(
+            MktdataMessageEvent(
+                sequence=sequence,
+                event_type=raw.event_type,
+                message_type=sanitize_external_text(raw.message_type) or "",
+                category=_classify_mktdata_message(raw.event_type, raw.message_type or ""),
+                correlation_id=sanitize_external_text(raw.correlation_id),
+                fields=tuple(
+                    MktdataField(name=name, value=sanitize_external_text(value))
+                    for name, value in raw.fields
+                ),
+                raw_message_dump=sanitize_external_text(raw.raw_dump),
+            )
+        )
+
+    categories = [event.category for event in events]
+    if subscribe_error:
+        outcome = "subscription_failure"
+    elif "subscription_failure" in categories:
+        outcome = "subscription_failure"
+    elif "subscription_terminated" in categories:
+        outcome = "subscription_terminated"
+    elif "data_received" in categories:
+        outcome = "data_received"
+    elif "subscription_started" in categories:
+        outcome = "subscription_started"
+    elif not events:
+        outcome = "timeout_no_data"
+    else:
+        outcome = "subscription_status_unclassified"
+
+    return MktdataSubscriptionReport(
+        topic=topic,
+        fields_requested=tuple(fields),
+        message_cap=max_messages,
+        timeout_seconds=timeout_seconds,
+        outcome=outcome,
+        subscribe_error=sanitize_external_text(subscribe_error),
+        events=tuple(events),
+        blocker_note=(
+            "This probe assigns no verdict. Whether any recorded field is the OVME proxy "
+            "vol, and whether //blp/mktdata exposes anything //blp/refdata's stage 4 did "
+            "not, is Eddy's judgment on this evidence -- never a claim this script makes."
+        ),
+    )
+
+
 # --- report -------------------------------------------------------------------------
 
 
@@ -925,6 +1298,8 @@ def build_report(
     candidate_probes: tuple[CandidateValueProbe, ...],
     candidate_probe_error: str | None,
     kproxy: KproxyResolution,
+    mktdata: MktdataSubscriptionReport | None = None,
+    mktdata_error: str | None = None,
 ) -> dict:
     return {
         "generated_at": generated_at,
@@ -969,6 +1344,32 @@ def build_report(
         "candidate_value_probes": [_probe_to_dict(p) for p in candidate_probes],
         "candidate_value_probe_error": candidate_probe_error,
         "kproxy": dict(kproxy.__dict__),
+        "mktdata_subscription": (
+            None
+            if mktdata is None
+            else {
+                "topic": mktdata.topic,
+                "fields_requested": list(mktdata.fields_requested),
+                "message_cap": mktdata.message_cap,
+                "timeout_seconds": mktdata.timeout_seconds,
+                "outcome": mktdata.outcome,
+                "subscribe_error": mktdata.subscribe_error,
+                "events": [
+                    {
+                        "sequence": event.sequence,
+                        "event_type": event.event_type,
+                        "message_type": event.message_type,
+                        "category": event.category,
+                        "correlation_id": event.correlation_id,
+                        "fields": [dict(field.__dict__) for field in event.fields],
+                        "raw_message_dump": event.raw_message_dump,
+                    }
+                    for event in mktdata.events
+                ],
+                "blocker_note": mktdata.blocker_note,
+            }
+        ),
+        "mktdata_subscription_error": mktdata_error,
         "verdict": None,
         "verdict_note": (
             "This script does not assign Issue #179's DIRECT ROUTE FOUND / PARTIAL / "
@@ -1114,6 +1515,45 @@ def render_markdown(data: dict) -> str:
         if kproxy[key] is not None:
             lines.append(f"- {key}: {kproxy[key]}")
     lines.append("")
+
+    mktdata = data["mktdata_subscription"]
+    lines.append("## //blp/mktdata subscription discovery probe (operator-supplied topic only)")
+    lines.append("")
+    if data["mktdata_subscription_error"]:
+        lines.append(f"Error: {data['mktdata_subscription_error']}")
+        lines.append("")
+    if mktdata is None:
+        lines.append("(not run)")
+        lines.append("")
+    else:
+        lines.append(f"Topic: `{mktdata['topic']}`")
+        requested_fields = ", ".join(f"`{f}`" for f in mktdata["fields_requested"])
+        lines.append("Fields requested: " + (requested_fields or "(none -- field-agnostic)"))
+        lines.append(
+            f"Message cap: {mktdata['message_cap']} -- Timeout: {mktdata['timeout_seconds']}s"
+        )
+        lines.append(f"Outcome: **{mktdata['outcome']}**")
+        if mktdata["subscribe_error"]:
+            lines.append(f"Subscribe error: {mktdata['subscribe_error']}")
+        lines.append("")
+        if not mktdata["events"]:
+            lines.append("(no subscription status/data message captured before timeout)")
+            lines.append("")
+        else:
+            lines.append("| # | Event type | Message type | Category | Fields |")
+            lines.append("|---|---|---|---|---|")
+            for event in mktdata["events"]:
+                fields = (
+                    ", ".join(f"{f['name']}={f['value']}" for f in event["fields"]) or "(none)"
+                )
+                lines.append(
+                    f"| {event['sequence']} | {event['event_type']} | {event['message_type']} | "
+                    f"{event['category']} | {fields} |"
+                )
+            lines.append("")
+        lines.append(mktdata["blocker_note"])
+        lines.append("")
+
     lines.append("## Verdict")
     lines.append("")
     lines.append(data["verdict_note"])
@@ -1230,6 +1670,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=f"Where to write the report (default: ./{DEFAULT_OUTPUT_DIRNAME})",
     )
+    parser.add_argument(
+        "--mktdata-security",
+        default=None,
+        help=(
+            "Stage 5: operator-supplied //blp/mktdata topic/security to subscribe to "
+            "read-only (e.g. 'USSNAC4 Curncy'). Never guessed by this tool -- omit to skip "
+            "stage 5 entirely"
+        ),
+    )
+    parser.add_argument(
+        "--mktdata-field",
+        action="append",
+        default=None,
+        dest="mktdata_fields",
+        help=(
+            "Field mnemonic to request in the stage 5 subscription; repeatable. Omitted "
+            "entirely means a field-agnostic subscription -- no field name is guessed "
+            "either way"
+        ),
+    )
+    parser.add_argument(
+        "--mktdata-timeout",
+        type=float,
+        default=DEFAULT_MKTDATA_TIMEOUT_SECONDS,
+        help=f"Stage 5 hard timeout in seconds (default: {DEFAULT_MKTDATA_TIMEOUT_SECONDS})",
+    )
+    parser.add_argument(
+        "--mktdata-max-messages",
+        type=int,
+        default=DEFAULT_MKTDATA_MESSAGE_CAP,
+        help=f"Stage 5 hard message-count cap (default: {DEFAULT_MKTDATA_MESSAGE_CAP})",
+    )
     return parser.parse_args(argv)
 
 
@@ -1303,6 +1775,21 @@ def main(argv: list[str] | None = None) -> int:
         args.katm_provenance,
     )
 
+    mktdata: MktdataSubscriptionReport | None = None
+    mktdata_error: str | None = None
+    if args.mktdata_security:
+        try:
+            mktdata = run_mktdata_subscription(
+                args.mktdata_security,
+                tuple(args.mktdata_fields) if args.mktdata_fields else (),
+                max_messages=args.mktdata_max_messages,
+                timeout_seconds=args.mktdata_timeout,
+            )
+        except ValueError as exc:
+            mktdata_error = str(exc)
+        except ImportError as exc:
+            mktdata_error = f"blpapi is not installed ({exc})"
+
     data = build_report(
         generated_at=_utc_now(),
         coordinate=coordinate,
@@ -1311,6 +1798,8 @@ def main(argv: list[str] | None = None) -> int:
         candidate_probes=candidate_probes,
         candidate_probe_error=candidate_probe_error,
         kproxy=kproxy,
+        mktdata=mktdata,
+        mktdata_error=mktdata_error,
     )
     output_dir = Path(args.output_dir) if args.output_dir else Path.cwd() / DEFAULT_OUTPUT_DIRNAME
     markdown_path, json_path = write_report(data, output_dir)
@@ -1326,6 +1815,10 @@ def main(argv: list[str] | None = None) -> int:
     if candidate_probe_error:
         print(f"Candidate probe error: {candidate_probe_error}")
     print(f"Kproxy: {kproxy.status}" + (f" -- {kproxy.reason}" if kproxy.reason else ""))
+    if mktdata is not None:
+        print(f"mktdata subscription ({mktdata.topic!r}): {mktdata.outcome}")
+    if mktdata_error:
+        print(f"mktdata subscription error: {mktdata_error}")
     print("")
     print("Full report (paste back or attach either file):")
     print(f"  {markdown_path.resolve()}")

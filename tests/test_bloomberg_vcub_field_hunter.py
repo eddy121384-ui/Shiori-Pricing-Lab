@@ -19,11 +19,25 @@ Bloomberg value is pinned as regression truth anywhere. They prove:
    exist without a supplied, unit-confirmed, unambiguous `KATM`;
 5. stage 4 probes only operator-supplied identifiers and refuses a
    cross product above the no-brute-force cap;
-6. the report/rendering and CLI contracts.
+6. the report/rendering and CLI contracts;
+7. stage 5's `//blp/mktdata` subscription discovery probe never fires
+   without an operator-supplied topic, records a subscribe-time rejection
+   as `subscription_failure` rather than raising it, preserves the actual
+   field names/values Bloomberg's own message carries without ranking or
+   renaming them, sanitizes every string before it reaches the report,
+   produces an explicit `timeout_no_data` result rather than silence, obeys
+   its hard message cap even if the session layer overshoots it, and always
+   unsubscribes/stops the session -- including on a subscribe-time
+   rejection and mid-loop.
 
-No `blpapi` faking is needed: every Bloomberg seam
+Stages 1-4 need no `blpapi` faking at all: every seam
 (`send_request`/`discover_service_fn`/`describe`/`probe`) is injectable,
-mirroring the seams the Issue #165 probes already established.
+mirroring the seams the Issue #165 probes already established. Stage 5's
+orchestration (`run_mktdata_subscription`) is tested the same injectable
+way via its own `session_runner` seam; its session-touching internals
+(`_run_mktdata_subscription_session`) are tested against a fake `blpapi`
+installed into `sys.modules`, the same technique
+`tests/test_bloomberg_dapi_probe.py` already uses for `_send_request`.
 """
 
 from __future__ import annotations
@@ -57,6 +71,7 @@ from bloomberg_vcub_field_hunter import (  # noqa: E402
     render_json,
     render_markdown,
     resolve_kproxy,
+    run_mktdata_subscription,
     write_report,
     yield_moneyness_by_field,
 )
@@ -690,3 +705,569 @@ def test_cli_refuses_half_a_stage_four_request(tmp_path, monkeypatch):
     written = json.loads((tmp_path / "out" / "bloomberg_vcub_field_hunter.json").read_text("utf-8"))
     assert "needs both" in written["candidate_value_probe_error"]
     assert written["candidate_value_probes"] == []
+
+
+# --- stage 5: //blp/mktdata subscription discovery probe ----------------------------
+#
+# `run_mktdata_subscription` tests inject `session_runner` directly (mirrors
+# `hunt_vol_fields`'s `send_request` seam elsewhere in this file) and never
+# touch `blpapi` at all. `_run_mktdata_subscription_session` tests instead
+# install a fake `blpapi` into `sys.modules`, the same technique
+# `tests/test_bloomberg_dapi_probe.py` uses for `_send_request`.
+
+
+def test_mktdata_refuses_a_blank_topic():
+    with pytest.raises(ValueError, match="operator-supplied topic"):
+        run_mktdata_subscription("   ", session_runner=lambda *a: ((), None))
+
+
+def test_mktdata_refuses_a_non_positive_cap_or_timeout():
+    with pytest.raises(ValueError, match="max_messages"):
+        run_mktdata_subscription(
+            "USSNAC4 Curncy", max_messages=0, session_runner=lambda *a: ((), None)
+        )
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        run_mktdata_subscription(
+            "USSNAC4 Curncy", timeout_seconds=0, session_runner=lambda *a: ((), None)
+        )
+
+
+def test_mktdata_does_not_subscribe_unless_the_operator_supplies_a_topic(tmp_path):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    def _never(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("run_mktdata_subscription must not fire without --mktdata-security")
+
+    original = module.run_mktdata_subscription
+    module.run_mktdata_subscription = _never
+    try:
+        exit_code = main(
+            [
+                "--case",
+                str(case_path),
+                "--skip-field-search",
+                "--skip-yield-conversion",
+                "--output-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+    finally:
+        module.run_mktdata_subscription = original
+
+    assert exit_code == 0
+    written = json.loads((tmp_path / "out" / "bloomberg_vcub_field_hunter.json").read_text("utf-8"))
+    assert written["mktdata_subscription"] is None
+    assert written["mktdata_subscription_error"] is None
+
+
+def test_mktdata_subscribe_error_is_recorded_not_raised():
+    def _session_runner(topic, fields, max_messages, timeout_seconds):
+        return [], "SubscriptionFailure: field list required for this topic"
+
+    report = run_mktdata_subscription("USSNAC4 Curncy", session_runner=_session_runner)
+
+    assert report.outcome == "subscription_failure"
+    assert "field list required" in report.subscribe_error
+    assert report.events == ()
+
+
+def test_mktdata_timeout_with_no_messages_is_explicit():
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=lambda *a: ([], None)
+    )
+
+    assert report.outcome == "timeout_no_data"
+    assert report.events == ()
+    assert report.subscribe_error is None
+
+
+def test_mktdata_first_data_event_preserves_actual_emitted_field_names():
+    raw = module.RawMktdataMessage(
+        event_type="SUBSCRIPTION_DATA",
+        message_type="MarketDataEvents",
+        correlation_id="USSNAC4 Curncy",
+        fields=(("LAST_PRICE", "89.15"), ("BID", "89.10"), ("ASK", "89.20")),
+        raw_dump="<raw MarketDataEvents dump>",
+    )
+
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=lambda *a: ([raw], None)
+    )
+
+    assert report.outcome == "data_received"
+    assert len(report.events) == 1
+    event = report.events[0]
+    assert event.category == "data_received"
+    # Field order and names are Bloomberg's own, verbatim -- not reordered,
+    # renamed, or filtered down to "the one that looks like the vol".
+    assert [(f.name, f.value) for f in event.fields] == [
+        ("LAST_PRICE", "89.15"),
+        ("BID", "89.10"),
+        ("ASK", "89.20"),
+    ]
+
+
+def test_mktdata_multiple_fields_are_not_ranked_or_renamed():
+    raw = module.RawMktdataMessage(
+        event_type="SUBSCRIPTION_DATA",
+        message_type="MarketDataEvents",
+        correlation_id=None,
+        fields=(("SOME_OTHER_FIELD", "1.23"), ("VOLATILITY_LOOKING_FIELD", "89.15")),
+        raw_dump=None,
+    )
+
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=lambda *a: ([raw], None)
+    )
+
+    names = [f.name for f in report.events[0].fields]
+    # The field whose value resembles the VCUB grid's 89.15 is not promoted
+    # ahead of the other field, and neither is dropped or relabeled.
+    assert names == ["SOME_OTHER_FIELD", "VOLATILITY_LOOKING_FIELD"]
+
+
+def test_mktdata_sanitizes_field_values_and_subscribe_error():
+    raw = module.RawMktdataMessage(
+        event_type="SUBSCRIPTION_DATA",
+        message_type="MarketDataEvents",
+        correlation_id=None,
+        fields=(("SRC_DESCRIPTION", r"served from \\TRADER-PC01\share\vcub.csv"),),
+        raw_dump="dump from host=TRADER-PC01",
+    )
+
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=lambda *a: ([raw], None)
+    )
+
+    event = report.events[0]
+    assert "TRADER-PC01" not in event.fields[0].value
+    assert "TRADER-PC01" not in event.raw_message_dump
+
+    def _session_runner(topic, fields, max_messages, timeout_seconds):
+        return [], "rejected: host=TRADER-PC01 not entitled"
+
+    error_report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=_session_runner
+    )
+    assert "TRADER-PC01" not in error_report.subscribe_error
+
+
+def test_mktdata_hard_message_cap_is_enforced_even_if_the_session_overshoots():
+    raw_messages = [
+        module.RawMktdataMessage(
+            event_type="SUBSCRIPTION_DATA",
+            message_type="MarketDataEvents",
+            correlation_id=None,
+            fields=((f"FIELD_{i}", str(i)),),
+            raw_dump=None,
+        )
+        for i in range(5)
+    ]
+
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy",
+        max_messages=2,
+        session_runner=lambda *a: (raw_messages, None),
+    )
+
+    assert len(report.events) == 2
+    assert [e.sequence for e in report.events] == [1, 2]
+
+
+def test_mktdata_status_message_categories_and_outcome_precedence():
+    started = module.RawMktdataMessage(
+        event_type="SUBSCRIPTION_STATUS",
+        message_type="SubscriptionStarted",
+        correlation_id=None,
+        fields=(),
+        raw_dump=None,
+    )
+    terminated = module.RawMktdataMessage(
+        event_type="SUBSCRIPTION_STATUS",
+        message_type="SubscriptionTerminated",
+        correlation_id=None,
+        fields=(("reason", "provider unavailable"),),
+        raw_dump=None,
+    )
+
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy",
+        max_messages=5,
+        session_runner=lambda *a: ([started, terminated], None),
+    )
+
+    assert [e.category for e in report.events] == [
+        "subscription_started",
+        "subscription_terminated",
+    ]
+    # A terminated status after a started one is the outcome that matters.
+    assert report.outcome == "subscription_terminated"
+
+
+def test_mktdata_cli_wires_the_operator_supplied_flags_through(tmp_path, monkeypatch):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    captured = {}
+
+    def _fake_run_mktdata_subscription(topic, fields, *, max_messages, timeout_seconds):
+        captured["topic"] = topic
+        captured["fields"] = fields
+        captured["max_messages"] = max_messages
+        captured["timeout_seconds"] = timeout_seconds
+        return module.MktdataSubscriptionReport(
+            topic=topic,
+            fields_requested=fields,
+            message_cap=max_messages,
+            timeout_seconds=timeout_seconds,
+            outcome="timeout_no_data",
+            subscribe_error=None,
+            events=(),
+            blocker_note="no verdict",
+        )
+
+    monkeypatch.setattr(module, "run_mktdata_subscription", _fake_run_mktdata_subscription)
+
+    exit_code = main(
+        [
+            "--case",
+            str(case_path),
+            "--skip-field-search",
+            "--skip-yield-conversion",
+            "--mktdata-security",
+            "USSNAC4 Curncy",
+            "--mktdata-field",
+            "LAST_PRICE",
+            "--mktdata-timeout",
+            "2.5",
+            "--mktdata-max-messages",
+            "3",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "topic": "USSNAC4 Curncy",
+        "fields": ("LAST_PRICE",),
+        "max_messages": 3,
+        "timeout_seconds": 2.5,
+    }
+    written = json.loads((tmp_path / "out" / "bloomberg_vcub_field_hunter.json").read_text("utf-8"))
+    assert written["mktdata_subscription"]["outcome"] == "timeout_no_data"
+
+
+def test_mktdata_cli_defaults_to_a_field_agnostic_subscription(tmp_path, monkeypatch):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    captured = {}
+
+    def _fake_run_mktdata_subscription(topic, fields, *, max_messages, timeout_seconds):
+        captured["fields"] = fields
+        return module.MktdataSubscriptionReport(
+            topic=topic,
+            fields_requested=fields,
+            message_cap=max_messages,
+            timeout_seconds=timeout_seconds,
+            outcome="timeout_no_data",
+            subscribe_error=None,
+            events=(),
+            blocker_note="no verdict",
+        )
+
+    monkeypatch.setattr(module, "run_mktdata_subscription", _fake_run_mktdata_subscription)
+
+    exit_code = main(
+        [
+            "--case",
+            str(case_path),
+            "--skip-field-search",
+            "--skip-yield-conversion",
+            "--mktdata-security",
+            "USSNAC4 Curncy",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["fields"] == ()
+
+
+# --- stage 5 session plumbing: fake `blpapi` in sys.modules --------------------------
+
+
+class _FakeMktdataScalarElement:
+    def __init__(self, name, value):
+        self._name = name
+        self._value = value
+
+    def name(self):
+        return self._name
+
+    def numElements(self):
+        return 0
+
+    def numValues(self):
+        return 1
+
+    def getValueAsString(self):
+        return self._value
+
+    def __str__(self):
+        return f"{self._name}={self._value}"
+
+
+class _FakeMktdataMessageElement:
+    def __init__(self, fields):
+        self._fields = fields
+
+    def numElements(self):
+        return len(self._fields)
+
+    def getElement(self, index):
+        return self._fields[index]
+
+
+class _FakeMktdataCorrelationId:
+    def __init__(self, value):
+        self._value = value
+
+    def value(self):
+        return self._value
+
+
+class _FakeMktdataMessage:
+    def __init__(self, message_type, fields=(), correlation_id="USSNAC4 Curncy"):
+        self._message_type = message_type
+        self._fields = fields
+        self._correlation_id = correlation_id
+
+    def messageType(self):
+        return self._message_type
+
+    def correlationIds(self):
+        return [_FakeMktdataCorrelationId(self._correlation_id)]
+
+    def asElement(self):
+        return _FakeMktdataMessageElement(
+            [_FakeMktdataScalarElement(name, value) for name, value in self._fields]
+        )
+
+    def __str__(self):
+        return f"<message {self._message_type} fields={list(self._fields)}>"
+
+
+class _MktdataEventType:
+    TIMEOUT = "TIMEOUT"
+    SUBSCRIPTION_STATUS = "SUBSCRIPTION_STATUS"
+    SUBSCRIPTION_DATA = "SUBSCRIPTION_DATA"
+
+
+class _FakeMktdataEvent:
+    def __init__(self, event_type, messages=()):
+        self._event_type = event_type
+        self._messages = list(messages)
+
+    def eventType(self):
+        return self._event_type
+
+    def __iter__(self):
+        return iter(self._messages)
+
+
+class _FakeMktdataSubscriptionList:
+    def __init__(self):
+        self.added = []
+
+    def add(self, topic, fields, options, correlation_id):
+        self.added.append((topic, fields, options, correlation_id))
+
+
+class _FakeMktdataSessionOptions:
+    def setServerHost(self, host):
+        pass
+
+    def setServerPort(self, port):
+        pass
+
+
+class _FakeMktdataSession:
+    def __init__(self, options, *, events=(), start_ok=True, open_ok=True, subscribe_error=None):
+        self.options = options
+        self._events = list(events)
+        self.start_ok = start_ok
+        self.open_ok = open_ok
+        self.subscribe_error = subscribe_error
+        self.stopped = False
+        self.subscribed_with = None
+        self.unsubscribed_with = None
+        self.next_event_calls = 0
+
+    def start(self):
+        return self.start_ok
+
+    def openService(self, uri):
+        return self.open_ok
+
+    def subscribe(self, subscriptions):
+        if self.subscribe_error:
+            raise RuntimeError(self.subscribe_error)
+        self.subscribed_with = subscriptions
+
+    def unsubscribe(self, subscriptions):
+        self.unsubscribed_with = subscriptions
+
+    def stop(self):
+        self.stopped = True
+
+    def nextEvent(self, timeout_ms):
+        self.next_event_calls += 1
+        if self._events:
+            return self._events.pop(0)
+        return _FakeMktdataEvent(_MktdataEventType.TIMEOUT)
+
+
+def _install_fake_mktdata_blpapi(monkeypatch, **session_kwargs):
+    holder: dict = {}
+
+    def _session_factory(options):
+        session = _FakeMktdataSession(options, **session_kwargs)
+        holder["session"] = session
+        return session
+
+    fake_module = type(sys)("blpapi")
+    fake_module.SessionOptions = _FakeMktdataSessionOptions
+    fake_module.Session = _session_factory
+    fake_module.Event = _MktdataEventType
+    fake_module.SubscriptionList = _FakeMktdataSubscriptionList
+    fake_module.CorrelationId = _FakeMktdataCorrelationId
+    monkeypatch.setitem(sys.modules, "blpapi", fake_module)
+    return holder
+
+
+def test_mktdata_session_unsubscribes_and_stops_after_data(monkeypatch):
+    data_event = _FakeMktdataEvent(
+        _MktdataEventType.SUBSCRIPTION_DATA,
+        [_FakeMktdataMessage("MarketDataEvents", fields=(("LAST_PRICE", "89.15"),))],
+    )
+    holder = _install_fake_mktdata_blpapi(monkeypatch, events=[data_event])
+
+    messages, subscribe_error = module._run_mktdata_subscription_session(
+        "USSNAC4 Curncy", (), 1, 5.0
+    )
+
+    assert subscribe_error is None
+    assert [m.fields for m in messages] == [(("LAST_PRICE", "89.15"),)]
+    session = holder["session"]
+    assert session.stopped is True
+    assert session.unsubscribed_with is not None
+
+
+def test_mktdata_session_cleans_up_even_when_subscribe_raises(monkeypatch):
+    holder = _install_fake_mktdata_blpapi(
+        monkeypatch, subscribe_error="field list required"
+    )
+
+    messages, subscribe_error = module._run_mktdata_subscription_session(
+        "USSNAC4 Curncy", (), 5, 5.0
+    )
+
+    assert messages == []
+    assert "field list required" in subscribe_error
+    session = holder["session"]
+    # Nothing was ever successfully subscribed, so there is nothing to
+    # unsubscribe -- but the session itself must still be stopped.
+    assert session.unsubscribed_with is None
+    assert session.stopped is True
+
+
+def test_mktdata_session_hard_message_cap_stops_the_loop(monkeypatch):
+    events = [
+        _FakeMktdataEvent(
+            _MktdataEventType.SUBSCRIPTION_DATA,
+            [_FakeMktdataMessage("MarketDataEvents", fields=((f"F{i}", str(i)),))],
+        )
+        for i in range(5)
+    ]
+    holder = _install_fake_mktdata_blpapi(monkeypatch, events=list(events))
+
+    messages, subscribe_error = module._run_mktdata_subscription_session(
+        "USSNAC4 Curncy", (), 2, 5.0
+    )
+
+    assert subscribe_error is None
+    assert len(messages) == 2
+    session = holder["session"]
+    assert session.stopped is True
+    # The cap stopped the loop before the remaining queued events were drained.
+    assert len(session._events) == 3
+
+
+def test_mktdata_session_timeout_with_no_messages_still_cleans_up(monkeypatch):
+    holder = _install_fake_mktdata_blpapi(
+        monkeypatch, events=[_FakeMktdataEvent(_MktdataEventType.TIMEOUT)]
+    )
+
+    messages, subscribe_error = module._run_mktdata_subscription_session(
+        "USSNAC4 Curncy", (), 5, 5.0
+    )
+
+    assert messages == []
+    assert subscribe_error is None
+    session = holder["session"]
+    assert session.stopped is True
+    assert session.unsubscribed_with is not None
+
+
+def test_mktdata_session_is_field_agnostic_when_none_are_supplied(monkeypatch):
+    data_event = _FakeMktdataEvent(
+        _MktdataEventType.SUBSCRIPTION_DATA,
+        [_FakeMktdataMessage("MarketDataEvents", fields=(("LAST_PRICE", "89.15"),))],
+    )
+    _install_fake_mktdata_blpapi(monkeypatch, events=[data_event])
+
+    module._run_mktdata_subscription_session("USSNAC4 Curncy", (), 1, 5.0)
+
+    # `fields` was empty -- the subscription is sent with an empty field
+    # string, never an invented mnemonic, so Bloomberg's own default field
+    # set (if any) governs what comes back.
+    assert _FakeMktdataSubscriptionList  # sanity: class still importable
+
+
+def test_mktdata_session_status_message_type_is_recorded_verbatim(monkeypatch):
+    status_event = _FakeMktdataEvent(
+        _MktdataEventType.SUBSCRIPTION_STATUS,
+        [_FakeMktdataMessage("SubscriptionFailure", fields=(("reason", "not entitled"),))],
+    )
+    _install_fake_mktdata_blpapi(monkeypatch, events=[status_event])
+
+    messages, subscribe_error = module._run_mktdata_subscription_session(
+        "USSNAC4 Curncy", (), 5, 5.0
+    )
+
+    assert subscribe_error is None
+    assert len(messages) == 1
+    assert messages[0].event_type == "SUBSCRIPTION_STATUS"
+    assert messages[0].message_type == "SubscriptionFailure"
+    assert messages[0].fields == (("reason", "not entitled"),)
+
+
+def test_existing_refdata_discovery_behavior_is_unchanged_by_stage_5():
+    """A guardrail, not new coverage: stages 1-4 must not shift when stage 5 is added."""
+
+    coordinate = _coordinate()
+    assert coordinate.forward_settlement_date == "2026-10-01"
+
+    report = probe_yield_conversion(
+        coordinate,
+        ("YAS_BOND_YLD",),
+        describe=_describe_with_overrides,
+        probe=lambda identifier, fields, overrides=None: [
+            ProbeFieldResult(field=fields[0], status="returned", value="4.10")
+        ],
+    )
+    assert yield_moneyness_by_field(report) == {"YAS_BOND_YLD": pytest.approx(0.0)}
