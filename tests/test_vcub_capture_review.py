@@ -8,6 +8,8 @@ so it cannot drop a blocking error on the round trip.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 from test_bloomberg_vcub_atm_template import canonical_tokens
@@ -123,6 +125,92 @@ def test_a_blocked_capture_cannot_be_confirmed_through_the_store(monkeypatch) ->
     with pytest.raises(ValueError, match="EXPIRY_ANCHOR_UNRESOLVED"):
         store.confirm(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
     assert store.get(capture_id).review_status is VCUBCaptureStatus.PENDING_REVIEW
+
+
+def test_a_decided_capture_is_never_reset_by_re_reading_the_same_image(stub_reader) -> None:
+    """Codex review round 3, PR #182.
+
+    Reusing the review slot keeps a re-parse from leaving an orphan behind,
+    but only while the slot is still pending. Overwriting a decided capture
+    let a terminal decision be silently reset and the same capture reviewed
+    twice.
+    """
+
+    store = VCUBCaptureReviewStore()
+    first_id, _capture, _ = _parse(store)
+    store.confirm(first_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    second_id, second, _ = _parse(store)
+
+    assert store.get(first_id).review_status is VCUBCaptureStatus.CONFIRMED
+    assert store.get(first_id).reviewed_by == "Eddy"
+    assert second_id != first_id
+    assert second.review_status is VCUBCaptureStatus.PENDING_REVIEW
+
+
+def test_a_pending_capture_slot_is_still_reused_by_re_reading_the_same_image(
+    stub_reader,
+) -> None:
+    """The decided-slot rule must not cost the ordinary re-parse its slot."""
+
+    store = VCUBCaptureReviewStore()
+
+    first_id, _first, _ = _parse(store)
+    second_id, _second, _ = _parse(store)
+
+    assert first_id == second_id
+    assert len(store) == 1
+
+
+def test_a_concurrent_confirm_and_reject_cannot_both_be_accepted(stub_reader) -> None:
+    """Codex review round 3, PR #182.
+
+    ``create_server`` is a ThreadingHTTPServer, so both can arrive at once.
+    Un-serialised, both callers saw the same pending object, both returned a
+    decision, and whichever wrote last silently determined the record -- so
+    a trader could be shown a rejection while the stored record said
+    confirmed. Which caller wins is a race; that exactly one does is not.
+    """
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _ = _parse(store)
+
+    # Widen the window between the read and the write. This does not create
+    # the race, it only makes an un-serialised sequence observable.
+    unlocked_get = store._get_locked
+
+    def slow_get(identifier: str):
+        found = unlocked_get(identifier)
+        time.sleep(0.05)
+        return found
+
+    store._get_locked = slow_get
+
+    outcomes: list[tuple[str, str]] = []
+    start = threading.Barrier(2)
+
+    def review(action, name: str) -> None:
+        start.wait()
+        try:
+            outcomes.append((name, action(capture_id, reviewed_by=name, reviewed_at=_REVIEWED_AT)
+                             .review_status.value))
+        except ValueError:
+            outcomes.append((name, "refused"))
+
+    threads = [
+        threading.Thread(target=review, args=(store.confirm, "confirm")),
+        threading.Thread(target=review, args=(store.reject, "reject")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    accepted = [name for name, result in outcomes if result != "refused"]
+    assert len(accepted) == 1, f"both callers were accepted: {outcomes}"
+    retained = unlocked_get(capture_id)
+    assert retained.review_status is not VCUBCaptureStatus.PENDING_REVIEW
+    assert retained.reviewed_by == accepted[0]
 
 
 def test_an_unknown_capture_id_is_an_error_not_a_blank_capture() -> None:

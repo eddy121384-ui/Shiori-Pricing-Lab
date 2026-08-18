@@ -7,6 +7,16 @@ is deliberate: a capture the page could round-trip is a capture whose
 impossible while anything blocks" has to be a fact about the server, not a
 promise about the client.
 
+**One decision per capture, under a threading server.** ``create_server``
+is a :class:`ThreadingHTTPServer`, so a confirm and a reject for the same
+capture can arrive on two threads at once. Every read-modify-write below is
+therefore serialised by :attr:`VCUBCaptureReviewStore._lock`; without it
+both callers observed the same ``PENDING_REVIEW`` object, both returned
+200, and whichever wrote last silently decided the record -- so the trader
+who rejected a capture could be shown a rejection while the stored record
+said confirmed (Codex review round 3, PR #182). The OCR read deliberately
+stays *outside* the lock: it is the slow part and touches no shared state.
+
 Nothing in this module imports :mod:`shiori_pricing_lab.pricing` or the
 workbench's pricing entry point. Parsing an image and confirming a capture
 do not price anything, do not touch the trader's ticket, and do not feed any
@@ -17,11 +27,15 @@ decision about it.
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections import OrderedDict
 from datetime import UTC, datetime
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
-from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
+from shiori_pricing_lab.data.bloomberg_vcub_capture import (
+    VCUBATMCapture,
+    VCUBCaptureStatus,
+)
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     build_capture_provenance,
     read_tokens_from_image_bytes,
@@ -59,9 +73,11 @@ class VCUBCaptureReviewStore:
             raise ValueError(f"capacity must be at least 1, got {capacity!r}")
         self._capacity = capacity
         self._captures: OrderedDict[str, VCUBATMCapture] = OrderedDict()
+        self._lock = threading.Lock()
 
     def __len__(self) -> int:
-        return len(self._captures)
+        with self._lock:
+            return len(self._captures)
 
     def parse_image(
         self,
@@ -82,13 +98,41 @@ class VCUBCaptureReviewStore:
         provenance = build_capture_provenance(
             source_reference=source_reference, raw_image=raw_image, captured_at=captured_at
         )
+        # Outside the lock on purpose: reading the image is the slow step and
+        # touches nothing shared.
         tokens, reader_notes = read_tokens_from_image_bytes(raw_image, engine=engine)
         capture = parse_vcub_atm_tokens(tokens, provenance=provenance)
-        identifier = capture_id_for(provenance.source_image_sha256, captured_at)
-        self._store(identifier, capture)
+        with self._lock:
+            identifier = self._free_identifier(provenance.source_image_sha256, captured_at)
+            self._store_locked(identifier, capture)
         return identifier, capture, reader_notes
 
+    def _free_identifier(self, source_image_sha256: str, captured_at: str) -> str:
+        """An id for this read that will not overwrite an already-decided capture.
+
+        Re-reading the same file in the same second normally reuses its
+        review slot, which keeps a re-parse from leaving an orphan behind.
+        That is only safe while the slot is still pending: a slot holding a
+        confirmed or rejected capture must keep it, or a re-parse would
+        silently reset a terminal decision and let the same capture be
+        reviewed twice (Codex review round 3, PR #182). A decided slot
+        therefore yields a distinct identity instead.
+        """
+
+        identifier = capture_id_for(source_image_sha256, captured_at)
+        attempt = 0
+        while True:
+            existing = self._captures.get(identifier)
+            if existing is None or existing.review_status is VCUBCaptureStatus.PENDING_REVIEW:
+                return identifier
+            attempt += 1
+            identifier = capture_id_for(source_image_sha256, f"{captured_at}#{attempt}")
+
     def get(self, capture_id: str) -> VCUBATMCapture:
+        with self._lock:
+            return self._get_locked(capture_id)
+
+    def _get_locked(self, capture_id: str) -> VCUBATMCapture:
         try:
             return self._captures[capture_id]
         except KeyError as exc:
@@ -99,11 +143,12 @@ class VCUBCaptureReviewStore:
     ) -> VCUBATMCapture:
         """Accept a capture on a named trader's behalf, or raise if it is blocked."""
 
-        confirmed = self.get(capture_id).confirm(
-            reviewed_by=reviewed_by,
-            reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
-        )
-        self._store(capture_id, confirmed)
+        with self._lock:
+            confirmed = self._get_locked(capture_id).confirm(
+                reviewed_by=reviewed_by,
+                reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
+            )
+            self._store_locked(capture_id, confirmed)
         return confirmed
 
     def reject(
@@ -111,14 +156,17 @@ class VCUBCaptureReviewStore:
     ) -> VCUBATMCapture:
         """Refuse a capture on a named trader's behalf, leaving its values unaccepted."""
 
-        rejected = self.get(capture_id).reject(
-            reviewed_by=reviewed_by,
-            reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
-        )
-        self._store(capture_id, rejected)
+        with self._lock:
+            rejected = self._get_locked(capture_id).reject(
+                reviewed_by=reviewed_by,
+                reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
+            )
+            self._store_locked(capture_id, rejected)
         return rejected
 
-    def _store(self, capture_id: str, capture: VCUBATMCapture) -> None:
+    def _store_locked(self, capture_id: str, capture: VCUBATMCapture) -> None:
+        """Caller must hold ``self._lock``."""
+
         self._captures[capture_id] = capture
         self._captures.move_to_end(capture_id)
         while len(self._captures) > self._capacity:
