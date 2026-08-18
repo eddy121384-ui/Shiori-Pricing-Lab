@@ -1320,17 +1320,18 @@ def probe_instrument_lookup(
     evidence = discover_service_fn(service_uri)
 
     if not evidence.opened:
+        sanitized_open_error = sanitize_external_text(evidence.open_error)
         return InstrumentLookupReport(
             service_uri=service_uri,
             query=query,
             service_opened=False,
-            open_error=sanitize_external_text(evidence.open_error),
+            open_error=sanitized_open_error,
             full_schema_dump=sanitize_external_text(evidence.full_schema_dump),
             operations_found=(),
             capability_confirmed=False,
             attempts=(),
             blocker_note=(
-                f"{service_uri} did not open on this run ({evidence.open_error!r}) -- no "
+                f"{service_uri} did not open on this run ({sanitized_open_error!r}) -- no "
                 "lookup operation could be probed. This is the explicit feasibility "
                 "answer Issue #179 asked for, not a fallback to a guessed request."
             ),
@@ -1390,7 +1391,17 @@ def probe_instrument_lookup(
                 collect=_collect,
                 context=f"{operation.name}({element}={query!r})",
             )
-        except (RuntimeError, ImportError) as exc:
+        except ImportError:
+            # blpapi missing is global, not per-operation -- let main()'s
+            # single "blpapi is not installed" handler report it once,
+            # exactly as every other stage in this file already does,
+            # rather than repeating it per usable operation below.
+            raise
+        except Exception as exc:  # noqa: BLE001 -- one operation's own request/schema
+            # failure (e.g. a blpapi-native exception building a request for
+            # an operation this run's own introspection found, but whose
+            # exact shape was never live-confirmed) must not abort the
+            # remaining usable operations or the report this stage writes.
             attempts.append(
                 InstrumentLookupAttempt(
                     operation_name=operation.name,

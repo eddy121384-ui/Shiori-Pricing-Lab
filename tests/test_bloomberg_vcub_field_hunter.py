@@ -1432,6 +1432,26 @@ def test_lookup_reports_explicitly_when_the_service_does_not_open():
     assert "did not open" in report.blocker_note
 
 
+def test_lookup_sanitizes_the_open_error_inside_the_blocker_note_too():
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: ServiceEvidence(
+            service_uri=_INSTRUMENTS,
+            opened=False,
+            open_error="connection refused by host=TRADER-PC01",
+            full_schema_dump=None,
+            operations=(),
+            operation_list_error=None,
+        ),
+        send_request=lambda **k: pytest.fail("must not send a request; the service didn't open"),
+    )
+
+    assert "TRADER-PC01" not in report.open_error
+    # The blocker note interpolates the same error text -- it must not
+    # bypass the sanitizer that the dedicated `open_error` field went through.
+    assert "TRADER-PC01" not in report.blocker_note
+
+
 def test_lookup_reports_explicitly_when_no_operation_exposes_a_usable_element():
     operations = (
         OperationEvidence(
@@ -1559,6 +1579,62 @@ def test_lookup_records_a_request_error_without_raising():
     assert report.capability_confirmed is True
     assert report.attempts[0].status == "error"
     assert "timed out" in report.attempts[0].error
+
+
+def test_lookup_records_a_non_runtime_request_exception_without_raising():
+    # A blpapi-native exception (e.g. building a request for an operation
+    # this run's own introspection found but whose exact shape was never
+    # live-confirmed) is not a RuntimeError -- it must still be recorded as
+    # an "error" attempt, never escape and abort the whole probe.
+    class _BlpapiNativeException(Exception):
+        pass
+
+    operations = (
+        OperationEvidence(
+            name="instrumentListRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+    )
+
+    def _send_request(**kwargs):
+        raise _BlpapiNativeException("unknown operation instrumentListRequest")
+
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(operations=operations),
+        send_request=_send_request,
+    )
+
+    assert report.attempts[0].status == "error"
+    assert "unknown operation" in report.attempts[0].error
+
+
+def test_lookup_lets_import_error_propagate_for_a_single_clean_message():
+    # blpapi missing is global, not per-operation -- main()'s existing
+    # "blpapi is not installed" handler is the one place this is reported,
+    # exactly like every other stage in this file.
+    operations = (
+        OperationEvidence(
+            name="instrumentListRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+    )
+
+    def _send_request(**kwargs):
+        raise ImportError("No module named 'blpapi'")
+
+    with pytest.raises(ImportError):
+        probe_instrument_lookup(
+            "USSNAC4",
+            discover_service_fn=lambda uri: _instruments_service(operations=operations),
+            send_request=_send_request,
+        )
 
 
 def test_lookup_probes_every_usable_operation_independently():
