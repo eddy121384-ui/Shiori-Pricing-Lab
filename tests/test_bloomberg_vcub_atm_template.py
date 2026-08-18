@@ -511,6 +511,72 @@ def test_a_dropped_edge_row_is_caught_even_when_the_row_pitch_is_uneven() -> Non
     assert not capture.can_confirm
 
 
+@pytest.mark.parametrize("dropped", ["1Yr", "6Yr"])
+def test_a_dropped_edge_tenor_header_fails_closed(dropped: str) -> None:
+    """The column-axis mirror of the dropped edge row label.
+
+    The row axis needs an explicit window because chrome sits above and
+    below a table; the column axis does not, because a number beside the
+    matrix is refused at any distance. This pins that asymmetry: losing the
+    first or last tenor header must not quietly narrow the surface.
+    """
+
+    tokens = [
+        token
+        for token in canonical_tokens()
+        if not (token.text == dropped and abs(token.y_center - _HEADER_Y) < 1.0)
+    ]
+
+    capture = parse(tokens)
+
+    assert "NUMERIC_TOKEN_OUTSIDE_COLUMNS" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+def _short_axis_tokens(row_count: int, dropped_row: int) -> list[VCUBTextToken]:
+    tokens = metadata_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(TENOR_LABELS):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index in range(row_count):
+        if row_index != dropped_row:
+            tokens.append(
+                _token(EXPIRY_LABELS[row_index], _ANCHOR_X + 14.0, _row_y(row_index))
+            )
+        for column_index in range(len(TENOR_LABELS)):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    _row_y(row_index),
+                )
+            )
+    return tokens
+
+
+def test_a_dropped_middle_label_on_a_three_row_axis_fails_closed() -> None:
+    """The pitch check needs three centres, so on a three-row axis it is
+    inactive after a label is lost. The dropped row's values then land on
+    the re-spanned boundary, and the ambiguity check refuses them -- which
+    is what keeps that blind spot closed."""
+
+    capture = parse(_short_axis_tokens(3, 1))
+
+    assert "CELL_POSITION_AMBIGUOUS" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+@pytest.mark.parametrize("dropped_row", [0, 1])
+def test_a_dropped_label_on_a_two_row_axis_fails_closed(dropped_row: int) -> None:
+    """Two rows leave one pitch that no regularity check has vetted; the
+    edge-row window still catches the orphaned values."""
+
+    capture = parse(_short_axis_tokens(2, dropped_row))
+
+    assert "NUMERIC_TOKEN_OUTSIDE_ROWS" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
 def test_an_unevenly_spaced_axis_still_refuses_a_boundary_straddling_value() -> None:
     """Codex review, PR #182.
 
