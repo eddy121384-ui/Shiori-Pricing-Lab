@@ -468,6 +468,49 @@ def test_a_dropped_interior_label_on_a_four_row_axis_fails_closed() -> None:
     assert not capture.can_confirm
 
 
+def test_a_dropped_edge_row_is_caught_even_when_the_row_pitch_is_uneven() -> None:
+    """Codex review round 2, PR #182.
+
+    Pitches of 28px and 44px are uneven but stay inside the regularity
+    threshold, so the axis is accepted. A window of one *narrowest* pitch
+    then stops short of a dropped bottom row continuing at the wider pitch,
+    and its whole set of values would be waved through as chrome.
+    """
+
+    narrow, wide = 28.0, 44.0
+    row_tops = [_FIRST_ROW_Y, _FIRST_ROW_Y + narrow, _FIRST_ROW_Y + narrow + wide]
+    dropped_row_y = row_tops[-1] + wide
+
+    tokens = metadata_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(TENOR_LABELS):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index, row_y in enumerate(row_tops):
+        tokens.append(_token(EXPIRY_LABELS[row_index], _ANCHOR_X + 14.0, row_y))
+        for column_index in range(len(TENOR_LABELS)):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    row_y,
+                )
+            )
+    # The fourth row's label was missed; only its values were read.
+    for column_index in range(len(TENOR_LABELS)):
+        tokens.append(
+            _token(
+                f"{_synthetic_value(3, column_index):.2f}",
+                _column_x(column_index) + 6.0,
+                dropped_row_y,
+            )
+        )
+
+    capture = parse(tokens)
+
+    assert "NUMERIC_TOKEN_OUTSIDE_ROWS" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
 def test_an_unevenly_spaced_axis_still_refuses_a_boundary_straddling_value() -> None:
     """Codex review, PR #182.
 

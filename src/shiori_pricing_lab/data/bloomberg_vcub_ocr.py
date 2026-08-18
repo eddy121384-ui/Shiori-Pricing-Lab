@@ -141,7 +141,14 @@ def tokens_from_detections(
         right = max(x for x, _ in points)
         top = min(y for _, y in points)
         bottom = max(y for _, y in points)
-        if right <= left or bottom <= top:
+        width = right - left
+        height = bottom - top
+        # Finite corners do not guarantee a finite extent: coordinates as
+        # extreme as -1e308 and 1e308 each pass the check above while their
+        # difference overflows to infinity, which VCUBTextToken then refuses
+        # -- turning one bad detection into a failed capture rather than a
+        # dropped token (Codex review round 2, PR #182).
+        if right <= left or bottom <= top or not math.isfinite(width) or not math.isfinite(height):
             notes.append(f"{cleaned!r} had a degenerate bounding box and was ignored")
             continue
         tokens.append(
@@ -149,8 +156,8 @@ def tokens_from_detections(
                 text=cleaned,
                 left=left,
                 top=top,
-                width=right - left,
-                height=bottom - top,
+                width=width,
+                height=height,
                 confidence=confidence,
             )
         )

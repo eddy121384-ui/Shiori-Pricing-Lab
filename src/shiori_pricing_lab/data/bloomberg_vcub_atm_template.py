@@ -577,12 +577,21 @@ def parse_vcub_atm_tokens(
         row_centres, max(token.height for token in label_tokens)
     )
     # Where a row the reader missed at the very top or bottom of the matrix
-    # would have sat: one pitch beyond the outermost resolved band (Codex
-    # review, PR #182). A dropped *edge* label is invisible to the pitch
-    # check -- there is no gap left behind, the axis simply ends early -- so
-    # without this its whole row of values would fall outside every band and
-    # be waved through as page chrome, silently truncating the surface.
-    missing_row_zone = row_outer * 2.0
+    # would have sat (Codex review, PR #182). A dropped *edge* label is
+    # invisible to the pitch check -- there is no gap left behind, the axis
+    # simply ends early -- so without this its whole row of values would fall
+    # outside every band and be waved through as page chrome, silently
+    # truncating the surface.
+    #
+    # The window is the widest pitch this axis is *allowed* to have, not the
+    # narrowest one it happens to show (Codex review round 2). On an axis
+    # whose pitches are uneven but still within the regularity threshold --
+    # 28px and 44px, say -- a window of one narrowest pitch stops short of a
+    # dropped row continuing at the wider pitch, and the truncated grid stays
+    # confirmable. Since ``_check_pitch_regularity`` has already refused
+    # anything wider than ``narrowest * _PITCH_IRREGULARITY_MULTIPLE``, that
+    # product is exactly the furthest a legitimate next row could sit.
+    missing_row_zone = row_outer * 2.0 * _PITCH_IRREGULARITY_MULTIPLE
     first_row_top_edge = row_centres[0] - row_outer
     last_row_bottom_edge = row_centres[-1] + row_outer
 

@@ -121,6 +121,21 @@ def test_a_non_finite_box_coordinate_is_dropped_rather_than_raising(bad) -> None
     assert "non-finite bounding box" in notes[0]
 
 
+def test_a_box_whose_derived_extent_overflows_is_dropped_rather_than_raising() -> None:
+    """Codex review round 2, PR #182.
+
+    Each corner is finite, but the width overflows to infinity, which
+    VCUBTextToken refuses -- one bad detection must not fail the capture.
+    """
+
+    box = [(-1e308, 20.0), (1e308, 22.0), (1e308, 44.0), (-1e308, 42.0)]
+
+    tokens, notes = tokens_from_detections([[box, "3Mo", 0.9]])
+
+    assert tokens == ()
+    assert "degenerate bounding box" in notes[0]
+
+
 def test_a_valid_confidence_is_carried_through_exactly() -> None:
     (token,), _notes = tokens_from_detections([[_BOX, "3Mo", 1.0]])
 
