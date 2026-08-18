@@ -274,6 +274,8 @@ reprices from it, so results are always reproducible from
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import asdict
 from datetime import datetime
@@ -296,6 +298,7 @@ from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     apply_standalone_option_case_overlay,
     extract_standalone_option_case_overlay,
 )
+from shiori_pricing_lab.app.vcub_capture_review import VCUBCaptureReviewStore
 from shiori_pricing_lab.data._validation import (
     _parse_iso_date,
     _require_finite_number,
@@ -325,6 +328,7 @@ from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
 from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
     load_bloomberg_usd_sofr_par_rate_curve,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
 )
@@ -363,6 +367,8 @@ _STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/script.js": ("script.js", "application/javascript; charset=utf-8"),
+    "/vcub_capture.css": ("vcub_capture.css", "text/css; charset=utf-8"),
+    "/vcub_capture.js": ("vcub_capture.js", "application/javascript; charset=utf-8"),
 }
 
 DEFAULT_HOST = "127.0.0.1"
@@ -499,6 +505,13 @@ DEFAULT_PORT = 8765
 # process would still refuse every interim-coupon horizon, and a stale -v18
 # page would render neither.
 #
+# Bumped to -v21 for Issue #181's VCUB ATM visual-capture prototype: the
+# server gained POST /api/vcub/atm/parse, /confirm, and /reject plus the
+# Capture view's two static files. A stale -v20 process serves this
+# commit's page (which has a Capture nav item) against a route table that
+# 404s every capture route, so the view would look available and do
+# nothing.
+#
 # Bumped to -v20 for Issue #177's promotion of the Shiori Derived Forward to
 # the Black-76 default: POST /api/case and POST /api/case/bloomberg now
 # resolve the effective Forward server-side (see
@@ -511,7 +524,7 @@ DEFAULT_PORT = 8765
 # page last put in that field -- including one derived against a spot quote
 # the refresh has since replaced -- which is precisely the stale-Forward
 # failure this contract exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v20"
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v21"
 
 
 def load_base_case() -> dict:
@@ -2369,6 +2382,70 @@ def resolve_bond_advanced_profile(body: dict) -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# Issue #181 -- VCUB ATM Swaptions visual capture
+#
+# One process-wide review store. A capture lives here between the trader
+# parsing a screenshot and deciding on it, so the confirm/reject routes name
+# a capture by id and never accept one posted back by the page -- a page
+# cannot drop a blocking error on the round trip and confirm what the parser
+# refused. No route below touches ``price_standalone_option_case``, the base
+# case, or any market-data input: this is transcription plus a decision.
+# --------------------------------------------------------------------------
+
+VCUB_CAPTURE_REVIEW_STORE = VCUBCaptureReviewStore()
+
+#: An upper bound on one posted screenshot. A full-screen PNG is a few
+#: megabytes; this only stops a mis-picked file from tying up the local
+#: bridge, and is not a claim about what the parser can read.
+MAX_CAPTURE_IMAGE_BYTES = 25 * 1024 * 1024
+
+
+def parse_vcub_atm_screenshot(source_reference: str, image_base64: str) -> dict:
+    """Read one operator-supplied VCUB ATM screenshot and file it for review."""
+
+    _require_non_blank_field(source_reference, "source_reference")
+    _require_non_blank_field(image_base64, "image_base64")
+    try:
+        raw_image = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"image_base64 is not valid base64: {exc}") from exc
+    if not raw_image:
+        raise ValueError("image_base64 decoded to an empty file")
+    if len(raw_image) > MAX_CAPTURE_IMAGE_BYTES:
+        raise ValueError(
+            f"image_base64 decoded to {len(raw_image)} bytes, above the "
+            f"{MAX_CAPTURE_IMAGE_BYTES}-byte limit for one screenshot"
+        )
+    capture_id, capture, reader_notes = VCUB_CAPTURE_REVIEW_STORE.parse_image(
+        source_reference=source_reference, raw_image=raw_image
+    )
+    return {
+        "capture_id": capture_id,
+        "capture": capture.to_dict(),
+        "reader_notes": list(reader_notes),
+    }
+
+
+def review_vcub_atm_capture(capture_id: str, reviewed_by: str, *, confirm: bool) -> dict:
+    """Confirm or reject a capture already under review, on a named trader's behalf."""
+
+    _require_non_blank_field(capture_id, "capture_id")
+    _require_non_blank_field(reviewed_by, "reviewed_by")
+    store = VCUB_CAPTURE_REVIEW_STORE
+    reviewed = (
+        store.confirm(capture_id, reviewed_by=reviewed_by)
+        if confirm
+        else store.reject(capture_id, reviewed_by=reviewed_by)
+    )
+    return {"capture_id": capture_id, "capture": reviewed.to_dict()}
+
+
+def _require_non_blank_field(value: object, field_name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-blank string")
+
+
 _EXPORT_JSON_FILENAME = "shiori_standalone_option_run.json"
 _EXPORT_MARKDOWN_FILENAME = "shiori_standalone_option_run.md"
 
@@ -2638,6 +2715,67 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, payload)
 
+    def _handle_api_vcub_atm_parse(self, raw_body: bytes) -> None:
+        body = self._decoded_object(raw_body, ("source_reference", "image_base64"))
+        if body is None:
+            return
+        try:
+            payload = parse_vcub_atm_screenshot(body["source_reference"], body["image_base64"])
+        except VCUBOCRUnavailableError as exc:
+            # Not a bad request and not a crash: the workbench is simply
+            # missing its optional reader, and the message carries the one
+            # command that installs it.
+            self._write_json(501, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
+    def _handle_vcub_atm_review(self, raw_body: bytes, *, confirm: bool) -> None:
+        body = self._decoded_object(raw_body, ("capture_id", "reviewed_by"))
+        if body is None:
+            return
+        try:
+            payload = review_vcub_atm_capture(
+                body["capture_id"], body["reviewed_by"], confirm=confirm
+            )
+        except KeyError as exc:
+            self._write_json(404, {"error": str(exc.args[0])})
+            return
+        except Exception as exc:  # noqa: BLE001
+            # A refused confirmation is a normal, expected outcome -- the
+            # capture had blocking errors -- so it is a 400 with the reason
+            # verbatim, never a silent success.
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
+    def _handle_api_vcub_atm_confirm(self, raw_body: bytes) -> None:
+        self._handle_vcub_atm_review(raw_body, confirm=True)
+
+    def _handle_api_vcub_atm_reject(self, raw_body: bytes) -> None:
+        self._handle_vcub_atm_review(raw_body, confirm=False)
+
+    def _decoded_object(self, raw_body: bytes, required_keys: tuple[str, ...]) -> dict | None:
+        """Return the request body as a dict, or answer 400 and return ``None``."""
+
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return None
+        if not isinstance(body, dict) or not set(required_keys).issubset(body):
+            self._write_json(
+                400,
+                {
+                    "error": "request body must be a JSON object with "
+                    + " and ".join(f"'{key}'" for key in required_keys)
+                },
+            )
+            return None
+        return body
+
     def _handle_api_export_json(self, raw_body: bytes) -> None:
         self._handle_export(raw_body, export_current_run_as_json)
 
@@ -2655,6 +2793,9 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/bond/advanced-profile": _handle_api_bond_advanced_profile,
         "/api/bond/convention-profile/candidates": _handle_api_bond_profile_candidates,
         "/api/bloomberg/option-discount-curve": _handle_api_bloomberg_option_discount_curve,
+        "/api/vcub/atm/parse": _handle_api_vcub_atm_parse,
+        "/api/vcub/atm/confirm": _handle_api_vcub_atm_confirm,
+        "/api/vcub/atm/reject": _handle_api_vcub_atm_reject,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

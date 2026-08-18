@@ -5007,22 +5007,37 @@
     });
   }
 
+  // Issue #181 added a third view, so this is now the shell's one view
+  // router rather than a two-way toggle. It still owns nothing but
+  // visibility: each view's own module does its own loading, and learns it
+  // became visible from the `shiori:viewchange` event dispatched below
+  // rather than by being called from in here.
+  const navCapture = document.getElementById("nav-capture");
+  const viewCapture = document.getElementById("view-capture");
+
   function switchToView(view) {
     const showMarkets = view === "markets";
+    const showCapture = view === "capture";
+    const showPricing = !showMarkets && !showCapture;
     viewMarkets.hidden = !showMarkets;
-    viewPricing.hidden = showMarkets;
-    if (els.footer) els.footer.hidden = showMarkets;
+    viewPricing.hidden = !showPricing;
+    if (viewCapture) viewCapture.hidden = !showCapture;
+    // The footer's Price/Clear/Export actions are Pricing-only.
+    if (els.footer) els.footer.hidden = !showPricing;
     navMarkets.classList.toggle("active", showMarkets);
-    navPricing.classList.toggle("active", !showMarkets);
-    setPricingContextSuppressed(showMarkets);
+    navPricing.classList.toggle("active", showPricing);
+    if (navCapture) navCapture.classList.toggle("active", showCapture);
+    setPricingContextSuppressed(!showPricing);
 
     if (showMarkets && !lastSuccessfulCurve && !isLoadingCurve) {
       loadCurve();
     }
+    document.dispatchEvent(new CustomEvent("shiori:viewchange", { detail: { view } }));
   }
 
   navMarkets.addEventListener("click", () => switchToView("markets"));
   navPricing.addEventListener("click", () => switchToView("pricing"));
+  if (navCapture) navCapture.addEventListener("click", () => switchToView("capture"));
   els.refreshBtn.addEventListener("click", () => loadCurve());
 
   function formatPercent(value, digits) {

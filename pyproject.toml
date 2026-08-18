@@ -19,6 +19,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Issue #181's VCUB visual capture. Deliberately optional, not a core
+# requirement: it is the only part of the repository that needs an OCR
+# reader, and the ordinary start_shiori.bat install should stay as light as
+# it is today. rapidocr-onnxruntime is pip-only on Windows -- no system
+# installer, no administrator rights, no PATH entry, no GPU. Without this
+# extra the Capture view reports the missing reader and captures nothing;
+# every structural test in the slice still runs.
+capture = [
+  "rapidocr-onnxruntime>=1.3",
+  "pillow>=10.0",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.5",

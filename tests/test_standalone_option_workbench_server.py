@@ -110,6 +110,8 @@ def test_serves_static_prototype_files_verbatim(server_url: str) -> None:
         ("/", "index.html"),
         ("/styles.css", "styles.css"),
         ("/script.js", "script.js"),
+        ("/vcub_capture.css", "vcub_capture.css"),
+        ("/vcub_capture.js", "vcub_capture.js"),
     ):
         with urllib.request.urlopen(f"{server_url}{route}") as response:
             body = response.read()

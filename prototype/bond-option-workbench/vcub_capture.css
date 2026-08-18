@@ -1,0 +1,86 @@
+/* Capture view (Issue #181) -- Bloomberg VCUB ATM Swaptions visual capture.
+   Shiori's own visual language only: the same card/table/button components
+   the rest of the workbench uses. Nothing here imitates Bloomberg styling.
+   What is reproduced is the data topology -- Expiry down the rows, Swap
+   Tenor across the columns -- not the terminal's look. */
+
+/* #view-capture carries class `.main`, whose own `display: flex` would
+   otherwise beat the UA stylesheet's `[hidden]` rule; `.main[hidden]` in
+   styles.css already fixes that for every view. */
+
+.capture-header-card { padding: 16px 22px; }
+.capture-header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.capture-title-block { display: flex; flex-direction: column; gap: 6px; }
+.capture-title { font-size: 21px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.2px; }
+.capture-subtitle { font-size: 13px; color: var(--muted); max-width: 900px; line-height: 1.5; }
+.capture-subtitle .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.capture-header-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.capture-header-actions label.btn { cursor: pointer; }
+
+.capture-file-row { margin-top: 12px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.capture-file-row[hidden] { display: none; }
+.capture-file-name { font-size: 13px; font-weight: 600; color: var(--text-strong); word-break: break-all; }
+.capture-file-note { font-size: 12px; color: var(--muted-2); }
+
+.capture-review-card .card-body { display: flex; flex-direction: column; gap: 14px; }
+.capture-review-card .card-body[hidden] { display: none; }
+
+.capture-status-pill {
+  display: inline-flex; align-items: center; height: 24px; padding: 0 12px;
+  border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
+  background: var(--field-bg); border: 1px solid var(--field-border); color: var(--muted);
+}
+.capture-status-pill.is-blocked { background: #fff6f6; border-color: #f3c6c6; color: #b0362f; }
+.capture-status-pill.is-ready { background: var(--blue-soft-bg); border-color: #bcd3f7; color: var(--blue-soft-text); }
+.capture-status-pill.is-confirmed { background: #eefaf4; border-color: #b6e3cd; color: #17794f; }
+.capture-status-pill.is-rejected { background: #f5f6f8; border-color: var(--border-strong); color: #55607a; }
+
+.capture-blockers, .capture-warnings { border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); }
+.capture-blockers[hidden], .capture-warnings[hidden] { display: none; }
+.capture-blockers { background: #fff6f6; border-color: #f3c6c6; }
+.capture-warnings { background: #fffaf0; border-color: #f4dfa8; }
+.capture-blockers-title { font-size: 13px; font-weight: 700; color: #b0362f; margin-bottom: 6px; }
+.capture-warnings-title { font-size: 13px; font-weight: 700; color: #8a641a; margin-bottom: 6px; }
+.capture-issue-list { list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 190px; overflow-y: auto; }
+.capture-issue-list li { font-size: 12.5px; line-height: 1.5; color: #4b5563; }
+.capture-issue-list .cell { font-weight: 700; color: var(--text-strong); }
+.capture-issue-list .code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11px; color: var(--muted-2); margin-left: 6px;
+}
+
+.capture-meta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 18px; }
+.capture-meta-item { display: flex; flex-direction: column; gap: 3px; }
+.capture-meta-k { font-size: 11.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.capture-meta-v { font-size: 14px; font-weight: 600; color: var(--text-strong); word-break: break-word; }
+.capture-meta-v.is-unresolved { color: var(--muted-2); font-weight: 500; font-style: italic; }
+
+.capture-review-actions { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--border); padding-top: 14px; }
+.capture-review-by-label { font-size: 13px; color: var(--muted); }
+.capture-review-by { width: 240px; }
+.capture-review-actions .btn:last-child { margin-left: auto; }
+
+.capture-compare-card .card-body { display: flex; flex-direction: column; gap: 12px; }
+.capture-compare { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; align-items: start; }
+.capture-pane-label { font-size: 11.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.capture-shot-wrap {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--field-bg);
+  max-height: 560px; overflow: auto;
+}
+.capture-shot-wrap img { display: block; width: 100%; height: auto; }
+.capture-grid-wrap { border: 1px solid var(--border); border-radius: 10px; max-height: 560px; overflow: auto; }
+.capture-grid-table { font-variant-numeric: tabular-nums; }
+.capture-grid-table th.expiry-corner, .capture-grid-table td.expiry-label {
+  position: sticky; left: 0; background: var(--card); z-index: 1;
+  font-weight: 700; color: var(--text-strong); text-align: left;
+}
+.capture-grid-table th { position: sticky; top: 0; background: var(--card); z-index: 2; }
+.capture-grid-table th.expiry-corner { z-index: 3; }
+.capture-grid-table td.unresolved { color: #b0362f; font-style: italic; }
+
+.capture-provenance {
+  border-top: 1px solid var(--border); padding-top: 10px;
+  font-size: 12px; color: var(--muted-2); line-height: 1.7;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  word-break: break-all;
+}
