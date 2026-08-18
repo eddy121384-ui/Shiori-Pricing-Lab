@@ -46,7 +46,14 @@ operator-confirmed topic, least-assumptive form first::
         --skip-field-search --skip-yield-conversion \\
         --mktdata-security "USSNAC4 Curncy"
 
-**The five stages.**
+Stage 6 (the `//blp/instruments` lookup discovery probe) needs an
+operator-confirmed query, same least-assumptive shape::
+
+    python tools/bloomberg_vcub_field_hunter.py --case my_case.json \\
+        --skip-field-search --skip-yield-conversion \\
+        --lookup-security "USSNAC4"
+
+**The six stages.**
 
 1. *Proxy coordinate* (offline, deterministic, no Bloomberg at all). One
    already-valid standalone option case is parsed by the existing,
@@ -111,13 +118,35 @@ operator-confirmed topic, least-assumptive form first::
    `run_mktdata_subscription`'s own docstring below. This stage assigns no
    verdict either.
 
+6. *`//blp/instruments` lookup discovery probe* -- opt-in, only when
+   `--lookup-security` is supplied. Tests whether Bloomberg exposes an
+   *instrument-resolution/lookup* route for the operator-supplied query at
+   all, distinct from the reference-data and subscription routes stages
+   4/5 already probed. First audits `//blp/instruments`'s own schema via
+   the same `discover_service` introspection stage 2 already uses (opened,
+   full schema dump, every operation's own request schema); only if this
+   run's own introspection reports an operation whose *own* request schema
+   exposes a top-level `STRING` element does this stage send the query
+   through it, using exactly that element -- never a request name or field
+   this script assumed from memory or documentation. Every returned
+   security/parse-key/description is recorded verbatim (raw dump) and via
+   a best-effort field walk, both sanitized; none is promoted, renamed, or
+   asserted to be the query's resolved instrument. If `//blp/instruments`
+   does not open, or opens but no operation exposes a usable element, that
+   is reported explicitly as the feasibility answer -- never papered over
+   with a guessed request. No yellow key, suffix, or field mnemonic is
+   invented anywhere in this stage. This stage assigns no verdict either.
+
 **Deliberately not in this script.** No `sigma_vcub` -> normal yield vol
 -> price vol conversion. No Black-76, no `PRICE_VOL` contract change, no
 vol auto-fill, no surface construction, no interpolation of anything (if
 Bloomberg returns a grid, the grid is reported as a grid). No screenshot,
 OCR or UI automation. No calibration, multiplier or fudge that would make
 a candidate number "look right". No hard-coded ticker, curve id, VCUB
-coordinate or magic override. No Gilt/EUR/JPY generalization.
+coordinate or magic override. No Gilt/EUR/JPY generalization. No guessed
+yellow key, ticker suffix, or lookup field mnemonic anywhere (stage 6
+included) -- an operation/field is used only once this run's own schema
+introspection confirms it.
 
 **Separation from production.** Never imported by anything under `src/`.
 Reuses `bloomberg_curve_discovery_probe.discover_service` /
@@ -133,7 +162,12 @@ is a `//blp/refdata`/`//blp/apiflds` request/response probe, a different
 session shape entirely. It stays inside this developer-tool file rather
 than moving into `src/`, still uses `sanitize_external_text` for every
 Bloomberg-authored string it stores, and remains its own single, bounded
-`//blp/mktdata` implementation -- no second one is added elsewhere.
+`//blp/mktdata` implementation -- no second one is added elsewhere. Stage
+6 (`probe_instrument_lookup`) adds no new session framework at all: it
+reuses `discover_service` and `_send_request` unchanged, the same
+request/response shape stage 2 already established for
+`//blp/apiflds`/`//blp/refdata` -- `//blp/instruments` is simply a third
+service URI sent through that same proven plumbing.
 """
 
 from __future__ import annotations
@@ -914,7 +948,7 @@ class MktdataSubscriptionReport:
     blocker_note: str
 
 
-def _mktdata_message_fields(message) -> tuple[tuple[str, str | None], ...]:
+def _message_top_level_fields(message) -> tuple[tuple[str, str | None], ...]:
     """Top-level `(name, value)` pairs off one message's own element tree.
 
     Walks `message.asElement()`'s own `numElements()`/`getElement(index)` --
@@ -925,6 +959,12 @@ def _mktdata_message_fields(message) -> tuple[tuple[str, str | None], ...]:
     `str()` dump rather than a guessed scalar, so nothing is silently
     collapsed or misrepresented. Never raises: a shape this SDK version
     cannot walk this way just yields fewer fields, never a lost message.
+
+    Shared between stage 5 (`//blp/mktdata`) and stage 6
+    (`//blp/instruments`) -- both receive a Bloomberg response/event message
+    whose exact field shape is not something this repo has confirmed live,
+    so both read it the same field-agnostic way rather than each guessing
+    its own.
     """
 
     try:
@@ -1046,7 +1086,7 @@ def _run_mktdata_subscription_session(
                         event_type=event_type_name,
                         message_type=_safe_str(msg.messageType()) or "",
                         correlation_id=correlation_id_str,
-                        fields=_mktdata_message_fields(msg),
+                        fields=_message_top_level_fields(msg),
                         raw_dump=_safe_str(msg),
                     )
                 )
@@ -1195,6 +1235,222 @@ def run_mktdata_subscription(
     )
 
 
+# --- stage 6: //blp/instruments lookup discovery probe -------------------------------
+
+_INSTRUMENTS_SERVICE = "//blp/instruments"
+
+# A lookup service should expose very few operations; this is a sanity cap
+# against an unexpectedly large schema, not a brute-force search -- the same
+# no-blind-sweep principle as stage 4's MAX_CANDIDATE_PROBES.
+MAX_LOOKUP_OPERATION_ATTEMPTS = 5
+
+
+@dataclass(frozen=True)
+class InstrumentLookupAttempt:
+    """One (operation, request element) pair this run's own schema
+    introspection confirmed, and what Bloomberg returned for it."""
+
+    operation_name: str
+    request_element_used: str
+    status: str  # "sent" | "error"
+    error: str | None
+    raw_response_dump: str | None
+    top_level_fields: tuple[tuple[str, str | None], ...]
+
+
+@dataclass(frozen=True)
+class InstrumentLookupReport:
+    service_uri: str
+    query: str
+    service_opened: bool
+    open_error: str | None
+    full_schema_dump: str | None
+    operations_found: tuple[str, ...]
+    capability_confirmed: bool
+    attempts: tuple[InstrumentLookupAttempt, ...]
+    blocker_note: str
+
+
+def probe_instrument_lookup(
+    query: str,
+    service_uri: str = _INSTRUMENTS_SERVICE,
+    discover_service_fn=None,
+    send_request=_send_request,
+) -> InstrumentLookupReport:
+    """Audit `service_uri`'s own schema, then query it -- only if this run's own
+    introspection confirms a usable lookup operation.
+
+    Issue #179's remaining hypothesis after stages 4/5: is there a Bloomberg
+    *instrument-resolution/lookup* route for the operator-confirmed VCUB
+    cell ticker at all, distinct from the reference-data and subscription
+    routes already probed? `//blp/instruments` is Bloomberg's own
+    documented instrument-lookup service endpoint -- referencing it by name
+    is no more a guess than this file already referencing
+    `//blp/refdata`/`//blp/apiflds`/`//blp/mktdata` by name elsewhere. What
+    this function refuses to guess is *which request and field* to send
+    `query` through: it reuses
+    `bloomberg_curve_discovery_probe.discover_service`'s own schema
+    introspection (the same helper stage 2 already uses, gated the same
+    way) to read every operation this run's own `//blp/instruments`
+    actually reports, and sends `query` only through an operation whose
+    *own request schema* -- not this script's memory of Bloomberg's
+    documentation -- exposes a top-level `STRING` element. No yellow key,
+    suffix, or field mnemonic is invented anywhere in this function.
+
+    If the service does not open, or opens but no operation exposes a
+    usable top-level string element, `capability_confirmed` is `False` and
+    `attempts` is empty -- an explicit, reported "no suitable lookup
+    operation" outcome, never a fallback guess. Every returned
+    security/parse-key/description Bloomberg sends back is recorded
+    verbatim (raw dump) and via a best-effort field walk, both sanitized;
+    none is promoted, renamed, or asserted to be the query's resolved form.
+
+    Raises `ValueError` if `query` is blank (no query is ever guessed) or
+    if an unexpectedly large operation list would turn this into a blind
+    sweep, and `ImportError` if `blpapi` is not installed.
+    """
+
+    if not query or not query.strip():
+        raise ValueError(
+            "probe_instrument_lookup needs an operator-supplied query -- "
+            "none is guessed by this script"
+        )
+
+    discover_service_fn = discover_service_fn or discover_service
+    evidence = discover_service_fn(service_uri)
+
+    if not evidence.opened:
+        return InstrumentLookupReport(
+            service_uri=service_uri,
+            query=query,
+            service_opened=False,
+            open_error=sanitize_external_text(evidence.open_error),
+            full_schema_dump=sanitize_external_text(evidence.full_schema_dump),
+            operations_found=(),
+            capability_confirmed=False,
+            attempts=(),
+            blocker_note=(
+                f"{service_uri} did not open on this run ({evidence.open_error!r}) -- no "
+                "lookup operation could be probed. This is the explicit feasibility "
+                "answer Issue #179 asked for, not a fallback to a guessed request."
+            ),
+        )
+
+    operations_found = tuple(op.name for op in evidence.operations)
+    usable_operations = [op for op in evidence.operations if op.candidate_string_elements]
+
+    if not usable_operations:
+        return InstrumentLookupReport(
+            service_uri=service_uri,
+            query=query,
+            service_opened=True,
+            open_error=None,
+            full_schema_dump=sanitize_external_text(evidence.full_schema_dump),
+            operations_found=operations_found,
+            capability_confirmed=False,
+            attempts=(),
+            blocker_note=(
+                f"This run's own introspection of {service_uri} found "
+                f"{len(operations_found)} operation(s) ({', '.join(operations_found) or 'none'}) "
+                "but none exposed a top-level STRING request element this probe could use "
+                "without guessing one; nothing was queried. Read full_schema_dump by hand "
+                "before concluding this workstation's Desktop API genuinely has no lookup "
+                "route -- the structured operation walk here is best-effort, exactly like "
+                "stage 2's own field search."
+            ),
+        )
+
+    if len(usable_operations) > MAX_LOOKUP_OPERATION_ATTEMPTS:
+        raise ValueError(
+            f"{service_uri} reported {len(usable_operations)} operations with a usable "
+            f"string element, above the {MAX_LOOKUP_OPERATION_ATTEMPTS}-attempt sanity cap "
+            "-- refusing rather than probing all of them blind"
+        )
+
+    attempts: list[InstrumentLookupAttempt] = []
+    for operation in usable_operations:
+        element = operation.candidate_string_elements[0]
+
+        def _configure(request, _element=element, _query=query) -> None:
+            try:
+                request.set(_element, _query)
+            except Exception:  # noqa: BLE001
+                request.append(_element, _query)
+
+        raw_messages: list = []
+
+        def _collect(message, _raw=raw_messages) -> None:
+            _raw.append(message)
+
+        try:
+            send_request(
+                service_uri=service_uri,
+                request_name=operation.name,
+                configure=_configure,
+                collect=_collect,
+                context=f"{operation.name}({element}={query!r})",
+            )
+        except (RuntimeError, ImportError) as exc:
+            attempts.append(
+                InstrumentLookupAttempt(
+                    operation_name=operation.name,
+                    request_element_used=element,
+                    status="error",
+                    error=sanitize_external_text(str(exc)),
+                    raw_response_dump=None,
+                    top_level_fields=(),
+                )
+            )
+            continue
+
+        if not raw_messages:
+            # The operation was sent to, cleanly -- it just answered with no
+            # messages. Recorded explicitly rather than silently vanishing.
+            attempts.append(
+                InstrumentLookupAttempt(
+                    operation_name=operation.name,
+                    request_element_used=element,
+                    status="sent",
+                    error=None,
+                    raw_response_dump=None,
+                    top_level_fields=(),
+                )
+            )
+            continue
+
+        for message in raw_messages:
+            attempts.append(
+                InstrumentLookupAttempt(
+                    operation_name=operation.name,
+                    request_element_used=element,
+                    status="sent",
+                    error=None,
+                    raw_response_dump=sanitize_external_text(_safe_str(message)),
+                    top_level_fields=tuple(
+                        (name, sanitize_external_text(value))
+                        for name, value in _message_top_level_fields(message)
+                    ),
+                )
+            )
+
+    return InstrumentLookupReport(
+        service_uri=service_uri,
+        query=query,
+        service_opened=True,
+        open_error=None,
+        full_schema_dump=sanitize_external_text(evidence.full_schema_dump),
+        operations_found=operations_found,
+        capability_confirmed=True,
+        attempts=tuple(attempts),
+        blocker_note=(
+            "This probe assigns no verdict and promotes no result. Every returned "
+            "security/parse-key/description above is Bloomberg's own text, verbatim and "
+            "sanitized; which one (if any) resolves the operator-supplied query is Eddy's "
+            "judgment on this evidence, not a claim this script makes."
+        ),
+    )
+
+
 # --- report -------------------------------------------------------------------------
 
 
@@ -1313,6 +1569,8 @@ def build_report(
     kproxy: KproxyResolution,
     mktdata: MktdataSubscriptionReport | None = None,
     mktdata_error: str | None = None,
+    instrument_lookup: InstrumentLookupReport | None = None,
+    instrument_lookup_error: str | None = None,
 ) -> dict:
     return {
         "generated_at": generated_at,
@@ -1383,6 +1641,32 @@ def build_report(
             }
         ),
         "mktdata_subscription_error": mktdata_error,
+        "instrument_lookup": (
+            None
+            if instrument_lookup is None
+            else {
+                "service_uri": instrument_lookup.service_uri,
+                "query": instrument_lookup.query,
+                "service_opened": instrument_lookup.service_opened,
+                "open_error": instrument_lookup.open_error,
+                "full_schema_dump": instrument_lookup.full_schema_dump,
+                "operations_found": list(instrument_lookup.operations_found),
+                "capability_confirmed": instrument_lookup.capability_confirmed,
+                "attempts": [
+                    {
+                        "operation_name": attempt.operation_name,
+                        "request_element_used": attempt.request_element_used,
+                        "status": attempt.status,
+                        "error": attempt.error,
+                        "raw_response_dump": attempt.raw_response_dump,
+                        "top_level_fields": [list(pair) for pair in attempt.top_level_fields],
+                    }
+                    for attempt in instrument_lookup.attempts
+                ],
+                "blocker_note": instrument_lookup.blocker_note,
+            }
+        ),
+        "instrument_lookup_error": instrument_lookup_error,
         "verdict": None,
         "verdict_note": (
             "This script does not assign Issue #179's DIRECT ROUTE FOUND / PARTIAL / "
@@ -1567,6 +1851,65 @@ def render_markdown(data: dict) -> str:
         lines.append(mktdata["blocker_note"])
         lines.append("")
 
+    lookup = data["instrument_lookup"]
+    lines.append("## //blp/instruments lookup discovery probe (operator-supplied query only)")
+    lines.append("")
+    if data["instrument_lookup_error"]:
+        lines.append(f"Error: {data['instrument_lookup_error']}")
+        lines.append("")
+    if lookup is None:
+        lines.append("(not run)")
+        lines.append("")
+    else:
+        lines.append(f"Service: `{lookup['service_uri']}` -- Query: `{lookup['query']}`")
+        lines.append(f"Service opened this run: {lookup['service_opened']}")
+        if lookup["open_error"]:
+            lines.append(f"Open error: {lookup['open_error']}")
+        found_operations = ", ".join(f"`{o}`" for o in lookup["operations_found"])
+        lines.append("Operations found: " + (found_operations or "(none)"))
+        lines.append(f"Lookup capability confirmed this run: {lookup['capability_confirmed']}")
+        lines.append("")
+        if not lookup["attempts"]:
+            lines.append("(no operation was queried)")
+            lines.append("")
+        else:
+            lines.append("| Operation | Element used | Status | Fields returned |")
+            lines.append("|---|---|---|---|")
+            for attempt in lookup["attempts"]:
+                fields = (
+                    ", ".join(f"{n}={v}" for n, v in attempt["top_level_fields"])
+                    or (attempt["error"] or "(none)")
+                )
+                lines.append(
+                    f"| `{attempt['operation_name']}` | `{attempt['request_element_used']}` | "
+                    f"{attempt['status']} | {fields} |"
+                )
+            lines.append("")
+            for attempt in lookup["attempts"]:
+                if attempt["raw_response_dump"]:
+                    lines.append(
+                        f"<details><summary>Raw response -- "
+                        f"{attempt['operation_name']}</summary>"
+                    )
+                    lines.append("")
+                    lines.append("```")
+                    lines.append(attempt["raw_response_dump"])
+                    lines.append("```")
+                    lines.append("")
+                    lines.append("</details>")
+                    lines.append("")
+        lines.append(lookup["blocker_note"])
+        lines.append("")
+        if lookup["full_schema_dump"]:
+            lines.append("<details><summary>Full //blp/instruments schema dump</summary>")
+            lines.append("")
+            lines.append("```")
+            lines.append(lookup["full_schema_dump"])
+            lines.append("```")
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
     lines.append("## Verdict")
     lines.append("")
     lines.append(data["verdict_note"])
@@ -1715,6 +2058,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_MKTDATA_MESSAGE_CAP,
         help=f"Stage 5 hard message-count cap (default: {DEFAULT_MKTDATA_MESSAGE_CAP})",
     )
+    parser.add_argument(
+        "--lookup-security",
+        default=None,
+        help=(
+            "Stage 6: operator-supplied query for the //blp/instruments lookup discovery "
+            "probe (e.g. 'USSNAC4'). Never guessed by this tool -- omit to skip stage 6 "
+            "entirely"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1803,6 +2155,16 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError as exc:
             mktdata_error = f"blpapi is not installed ({exc})"
 
+    instrument_lookup: InstrumentLookupReport | None = None
+    instrument_lookup_error: str | None = None
+    if args.lookup_security:
+        try:
+            instrument_lookup = probe_instrument_lookup(args.lookup_security)
+        except ValueError as exc:
+            instrument_lookup_error = str(exc)
+        except ImportError as exc:
+            instrument_lookup_error = f"blpapi is not installed ({exc})"
+
     data = build_report(
         generated_at=_utc_now(),
         coordinate=coordinate,
@@ -1813,6 +2175,8 @@ def main(argv: list[str] | None = None) -> int:
         kproxy=kproxy,
         mktdata=mktdata,
         mktdata_error=mktdata_error,
+        instrument_lookup=instrument_lookup,
+        instrument_lookup_error=instrument_lookup_error,
     )
     output_dir = Path(args.output_dir) if args.output_dir else Path.cwd() / DEFAULT_OUTPUT_DIRNAME
     markdown_path, json_path = write_report(data, output_dir)
@@ -1832,6 +2196,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"mktdata subscription ({mktdata.topic!r}): {mktdata.outcome}")
     if mktdata_error:
         print(f"mktdata subscription error: {mktdata_error}")
+    if instrument_lookup is not None:
+        print(
+            f"instrument lookup ({instrument_lookup.query!r}): "
+            f"capability_confirmed={instrument_lookup.capability_confirmed}, "
+            f"{len(instrument_lookup.attempts)} attempt(s)"
+        )
+    if instrument_lookup_error:
+        print(f"instrument lookup error: {instrument_lookup_error}")
     print("")
     print("Full report (paste back or attach either file):")
     print(f"  {markdown_path.resolve()}")

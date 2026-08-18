@@ -28,7 +28,15 @@ Bloomberg value is pinned as regression truth anywhere. They prove:
    produces an explicit `timeout_no_data` result rather than silence, obeys
    its hard message cap even if the session layer overshoots it, and always
    unsubscribes/stops the session -- including on a subscribe-time
-   rejection and mid-loop.
+   rejection and mid-loop;
+8. stage 6's `//blp/instruments` lookup discovery probe never fires
+   without an operator-supplied query, only sends a request through an
+   operation and element *this run's own schema introspection* confirmed
+   (never a hardcoded request name or field), reports an explicit
+   "no suitable lookup operation" outcome when the service does not open
+   or exposes none, records every returned field verbatim and unranked,
+   sanitizes every string, and refuses a blind sweep above its operation
+   cap.
 
 Stages 1-4 need no `blpapi` faking at all: every seam
 (`send_request`/`discover_service_fn`/`describe`/`probe`) is injectable,
@@ -38,6 +46,10 @@ way via its own `session_runner` seam; its session-touching internals
 (`_run_mktdata_subscription_session`) are tested against a fake `blpapi`
 installed into `sys.modules`, the same technique
 `tests/test_bloomberg_dapi_probe.py` already uses for `_send_request`.
+Stage 6 (`probe_instrument_lookup`) needs no `blpapi` faking either -- it
+reuses stage 2's own `discover_service_fn`/`send_request` seams, so a fake
+`ServiceEvidence`/`OperationEvidence` pair and a fake `send_request` are
+enough, mirroring `test_field_search_marks_records_only_by_literal_bloomberg_text`.
 """
 
 from __future__ import annotations
@@ -61,12 +73,14 @@ from bloomberg_dapi_probe import FieldDescription, ProbeFieldResult  # noqa: E40
 from bloomberg_vcub_field_hunter import (  # noqa: E402
     DEFAULT_VCUB_SEARCH_TERMS,
     MAX_CANDIDATE_PROBES,
+    MAX_LOOKUP_OPERATION_ATTEMPTS,
     ProxyCoordinate,
     build_report,
     derive_proxy_coordinate,
     hunt_vol_fields,
     main,
     probe_candidate_values,
+    probe_instrument_lookup,
     probe_yield_conversion,
     render_json,
     render_markdown,
@@ -1319,3 +1333,429 @@ def test_existing_refdata_discovery_behavior_is_unchanged_by_stage_5():
         ],
     )
     assert yield_moneyness_by_field(report) == {"YAS_BOND_YLD": pytest.approx(0.0)}
+
+
+# --- stage 6: //blp/instruments lookup discovery probe -------------------------------
+#
+# `probe_instrument_lookup` reuses stage 2's own seams
+# (`discover_service_fn`/`send_request`) -- no new fake `blpapi` machinery
+# needed. A tiny element-tree fake message (mirroring stage 5's
+# `_FakeMktdataScalarElement`/`_FakeMktdataMessageElement`) stands in for
+# whatever Bloomberg's own `//blp/instruments` response shape turns out to
+# be, since that shape has no live confirmation in this repo yet.
+
+_INSTRUMENTS = "//blp/instruments"
+
+
+def _instruments_service(
+    *, opened: bool = True, operations: tuple[OperationEvidence, ...] = ()
+) -> ServiceEvidence:
+    return ServiceEvidence(
+        service_uri=_INSTRUMENTS,
+        opened=opened,
+        open_error=None if opened else "could not open",
+        full_schema_dump="instruments schema",
+        operations=operations,
+        operation_list_error=None,
+    )
+
+
+class _FakeLookupScalarElement:
+    def __init__(self, name, value):
+        self._name = name
+        self._value = value
+
+    def name(self):
+        return self._name
+
+    def numElements(self):
+        return 0
+
+    def numValues(self):
+        return 1
+
+    def getValueAsString(self):
+        return self._value
+
+    def __str__(self):
+        return f"{self._name}={self._value}"
+
+
+class _FakeLookupMessageElement:
+    def __init__(self, fields):
+        self._fields = fields
+
+    def numElements(self):
+        return len(self._fields)
+
+    def getElement(self, index):
+        return self._fields[index]
+
+
+class _FakeLookupMessage:
+    def __init__(self, fields, dump="<raw lookup response>"):
+        self._fields = fields
+        self._dump = dump
+
+    def asElement(self):
+        return _FakeLookupMessageElement(
+            [_FakeLookupScalarElement(name, value) for name, value in self._fields]
+        )
+
+    def __str__(self):
+        return self._dump
+
+
+def test_lookup_refuses_a_blank_query_without_touching_discover_service():
+    called = []
+
+    def _discover(uri):
+        called.append(uri)
+        return _instruments_service(opened=False)
+
+    with pytest.raises(ValueError, match="operator-supplied query"):
+        probe_instrument_lookup("   ", discover_service_fn=_discover)
+
+    assert called == []
+
+
+def test_lookup_reports_explicitly_when_the_service_does_not_open():
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(opened=False),
+        send_request=lambda **k: pytest.fail("must not send a request; the service didn't open"),
+    )
+
+    assert report.capability_confirmed is False
+    assert report.service_opened is False
+    assert report.attempts == ()
+    assert "did not open" in report.blocker_note
+
+
+def test_lookup_reports_explicitly_when_no_operation_exposes_a_usable_element():
+    operations = (
+        OperationEvidence(
+            name="SomeOtherOperation",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=(),
+        ),
+    )
+
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(operations=operations),
+        send_request=lambda **k: pytest.fail("must not send a request with no usable element"),
+    )
+
+    assert report.capability_confirmed is False
+    assert report.operations_found == ("SomeOtherOperation",)
+    assert report.attempts == ()
+    assert "no lookup operation was guessed" not in report.blocker_note  # sanity: no such claim
+    assert "without guessing one" in report.blocker_note
+
+
+def test_lookup_sends_the_query_through_the_confirmed_operation_and_element():
+    operations = (
+        OperationEvidence(
+            name="instrumentListRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+    )
+
+    sent = {}
+
+    def _send_request(*, service_uri, request_name, configure, collect, context):
+        assert service_uri == _INSTRUMENTS
+        assert request_name == "instrumentListRequest"
+
+        class _Req:
+            def __init__(self):
+                self.values = {}
+
+            def set(self, name, value):
+                self.values[name] = value
+
+        request = _Req()
+        configure(request)
+        sent["request"] = request.values
+        collect(
+            _FakeLookupMessage(
+                [("security", "USSNAC4 BGN Curncy"), ("description", "US SOFR swaption vol")]
+            )
+        )
+
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(operations=operations),
+        send_request=_send_request,
+    )
+
+    assert sent["request"] == {"query": "USSNAC4"}
+    assert report.capability_confirmed is True
+    assert len(report.attempts) == 1
+    attempt = report.attempts[0]
+    assert attempt.operation_name == "instrumentListRequest"
+    assert attempt.request_element_used == "query"
+    assert attempt.status == "sent"
+    # Fields are Bloomberg's own, verbatim and in the order returned -- not
+    # reordered, filtered, or promoted because one looks like a resolved ticker.
+    assert attempt.top_level_fields == (
+        ("security", "USSNAC4 BGN Curncy"),
+        ("description", "US SOFR swaption vol"),
+    )
+
+
+def test_lookup_records_an_operation_that_answers_with_no_messages():
+    operations = (
+        OperationEvidence(
+            name="instrumentListRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+    )
+
+    def _send_request(*, service_uri, request_name, configure, collect, context):
+        pass  # Bloomberg answered with zero messages -- not an error.
+
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(operations=operations),
+        send_request=_send_request,
+    )
+
+    assert len(report.attempts) == 1
+    assert report.attempts[0].status == "sent"
+    assert report.attempts[0].raw_response_dump is None
+    assert report.attempts[0].top_level_fields == ()
+
+
+def test_lookup_records_a_request_error_without_raising():
+    operations = (
+        OperationEvidence(
+            name="instrumentListRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+    )
+
+    def _send_request(**kwargs):
+        raise RuntimeError("Bloomberg DAPI request timed out")
+
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(operations=operations),
+        send_request=_send_request,
+    )
+
+    assert report.capability_confirmed is True
+    assert report.attempts[0].status == "error"
+    assert "timed out" in report.attempts[0].error
+
+
+def test_lookup_probes_every_usable_operation_independently():
+    operations = (
+        OperationEvidence(
+            name="OpA",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+        OperationEvidence(
+            name="OpB",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("searchText",),
+        ),
+    )
+
+    def _send_request(*, service_uri, request_name, configure, collect, context):
+        class _Req:
+            def set(self, name, value):
+                pass
+
+        configure(_Req())
+        collect(_FakeLookupMessage([("op", request_name)]))
+
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: _instruments_service(operations=operations),
+        send_request=_send_request,
+    )
+
+    assert [a.operation_name for a in report.attempts] == ["OpA", "OpB"]
+    assert [a.request_element_used for a in report.attempts] == ["query", "searchText"]
+
+
+def test_lookup_refuses_a_blind_sweep_above_the_operation_cap():
+    operations = tuple(
+        OperationEvidence(
+            name=f"Op{i}",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        )
+        for i in range(MAX_LOOKUP_OPERATION_ATTEMPTS + 1)
+    )
+
+    with pytest.raises(ValueError, match="sanity cap"):
+        probe_instrument_lookup(
+            "USSNAC4",
+            discover_service_fn=lambda uri: _instruments_service(operations=operations),
+            send_request=lambda **k: pytest.fail("must not fire above the cap"),
+        )
+
+
+def test_lookup_sanitizes_open_error():
+    report = probe_instrument_lookup(
+        "USSNAC4",
+        discover_service_fn=lambda uri: ServiceEvidence(
+            service_uri=_INSTRUMENTS,
+            opened=False,
+            open_error="connection refused by host=TRADER-PC01",
+            full_schema_dump=None,
+            operations=(),
+            operation_list_error=None,
+        ),
+        send_request=lambda **k: pytest.fail("must not send a request; the service didn't open"),
+    )
+
+    assert report.open_error is not None
+    assert "TRADER-PC01" not in report.open_error
+
+
+def test_lookup_sanitizes_schema_dump_and_returned_fields():
+    operations = (
+        OperationEvidence(
+            name="instrumentListRequest",
+            description=None,
+            request_schema=None,
+            response_schemas=(),
+            candidate_string_elements=("query",),
+        ),
+    )
+
+    def _discover(uri):
+        return ServiceEvidence(
+            service_uri=_INSTRUMENTS,
+            opened=True,
+            open_error=None,
+            full_schema_dump="schema from host=TRADER-PC01",
+            operations=operations,
+            operation_list_error=None,
+        )
+
+    def _send_request(*, service_uri, request_name, configure, collect, context):
+        class _Req:
+            def set(self, name, value):
+                pass
+
+        configure(_Req())
+        collect(
+            _FakeLookupMessage(
+                [("description", r"served from \\TRADER-PC01\share\lookup.csv")],
+                dump="dump from host=TRADER-PC01",
+            )
+        )
+
+    report = probe_instrument_lookup(
+        "USSNAC4", discover_service_fn=_discover, send_request=_send_request
+    )
+
+    assert "TRADER-PC01" not in report.full_schema_dump
+    assert "TRADER-PC01" not in report.attempts[0].top_level_fields[0][1]
+    assert "TRADER-PC01" not in report.attempts[0].raw_response_dump
+
+
+def test_lookup_does_not_run_unless_the_operator_supplies_a_query(tmp_path):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    def _never(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("probe_instrument_lookup must not fire without --lookup-security")
+
+    original = module.probe_instrument_lookup
+    module.probe_instrument_lookup = _never
+    try:
+        exit_code = main(
+            [
+                "--case",
+                str(case_path),
+                "--skip-field-search",
+                "--skip-yield-conversion",
+                "--output-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+    finally:
+        module.probe_instrument_lookup = original
+
+    assert exit_code == 0
+    written = json.loads((tmp_path / "out" / "bloomberg_vcub_field_hunter.json").read_text("utf-8"))
+    assert written["instrument_lookup"] is None
+    assert written["instrument_lookup_error"] is None
+
+
+def test_lookup_cli_wires_the_operator_supplied_query_through(tmp_path, monkeypatch):
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_CASE), encoding="utf-8")
+
+    captured = {}
+
+    def _fake_probe_instrument_lookup(query):
+        captured["query"] = query
+        return module.InstrumentLookupReport(
+            service_uri=_INSTRUMENTS,
+            query=query,
+            service_opened=True,
+            open_error=None,
+            full_schema_dump=None,
+            operations_found=("instrumentListRequest",),
+            capability_confirmed=True,
+            attempts=(),
+            blocker_note="no verdict",
+        )
+
+    monkeypatch.setattr(module, "probe_instrument_lookup", _fake_probe_instrument_lookup)
+
+    exit_code = main(
+        [
+            "--case",
+            str(case_path),
+            "--skip-field-search",
+            "--skip-yield-conversion",
+            "--lookup-security",
+            "USSNAC4",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {"query": "USSNAC4"}
+    written = json.loads((tmp_path / "out" / "bloomberg_vcub_field_hunter.json").read_text("utf-8"))
+    assert written["instrument_lookup"]["query"] == "USSNAC4"
+    assert written["instrument_lookup"]["capability_confirmed"] is True
+
+
+def test_existing_behavior_is_unchanged_by_stage_6():
+    """A guardrail, not new coverage: stages 1-5 must not shift when stage 6 is added."""
+
+    coordinate = _coordinate()
+    assert coordinate.forward_settlement_date == "2026-10-01"
+
+    report = run_mktdata_subscription(
+        "USSNAC4 Curncy", session_runner=lambda *a: ([], None)
+    )
+    assert report.outcome == "timeout_no_data"
