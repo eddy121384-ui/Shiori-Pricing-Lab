@@ -591,7 +591,17 @@ def parse_vcub_atm_tokens(
     # confirmable. Since ``_check_pitch_regularity`` has already refused
     # anything wider than ``narrowest * _PITCH_IRREGULARITY_MULTIPLE``, that
     # product is exactly the furthest a legitimate next row could sit.
-    missing_row_zone = row_outer * 2.0 * _PITCH_IRREGULARITY_MULTIPLE
+    # With a single resolved row there is no pitch to measure at all:
+    # ``_band_edges`` falls back to the surviving label's own height, which no
+    # invariant relates to the missing row's spacing, so a window derived from
+    # it can stop short of an orphaned row and wave a whole row away (Codex
+    # review round 4, PR #182). When the pitch is unmeasurable the row axis
+    # therefore adopts the column axis's rule instead -- refuse a stray number
+    # at any distance -- rather than trusting a window it cannot size.
+    row_pitch_is_measurable = len(row_centres) > 1
+    missing_row_zone = (
+        row_outer * 2.0 * _PITCH_IRREGULARITY_MULTIPLE if row_pitch_is_measurable else None
+    )
     first_row_top_edge = row_centres[0] - row_outer
     last_row_bottom_edge = row_centres[-1] + row_outer
 
@@ -616,7 +626,7 @@ def parse_vcub_atm_tokens(
             # table is ignored, but a *number* sitting exactly where the
             # next row would be is the signature of a dropped edge label,
             # not chrome, so it fails the capture closed.
-            near_a_missing_edge_row = (
+            near_a_missing_edge_row = missing_row_zone is None or (
                 first_row_top_edge - missing_row_zone
                 <= token.y_center
                 <= last_row_bottom_edge + missing_row_zone

@@ -567,11 +567,38 @@ def test_a_dropped_middle_label_on_a_three_row_axis_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("dropped_row", [0, 1])
-def test_a_dropped_label_on_a_two_row_axis_fails_closed(dropped_row: int) -> None:
-    """Two rows leave one pitch that no regularity check has vetted; the
-    edge-row window still catches the orphaned values."""
+@pytest.mark.parametrize("pitch", [_ROW_PITCH, 100.0, 400.0])
+def test_a_dropped_label_on_a_two_row_axis_fails_closed(
+    dropped_row: int, pitch: float
+) -> None:
+    """Losing one of two rows leaves a single centre and no measurable pitch.
 
-    capture = parse(_short_axis_tokens(2, dropped_row))
+    Codex review round 4, PR #182: an earlier version of this test used only
+    the canonical spacing and passed for the wrong reason -- 28px happens to
+    fit inside the window ``_band_edges`` derives from the surviving label's
+    own *height*, which no invariant ties to the missing row's spacing. At a
+    wider pitch the orphaned row fell outside that window and a one-row grid
+    was confirmable. The wide cases are the ones that matter here.
+    """
+
+    tokens = metadata_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(TENOR_LABELS):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index in range(2):
+        row_y = _FIRST_ROW_Y + row_index * pitch
+        if row_index != dropped_row:
+            tokens.append(_token(EXPIRY_LABELS[row_index], _ANCHOR_X + 14.0, row_y))
+        for column_index in range(len(TENOR_LABELS)):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    row_y,
+                )
+            )
+
+    capture = parse(tokens)
 
     assert "NUMERIC_TOKEN_OUTSIDE_ROWS" in codes(capture.blocking_errors)
     assert not capture.can_confirm

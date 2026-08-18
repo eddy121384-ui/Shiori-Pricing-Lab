@@ -162,6 +162,45 @@ def test_a_pending_capture_slot_is_still_reused_by_re_reading_the_same_image(
     assert len(store) == 1
 
 
+def test_two_clients_parsing_one_image_never_share_a_review_slot(monkeypatch) -> None:
+    """Codex review round 4, PR #182.
+
+    Two clients reading the same image in the same second used to share an
+    id, and the later store replaced the capture the first client was still
+    looking at -- so that client's Confirm applied to OCR output and
+    provenance it never saw. The reads run outside the lock and even the
+    filename may differ, so the two captures can genuinely disagree.
+    """
+
+    reads = iter(
+        [
+            tuple(canonical_tokens()),
+            tuple(canonical_tokens()[:-1]),  # the second read lost a cell
+        ]
+    )
+    monkeypatch.setattr(
+        review_module,
+        "read_tokens_from_image_bytes",
+        lambda raw_image, *, engine=None, **kwargs: (next(reads), ()),
+    )
+    store = VCUBCaptureReviewStore()
+
+    first_id, first, _ = store.parse_image(
+        source_reference="clientA.png", raw_image=_IMAGE, captured_at=_CAPTURED_AT
+    )
+    second_id, second, _ = store.parse_image(
+        source_reference="clientB.png", raw_image=_IMAGE, captured_at=_CAPTURED_AT
+    )
+
+    assert first_id != second_id
+    confirmed = store.confirm(first_id, reviewed_by="ClientA", reviewed_at=_REVIEWED_AT)
+    assert confirmed.grid == first.grid
+    assert confirmed.provenance.source_reference == "clientA.png"
+    assert store.get(second_id).review_status is VCUBCaptureStatus.PENDING_REVIEW
+    assert store.get(second_id).provenance.source_reference == "clientB.png"
+    assert second.provenance.source_reference == "clientB.png"
+
+
 def test_a_concurrent_confirm_and_reject_cannot_both_be_accepted(stub_reader) -> None:
     """Codex review round 3, PR #182.
 

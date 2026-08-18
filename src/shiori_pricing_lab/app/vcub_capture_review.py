@@ -32,10 +32,7 @@ from collections import OrderedDict
 from datetime import UTC, datetime
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
-from shiori_pricing_lab.data.bloomberg_vcub_capture import (
-    VCUBATMCapture,
-    VCUBCaptureStatus,
-)
+from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     build_capture_provenance,
     read_tokens_from_image_bytes,
@@ -103,27 +100,41 @@ class VCUBCaptureReviewStore:
         tokens, reader_notes = read_tokens_from_image_bytes(raw_image, engine=engine)
         capture = parse_vcub_atm_tokens(tokens, provenance=provenance)
         with self._lock:
-            identifier = self._free_identifier(provenance.source_image_sha256, captured_at)
+            identifier = self._free_identifier(
+                provenance.source_image_sha256, captured_at, capture
+            )
             self._store_locked(identifier, capture)
         return identifier, capture, reader_notes
 
-    def _free_identifier(self, source_image_sha256: str, captured_at: str) -> str:
-        """An id for this read that will not overwrite an already-decided capture.
+    def _free_identifier(
+        self, source_image_sha256: str, captured_at: str, capture: VCUBATMCapture
+    ) -> str:
+        """An id for this read that cannot displace a capture someone else holds.
 
-        Re-reading the same file in the same second normally reuses its
-        review slot, which keeps a re-parse from leaving an orphan behind.
-        That is only safe while the slot is still pending: a slot holding a
-        confirmed or rejected capture must keep it, or a re-parse would
-        silently reset a terminal decision and let the same capture be
-        reviewed twice (Codex review round 3, PR #182). A decided slot
-        therefore yields a distinct identity instead.
+        Re-reading the same file in the same second reuses its review slot,
+        which keeps a re-parse from leaving an orphan behind. That is only
+        safe when the slot holds *exactly* this capture:
+
+        * a decided capture must keep its slot, or a re-parse would silently
+          reset a terminal decision and let the same capture be reviewed
+          twice (round 3);
+        * a *pending* capture must too, unless the new read is identical to
+          it. Two clients parsing the same image in the same second otherwise
+          share one id, and the later store replaces the capture the first
+          client is still looking at -- so that client's Confirm would apply
+          to OCR output and provenance it never saw (round 4). The reads run
+          outside the lock and even ``source_reference`` may differ, so this
+          is a real divergence, not a formality.
+
+        Captures are frozen dataclasses of immutable fields, so ``==`` is an
+        exact structural comparison: same provenance, same grid, same issues.
         """
 
         identifier = capture_id_for(source_image_sha256, captured_at)
         attempt = 0
         while True:
             existing = self._captures.get(identifier)
-            if existing is None or existing.review_status is VCUBCaptureStatus.PENDING_REVIEW:
+            if existing is None or existing == capture:
                 return identifier
             attempt += 1
             identifier = capture_id_for(source_image_sha256, f"{captured_at}#{attempt}")
