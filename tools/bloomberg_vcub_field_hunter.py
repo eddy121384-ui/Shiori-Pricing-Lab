@@ -8,6 +8,35 @@ them. Its one question, and nothing beyond it:
     bond-option model uses, `sigma_vcub(Texp, Ttenor, Kproxy)`, from a
     supported Bloomberg data interface -- with no screenshot and no OCR?
 
+**Resolution (Issue #179): `NO NON-VISUAL ROUTE FOUND`.** Eddy ran every
+stage of this tool live against the operator-confirmed VCUB cell
+(`3Mo x 4Yr = 89.15`, ticker `USSNAC4`, Excel-exported exact string
+`USSNAC4 BVOL Curncy`) on his own Bloomberg-networked workstation.
+Verbatim outcomes, none fabricated or promoted by this script::
+
+    refdata USSNAC4 BVOL Curncy                          -> INVALID_SECURITY
+    refdata USSNAC4 Curncy       + PX_LAST / LAST_PRICE   -> absent
+    refdata USSNAC4 BGN Curncy   + SWPN_IMPLIED_VOL       -> field not applicable
+    refdata USSNAC4 BGN Curncy   + BVOL_OIS_SWAPTION,
+                                    IR_VOL_FMT=normal      -> field not applicable
+    mktdata USSNAC4 Curncy                                -> resolution failed
+    mktdata USSNAC4 BGN Curncy                            -> resolution failed
+    instruments lookup "USSNAC4"                          -> all 3 operations: empty results[]
+    instruments lookup "USSNAC4 BVOL Curncy"               -> all 3 operations: empty results[]
+
+**This verdict is deliberately bounded.** It means: no supported
+non-visual route was found through the Bloomberg Desktop API interfaces
+this issue actually investigated (`//blp/refdata`, `//blp/mktdata`,
+`//blp/instruments`) for this ticker, these mnemonics, and these
+overrides. It does **not** claim Bloomberg universally has no possible API
+route to this value -- a different interface, a different entitlement, or
+a different ticker/mnemonic this issue never tried could still exist. This
+tool stops guessing suffixes, fields, and mnemonics here, exactly as
+Issue #179 required throughout; whether to open a new, separately-scoped
+investigation (a different Bloomberg interface, an entitlement request, or
+a visual/GUI-assisted route with its own explicit approval) is Eddy's
+decision, not this script's.
+
 **Methodology is given, never re-guessed here.** Bloomberg Quantitative
 Analytics, *Valuation of Bond Forwards and Options in OVME* (2025) §2.5
 defines the reference swaption coordinate this script reports::
