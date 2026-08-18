@@ -213,6 +213,48 @@ def test_a_concurrent_confirm_and_reject_cannot_both_be_accepted(stub_reader) ->
     assert retained.reviewed_by == accepted[0]
 
 
+def test_the_store_stays_consistent_under_concurrent_parse_and_review(stub_reader) -> None:
+    """Deadlock-freedom and eviction, exercised together.
+
+    The single-transition test above pins one race in isolation. This one
+    runs parse, confirm, reject, and capacity eviction against each other on
+    several threads: the lock is non-reentrant, so any locked method that
+    called a public locking one would hang here rather than fail quietly.
+    ``ValueError`` (already decided) and ``KeyError`` (evicted before the
+    review landed) are both legitimate outcomes; anything else is not.
+    """
+
+    store = VCUBCaptureReviewStore(capacity=3)
+    unexpected: list[str] = []
+
+    def churn(worker: int) -> None:
+        try:
+            for index in range(15):
+                capture_id, _capture, _notes = store.parse_image(
+                    source_reference="vcub.png",
+                    raw_image=bytes([index % 4]) * 8,
+                    captured_at=_CAPTURED_AT,
+                )
+                try:
+                    action = store.confirm if index % 2 else store.reject
+                    action(capture_id, reviewed_by=f"t{worker}", reviewed_at=_REVIEWED_AT)
+                except (ValueError, KeyError):
+                    pass
+                len(store)
+        except Exception as exc:  # noqa: BLE001
+            unexpected.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=churn, args=(worker,)) for worker in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not any(thread.is_alive() for thread in threads), "a thread deadlocked on the store"
+    assert unexpected == []
+    assert len(store) <= 3
+
+
 def test_an_unknown_capture_id_is_an_error_not_a_blank_capture() -> None:
     with pytest.raises(KeyError, match="no capture is under review"):
         VCUBCaptureReviewStore().get("deadbeef")
