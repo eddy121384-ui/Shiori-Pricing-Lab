@@ -1047,6 +1047,87 @@ def test_a_curve_config_name_is_captured_whole(curve_name: str) -> None:
     assert parse(tokens).metadata.curve_config == curve_name
 
 
+def _curve_line_tokens(words: Sequence[str], y: float = 20.0) -> list[VCUBTextToken]:
+    """A header line with one token per supplied box, tightly spaced."""
+
+    tokens: list[VCUBTextToken] = []
+    cursor = 40.0
+    for word in words:
+        width = max(len(word), 1) * 7.0
+        tokens.append(
+            VCUBTextToken(text=word, left=cursor, top=y, width=width, height=9.0)
+        )
+        cursor += width + 4.0
+    return tokens
+
+
+@pytest.mark.parametrize(
+    "boxes,expected",
+    [
+        # However the reader chooses to group the suffix, the name is whole.
+        ((["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"]), "USD RFR BVOL Cube (Default)"),
+        (
+            (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(", "Default", ")"]),
+            "USD RFR BVOL Cube (Default)",
+        ),
+        (
+            (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default", ")"]),
+            "USD RFR BVOL Cube (Default)",
+        ),
+        ((["CCY\u25be", "USD", "RFR", "BVOL", "Cube"]), "USD RFR BVOL Cube"),
+    ],
+)
+def test_a_split_parenthetical_suffix_is_still_captured_whole(
+    boxes: list[str], expected: str
+) -> None:
+    """Codex review, PR #182.
+
+    Taking a single token after the anchor dropped the suffix whenever the
+    reader returned ``(Default)`` as separate boxes, and the shortened name
+    was stored as resolved metadata. How OCR groups boxes varies by screen,
+    so the name must not depend on it.
+    """
+
+    tokens = _curve_line_tokens(boxes) + _header_line("ATM Swaptions", 44.0) + grid_tokens()
+
+    assert parse(tokens).metadata.curve_config == expected
+
+
+def test_a_suffix_that_never_closes_leaves_the_field_unresolved() -> None:
+    """Better unresolved than a name missing what the screen displayed."""
+
+    tokens = (
+        _curve_line_tokens(["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default"])
+        + _header_line("ATM Swaptions", 44.0)
+        + grid_tokens()
+    )
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
+
+
+def test_a_menu_action_returned_as_one_detection_is_still_not_a_curve_config() -> None:
+    """Codex review, PR #182.
+
+    The exclusion checked for a marker occupying its own token, so a reader
+    that returned ``9) Analyze Cube`` as a single detection had the menu
+    action stored as the resolved configuration name.
+    """
+
+    tokens = (
+        _curve_line_tokens(["9) Analyze Cube"])
+        + _header_line("ATM Swaptions", 44.0)
+        + grid_tokens()
+    )
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
+
+
 def test_a_menu_action_ending_in_cube_is_never_a_curve_config() -> None:
     """'Analyze Cube' is a clickable action, not a configuration value."""
 

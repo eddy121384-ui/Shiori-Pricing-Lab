@@ -97,11 +97,18 @@ _MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\)\s+")
 # the punctuation a curve name can legitimately carry -- "RFR/OIS" -- because
 # a class that stopped at the slash would begin matching *after* it.
 _CUBE_ANCHOR_RE = re.compile(r"cube$", re.IGNORECASE)
-_MENU_MARKER_TOKEN_RE = re.compile(r"^\d{1,3}\)$")
+# Matched against the candidate's own text, not only against a token that
+# happens to hold the marker alone: the reader may return "9) Analyze Cube"
+# as a single detection, and an exact-token test would let that menu action
+# through as a configuration name.
+_MENU_MARKER_RE = re.compile(r"^\d{1,3}\)")
 # A widget's text ends where a separator glyph does -- the dropdown caret
 # Bloomberg draws on the right of each selector. Anything alphanumeric, or
-# punctuation a name can carry, is still part of the value.
-_WIDGET_SEPARATOR_TAIL_RE = re.compile(r"[^0-9A-Za-z)]$")
+# punctuation a name can carry, is still part of the value. Both parentheses
+# are exempt: a reader that returns "(Default)" as "(", "Default", ")" would
+# otherwise have its lone "(" read as the end of a widget, cutting the name
+# off from its own suffix.
+_WIDGET_SEPARATOR_TAIL_RE = re.compile(r"[^0-9A-Za-z()]$")
 # Two tokens belong to the same widget while the gap between them stays
 # within a normal word space. Measured in character widths taken from the
 # tokens themselves, so it scales with font size and DPI like every other
@@ -479,28 +486,70 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
         return None  # no name here, or two: either way not this line's value
     anchor = anchors[0]
 
-    last = anchor
-    if last + 1 < len(tokens):
-        following = _normalise(tokens[last + 1].text)
-        if following.startswith("(") and not _starts_a_new_widget(
-            tokens[last], tokens[last + 1]
-        ):
-            last += 1
+    last = _extend_over_parenthetical(tokens, anchor)
+    if last is None:
+        return None  # a suffix opened and never closed: the name would be partial
 
     first = anchor
     while first > 0 and not _starts_a_new_widget(tokens[first - 1], tokens[first]):
         first -= 1
 
-    # "9) Analyze Cube" is a menu action, not a configuration value.
-    if first > 0 and _MENU_MARKER_TOKEN_RE.match(_normalise(tokens[first - 1].text)):
-        return None
-    if _MENU_MARKER_TOKEN_RE.match(_normalise(tokens[first].text)):
+    # "9) Analyze Cube" is a menu action, not a configuration value -- whether
+    # the reader put the marker in its own box or in the same one as the text.
+    if first > 0 and _MENU_MARKER_RE.match(_normalise(tokens[first - 1].text)):
         return None
 
-    name = _trim_ui_glyphs(
-        " ".join(_normalise(token.text) for token in tokens[first : last + 1])
-    )
-    return name or None
+    name = _trim_ui_glyphs(_join_name(tokens[first : last + 1]))
+    if not name or _MENU_MARKER_RE.match(name):
+        return None
+    return name
+
+
+def _parenthesis_delta(token: VCUBTextToken) -> int:
+    text = _normalise(token.text)
+    return text.count("(") - text.count(")")
+
+
+def _extend_over_parenthetical(
+    tokens: Sequence[VCUBTextToken], anchor: int
+) -> int | None:
+    """Index of the name's last token, consuming a whole ``(...)`` suffix.
+
+    The reader may return ``(Default)`` as one box or as ``(``, ``Default``
+    and ``)``. Taking a single following token dropped the suffix in the
+    split case and stored the shortened name as resolved metadata (Codex
+    review, PR #182), so the suffix is followed until its parentheses
+    balance. A suffix that opens and never closes inside this widget yields
+    ``None``: better to leave the field unresolved than to record a name
+    missing what the screen displayed.
+    """
+
+    index = anchor
+    depth = _parenthesis_delta(tokens[anchor])
+    while True:
+        if depth <= 0:
+            following = index + 1
+            begins_suffix = (
+                depth == 0
+                and following < len(tokens)
+                and _normalise(tokens[following].text).startswith("(")
+                and not _starts_a_new_widget(tokens[index], tokens[following])
+            )
+            if not begins_suffix:
+                return index
+        following = index + 1
+        if following >= len(tokens) or _starts_a_new_widget(tokens[index], tokens[following]):
+            return None
+        index = following
+        depth += _parenthesis_delta(tokens[index])
+
+
+def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
+    """Join a name's tokens, closing up spacing the reader introduced."""
+
+    text = " ".join(_normalise(token.text) for token in tokens)
+    text = re.sub(r"\(\s+", "(", text)
+    return re.sub(r"\s+\)", ")", text)
 
 
 def _unique_curve_config(lines: Sequence[_TextLine]) -> str | None:
