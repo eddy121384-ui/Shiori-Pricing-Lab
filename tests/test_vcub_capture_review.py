@@ -17,6 +17,7 @@ from test_bloomberg_vcub_atm_template import canonical_tokens
 import shiori_pricing_lab.app.vcub_capture_review as review_module
 from shiori_pricing_lab.app.vcub_capture_review import (
     VCUBCaptureReviewStore,
+    VCUBCaptureStoreFullError,
     capture_id_for,
     utc_now_iso,
 )
@@ -296,8 +297,9 @@ def test_the_store_stays_consistent_under_concurrent_parse_and_review(stub_reade
     runs parse, confirm, reject, and capacity eviction against each other on
     several threads: the lock is non-reentrant, so any locked method that
     called a public locking one would hang here rather than fail quietly.
-    ``ValueError`` (already decided) and ``KeyError`` (evicted before the
-    review landed) are both legitimate outcomes; anything else is not.
+    ``ValueError`` (already decided), ``KeyError`` (evicted before the review
+    landed), and ``VCUBCaptureStoreFullError`` (the retention policy refusing
+    to discard a decision) are all legitimate outcomes; anything else is not.
     """
 
     store = VCUBCaptureReviewStore(capacity=3)
@@ -306,11 +308,14 @@ def test_the_store_stays_consistent_under_concurrent_parse_and_review(stub_reade
     def churn(worker: int) -> None:
         try:
             for index in range(15):
-                capture_id, _capture, _notes = store.parse_image(
-                    source_reference="vcub.png",
-                    raw_image=bytes([index % 4]) * 8,
-                    captured_at=_CAPTURED_AT,
-                )
+                try:
+                    capture_id, _capture, _notes = store.parse_image(
+                        source_reference="vcub.png",
+                        raw_image=bytes([index % 4]) * 8,
+                        captured_at=_CAPTURED_AT,
+                    )
+                except VCUBCaptureStoreFullError:
+                    continue
                 try:
                     action = store.confirm if index % 2 else store.reject
                     action(capture_id, reviewed_by=f"t{worker}", reviewed_at=_REVIEWED_AT)
@@ -336,7 +341,7 @@ def test_an_unknown_capture_id_is_an_error_not_a_blank_capture() -> None:
         VCUBCaptureReviewStore().get("deadbeef")
 
 
-def test_the_store_forgets_the_oldest_capture_once_it_is_full(stub_reader, monkeypatch) -> None:
+def test_the_store_forgets_the_oldest_pending_capture_once_it_is_full(stub_reader) -> None:
     store = VCUBCaptureReviewStore(capacity=2)
     ids = [
         store.parse_image(
@@ -349,6 +354,109 @@ def test_the_store_forgets_the_oldest_capture_once_it_is_full(stub_reader, monke
     with pytest.raises(KeyError):
         store.get(ids[0])
     assert store.get(ids[2]) is not None
+
+
+# ---------------------------------------------------------------------------
+# Retention policy (Eddy/Sophira RED decision on Issue #181)
+# ---------------------------------------------------------------------------
+
+
+def _fill(store: VCUBCaptureReviewStore, count: int, *, first: int = 0) -> list[str]:
+    return [
+        store.parse_image(
+            source_reference="vcub.png",
+            raw_image=_IMAGE + bytes([index]),
+            captured_at=_CAPTURED_AT,
+        )[0]
+        for index in range(first, first + count)
+    ]
+
+
+@pytest.mark.parametrize("decide", ["confirm", "reject"])
+def test_a_decided_capture_is_never_evicted_to_make_room(stub_reader, decide: str) -> None:
+    """Requirement 1: a decision is a record, and the store never loses one."""
+
+    store = VCUBCaptureReviewStore(capacity=2)
+    (decided_id,) = _fill(store, 1)
+    getattr(store, decide)(decided_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    _fill(store, 6, first=1)  # far more pressure than the store can hold
+
+    kept = store.get(decided_id)
+    assert kept.review_status is not VCUBCaptureStatus.PENDING_REVIEW
+    assert kept.reviewed_by == "Eddy"
+
+
+def test_the_oldest_pending_capture_is_the_one_evicted(stub_reader) -> None:
+    """Requirement 2: pending captures are the only eviction candidates."""
+
+    store = VCUBCaptureReviewStore(capacity=3)
+    first, second, third = _fill(store, 3)
+    store.confirm(first, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    _fill(store, 1, first=3)
+
+    assert store.get(first).review_status is VCUBCaptureStatus.CONFIRMED
+    with pytest.raises(KeyError):
+        store.get(second)  # the oldest *pending* one, not the oldest one
+    assert store.get(third) is not None
+
+
+def test_a_store_full_of_decided_captures_refuses_a_new_parse(stub_reader) -> None:
+    """Requirement 4: refuse the parse rather than discard a decision."""
+
+    store = VCUBCaptureReviewStore(capacity=2)
+    for capture_id in _fill(store, 2):
+        store.confirm(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    with pytest.raises(VCUBCaptureStoreFullError, match="already been confirmed or rejected"):
+        _fill(store, 1, first=2)
+
+    assert len(store) == 2
+
+
+def test_the_store_full_message_says_what_to_do_about_it(stub_reader) -> None:
+    store = VCUBCaptureReviewStore(capacity=1)
+    (only_id,) = _fill(store, 1)
+    store.reject(only_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    with pytest.raises(VCUBCaptureStoreFullError) as caught:
+        _fill(store, 1, first=1)
+
+    message = str(caught.value)
+    assert "Restart the workbench" in message
+    assert "in memory only" in message
+
+
+def test_recording_a_decision_never_pushes_another_capture_out(stub_reader) -> None:
+    """Deciding replaces an entry rather than adding one, so it frees nothing
+    and must cost nothing."""
+
+    store = VCUBCaptureReviewStore(capacity=3)
+    first, second, third = _fill(store, 3)
+
+    store.confirm(third, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    assert len(store) == 3
+    assert {store.get(first) is not None, store.get(second) is not None} == {True}
+
+
+def test_an_identical_re_read_at_capacity_reuses_its_slot_without_refusing(
+    stub_reader,
+) -> None:
+    """A re-read that reuses its own slot adds nothing, so a full store of
+    pending captures must not treat it as needing room."""
+
+    store = VCUBCaptureReviewStore(capacity=2)
+    first, second = _fill(store, 2)
+
+    again, _capture, _notes = store.parse_image(
+        source_reference="vcub.png", raw_image=_IMAGE + bytes([1]), captured_at=_CAPTURED_AT
+    )
+
+    assert again == second
+    assert store.get(first) is not None
+    assert len(store) == 2
 
 
 def test_a_capacity_below_one_is_refused() -> None:

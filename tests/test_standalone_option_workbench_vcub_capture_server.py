@@ -180,6 +180,33 @@ def test_an_oversized_image_is_refused_before_it_is_read(server_url, stub_reader
     assert "limit for one screenshot" in payload["error"]
 
 
+def test_a_store_full_of_decided_captures_answers_507_not_a_silent_eviction(
+    server_url, stub_reader, monkeypatch
+) -> None:
+    """Eddy/Sophira RED decision on Issue #181: a decided capture is never
+    discarded to make room, so the parse is refused instead."""
+
+    monkeypatch.setattr(
+        server_module, "VCUB_CAPTURE_REVIEW_STORE", VCUBCaptureReviewStore(capacity=1)
+    )
+    _status, parsed = _parse(server_url)
+    _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    status, payload = _parse(server_url, source_reference="another.png")
+
+    assert status == 507
+    assert "already been confirmed or rejected" in payload["error"]
+    assert "Restart the workbench" in payload["error"]
+    # The decided capture is still there, and still confirmed.
+    assert (
+        server_module.VCUB_CAPTURE_REVIEW_STORE.get(parsed["capture_id"]).review_status.value
+        == "CONFIRMED"
+    )
+
+
 def test_a_missing_ocr_reader_answers_501_with_the_install_command(
     server_url, monkeypatch
 ) -> None:

@@ -17,6 +17,27 @@ who rejected a capture could be shown a rejection while the stored record
 said confirmed (Codex review round 3, PR #182). The OCR read deliberately
 stays *outside* the lock: it is the slow part and touches no shared state.
 
+**Retention policy (Eddy/Sophira RED decision on Issue #181).** A capture a
+trader has decided on is a record of that decision, so the store must never
+lose one quietly:
+
+* ``CONFIRMED`` and ``REJECTED`` captures are immutable and non-evictable
+  for the lifetime of this server process;
+* at capacity the store evicts the oldest ``PENDING_REVIEW`` capture;
+* an issued capture id is never reused, so an id that *has* been evicted
+  fails loudly on lookup rather than silently addressing a later capture;
+* if the store is full and nothing pending can be evicted, the new parse is
+  refused with :class:`VCUBCaptureStoreFullError` -- a decided record is
+  never sacrificed to make room.
+
+**Prototype limitation, stated explicitly.** This retention is in-memory and
+process-scoped by design. Restarting the workbench loses the review history,
+including confirmed and rejected captures, and this module deliberately adds
+no database, no file persistence, no audit store, and no retention
+subsystem. Durable retention and audit persistence belong to a later
+production market-data ingestion issue, not to this prototype. A decision
+that must outlive the process must be recorded outside it.
+
 Nothing in this module imports :mod:`shiori_pricing_lab.pricing` or the
 workbench's pricing entry point. Parsing an image and confirming a capture
 do not price anything, do not touch the trader's ticket, and do not feed any
@@ -32,16 +53,32 @@ from collections import OrderedDict
 from datetime import UTC, datetime
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
-from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
+from shiori_pricing_lab.data.bloomberg_vcub_capture import (
+    VCUBATMCapture,
+    VCUBCaptureStatus,
+)
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     build_capture_provenance,
     read_tokens_from_image_bytes,
 )
 
-#: How many captures one workbench session keeps reviewable at once. A
-#: trader compares one screenshot at a time; the rest is just enough history
-#: to go back to the previous one.
-DEFAULT_CAPACITY = 8
+#: How many captures one workbench session holds at once. Under the
+#: retention policy above a decided capture is never evicted, so this is
+#: really "how many decisions one session can record" rather than "how much
+#: scrollback" -- 8 would have refused the ninth confirm of a sitting. This
+#: is an ordinary implementation detail chosen to fit a review session, not a
+#: change to the policy: the bound itself, and refusing rather than evicting
+#: at it, are exactly as decided.
+DEFAULT_CAPACITY = 64
+
+
+class VCUBCaptureStoreFullError(RuntimeError):
+    """The review store is full of decided captures and cannot take another.
+
+    Raised rather than evicting a confirmed or rejected record. Recovering
+    means restarting the workbench, which is the documented prototype
+    limitation -- there is no durable store to fall back on.
+    """
 
 
 def utc_now_iso() -> str:
@@ -108,8 +145,40 @@ class VCUBCaptureReviewStore:
             identifier = self._free_identifier(
                 provenance.source_image_sha256, captured_at, capture
             )
+            if identifier not in self._captures:
+                # Only a genuinely new slot grows the store; an identical
+                # re-read reusing its own slot does not, and must not be able
+                # to trip the capacity refusal.
+                self._make_room_locked()
             self._store_locked(identifier, capture)
         return identifier, capture, reader_notes
+
+    def _make_room_locked(self) -> None:
+        """Free one slot by evicting the oldest pending capture, or refuse.
+
+        Caller must hold ``self._lock``. A decided capture is never a
+        candidate: when nothing pending is left to give up, the parse is
+        refused instead (Eddy/Sophira RED decision on Issue #181).
+        """
+
+        while len(self._captures) >= self._capacity:
+            oldest_pending = next(
+                (
+                    identifier
+                    for identifier, held in self._captures.items()
+                    if held.review_status is VCUBCaptureStatus.PENDING_REVIEW
+                ),
+                None,
+            )
+            if oldest_pending is None:
+                decided = len(self._captures)
+                raise VCUBCaptureStoreFullError(
+                    f"the review store is full: all {decided} captures it holds have already "
+                    "been confirmed or rejected, and a decided capture is never discarded to "
+                    "make room. Restart the workbench to begin a new review session -- this "
+                    "prototype keeps its review history in memory only."
+                )
+            del self._captures[oldest_pending]
 
     def _free_identifier(
         self, source_image_sha256: str, captured_at: str, capture: VCUBATMCapture
@@ -190,9 +259,13 @@ class VCUBCaptureReviewStore:
         return rejected
 
     def _store_locked(self, capture_id: str, capture: VCUBATMCapture) -> None:
-        """Caller must hold ``self._lock``."""
+        """Caller must hold ``self._lock``.
+
+        Never evicts. Making room is :meth:`_make_room_locked`'s job and
+        happens only when a *new* slot is being claimed, so recording a
+        decision -- which replaces an entry rather than adding one -- can
+        never push another capture out.
+        """
 
         self._captures[capture_id] = capture
         self._captures.move_to_end(capture_id)
-        while len(self._captures) > self._capacity:
-            self._captures.popitem(last=False)

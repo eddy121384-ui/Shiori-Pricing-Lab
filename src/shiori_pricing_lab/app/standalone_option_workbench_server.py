@@ -298,7 +298,10 @@ from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
     apply_standalone_option_case_overlay,
     extract_standalone_option_case_overlay,
 )
-from shiori_pricing_lab.app.vcub_capture_review import VCUBCaptureReviewStore
+from shiori_pricing_lab.app.vcub_capture_review import (
+    VCUBCaptureReviewStore,
+    VCUBCaptureStoreFullError,
+)
 from shiori_pricing_lab.data._validation import (
     _parse_iso_date,
     _require_finite_number,
@@ -2721,6 +2724,14 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = parse_vcub_atm_screenshot(body["source_reference"], body["image_base64"])
+        except VCUBCaptureStoreFullError as exc:
+            # Not a bad request: the operator's image was fine, but every
+            # slot holds a capture they have already decided on, and a
+            # decided record is never discarded to make room (Eddy/Sophira
+            # RED decision on Issue #181). 507 says exactly that -- the
+            # server cannot store the representation.
+            self._write_json(507, {"error": str(exc)})
+            return
         except VCUBOCRUnavailableError as exc:
             # Not a bad request and not a crash: the workbench is simply
             # missing its optional reader, and the message carries the one
