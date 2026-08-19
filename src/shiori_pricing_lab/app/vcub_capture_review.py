@@ -109,8 +109,8 @@ class VCUBCaptureReviewStore:
         self._captures: OrderedDict[str, VCUBATMCapture] = OrderedDict()
         # Every id this store has ever handed out, including ones whose
         # capture has since been evicted. An id is never recycled: see
-        # :meth:`_free_identifier`. One 32-character string per parse, which
-        # a workbench session does not accumulate meaningfully.
+        # :meth:`_find_identifier`. One 32-character string per parse that
+        # actually claimed a slot -- a refused parse reserves nothing.
         self._issued_identifiers: set[str] = set()
         self._lock = threading.Lock()
 

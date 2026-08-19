@@ -8,6 +8,7 @@ so it cannot drop a blocking error on the round trip.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 
@@ -288,6 +289,80 @@ def test_a_concurrent_confirm_and_reject_cannot_both_be_accepted(stub_reader) ->
     retained = unlocked_get(capture_id)
     assert retained.review_status is not VCUBCaptureStatus.PENDING_REVIEW
     assert retained.reviewed_by == accepted[0]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, seed: int) -> None:
+    """Every retention rule at once, against randomised parse/decide traffic.
+
+    The single-rule tests above each pin one behaviour in a hand-built
+    scenario. Rounds 5 and 6 both found defects that only appeared when the
+    rules interacted -- an id recycled after eviction, and a re-read
+    refreshing an age that eviction then relied on -- so this drives the
+    store the way a session would and checks all four invariants after every
+    step:
+
+    1. a decided capture is never removed;
+    2. the capture handed to a caller is the one stored under its id;
+    3. only the oldest *pending* capture by true insertion age is evicted;
+    4. capacity is never exceeded.
+    """
+
+    rng = random.Random(seed)
+    variants = [
+        tuple(canonical_tokens()),
+        tuple(canonical_tokens()[:-1]),
+        tuple(canonical_tokens()[:-2]),
+    ]
+    monkeypatch.setattr(
+        review_module,
+        "read_tokens_from_image_bytes",
+        lambda raw_image, *, engine=None, **kwargs: (variants[rng.randrange(len(variants))], ()),
+    )
+    capacity = rng.randint(2, 4)
+    store = VCUBCaptureReviewStore(capacity=capacity)
+    birth: dict[str, int] = {}
+    decided: set[str] = set()
+    clock = 0
+
+    for _ in range(40):
+        if rng.random() < 0.65:
+            before = list(store._captures)
+            pending_before = [
+                identifier
+                for identifier in before
+                if store._captures[identifier].review_status is VCUBCaptureStatus.PENDING_REVIEW
+            ]
+            try:
+                capture_id, capture, _notes = store.parse_image(
+                    source_reference="vcub.png",
+                    raw_image=bytes([rng.randrange(5)]),
+                    captured_at=_CAPTURED_AT,
+                )
+            except VCUBCaptureStoreFullError:
+                assert decided <= set(store._captures), "a refusal discarded a decision"
+                continue
+            assert store._captures[capture_id] == capture, (
+                "stored capture is not the one handed out"
+            )
+            if capture_id not in birth:
+                birth[capture_id] = clock
+                clock += 1
+            evicted = [item for item in before if item not in store._captures]
+            if evicted:
+                oldest_pending = min(pending_before, key=lambda item: birth.get(item, -1))
+                assert evicted == [oldest_pending], "eviction did not take the oldest pending"
+        elif store._captures:
+            capture_id = rng.choice(list(store._captures))
+            try:
+                action = store.confirm if rng.random() < 0.5 else store.reject
+                action(capture_id, reviewed_by="trader", reviewed_at=_REVIEWED_AT)
+                decided.add(capture_id)
+            except (ValueError, KeyError):
+                pass
+
+        assert decided <= set(store._captures), "a decided capture was evicted"
+        assert len(store._captures) <= capacity
 
 
 def test_the_store_stays_consistent_under_concurrent_parse_and_review(stub_reader) -> None:
