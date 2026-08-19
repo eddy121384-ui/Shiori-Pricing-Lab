@@ -325,9 +325,12 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
     step:
 
     1. a decided capture is never removed;
-    2. the capture handed to a caller is byte-for-byte the one stored under
-       its id -- compared by served response, not by ``==``, since dataclass
-       equality is exactly what proved too weak for signed zero;
+    2. every id still held goes on matching the response its own client was
+       handed -- not merely the newest one. Checking only the latest return
+       is vacuous: that return has already overwritten the slot, so a
+       ``_find_identifier`` that reused every pending base id passed all six
+       seeds. Each outstanding client's content is therefore remembered by
+       id and re-checked after every step (Codex review, PR #182);
     3. only the oldest *pending* capture by true insertion age is evicted;
     4. capacity is never exceeded.
     """
@@ -353,7 +356,26 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
     store = VCUBCaptureReviewStore(capacity=capacity)
     birth: dict[str, int] = {}
     decided: set[str] = set()
+    # id -> the reviewable content its client was handed. A decision advances
+    # review_status, so only the content a trader actually reviewed is
+    # compared; that must never change under an id someone is holding.
+    handed: dict[str, str] = {}
     clock = 0
+
+    def reviewed_content(capture) -> str:
+        payload = capture.to_dict()
+        for volatile in ("review_status", "reviewed_by", "reviewed_at", "can_confirm"):
+            payload.pop(volatile)
+        return json.dumps(payload, sort_keys=True)
+
+    def every_outstanding_id_still_matches_its_client() -> None:
+        for identifier, content in handed.items():
+            held = store._captures.get(identifier)
+            if held is None:
+                continue  # legitimately evicted; ids are never recycled
+            assert reviewed_content(held) == content, (
+                f"the capture under {identifier[:8]} is no longer the one its client reviewed"
+            )
 
     for _ in range(40):
         if rng.random() < 0.65:
@@ -375,6 +397,16 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
             assert response_fingerprint(store._captures[capture_id]) == response_fingerprint(
                 capture
             ), "stored capture is not the one handed out"
+            content = reviewed_content(capture)
+            # The invariant, stated where it can actually fail: an id already
+            # handed to a client must never come back carrying different
+            # content. Recording the newest content unconditionally -- the
+            # first version of this guard -- destroyed the earlier client's
+            # record and let a "reuse any pending slot" mutant pass.
+            assert handed.get(capture_id, content) == content, (
+                f"id {capture_id[:8]} was handed out again for different content"
+            )
+            handed[capture_id] = content
             if capture_id not in birth:
                 birth[capture_id] = clock
                 clock += 1
@@ -393,6 +425,7 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
 
         assert decided <= set(store._captures), "a decided capture was evicted"
         assert len(store._captures) <= capacity
+        every_outstanding_id_still_matches_its_client()
 
 
 def test_the_store_stays_consistent_under_concurrent_parse_and_review(stub_reader) -> None:
