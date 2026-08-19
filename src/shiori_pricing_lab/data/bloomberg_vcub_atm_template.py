@@ -96,11 +96,17 @@ _MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\)\s+")
 # selectors drawn to its left on the same line. The character class covers
 # the punctuation a curve name can legitimately carry -- "RFR/OIS" -- because
 # a class that stopped at the slash would begin matching *after* it.
-_CURVE_NAME_CHARACTERS = r"A-Za-z0-9/&._-"
-_CURVE_CONFIG_RE = re.compile(
-    rf"(?:[{_CURVE_NAME_CHARACTERS}]+\s+){{0,8}}Cube(?:\s*\([^)]*\))?", re.IGNORECASE
-)
-_CURVE_NAME_TAIL_RE = re.compile(rf"[{_CURVE_NAME_CHARACTERS}]$")
+_CUBE_ANCHOR_RE = re.compile(r"cube$", re.IGNORECASE)
+_MENU_MARKER_TOKEN_RE = re.compile(r"^\d{1,3}\)$")
+# A widget's text ends where a separator glyph does -- the dropdown caret
+# Bloomberg draws on the right of each selector. Anything alphanumeric, or
+# punctuation a name can carry, is still part of the value.
+_WIDGET_SEPARATOR_TAIL_RE = re.compile(r"[^0-9A-Za-z)]$")
+# Two tokens belong to the same widget while the gap between them stays
+# within a normal word space. Measured in character widths taken from the
+# tokens themselves, so it scales with font size and DPI like every other
+# threshold in this module.
+_FIELD_GAP_CHARACTER_WIDTHS = 2.0
 # Closed vocabularies are matched against alphanumeric runs rather than
 # whitespace-separated words: the live screen glues a dropdown caret onto
 # the value it belongs to, so "USD" and "Mid" never appeared as bare words
@@ -409,7 +415,7 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     # Only a *value* segment can carry the curve name: "Analyze Cube" is a
     # menu action, and counting it made the live screen's two "Cube"
     # occurrences ambiguous and left this field unresolved.
-    resolved["curve_config"] = _unique_curve_config(value_segments)
+    resolved["curve_config"] = _unique_curve_config(lines)
     side = _unique_member([run.upper() for run in runs], set(_SIDE_TEXTS))
     resolved["side"] = None if side is None else _SIDE_TEXTS[side]
     resolved["quote_date"] = _unique_match(line_texts, _DATE_RE)
@@ -431,32 +437,78 @@ def _unique_member(candidates: Sequence[str], allowed: set[str]) -> str | None:
     return found.pop() if len(found) == 1 else None
 
 
-def _unique_curve_config(value_segments: Sequence[str]) -> str | None:
-    """The one curve/config name on the screen, whole, or nothing.
+def _character_width(token: VCUBTextToken) -> float:
+    return token.width / max(len(_normalise(token.text)), 1)
 
-    The phrase reaches back a bounded number of words, so on a name longer
-    than that bound the regex would otherwise start matching in the middle
-    and hand back a *truncated* name as if it were the resolved value --
-    inventing Bloomberg metadata, which is precisely what this layer must
-    never do (Codex review, PR #182).
 
-    A match is therefore only trusted when nothing name-like immediately
-    precedes it: it has to start at the beginning of its field segment, or
-    just after a character that cannot be part of a name, such as the
-    dropdown caret separating this widget from the one on its left. A match
-    that starts mid-name is discarded, leaving the field explicitly
-    unresolved rather than quietly shortened.
+def _starts_a_new_widget(left: VCUBTextToken, right: VCUBTextToken) -> bool:
+    """Whether ``right`` begins a different widget from ``left``.
+
+    Two real boundary signals, both read off the boxes rather than guessed
+    from the joined text: a separator glyph closing the left token (the
+    dropdown caret), or a gap wider than a word space between them.
     """
 
-    found: set[str] = set()
-    for segment in value_segments:
-        for match in _CURVE_CONFIG_RE.finditer(segment):
-            preceding = segment[: match.start()].rstrip()
-            if preceding and _CURVE_NAME_TAIL_RE.search(preceding):
-                continue  # started mid-name: the value would be truncated
-            name = _trim_ui_glyphs(match.group(0))
-            if name:
-                found.add(name)
+    if _WIDGET_SEPARATOR_TAIL_RE.search(_normalise(left.text)):
+        return True
+    gap = right.left - left.right
+    scale = max(_character_width(left), _character_width(right))
+    return scale > 0 and gap > scale * _FIELD_GAP_CHARACTER_WIDTHS
+
+
+def _curve_config_in_line(line: _TextLine) -> str | None:
+    """The curve/config name on one header line, whole, or ``None``.
+
+    Read from the *tokens*, anchored on the word Bloomberg ends the name
+    with and extended leftwards until a real widget boundary. Earlier
+    versions searched the joined text for a bounded phrase, which meant
+    every character not enumerated in the name's character class became a
+    false boundary: ``USD RFR+OIS BVOL Cube`` came back as ``OIS BVOL
+    Cube``, a partial Bloomberg name presented as resolved metadata (Codex
+    review, PR #182). A token is atomic here, so a match can no longer
+    restart in the middle of one.
+    """
+
+    tokens = line.tokens
+    anchors = [
+        index
+        for index, token in enumerate(tokens)
+        if _CUBE_ANCHOR_RE.search(_normalise(token.text))
+    ]
+    if len(anchors) != 1:
+        return None  # no name here, or two: either way not this line's value
+    anchor = anchors[0]
+
+    last = anchor
+    if last + 1 < len(tokens):
+        following = _normalise(tokens[last + 1].text)
+        if following.startswith("(") and not _starts_a_new_widget(
+            tokens[last], tokens[last + 1]
+        ):
+            last += 1
+
+    first = anchor
+    while first > 0 and not _starts_a_new_widget(tokens[first - 1], tokens[first]):
+        first -= 1
+
+    # "9) Analyze Cube" is a menu action, not a configuration value.
+    if first > 0 and _MENU_MARKER_TOKEN_RE.match(_normalise(tokens[first - 1].text)):
+        return None
+    if _MENU_MARKER_TOKEN_RE.match(_normalise(tokens[first].text)):
+        return None
+
+    name = _trim_ui_glyphs(
+        " ".join(_normalise(token.text) for token in tokens[first : last + 1])
+    )
+    return name or None
+
+
+def _unique_curve_config(lines: Sequence[_TextLine]) -> str | None:
+    """The one curve/config name on the screen, whole, or nothing."""
+
+    found = {
+        name for line in lines if (name := _curve_config_in_line(line)) is not None
+    }
     return found.pop() if len(found) == 1 else None
 
 

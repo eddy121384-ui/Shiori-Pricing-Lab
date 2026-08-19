@@ -16,6 +16,8 @@ is decided from those boxes alone. The small end-to-end image test lives in
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import (
@@ -78,27 +80,33 @@ def _column_x(column_index: int) -> float:
     return _FIRST_COLUMN_X + column_index * _COLUMN_PITCH
 
 
+#: Word boxes inside one phrase sit about half a character width apart in
+#: rendered text. The original version of this fixture spread them four times
+#: wider than that, which read as five separate widgets once field boundaries
+#: were derived from real gaps -- the fixture was unrealistic, not the rule.
+_WORD_GAP = 4.0
+
+
+def _word_row(words: Sequence[str], y: float, left: float = 40.0) -> list[VCUBTextToken]:
+    """One header line laid out with realistic intra-phrase spacing."""
+
+    tokens: list[VCUBTextToken] = []
+    cursor = left
+    for word in words:
+        width = len(word) * 8.0
+        tokens.append(_token(word, cursor + width / 2.0, y, width=width))
+        cursor += width + _WORD_GAP
+    return tokens
+
+
 def metadata_tokens() -> list[VCUBTextToken]:
     """The header context above the matrix, as separate word tokens."""
 
-    tokens = [
-        _token("USD", 60.0, 20.0),
-        _token("RFR", 100.0, 20.0),
-        _token("BVOL", 145.0, 20.0),
-        _token("Cube", 195.0, 20.0),
-        _token("(Default)", 260.0, 20.0),
-        _token("ATM", 60.0, 50.0),
-        _token("Swaptions", 130.0, 50.0),
-        _token("Mid", 230.0, 50.0),
-        _token("08/18/26", 300.0, 50.0),
-        _token("Type", 60.0, 80.0),
-        _token("Normal", 120.0, 80.0),
-        _token("Vol", 165.0, 80.0),
-        _token("(OIS)", 210.0, 80.0),
-        _token("Source", 280.0, 80.0),
-        _token("BVOL", 340.0, 80.0),
-    ]
-    return tokens
+    return (
+        _word_row(("USD", "RFR", "BVOL", "Cube", "(Default)"), 20.0)
+        + _word_row(("ATM", "Swaptions", "Mid", "08/18/26"), 50.0)
+        + _word_row(("Type", "Normal", "Vol", "(OIS)", "Source", "BVOL"), 80.0)
+    )
 
 
 def grid_tokens(
@@ -1009,19 +1017,27 @@ def test_the_live_header_layout_resolves_every_metadata_field() -> None:
 @pytest.mark.parametrize(
     "curve_name",
     [
-        "USD RFR BVOL Cube (Default)",
-        "USD SOFR OIS Bloomberg BVOL Cube (Default)",
-        "USD RFR/OIS BVOL Cube (Default)",
+        "USD RFR BVOL Cube (Default)",                   # the live screen's own name
+        "USD SOFR OIS Bloomberg BVOL Cube (Default)",    # more words than the old bound
+        "USD RFR/OIS BVOL Cube (Default)",               # punctuation inside the name
+        "USD RFR+OIS BVOL Cube (Default)",               # punctuation never enumerated
+        "USD RFR|OIS BVOL Cube (Default)",
+        "USD RFR (OIS) BVOL Cube (Default)",             # parentheses inside the name
+        "A B C D E F G H I J K L BVOL Cube (Default)",   # far longer than any bound
     ],
 )
 def test_a_curve_config_name_is_captured_whole(curve_name: str) -> None:
-    """Codex review, PR #182.
+    """Codex review, PR #182 (twice).
 
-    The phrase reaches back a bounded number of words. On a longer name, or
-    one carrying punctuation, it used to start matching in the middle and
-    return a *truncated* name as the resolved value -- inventing Bloomberg
-    metadata. ``USD SOFR OIS Bloomberg BVOL Cube (Default)`` came back as
-    ``SOFR OIS ...`` and ``USD RFR/OIS BVOL Cube`` as ``OIS BVOL Cube``.
+    The name used to be found by searching the joined line for a bounded
+    phrase, so every character not enumerated in its character class became
+    a false field boundary: the match restarted after it and a *truncated*
+    Bloomberg name was stored as the resolved value. Enumerating more
+    characters only moved the hole -- ``+``, ``|`` and an inner ``(OIS)``
+    all still truncated.
+
+    The name is now read from the tokens, extended leftwards to a real
+    widget boundary, so a match cannot restart in the middle of one.
     """
 
     tokens = _header_line(f"CCY\u25be IDX\u25be {curve_name}\u25be Mid\u25be", 20.0)
@@ -1031,13 +1047,10 @@ def test_a_curve_config_name_is_captured_whole(curve_name: str) -> None:
     assert parse(tokens).metadata.curve_config == curve_name
 
 
-def test_a_curve_config_name_beyond_the_phrase_bound_fails_closed() -> None:
-    """The bound must cost a resolution, never a truncation."""
+def test_a_menu_action_ending_in_cube_is_never_a_curve_config() -> None:
+    """'Analyze Cube' is a clickable action, not a configuration value."""
 
-    tokens = _header_line(
-        "CCY\u25be IDX\u25be A B C D E F G H I J K L BVOL Cube (Default)\u25be", 20.0
-    )
-    tokens += _header_line("ATM Swaptions", 44.0)
+    tokens = _header_line("9) Analyze Cube 1) Caps/Floors 3) ATM Swaptions", 20.0)
     tokens += grid_tokens()
 
     metadata = parse(tokens).metadata
