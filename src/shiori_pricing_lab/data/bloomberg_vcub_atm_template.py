@@ -85,6 +85,23 @@ _VOL_TYPE_RE = re.compile(
     r"\b(Normal|Black|Lognormal|Shifted Lognormal|SABR)\s+Vol(\s*\([^)]*\))?", re.IGNORECASE
 )
 _KNOWN_SOURCE_TEXTS = frozenset({"BVOL", "CMPN", "BGN"})
+# Bloomberg writes every clickable action on a screen as "N) Label". The
+# first live capture read Source as "BVOL 16) Use This Contributor in
+# Configuration" because nothing stopped the value run at the action that
+# followed it, so these markers are treated as field boundaries.
+_MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\)\s+")
+# The curve/config *name*, anchored on the word Bloomberg always ends it
+# with. Bounded to a few preceding words so it captures "USD RFR BVOL Cube
+# (Default)" without swallowing the currency and index selectors drawn to
+# its left on the same line.
+_CURVE_CONFIG_RE = re.compile(
+    r"(?:[A-Za-z0-9]+\s+){0,4}Cube(?:\s*\([^)]*\))?", re.IGNORECASE
+)
+# Closed vocabularies are matched against alphanumeric runs rather than
+# whitespace-separated words: the live screen glues a dropdown caret onto
+# the value it belongs to, so "USD" and "Mid" never appeared as bare words
+# and both fields read Unresolved on a screen that plainly showed them.
+_ALPHANUMERIC_RUN_RE = re.compile(r"[0-9A-Za-z]+")
 # Field labels VCUB draws on its own header lines. A labelled value run ends
 # at the next one of these, so two fields sharing a line stay separate.
 _FIELD_LABELS = frozenset(
@@ -248,6 +265,38 @@ def _assign_band(
     return index, ambiguous
 
 
+def _spans_are_orderable(
+    first_low: float, first_high: float, second_low: float, second_high: float
+) -> bool:
+    """Whether two label boxes are unambiguously ordered along one axis.
+
+    Overlap alone does not make an order ambiguous, which is what the first
+    live Bloomberg capture proved: on a real VCUB grid the rows are dense
+    enough that adjacent expiry labels' detected boxes bleed into one
+    another by a pixel or two while their centres stay a full row apart.
+    Refusing any overlap failed that capture closed on ``2Mo``/``3Mo``
+    despite their order being perfectly legible.
+
+    What *is* ambiguous is two labels close enough to be reading as one
+    visual line -- exactly the condition :func:`_group_into_lines` uses to
+    decide two tokens share a line -- so the two tests use the same
+    fraction, and two labels the grouper would have merged are still
+    refused here.
+
+    This never widens what a value can be assigned to: the axis order comes
+    from the centres, every band boundary comes from the centres, and so
+    does every cell placement. Only the box-touching test is relaxed.
+    """
+
+    overlap = first_high - second_low
+    if overlap <= 0:
+        return True
+    shorter = min(first_high - first_low, second_high - second_low)
+    if shorter <= 0:
+        return False
+    return overlap / shorter < _LINE_OVERLAP_FRACTION
+
+
 def _check_pitch_regularity(
     centres: Sequence[float], issues: _Issues, *, code: str, axis: str
 ) -> None:
@@ -296,6 +345,40 @@ def _check_monotonic_labels(
 # --------------------------------------------------------------------------
 
 
+def _field_segments(text: str) -> list[tuple[str, bool]]:
+    """Split one header line into ``(segment, is_menu_action)`` pairs.
+
+    A Bloomberg header line packs several independent widgets side by side,
+    and the reader returns them as one line. Splitting at the ``N)`` action
+    markers separates a field's value from the menu entry drawn next to it,
+    which is what stopped ``Source`` from swallowing the whole rest of its
+    line on the first live capture.
+    """
+
+    boundaries = list(_MENU_ACTION_RE.finditer(text))
+    segments: list[tuple[str, bool]] = []
+    cursor = 0
+    for boundary in boundaries:
+        segments.append((text[cursor : boundary.start()], cursor != 0))
+        cursor = boundary.end()
+    segments.append((text[cursor:], bool(boundaries)))
+    return [(segment.strip(), is_menu) for segment, is_menu in segments if segment.strip()]
+
+
+def _trim_ui_glyphs(text: str) -> str:
+    """Drop the dropdown carets and separators a widget's text carries.
+
+    Only characters that cannot begin or end a real value are removed, so a
+    parenthesised suffix such as ``Normal Vol (OIS)`` survives intact.
+    """
+
+    while text and not (text[-1].isalnum() or text[-1] == ")"):
+        text = text[:-1]
+    while text and not (text[0].isalnum() or text[0] == "("):
+        text = text[1:]
+    return text.strip()
+
+
 def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSourceMetadata:
     """Read the screen's header context, marking anything uncertain unresolved.
 
@@ -310,22 +393,29 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     """
 
     line_texts = [line.joined_text() for line in lines]
-    words = [word for text in line_texts for word in text.split()]
+    segments = [segment for text in line_texts for segment in _field_segments(text)]
+    value_segments = [segment for segment, is_menu in segments if not is_menu]
+    runs = [
+        run for segment, _is_menu in segments for run in _ALPHANUMERIC_RUN_RE.findall(segment)
+    ]
 
     resolved: dict[str, str | None] = dict.fromkeys(METADATA_FIELDS, None)
 
-    resolved["currency"] = _unique_member(words, set(Currency))
-    resolved["curve_config"] = _unique_line_containing(line_texts, "cube")
-    side = _unique_member([word.upper() for word in words], set(_SIDE_TEXTS))
+    resolved["currency"] = _unique_member(runs, set(Currency))
+    # Only a *value* segment can carry the curve name: "Analyze Cube" is a
+    # menu action, and counting it made the live screen's two "Cube"
+    # occurrences ambiguous and left this field unresolved.
+    resolved["curve_config"] = _unique_match(value_segments, _CURVE_CONFIG_RE)
+    side = _unique_member([run.upper() for run in runs], set(_SIDE_TEXTS))
     resolved["side"] = None if side is None else _SIDE_TEXTS[side]
     resolved["quote_date"] = _unique_match(line_texts, _DATE_RE)
     if tab_resolved:
         resolved["tab"] = ATM_SWAPTIONS_TAB
-    resolved["vol_type"] = _labelled_value(line_texts, "Type") or _unique_match(
-        line_texts, _VOL_TYPE_RE
+    resolved["vol_type"] = _labelled_value(value_segments, "Type") or _unique_match(
+        value_segments, _VOL_TYPE_RE
     )
-    resolved["source"] = _labelled_value(line_texts, "Source") or _unique_member(
-        [word.upper() for word in words], _KNOWN_SOURCE_TEXTS
+    resolved["source"] = _labelled_value(value_segments, "Source") or _unique_member(
+        [run.upper() for run in runs], _KNOWN_SOURCE_TEXTS
     )
 
     unresolved = tuple(name for name in METADATA_FIELDS if resolved[name] is None)
@@ -339,8 +429,11 @@ def _unique_member(candidates: Sequence[str], allowed: set[str]) -> str | None:
 
 def _unique_match(line_texts: Sequence[str], pattern: re.Pattern[str]) -> str | None:
     found = {
-        match.group(0) for text in line_texts for match in pattern.finditer(text)
+        _trim_ui_glyphs(match.group(0))
+        for text in line_texts
+        for match in pattern.finditer(text)
     }
+    found.discard("")
     return found.pop() if len(found) == 1 else None
 
 
@@ -370,8 +463,8 @@ def _labelled_value(line_texts: Sequence[str], label: str) -> str | None:
                 break
             value_words.append(word)
         if value_words:
-            matches.append(" ".join(value_words))
-    unique = set(matches)
+            matches.append(_trim_ui_glyphs(" ".join(value_words)))
+    unique = {match for match in matches if match}
     return unique.pop() if len(unique) == 1 else None
 
 
@@ -436,11 +529,13 @@ def _resolve_tenor_headers(
         )
         return None
     for index in range(len(headers) - 1):
-        if headers[index].right > headers[index + 1].left:
+        left, right = headers[index], headers[index + 1]
+        if not _spans_are_orderable(left.left, left.right, right.left, right.right):
             issues.block(
                 "TENOR_HEADERS_NOT_ORDERABLE",
                 f"tenor headers {labels[index]!r} and {labels[index + 1]!r} overlap "
-                "horizontally, so their left-to-right order is not unambiguous",
+                "horizontally by enough to read as one header, so their left-to-right order "
+                "is not unambiguous",
             )
             return None
     _check_monotonic_labels(
@@ -505,11 +600,12 @@ def _resolve_expiry_labels(
         )
         return None
     for index in range(len(labels_tokens) - 1):
-        if labels_tokens[index].bottom > labels_tokens[index + 1].top:
+        upper, lower = labels_tokens[index], labels_tokens[index + 1]
+        if not _spans_are_orderable(upper.top, upper.bottom, lower.top, lower.bottom):
             issues.block(
                 "EXPIRY_ROWS_NOT_ORDERABLE",
-                f"expiry labels {labels[index]!r} and {labels[index + 1]!r} overlap vertically, "
-                "so their top-to-bottom order is not unambiguous",
+                f"expiry labels {labels[index]!r} and {labels[index + 1]!r} overlap vertically "
+                "by enough to read as one row, so their top-to-bottom order is not unambiguous",
             )
             return None
     _check_monotonic_labels(

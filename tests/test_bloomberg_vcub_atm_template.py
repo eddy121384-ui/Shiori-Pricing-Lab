@@ -51,15 +51,21 @@ def _synthetic_value(row_index: int, column_index: int) -> float:
 
 
 def _token(
-    text: str, x_center: float, y_center: float, *, width: float | None = None
+    text: str,
+    x_center: float,
+    y_center: float,
+    *,
+    width: float | None = None,
+    height: float | None = None,
 ) -> VCUBTextToken:
     width = len(text) * 8.0 if width is None else width
+    height = _GLYPH_HEIGHT if height is None else height
     return VCUBTextToken(
         text=text,
         left=x_center - width / 2.0,
-        top=y_center - _GLYPH_HEIGHT / 2.0,
+        top=y_center - height / 2.0,
         width=width,
-        height=_GLYPH_HEIGHT,
+        height=height,
         confidence=0.99,
     )
 
@@ -697,6 +703,103 @@ def test_an_exponent_cell_is_malformed_even_when_it_would_be_finite(text: str) -
     assert not capture.can_confirm
 
 
+# ---------------------------------------------------------------------------
+# Live-capture geometry (Issue #181 acceptance run 1)
+#
+# The first real VCUB capture failed closed on EXPIRY_ROWS_NOT_ORDERABLE for
+# '2Mo'/'3Mo'. The grid on a real screen is dense enough that adjacent expiry
+# labels' detected boxes bleed into one another while their centres stay a
+# full row apart. These fixtures reproduce that *proportion* -- boxes taller
+# than the row pitch -- with synthetic labels and generated numbers. No live
+# screenshot and no market data from it is reproduced here.
+# ---------------------------------------------------------------------------
+
+_DENSE_ROW_PITCH = 11.0
+_DENSE_GLYPH_HEIGHT = 13.0  # taller than the pitch: adjacent boxes overlap
+
+
+def _dense_grid_tokens(glyph_height: float = _DENSE_GLYPH_HEIGHT) -> list[VCUBTextToken]:
+    tokens = metadata_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(TENOR_LABELS):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index, label in enumerate(EXPIRY_LABELS):
+        row_y = _FIRST_ROW_Y + row_index * _DENSE_ROW_PITCH
+        tokens.append(
+            _token(label, _ANCHOR_X + 14.0, row_y, height=glyph_height)
+        )
+        for column_index in range(len(TENOR_LABELS)):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    row_y,
+                    height=glyph_height,
+                )
+            )
+    return tokens
+
+
+def test_a_dense_grid_whose_row_boxes_overlap_still_parses() -> None:
+    """The live acceptance failure: overlap is not ambiguity.
+
+    Adjacent rows' boxes overlap here by 2px against an 11px pitch, exactly
+    the shape the real screen produced. Refusing any overlap blocked a
+    capture whose order was perfectly legible.
+    """
+
+    capture = parse(_dense_grid_tokens())
+
+    assert codes(capture.blocking_errors) == []
+    assert capture.grid.expiry_labels == EXPIRY_LABELS
+    assert capture.can_confirm
+
+
+def test_relaxing_overlap_moved_no_value_out_of_its_own_cell() -> None:
+    """The guarantee that matters: order is read from centres, and so is
+    every placement, so tolerating box bleed cannot shift a cell."""
+
+    capture = parse(_dense_grid_tokens())
+
+    for row_index, expiry in enumerate(EXPIRY_LABELS):
+        for column_index, tenor in enumerate(TENOR_LABELS):
+            assert capture.grid.value_at(expiry, tenor) == pytest.approx(
+                _synthetic_value(row_index, column_index)
+            ), f"{expiry} x {tenor} moved once overlapping boxes were allowed"
+
+
+def test_labels_overlapping_enough_to_read_as_one_row_still_fail_closed() -> None:
+    """The relaxation has a floor: boxes that would group into a single text
+    line are still refused, so a genuinely unreadable order cannot slip in."""
+
+    tokens = [
+        token
+        for token in canonical_tokens()
+        if not (token.text == "2Mo" and abs(token.x_center - (_ANCHOR_X + 14.0)) < 1.0)
+    ]
+    # '2Mo' redrawn almost on top of '3Mo': centres 3px apart, boxes 14 tall.
+    tokens.append(_token("2Mo", _ANCHOR_X + 14.0, _row_y(2) - 3.0))
+
+    capture = parse(tokens)
+
+    assert "EXPIRY_ROWS_NOT_ORDERABLE" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+def test_tenor_headers_overlapping_enough_to_read_as_one_still_fail_closed() -> None:
+    tokens = [
+        token
+        for token in canonical_tokens()
+        if not (token.text == "2Yr" and abs(token.y_center - _HEADER_Y) < 1.0)
+    ]
+    tokens.append(_token("2Yr", _column_x(2) - 6.0, _HEADER_Y))
+
+    capture = parse(tokens)
+
+    assert "TENOR_HEADERS_NOT_ORDERABLE" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
 def test_an_unevenly_spaced_axis_still_refuses_a_boundary_straddling_value() -> None:
     """Codex review, PR #182.
 
@@ -821,6 +924,99 @@ def test_a_stray_footer_number_below_the_matrix_is_not_a_cell() -> None:
 # ---------------------------------------------------------------------------
 # 15: metadata resolves or is explicitly unresolved, never invented
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Live-capture header layout (Issue #181 acceptance run 1)
+#
+# The real screen packs several widgets onto one line and draws clickable
+# actions as "N) Label" beside them. Currency, Curve/Config and Side all read
+# Unresolved and Source came back contaminated. These fixtures reproduce that
+# text layout -- caret glued to its value, menu actions alongside -- with no
+# captured market data.
+# ---------------------------------------------------------------------------
+
+
+def _header_line(text: str, y: float, x: float = 40.0) -> list[VCUBTextToken]:
+    tokens: list[VCUBTextToken] = []
+    cursor = x
+    for word in text.split():
+        width = len(word) * 7.0
+        tokens.append(
+            VCUBTextToken(text=word, left=cursor, top=y, width=width, height=9.0)
+        )
+        cursor += width + 5.0
+    return tokens
+
+
+def _live_layout_header_tokens() -> list[VCUBTextToken]:
+    return (
+        _header_line(
+            "USD\u25be RFR\u25be USD RFR BVOL Cube (Default)\u25be Mid\u25be Date: 08/19/26",
+            20.0,
+        )
+        + _header_line(
+            "9) Analyze Cube 1) Caps/Floors 3) ATM Swaptions 4) OTM Swaptions / SABR", 44.0
+        )
+        + _header_line(
+            "Type Normal Vol (OIS)\u25be Source BVOL\u25be "
+            "16) Use This Contributor in Configuration",
+            68.0,
+        )
+    )
+
+
+def _live_layout_capture():
+    return parse(_live_layout_header_tokens() + grid_tokens())
+
+
+def test_a_caret_glued_to_its_value_no_longer_hides_the_currency_or_side() -> None:
+    """Both read Unresolved on a screen that plainly showed them, because the
+    dropdown caret came back attached and neither was ever a bare word."""
+
+    metadata = _live_layout_capture().metadata
+
+    assert metadata.currency == "USD"
+    assert metadata.side == "Mid"
+
+
+def test_a_menu_action_beside_a_field_no_longer_contaminates_it() -> None:
+    """Source came back as the whole rest of its line, menu entry included."""
+
+    metadata = _live_layout_capture().metadata
+
+    assert metadata.source == "BVOL"
+    assert metadata.vol_type == "Normal Vol (OIS)"
+
+
+def test_the_analyze_cube_menu_entry_no_longer_hides_the_curve_config() -> None:
+    """Two occurrences of 'Cube' made the field ambiguous -- but one of them
+    is a menu action, not a value."""
+
+    metadata = _live_layout_capture().metadata
+
+    assert metadata.curve_config == "USD RFR BVOL Cube (Default)"
+
+
+def test_the_live_header_layout_resolves_every_metadata_field() -> None:
+    metadata = _live_layout_capture().metadata
+
+    assert metadata.unresolved_fields == ()
+    assert metadata.quote_date == "08/19/26"
+    assert metadata.tab == "ATM Swaptions"
+
+
+def test_two_curve_config_values_still_leave_the_field_unresolved() -> None:
+    """Segmenting menu actions away must not make the field credulous: two
+    genuine candidates are still refused."""
+
+    tokens = _live_layout_header_tokens() + grid_tokens()
+    tokens += _header_line("EUR ESTR BVOL Cube (Default)", 92.0)
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
 
 
 def test_metadata_reads_the_screen_header_verbatim() -> None:
