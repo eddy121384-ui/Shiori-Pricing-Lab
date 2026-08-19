@@ -216,7 +216,9 @@ def test_two_clients_parsing_one_image_never_share_a_review_slot(monkeypatch) ->
 
     assert first_id != second_id
     confirmed = store.confirm(first_id, reviewed_by="ClientA", reviewed_at=_REVIEWED_AT)
-    assert confirmed.grid == first.grid
+    assert response_fingerprint(confirmed) == response_fingerprint(
+        first.confirm(reviewed_by="ClientA", reviewed_at=_REVIEWED_AT)
+    )
     assert confirmed.provenance.source_reference == "clientA.png"
     assert store.get(second_id).review_status is VCUBCaptureStatus.PENDING_REVIEW
     assert store.get(second_id).provenance.source_reference == "clientB.png"
@@ -323,7 +325,9 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
     step:
 
     1. a decided capture is never removed;
-    2. the capture handed to a caller is the one stored under its id;
+    2. the capture handed to a caller is byte-for-byte the one stored under
+       its id -- compared by served response, not by ``==``, since dataclass
+       equality is exactly what proved too weak for signed zero;
     3. only the oldest *pending* capture by true insertion age is evicted;
     4. capacity is never exceeded.
     """
@@ -333,6 +337,12 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
         tuple(canonical_tokens()),
         tuple(canonical_tokens()[:-1]),
         tuple(canonical_tokens()[:-2]),
+        # The signed-zero pair: two reads Python calls equal but a client is
+        # served differently. Included so the guard exercises the exact class
+        # of divergence that dataclass equality missed, rather than only
+        # coarse structural differences.
+        tuple(_tokens_with_cell("-0.00")),
+        tuple(_tokens_with_cell("0.00")),
     ]
     monkeypatch.setattr(
         review_module,
@@ -362,9 +372,9 @@ def test_the_retention_invariants_hold_under_randomised_operation(monkeypatch, s
             except VCUBCaptureStoreFullError:
                 assert decided <= set(store._captures), "a refusal discarded a decision"
                 continue
-            assert store._captures[capture_id] == capture, (
-                "stored capture is not the one handed out"
-            )
+            assert response_fingerprint(store._captures[capture_id]) == response_fingerprint(
+                capture
+            ), "stored capture is not the one handed out"
             if capture_id not in birth:
                 birth[capture_id] = clock
                 clock += 1
