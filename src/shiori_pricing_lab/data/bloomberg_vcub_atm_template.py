@@ -109,14 +109,27 @@ _MENU_MARKER_RE = re.compile(r"^\d{1,3}\)")
 # the capture leave Curve/Config unresolved, never mis-sliced. Seven rounds of
 # review on this field all shared one shape -- a guess about where a name ends
 # produced a *wrong* name -- so the guess now costs a resolution instead.
-_NAME_PLAUSIBLE_RE = re.compile(r"^[0-9A-Za-z ()/&._+:-]+$")
+#
+# The widget-separator test below is built from the *same* string, so the two
+# are complements by construction. Kept as two independent enumerations they
+# disagreed, and the disagreement truncated a name: a name could carry "+"
+# while a trailing "+" also ended a widget, so `USD RFR+ OIS BVOL Cube
+# (Default)` split into boxes stored `OIS BVOL Cube (Default)` -- a real
+# Bloomberg name with its head cut off, presented as resolved (Codex review,
+# PR #182).
+_NAME_CHARACTERS = r"0-9A-Za-z ()/&._+:-"
+_NAME_PLAUSIBLE_RE = re.compile(rf"^[{_NAME_CHARACTERS}]+$")
 # A widget's text ends where a separator glyph does -- the dropdown caret
-# Bloomberg draws on the right of each selector. Anything alphanumeric, or
-# punctuation a name can carry, is still part of the value. Both parentheses
-# are exempt: a reader that returns "(Default)" as "(", "Default", ")" would
-# otherwise have its lone "(" read as the end of a widget, cutting the name
-# off from its own suffix.
-_WIDGET_SEPARATOR_TAIL_RE = re.compile(r"[^0-9A-Za-z()]$")
+# Bloomberg draws on the right of each selector. Anything a name can carry is
+# still part of the value, parentheses included: a reader that returns
+# "(Default)" as "(", "Default", ")" would otherwise have its lone "(" read as
+# the end of a widget, cutting the name off from its own suffix.
+#
+# A caret the reader hands back as a name character -- "v", "." -- is not seen
+# as a boundary here, and the walk then runs to the start of its line, where
+# the field goes unresolved. That direction costs a resolution; the direction
+# this rule refuses to take costs correctness.
+_WIDGET_SEPARATOR_TAIL_RE = re.compile(rf"[^{_NAME_CHARACTERS}]$")
 # Two tokens belong to the same widget while the gap between them stays
 # within a normal word space. Measured in character widths taken from the
 # tokens themselves, so it scales with font size and DPI like every other

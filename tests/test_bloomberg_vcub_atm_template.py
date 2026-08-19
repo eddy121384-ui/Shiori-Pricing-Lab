@@ -1091,6 +1091,18 @@ _WHOLE_NAME = "USD RFR BVOL Cube (Default)"
             ["CCY\u25be", "USD RFR+ OIS BVOL Cube (Default)\u25be"],
             "USD RFR+ OIS BVOL Cube (Default)",
         ),
+        # The same name split at its own punctuation. A trailing "+" used to
+        # read as a widget separator, so the walk stopped inside the name and
+        # stored "OIS BVOL Cube (Default)" -- truncated, and truncated the
+        # same way whether or not a boundary preceded it.
+        (
+            ["CCY\u25be", "USD", "RFR+", "OIS", "BVOL", "Cube", "(Default)"],
+            "USD RFR+ OIS BVOL Cube (Default)",
+        ),
+        (
+            ["CCY\u25be", "USD", "RFR:", "OIS", "BVOL", "Cube", "(Default)"],
+            "USD RFR: OIS BVOL Cube (Default)",
+        ),
         # The selectors beside it came back merged, but a caret survived, so
         # the boundary is observed and the whole detection is one widget.
         (["USD\u25be RFR\u25be", "USD RFR BVOL Cube (Default)"], _WHOLE_NAME),
@@ -1128,6 +1140,9 @@ def test_a_curve_name_whose_boundary_is_verified_is_captured_whole(
         # geometry, so nothing here marks where the name starts either.
         ["USD", "RFR", "USD", "RFR", "BVOL", "Cube", "(Default)"],
         ["USD", "RFR", "BVOL", "Cube", "(Default)"],
+        # Punctuation inside the name is not a boundary, so this walks to the
+        # start of its line and goes unresolved rather than truncating.
+        ["USD", "RFR+", "OIS", "BVOL", "Cube", "(Default)"],
     ],
 )
 def test_a_curve_name_sharing_a_detection_with_its_neighbour_is_refused(
