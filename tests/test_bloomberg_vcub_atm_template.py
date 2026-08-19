@@ -1212,6 +1212,66 @@ def test_a_word_the_reader_split_does_not_gain_a_space_the_screen_never_drew() -
     assert from_two_boxes == from_one_box
 
 
+def _with_word_split(tokens, text: str, halves: Sequence[str]) -> list[VCUBTextToken]:
+    """Return ``tokens`` with one token re-detected as touching halves.
+
+    Same pixels, same extent -- only the reader's boxing differs, which is
+    what a split inside a word looks like coming back from RapidOCR.
+    """
+
+    assert "".join(halves) == text
+    out: list[VCUBTextToken] = []
+    for token in tokens:
+        if token.text != text:
+            out.append(token)
+            continue
+        cursor = token.left
+        for half in halves:
+            width = token.width * len(half) / len(text)
+            out.append(
+                VCUBTextToken(
+                    text=half, left=cursor, top=token.top, width=width, height=token.height
+                )
+            )
+            cursor += width
+    return out
+
+
+@pytest.mark.parametrize(
+    "text,halves",
+    [
+        ("BVOL\u25be", ["BV", "OL\u25be"]),          # the Source value itself
+        ("Normal", ["Nor", "mal"]),               # a word inside the vol type
+        ("16)", ["1", "6)"]),                     # the digits of a menu marker
+        ("Mid\u25be", ["Mi", "d\u25be"]),             # the Side value
+        ("Swaptions", ["Swap", "tions"]),         # the tab name
+    ],
+)
+def test_a_word_the_reader_split_changes_no_metadata_field(
+    text: str, halves: list[str]
+) -> None:
+    """Codex review, PR #182 -- the shape every remaining defect has had.
+
+    A line's text was assembled by putting a space between every pair of
+    detections, and every metadata rule reads that text. So a word the
+    reader happened to cut in two changed the stored evidence: ``BVOL`` came
+    back as ``BV OL``, and a ``16)`` marker cut between its digits stopped
+    reading as a menu boundary at all, leaving its ``1`` attached to Source.
+
+    The same pixels must resolve the same way however they are boxed, so
+    this asserts the whole metadata record is unchanged rather than one
+    field.
+    """
+
+    tokens = _live_layout_header_tokens() + grid_tokens()
+    split = _with_word_split(tokens, text, halves)
+    occurrences = sum(1 for token in tokens if token.text == text)
+
+    assert occurrences  # the word is really on this screen
+    assert len(split) == len(tokens) + occurrences  # and really was split
+    assert parse(split).metadata == parse(tokens).metadata
+
+
 def test_a_menu_marker_split_across_boxes_still_bounds_the_field() -> None:
     """Codex review, PR #182 -- the live capture's contamination, returning
     through a different grouping.

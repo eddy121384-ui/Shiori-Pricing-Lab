@@ -232,7 +232,19 @@ class _TextLine:
         return max(token.bottom for token in self.tokens)
 
     def joined_text(self) -> str:
-        return " ".join(_normalise(token.text) for token in self.tokens)
+        """This line's text, spaced as the screen drew it.
+
+        Spacing comes from the boxes, never from the fact that the reader
+        returned two of them. Joining unconditionally put a space wherever a
+        word had been split, and every metadata rule reads this text: a
+        ``BVOL`` cut into ``BV`` and ``OL`` stored Source as ``BV OL``, and a
+        ``16)`` marker cut into ``1`` and ``6)`` stopped reading as a menu
+        boundary at all, leaving its ``1`` attached to Source (Codex review,
+        PR #182). Identical pixels must not produce different evidence
+        because of how the reader boxed them.
+        """
+
+        return _join_by_geometry(self.tokens)
 
 
 def _group_into_lines(tokens: Sequence[VCUBTextToken]) -> list[_TextLine]:
@@ -610,6 +622,16 @@ def _separated_by_a_space(left: VCUBTextToken, right: VCUBTextToken) -> bool:
     return scale > 0 and (right.left - left.right) > scale * _SPLIT_WORD_GAP_CHARACTER_WIDTHS
 
 
+def _join_by_geometry(tokens: Sequence[VCUBTextToken]) -> str:
+    """Join tokens, inserting a space only where their boxes show one."""
+
+    text = _normalise(tokens[0].text)
+    # Deliberately ragged: the last token has no successor to pair with.
+    for left, right in zip(tokens, tokens[1:], strict=False):
+        text += (" " if _separated_by_a_space(left, right) else "") + _normalise(right.text)
+    return text
+
+
 def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
     """Join a name's tokens, closing up spacing the reader introduced.
 
@@ -621,10 +643,7 @@ def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
     grouping.
     """
 
-    text = _normalise(tokens[0].text)
-    # Deliberately ragged: the last token has no successor to pair with.
-    for left, right in zip(tokens, tokens[1:], strict=False):
-        text += (" " if _separated_by_a_space(left, right) else "") + _normalise(right.text)
+    text = _join_by_geometry(tokens)
     text = re.sub(r"\(\s+", "(", text)
     return re.sub(r"\s+\)", ")", text)
 
