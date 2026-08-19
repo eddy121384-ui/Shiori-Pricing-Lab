@@ -265,6 +265,70 @@ def test_each_rendered_cell_names_the_intersection_it_belongs_to(
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_negative_zero_cell_is_not_rendered_as_a_positive_zero(
+    page, server_url, tmp_path
+) -> None:
+    """Codex review, PR #182.
+
+    JavaScript hides signed zero twice: ``(-0).toFixed(2)`` is ``"0.00"`` and
+    ``Number("0.00") === -0`` is true, so a naive round-trip check calls the
+    rendering lossless while showing a different number from the one the
+    bridge holds. The bridge now treats -0.0 and 0.0 as distinct captures, so
+    the page must not collapse them back together.
+    """
+
+    payload = _capture_payload()
+    payload["capture"]["grid"]["values"] = [
+        [-0.0, 0.0, 80.75],
+        [81.5, None, 82.0],
+        [83.0, 83.25, 85.153],
+    ]
+    _route_json(page, "/api/vcub/atm/parse", payload)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-compare-card"))
+
+    rows = page.eval_on_selector_all(
+        "#capture-grid-body tr",
+        "els => els.map(row => Array.from(row.children).map(cell => cell.textContent))",
+    )
+
+    assert rows[0][1] == "-0.00"
+    assert rows[0][2] == "0.00"
+    assert rows[2][3] == "85.153"  # never silently rounded either
+
+
+@_PLAYWRIGHT_SKIP
+def test_the_screenshot_cannot_be_swapped_while_a_parse_is_in_flight(
+    page, server_url, tmp_path
+) -> None:
+    """Codex review, PR #182.
+
+    Left live, choosing another screenshot mid-request swapped the selection
+    and the preview under the response still on its way, so one file's grid
+    could render beside another file's image and Confirm would apply to a
+    capture the trader was no longer looking at.
+    """
+
+    # The handler never fulfils, so the request stays genuinely in flight
+    # while the assertions run. Blocking *inside* the handler instead would
+    # stall Playwright's own dispatch loop, and the request would already
+    # have completed by the time the page could be inspected.
+    page.route("**/api/vcub/atm/parse", lambda route, request: None)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-loading"))
+
+    assert page.eval_on_selector("#capture-file-input", "el => el.disabled") is True
+    assert "is-disabled" in page.get_attribute('label[for="capture-file-input"]', "class")
+    # The picker being frozen is what makes the swap impossible; the response
+    # is pinned to its own request as a second, independent guard.
+    assert page.eval_on_selector("#capture-parse-btn", "el => el.className").find(
+        "is-disabled"
+    ) >= 0
+
+
+@_PLAYWRIGHT_SKIP
 def test_the_source_screenshot_is_shown_beside_the_reconstructed_grid(
     page, server_url, tmp_path
 ) -> None:

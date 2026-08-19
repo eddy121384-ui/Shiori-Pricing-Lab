@@ -29,6 +29,7 @@
     fileRow: document.getElementById("capture-file-row"),
     fileName: document.getElementById("capture-file-name"),
     parseBtn: document.getElementById("capture-parse-btn"),
+    chooseBtn: document.querySelector('label[for="capture-file-input"]'),
     loading: document.getElementById("capture-loading"),
     errorSection: document.getElementById("capture-error"),
     errorTitle: document.getElementById("capture-error-title"),
@@ -217,9 +218,18 @@
   // allowed to impose: a value that does not survive `toFixed(2)` intact is
   // shown in full, so what the trader compares against the screenshot is
   // exactly what the parser read.
+  //
+  // Signed zero is handled explicitly because JavaScript hides it twice over:
+  // `(-0).toFixed(2)` is "0.00", and `Number("0.00") === -0` is true, so a
+  // naive round-trip check calls the rendering lossless while showing the
+  // trader a different number from the one the server holds. The bridge now
+  // treats -0.0 and 0.0 as distinct captures, so this page must not collapse
+  // them back together (Codex review, PR #182).
   function formatCapturedValue(value) {
-    const twoDecimals = value.toFixed(2);
-    return Number(twoDecimals) === value ? twoDecimals : String(value);
+    const sign = value < 0 || Object.is(value, -0) ? "-" : "";
+    const magnitude = Math.abs(value);
+    const twoDecimals = sign + magnitude.toFixed(2);
+    return Object.is(Number(twoDecimals), value) ? twoDecimals : sign + String(magnitude);
   }
 
   // Expiry down the rows, Swap Tenor across the columns -- VCUB's own data
@@ -324,6 +334,13 @@
     busy = value;
     els.loading.hidden = !value;
     setDisabled(els.parseBtn, value || !selectedFile);
+    // The file picker is frozen for the whole in-flight interval. Left live,
+    // choosing another screenshot mid-request swapped `selectedFile` and the
+    // preview under the response still on its way, so the first file's grid
+    // could render beside the second file's image and Confirm would apply to
+    // a capture the trader was no longer looking at (Codex review, PR #182).
+    els.fileInput.disabled = value;
+    setDisabled(els.chooseBtn, value);
     if (value) {
       setDisabled(els.confirmBtn, true);
       setDisabled(els.rejectBtn, true);
@@ -355,16 +372,22 @@
   els.parseBtn.addEventListener("click", async () => {
     if (!selectedFile || busy) return;
     clearError();
+    // Pinned for this request: every field below reads the snapshot, never
+    // the live `selectedFile`, so one request can only ever pair one file's
+    // bytes with that same file's name -- belt and braces alongside the
+    // frozen picker above.
+    const requestedFile = selectedFile;
     setBusy(true);
     try {
-      const bytes = await readFileAsBytes(selectedFile);
+      const bytes = await readFileAsBytes(requestedFile);
       const payload = validateCapturePayload(
         await postJson("/api/vcub/atm/parse", {
-          source_reference: selectedFile.name,
+          source_reference: requestedFile.name,
           image_base64: base64FromBytes(bytes),
         })
       );
       setBusy(false);
+      if (selectedFile !== requestedFile) return; // the trader moved on; this answer is stale
       renderCapture(payload, payload.reader_notes);
     } catch (err) {
       setBusy(false);
