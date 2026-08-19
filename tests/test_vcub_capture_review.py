@@ -13,20 +13,40 @@ import threading
 import time
 
 import pytest
-from test_bloomberg_vcub_atm_template import canonical_tokens
+from test_bloomberg_vcub_atm_template import (
+    canonical_tokens,
+    grid_tokens,
+    metadata_tokens,
+    outside_grid_tokens,
+    provenance,
+)
 
 import shiori_pricing_lab.app.vcub_capture_review as review_module
 from shiori_pricing_lab.app.vcub_capture_review import (
     VCUBCaptureReviewStore,
     VCUBCaptureStoreFullError,
     capture_id_for,
+    response_fingerprint,
     utc_now_iso,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
 from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBCaptureStatus
 
 _IMAGE = b"\x89PNG\r\n\x1a\n-synthetic-not-a-screenshot"
 _CAPTURED_AT = "2026-08-18T09:30:00Z"
 _REVIEWED_AT = "2026-08-18T09:41:00Z"
+
+
+def _tokens_with_cell(text: str):
+    """The canonical grid with one cell replaced by ``text``."""
+
+    return metadata_tokens() + grid_tokens(value_overrides={(2, 3): text}) + (
+        outside_grid_tokens()
+    )
+
+
+def _capture_with_cell(text: str):
+    return parse_vcub_atm_tokens(tuple(_tokens_with_cell(text)), provenance=provenance())
 
 
 @pytest.fixture()
@@ -501,6 +521,51 @@ def test_the_store_full_message_says_what_to_do_about_it(stub_reader) -> None:
     message = str(caught.value)
     assert "Restart the workbench" in message
     assert "in memory only" in message
+
+
+def test_two_reads_differing_only_in_signed_zero_get_distinct_slots(monkeypatch) -> None:
+    """Codex review on `49bf0cd`, PR #182.
+
+    Slot reuse asks "is this the read the client is already looking at",
+    and Python equality answers that question wrongly for signed zero:
+    ``-0.0 == 0.0`` is true, but the client is shown -- and served -- two
+    different numbers. Reusing the slot therefore let a client confirm a
+    capture whose displayed value it never saw.
+    """
+
+    reads = iter(
+        [
+            tuple(_tokens_with_cell("-0.00")),
+            tuple(_tokens_with_cell("0.00")),
+        ]
+    )
+    monkeypatch.setattr(
+        review_module,
+        "read_tokens_from_image_bytes",
+        lambda raw_image, *, engine=None, **kwargs: (next(reads), ()),
+    )
+    store = VCUBCaptureReviewStore()
+
+    first_id, first, _ = store.parse_image(
+        source_reference="a.png", raw_image=_IMAGE, captured_at=_CAPTURED_AT
+    )
+    second_id, second, _ = store.parse_image(
+        source_reference="a.png", raw_image=_IMAGE, captured_at=_CAPTURED_AT
+    )
+
+    assert first.grid == second.grid, "dataclass equality alone would have reused the slot"
+    assert first_id != second_id
+    assert json.dumps(store.get(first_id).grid.value_at("3Mo", "4Yr")) == json.dumps(
+        first.grid.value_at("3Mo", "4Yr")
+    )
+
+
+def test_the_response_fingerprint_separates_values_python_calls_equal() -> None:
+    negative = _capture_with_cell("-0.00")
+    positive = _capture_with_cell("0.00")
+
+    assert negative.grid == positive.grid  # Python's own answer
+    assert response_fingerprint(negative) != response_fingerprint(positive)
 
 
 def test_a_refused_parse_reserves_no_identifier(stub_reader) -> None:

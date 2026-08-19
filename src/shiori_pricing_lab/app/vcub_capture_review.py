@@ -48,6 +48,7 @@ decision about it.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from collections import OrderedDict
 from datetime import UTC, datetime
@@ -85,6 +86,21 @@ def utc_now_iso() -> str:
     """The current instant as a second-precision UTC ISO-8601 string."""
 
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def response_fingerprint(capture: VCUBATMCapture) -> str:
+    """Exactly what a client would receive for ``capture``, as one string.
+
+    Slot reuse turns on "is this read the same as the one a client is already
+    looking at", and the honest test of that is the response itself, not
+    Python equality over the dataclass. The two diverge: a cell read as
+    ``-0.00`` and one read as ``0.00`` produce ``-0.0`` and ``0.0``, which
+    compare equal in Python but serialise -- and render -- differently, so
+    reusing the slot let a client confirm a capture whose displayed value it
+    never saw (Codex review on `49bf0cd`, PR #182).
+    """
+
+    return json.dumps(capture.to_dict(), sort_keys=True)
 
 
 def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
@@ -216,15 +232,19 @@ class VCUBCaptureReviewStore:
           a silent retarget onto a capture nobody reviewed. Eviction may
           lose a capture; it must never redirect one.
 
-        Captures are frozen dataclasses of immutable fields, so ``==`` is an
-        exact structural comparison: same provenance, same grid, same issues.
+        Sameness is decided by :func:`response_fingerprint` -- the serialised
+        response a client would receive -- rather than by dataclass equality,
+        which treats ``-0.0`` and ``0.0`` as the same value while the client
+        is shown two different numbers.
         """
 
         identifier = capture_id_for(source_image_sha256, captured_at)
         attempt = 0
         while True:
             existing = self._captures.get(identifier)
-            reusable = existing is not None and existing == capture
+            reusable = existing is not None and response_fingerprint(
+                existing
+            ) == response_fingerprint(capture)
             if reusable or identifier not in self._issued_identifiers:
                 return identifier
             attempt += 1
