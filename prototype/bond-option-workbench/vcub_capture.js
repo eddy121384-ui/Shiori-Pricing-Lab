@@ -79,6 +79,9 @@
   let selectedObjectUrl = null;
   let captureId = null;
   let busy = false;
+  // The capture currently on screen, so the review actions can be restored to
+  // match it after a request finishes -- including a failed one.
+  let renderedCapture = null;
 
   function setDisabled(el, disabled) {
     el.classList.toggle("is-disabled", Boolean(disabled));
@@ -311,10 +314,8 @@
     renderGrid(capture.grid);
     renderProvenance(capture.provenance, readerNotes);
 
-    const decided = capture.review_status !== "PENDING_REVIEW";
-    setDisabled(els.confirmBtn, !capture.can_confirm || busy);
-    setDisabled(els.rejectBtn, decided || busy);
-    els.reviewedBy.disabled = decided;
+    renderedCapture = capture;
+    applyReviewActionState();
 
     if (capture.review_status === "CONFIRMED") {
       els.reviewStatus.textContent = `Confirmed by ${capture.reviewed_by} at ${capture.reviewed_at}. These values are recorded as a reviewed capture only — nothing is priced from them.`;
@@ -341,10 +342,25 @@
     // a capture the trader was no longer looking at (Codex review, PR #182).
     els.fileInput.disabled = value;
     setDisabled(els.chooseBtn, value);
-    if (value) {
+    applyReviewActionState();
+  }
+
+  // Confirm/Reject availability is derived in one place, from the capture on
+  // screen and whether a request is in flight, and re-applied whenever either
+  // changes. Disabling them on the way into a request and restoring them only
+  // on the success path -- the previous shape -- left both buttons dead after
+  // a failed confirm or reject, so the capture stayed pending with no way to
+  // retry short of reparsing (Codex review, PR #182).
+  function applyReviewActionState() {
+    if (renderedCapture === null) {
       setDisabled(els.confirmBtn, true);
       setDisabled(els.rejectBtn, true);
+      return;
     }
+    const decided = renderedCapture.review_status !== "PENDING_REVIEW";
+    setDisabled(els.confirmBtn, busy || !renderedCapture.can_confirm);
+    setDisabled(els.rejectBtn, busy || decided);
+    els.reviewedBy.disabled = decided;
   }
 
   els.fileInput.addEventListener("change", () => {
@@ -361,6 +377,7 @@
     // A new file invalidates whatever was under review: never leave one
     // screenshot's grid on screen beside another screenshot.
     captureId = null;
+    renderedCapture = null;
     els.reviewCard.hidden = true;
     els.compareCard.hidden = true;
     if (selectedFile) {
@@ -390,6 +407,7 @@
       if (selectedFile !== requestedFile) return; // the trader moved on; this answer is stale
       renderCapture(payload, payload.reader_notes);
     } catch (err) {
+      renderedCapture = null;
       setBusy(false);
       els.reviewCard.hidden = true;
       els.compareCard.hidden = true;

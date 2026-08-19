@@ -496,6 +496,67 @@ def test_a_review_without_a_reviewer_name_never_reaches_the_bridge(
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_failed_confirm_leaves_the_trader_able_to_try_again(
+    page, server_url, tmp_path
+) -> None:
+    """Codex review, PR #182.
+
+    Confirm and Reject were disabled on the way into a request and restored
+    only on the success path, so a failed confirm left both dead: the capture
+    stayed pending with no way to retry short of reparsing the screenshot.
+    """
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(page, "/api/vcub/atm/confirm", {"error": "bridge unavailable"}, status=500)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-error"))
+
+    assert "bridge unavailable" in page.text_content("#capture-error-detail")
+    # Still pending, and still actionable.
+    assert page.text_content("#capture-status-pill").strip() == "Pending review"
+    assert "is-disabled" not in page.get_attribute("#capture-confirm-btn", "class")
+    assert "is-disabled" not in page.get_attribute("#capture-reject-btn", "class")
+    assert page.eval_on_selector("#capture-reviewed-by", "el => el.disabled") is False
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_confirm_on_a_blocked_capture_does_not_become_confirmable(
+    page, server_url, tmp_path
+) -> None:
+    """Restoring the actions must restore them to what the capture allows,
+    never simply re-enable both."""
+
+    blocked = _capture_payload(
+        blocking_errors=[
+            {
+                "code": "CELL_POSITION_AMBIGUOUS",
+                "message": "'85.15' sits on a column boundary",
+                "expiry": "3Mo",
+                "tenor": "4Yr",
+            }
+        ],
+        can_confirm=False,
+    )
+    _route_json(page, "/api/vcub/atm/parse", blocked)
+    _route_json(page, "/api/vcub/atm/reject", {"error": "bridge unavailable"}, status=500)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-blockers"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-reject-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-error"))
+
+    assert "is-disabled" not in page.get_attribute("#capture-reject-btn", "class")
+    assert "is-disabled" in page.get_attribute("#capture-confirm-btn", "class")
+
+
+@_PLAYWRIGHT_SKIP
 def test_choosing_another_screenshot_clears_the_previous_reconstruction(
     page, server_url, tmp_path
 ) -> None:
