@@ -91,12 +91,16 @@ _KNOWN_SOURCE_TEXTS = frozenset({"BVOL", "CMPN", "BGN"})
 # followed it, so these markers are treated as field boundaries.
 _MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\)\s+")
 # The curve/config *name*, anchored on the word Bloomberg always ends it
-# with. Bounded to a few preceding words so it captures "USD RFR BVOL Cube
-# (Default)" without swallowing the currency and index selectors drawn to
-# its left on the same line.
+# with, and reaching back over the words that precede it so it captures
+# "USD RFR BVOL Cube (Default)" without swallowing the currency and index
+# selectors drawn to its left on the same line. The character class covers
+# the punctuation a curve name can legitimately carry -- "RFR/OIS" -- because
+# a class that stopped at the slash would begin matching *after* it.
+_CURVE_NAME_CHARACTERS = r"A-Za-z0-9/&._-"
 _CURVE_CONFIG_RE = re.compile(
-    r"(?:[A-Za-z0-9]+\s+){0,4}Cube(?:\s*\([^)]*\))?", re.IGNORECASE
+    rf"(?:[{_CURVE_NAME_CHARACTERS}]+\s+){{0,8}}Cube(?:\s*\([^)]*\))?", re.IGNORECASE
 )
+_CURVE_NAME_TAIL_RE = re.compile(rf"[{_CURVE_NAME_CHARACTERS}]$")
 # Closed vocabularies are matched against alphanumeric runs rather than
 # whitespace-separated words: the live screen glues a dropdown caret onto
 # the value it belongs to, so "USD" and "Mid" never appeared as bare words
@@ -405,7 +409,7 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     # Only a *value* segment can carry the curve name: "Analyze Cube" is a
     # menu action, and counting it made the live screen's two "Cube"
     # occurrences ambiguous and left this field unresolved.
-    resolved["curve_config"] = _unique_match(value_segments, _CURVE_CONFIG_RE)
+    resolved["curve_config"] = _unique_curve_config(value_segments)
     side = _unique_member([run.upper() for run in runs], set(_SIDE_TEXTS))
     resolved["side"] = None if side is None else _SIDE_TEXTS[side]
     resolved["quote_date"] = _unique_match(line_texts, _DATE_RE)
@@ -424,6 +428,35 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
 
 def _unique_member(candidates: Sequence[str], allowed: set[str]) -> str | None:
     found = {candidate for candidate in candidates if candidate in allowed}
+    return found.pop() if len(found) == 1 else None
+
+
+def _unique_curve_config(value_segments: Sequence[str]) -> str | None:
+    """The one curve/config name on the screen, whole, or nothing.
+
+    The phrase reaches back a bounded number of words, so on a name longer
+    than that bound the regex would otherwise start matching in the middle
+    and hand back a *truncated* name as if it were the resolved value --
+    inventing Bloomberg metadata, which is precisely what this layer must
+    never do (Codex review, PR #182).
+
+    A match is therefore only trusted when nothing name-like immediately
+    precedes it: it has to start at the beginning of its field segment, or
+    just after a character that cannot be part of a name, such as the
+    dropdown caret separating this widget from the one on its left. A match
+    that starts mid-name is discarded, leaving the field explicitly
+    unresolved rather than quietly shortened.
+    """
+
+    found: set[str] = set()
+    for segment in value_segments:
+        for match in _CURVE_CONFIG_RE.finditer(segment):
+            preceding = segment[: match.start()].rstrip()
+            if preceding and _CURVE_NAME_TAIL_RE.search(preceding):
+                continue  # started mid-name: the value would be truncated
+            name = _trim_ui_glyphs(match.group(0))
+            if name:
+                found.add(name)
     return found.pop() if len(found) == 1 else None
 
 

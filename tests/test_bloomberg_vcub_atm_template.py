@@ -1006,6 +1006,46 @@ def test_the_live_header_layout_resolves_every_metadata_field() -> None:
     assert metadata.tab == "ATM Swaptions"
 
 
+@pytest.mark.parametrize(
+    "curve_name",
+    [
+        "USD RFR BVOL Cube (Default)",
+        "USD SOFR OIS Bloomberg BVOL Cube (Default)",
+        "USD RFR/OIS BVOL Cube (Default)",
+    ],
+)
+def test_a_curve_config_name_is_captured_whole(curve_name: str) -> None:
+    """Codex review, PR #182.
+
+    The phrase reaches back a bounded number of words. On a longer name, or
+    one carrying punctuation, it used to start matching in the middle and
+    return a *truncated* name as the resolved value -- inventing Bloomberg
+    metadata. ``USD SOFR OIS Bloomberg BVOL Cube (Default)`` came back as
+    ``SOFR OIS ...`` and ``USD RFR/OIS BVOL Cube`` as ``OIS BVOL Cube``.
+    """
+
+    tokens = _header_line(f"CCY\u25be IDX\u25be {curve_name}\u25be Mid\u25be", 20.0)
+    tokens += _header_line("ATM Swaptions", 44.0)
+    tokens += grid_tokens()
+
+    assert parse(tokens).metadata.curve_config == curve_name
+
+
+def test_a_curve_config_name_beyond_the_phrase_bound_fails_closed() -> None:
+    """The bound must cost a resolution, never a truncation."""
+
+    tokens = _header_line(
+        "CCY\u25be IDX\u25be A B C D E F G H I J K L BVOL Cube (Default)\u25be", 20.0
+    )
+    tokens += _header_line("ATM Swaptions", 44.0)
+    tokens += grid_tokens()
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
+
+
 def test_two_curve_config_values_still_leave_the_field_unresolved() -> None:
     """Segmenting menu actions away must not make the field credulous: two
     genuine candidates are still refused."""
