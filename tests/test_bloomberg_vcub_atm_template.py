@@ -107,7 +107,10 @@ def metadata_tokens() -> list[VCUBTextToken]:
         # ending at its own caret: on the real screen the curve/config is
         # never the first widget on its line.
         _word_row(("USD\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"), 20.0)
-        + _word_row(("ATM", "Swaptions", "Mid", "08/18/26"), 50.0)
+        # Side is its own selector on the real screen, not a word inside the
+        # phrase beside it -- placed here with the gap a separate widget has.
+        + _word_row(("ATM", "Swaptions"), 50.0)
+        + _word_row(("Mid\u25be", "08/18/26"), 50.0, left=160.0)
         + _word_row(("Type", "Normal", "Vol", "(OIS)", "Source", "BVOL"), 80.0)
     )
 
@@ -1349,14 +1352,16 @@ def test_the_vol_type_pattern_does_not_read_an_illegible_line(
         assert "vol_type" in metadata.unresolved_fields
 
 
-def _source_line(boxes: Sequence[tuple[str, float]]) -> list[VCUBTextToken]:
+def _source_line(
+    boxes: Sequence[tuple[str, float]], y: float = 68.0
+) -> list[VCUBTextToken]:
     """A header line from ``(text, gap_after)`` pairs."""
 
     tokens: list[VCUBTextToken] = []
     cursor = 40.0
     for text, gap in boxes:
         width = len(text) * 7.0
-        tokens.append(VCUBTextToken(text=text, left=cursor, top=68.0, width=width, height=9.0))
+        tokens.append(VCUBTextToken(text=text, left=cursor, top=y, width=width, height=9.0))
         cursor += width + gap
     return tokens
 
@@ -1390,6 +1395,44 @@ def test_an_illegible_gap_cannot_manufacture_a_vocabulary_member() -> None:
     assert one_box.source == "B VOL"  # what the screen displayed
     assert split.source is None  # never the code it was not
     _assert_only_unresolves(split, one_box)
+
+
+@pytest.mark.parametrize(
+    "field,displayed,widget,halves",
+    [
+        ("source", "CMPN", "CMPN\u25be", ["CM", "PN\u25be"]),
+        ("currency", "EUR", "EUR\u25be", ["EU", "R\u25be"]),
+    ],
+)
+def test_a_field_never_inherits_a_code_from_another_widget(
+    field: str, displayed: str, widget: str, halves: list[str]
+) -> None:
+    """Codex review, PR #182.
+
+    The live screen's curve name is ``USD RFR BVOL Cube (Default)``, so
+    ``BVOL`` and ``USD`` are on the screen whether or not the Source and
+    Currency widgets are readable. Scanning every word for a vocabulary
+    member let an unreadable field inherit them: a screen showing Source
+    ``CMPN`` stored ``BVOL``, and one showing Currency ``EUR`` stored
+    ``USD``.
+
+    A vocabulary is now matched against what a widget *displays*, so the same
+    letters inside a longer name are not evidence of anything.
+    """
+
+    curve = _source_line(
+        [("USD RFR BVOL Cube (Default)\u25be", 5.0), (widget, 5.0)], y=20.0
+    )
+    illegible = _source_line(
+        [("USD RFR BVOL Cube (Default)\u25be", 5.0), (halves[0], 2.0), (halves[1], 5.0)],
+        y=20.0,
+    )
+    tail = _header_line("3) ATM Swaptions", 44.0) + grid_tokens()
+
+    assert getattr(parse(curve + tail).metadata, field) == displayed
+    unreadable = parse(illegible + tail).metadata
+    assert getattr(unreadable, field) is None
+    assert field in unreadable.unresolved_fields
 
 
 def test_a_curve_name_whose_own_spacing_is_illegible_is_unresolved() -> None:
@@ -1538,7 +1581,7 @@ def test_metadata_that_cannot_be_read_is_marked_unresolved_and_not_invented() ->
     tokens = [
         token
         for token in canonical_tokens()
-        if token.text not in {"Mid", "08/18/26", "Cube", "(Default)"}
+        if token.text not in {"Mid\u25be", "08/18/26", "Cube", "(Default)"}
     ]
 
     metadata = parse(tokens).metadata

@@ -489,22 +489,16 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     # Per fragment rather than per line on purpose: one unreadable gap
     # somewhere on a header line must not cost the currency, side and source
     # that are perfectly legible beside it.
-    runs = [
-        run
-        for line in lines
-        for fragment in _legible_fragments(line.tokens)
-        for segment, _is_menu in _field_segments(fragment)
-        for run in _ALPHANUMERIC_RUN_RE.findall(segment)
-    ]
+    widget_values = [value for line in lines for value in _widget_values(line.tokens)]
 
     resolved: dict[str, str | None] = dict.fromkeys(METADATA_FIELDS, None)
 
-    resolved["currency"] = _unique_member(runs, set(Currency))
+    resolved["currency"] = _unique_member(widget_values, set(Currency))
     # Only a *value* segment can carry the curve name: "Analyze Cube" is a
     # menu action, and counting it made the live screen's two "Cube"
     # occurrences ambiguous and left this field unresolved.
     resolved["curve_config"] = _unique_curve_config(lines)
-    side = _unique_member([run.upper() for run in runs], set(_SIDE_TEXTS))
+    side = _unique_member([value.upper() for value in widget_values], set(_SIDE_TEXTS))
     resolved["side"] = None if side is None else _SIDE_TEXTS[side]
     resolved["quote_date"] = _unique_match(legible_line_texts, _DATE_RE)
     if tab_resolved:
@@ -513,7 +507,7 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
         legible_value_segments, _VOL_TYPE_RE
     )
     resolved["source"] = _labelled_value(legible_value_segments, "Source") or _unique_member(
-        [run.upper() for run in runs], _KNOWN_SOURCE_TEXTS
+        [value.upper() for value in widget_values], _KNOWN_SOURCE_TEXTS
     )
 
     unresolved = tuple(name for name in METADATA_FIELDS if resolved[name] is None)
@@ -668,25 +662,39 @@ def _space_between(left: VCUBTextToken, right: VCUBTextToken) -> bool | None:
     return None
 
 
-def _legible_fragments(tokens: Sequence[VCUBTextToken]) -> list[str]:
-    """The line's text, cut wherever the boxes do not settle the spacing.
+def _widget_values(tokens: Sequence[VCUBTextToken]) -> list[str]:
+    """Each widget's own displayed value, where the boxes settle its spacing.
 
-    Each fragment is joined from tokens whose every gap was legible, so no
-    fragment spans a join that might not be there. A rule reading these can
-    never see a word the reader's boxing invented.
+    A closed vocabulary is matched against these rather than against every
+    word on the screen. The live header shows why: its curve name is
+    ``USD RFR BVOL Cube (Default)``, so ``BVOL`` and ``USD`` both appear on a
+    screen whose Source and Currency widgets are elsewhere. Scanning
+    everything let an unreadable Source inherit the curve's contributor code
+    -- Source ``CMPN`` stored as ``BVOL``, Currency ``EUR`` stored as ``USD``
+    (Codex review, PR #182). A widget displaying exactly ``USD`` is evidence
+    of the currency; the same letters inside a longer name are not.
+
+    A widget whose own spacing is illegible contributes nothing, so a value
+    cannot be assembled across a gap that may not be there.
     """
 
-    fragments: list[str] = []
-    group = [tokens[0]]
+    values: list[str] = []
+    group: list[VCUBTextToken] = [tokens[0]]
     # Deliberately ragged: the last token has no successor to pair with.
     for left, right in zip(tokens, tokens[1:], strict=False):
-        if _space_between(left, right) is None:
-            fragments.append(_join_by_geometry(group)[0])
+        if _starts_a_new_widget(left, right):
+            values.append(group)  # type: ignore[arg-type]
             group = [right]
         else:
             group.append(right)
-    fragments.append(_join_by_geometry(group)[0])
-    return fragments
+    values.append(group)  # type: ignore[arg-type]
+
+    resolved: list[str] = []
+    for widget in values:
+        text, certain = _join_by_geometry(widget)  # type: ignore[arg-type]
+        if certain:
+            resolved.append(_trim_ui_glyphs(text))
+    return [value for value in resolved if value]
 
 
 def _join_by_geometry(tokens: Sequence[VCUBTextToken]) -> tuple[str, bool]:
