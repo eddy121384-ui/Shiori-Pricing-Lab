@@ -89,7 +89,13 @@ _KNOWN_SOURCE_TEXTS = frozenset({"BVOL", "CMPN", "BGN"})
 # first live capture read Source as "BVOL 16) Use This Contributor in
 # Configuration" because nothing stopped the value run at the action that
 # followed it, so these markers are treated as field boundaries.
-_MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\)\s+")
+# The whitespace before ")" is what a *split* detection leaves behind: the
+# reader may return "16", ")" and "Use" as separate boxes, and joining a line
+# puts a space between them. Without it the live screen's Source read back as
+# "BVOL 16 ) Use This Contributor in Configuration" -- the same contamination
+# this boundary was added for, arriving through a different grouping (Codex
+# review, PR #182).
+_MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\s*\)\s+")
 # The curve/config *name*, anchored on the word Bloomberg always ends it
 # with, and reaching back over the words that precede it so it captures
 # "USD RFR BVOL Cube (Default)" without swallowing the currency and index
@@ -103,7 +109,7 @@ _CUBE_ANCHOR_RE = re.compile(r"\bcube\b", re.IGNORECASE)
 # happens to hold the marker alone: the reader may return "9) Analyze Cube"
 # as a single detection, and an exact-token test would let that menu action
 # through as a configuration name.
-_MENU_MARKER_RE = re.compile(r"^\d{1,3}\)")
+_MENU_MARKER_RE = re.compile(r"^\d{1,3}\s*\)")
 # What a configuration name may be made of. Generous on purpose, and it only
 # ever decides whether the field resolves: a character not listed here makes
 # the capture leave Curve/Config unresolved, never mis-sliced. Seven rounds of
@@ -135,6 +141,12 @@ _WIDGET_SEPARATOR_TAIL_RE = re.compile(rf"[^{_NAME_CHARACTERS}]$")
 # tokens themselves, so it scales with font size and DPI like every other
 # threshold in this module.
 _FIELD_GAP_CHARACTER_WIDTHS = 2.0
+# Two tokens are two words -- rather than one word the reader cut in half --
+# once the gap between them is a real fraction of a character. Boxes are drawn
+# tight around their glyphs, so a split inside a word leaves them touching,
+# while the live header's word spaces run about 0.7 character widths: the
+# threshold sits well clear of both.
+_SPLIT_WORD_GAP_CHARACTER_WIDTHS = 0.25
 # Closed vocabularies are matched against alphanumeric runs rather than
 # whitespace-separated words: the live screen glues a dropdown caret onto
 # the value it belongs to, so "USD" and "Mid" never appeared as bare words
@@ -591,10 +603,28 @@ def _extend_over_parenthetical(
         depth += _parenthesis_delta(tokens[index])
 
 
-def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
-    """Join a name's tokens, closing up spacing the reader introduced."""
+def _separated_by_a_space(left: VCUBTextToken, right: VCUBTextToken) -> bool:
+    """Whether the screen drew a space between two tokens of one name."""
 
-    text = " ".join(_normalise(token.text) for token in tokens)
+    scale = max(_character_width(left), _character_width(right))
+    return scale > 0 and (right.left - left.right) > scale * _SPLIT_WORD_GAP_CHARACTER_WIDTHS
+
+
+def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
+    """Join a name's tokens, closing up spacing the reader introduced.
+
+    Whether a space goes between two tokens is read off their boxes, never
+    assumed. Joining unconditionally inserted a character the screen never
+    displayed: identical geometry stored ``RFR+OIS`` when the reader returned
+    one box and ``RFR+ OIS`` when it split the word in two (Codex review,
+    PR #182), so the recorded Bloomberg name depended on the reader's
+    grouping.
+    """
+
+    text = _normalise(tokens[0].text)
+    # Deliberately ragged: the last token has no successor to pair with.
+    for left, right in zip(tokens, tokens[1:], strict=False):
+        text += (" " if _separated_by_a_space(left, right) else "") + _normalise(right.text)
     text = re.sub(r"\(\s+", "(", text)
     return re.sub(r"\s+\)", ")", text)
 

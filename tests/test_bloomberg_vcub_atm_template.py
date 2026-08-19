@@ -1171,6 +1171,74 @@ def test_a_curve_name_sharing_a_detection_with_its_neighbour_is_refused(
     assert "curve_config" in metadata.unresolved_fields
 
 
+def _curve_line_with_split_word() -> list[VCUBTextToken]:
+    """The same header line, with one word of the name cut in two.
+
+    The two halves' boxes touch, which is what a reader that split a word
+    inside it returns -- boxes are drawn tight around their glyphs.
+    """
+
+    whole = _curve_line_tokens(["CCY\u25be", "USD", "RFR+OIS", "BVOL", "Cube", "(Default)"])
+    left = VCUBTextToken(text="RFR+", left=whole[2].left, top=20.0, width=4 * 7.0, height=9.0)
+    right = VCUBTextToken(text="OIS", left=left.right, top=20.0, width=3 * 7.0, height=9.0)
+    shift = right.right - whole[2].right
+    tail = [
+        VCUBTextToken(
+            text=token.text, left=token.left + shift, top=token.top,
+            width=token.width, height=token.height,
+        )
+        for token in whole[3:]
+    ]
+    return whole[:2] + [left, right] + tail
+
+
+def test_a_word_the_reader_split_does_not_gain_a_space_the_screen_never_drew() -> None:
+    """Codex review, PR #182.
+
+    Joining a name's tokens with a space inserted a character the screen
+    never displayed: the very same geometry stored ``RFR+OIS`` when the
+    reader returned one box and ``RFR+ OIS`` when it cut the word in two, so
+    the recorded Bloomberg name depended on the reader's grouping. Spacing
+    now comes from the boxes.
+    """
+
+    whole = _curve_line_tokens(["CCY\u25be", "USD", "RFR+OIS", "BVOL", "Cube", "(Default)"])
+    trailer = _header_line("ATM Swaptions", 44.0) + grid_tokens()
+
+    from_one_box = parse(whole + trailer).metadata.curve_config
+    from_two_boxes = parse(_curve_line_with_split_word() + trailer).metadata.curve_config
+
+    assert from_one_box == "USD RFR+OIS BVOL Cube (Default)"
+    assert from_two_boxes == from_one_box
+
+
+def test_a_menu_marker_split_across_boxes_still_bounds_the_field() -> None:
+    """Codex review, PR #182 -- the live capture's contamination, returning
+    through a different grouping.
+
+    ``joined_text`` puts a space between separately detected tokens, so a
+    reader that returned the marker as ``16``, ``)`` and ``Use`` produced
+    ``16 ) Use``, which the boundary pattern did not recognise. Source then
+    swallowed the whole rest of its line again -- exactly what failed on the
+    first live acceptance run.
+    """
+
+    tokens = (
+        _header_line("USD\u25be RFR\u25be USD RFR BVOL Cube (Default)\u25be Mid\u25be", 20.0)
+        + _header_line(
+            "Type Normal Vol (OIS)\u25be Source BVOL\u25be "
+            "16 ) Use This Contributor in Configuration",
+            68.0,
+        )
+        + grid_tokens()
+    )
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.source == "BVOL"
+    assert metadata.vol_type == "Normal Vol (OIS)"
+
+
 def test_a_suffix_that_never_closes_leaves_the_field_unresolved() -> None:
     """Better unresolved than a name missing what the screen displayed."""
 
