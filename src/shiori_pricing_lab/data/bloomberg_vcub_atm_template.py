@@ -507,6 +507,17 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
     if first > 0 and _MENU_MARKER_RE.match(_normalise(tokens[first - 1].text)):
         return None
 
+    # A boundary was *observed* to the left only when the walk stopped at one.
+    # Running out of tokens proves nothing: the reader can return the
+    # selectors standing beside this field inside the candidate's own box,
+    # their carets dropped, and `USD RFR USD RFR BVOL Cube (Default)` then
+    # reads as a name (Codex review, PR #182). A box holding a single word
+    # cannot hide that boundary -- widgets returned separately keep their own
+    # boxes, and the gap between them is exactly what the walk measures -- so
+    # only a multi-word leading box goes unresolved.
+    if first == 0 and len(_normalise(tokens[first].text).split()) > 1:
+        return None
+
     name = _trim_ui_glyphs(_join_name(tokens[first : last + 1]))
     if not name or _MENU_MARKER_RE.match(name):
         return None

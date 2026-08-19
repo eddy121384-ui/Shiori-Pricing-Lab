@@ -1088,6 +1088,12 @@ _WHOLE_NAME = "USD RFR BVOL Cube (Default)"
             ["CCY\u25be", "USD RFR+ OIS BVOL Cube (Default)\u25be"],
             "USD RFR+ OIS BVOL Cube (Default)",
         ),
+        # Nothing precedes the name on its line, and its leading box holds one
+        # word: no widget can be hiding inside it.
+        (["USD", "RFR", "BVOL", "Cube", "(Default)"], _WHOLE_NAME),
+        # The selectors beside it came back merged, but a caret survived, so
+        # the boundary is observed and the whole detection is one widget.
+        (["USD\u25be RFR\u25be", "USD RFR BVOL Cube (Default)"], _WHOLE_NAME),
     ],
 )
 def test_a_curve_name_whose_boundary_is_verified_is_captured_whole(
@@ -1110,6 +1116,13 @@ def test_a_curve_name_whose_boundary_is_verified_is_captured_whole(
         ["CCY\u25be", "USD RFR BVOL Cube (Default) Mid\u25be"],
         ["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)\u25be Mid\u25be"],
         ["USD\u25be RFR\u25be USD RFR BVOL Cube (Default)\u25be Mid\u25be"],
+        # The reader merged the Currency and Index selectors *into* the name's
+        # box and dropped their carets. Nothing precedes it on the line, so no
+        # boundary was ever observed to its left -- the screen showed only
+        # "USD RFR BVOL Cube (Default)".
+        ["USD RFR USD RFR BVOL Cube (Default)"],
+        ["USD RFR USD RFR BVOL Cube"],
+        ["USD RFR USD RFR BVOL Cube (Default)\u25be"],
     ],
 )
 def test_a_curve_name_sharing_a_detection_with_its_neighbour_is_refused(
