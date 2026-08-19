@@ -142,7 +142,7 @@ class VCUBCaptureReviewStore:
         tokens, reader_notes = read_tokens_from_image_bytes(raw_image, engine=engine)
         capture = parse_vcub_atm_tokens(tokens, provenance=provenance)
         with self._lock:
-            identifier = self._free_identifier(
+            identifier = self._find_identifier(
                 provenance.source_image_sha256, captured_at, capture
             )
             if identifier not in self._captures:
@@ -150,6 +150,12 @@ class VCUBCaptureReviewStore:
                 # re-read reusing its own slot does not, and must not be able
                 # to trip the capacity refusal.
                 self._make_room_locked()
+            # Reserved only now that the slot is certain. Committing before
+            # ``_make_room_locked`` could raise meant every refused parse burned
+            # an id permanently -- 200 refusals of one image burned 200 ids --
+            # growing this set without bound and lengthening the suffix walk
+            # each time (Codex review round 6, PR #182).
+            self._issued_identifiers.add(identifier)
             self._store_locked(identifier, capture)
         return identifier, capture, reader_notes
 
@@ -180,10 +186,13 @@ class VCUBCaptureReviewStore:
                 )
             del self._captures[oldest_pending]
 
-    def _free_identifier(
+    def _find_identifier(
         self, source_image_sha256: str, captured_at: str, capture: VCUBATMCapture
     ) -> str:
         """An id for this read that cannot displace a capture someone else holds.
+
+        Pure: it reserves nothing. The caller commits the returned id to
+        :attr:`_issued_identifiers` only once the slot is certain.
 
         Re-reading the same file in the same second reuses its review slot,
         which keeps a re-parse from leaving an orphan behind. That is only
@@ -217,7 +226,6 @@ class VCUBCaptureReviewStore:
             existing = self._captures.get(identifier)
             reusable = existing is not None and existing == capture
             if reusable or identifier not in self._issued_identifiers:
-                self._issued_identifiers.add(identifier)
                 return identifier
             attempt += 1
             identifier = capture_id_for(source_image_sha256, f"{captured_at}#{attempt}")
@@ -265,7 +273,13 @@ class VCUBCaptureReviewStore:
         happens only when a *new* slot is being claimed, so recording a
         decision -- which replaces an entry rather than adding one -- can
         never push another capture out.
+
+        Assignment deliberately does *not* refresh an existing key's position:
+        ``OrderedDict`` keeps it where it was, and a new key lands at the end
+        on its own. Refreshing it meant an identical re-read of the oldest
+        pending capture moved it to the back, so the next parse evicted a
+        *younger* pending capture instead -- breaking the oldest-pending rule
+        the retention policy is built on (Codex review round 6, PR #182).
         """
 
         self._captures[capture_id] = capture
-        self._captures.move_to_end(capture_id)

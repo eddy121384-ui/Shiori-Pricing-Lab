@@ -428,6 +428,50 @@ def test_the_store_full_message_says_what_to_do_about_it(stub_reader) -> None:
     assert "in memory only" in message
 
 
+def test_a_refused_parse_reserves_no_identifier(stub_reader) -> None:
+    """Codex review round 6, PR #182.
+
+    The id was committed before the capacity check could refuse, so every
+    refused parse burned one permanently: 200 refusals of a single image
+    burned 200 ids, growing the set without bound and lengthening the
+    suffix walk each time.
+    """
+
+    store = VCUBCaptureReviewStore(capacity=1)
+    (only_id,) = _fill(store, 1)
+    store.confirm(only_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+    reserved_before = len(store._issued_identifiers)
+
+    for _ in range(25):
+        with pytest.raises(VCUBCaptureStoreFullError):
+            _fill(store, 1, first=1)
+
+    assert len(store._issued_identifiers) == reserved_before
+
+
+def test_reusing_a_pending_slot_does_not_make_it_look_younger(stub_reader) -> None:
+    """Codex review round 6, PR #182.
+
+    Re-reading a capture refreshed its position, so the next parse evicted a
+    *younger* pending capture instead of the oldest one -- breaking the very
+    rule the retention policy is built on.
+    """
+
+    store = VCUBCaptureReviewStore(capacity=2)
+    oldest, newer = _fill(store, 2)
+
+    # An identical re-read of the oldest: same slot, and its age must stand.
+    again, _capture, _notes = store.parse_image(
+        source_reference="vcub.png", raw_image=_IMAGE + bytes([0]), captured_at=_CAPTURED_AT
+    )
+    assert again == oldest
+    _fill(store, 1, first=2)
+
+    with pytest.raises(KeyError):
+        store.get(oldest)
+    assert store.get(newer) is not None
+
+
 def test_recording_a_decision_never_pushes_another_capture_out(stub_reader) -> None:
     """Deciding replaces an entry rather than adding one, so it frees nothing
     and must cost nothing."""
