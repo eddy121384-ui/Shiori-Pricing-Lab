@@ -103,7 +103,10 @@ def metadata_tokens() -> list[VCUBTextToken]:
     """The header context above the matrix, as separate word tokens."""
 
     return (
-        _word_row(("USD", "RFR", "BVOL", "Cube", "(Default)"), 20.0)
+        # The currency selector Bloomberg draws to the left of the name,
+        # ending at its own caret: on the real screen the curve/config is
+        # never the first widget on its line.
+        _word_row(("USD\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"), 20.0)
         + _word_row(("ATM", "Swaptions", "Mid", "08/18/26"), 50.0)
         + _word_row(("Type", "Normal", "Vol", "(OIS)", "Source", "BVOL"), 80.0)
     )
@@ -1088,9 +1091,6 @@ _WHOLE_NAME = "USD RFR BVOL Cube (Default)"
             ["CCY\u25be", "USD RFR+ OIS BVOL Cube (Default)\u25be"],
             "USD RFR+ OIS BVOL Cube (Default)",
         ),
-        # Nothing precedes the name on its line, and its leading box holds one
-        # word: no widget can be hiding inside it.
-        (["USD", "RFR", "BVOL", "Cube", "(Default)"], _WHOLE_NAME),
         # The selectors beside it came back merged, but a caret survived, so
         # the boundary is observed and the whole detection is one widget.
         (["USD\u25be RFR\u25be", "USD RFR BVOL Cube (Default)"], _WHOLE_NAME),
@@ -1123,6 +1123,11 @@ def test_a_curve_name_whose_boundary_is_verified_is_captured_whole(
         ["USD RFR USD RFR BVOL Cube (Default)"],
         ["USD RFR USD RFR BVOL Cube"],
         ["USD RFR USD RFR BVOL Cube (Default)\u25be"],
+        # The same screen with one word per detection. The gap between two
+        # separate widgets is 5px against a 14px boundary threshold on this
+        # geometry, so nothing here marks where the name starts either.
+        ["USD", "RFR", "USD", "RFR", "BVOL", "Cube", "(Default)"],
+        ["USD", "RFR", "BVOL", "Cube", "(Default)"],
     ],
 )
 def test_a_curve_name_sharing_a_detection_with_its_neighbour_is_refused(
@@ -1225,7 +1230,9 @@ def test_two_curve_config_values_still_leave_the_field_unresolved() -> None:
     genuine candidates are still refused."""
 
     tokens = _live_layout_header_tokens() + grid_tokens()
-    tokens += _header_line("EUR ESTR BVOL Cube (Default)", 92.0)
+    # Caret-terminated selector to its left, so this is a genuine second
+    # candidate rather than one the left-boundary rule would drop anyway.
+    tokens += _header_line("EUR\u25be EUR ESTR BVOL Cube (Default)", 92.0)
 
     metadata = parse(tokens).metadata
 

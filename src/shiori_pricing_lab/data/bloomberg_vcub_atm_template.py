@@ -507,15 +507,21 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
     if first > 0 and _MENU_MARKER_RE.match(_normalise(tokens[first - 1].text)):
         return None
 
-    # A boundary was *observed* to the left only when the walk stopped at one.
-    # Running out of tokens proves nothing: the reader can return the
-    # selectors standing beside this field inside the candidate's own box,
-    # their carets dropped, and `USD RFR USD RFR BVOL Cube (Default)` then
-    # reads as a name (Codex review, PR #182). A box holding a single word
-    # cannot hide that boundary -- widgets returned separately keep their own
-    # boxes, and the gap between them is exactly what the walk measures -- so
-    # only a multi-word leading box goes unresolved.
-    if first == 0 and len(_normalise(tokens[first].text).split()) > 1:
+    # A boundary was *observed* to the left only when the walk stopped at
+    # one. Running out of tokens proves nothing, so the field is unresolved
+    # there (Codex review, PR #182): the selectors standing beside it can
+    # arrive with their carets dropped, and `USD RFR USD RFR BVOL Cube
+    # (Default)` then reads as a name on a screen displaying only half of
+    # it.
+    #
+    # An earlier version of this rule still trusted a *single-word* leading
+    # box, reasoning that separately detected widgets keep their own boxes
+    # so the gap between them would be caught above. The live header
+    # disproves that: its words sit 5px apart against a 14px threshold, so
+    # on real geometry a gap never marks a widget boundary and only the
+    # caret does. One word per detection therefore stored the same wrong
+    # name.
+    if first == 0:
         return None
 
     name = _trim_ui_glyphs(_join_name(tokens[first : last + 1]))
