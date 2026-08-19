@@ -96,7 +96,9 @@ _MENU_ACTION_RE = re.compile(r"\s*\b\d{1,3}\)\s+")
 # selectors drawn to its left on the same line. The character class covers
 # the punctuation a curve name can legitimately carry -- "RFR/OIS" -- because
 # a class that stopped at the slash would begin matching *after* it.
-_CUBE_ANCHOR_RE = re.compile(r"cube$", re.IGNORECASE)
+# Matched as a word anywhere in a detection, not only at its end: once a
+# reader hands back the whole field in one box the anchor sits mid-text.
+_CUBE_ANCHOR_RE = re.compile(r"\bcube\b", re.IGNORECASE)
 # Matched against the candidate's own text, not only against a token that
 # happens to hold the marker alone: the reader may return "9) Analyze Cube"
 # as a single detection, and an exact-token test would let that menu action
@@ -109,6 +111,12 @@ _MENU_MARKER_RE = re.compile(r"^\d{1,3}\)")
 # otherwise have its lone "(" read as the end of a widget, cutting the name
 # off from its own suffix.
 _WIDGET_SEPARATOR_TAIL_RE = re.compile(r"[^0-9A-Za-z()]$")
+# The same separator, found *inside* a detection. A reader is free to return
+# two adjacent widgets in one box -- "(Default)\u25be Mid\u25be" -- and once it
+# does, the box spans both and no geometry survives to tell them apart. The
+# glyph in the text is the only remaining boundary, so a detection is cut
+# there before anything reads it as one value.
+_INTERNAL_SEPARATOR_RE = re.compile(r"(?<=[^0-9A-Za-z()])\s+")
 # Two tokens belong to the same widget while the gap between them stays
 # within a normal word space. Measured in character widths taken from the
 # tokens themselves, so it scales with font size and DPI like every other
@@ -463,6 +471,48 @@ def _starts_a_new_widget(left: VCUBTextToken, right: VCUBTextToken) -> bool:
     return scale > 0 and gap > scale * _FIELD_GAP_CHARACTER_WIDTHS
 
 
+def _split_at_internal_separators(
+    tokens: Sequence[VCUBTextToken],
+) -> list[VCUBTextToken]:
+    """Cut any detection that spans a widget boundary into its widgets.
+
+    Grouping is the reader's choice, not the screen's: the same header can
+    come back as one box per word or as one box holding a value and its
+    neighbour. Splitting on the separator glyph before anything walks the
+    tokens means the extraction no longer depends on that choice, which five
+    rounds of per-grouping fixes had not achieved (Codex review, PR #182).
+
+    Each part keeps its share of the original box, apportioned by character
+    count. That is an estimate, but it is only ever used to decide adjacency,
+    and the parts are separated by the glyph itself -- which the widget test
+    already treats as a boundary -- so the estimate never decides the split.
+    """
+
+    split: list[VCUBTextToken] = []
+    for token in tokens:
+        text = _normalise(token.text)
+        parts = [part for part in _INTERNAL_SEPARATOR_RE.split(text) if part]
+        if len(parts) < 2:
+            split.append(token)
+            continue
+        characters = sum(len(part) for part in parts)
+        cursor = token.left
+        for part in parts:
+            width = token.width * len(part) / characters
+            split.append(
+                VCUBTextToken(
+                    text=part,
+                    left=cursor,
+                    top=token.top,
+                    width=width,
+                    height=token.height,
+                    confidence=token.confidence,
+                )
+            )
+            cursor += width
+    return split
+
+
 def _curve_config_in_line(line: _TextLine) -> str | None:
     """The curve/config name on one header line, whole, or ``None``.
 
@@ -476,7 +526,7 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
     restart in the middle of one.
     """
 
-    tokens = line.tokens
+    tokens = _split_at_internal_separators(line.tokens)
     anchors = [
         index
         for index, token in enumerate(tokens)

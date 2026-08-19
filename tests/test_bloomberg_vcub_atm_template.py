@@ -1061,31 +1061,42 @@ def _curve_line_tokens(words: Sequence[str], y: float = 20.0) -> list[VCUBTextTo
     return tokens
 
 
+_WHOLE_NAME = "USD RFR BVOL Cube (Default)"
+
+
 @pytest.mark.parametrize(
     "boxes,expected",
     [
-        # However the reader chooses to group the suffix, the name is whole.
-        ((["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"]), "USD RFR BVOL Cube (Default)"),
+        # One box per word.
+        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"], _WHOLE_NAME),
+        # The suffix arriving in two or three boxes.
+        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(", "Default", ")"], _WHOLE_NAME),
+        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default", ")"], _WHOLE_NAME),
+        # The suffix arriving glued to the *next* widget's value.
+        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)\u25be Mid\u25be"], _WHOLE_NAME),
+        # The name and its suffix in one box, and the whole header in one box.
+        (["CCY\u25be", "USD RFR BVOL Cube (Default)\u25be", "Mid\u25be"], _WHOLE_NAME),
+        (["USD\u25be RFR\u25be USD RFR BVOL Cube (Default)\u25be Mid\u25be"], _WHOLE_NAME),
+        # No suffix at all, and punctuation no character class enumerates.
+        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube"], "USD RFR BVOL Cube"),
         (
-            (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(", "Default", ")"]),
-            "USD RFR BVOL Cube (Default)",
+            ["CCY\u25be", "USD", "RFR+OIS", "BVOL", "Cube", "(Default)"],
+            "USD RFR+OIS BVOL Cube (Default)",
         ),
-        (
-            (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default", ")"]),
-            "USD RFR BVOL Cube (Default)",
-        ),
-        ((["CCY\u25be", "USD", "RFR", "BVOL", "Cube"]), "USD RFR BVOL Cube"),
     ],
 )
-def test_a_split_parenthetical_suffix_is_still_captured_whole(
+def test_the_curve_name_does_not_depend_on_how_ocr_groups_boxes(
     boxes: list[str], expected: str
 ) -> None:
-    """Codex review, PR #182.
+    """Codex review, PR #182 -- five rounds of it.
 
-    Taking a single token after the anchor dropped the suffix whenever the
-    reader returned ``(Default)`` as separate boxes, and the shortened name
-    was stored as resolved metadata. How OCR groups boxes varies by screen,
-    so the name must not depend on it.
+    Grouping is the reader's choice, not the screen's, and each round found
+    another grouping that truncated or contaminated the name: a split
+    suffix dropped it, a suffix glued to the neighbouring Side widget
+    swallowed ``Mid`` into the stored value. Handling groupings one at a
+    time never converged, so a detection is now cut at the separator glyph
+    inside it before anything reads it, and every grouping of the same
+    screen yields the same name.
     """
 
     tokens = _curve_line_tokens(boxes) + _header_line("ATM Swaptions", 44.0) + grid_tokens()
