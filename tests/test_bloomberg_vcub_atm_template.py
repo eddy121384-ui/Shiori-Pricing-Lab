@@ -604,6 +604,99 @@ def test_a_dropped_label_on_a_two_row_axis_fails_closed(
     assert not capture.can_confirm
 
 
+def _grid_with_row_positions(row_positions, labels) -> list[VCUBTextToken]:
+    """A well-formed grid whose rows sit exactly where told, values centred."""
+
+    tokens = metadata_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(TENOR_LABELS):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index, (row_y, label) in enumerate(zip(row_positions, labels, strict=True)):
+        tokens.append(_token(label, _ANCHOR_X + 14.0, row_y))
+        for column_index in range(len(TENOR_LABELS)):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    row_y,
+                )
+            )
+    return tokens
+
+
+def test_irregular_row_spacing_alone_fails_the_capture_closed() -> None:
+    """The pitch guard, isolated from every other guard.
+
+    Found by mutation testing: disabling `_check_pitch_regularity` entirely
+    left the whole parser suite green, because every dropped-label case also
+    trips the ambiguity check. Here the values sit exactly on their row
+    centres and well clear of both boundaries, so nothing else can fire --
+    only the spacing itself says a row is missing.
+    """
+
+    capture = parse(_grid_with_row_positions([140.0, 168.0, 250.0], EXPIRY_LABELS[:3]))
+
+    assert "ROW_PITCH_IRREGULAR" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+def test_an_axis_that_does_not_increase_in_tenor_fails_closed() -> None:
+    """The monotonic-axis check, isolated.
+
+    Also found by mutation testing: nothing required it. Spacing here is
+    regular and no value is near a boundary, so the only thing wrong is that
+    the labels do not increase down the axis -- which is what a mis-read
+    label looks like.
+    """
+
+    capture = parse(
+        _grid_with_row_positions([140.0, 168.0, 196.0], ("1Mo", "3Mo", "2Mo"))
+    )
+
+    assert "EXPIRY_LABELS_NOT_MONOTONIC" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+def test_tenor_headers_that_do_not_increase_fail_closed() -> None:
+    tokens = metadata_tokens() + outside_grid_tokens()
+    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    for column_index, label in enumerate(("1Yr", "3Yr", "2Yr")):
+        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+    for row_index in range(3):
+        tokens.append(_token(EXPIRY_LABELS[row_index], _ANCHOR_X + 14.0, _row_y(row_index)))
+        for column_index in range(3):
+            tokens.append(
+                _token(
+                    f"{_synthetic_value(row_index, column_index):.2f}",
+                    _column_x(column_index) + 6.0,
+                    _row_y(row_index),
+                )
+            )
+
+    capture = parse(tokens)
+
+    assert "TENOR_HEADERS_NOT_MONOTONIC" in codes(capture.blocking_errors)
+    assert not capture.can_confirm
+
+
+@pytest.mark.parametrize("text", ["1e2", "1E2", "8.5e1"])
+def test_an_exponent_cell_is_malformed_even_when_it_would_be_finite(text: str) -> None:
+    """The regex's exponent exclusion, isolated.
+
+    Mutation testing showed that allowing exponents left the suite green,
+    because `1e999` is still caught downstream by the finiteness check. A
+    *finite* exponent slips past that second line entirely: without this,
+    `1e2` would quietly become the value 100 in a cell where VCUB never
+    writes one.
+    """
+
+    capture = parse(canonical_tokens(value_overrides={(2, 3): text}))
+
+    assert "MALFORMED_NUMERIC_CELL" in codes(capture.blocking_errors)
+    assert capture.grid.value_at("3Mo", "4Yr") is None
+    assert not capture.can_confirm
+
+
 def test_an_unevenly_spaced_axis_still_refuses_a_boundary_straddling_value() -> None:
     """Codex review, PR #182.
 
