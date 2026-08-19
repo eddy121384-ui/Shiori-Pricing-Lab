@@ -479,9 +479,21 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     legible_value_segments = [
         segment for segment, is_menu, certain in segments if not is_menu and certain
     ]
+    # The closed vocabularies store a member of their own set rather than
+    # screen text, but an illegible gap can still *manufacture* one: a Source
+    # displayed as `B VOL` returned as two boxes joins closed to `BVOL`, which
+    # is a real contributor code the screen never showed (Codex review,
+    # PR #182). So runs are collected from fragments that no illegible gap
+    # runs through -- such a run is simply never formed.
+    #
+    # Per fragment rather than per line on purpose: one unreadable gap
+    # somewhere on a header line must not cost the currency, side and source
+    # that are perfectly legible beside it.
     runs = [
         run
-        for segment, _is_menu, _certain in segments
+        for line in lines
+        for fragment in _legible_fragments(line.tokens)
+        for segment, _is_menu in _field_segments(fragment)
         for run in _ALPHANUMERIC_RUN_RE.findall(segment)
     ]
 
@@ -654,6 +666,27 @@ def _space_between(left: VCUBTextToken, right: VCUBTextToken) -> bool | None:
     if ratio >= _WORD_SPACE_GAP_CHARACTER_WIDTHS:
         return True
     return None
+
+
+def _legible_fragments(tokens: Sequence[VCUBTextToken]) -> list[str]:
+    """The line's text, cut wherever the boxes do not settle the spacing.
+
+    Each fragment is joined from tokens whose every gap was legible, so no
+    fragment spans a join that might not be there. A rule reading these can
+    never see a word the reader's boxing invented.
+    """
+
+    fragments: list[str] = []
+    group = [tokens[0]]
+    # Deliberately ragged: the last token has no successor to pair with.
+    for left, right in zip(tokens, tokens[1:], strict=False):
+        if _space_between(left, right) is None:
+            fragments.append(_join_by_geometry(group)[0])
+            group = [right]
+        else:
+            group.append(right)
+    fragments.append(_join_by_geometry(group)[0])
+    return fragments
 
 
 def _join_by_geometry(tokens: Sequence[VCUBTextToken]) -> tuple[str, bool]:

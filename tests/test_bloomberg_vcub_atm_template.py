@@ -1349,6 +1349,49 @@ def test_the_vol_type_pattern_does_not_read_an_illegible_line(
         assert "vol_type" in metadata.unresolved_fields
 
 
+def _source_line(boxes: Sequence[tuple[str, float]]) -> list[VCUBTextToken]:
+    """A header line from ``(text, gap_after)`` pairs."""
+
+    tokens: list[VCUBTextToken] = []
+    cursor = 40.0
+    for text, gap in boxes:
+        width = len(text) * 7.0
+        tokens.append(VCUBTextToken(text=text, left=cursor, top=68.0, width=width, height=9.0))
+        cursor += width + gap
+    return tokens
+
+
+def test_an_illegible_gap_cannot_manufacture_a_vocabulary_member() -> None:
+    """Codex review, PR #182.
+
+    The closed vocabularies store a member of their own set rather than screen
+    text, which looked safe -- but an illegible gap can *manufacture* one. A
+    Source displayed as ``B VOL`` and returned as two boxes joined closed to
+    ``BVOL``, a real Bloomberg contributor code the screen never showed, while
+    the same pixels in one box stored ``B VOL``.
+
+    Note there is no ``BVOL`` anywhere else on this fixture: the live header's
+    curve name contains one, which would mask the mechanism under test.
+    """
+
+    head = _header_line("USD\u25be RFR\u25be Mid\u25be", 20.0)
+    tail = _header_line("3) ATM Swaptions", 44.0) + grid_tokens()
+    prefix: list[tuple[str, float]] = [
+        ("Type", 5.0), ("Normal", 5.0), ("Vol", 5.0), ("(OIS)\u25be", 5.0), ("Source", 5.0)
+    ]
+
+    one_box = parse(
+        head + _source_line([*prefix, ("B VOL\u25be", 5.0)]) + tail
+    ).metadata
+    split = parse(
+        head + _source_line([*prefix, ("B", 2.0), ("VOL\u25be", 5.0)]) + tail
+    ).metadata
+
+    assert one_box.source == "B VOL"  # what the screen displayed
+    assert split.source is None  # never the code it was not
+    _assert_only_unresolves(split, one_box)
+
+
 def test_a_curve_name_whose_own_spacing_is_illegible_is_unresolved() -> None:
     """The name is the one field copied verbatim from the screen, so it
     refuses a spacing it cannot read rather than store a fabricated one."""
