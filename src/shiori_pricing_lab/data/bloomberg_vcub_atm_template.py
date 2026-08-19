@@ -678,23 +678,20 @@ def _widget_values(tokens: Sequence[VCUBTextToken]) -> list[str]:
     cannot be assembled across a gap that may not be there.
     """
 
-    values: list[str] = []
-    group: list[VCUBTextToken] = [tokens[0]]
+    widgets: list[list[VCUBTextToken]] = [[tokens[0]]]
     # Deliberately ragged: the last token has no successor to pair with.
     for left, right in zip(tokens, tokens[1:], strict=False):
         if _starts_a_new_widget(left, right):
-            values.append(group)  # type: ignore[arg-type]
-            group = [right]
+            widgets.append([right])
         else:
-            group.append(right)
-    values.append(group)  # type: ignore[arg-type]
+            widgets[-1].append(right)
 
-    resolved: list[str] = []
-    for widget in values:
-        text, certain = _join_by_geometry(widget)  # type: ignore[arg-type]
-        if certain:
-            resolved.append(_trim_ui_glyphs(text))
-    return [value for value in resolved if value]
+    values: list[str] = []
+    for widget in widgets:
+        text, certain = _join_by_geometry(widget)
+        if certain and (value := _trim_ui_glyphs(text)):
+            values.append(value)
+    return values
 
 
 def _join_by_geometry(tokens: Sequence[VCUBTextToken]) -> tuple[str, bool]:
