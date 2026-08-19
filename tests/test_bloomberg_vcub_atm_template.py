@@ -1212,11 +1212,15 @@ def test_a_word_the_reader_split_does_not_gain_a_space_the_screen_never_drew() -
     assert from_two_boxes == from_one_box
 
 
-def _with_word_split(tokens, text: str, halves: Sequence[str]) -> list[VCUBTextToken]:
-    """Return ``tokens`` with one token re-detected as touching halves.
+def _with_word_split(
+    tokens, text: str, halves: Sequence[str], gap: float = 0.0
+) -> list[VCUBTextToken]:
+    """Return ``tokens`` with one token re-detected as two boxes.
 
-    Same pixels, same extent -- only the reader's boxing differs, which is
-    what a split inside a word looks like coming back from RapidOCR.
+    Same pixels, same outer extent -- only the reader's boxing differs, which
+    is what a split inside a word looks like coming back from RapidOCR. The
+    halves touch by default; ``gap`` opens the kind of tight space a detector
+    can leave between glyph clusters.
     """
 
     assert "".join(halves) == text
@@ -1225,15 +1229,16 @@ def _with_word_split(tokens, text: str, halves: Sequence[str]) -> list[VCUBTextT
         if token.text != text:
             out.append(token)
             continue
+        character = (token.width - gap) / len(text)
         cursor = token.left
-        for half in halves:
-            width = token.width * len(half) / len(text)
+        for index, half in enumerate(halves):
+            width = character * len(half)
             out.append(
                 VCUBTextToken(
                     text=half, left=cursor, top=token.top, width=width, height=token.height
                 )
             )
-            cursor += width
+            cursor += width + (gap if index == 0 else 0.0)
     return out
 
 
@@ -1270,6 +1275,47 @@ def test_a_word_the_reader_split_changes_no_metadata_field(
     assert occurrences  # the word is really on this screen
     assert len(split) == len(tokens) + occurrences  # and really was split
     assert parse(split).metadata == parse(tokens).metadata
+
+
+@pytest.mark.parametrize("gap", [0.0, 1.0, 2.0])
+def test_a_split_word_whose_halves_do_not_quite_touch_changes_no_metadata(
+    gap: float,
+) -> None:
+    """Codex review, PR #182.
+
+    The first version of this rule asked one question -- is the gap wider
+    than a quarter of a character -- and so had to answer even where the
+    boxes do not say. Halves left 2px apart inside a 42px word read as a
+    space, and the capture stored ``Nor mal Vol (OIS)`` as a fully resolved
+    vol type.
+
+    The gaps here run from touching to the widest a detector plausibly
+    leaves inside a word; a real word space on this screen is 5px. None of
+    them may change what is stored.
+    """
+
+    tokens = _live_layout_header_tokens() + grid_tokens()
+    split = _with_word_split(tokens, "Normal", ["Nor", "mal"], gap=gap)
+
+    assert parse(split).metadata == parse(tokens).metadata
+
+
+def test_a_curve_name_whose_own_spacing_is_illegible_is_unresolved() -> None:
+    """The name is the one field copied verbatim from the screen, so it
+    refuses a spacing it cannot read rather than store a fabricated one."""
+
+    tokens = _curve_line_tokens(["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"])
+    illegible = _with_word_split(tokens, "BVOL", ["BV", "OL"], gap=2.0)
+
+    assert parse(tokens + _header_line("ATM Swaptions", 44.0) + grid_tokens()) \
+        .metadata.curve_config == "USD RFR BVOL Cube (Default)"
+
+    metadata = parse(
+        illegible + _header_line("ATM Swaptions", 44.0) + grid_tokens()
+    ).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
 
 
 def test_a_menu_marker_split_across_boxes_still_bounds_the_field() -> None:

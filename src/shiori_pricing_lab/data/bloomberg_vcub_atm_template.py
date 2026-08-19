@@ -141,12 +141,16 @@ _WIDGET_SEPARATOR_TAIL_RE = re.compile(rf"[^{_NAME_CHARACTERS}]$")
 # tokens themselves, so it scales with font size and DPI like every other
 # threshold in this module.
 _FIELD_GAP_CHARACTER_WIDTHS = 2.0
-# Two tokens are two words -- rather than one word the reader cut in half --
-# once the gap between them is a real fraction of a character. Boxes are drawn
-# tight around their glyphs, so a split inside a word leaves them touching,
-# while the live header's word spaces run about 0.7 character widths: the
-# threshold sits well clear of both.
-_SPLIT_WORD_GAP_CHARACTER_WIDTHS = 0.25
+# Whether the screen drew a space between two boxes, measured in character
+# widths taken from the boxes themselves. Two bounds rather than one, because
+# a single threshold has to answer even where the geometry does not: boxes a
+# reader left 0.3 character widths apart could be one word it cut in half or
+# two words set tight, and guessing either way stores text the screen may not
+# have shown (Codex review, PR #182). Measured on the fixtures this parser is
+# built from: a split inside a word leaves its halves touching (0.0), and
+# real word spaces run 0.5 to 0.7 character widths.
+_ONE_WORD_GAP_CHARACTER_WIDTHS = 0.15
+_WORD_SPACE_GAP_CHARACTER_WIDTHS = 0.45
 # Closed vocabularies are matched against alphanumeric runs rather than
 # whitespace-separated words: the live screen glues a dropdown caret onto
 # the value it belongs to, so "USD" and "Mid" never appeared as bare words
@@ -244,7 +248,7 @@ class _TextLine:
         because of how the reader boxed them.
         """
 
-        return _join_by_geometry(self.tokens)
+        return _join_by_geometry(self.tokens)[0]
 
 
 def _group_into_lines(tokens: Sequence[VCUBTextToken]) -> list[_TextLine]:
@@ -454,11 +458,24 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     the capture -- what it forbids is inventing a value.
     """
 
-    line_texts = [line.joined_text() for line in lines]
-    segments = [segment for text in line_texts for segment in _field_segments(text)]
-    value_segments = [segment for segment, is_menu in segments if not is_menu]
+    joins = [_join_by_geometry(line.tokens) for line in lines]
+    line_texts = [text for text, _certain in joins]
+    segments = [
+        (segment, is_menu, certain)
+        for text, certain in joins
+        for segment, is_menu in _field_segments(text)
+    ]
+    value_segments = [segment for segment, is_menu, _certain in segments if not is_menu]
+    # A rule that copies screen text verbatim may only read a line whose
+    # spacing the boxes settled; the rest match against closed vocabularies
+    # and patterns, where uncertain spacing costs a match, never a wrong one.
+    legible_value_segments = [
+        segment for segment, is_menu, certain in segments if not is_menu and certain
+    ]
     runs = [
-        run for segment, _is_menu in segments for run in _ALPHANUMERIC_RUN_RE.findall(segment)
+        run
+        for segment, _is_menu, _certain in segments
+        for run in _ALPHANUMERIC_RUN_RE.findall(segment)
     ]
 
     resolved: dict[str, str | None] = dict.fromkeys(METADATA_FIELDS, None)
@@ -473,10 +490,10 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     resolved["quote_date"] = _unique_match(line_texts, _DATE_RE)
     if tab_resolved:
         resolved["tab"] = ATM_SWAPTIONS_TAB
-    resolved["vol_type"] = _labelled_value(value_segments, "Type") or _unique_match(
+    resolved["vol_type"] = _labelled_value(legible_value_segments, "Type") or _unique_match(
         value_segments, _VOL_TYPE_RE
     )
-    resolved["source"] = _labelled_value(value_segments, "Source") or _unique_member(
+    resolved["source"] = _labelled_value(legible_value_segments, "Source") or _unique_member(
         [run.upper() for run in runs], _KNOWN_SOURCE_TEXTS
     )
 
@@ -561,7 +578,10 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
     if first == 0:
         return None
 
-    name = _trim_ui_glyphs(_join_name(tokens[first : last + 1]))
+    joined = _join_name(tokens[first : last + 1])
+    if joined is None:
+        return None
+    name = _trim_ui_glyphs(joined)
     if not name or _MENU_MARKER_RE.match(name):
         return None
 
@@ -615,24 +635,43 @@ def _extend_over_parenthetical(
         depth += _parenthesis_delta(tokens[index])
 
 
-def _separated_by_a_space(left: VCUBTextToken, right: VCUBTextToken) -> bool:
-    """Whether the screen drew a space between two tokens of one name."""
+def _space_between(left: VCUBTextToken, right: VCUBTextToken) -> bool | None:
+    """Whether the screen drew a space, or ``None`` if the boxes do not say."""
 
     scale = max(_character_width(left), _character_width(right))
-    return scale > 0 and (right.left - left.right) > scale * _SPLIT_WORD_GAP_CHARACTER_WIDTHS
+    if scale <= 0:
+        return None
+    ratio = (right.left - left.right) / scale
+    if ratio < _ONE_WORD_GAP_CHARACTER_WIDTHS:
+        return False
+    if ratio >= _WORD_SPACE_GAP_CHARACTER_WIDTHS:
+        return True
+    return None
 
 
-def _join_by_geometry(tokens: Sequence[VCUBTextToken]) -> str:
-    """Join tokens, inserting a space only where their boxes show one."""
+def _join_by_geometry(tokens: Sequence[VCUBTextToken]) -> tuple[str, bool]:
+    """Join tokens by their boxes; also report whether every gap was legible.
+
+    An illegible gap is joined *closed*, because the alternative is writing a
+    character the screen may never have drawn. That still leaves the text
+    uncertain -- two words set tight would be run together -- so the flag
+    travels with it and the one rule that copies screen text verbatim
+    declines to use it.
+    """
 
     text = _normalise(tokens[0].text)
+    certain = True
     # Deliberately ragged: the last token has no successor to pair with.
     for left, right in zip(tokens, tokens[1:], strict=False):
-        text += (" " if _separated_by_a_space(left, right) else "") + _normalise(right.text)
-    return text
+        space = _space_between(left, right)
+        if space is None:
+            certain = False
+            space = False
+        text += (" " if space else "") + _normalise(right.text)
+    return text, certain
 
 
-def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
+def _join_name(tokens: Sequence[VCUBTextToken]) -> str | None:
     """Join a name's tokens, closing up spacing the reader introduced.
 
     Whether a space goes between two tokens is read off their boxes, never
@@ -643,7 +682,9 @@ def _join_name(tokens: Sequence[VCUBTextToken]) -> str:
     grouping.
     """
 
-    text = _join_by_geometry(tokens)
+    text, certain = _join_by_geometry(tokens)
+    if not certain:
+        return None  # its own spacing is a guess: better unresolved than wrong
     text = re.sub(r"\(\s+", "(", text)
     return re.sub(r"\s+\)", ")", text)
 
