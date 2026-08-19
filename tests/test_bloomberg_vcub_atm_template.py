@@ -1021,7 +1021,6 @@ def test_the_live_header_layout_resolves_every_metadata_field() -> None:
         "USD SOFR OIS Bloomberg BVOL Cube (Default)",    # more words than the old bound
         "USD RFR/OIS BVOL Cube (Default)",               # punctuation inside the name
         "USD RFR+OIS BVOL Cube (Default)",               # punctuation never enumerated
-        "USD RFR|OIS BVOL Cube (Default)",
         "USD RFR (OIS) BVOL Cube (Default)",             # parentheses inside the name
         "A B C D E F G H I J K L BVOL Cube (Default)",   # far longer than any bound
     ],
@@ -1067,41 +1066,76 @@ _WHOLE_NAME = "USD RFR BVOL Cube (Default)"
 @pytest.mark.parametrize(
     "boxes,expected",
     [
-        # One box per word.
+        # One box per word, and the suffix arriving in two or three boxes:
+        # every boundary here is verified by the gaps between detections.
         (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)"], _WHOLE_NAME),
-        # The suffix arriving in two or three boxes.
-        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(", "Default", ")"], _WHOLE_NAME),
         (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default", ")"], _WHOLE_NAME),
-        # The suffix arriving glued to the *next* widget's value.
-        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)\u25be Mid\u25be"], _WHOLE_NAME),
-        # The name and its suffix in one box, and the whole header in one box.
-        (["CCY\u25be", "USD RFR BVOL Cube (Default)\u25be", "Mid\u25be"], _WHOLE_NAME),
-        (["USD\u25be RFR\u25be USD RFR BVOL Cube (Default)\u25be Mid\u25be"], _WHOLE_NAME),
-        # No suffix at all, and punctuation no character class enumerates.
+        (["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(", "Default", ")"], _WHOLE_NAME),
+        # The whole field in one box, ending at its own caret.
+        (["CCY\u25be", "USD RFR BVOL Cube (Default)\u25be"], _WHOLE_NAME),
         (["CCY\u25be", "USD", "RFR", "BVOL", "Cube"], "USD RFR BVOL Cube"),
+        # Punctuation the name carries, including a form that a splitter
+        # would have cut in two.
+        (
+            ["CCY\u25be", "USD", "RFR", "(OIS)", "BVOL", "Cube", "(Default)"],
+            "USD RFR (OIS) BVOL Cube (Default)",
+        ),
         (
             ["CCY\u25be", "USD", "RFR+OIS", "BVOL", "Cube", "(Default)"],
             "USD RFR+OIS BVOL Cube (Default)",
         ),
+        (
+            ["CCY\u25be", "USD RFR+ OIS BVOL Cube (Default)\u25be"],
+            "USD RFR+ OIS BVOL Cube (Default)",
+        ),
     ],
 )
-def test_the_curve_name_does_not_depend_on_how_ocr_groups_boxes(
+def test_a_curve_name_whose_boundary_is_verified_is_captured_whole(
     boxes: list[str], expected: str
 ) -> None:
-    """Codex review, PR #182 -- five rounds of it.
-
-    Grouping is the reader's choice, not the screen's, and each round found
-    another grouping that truncated or contaminated the name: a split
-    suffix dropped it, a suffix glued to the neighbouring Side widget
-    swallowed ``Mid`` into the stored value. Handling groupings one at a
-    time never converged, so a detection is now cut at the separator glyph
-    inside it before anything reads it, and every grouping of the same
-    screen yields the same name.
-    """
+    """However the reader groups the boxes, a verified boundary gives the
+    whole name -- never part of one."""
 
     tokens = _curve_line_tokens(boxes) + _header_line("ATM Swaptions", 44.0) + grid_tokens()
 
     assert parse(tokens).metadata.curve_config == expected
+
+
+@pytest.mark.parametrize(
+    "boxes",
+    [
+        # The reader merged Curve/Config with the Side widget beside it. With
+        # the caret dropped there is nothing in the text saying where the name
+        # ends; with it kept, the detection still holds two widgets.
+        ["CCY\u25be", "USD RFR BVOL Cube (Default) Mid\u25be"],
+        ["CCY\u25be", "USD", "RFR", "BVOL", "Cube", "(Default)\u25be Mid\u25be"],
+        ["USD\u25be RFR\u25be USD RFR BVOL Cube (Default)\u25be Mid\u25be"],
+    ],
+)
+def test_a_curve_name_sharing_a_detection_with_its_neighbour_is_refused(
+    boxes: list[str],
+) -> None:
+    """Codex review, PR #182 -- seven rounds, every one the same shape.
+
+    Each round found another grouping where a guess about where the name
+    ended produced a *wrong* name: truncated by a splitter, or extended
+    through the next widget's value. A detection can hold this field and its
+    neighbour at once, and when the caret between them is missing nothing in
+    the text distinguishes the two.
+
+    So the guess now costs a resolution rather than correctness. A candidate
+    is trusted only when it accounts for the whole of what it was read from
+    -- no separator surviving inside it, no text trailing the name. These
+    would each have stored a fabricated Bloomberg name; they are unresolved
+    instead, which Issue #181 explicitly permits and which a trader can see.
+    """
+
+    tokens = _curve_line_tokens(boxes) + _header_line("ATM Swaptions", 44.0) + grid_tokens()
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
 
 
 def test_a_suffix_that_never_closes_leaves_the_field_unresolved() -> None:
@@ -1129,6 +1163,28 @@ def test_a_menu_action_returned_as_one_detection_is_still_not_a_curve_config() -
 
     tokens = (
         _curve_line_tokens(["9) Analyze Cube"])
+        + _header_line("ATM Swaptions", 44.0)
+        + grid_tokens()
+    )
+
+    metadata = parse(tokens).metadata
+
+    assert metadata.curve_config is None
+    assert "curve_config" in metadata.unresolved_fields
+
+
+def test_a_name_carrying_a_divider_glyph_is_refused_rather_than_sliced() -> None:
+    """A pipe reads as a UI divider far more readily than as part of a name.
+
+    It could be either, and the parser cannot tell -- so under the rule that
+    an enumeration mistake costs a resolution rather than correctness, this
+    is left unresolved instead of being cut at a character that may or may
+    not be a boundary. An earlier head resolved it, which was luck rather
+    than judgement.
+    """
+
+    tokens = (
+        _curve_line_tokens(["CCY\u25be", "USD", "RFR|OIS", "BVOL", "Cube", "(Default)"])
         + _header_line("ATM Swaptions", 44.0)
         + grid_tokens()
     )

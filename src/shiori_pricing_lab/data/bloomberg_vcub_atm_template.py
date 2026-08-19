@@ -104,6 +104,12 @@ _CUBE_ANCHOR_RE = re.compile(r"\bcube\b", re.IGNORECASE)
 # as a single detection, and an exact-token test would let that menu action
 # through as a configuration name.
 _MENU_MARKER_RE = re.compile(r"^\d{1,3}\)")
+# What a configuration name may be made of. Generous on purpose, and it only
+# ever decides whether the field resolves: a character not listed here makes
+# the capture leave Curve/Config unresolved, never mis-sliced. Seven rounds of
+# review on this field all shared one shape -- a guess about where a name ends
+# produced a *wrong* name -- so the guess now costs a resolution instead.
+_NAME_PLAUSIBLE_RE = re.compile(r"^[0-9A-Za-z ()/&._+:-]+$")
 # A widget's text ends where a separator glyph does -- the dropdown caret
 # Bloomberg draws on the right of each selector. Anything alphanumeric, or
 # punctuation a name can carry, is still part of the value. Both parentheses
@@ -111,12 +117,6 @@ _MENU_MARKER_RE = re.compile(r"^\d{1,3}\)")
 # otherwise have its lone "(" read as the end of a widget, cutting the name
 # off from its own suffix.
 _WIDGET_SEPARATOR_TAIL_RE = re.compile(r"[^0-9A-Za-z()]$")
-# The same separator, found *inside* a detection. A reader is free to return
-# two adjacent widgets in one box -- "(Default)\u25be Mid\u25be" -- and once it
-# does, the box spans both and no geometry survives to tell them apart. The
-# glyph in the text is the only remaining boundary, so a detection is cut
-# there before anything reads it as one value.
-_INTERNAL_SEPARATOR_RE = re.compile(r"(?<=[^0-9A-Za-z()])\s+")
 # Two tokens belong to the same widget while the gap between them stays
 # within a normal word space. Measured in character widths taken from the
 # tokens themselves, so it scales with font size and DPI like every other
@@ -471,48 +471,6 @@ def _starts_a_new_widget(left: VCUBTextToken, right: VCUBTextToken) -> bool:
     return scale > 0 and gap > scale * _FIELD_GAP_CHARACTER_WIDTHS
 
 
-def _split_at_internal_separators(
-    tokens: Sequence[VCUBTextToken],
-) -> list[VCUBTextToken]:
-    """Cut any detection that spans a widget boundary into its widgets.
-
-    Grouping is the reader's choice, not the screen's: the same header can
-    come back as one box per word or as one box holding a value and its
-    neighbour. Splitting on the separator glyph before anything walks the
-    tokens means the extraction no longer depends on that choice, which five
-    rounds of per-grouping fixes had not achieved (Codex review, PR #182).
-
-    Each part keeps its share of the original box, apportioned by character
-    count. That is an estimate, but it is only ever used to decide adjacency,
-    and the parts are separated by the glyph itself -- which the widget test
-    already treats as a boundary -- so the estimate never decides the split.
-    """
-
-    split: list[VCUBTextToken] = []
-    for token in tokens:
-        text = _normalise(token.text)
-        parts = [part for part in _INTERNAL_SEPARATOR_RE.split(text) if part]
-        if len(parts) < 2:
-            split.append(token)
-            continue
-        characters = sum(len(part) for part in parts)
-        cursor = token.left
-        for part in parts:
-            width = token.width * len(part) / characters
-            split.append(
-                VCUBTextToken(
-                    text=part,
-                    left=cursor,
-                    top=token.top,
-                    width=width,
-                    height=token.height,
-                    confidence=token.confidence,
-                )
-            )
-            cursor += width
-    return split
-
-
 def _curve_config_in_line(line: _TextLine) -> str | None:
     """The curve/config name on one header line, whole, or ``None``.
 
@@ -526,7 +484,7 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
     restart in the middle of one.
     """
 
-    tokens = _split_at_internal_separators(line.tokens)
+    tokens = line.tokens
     anchors = [
         index
         for index, token in enumerate(tokens)
@@ -552,6 +510,15 @@ def _curve_config_in_line(line: _TextLine) -> str | None:
     name = _trim_ui_glyphs(_join_name(tokens[first : last + 1]))
     if not name or _MENU_MARKER_RE.match(name):
         return None
+
+    # Everything below refuses rather than repairs. A detection can hold this
+    # field and its neighbour at once, and when the reader drops the caret
+    # between them nothing in the text says where one ends -- so a candidate
+    # is only trusted when it accounts for the whole of what it was read from.
+    if not _NAME_PLAUSIBLE_RE.match(name):
+        return None  # a separator glyph survives inside it: two widgets, not one
+    if not (name.casefold().endswith("cube") or name.endswith(")")):
+        return None  # text trails the name: the next widget came along with it
     return name
 
 
