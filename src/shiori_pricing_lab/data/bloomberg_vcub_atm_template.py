@@ -459,16 +459,23 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     """
 
     joins = [_join_by_geometry(line.tokens) for line in lines]
-    line_texts = [text for text, _certain in joins]
     segments = [
         (segment, is_menu, certain)
         for text, certain in joins
         for segment, is_menu in _field_segments(text)
     ]
-    value_segments = [segment for segment, is_menu, _certain in segments if not is_menu]
-    # A rule that copies screen text verbatim may only read a line whose
-    # spacing the boxes settled; the rest match against closed vocabularies
-    # and patterns, where uncertain spacing costs a match, never a wrong one.
+    # A rule that *stores what it read* may only read a line whose spacing the
+    # boxes settled -- whether it copies a labelled value or the text a pattern
+    # matched. A pattern is no protection on its own: `_VOL_TYPE_RE` tolerates
+    # the whitespace before its parenthesis, so an illegible gap there stored
+    # `Normal Vol(OIS)` where the same screen with one box stored
+    # `Normal Vol (OIS)` (Codex review, PR #182).
+    #
+    # What is left reads illegible lines safely because it stores nothing from
+    # them: the closed vocabularies match whole alphanumeric runs, and a gap
+    # closed between two of them yields a run that is in no vocabulary, so the
+    # field goes unresolved rather than wrong.
+    legible_line_texts = [text for text, certain in joins if certain]
     legible_value_segments = [
         segment for segment, is_menu, certain in segments if not is_menu and certain
     ]
@@ -487,11 +494,11 @@ def _resolve_metadata(lines: Sequence[_TextLine], tab_resolved: bool) -> VCUBSou
     resolved["curve_config"] = _unique_curve_config(lines)
     side = _unique_member([run.upper() for run in runs], set(_SIDE_TEXTS))
     resolved["side"] = None if side is None else _SIDE_TEXTS[side]
-    resolved["quote_date"] = _unique_match(line_texts, _DATE_RE)
+    resolved["quote_date"] = _unique_match(legible_line_texts, _DATE_RE)
     if tab_resolved:
         resolved["tab"] = ATM_SWAPTIONS_TAB
     resolved["vol_type"] = _labelled_value(legible_value_segments, "Type") or _unique_match(
-        value_segments, _VOL_TYPE_RE
+        legible_value_segments, _VOL_TYPE_RE
     )
     resolved["source"] = _labelled_value(legible_value_segments, "Source") or _unique_member(
         [run.upper() for run in runs], _KNOWN_SOURCE_TEXTS

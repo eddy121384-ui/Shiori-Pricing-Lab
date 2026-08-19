@@ -1277,6 +1277,22 @@ def test_a_word_the_reader_split_changes_no_metadata_field(
     assert parse(split).metadata == parse(tokens).metadata
 
 
+def _assert_only_unresolves(split, base) -> None:
+    """Every field the split capture resolved matches the unsplit one.
+
+    A field may go *unresolved* when the reader's boxing leaves the spacing
+    illegible -- that is the designed cost. What it may never do is resolve
+    to something the unsplit screen did not say.
+    """
+
+    for field in METADATA_FIELDS:
+        value = getattr(split, field)
+        if value is not None:
+            assert value == getattr(base, field), field
+        else:
+            assert field in split.unresolved_fields
+
+
 @pytest.mark.parametrize("gap", [0.0, 1.0, 2.0])
 def test_a_split_word_whose_halves_do_not_quite_touch_changes_no_metadata(
     gap: float,
@@ -1297,7 +1313,40 @@ def test_a_split_word_whose_halves_do_not_quite_touch_changes_no_metadata(
     tokens = _live_layout_header_tokens() + grid_tokens()
     split = _with_word_split(tokens, "Normal", ["Nor", "mal"], gap=gap)
 
-    assert parse(split).metadata == parse(tokens).metadata
+    _assert_only_unresolves(parse(split).metadata, parse(tokens).metadata)
+
+
+@pytest.mark.parametrize("gap,expected", [(5.0, "Normal Vol (OIS)"), (2.0, None)])
+def test_the_vol_type_pattern_does_not_read_an_illegible_line(
+    gap: float, expected: str | None
+) -> None:
+    """Codex review, PR #182.
+
+    Restricting only the labelled-value rule was not enough: a pattern is no
+    protection on its own, because ``_VOL_TYPE_RE`` tolerates the whitespace
+    before its parenthesis. With the gap between ``Vol`` and ``(OIS)``
+    illegible, the same screen stored ``Normal Vol(OIS)`` from separate boxes
+    where one box stored ``Normal Vol (OIS)``.
+
+    Every rule that stores what it read now reads legible lines only, so the
+    illegible case costs the field rather than changing it.
+    """
+
+    words = ["Type", "Normal", "Vol", "(OIS)\u25be", "Source", "BVOL\u25be", "16)", "Use"]
+    tokens: list[VCUBTextToken] = []
+    cursor = 40.0
+    for word in words:
+        width = len(word) * 7.0
+        tokens.append(VCUBTextToken(text=word, left=cursor, top=68.0, width=width, height=9.0))
+        cursor += width + (gap if word == "Vol" else 5.0)
+
+    metadata = parse(
+        _header_line("3) ATM Swaptions", 44.0) + tokens + grid_tokens()
+    ).metadata
+
+    assert metadata.vol_type == expected
+    if expected is None:
+        assert "vol_type" in metadata.unresolved_fields
 
 
 def test_a_curve_name_whose_own_spacing_is_illegible_is_unresolved() -> None:
