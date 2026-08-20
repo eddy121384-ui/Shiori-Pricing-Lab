@@ -331,7 +331,12 @@ from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
 from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
     load_bloomberg_usd_sofr_par_rate_curve,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
+from shiori_pricing_lab.data.vcub_vol_surface_adapter import (
+    canonical_surface_from_confirmed_capture,
+)
+from shiori_pricing_lab.data.vol_surface_store import VolSurfaceStore
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
 )
@@ -508,6 +513,13 @@ DEFAULT_PORT = 8765
 # process would still refuse every interim-coupon horizon, and a stale -v18
 # page would render neither.
 #
+# Bumped to -v22 for Issue #183's canonical vol-surface store: a confirmed
+# capture is now persisted to local SQLite and POST /api/vcub/atm/confirm
+# answers with a "storage" block naming the surface it saved. A stale -v21
+# process would confirm captures and persist nothing while serving this
+# commit's page -- which reports what that block says -- so the trader would
+# be told a surface was saved that no restart could ever find.
+#
 # Bumped to -v21 for Issue #181's VCUB ATM visual-capture prototype: the
 # server gained POST /api/vcub/atm/parse, /confirm, and /reject plus the
 # Capture view's two static files. A stale -v20 process serves this
@@ -527,7 +539,7 @@ DEFAULT_PORT = 8765
 # page last put in that field -- including one derived against a spot quote
 # the refresh has since replaced -- which is precisely the stale-Forward
 # failure this contract exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v21"
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v22"
 
 
 def load_base_case() -> dict:
@@ -2386,17 +2398,30 @@ def resolve_bond_advanced_profile(body: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Issue #181 -- VCUB ATM Swaptions visual capture
+# Issues #181/#183 -- VCUB ATM Swaptions visual capture, and where it lands
 #
 # One process-wide review store. A capture lives here between the trader
 # parsing a screenshot and deciding on it, so the confirm/reject routes name
 # a capture by id and never accept one posted back by the page -- a page
 # cannot drop a blocking error on the round trip and confirm what the parser
-# refused. No route below touches ``price_standalone_option_case``, the base
-# case, or any market-data input: this is transcription plus a decision.
+# refused.
+#
+# Issue #183 adds the durable half: confirming also writes the surface to the
+# canonical local SQLite store below, through the typed
+# ``vol_surface``/``vol_surface_store`` boundary -- this module never opens a
+# database itself. No route below touches ``price_standalone_option_case``,
+# the base case, or any market-data input: this is transcription, a decision,
+# and storing what was decided.
 # --------------------------------------------------------------------------
 
 VCUB_CAPTURE_REVIEW_STORE = VCUBCaptureReviewStore()
+
+#: The canonical, durable half of the same flow (Issue #183). The review
+#: store above holds a capture for the length of one review session; this one
+#: keeps the surface a trader confirmed, in local SQLite, past the restart
+#: that empties the other. Constructing it touches no disk -- the database
+#: appears on the first confirmed save.
+VOL_SURFACE_STORE = VolSurfaceStore()
 
 #: An upper bound on one posted screenshot. A full-screen PNG is a few
 #: megabytes; this only stops a mis-picked file from tying up the local
@@ -2430,18 +2455,90 @@ def parse_vcub_atm_screenshot(source_reference: str, image_base64: str) -> dict:
     }
 
 
+#: What the ``storage`` block says when nothing was even attempted: a
+#: rejected capture is a review record, never active vol-surface data, so it
+#: is not offered to the canonical store at all.
+STORAGE_NOT_ATTEMPTED = "NOT_ATTEMPTED"
+
+#: What it says when the save was attempted and did not succeed. Reported as
+#: its own state rather than folded into a 4xx, because the trader's decision
+#: itself *did* land -- what failed is durability, and Issue #183 requires the
+#: page to be able to tell those two apart instead of implying the capture was
+#: durably accepted.
+STORAGE_FAILED = "FAILED"
+
+
 def review_vcub_atm_capture(capture_id: str, reviewed_by: str, *, confirm: bool) -> dict:
-    """Confirm or reject a capture already under review, on a named trader's behalf."""
+    """Confirm or reject a capture already under review, on a named trader's behalf.
+
+    A confirmation is also the moment the surface becomes canonical market
+    data, so it is persisted here -- and the response says, in its own
+    ``storage`` block, exactly what happened to it. The review decision is
+    recorded first and is never rolled back by a storage failure: a trader
+    who confirmed a capture decided it, and losing that decision because a
+    database was unwritable would be a second failure on top of the first.
+    What must not happen is claiming durability that does not exist, which is
+    why ``storage.status`` is reported verbatim rather than assumed.
+    """
 
     _require_non_blank_field(capture_id, "capture_id")
     _require_non_blank_field(reviewed_by, "reviewed_by")
     store = VCUB_CAPTURE_REVIEW_STORE
+    # ``confirm_idempotent`` rather than ``confirm``: a storage failure leaves
+    # a capture confirmed but not durable, and pressing Confirm again is the
+    # trader's only way to retry the write. The repeat is theirs alone, and
+    # the check happens inside the review store's lock -- see that method.
     reviewed = (
-        store.confirm(capture_id, reviewed_by=reviewed_by)
+        store.confirm_idempotent(capture_id, reviewed_by=reviewed_by)
         if confirm
         else store.reject(capture_id, reviewed_by=reviewed_by)
     )
-    return {"capture_id": capture_id, "capture": reviewed.to_dict()}
+    storage = (
+        _persist_confirmed_capture(capture_id, reviewed)
+        if confirm
+        else _storage_result(STORAGE_NOT_ATTEMPTED)
+    )
+    return {"capture_id": capture_id, "capture": reviewed.to_dict(), "storage": storage}
+
+
+
+
+def _persist_confirmed_capture(capture_id: str, capture: VCUBATMCapture) -> dict:
+    """Write one confirmed capture to the canonical store and report the result.
+
+    Every failure -- an unconfirmed capture, a conflicting surface already
+    stored, an unwritable database -- comes back as a ``FAILED`` block
+    carrying the reason verbatim. None of them raises: the confirmation
+    already happened, and the honest answer to "did this persist?" is "no,
+    because ...", not a 500 that leaves the page guessing.
+    """
+
+    try:
+        surface = canonical_surface_from_confirmed_capture(capture, capture_id=capture_id)
+        outcome = VOL_SURFACE_STORE.save_confirmed_surface(surface)
+    except Exception as exc:  # noqa: BLE001
+        return _storage_result(STORAGE_FAILED, error=str(exc))
+    return _storage_result(
+        outcome.status.value, surface_id=outcome.surface_id, point_count=outcome.point_count
+    )
+
+
+def _storage_result(
+    status: str,
+    *,
+    surface_id: str | None = None,
+    point_count: int | None = None,
+    error: str | None = None,
+) -> dict:
+    """One fixed shape for the ``storage`` block, whatever happened."""
+
+    return {
+        "status": status,
+        "surface_id": surface_id,
+        "point_count": point_count,
+        "error": error,
+        "database": str(VOL_SURFACE_STORE.database_path),
+    }
 
 
 def _require_non_blank_field(value: object, field_name: str) -> None:

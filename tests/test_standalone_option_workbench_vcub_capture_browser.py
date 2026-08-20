@@ -104,6 +104,36 @@ def _capture_payload(**overrides) -> dict:
     return {"capture_id": "cap-1", "capture": capture, "reader_notes": []}
 
 
+def _confirmed_payload(storage: dict | None) -> dict:
+    """The confirm route's answer, with Issue #183's ``storage`` block.
+
+    ``storage=None`` models an older workbench process that persists
+    nothing and says nothing -- the case the page must fail closed on.
+    """
+
+    payload = _capture_payload()
+    payload["capture"].update(
+        {
+            "review_status": "CONFIRMED",
+            "reviewed_by": "Eddy",
+            "reviewed_at": "2026-08-18T09:45:00Z",
+            "can_confirm": False,
+        }
+    )
+    if storage is not None:
+        payload["storage"] = storage
+    return payload
+
+
+_SAVED_STORAGE = {
+    "status": "SAVED",
+    "surface_id": "3b4b3913f0c48ebda1b1cedc319f08a0",
+    "point_count": 9,
+    "error": None,
+    "database": "/repo/data/vol_surfaces.sqlite3",
+}
+
+
 def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -431,27 +461,235 @@ def test_confirming_sends_the_capture_id_and_reviewer_and_shows_the_result(
     page, server_url, tmp_path
 ) -> None:
     _route_json(page, "/api/vcub/atm/parse", _capture_payload())
-    confirmed = _capture_payload()
-    confirmed["capture"].update(
-        {
-            "review_status": "CONFIRMED",
-            "reviewed_by": "Eddy",
-            "reviewed_at": "2026-08-18T09:45:00Z",
-            "can_confirm": False,
-        }
+    posted = _route_json(
+        page, "/api/vcub/atm/confirm", _confirmed_payload(_SAVED_STORAGE)
     )
-    posted = _route_json(page, "/api/vcub/atm/confirm", confirmed)
     _open_capture_view(page, server_url)
     _choose_and_parse(page, tmp_path)
     _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
 
     page.fill("#capture-reviewed-by", "Eddy")
     page.click("#capture-confirm-btn")
-    _wait_until(lambda: page.text_content("#capture-status-pill").strip() == "Confirmed")
+    _wait_until(
+        lambda: page.text_content("#capture-status-pill").strip() == "Confirmed & saved"
+    )
 
     assert posted == [{"capture_id": "cap-1", "reviewed_by": "Eddy"}]
     assert "Confirmed by Eddy" in page.text_content("#capture-review-status")
     assert "is-disabled" in page.get_attribute("#capture-confirm-btn", "class")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_saved_surface_shows_the_identity_it_was_stored_under(
+    page, server_url, tmp_path
+) -> None:
+    """Issue #183: the trader must be able to see *which* surface was saved."""
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(page, "/api/vcub/atm/confirm", _confirmed_payload(_SAVED_STORAGE))
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    detail = page.text_content("#capture-storage-detail")
+    assert _SAVED_STORAGE["surface_id"] in detail
+    assert "points: 9" in detail
+    assert "/repo/data/vol_surfaces.sqlite3" in detail
+    assert "saved to the local vol-surface store" in page.text_content("#capture-storage-title")
+    assert "survives a workbench restart" in page.text_content("#capture-review-status")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_surface_that_was_already_stored_still_reads_as_saved(
+    page, server_url, tmp_path
+) -> None:
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(
+        page,
+        "/api/vcub/atm/confirm",
+        _confirmed_payload({**_SAVED_STORAGE, "status": "ALREADY_SAVED"}),
+    )
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert page.text_content("#capture-status-pill").strip() == "Confirmed & saved"
+    assert "already stored" in page.text_content("#capture-storage-title")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_storage_failure_is_never_shown_as_a_saved_surface(
+    page, server_url, tmp_path
+) -> None:
+    """Issue #183: a failed write must not be dressed up as durable acceptance."""
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(
+        page,
+        "/api/vcub/atm/confirm",
+        _confirmed_payload(
+            {
+                "status": "FAILED",
+                "surface_id": None,
+                "point_count": None,
+                "error": "the vol-surface store refused the write: disk I/O error",
+                "database": "/repo/data/vol_surfaces.sqlite3",
+            }
+        ),
+    )
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert page.text_content("#capture-status-pill").strip() == "Confirmed — not saved"
+    assert "NOT saved" in page.text_content("#capture-storage-title")
+    assert "disk I/O error" in page.text_content("#capture-storage-detail")
+    assert "lost on restart" in page.text_content("#capture-review-status")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_save_leaves_the_trader_able_to_retry_it(page, server_url, tmp_path) -> None:
+    """Codex review round 2, PR #184.
+
+    The server gained a same-reviewer retry and this page could not reach
+    it: a confirmed capture has ``can_confirm: false``, so Confirm carried
+    ``is-disabled`` and the shared CSS gives that ``pointer-events: none``.
+    A failed write still stranded the trader.
+    """
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    failed = _confirmed_payload(
+        {
+            "status": "FAILED",
+            "surface_id": None,
+            "point_count": None,
+            "error": "the vol-surface store refused the write: disk I/O error",
+            "database": "/repo/data/vol_surfaces.sqlite3",
+        }
+    )
+    posted = _route_json(page, "/api/vcub/atm/confirm", failed)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert "is-disabled" not in page.get_attribute("#capture-confirm-btn", "class")
+    assert page.text_content("#capture-confirm-btn").strip() == "Retry save"
+
+    # And pressing it really does reach the bridge again, under the same name.
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: len(posted) == 2)
+    assert posted == [{"capture_id": "cap-1", "reviewed_by": "Eddy"}] * 2
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_saved_surface_leaves_confirm_spent(page, server_url, tmp_path) -> None:
+    """The retry is for a failed write only -- a stored surface needs no button."""
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(page, "/api/vcub/atm/confirm", _confirmed_payload(_SAVED_STORAGE))
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert "is-disabled" in page.get_attribute("#capture-confirm-btn", "class")
+    assert page.text_content("#capture-confirm-btn").strip() == "Confirm"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_retry_offer_never_appears_on_a_blocked_capture(page, server_url, tmp_path) -> None:
+    """The one decided state that reopens Confirm must not reopen any other."""
+
+    blocked = _capture_payload(
+        blocking_errors=[
+            {
+                "code": "CELL_POSITION_AMBIGUOUS",
+                "message": "'85.15' sits on a column boundary",
+                "expiry": "3Mo",
+                "tenor": "4Yr",
+            }
+        ],
+        can_confirm=False,
+    )
+    _route_json(page, "/api/vcub/atm/parse", blocked)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-blockers"))
+
+    assert "is-disabled" in page.get_attribute("#capture-confirm-btn", "class")
+    assert page.text_content("#capture-confirm-btn").strip() == "Confirm"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_confirmation_with_no_storage_answer_is_treated_as_not_saved(
+    page, server_url, tmp_path
+) -> None:
+    """An older workbench process persists nothing; the page must not assume it did."""
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(page, "/api/vcub/atm/confirm", _confirmed_payload(None))
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert page.text_content("#capture-status-pill").strip() == "Confirmed — not saved"
+    assert "did not report a save" in page.text_content("#capture-storage-title")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_rejection_shows_no_storage_block_at_all(page, server_url, tmp_path) -> None:
+    """A rejected capture is never offered to the canonical store."""
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    rejected = _capture_payload()
+    rejected["capture"].update(
+        {
+            "review_status": "REJECTED",
+            "reviewed_by": "Eddy",
+            "reviewed_at": "2026-08-18T09:45:00Z",
+            "can_confirm": False,
+        }
+    )
+    rejected["storage"] = {
+        "status": "NOT_ATTEMPTED",
+        "surface_id": None,
+        "point_count": None,
+        "error": None,
+        "database": "/repo/data/vol_surfaces.sqlite3",
+    }
+    _route_json(page, "/api/vcub/atm/reject", rejected)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-reject-btn")
+    _wait_until(lambda: page.text_content("#capture-status-pill").strip() == "Rejected")
+
+    assert _is_actually_hidden(page, "capture-storage")
 
 
 @_PLAYWRIGHT_SKIP

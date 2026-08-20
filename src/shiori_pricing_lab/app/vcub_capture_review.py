@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 import threading
 from collections import OrderedDict
 from datetime import UTC, datetime
@@ -103,15 +105,52 @@ def response_fingerprint(capture: VCUBATMCapture) -> str:
     return json.dumps(capture.to_dict(), sort_keys=True)
 
 
-def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
-    """A stable id for one image read at one instant.
+#: Mixed into every id this process mints, generated once at import time.
+#: Issue #183's canonical store hashes ``capture_id`` into a surface's
+#: identity (Eddy's PR #184 decision #1), and the store's own SQLite file is
+#: an ordinary local file two independently launched workbench processes can
+#: point at. Without a process salt, two such processes reading
+#: byte-identical image bytes within the same wall-clock second would derive
+#: the *same* deterministic id from content alone -- with no shared state to
+#: notice they are different processes -- and one process's confirmed
+#: surface could silently collide with, or be refused as a conflict of,
+#: the other's (Codex review round 5, PR #184). The salt is process-lifetime
+#: stable, so every intra-process guarantee ``capture_id_for`` and
+#: :meth:`VCUBCaptureReviewStore._find_identifier` provide -- same inputs
+#: reuse the same slot, the purity :func:`capture_id_for` itself is tested
+#: against -- is unaffected; only cross-process collision closes.
+#:
+#: Not sufficient alone against ``os.fork()``: a POSIX fork duplicates the
+#: parent's memory, so every forked child inherits this exact value, and two
+#: children parsing identical bytes at the identical second would still
+#: collide (Codex review round 6, PR #184). Nothing in this codebase forks
+#: today -- the workbench is one ``ThreadingHTTPServer`` process launched
+#: fresh by ``start_shiori.bat`` -- but the id is cheap to make correct
+#: regardless, so :func:`capture_id_for` also mixes in ``os.getpid()`` at
+#: call time: a fork always gives the child a new pid even though its copy
+#: of this module-level value is bit-identical to the parent's.
+_PROCESS_SALT = secrets.token_hex(16)
 
-    Derived from the image hash and the capture time rather than a random
-    token, so re-parsing the same file in the same second reuses the same
-    review slot instead of leaving an orphan behind.
+
+def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
+    """A stable id for one image read at one instant, unique to this process.
+
+    Derived from the image hash and the capture time rather than a purely
+    random token, so re-parsing the same file in the same second within
+    *this* process reuses the same review slot instead of leaving an orphan
+    behind. The per-process salt (:data:`_PROCESS_SALT`) plus the calling
+    process's own pid make it globally unique too: two workbench processes
+    -- including two that share inherited memory via ``os.fork()`` -- reading
+    identical bytes at the identical second mint different ids, which is
+    what keeps two operators' confirmed surfaces from colliding through a
+    shared database file. ``os.getpid()`` is read fresh on every call rather
+    than cached alongside the salt, since a fork changes it after the salt
+    has already been computed and inherited.
     """
 
-    digest = hashlib.sha256(f"{source_image_sha256}|{captured_at}".encode())
+    digest = hashlib.sha256(
+        f"{_PROCESS_SALT}|{os.getpid()}|{source_image_sha256}|{captured_at}".encode()
+    )
     return digest.hexdigest()[:32]
 
 
@@ -267,6 +306,48 @@ class VCUBCaptureReviewStore:
 
         with self._lock:
             confirmed = self._get_locked(capture_id).confirm(
+                reviewed_by=reviewed_by,
+                reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
+            )
+            self._store_locked(capture_id, confirmed)
+        return confirmed
+
+    def confirm_idempotent(
+        self, capture_id: str, *, reviewed_by: str, reviewed_at: str | None = None
+    ) -> VCUBATMCapture:
+        """Accept a capture, or hand back the confirmation this trader already made.
+
+        The same decision as :meth:`confirm`, made once, but safe to repeat.
+        Issue #183 gave a confirmation a second job -- writing the surface to
+        the canonical store -- and that write can fail, so the trader needs
+        to be able to press Confirm again to retry it. :meth:`confirm` alone
+        cannot serve that: the state machine is terminal, so the second press
+        raises and the trader is stranded with a capture that is confirmed
+        and not durable (Codex review, PR #184).
+
+        The check and the transition happen **together under the lock**, not
+        as a read followed by a write. Two same-trader requests overlapping on
+        a pending capture -- a double click, a browser retrying a timed-out
+        POST -- otherwise both saw ``PENDING_REVIEW``, and the loser then hit
+        the terminal state and was refused, for a confirmation that had in
+        fact been accepted (Codex review round 2, PR #184). That is the same
+        read-modify-write hazard the lock was introduced for in round 3 of
+        PR #182.
+
+        Only the capture's *own* confirmer gets the repeat. Anyone else falls
+        through to the ordinary transition and is refused there, so a second
+        person can never be told their confirmation was accepted -- one
+        decision, by one named trader, exactly as Issue #181 decided.
+        """
+
+        with self._lock:
+            held = self._get_locked(capture_id)
+            if (
+                held.review_status is VCUBCaptureStatus.CONFIRMED
+                and held.reviewed_by == reviewed_by
+            ):
+                return held
+            confirmed = held.confirm(
                 reviewed_by=reviewed_by,
                 reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
             )

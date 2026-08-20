@@ -23,6 +23,7 @@ import shiori_pricing_lab.app.vcub_capture_review as review_module
 from shiori_pricing_lab.app.standalone_option_workbench_server import PROTOTYPE_DIR, create_server
 from shiori_pricing_lab.app.vcub_capture_review import VCUBCaptureReviewStore
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
+from shiori_pricing_lab.data.vol_surface_store import VolSurfaceStore
 
 _IMAGE = b"\x89PNG\r\n\x1a\n-synthetic-not-a-screenshot"
 _IMAGE_B64 = base64.b64encode(_IMAGE).decode("ascii")
@@ -43,10 +44,18 @@ def server_url() -> Iterator[str]:
 
 
 @pytest.fixture(autouse=True)
-def fresh_store(monkeypatch) -> None:
-    """A clean review store per test -- the real one is process-wide."""
+def fresh_store(monkeypatch, tmp_path) -> None:
+    """Clean, throwaway stores per test -- the real ones are process-wide.
+
+    The canonical store is redirected at a ``tmp_path`` database as well as
+    the in-memory review store, so confirming a capture in a test never
+    writes into the workbench's own ``data/vol_surfaces.sqlite3``.
+    """
 
     monkeypatch.setattr(server_module, "VCUB_CAPTURE_REVIEW_STORE", VCUBCaptureReviewStore())
+    monkeypatch.setattr(
+        server_module, "VOL_SURFACE_STORE", VolSurfaceStore(tmp_path / "vol_surfaces.sqlite3")
+    )
 
 
 @pytest.fixture()
@@ -348,6 +357,228 @@ def test_neither_parsing_nor_confirming_invokes_the_pricing_entry_point(
 
     assert status == 200
     assert payload["capture"]["review_status"] == "CONFIRMED"
+
+
+# --------------------------------------------------------------------------
+# Issue #183 -- durable storage of a confirmed capture
+# --------------------------------------------------------------------------
+
+
+def test_confirming_saves_the_surface_and_says_so(server_url, stub_reader) -> None:
+    _status, parsed = _parse(server_url)
+
+    status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert status == 200
+    storage = payload["storage"]
+    assert storage["status"] == "SAVED"
+    assert storage["error"] is None
+    assert storage["point_count"] == 48  # the 8x6 synthetic fixture grid
+    stored = server_module.VOL_SURFACE_STORE.fetch_surface(storage["surface_id"])
+    assert stored.provenance.capture_id == parsed["capture_id"]
+    assert stored.provenance.confirmed_by == "Eddy"
+    assert len(stored.points) == 48
+
+
+def test_the_saved_surface_outlives_the_process_that_confirmed_it(
+    server_url, stub_reader
+) -> None:
+    """A fresh store over the same file is what a restart actually looks like."""
+
+    _status, parsed = _parse(server_url)
+    _status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+    surface_id = payload["storage"]["surface_id"]
+    saved = server_module.VOL_SURFACE_STORE.fetch_surface(surface_id)
+
+    after_restart = VolSurfaceStore(server_module.VOL_SURFACE_STORE.database_path)
+
+    assert after_restart.fetch_surface(surface_id) == saved
+    assert [summary.surface_id for summary in after_restart.list_surfaces()] == [surface_id]
+
+
+def test_rejecting_never_offers_anything_to_the_canonical_store(server_url, stub_reader) -> None:
+    _status, parsed = _parse(server_url)
+
+    _status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/reject",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert payload["storage"]["status"] == "NOT_ATTEMPTED"
+    assert payload["storage"]["surface_id"] is None
+    assert server_module.VOL_SURFACE_STORE.list_surfaces() == ()
+
+
+def test_a_storage_failure_is_reported_rather_than_dressed_up_as_a_save(
+    server_url, stub_reader, monkeypatch
+) -> None:
+    """The confirmation stands; the claim of durability must not."""
+
+    def refuse(surface):
+        raise RuntimeError("the vol-surface store refused the write: disk I/O error")
+
+    monkeypatch.setattr(
+        server_module.VOL_SURFACE_STORE, "save_confirmed_surface", refuse
+    )
+    _status, parsed = _parse(server_url)
+
+    status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert status == 200
+    assert payload["capture"]["review_status"] == "CONFIRMED"
+    assert payload["storage"]["status"] == "FAILED"
+    assert payload["storage"]["surface_id"] is None
+    assert "disk I/O error" in payload["storage"]["error"]
+
+
+def test_the_confirmer_can_retry_a_save_that_failed(server_url, stub_reader, monkeypatch) -> None:
+    """Codex review, PR #184.
+
+    A storage failure left the capture confirmed but not durable, and the
+    review state machine is terminal, so pressing Confirm again was a 400.
+    The trader had no way to retry the write and no way to establish
+    durability short of restarting and recapturing the screen.
+    """
+
+    real_save = server_module.VOL_SURFACE_STORE.save_confirmed_surface
+
+    def refuse(surface):
+        raise RuntimeError("the vol-surface store refused the write: disk I/O error")
+
+    monkeypatch.setattr(server_module.VOL_SURFACE_STORE, "save_confirmed_surface", refuse)
+    _status, parsed = _parse(server_url)
+    _status, first = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+    assert first["storage"]["status"] == "FAILED"
+
+    monkeypatch.setattr(
+        server_module.VOL_SURFACE_STORE, "save_confirmed_surface", real_save
+    )
+    status, retried = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert status == 200
+    assert retried["storage"]["status"] == "SAVED"
+    assert retried["capture"]["review_status"] == "CONFIRMED"
+    assert retried["capture"]["reviewed_by"] == "Eddy"
+    assert retried["capture"]["reviewed_at"] == first["capture"]["reviewed_at"]
+    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 1
+
+
+def test_retrying_a_save_that_already_worked_stores_nothing_further(
+    server_url, stub_reader
+) -> None:
+    _status, parsed = _parse(server_url)
+    _status, first = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    _status, again = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert first["storage"]["status"] == "SAVED"
+    assert again["storage"]["status"] == "ALREADY_SAVED"
+    assert again["storage"]["surface_id"] == first["storage"]["surface_id"]
+    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 1
+
+
+def test_a_retry_never_lets_a_second_person_confirm_someone_elses_capture(
+    server_url, stub_reader
+) -> None:
+    """The retry is for the trader who already decided it, and nobody else."""
+
+    _status, parsed = _parse(server_url)
+    _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Someone Else"},
+    )
+
+    assert status == 400
+    assert "PENDING_REVIEW" in payload["error"]
+    held = server_module.VCUB_CAPTURE_REVIEW_STORE.get(parsed["capture_id"])
+    assert held.reviewed_by == "Eddy"
+
+
+def test_a_rejected_capture_can_never_be_confirmed_by_a_retry(server_url, stub_reader) -> None:
+    _status, parsed = _parse(server_url)
+    _post_json(
+        f"{server_url}/api/vcub/atm/reject",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert status == 400
+    assert "PENDING_REVIEW" in payload["error"]
+    assert server_module.VOL_SURFACE_STORE.list_surfaces() == ()
+
+
+def test_a_second_screenshot_of_the_same_screen_is_a_new_surface_not_a_conflict(
+    server_url, stub_reader
+) -> None:
+    """Eddy's PR #184 decision #1.
+
+    A canonical stored surface represents one capture, not the only surface
+    a business date may hold. A trader re-capturing the same VCUB screen
+    later -- same currency, curve/config, side, vol type, source, business
+    date -- must never have the second confirmation refused as an illegal
+    replacement of the first. ``capture_id`` differs (it is derived from the
+    image hash and the instant it was read), so the two file as two distinct
+    surfaces.
+    """
+
+    _status, first = _parse(server_url)
+    _status, first_payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": first["capture_id"], "reviewed_by": "Eddy"},
+    )
+    second_image = base64.b64encode(_IMAGE + b"-a-second-screenshot").decode("ascii")
+    _status, second = _parse(server_url, image_base64=second_image)
+    assert second["capture_id"] != first["capture_id"]
+    _status, second_payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": second["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert first_payload["storage"]["status"] == "SAVED"
+    assert second_payload["storage"]["status"] == "SAVED"
+    assert first_payload["storage"]["surface_id"] != second_payload["storage"]["surface_id"]
+    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 2
+    first_stored = server_module.VOL_SURFACE_STORE.fetch_surface(
+        first_payload["storage"]["surface_id"]
+    )
+    second_stored = server_module.VOL_SURFACE_STORE.fetch_surface(
+        second_payload["storage"]["surface_id"]
+    )
+    assert first_stored.provenance.capture_id == first["capture_id"]
+    assert second_stored.provenance.capture_id == second["capture_id"]
+    # Same logical identity in every other respect -- this is the point.
+    assert first_stored.identity.currency == second_stored.identity.currency
+    assert first_stored.identity.business_date == second_stored.identity.business_date
 
 
 def test_a_confirmed_capture_changes_nothing_about_the_bundled_case(

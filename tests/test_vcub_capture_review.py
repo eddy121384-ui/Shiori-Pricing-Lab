@@ -8,6 +8,7 @@ so it cannot drop a blocking error on the round trip.
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
 import time
@@ -131,6 +132,83 @@ def test_rejecting_leaves_the_captured_values_unaccepted(stub_reader) -> None:
     assert rejected.review_status is VCUBCaptureStatus.REJECTED
     assert rejected.accepted_grid is None
     assert store.get(capture_id).accepted_grid is None
+
+
+def test_a_traders_own_confirmation_can_be_repeated_without_raising(stub_reader) -> None:
+    """Issue #183 gave a confirmation a second job: writing the surface.
+
+    That write can fail, so the trader has to be able to press Confirm again
+    to retry it -- which ``confirm`` alone refuses, the state machine being
+    terminal (Codex review, PR #184).
+    """
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+
+    first = store.confirm_idempotent(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+    again = store.confirm_idempotent(capture_id, reviewed_by="Eddy")
+
+    assert first.review_status is VCUBCaptureStatus.CONFIRMED
+    assert again is first
+    assert again.reviewed_at == _REVIEWED_AT
+
+
+def test_a_repeat_is_only_ever_the_capture_s_own_confirmer(stub_reader) -> None:
+    """One decision, by one named trader -- the Issue #181 invariant stands."""
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+    store.confirm_idempotent(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    with pytest.raises(ValueError, match="only a PENDING_REVIEW capture"):
+        store.confirm_idempotent(capture_id, reviewed_by="Someone Else")
+
+    assert store.get(capture_id).reviewed_by == "Eddy"
+
+
+def test_a_rejected_capture_is_never_confirmed_by_a_repeat(stub_reader) -> None:
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+    store.reject(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    with pytest.raises(ValueError, match="only a PENDING_REVIEW capture"):
+        store.confirm_idempotent(capture_id, reviewed_by="Eddy")
+
+    assert store.get(capture_id).review_status is VCUBCaptureStatus.REJECTED
+
+
+def test_overlapping_repeats_by_one_trader_all_get_the_same_confirmation(stub_reader) -> None:
+    """Codex review round 2, PR #184.
+
+    The check and the transition have to happen together under the lock. As
+    a read followed by a write, two same-trader requests on a pending
+    capture -- a double click, a browser retrying a timed-out POST -- both
+    saw ``PENDING_REVIEW``, and the loser was then refused for a
+    confirmation that had in fact been accepted.
+    """
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+    barrier = threading.Barrier(8)
+    results: list[object] = []
+
+    def press() -> None:
+        try:
+            barrier.wait(timeout=10)
+            results.append(store.confirm_idempotent(capture_id, reviewed_by="Eddy"))
+        except BaseException as exc:  # noqa: BLE001
+            results.append(exc)
+
+    threads = [threading.Thread(target=press) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert len(results) == 8
+    assert not any(isinstance(result, BaseException) for result in results)
+    # Every presser sees one decision, recorded once, at one instant.
+    assert {result.reviewed_at for result in results} == {store.get(capture_id).reviewed_at}
 
 
 def test_a_blocked_capture_cannot_be_confirmed_through_the_store(monkeypatch) -> None:
@@ -695,6 +773,90 @@ def test_the_capture_id_depends_on_both_the_image_and_the_instant() -> None:
     assert capture_id_for("a" * 64, _CAPTURED_AT) == capture_id_for("a" * 64, _CAPTURED_AT)
     assert capture_id_for("a" * 64, _CAPTURED_AT) != capture_id_for("b" * 64, _CAPTURED_AT)
     assert capture_id_for("a" * 64, _CAPTURED_AT) != capture_id_for("a" * 64, _REVIEWED_AT)
+
+
+def test_two_workbench_processes_never_derive_the_same_capture_id(monkeypatch) -> None:
+    """Codex review round 5, PR #184.
+
+    Issue #183's canonical store hashes ``capture_id`` into a surface's
+    identity, and the store's SQLite file is an ordinary local file two
+    independently launched workbench processes can share. Without a
+    per-process salt, two such processes reading byte-identical bytes at the
+    identical second would derive the *same* id from content alone -- with
+    no shared state between them to notice -- so one operator's confirmed
+    surface could collide with, or be refused as conflicting with, another's.
+
+    Simulated with two real, separate interpreters rather than reasoning
+    about the salt in the abstract, since the whole point is that there is
+    no process-to-process coordination.
+    """
+
+    import subprocess
+    import sys
+
+    probe = (
+        "from shiori_pricing_lab.app.vcub_capture_review import capture_id_for;"
+        f"print(capture_id_for('{'a' * 64}', '{_CAPTURED_AT}'))"
+    )
+    first = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    second = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert first.stdout.strip() != second.stdout.strip()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is POSIX-only")
+def test_a_forked_child_still_derives_a_different_capture_id() -> None:
+    """Codex review round 6, PR #184.
+
+    A POSIX fork duplicates the parent's memory, so a forked child inherits
+    the exact same ``_PROCESS_SALT`` -- the salt alone would leave two
+    forked children parsing identical bytes at the identical second
+    colliding again, the same failure round 5 fixed for separately launched
+    processes. ``capture_id_for`` mixes in ``os.getpid()`` too, read fresh
+    at call time, which a fork always changes even though everything else
+    about the child's memory is byte-identical to the parent's.
+
+    Forks inside a test process safely: the child writes its result down a
+    pipe and exits via ``os._exit`` rather than returning into pytest's own
+    teardown machinery.
+    """
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        child_id = capture_id_for("a" * 64, _CAPTURED_AT)
+        os.write(write_fd, child_id.encode("ascii"))
+        os.close(write_fd)
+        os._exit(0)  # never run pytest's own teardown in the child
+
+    os.close(write_fd)
+    try:
+        child_id = os.read(read_fd, 64).decode("ascii")
+    finally:
+        os.close(read_fd)
+        os.waitpid(pid, 0)
+
+    parent_id = capture_id_for("a" * 64, _CAPTURED_AT)
+
+    assert child_id != parent_id
+
+
+def test_the_process_salt_never_breaks_reuse_within_one_process(stub_reader) -> None:
+    """The fix must close the cross-process gap without reopening PR #182's
+    intra-process guarantees: a re-read of the same file in the same second
+    still reuses its own review slot."""
+
+    store = VCUBCaptureReviewStore()
+
+    first_id, _capture, _notes = _parse(store)
+    second_id, _capture, _notes = _parse(store)
+
+    assert first_id == second_id
 
 
 def test_the_default_capture_timestamp_is_an_explicit_utc_instant() -> None:
