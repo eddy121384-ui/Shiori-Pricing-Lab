@@ -8,6 +8,7 @@ so it cannot drop a blocking error on the round trip.
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
 import time
@@ -805,6 +806,44 @@ def test_two_workbench_processes_never_derive_the_same_capture_id(monkeypatch) -
     )
 
     assert first.stdout.strip() != second.stdout.strip()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is POSIX-only")
+def test_a_forked_child_still_derives_a_different_capture_id() -> None:
+    """Codex review round 6, PR #184.
+
+    A POSIX fork duplicates the parent's memory, so a forked child inherits
+    the exact same ``_PROCESS_SALT`` -- the salt alone would leave two
+    forked children parsing identical bytes at the identical second
+    colliding again, the same failure round 5 fixed for separately launched
+    processes. ``capture_id_for`` mixes in ``os.getpid()`` too, read fresh
+    at call time, which a fork always changes even though everything else
+    about the child's memory is byte-identical to the parent's.
+
+    Forks inside a test process safely: the child writes its result down a
+    pipe and exits via ``os._exit`` rather than returning into pytest's own
+    teardown machinery.
+    """
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        child_id = capture_id_for("a" * 64, _CAPTURED_AT)
+        os.write(write_fd, child_id.encode("ascii"))
+        os.close(write_fd)
+        os._exit(0)  # never run pytest's own teardown in the child
+
+    os.close(write_fd)
+    try:
+        child_id = os.read(read_fd, 64).decode("ascii")
+    finally:
+        os.close(read_fd)
+        os.waitpid(pid, 0)
+
+    parent_id = capture_id_for("a" * 64, _CAPTURED_AT)
+
+    assert child_id != parent_id
 
 
 def test_the_process_salt_never_breaks_reuse_within_one_process(stub_reader) -> None:

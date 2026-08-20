@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import threading
 from collections import OrderedDict
@@ -118,6 +119,16 @@ def response_fingerprint(capture: VCUBATMCapture) -> str:
 #: :meth:`VCUBCaptureReviewStore._find_identifier` provide -- same inputs
 #: reuse the same slot, the purity :func:`capture_id_for` itself is tested
 #: against -- is unaffected; only cross-process collision closes.
+#:
+#: Not sufficient alone against ``os.fork()``: a POSIX fork duplicates the
+#: parent's memory, so every forked child inherits this exact value, and two
+#: children parsing identical bytes at the identical second would still
+#: collide (Codex review round 6, PR #184). Nothing in this codebase forks
+#: today -- the workbench is one ``ThreadingHTTPServer`` process launched
+#: fresh by ``start_shiori.bat`` -- but the id is cheap to make correct
+#: regardless, so :func:`capture_id_for` also mixes in ``os.getpid()`` at
+#: call time: a fork always gives the child a new pid even though its copy
+#: of this module-level value is bit-identical to the parent's.
 _PROCESS_SALT = secrets.token_hex(16)
 
 
@@ -127,13 +138,19 @@ def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
     Derived from the image hash and the capture time rather than a purely
     random token, so re-parsing the same file in the same second within
     *this* process reuses the same review slot instead of leaving an orphan
-    behind. The per-process salt (:data:`_PROCESS_SALT`) makes it globally
-    unique too: two workbench processes reading identical bytes at the
-    identical second mint different ids, which is what keeps two operators'
-    confirmed surfaces from colliding through a shared database file.
+    behind. The per-process salt (:data:`_PROCESS_SALT`) plus the calling
+    process's own pid make it globally unique too: two workbench processes
+    -- including two that share inherited memory via ``os.fork()`` -- reading
+    identical bytes at the identical second mint different ids, which is
+    what keeps two operators' confirmed surfaces from colliding through a
+    shared database file. ``os.getpid()`` is read fresh on every call rather
+    than cached alongside the salt, since a fork changes it after the salt
+    has already been computed and inherited.
     """
 
-    digest = hashlib.sha256(f"{_PROCESS_SALT}|{source_image_sha256}|{captured_at}".encode())
+    digest = hashlib.sha256(
+        f"{_PROCESS_SALT}|{os.getpid()}|{source_image_sha256}|{captured_at}".encode()
+    )
     return digest.hexdigest()[:32]
 
 
