@@ -28,11 +28,21 @@ identity fields, and its fingerprint from everything it asserts:
 and the surface row's primary key is claimed first, so a failure anywhere
 -- including partway through the points -- leaves the store exactly as it
 was. There is no state in which a surface exists with some of its grid.
+
+**Reads are checked against what was confirmed.** Every fetched surface is
+rebuilt and re-fingerprinted, and a mismatch against the fingerprint stored
+beside it raises :class:`VolSurfaceIntegrityError`. Rows that changed under
+the store -- a hand-edited database, a lost point row -- still rebuild into
+a perfectly legal :class:`CanonicalVolSurface`, so without this nothing
+downstream would notice it was no longer the grid a trader signed off on
+(Codex review, PR #184). ``list_surfaces`` deliberately does not check: it
+reads no points, and is a browse rather than a source of data.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from collections.abc import Iterable
@@ -61,8 +71,17 @@ SCHEMA_VERSION = 1
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATABASE_PATH = _PROJECT_ROOT / "data" / "vol_surfaces.sqlite3"
 
+#: One row, enforced by the table itself. Two processes opening a brand-new
+#: database can both find it empty and both insert; without the singleton key
+#: that left two version rows, and a later ``fetchone()`` then checked an
+#: arbitrary one -- defeating the fail-closed gate exactly when two builds
+#: disagree, which is the one case it exists for (Codex review, PR #184).
+#: :meth:`VolSurfaceStore._ensure_schema` also runs the whole check inside a
+#: write transaction, so the second process reads the first's row rather than
+#: racing it; the constraint is what makes the invariant structural.
 _SCHEMA_VERSION_STATEMENT = """
     CREATE TABLE IF NOT EXISTS schema_version (
+        id      INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
         version INTEGER NOT NULL
     )
 """
@@ -102,6 +121,7 @@ _SCHEMA_STATEMENTS = (
         strike_dimension TEXT    NOT NULL,
         strike_offset    REAL,
         volatility       REAL,
+        volatility_sign  INTEGER NOT NULL DEFAULT 1 CHECK (volatility_sign IN (-1, 1)),
         PRIMARY KEY (surface_id, point_index)
     )
     """,
@@ -154,6 +174,17 @@ class VolSurfaceConflictError(VolSurfaceStoreError):
 
 class VolSurfaceSchemaError(VolSurfaceStoreError):
     """The database on disk was written by a schema this build cannot read."""
+
+
+class VolSurfaceIntegrityError(VolSurfaceStoreError):
+    """A stored surface no longer matches the fingerprint saved with it.
+
+    The database is syntactically fine and the rows rebuild into a valid
+    surface -- they are simply not the surface that was confirmed. A dropped
+    point row leaves a smaller grid that is still a legal
+    :class:`CanonicalVolSurface`, so nothing else would notice (Codex review,
+    PR #184). Reading fails closed instead.
+    """
 
 
 class SaveStatus(StrEnum):
@@ -233,6 +264,38 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _sign_of(value: float | None) -> int:
+    """``-1`` for a negative value (negative zero included), ``1`` otherwise.
+
+    SQLite's REAL column is the one place an IEEE double does not survive a
+    round trip: ``-0.0`` comes back as ``0.0``. Every other finite double
+    stores and reloads bit-exact, so this single extra column is the whole
+    of what REAL cannot carry.
+
+    It matters because the capture slice deliberately treats ``-0.00`` and
+    ``0.00`` as different readings -- a trader shown one must not confirm the
+    other (PR #182, Codex round 8). Losing the sign here made a reloaded
+    surface's fingerprint differ from the one stored beside it, so a surface
+    conflicted with itself on the next save (Codex review, PR #184).
+    """
+
+    if value is None:
+        # The column is NOT NULL and an unresolved point has no sign to
+        # carry; ``_volatility_from_row`` returns ``None`` for it regardless
+        # of what is stored here.
+        return 1
+    return -1 if math.copysign(1.0, value) < 0 else 1
+
+
+def _volatility_from_row(row: sqlite3.Row) -> float | None:
+    """The stored volatility with its sign restored. ``None`` stays ``None``."""
+
+    value = row["volatility"]
+    if value is None:
+        return None
+    return math.copysign(float(value), row["volatility_sign"])
+
+
 class VolSurfaceStore:
     """A local SQLite database of confirmed volatility surfaces.
 
@@ -271,22 +334,40 @@ class VolSurfaceStore:
         database written by a later schema is never reshaped on the way to
         being rejected -- a ``CREATE TABLE IF NOT EXISTS`` run against it
         first could put back a table that schema deliberately dropped.
+
+        The whole check runs in one ``BEGIN IMMEDIATE`` transaction, which
+        takes SQLite's write lock for its duration. Read-then-insert in
+        autocommit let two processes opening a brand-new database both see an
+        empty version table and both insert, so the gate that exists to catch
+        two builds disagreeing was defeated by exactly that case (Codex
+        review, PR #184).
         """
 
-        connection.execute(_SCHEMA_VERSION_STATEMENT)
-        row = connection.execute("SELECT version FROM schema_version").fetchone()
-        if row is not None:
-            stored = int(row["version"])
-            if stored != SCHEMA_VERSION:
-                raise VolSurfaceSchemaError(
-                    f"{self._path} was written with vol-surface schema version {stored}, but "
-                    f"this build reads version {SCHEMA_VERSION}. Refusing to read it rather "
-                    "than guess what its columns mean."
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(_SCHEMA_VERSION_STATEMENT)
+            row = connection.execute("SELECT version FROM schema_version").fetchone()
+            if row is not None:
+                stored = int(row["version"])
+                if stored != SCHEMA_VERSION:
+                    raise VolSurfaceSchemaError(
+                        f"{self._path} was written with vol-surface schema version {stored}, "
+                        f"but this build reads version {SCHEMA_VERSION}. Refusing to read it "
+                        "rather than guess what its columns mean."
+                    )
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            if row is None:
+                connection.execute(
+                    "INSERT INTO schema_version (id, version) VALUES (1, ?)", (SCHEMA_VERSION,)
                 )
-        for statement in _SCHEMA_STATEMENTS:
-            connection.execute(statement)
-        if row is None:
-            connection.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        connection.execute("COMMIT")
 
     # -- writing ------------------------------------------------------------
 
@@ -390,7 +471,8 @@ class VolSurfaceStore:
     ) -> None:
         connection.executemany(
             "INSERT INTO vol_surface_point (surface_id, point_index, expiry, underlying_tenor, "
-            "strike_dimension, strike_offset, volatility) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "strike_dimension, strike_offset, volatility, volatility_sign) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     surface_id,
@@ -400,6 +482,7 @@ class VolSurfaceStore:
                     point.strike_dimension.value,
                     point.strike_offset,
                     point.volatility,
+                    _sign_of(point.volatility),
                 )
                 for index, point in enumerate(points)
             ],
@@ -423,13 +506,22 @@ class VolSurfaceStore:
             if row is None:
                 raise KeyError(f"no vol surface is stored with id {surface_id!r}")
             point_rows = connection.execute(
-                "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility "
-                "FROM vol_surface_point WHERE surface_id = ? ORDER BY point_index",
+                "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility, "
+                "volatility_sign FROM vol_surface_point WHERE surface_id = ? ORDER BY point_index",
                 (surface_id,),
             ).fetchall()
         finally:
             connection.close()
-        return _surface_from_rows(row, point_rows)
+        surface = _surface_from_rows(row, point_rows)
+        stored_fingerprint = row["content_fingerprint"]
+        if surface.content_fingerprint != stored_fingerprint:
+            raise VolSurfaceIntegrityError(
+                f"surface {surface_id} does not match the fingerprint stored with it "
+                f"(stored {stored_fingerprint}, rebuilt {surface.content_fingerprint}). The rows "
+                f"in {self._path} have changed since the surface was confirmed -- refusing to "
+                "hand back a surface that is not the one a trader signed off on."
+            )
+        return surface
 
     def fetch_points(self, surface_id: str) -> tuple[VolSurfacePoint, ...]:
         """The normalized points of one surface, for downstream assembly."""
@@ -527,7 +619,7 @@ def _surface_from_rows(row: sqlite3.Row, point_rows: Iterable[sqlite3.Row]) -> C
         VolSurfacePoint(
             expiry=point["expiry"],
             underlying_tenor=point["underlying_tenor"],
-            volatility=point["volatility"],
+            volatility=_volatility_from_row(point),
             strike_dimension=StrikeDimension(point["strike_dimension"]),
             strike_offset=point["strike_offset"],
         )

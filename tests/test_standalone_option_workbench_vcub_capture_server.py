@@ -440,6 +440,103 @@ def test_a_storage_failure_is_reported_rather_than_dressed_up_as_a_save(
     assert "disk I/O error" in payload["storage"]["error"]
 
 
+def test_the_confirmer_can_retry_a_save_that_failed(server_url, stub_reader, monkeypatch) -> None:
+    """Codex review, PR #184.
+
+    A storage failure left the capture confirmed but not durable, and the
+    review state machine is terminal, so pressing Confirm again was a 400.
+    The trader had no way to retry the write and no way to establish
+    durability short of restarting and recapturing the screen.
+    """
+
+    real_save = server_module.VOL_SURFACE_STORE.save_confirmed_surface
+
+    def refuse(surface):
+        raise RuntimeError("the vol-surface store refused the write: disk I/O error")
+
+    monkeypatch.setattr(server_module.VOL_SURFACE_STORE, "save_confirmed_surface", refuse)
+    _status, parsed = _parse(server_url)
+    _status, first = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+    assert first["storage"]["status"] == "FAILED"
+
+    monkeypatch.setattr(
+        server_module.VOL_SURFACE_STORE, "save_confirmed_surface", real_save
+    )
+    status, retried = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert status == 200
+    assert retried["storage"]["status"] == "SAVED"
+    assert retried["capture"]["review_status"] == "CONFIRMED"
+    assert retried["capture"]["reviewed_by"] == "Eddy"
+    assert retried["capture"]["reviewed_at"] == first["capture"]["reviewed_at"]
+    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 1
+
+
+def test_retrying_a_save_that_already_worked_stores_nothing_further(
+    server_url, stub_reader
+) -> None:
+    _status, parsed = _parse(server_url)
+    _status, first = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    _status, again = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert first["storage"]["status"] == "SAVED"
+    assert again["storage"]["status"] == "ALREADY_SAVED"
+    assert again["storage"]["surface_id"] == first["storage"]["surface_id"]
+    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 1
+
+
+def test_a_retry_never_lets_a_second_person_confirm_someone_elses_capture(
+    server_url, stub_reader
+) -> None:
+    """The retry is for the trader who already decided it, and nobody else."""
+
+    _status, parsed = _parse(server_url)
+    _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Someone Else"},
+    )
+
+    assert status == 400
+    assert "PENDING_REVIEW" in payload["error"]
+    held = server_module.VCUB_CAPTURE_REVIEW_STORE.get(parsed["capture_id"])
+    assert held.reviewed_by == "Eddy"
+
+
+def test_a_rejected_capture_can_never_be_confirmed_by_a_retry(server_url, stub_reader) -> None:
+    _status, parsed = _parse(server_url)
+    _post_json(
+        f"{server_url}/api/vcub/atm/reject",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    status, payload = _post_json(
+        f"{server_url}/api/vcub/atm/confirm",
+        {"capture_id": parsed["capture_id"], "reviewed_by": "Eddy"},
+    )
+
+    assert status == 400
+    assert "PENDING_REVIEW" in payload["error"]
+    assert server_module.VOL_SURFACE_STORE.list_surfaces() == ()
+
+
 def test_a_second_screenshot_of_one_surface_is_refused_not_silently_overwritten(
     server_url, stub_reader
 ) -> None:

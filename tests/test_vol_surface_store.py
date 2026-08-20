@@ -13,7 +13,9 @@ write leaves nothing behind.
 
 from __future__ import annotations
 
+import math
 import sqlite3
+import threading
 
 import pytest
 from test_vol_surface import (
@@ -26,12 +28,17 @@ from test_vol_surface import (
 )
 
 import shiori_pricing_lab.data.vol_surface_store as store_module
-from shiori_pricing_lab.data.vol_surface import VolSurfaceType
+from shiori_pricing_lab.data.vol_surface import (
+    CanonicalVolSurface,
+    VolSurfacePoint,
+    VolSurfaceType,
+)
 from shiori_pricing_lab.data.vol_surface_store import (
     DEFAULT_DATABASE_PATH,
     SCHEMA_VERSION,
     SaveStatus,
     VolSurfaceConflictError,
+    VolSurfaceIntegrityError,
     VolSurfaceSchemaError,
     VolSurfaceStore,
     VolSurfaceStoreError,
@@ -174,6 +181,192 @@ def test_the_screenshot_bytes_are_never_written_into_the_database(store, databas
     store.save_confirmed_surface(confirmed_surface())
 
     assert b"\x89PNG" not in database_path.read_bytes()
+
+
+# -- values SQLite does not round-trip on its own ---------------------------
+
+
+def _surface_with_first_volatility(value):
+    """The canonical surface with its first point's vol replaced by ``value``."""
+
+    base = confirmed_surface()
+    return CanonicalVolSurface(
+        identity=base.identity,
+        provenance=base.provenance,
+        points=(
+            VolSurfacePoint(
+                expiry=EXPIRY_LABELS[0], underlying_tenor=TENOR_LABELS[0], volatility=value
+            ),
+        )
+        + base.points[1:],
+    )
+
+
+def test_a_negative_zero_volatility_reloads_negative(store) -> None:
+    """Codex review, PR #184.
+
+    SQLite's REAL column is the one place an IEEE double does not survive:
+    ``-0.0`` comes back as ``0.0``. The capture slice treats ``-0.00`` and
+    ``0.00`` as different readings, so losing the sign hands back a grid the
+    trader never confirmed.
+    """
+
+    surface = _surface_with_first_volatility(-0.0)
+    store.save_confirmed_surface(surface)
+
+    reloaded = store.fetch_surface(surface.surface_id)
+
+    assert math.copysign(1.0, reloaded.points[0].volatility) < 0
+    assert reloaded.content_fingerprint == surface.content_fingerprint
+
+
+@pytest.mark.parametrize("value", [-0.0, 0.0, 80, 84.99, -25.5])
+def test_a_saved_surface_never_conflicts_with_its_own_reloaded_self(store, value) -> None:
+    """The round trip has to be exact, or the retry path reads as a conflict."""
+
+    surface = _surface_with_first_volatility(value)
+    store.save_confirmed_surface(surface)
+
+    reloaded = store.fetch_surface(surface.surface_id)
+
+    assert store.save_confirmed_surface(reloaded).status is SaveStatus.ALREADY_SAVED
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        1e-300,
+        -1e-300,
+        1.7976931348623157e308,
+        0.1 + 0.2,
+        84.99,
+        -84.99,
+        1234567.891011,
+        5e-324,
+    ],
+)
+def test_awkward_doubles_round_trip_bit_exact(store, value) -> None:
+    """The integrity gate must never fire on a value the store itself wrote.
+
+    SQLite REAL is an IEEE double, so everything except signed zero survives
+    -- but that is the claim the gate now depends on, so it is asserted
+    rather than assumed.
+    """
+
+    surface = _surface_with_first_volatility(value)
+    store.save_confirmed_surface(surface)
+
+    reloaded = store.fetch_surface(surface.surface_id)
+
+    assert reloaded.points[0].volatility == value
+    assert reloaded.content_fingerprint == surface.content_fingerprint
+
+
+def test_a_positive_zero_is_not_quietly_turned_negative(store) -> None:
+    """The sign column must carry the sign, not impose one."""
+
+    surface = _surface_with_first_volatility(0.0)
+    store.save_confirmed_surface(surface)
+
+    assert math.copysign(1.0, store.fetch_points(surface.surface_id)[0].volatility) > 0
+
+
+# -- integrity --------------------------------------------------------------
+
+
+def test_a_surface_edited_under_the_store_is_refused_not_returned(
+    store, database_path
+) -> None:
+    """Codex review, PR #184.
+
+    A dropped point row leaves a smaller grid that is still a perfectly legal
+    ``CanonicalVolSurface``, so nothing downstream would notice. The
+    fingerprint stored beside it is what makes that detectable.
+    """
+
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "DELETE FROM vol_surface_point WHERE surface_id = ? AND point_index = 7",
+            (surface.surface_id,),
+        )
+
+    with pytest.raises(VolSurfaceIntegrityError, match="does not match the fingerprint"):
+        store.fetch_surface(surface.surface_id)
+
+
+def test_an_edited_volatility_is_refused_too(store, database_path) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE vol_surface_point SET volatility = 1.0 WHERE surface_id = ? "
+            "AND point_index = 0",
+            (surface.surface_id,),
+        )
+
+    with pytest.raises(VolSurfaceIntegrityError):
+        store.fetch_points(surface.surface_id)
+
+
+def test_an_untouched_surface_passes_the_integrity_check_every_time(store) -> None:
+    """The gate must not fire on the ordinary path."""
+
+    surface = confirmed_surface(unresolved_cells=frozenset({(0, 0), (20, 14)}))
+    store.save_confirmed_surface(surface)
+
+    assert store.fetch_surface(surface.surface_id) == surface
+    assert store.fetch_surface(surface.surface_id).content_fingerprint == (
+        surface.content_fingerprint
+    )
+
+
+# -- schema initialisation --------------------------------------------------
+
+
+def test_only_one_schema_version_row_can_ever_exist(store, database_path) -> None:
+    """Codex review, PR #184.
+
+    Two processes opening a brand-new database could both find the version
+    table empty and both insert, leaving the fail-closed gate checking an
+    arbitrary row of two.
+    """
+
+    store.save_confirmed_surface(confirmed_surface())
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO schema_version (id, version) VALUES (1, ?)", (SCHEMA_VERSION + 1,)
+            )
+
+
+def test_concurrent_first_opens_agree_on_one_version(database_path) -> None:
+    """Eight threads racing to initialise one brand-new database."""
+
+    barrier = threading.Barrier(8)
+    failures: list[BaseException] = []
+
+    def initialise() -> None:
+        try:
+            barrier.wait(timeout=10)
+            VolSurfaceStore(database_path).list_surfaces()
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+
+    threads = [threading.Thread(target=initialise) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert failures == []
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchall() == [
+            (SCHEMA_VERSION,)
+        ]
 
 
 # -- duplicate policy -------------------------------------------------------

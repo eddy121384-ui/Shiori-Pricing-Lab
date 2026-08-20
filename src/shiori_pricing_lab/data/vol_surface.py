@@ -137,15 +137,21 @@ class VolSurfacePoint:
         _require_non_blank(self.underlying_tenor, "underlying_tenor")
         if not isinstance(self.strike_dimension, StrikeDimension):
             raise ValueError("strike_dimension must be a StrikeDimension")
-        if self.volatility is not None:
-            _require_finite(self.volatility, "volatility")
         if self.strike_dimension is StrikeDimension.ATM and self.strike_offset is not None:
             raise ValueError(
                 "an ATM point carries no strike offset; "
                 f"got strike_offset={self.strike_offset!r}"
             )
-        if self.strike_offset is not None:
-            _require_finite(self.strike_offset, "strike_offset")
+        # Normalised to ``float``, not merely validated. A caller may hand in
+        # an ``int`` -- ``_require_finite`` accepts one -- and keeping it an
+        # ``int`` made the point serialise as JSON ``80`` while the same point
+        # reloaded from SQLite's REAL column serialised as ``80.0``. The two
+        # fingerprints then differed, so a surface saved and fetched back
+        # conflicted with *itself* on the next save (Codex review, PR #184).
+        for name in ("volatility", "strike_offset"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _require_finite(value, name))
 
     @property
     def coordinate(self) -> tuple[str, str, str, float | None]:

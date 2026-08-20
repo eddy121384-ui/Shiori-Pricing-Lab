@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 
 import pytest
 
@@ -354,6 +355,59 @@ def test_an_identity_field_left_none_must_be_named_unresolved() -> None:
 
 
 # -- point and surface invariants -------------------------------------------
+
+
+def test_an_integer_volatility_is_normalised_to_a_float() -> None:
+    """Codex review, PR #184.
+
+    ``_require_finite`` accepts an ``int``, and keeping it one made the point
+    serialise as JSON ``80`` while the same point reloaded from SQLite's REAL
+    column serialised as ``80.0`` -- so a surface saved and fetched back
+    conflicted with itself on the next save.
+    """
+
+    point = VolSurfacePoint(expiry="3Mo", underlying_tenor="4Yr", volatility=80)
+
+    assert isinstance(point.volatility, float)
+    assert point.to_dict()["volatility"] == 80.0
+
+
+def test_a_negative_zero_volatility_stays_negative_in_the_model() -> None:
+    """The capture slice treats -0.00 and 0.00 as different readings (PR #182)."""
+
+    point = VolSurfacePoint(expiry="3Mo", underlying_tenor="4Yr", volatility=-0.0)
+
+    assert math.copysign(1.0, point.volatility) < 0
+    assert json.dumps(point.to_dict()["volatility"]) == "-0.0"
+
+
+def test_a_surface_differing_only_in_signed_zero_has_its_own_fingerprint() -> None:
+    """Dataclass equality calls these the same; what the trader saw does not."""
+
+    base = confirmed_surface()
+    negative = CanonicalVolSurface(
+        identity=base.identity,
+        provenance=base.provenance,
+        points=(
+            VolSurfacePoint(
+                expiry=EXPIRY_LABELS[0], underlying_tenor=TENOR_LABELS[0], volatility=-0.0
+            ),
+        )
+        + base.points[1:],
+    )
+    positive = CanonicalVolSurface(
+        identity=base.identity,
+        provenance=base.provenance,
+        points=(
+            VolSurfacePoint(
+                expiry=EXPIRY_LABELS[0], underlying_tenor=TENOR_LABELS[0], volatility=0.0
+            ),
+        )
+        + base.points[1:],
+    )
+
+    assert negative == positive  # Python says so; the fingerprint must not
+    assert negative.content_fingerprint != positive.content_fingerprint
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
