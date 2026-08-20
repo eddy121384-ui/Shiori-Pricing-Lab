@@ -480,6 +480,34 @@ def test_a_surface_cannot_be_built_without_a_confirmer_and_a_time() -> None:
         )
 
 
+def test_a_surface_cannot_disagree_with_itself_about_which_capture_it_is() -> None:
+    """Codex review, PR #184.
+
+    The store keeps one ``capture_id`` column, so a surface whose identity
+    and provenance named different captures would save under a
+    ``surface_id`` derived from one value and reload with the other --
+    mismatching the fingerprint it had just stored and becoming unreadable
+    the moment it was saved. Refused at construction instead.
+    """
+
+    base = confirmed_surface()
+    mismatched_identity = VolSurfaceIdentity(
+        surface_type=base.identity.surface_type,
+        capture_id="a-different-capture-id",
+        business_date=base.identity.business_date,
+        currency=base.identity.currency,
+        curve_config=base.identity.curve_config,
+        side=base.identity.side,
+        vol_type=base.identity.vol_type,
+        source=base.identity.source,
+    )
+
+    with pytest.raises(ValueError, match="identity.capture_id and provenance.capture_id"):
+        CanonicalVolSurface(
+            identity=mismatched_identity, provenance=base.provenance, points=base.points
+        )
+
+
 # -- exports ----------------------------------------------------------------
 
 

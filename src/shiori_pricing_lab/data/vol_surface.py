@@ -353,6 +353,15 @@ class CanonicalVolSurface:
     unresolved rather than asserting bp, %, or anything else from the look
     of the numbers -- inferring it would be exactly the silent unit
     coercion Issue #181's methodology boundary forbids.
+
+    ``identity.capture_id`` and ``provenance.capture_id`` must agree
+    (Codex review, PR #184). The store keeps only one ``capture_id`` column
+    -- the two are the same fact, the snapshot this surface came from, seen
+    from the identity side and the provenance side -- and rebuilds both
+    fields from it on load. A surface built with the two disagreeing would
+    save under a ``surface_id`` derived from one value and reload with the
+    other, mismatching the fingerprint it had just stored and becoming
+    unreadable the moment it was saved.
     """
 
     identity: VolSurfaceIdentity
@@ -365,6 +374,12 @@ class CanonicalVolSurface:
             raise ValueError("identity must be a VolSurfaceIdentity")
         if not isinstance(self.provenance, VolSurfaceProvenance):
             raise ValueError("provenance must be a VolSurfaceProvenance")
+        if self.identity.capture_id != self.provenance.capture_id:
+            raise ValueError(
+                "identity.capture_id and provenance.capture_id must agree -- they are the "
+                f"same capture, got {self.identity.capture_id!r} and "
+                f"{self.provenance.capture_id!r}"
+            )
         if not isinstance(self.points, tuple) or not self.points:
             raise ValueError("points must be a non-empty tuple of VolSurfacePoint")
         if any(not isinstance(point, VolSurfacePoint) for point in self.points):
