@@ -368,10 +368,33 @@ def test_a_database_from_the_previous_schema_fails_closed(database_path) -> None
         VolSurfaceStore(database_path).list_surfaces()
 
 
-def test_the_schema_version_moved_with_the_sign_column() -> None:
+def test_a_database_from_schema_version_2_also_fails_closed(database_path) -> None:
+    """Eddy's PR #184 decision #1 bumped the schema again, 2 -> 3.
+
+    ``capture_id`` joined the identity fields that ``surface_id`` and
+    ``content_fingerprint`` hash. A version-2 database's stored fingerprints
+    were computed without it, so this build's recomputed fingerprint would
+    mismatch every row -- not because the data drifted, but because the
+    formula did. Refusing the whole database at the schema gate is the
+    honest failure; a false ``VolSurfaceIntegrityError`` on perfectly good
+    rows would not be.
+    """
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE schema_version (id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1), "
+            "version INTEGER NOT NULL)"
+        )
+        connection.execute("INSERT INTO schema_version (id, version) VALUES (1, 2)")
+
+    with pytest.raises(VolSurfaceSchemaError, match="schema version 2"):
+        VolSurfaceStore(database_path).list_surfaces()
+
+
+def test_the_schema_version_moved_with_the_snapshot_dimension() -> None:
     """Pinned literally: the two must never drift apart again."""
 
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_an_untouched_surface_passes_the_integrity_check_every_time(store) -> None:
@@ -522,6 +545,76 @@ def test_a_different_identity_is_a_separate_surface_not_a_conflict(store) -> Non
     assert {summary.surface_id for summary in store.list_surfaces()} == {
         first.surface_id,
         second.surface_id,
+    }
+
+
+def test_a_later_capture_the_same_day_is_a_new_surface_not_a_conflict(store) -> None:
+    """Eddy's PR #184 decision #1.
+
+    A canonical stored surface is one capture/market snapshot, not the only
+    surface a business date is allowed to hold. Re-capturing the same VCUB
+    screen later -- same currency, curve/config, side, vol type, source,
+    business date, and even identical values -- must never be treated as an
+    illegal replacement of the day's first surface.
+    """
+
+    morning = confirmed_surface(capture_id="capture-morning")
+    afternoon = confirmed_surface(capture_id="capture-afternoon")
+    assert morning.surface_id != afternoon.surface_id
+
+    first = store.save_confirmed_surface(morning)
+    second = store.save_confirmed_surface(afternoon)
+
+    assert first.status is SaveStatus.SAVED
+    assert second.status is SaveStatus.SAVED
+    assert {summary.surface_id for summary in store.list_surfaces()} == {
+        morning.surface_id,
+        afternoon.surface_id,
+    }
+    assert store.fetch_surface(morning.surface_id).provenance.capture_id == "capture-morning"
+    assert store.fetch_surface(afternoon.surface_id).provenance.capture_id == "capture-afternoon"
+
+
+def test_retrying_the_same_capture_is_still_idempotent_under_the_snapshot_dimension(
+    store,
+) -> None:
+    """The other half of decision #1: only the *same* snapshot can collide."""
+
+    surface = confirmed_surface(capture_id="capture-once")
+
+    first = store.save_confirmed_surface(surface)
+    second = store.save_confirmed_surface(surface)
+
+    assert first.status is SaveStatus.SAVED
+    assert second.status is SaveStatus.ALREADY_SAVED
+    assert len(store.list_surfaces()) == 1
+
+
+def test_the_same_capture_with_conflicting_content_still_fails_closed(store) -> None:
+    """The snapshot dimension narrows what conflicts; it does not remove conflict."""
+
+    stored = confirmed_surface(capture_id="capture-once")
+    store.save_confirmed_surface(stored)
+    conflicting = confirmed_surface(
+        capture_id="capture-once", unresolved_cells=frozenset({(0, 0)})
+    )
+    assert conflicting.surface_id == stored.surface_id
+
+    with pytest.raises(VolSurfaceConflictError):
+        store.save_confirmed_surface(conflicting)
+
+    assert store.fetch_surface(stored.surface_id) == stored
+
+
+def test_the_listing_shows_which_capture_each_same_day_surface_belongs_to(store) -> None:
+    """A browse that cannot tell two same-day surfaces apart is dishonest."""
+
+    store.save_confirmed_surface(confirmed_surface(capture_id="capture-morning"))
+    store.save_confirmed_surface(confirmed_surface(capture_id="capture-afternoon"))
+
+    assert {summary.capture_id for summary in store.list_surfaces()} == {
+        "capture-morning",
+        "capture-afternoon",
     }
 
 

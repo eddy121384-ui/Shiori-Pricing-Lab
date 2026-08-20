@@ -27,6 +27,17 @@ carries a strike dimension and an optional strike offset. Today the only
 dimension is :attr:`StrikeDimension.ATM`, whose offset must be ``None``; a
 later OTM/SABR capture adds a dimension and populates the offset, and the
 row shape does not change.
+
+**A stored surface is one capture, not the only surface allowed for a day**
+(Eddy's PR #184 decision #1). :attr:`VolSurfaceIdentity.capture_id` is a
+required snapshot dimension alongside the other identity fields, not an
+opaque provenance detail: two captures sharing every other identity field
+are two different surfaces because they are two different observations, and
+neither is a conflicting replacement of the other. Only the *same* capture
+retried collides -- identical content is idempotent, different content under
+the same ``capture_id`` fails closed. ``capture_id`` is a snapshot marker,
+never a substitute for a market/quote timestamp: nothing here claims to know
+when a screen's data was quoted, only when it was captured.
 """
 
 from __future__ import annotations
@@ -65,9 +76,14 @@ class StrikeDimension(StrEnum):
     ATM = "ATM"
 
 
-#: The fields that identify one logical surface. Two observations sharing all
-#: of these are the same surface and must agree; two that differ in any of
-#: them are different surfaces and never collide.
+#: The fields that identify one logical surface, alongside the required
+#: ``capture_id`` snapshot dimension (Eddy's PR #184 decision #1). Two
+#: observations sharing all of these *and* the same ``capture_id`` are the
+#: same surface and must agree; two that differ in any of them -- including
+#: ``capture_id`` alone -- are different surfaces and never collide.
+#: ``capture_id`` is deliberately not listed here: it is never unresolved,
+#: so it has no place in the may-be-unresolved bookkeeping these names drive
+#: (see :class:`VolSurfaceIdentity`).
 IDENTITY_FIELDS: tuple[str, ...] = (
     "business_date",
     "currency",
@@ -178,8 +194,8 @@ class VolSurfacePoint:
 class VolSurfaceIdentity:
     """What distinguishes one stored surface from another.
 
-    Every field but :attr:`surface_type` may be unresolved, and an
-    unresolved field is ``None`` *and* named in
+    Every field but :attr:`surface_type` and :attr:`capture_id` may be
+    unresolved, and an unresolved field is ``None`` *and* named in
     :attr:`unresolved_fields` -- there is no third state, exactly as on the
     capture it came from. An incomplete identity is therefore visible to
     every later operation rather than papered over: Issue #183 requires such
@@ -189,9 +205,22 @@ class VolSurfaceIdentity:
     ``"08/18/26"``). It is deliberately not parsed into a calendar date
     here: choosing a day/month order for a vendor screen is an interpretation
     this layer is not entitled to make.
+
+    ``capture_id`` is the snapshot dimension (Eddy's PR #184 decision #1): a
+    stored surface represents *one capture*, not the only surface a business
+    date may ever hold. It is required and never unresolved -- a capture
+    always has one, assigned mechanically from the image read and the
+    instant it was read, never from a claimed market quote time -- and it
+    participates in :attr:`surface_id` exactly like the other identity
+    fields. A second capture of the same screen later the same day is
+    therefore a *new* surface, never a conflicting replacement of the first;
+    only a retry of the *same* capture can collide, and Issue #183's
+    duplicate policy (identical content idempotent, different content fails
+    closed) applies to that retry alone.
     """
 
     surface_type: VolSurfaceType
+    capture_id: str
     business_date: str | None = None
     currency: str | None = None
     curve_config: str | None = None
@@ -203,6 +232,7 @@ class VolSurfaceIdentity:
     def __post_init__(self) -> None:
         if not isinstance(self.surface_type, VolSurfaceType):
             raise ValueError("surface_type must be a VolSurfaceType")
+        _require_non_blank(self.capture_id, "capture_id")
         if not isinstance(self.unresolved_fields, tuple):
             raise ValueError("unresolved_fields must be a tuple")
         unknown = [name for name in self.unresolved_fields if name not in IDENTITY_FIELDS]
@@ -229,17 +259,22 @@ class VolSurfaceIdentity:
         makes "already saved" and "conflicting replacement" decidable at
         all. An unresolved field hashes as ``None``: it participates in the
         identity as *unresolved*, and is never stood in for.
+
+        ``capture_id`` participates too (Eddy's PR #184 decision #1), which
+        is what makes two captures sharing every other field two different
+        surfaces rather than one surface in conflict with itself.
         """
 
         return _digest(
             {
                 "surface_type": self.surface_type.value,
+                "capture_id": self.capture_id,
                 **{name: getattr(self, name) for name in IDENTITY_FIELDS},
             }
         )
 
     def to_dict(self) -> dict:
-        payload: dict = {"surface_type": self.surface_type.value}
+        payload: dict = {"surface_type": self.surface_type.value, "capture_id": self.capture_id}
         payload.update({name: getattr(self, name) for name in IDENTITY_FIELDS})
         payload["unresolved_fields"] = list(self.unresolved_fields)
         return payload

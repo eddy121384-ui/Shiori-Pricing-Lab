@@ -15,6 +15,13 @@ the quote date stays the text the screen drew (``"08/18/26"``) rather than
 becoming a parsed calendar date. An unresolved metadata field arrives here
 as ``None`` and leaves as ``None``, named in the identity's own unresolved
 list.
+
+**Every capture is its own surface identity.** ``capture_id`` -- the review
+store's id for this exact image read, not a Bloomberg quote timestamp --
+becomes :attr:`~shiori_pricing_lab.data.vol_surface.VolSurfaceIdentity.capture_id`
+(Eddy's PR #184 decision #1), so a second screenshot of the same screen
+later the same day files as a new surface rather than colliding with the
+first one.
 """
 
 from __future__ import annotations
@@ -97,6 +104,7 @@ def canonical_surface_from_confirmed_capture(
 
     identity = VolSurfaceIdentity(
         surface_type=VolSurfaceType.ATM_SWAPTION,
+        capture_id=capture_id,
         **{
             identity_field: getattr(metadata, metadata_field)
             for metadata_field, identity_field in _METADATA_TO_IDENTITY.items()

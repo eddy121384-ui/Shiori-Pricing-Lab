@@ -183,6 +183,7 @@ def test_the_identity_copies_the_screens_own_metadata_verbatim() -> None:
 
     assert surface.identity.to_dict() == {
         "surface_type": "ATM_SWAPTION",
+        "capture_id": CAPTURE_ID,
         "business_date": "08/18/26",
         "currency": "USD",
         "curve_config": "USD RFR BVOL Cube (Default)",
@@ -306,8 +307,28 @@ def test_an_unresolved_field_is_its_own_identity_never_a_stand_in() -> None:
     )
 
 
-def test_the_surface_id_ignores_provenance_and_values() -> None:
-    """Identity is *which* surface this is; content is what it says."""
+def test_a_different_capture_is_a_different_surface_even_with_identical_metadata() -> None:
+    """Eddy's PR #184 decision #1.
+
+    A stored surface is one capture, not the only surface a business date
+    may hold. A second capture of the same screen -- same currency, curve,
+    side, vol type, source, business date -- is a new observation, not an
+    illegal replacement of the first.
+    """
+
+    assert confirmed_surface(capture_id="a-different-capture-id").surface_id != (
+        confirmed_surface().surface_id
+    )
+
+
+def test_the_surface_id_ignores_provenance_and_values_but_not_the_snapshot() -> None:
+    """Identity is *which* surface this is; content is what it says.
+
+    ``capture_id`` is the one exception, and it is not really an exception:
+    it is the snapshot dimension of the identity itself (Eddy's PR #184
+    decision #1), not ordinary provenance -- covered separately above. Held
+    fixed here so this test isolates the fields that really are ignored.
+    """
 
     other = confirmed_surface(
         reviewed_by="Someone Else",
@@ -336,6 +357,7 @@ def test_an_identity_field_cannot_be_both_valued_and_unresolved() -> None:
     with pytest.raises(ValueError, match="listed unresolved but carries a value"):
         VolSurfaceIdentity(
             surface_type=VolSurfaceType.ATM_SWAPTION,
+            capture_id=CAPTURE_ID,
             currency="USD",
             unresolved_fields=("currency", "business_date", "curve_config", "side",
                                "vol_type", "source"),
@@ -346,12 +368,19 @@ def test_an_identity_field_left_none_must_be_named_unresolved() -> None:
     with pytest.raises(ValueError, match="currency is unresolved"):
         VolSurfaceIdentity(
             surface_type=VolSurfaceType.ATM_SWAPTION,
+            capture_id=CAPTURE_ID,
             business_date="08/18/26",
             curve_config="cube",
             side="Mid",
             vol_type="Normal Vol (OIS)",
             source="BVOL",
         )
+
+
+@pytest.mark.parametrize("capture_id", ["", "   "])
+def test_a_blank_capture_id_is_refused(capture_id: str) -> None:
+    with pytest.raises(ValueError, match="capture_id must be a non-blank string"):
+        VolSurfaceIdentity(surface_type=VolSurfaceType.ATM_SWAPTION, capture_id=capture_id)
 
 
 # -- point and surface invariants -------------------------------------------

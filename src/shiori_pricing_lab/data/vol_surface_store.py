@@ -15,14 +15,22 @@ runtime state: it lives outside the working tree's tracked files (see
 are ever written into it -- only the SHA-256 the capture kept.
 
 **Duplicate policy, stated once.** A surface's id is derived from its
-identity fields, and its fingerprint from everything it asserts:
+identity fields -- which include ``capture_id``, the snapshot dimension
+(Eddy's PR #184 decision #1) -- and its fingerprint from everything it
+asserts:
 
-* nothing stored under that id yet -> insert, :attr:`SaveStatus.SAVED`;
+* nothing stored under that id yet -> insert, :attr:`SaveStatus.SAVED`.
+  A second capture of the same screen later the same day, with every other
+  identity field unchanged, lands here: a *different* ``capture_id`` is a
+  *different* id, so it is a new surface, never a conflict with the first;
 * stored with the same fingerprint -> the same save retried,
-  :attr:`SaveStatus.ALREADY_SAVED`, nothing written;
+  :attr:`SaveStatus.ALREADY_SAVED`, nothing written. Reachable only when
+  ``capture_id`` also matches, since it is part of the id;
 * stored with a different fingerprint -> :class:`VolSurfaceConflictError`.
-  A conflicting observation of one logical surface is an operator decision,
-  never a silent overwrite of a surface someone already confirmed.
+  Only the *same* ``capture_id`` under different content reaches this --
+  two different snapshots never do. A conflicting observation of one
+  logical capture is an operator decision, never a silent overwrite of a
+  surface someone already confirmed.
 
 **All-or-nothing.** A surface and its points are written in one transaction
 and the surface row's primary key is claimed first, so a failure anywhere
@@ -60,19 +68,35 @@ from shiori_pricing_lab.data.vol_surface import (
     VolSurfaceType,
 )
 
-#: Bumped whenever the tables below change shape, in *either* direction: a
-#: database whose version is not exactly this one is refused rather than read
-#: with today's column meanings.
+#: Bumped whenever the tables below change shape, or whenever the derived
+#: ``surface_id``/``content_fingerprint`` formula changes in a way that makes
+#: a value computed by an earlier version incomparable to one this build
+#: computes: a database whose version is not exactly this one is refused
+#: rather than read with today's meaning.
 #:
 #: 2 -- ``vol_surface_point.volatility_sign`` and the singleton key on
 #: ``schema_version`` (Codex review, PR #184). Version 1 was written by an
 #: earlier commit on this branch and has neither column;
 #: ``CREATE TABLE IF NOT EXISTS`` would leave that database alone and the
 #: next save would fail on a missing column instead of failing closed here,
-#: so the version has to move with the shape. There is no migration -- the
-#: store is local runtime state rebuilt by re-confirming a capture, and this
-#: branch has never been merged.
-SCHEMA_VERSION = 2
+#: so the version has to move with the shape.
+#:
+#: 3 -- ``capture_id`` joined the identity fields that
+#: :meth:`~shiori_pricing_lab.data.vol_surface.VolSurfaceIdentity.surface_id`
+#: hashes, so a surface a snapshot's own screen already stored under the
+#: previous formula (Eddy's PR #184 decision #1) no longer decides
+#: "already saved" the same way. No table column changed, but every row's
+#: ``content_fingerprint`` was computed under the old formula and would
+#: mismatch a version-3 rebuild -- not because the data drifted, but because
+#: the formula did -- which would raise :class:`VolSurfaceIntegrityError`
+#: for perfectly good rows. Refusing the whole database with a clear
+#: schema-version message is the honest failure, not a false "your data was
+#: tampered with".
+#:
+#: There is no migration for any of the above -- the store is local runtime
+#: state rebuilt by re-confirming a capture, and this branch has never been
+#: merged.
+SCHEMA_VERSION = 3
 
 #: Where the workbench keeps its store by default: local runtime state under
 #: the repository's already-ignored ``data/`` directory (``.gitignore``
@@ -227,10 +251,16 @@ class VolSurfaceSummary:
     Deliberately not the surface itself: listing is a browse, and pulling
     every point of every surface to draw a list would be the wrong shape as
     soon as more than a handful of surfaces are stored.
+
+    ``capture_id`` is carried through so two surfaces that share every other
+    identity field -- two captures of the same screen on the same day -- are
+    legible as two different snapshots in the listing itself, not only
+    distinguishable by an opaque ``surface_id`` (Eddy's PR #184 decision #1).
     """
 
     surface_id: str
     surface_type: VolSurfaceType
+    capture_id: str
     business_date: str | None
     currency: str | None
     curve_config: str | None
@@ -246,6 +276,7 @@ class VolSurfaceSummary:
         return {
             "surface_id": self.surface_id,
             "surface_type": self.surface_type.value,
+            "capture_id": self.capture_id,
             "business_date": self.business_date,
             "currency": self.currency,
             "curve_config": self.curve_config,
@@ -589,9 +620,9 @@ class VolSurfaceStore:
         connection = self._connect()
         try:
             rows = connection.execute(
-                "SELECT s.surface_id, s.surface_type, s.business_date, s.currency, "
-                "s.curve_config, s.side, s.vol_type, s.source, s.confirmed_by, s.confirmed_at, "
-                "s.saved_at, (SELECT COUNT(*) FROM vol_surface_point p "
+                "SELECT s.surface_id, s.surface_type, s.capture_id, s.business_date, "
+                "s.currency, s.curve_config, s.side, s.vol_type, s.source, s.confirmed_by, "
+                "s.confirmed_at, s.saved_at, (SELECT COUNT(*) FROM vol_surface_point p "
                 "WHERE p.surface_id = s.surface_id) AS point_count "
                 f"FROM vol_surface s{where} ORDER BY s.saved_at DESC, s.surface_id",
                 tuple(parameters),
@@ -602,6 +633,7 @@ class VolSurfaceStore:
             VolSurfaceSummary(
                 surface_id=row["surface_id"],
                 surface_type=VolSurfaceType(row["surface_type"]),
+                capture_id=row["capture_id"],
                 business_date=row["business_date"],
                 currency=row["currency"],
                 curve_config=row["curve_config"],
@@ -627,6 +659,7 @@ def _surface_from_rows(row: sqlite3.Row, point_rows: Iterable[sqlite3.Row]) -> C
 
     identity = VolSurfaceIdentity(
         surface_type=VolSurfaceType(row["surface_type"]),
+        capture_id=row["capture_id"],
         business_date=row["business_date"],
         currency=row["currency"],
         curve_config=row["curve_config"],

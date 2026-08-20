@@ -537,10 +537,19 @@ def test_a_rejected_capture_can_never_be_confirmed_by_a_retry(server_url, stub_r
     assert server_module.VOL_SURFACE_STORE.list_surfaces() == ()
 
 
-def test_a_second_screenshot_of_one_surface_is_refused_not_silently_overwritten(
+def test_a_second_screenshot_of_the_same_screen_is_a_new_surface_not_a_conflict(
     server_url, stub_reader
 ) -> None:
-    """Same screen, different image: whose provenance is true is not the server's call."""
+    """Eddy's PR #184 decision #1.
+
+    A canonical stored surface represents one capture, not the only surface
+    a business date may hold. A trader re-capturing the same VCUB screen
+    later -- same currency, curve/config, side, vol type, source, business
+    date -- must never have the second confirmation refused as an illegal
+    replacement of the first. ``capture_id`` differs (it is derived from the
+    image hash and the instant it was read), so the two file as two distinct
+    surfaces.
+    """
 
     _status, first = _parse(server_url)
     _status, first_payload = _post_json(
@@ -556,13 +565,20 @@ def test_a_second_screenshot_of_one_surface_is_refused_not_silently_overwritten(
     )
 
     assert first_payload["storage"]["status"] == "SAVED"
-    assert second_payload["storage"]["status"] == "FAILED"
-    assert "already stored with different content" in second_payload["storage"]["error"]
-    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 1
-    stored = server_module.VOL_SURFACE_STORE.fetch_surface(
+    assert second_payload["storage"]["status"] == "SAVED"
+    assert first_payload["storage"]["surface_id"] != second_payload["storage"]["surface_id"]
+    assert len(server_module.VOL_SURFACE_STORE.list_surfaces()) == 2
+    first_stored = server_module.VOL_SURFACE_STORE.fetch_surface(
         first_payload["storage"]["surface_id"]
     )
-    assert stored.provenance.capture_id == first["capture_id"]
+    second_stored = server_module.VOL_SURFACE_STORE.fetch_surface(
+        second_payload["storage"]["surface_id"]
+    )
+    assert first_stored.provenance.capture_id == first["capture_id"]
+    assert second_stored.provenance.capture_id == second["capture_id"]
+    # Same logical identity in every other respect -- this is the point.
+    assert first_stored.identity.currency == second_stored.identity.currency
+    assert first_stored.identity.business_date == second_stored.identity.business_date
 
 
 def test_a_confirmed_capture_changes_nothing_about_the_bundled_case(
