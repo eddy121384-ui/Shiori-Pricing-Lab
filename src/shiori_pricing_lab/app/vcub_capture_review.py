@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import threading
 from collections import OrderedDict
 from datetime import UTC, datetime
@@ -103,15 +104,36 @@ def response_fingerprint(capture: VCUBATMCapture) -> str:
     return json.dumps(capture.to_dict(), sort_keys=True)
 
 
-def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
-    """A stable id for one image read at one instant.
+#: Mixed into every id this process mints, generated once at import time.
+#: Issue #183's canonical store hashes ``capture_id`` into a surface's
+#: identity (Eddy's PR #184 decision #1), and the store's own SQLite file is
+#: an ordinary local file two independently launched workbench processes can
+#: point at. Without a process salt, two such processes reading
+#: byte-identical image bytes within the same wall-clock second would derive
+#: the *same* deterministic id from content alone -- with no shared state to
+#: notice they are different processes -- and one process's confirmed
+#: surface could silently collide with, or be refused as a conflict of,
+#: the other's (Codex review round 5, PR #184). The salt is process-lifetime
+#: stable, so every intra-process guarantee ``capture_id_for`` and
+#: :meth:`VCUBCaptureReviewStore._find_identifier` provide -- same inputs
+#: reuse the same slot, the purity :func:`capture_id_for` itself is tested
+#: against -- is unaffected; only cross-process collision closes.
+_PROCESS_SALT = secrets.token_hex(16)
 
-    Derived from the image hash and the capture time rather than a random
-    token, so re-parsing the same file in the same second reuses the same
-    review slot instead of leaving an orphan behind.
+
+def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
+    """A stable id for one image read at one instant, unique to this process.
+
+    Derived from the image hash and the capture time rather than a purely
+    random token, so re-parsing the same file in the same second within
+    *this* process reuses the same review slot instead of leaving an orphan
+    behind. The per-process salt (:data:`_PROCESS_SALT`) makes it globally
+    unique too: two workbench processes reading identical bytes at the
+    identical second mint different ids, which is what keeps two operators'
+    confirmed surfaces from colliding through a shared database file.
     """
 
-    digest = hashlib.sha256(f"{source_image_sha256}|{captured_at}".encode())
+    digest = hashlib.sha256(f"{_PROCESS_SALT}|{source_image_sha256}|{captured_at}".encode())
     return digest.hexdigest()[:32]
 
 

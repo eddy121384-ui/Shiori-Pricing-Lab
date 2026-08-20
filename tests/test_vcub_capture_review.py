@@ -774,6 +774,52 @@ def test_the_capture_id_depends_on_both_the_image_and_the_instant() -> None:
     assert capture_id_for("a" * 64, _CAPTURED_AT) != capture_id_for("a" * 64, _REVIEWED_AT)
 
 
+def test_two_workbench_processes_never_derive_the_same_capture_id(monkeypatch) -> None:
+    """Codex review round 5, PR #184.
+
+    Issue #183's canonical store hashes ``capture_id`` into a surface's
+    identity, and the store's SQLite file is an ordinary local file two
+    independently launched workbench processes can share. Without a
+    per-process salt, two such processes reading byte-identical bytes at the
+    identical second would derive the *same* id from content alone -- with
+    no shared state between them to notice -- so one operator's confirmed
+    surface could collide with, or be refused as conflicting with, another's.
+
+    Simulated with two real, separate interpreters rather than reasoning
+    about the salt in the abstract, since the whole point is that there is
+    no process-to-process coordination.
+    """
+
+    import subprocess
+    import sys
+
+    probe = (
+        "from shiori_pricing_lab.app.vcub_capture_review import capture_id_for;"
+        f"print(capture_id_for('{'a' * 64}', '{_CAPTURED_AT}'))"
+    )
+    first = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    second = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert first.stdout.strip() != second.stdout.strip()
+
+
+def test_the_process_salt_never_breaks_reuse_within_one_process(stub_reader) -> None:
+    """The fix must close the cross-process gap without reopening PR #182's
+    intra-process guarantees: a re-read of the same file in the same second
+    still reuses its own review slot."""
+
+    store = VCUBCaptureReviewStore()
+
+    first_id, _capture, _notes = _parse(store)
+    second_id, _capture, _notes = _parse(store)
+
+    assert first_id == second_id
+
+
 def test_the_default_capture_timestamp_is_an_explicit_utc_instant() -> None:
     assert utc_now_iso().endswith("Z")
     assert len(utc_now_iso()) == len("2026-08-18T09:30:00Z")
