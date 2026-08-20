@@ -331,7 +331,7 @@ from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
 from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
     load_bloomberg_usd_sofr_par_rate_curve,
 )
-from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture, VCUBCaptureStatus
+from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
 from shiori_pricing_lab.data.vcub_vol_surface_adapter import (
     canonical_surface_from_confirmed_capture,
@@ -2484,8 +2484,12 @@ def review_vcub_atm_capture(capture_id: str, reviewed_by: str, *, confirm: bool)
     _require_non_blank_field(capture_id, "capture_id")
     _require_non_blank_field(reviewed_by, "reviewed_by")
     store = VCUB_CAPTURE_REVIEW_STORE
+    # ``confirm_idempotent`` rather than ``confirm``: a storage failure leaves
+    # a capture confirmed but not durable, and pressing Confirm again is the
+    # trader's only way to retry the write. The repeat is theirs alone, and
+    # the check happens inside the review store's lock -- see that method.
     reviewed = (
-        _confirm_or_retry(store, capture_id, reviewed_by)
+        store.confirm_idempotent(capture_id, reviewed_by=reviewed_by)
         if confirm
         else store.reject(capture_id, reviewed_by=reviewed_by)
     )
@@ -2497,31 +2501,6 @@ def review_vcub_atm_capture(capture_id: str, reviewed_by: str, *, confirm: bool)
     return {"capture_id": capture_id, "capture": reviewed.to_dict(), "storage": storage}
 
 
-def _confirm_or_retry(
-    store: VCUBCaptureReviewStore, capture_id: str, reviewed_by: str
-) -> VCUBATMCapture:
-    """Confirm a pending capture, or let its own confirmer retry the save.
-
-    A storage failure leaves a capture confirmed but not durable, and the
-    trader's only recourse is to press Confirm again. Refusing that -- the
-    review state machine is terminal, so a second ``confirm()`` raises --
-    left them with no way to retry the write and no way to establish
-    durability short of restarting and recapturing the screen (Codex review,
-    PR #184). So a repeat from **the trader who already confirmed it** is
-    read as retrying the save, not as deciding again.
-
-    Nothing about the decision moves: the stored capture is returned exactly
-    as it was recorded, with its original reviewer and timestamp, and only
-    :func:`_persist_confirmed_capture` runs again -- which the store's own
-    duplicate policy already makes idempotent. Anyone *else* posting Confirm
-    still falls through to ``store.confirm()`` and is refused, so a second
-    person can never be told their confirmation was accepted.
-    """
-
-    held = store.get(capture_id)
-    if held.review_status is VCUBCaptureStatus.CONFIRMED and held.reviewed_by == reviewed_by:
-        return held
-    return store.confirm(capture_id, reviewed_by=reviewed_by)
 
 
 def _persist_confirmed_capture(capture_id: str, capture: VCUBATMCapture) -> dict:

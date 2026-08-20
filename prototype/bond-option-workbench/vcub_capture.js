@@ -59,6 +59,11 @@
 
   const NBSP_DASH = "—";
 
+  // The Confirm button wears two labels. It is the same POST either way; what
+  // changes is what the server does with it, so the button says which.
+  const CONFIRM_LABEL = "Confirm";
+  const RETRY_SAVE_LABEL = "Retry save";
+
   // Deliberately explicit, never a generic string-humanizer: these are the
   // only metadata keys the server contract sends, and their labels are a
   // fixed, reviewed mapping.
@@ -120,6 +125,10 @@
   // The capture currently on screen, so the review actions can be restored to
   // match it after a request finishes -- including a failed one.
   let renderedCapture = null;
+  // And what the store did with it, because that decides whether Confirm is
+  // still live: a confirmed capture that did not reach the store needs its
+  // button back so the trader can retry the save.
+  let renderedStorageState = null;
 
   function setDisabled(el, disabled) {
     el.classList.toggle("is-disabled", Boolean(disabled));
@@ -415,6 +424,7 @@
     renderStorage(storageState, payload.storage);
 
     renderedCapture = capture;
+    renderedStorageState = storageState;
     applyReviewActionState();
 
     if (capture.review_status === "CONFIRMED") {
@@ -461,11 +471,27 @@
     if (renderedCapture === null) {
       setDisabled(els.confirmBtn, true);
       setDisabled(els.rejectBtn, true);
+      els.confirmBtn.textContent = CONFIRM_LABEL;
       return;
     }
     const decided = renderedCapture.review_status !== "PENDING_REVIEW";
-    setDisabled(els.confirmBtn, busy || !renderedCapture.can_confirm);
+    // A confirmed capture the store did not take is the one decided state
+    // where Confirm stays live. `can_confirm` is false by then -- the review
+    // decision is terminal and the server says so -- and reading it alone
+    // left the button inert with `pointer-events: none`, so the server-side
+    // retry was unreachable from this page and a failed write still stranded
+    // the trader (Codex review round 2, PR #184). The retry re-attempts the
+    // save under the same reviewer; it never re-decides anything.
+    const canRetrySave =
+      renderedCapture.review_status === "CONFIRMED" &&
+      renderedStorageState !== null &&
+      !renderedStorageState.saved;
+    setDisabled(els.confirmBtn, busy || (!renderedCapture.can_confirm && !canRetrySave));
     setDisabled(els.rejectBtn, busy || decided);
+    els.confirmBtn.textContent = canRetrySave ? RETRY_SAVE_LABEL : CONFIRM_LABEL;
+    // Left disabled on a retry on purpose: the server only repeats a
+    // confirmation for the trader who made it, and the field still holds
+    // their name, so freezing it is what keeps the retry addressed to them.
     els.reviewedBy.disabled = decided;
   }
 
@@ -484,6 +510,7 @@
     // screenshot's grid on screen beside another screenshot.
     captureId = null;
     renderedCapture = null;
+    renderedStorageState = null;
     els.reviewCard.hidden = true;
     els.compareCard.hidden = true;
     els.storage.hidden = true;
@@ -515,6 +542,7 @@
       renderCapture(payload, payload.reader_notes);
     } catch (err) {
       renderedCapture = null;
+      renderedStorageState = null;
       setBusy(false);
       els.reviewCard.hidden = true;
       els.compareCard.hidden = true;

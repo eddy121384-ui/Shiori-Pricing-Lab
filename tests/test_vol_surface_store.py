@@ -310,6 +310,70 @@ def test_an_edited_volatility_is_refused_too(store, database_path) -> None:
         store.fetch_points(surface.surface_id)
 
 
+def test_a_drifted_surface_is_never_reported_as_already_saved(store, database_path) -> None:
+    """Codex review round 2, PR #184.
+
+    The already-stored branch consulted only the surface row's own
+    fingerprint, which a deleted point row leaves untouched. So a retry
+    answered ``ALREADY_SAVED`` -- and the page said "Confirmed & saved" --
+    while fetching that very surface raised.
+    """
+
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "DELETE FROM vol_surface_point WHERE surface_id = ? AND point_index = 7",
+            (surface.surface_id,),
+        )
+
+    with pytest.raises(VolSurfaceIntegrityError):
+        store.save_confirmed_surface(surface)
+
+
+def test_a_drifted_surface_is_reported_as_drift_not_as_a_conflict(store, database_path) -> None:
+    """The stored rows are verified before either verdict is reached.
+
+    Otherwise a corrupt store blames the incoming capture, which may be
+    perfectly right.
+    """
+
+    stored = confirmed_surface()
+    store.save_confirmed_surface(stored)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE vol_surface_point SET volatility = 1.0 WHERE surface_id = ? "
+            "AND point_index = 0",
+            (stored.surface_id,),
+        )
+
+    with pytest.raises(VolSurfaceIntegrityError):
+        store.save_confirmed_surface(confirmed_surface(unresolved_cells=frozenset({(0, 0)})))
+
+
+def test_a_database_from_the_previous_schema_fails_closed(database_path) -> None:
+    """Codex review round 2, PR #184.
+
+    Schema 1 -- an earlier commit on this branch -- has no
+    ``volatility_sign`` column, and ``CREATE TABLE IF NOT EXISTS`` would
+    leave it that way. Without the version moving with the shape, the next
+    save failed on a missing column instead of failing closed here.
+    """
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_version (version) VALUES (1)")
+
+    with pytest.raises(VolSurfaceSchemaError, match="schema version 1"):
+        VolSurfaceStore(database_path).list_surfaces()
+
+
+def test_the_schema_version_moved_with_the_sign_column() -> None:
+    """Pinned literally: the two must never drift apart again."""
+
+    assert SCHEMA_VERSION == 2
+
+
 def test_an_untouched_surface_passes_the_integrity_check_every_time(store) -> None:
     """The gate must not fire on the ordinary path."""
 

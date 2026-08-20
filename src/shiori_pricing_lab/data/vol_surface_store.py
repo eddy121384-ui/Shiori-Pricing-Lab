@@ -60,9 +60,19 @@ from shiori_pricing_lab.data.vol_surface import (
     VolSurfaceType,
 )
 
-#: Bumped whenever the tables below change shape. A database written by a
-#: newer schema is refused rather than read with today's column meanings.
-SCHEMA_VERSION = 1
+#: Bumped whenever the tables below change shape, in *either* direction: a
+#: database whose version is not exactly this one is refused rather than read
+#: with today's column meanings.
+#:
+#: 2 -- ``vol_surface_point.volatility_sign`` and the singleton key on
+#: ``schema_version`` (Codex review, PR #184). Version 1 was written by an
+#: earlier commit on this branch and has neither column;
+#: ``CREATE TABLE IF NOT EXISTS`` would leave that database alone and the
+#: next save would fail on a missing column instead of failing closed here,
+#: so the version has to move with the shape. There is no migration -- the
+#: store is local runtime state rebuilt by re-confirming a capture, and this
+#: branch has never been merged.
+SCHEMA_VERSION = 2
 
 #: Where the workbench keeps its store by default: local runtime state under
 #: the repository's already-ignored ``data/`` directory (``.gitignore``
@@ -389,10 +399,16 @@ class VolSurfaceStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 existing = connection.execute(
-                    "SELECT content_fingerprint FROM vol_surface WHERE surface_id = ?",
+                    f"SELECT {', '.join(_SURFACE_COLUMNS)} FROM vol_surface "
+                    "WHERE surface_id = ?",
                     (surface_id,),
                 ).fetchone()
                 if existing is not None:
+                    # Verified before either verdict is reached, so a surface
+                    # whose rows have drifted is reported as drifted -- never
+                    # as "already saved, unchanged", and never as a conflict
+                    # with an incoming capture that may be perfectly right.
+                    self._verified_surface(connection, existing)
                     if existing["content_fingerprint"] == fingerprint:
                         connection.execute("ROLLBACK")
                         return SaveOutcome(
@@ -505,13 +521,28 @@ class VolSurfaceStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"no vol surface is stored with id {surface_id!r}")
-            point_rows = connection.execute(
-                "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility, "
-                "volatility_sign FROM vol_surface_point WHERE surface_id = ? ORDER BY point_index",
-                (surface_id,),
-            ).fetchall()
+            return self._verified_surface(connection, row)
         finally:
             connection.close()
+
+    def _verified_surface(
+        self, connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> CanonicalVolSurface:
+        """Rebuild the surface ``row`` heads, and refuse it if it has drifted.
+
+        Shared by :meth:`fetch_surface` and by the already-stored branch of
+        :meth:`save_confirmed_surface`, which must reach the same verdict:
+        answering ``ALREADY_SAVED`` from the surface row's fingerprint alone
+        told a trader their grid was stored unchanged while a fetch of that
+        same surface immediately raised (Codex review round 2, PR #184).
+        """
+
+        surface_id = row["surface_id"]
+        point_rows = connection.execute(
+            "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility, "
+            "volatility_sign FROM vol_surface_point WHERE surface_id = ? ORDER BY point_index",
+            (surface_id,),
+        ).fetchall()
         surface = _surface_from_rows(row, point_rows)
         stored_fingerprint = row["content_fingerprint"]
         if surface.content_fingerprint != stored_fingerprint:

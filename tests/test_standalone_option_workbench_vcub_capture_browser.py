@@ -560,6 +560,86 @@ def test_a_storage_failure_is_never_shown_as_a_saved_surface(
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_failed_save_leaves_the_trader_able_to_retry_it(page, server_url, tmp_path) -> None:
+    """Codex review round 2, PR #184.
+
+    The server gained a same-reviewer retry and this page could not reach
+    it: a confirmed capture has ``can_confirm: false``, so Confirm carried
+    ``is-disabled`` and the shared CSS gives that ``pointer-events: none``.
+    A failed write still stranded the trader.
+    """
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    failed = _confirmed_payload(
+        {
+            "status": "FAILED",
+            "surface_id": None,
+            "point_count": None,
+            "error": "the vol-surface store refused the write: disk I/O error",
+            "database": "/repo/data/vol_surfaces.sqlite3",
+        }
+    )
+    posted = _route_json(page, "/api/vcub/atm/confirm", failed)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert "is-disabled" not in page.get_attribute("#capture-confirm-btn", "class")
+    assert page.text_content("#capture-confirm-btn").strip() == "Retry save"
+
+    # And pressing it really does reach the bridge again, under the same name.
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: len(posted) == 2)
+    assert posted == [{"capture_id": "cap-1", "reviewed_by": "Eddy"}] * 2
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_saved_surface_leaves_confirm_spent(page, server_url, tmp_path) -> None:
+    """The retry is for a failed write only -- a stored surface needs no button."""
+
+    _route_json(page, "/api/vcub/atm/parse", _capture_payload())
+    _route_json(page, "/api/vcub/atm/confirm", _confirmed_payload(_SAVED_STORAGE))
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-review-card"))
+
+    page.fill("#capture-reviewed-by", "Eddy")
+    page.click("#capture-confirm-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-storage"))
+
+    assert "is-disabled" in page.get_attribute("#capture-confirm-btn", "class")
+    assert page.text_content("#capture-confirm-btn").strip() == "Confirm"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_retry_offer_never_appears_on_a_blocked_capture(page, server_url, tmp_path) -> None:
+    """The one decided state that reopens Confirm must not reopen any other."""
+
+    blocked = _capture_payload(
+        blocking_errors=[
+            {
+                "code": "CELL_POSITION_AMBIGUOUS",
+                "message": "'85.15' sits on a column boundary",
+                "expiry": "3Mo",
+                "tenor": "4Yr",
+            }
+        ],
+        can_confirm=False,
+    )
+    _route_json(page, "/api/vcub/atm/parse", blocked)
+    _open_capture_view(page, server_url)
+    _choose_and_parse(page, tmp_path)
+    _wait_until(lambda: not _is_actually_hidden(page, "capture-blockers"))
+
+    assert "is-disabled" in page.get_attribute("#capture-confirm-btn", "class")
+    assert page.text_content("#capture-confirm-btn").strip() == "Confirm"
+
+
+@_PLAYWRIGHT_SKIP
 def test_a_confirmation_with_no_storage_answer_is_treated_as_not_saved(
     page, server_url, tmp_path
 ) -> None:

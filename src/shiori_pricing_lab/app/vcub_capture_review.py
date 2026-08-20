@@ -273,6 +273,48 @@ class VCUBCaptureReviewStore:
             self._store_locked(capture_id, confirmed)
         return confirmed
 
+    def confirm_idempotent(
+        self, capture_id: str, *, reviewed_by: str, reviewed_at: str | None = None
+    ) -> VCUBATMCapture:
+        """Accept a capture, or hand back the confirmation this trader already made.
+
+        The same decision as :meth:`confirm`, made once, but safe to repeat.
+        Issue #183 gave a confirmation a second job -- writing the surface to
+        the canonical store -- and that write can fail, so the trader needs
+        to be able to press Confirm again to retry it. :meth:`confirm` alone
+        cannot serve that: the state machine is terminal, so the second press
+        raises and the trader is stranded with a capture that is confirmed
+        and not durable (Codex review, PR #184).
+
+        The check and the transition happen **together under the lock**, not
+        as a read followed by a write. Two same-trader requests overlapping on
+        a pending capture -- a double click, a browser retrying a timed-out
+        POST -- otherwise both saw ``PENDING_REVIEW``, and the loser then hit
+        the terminal state and was refused, for a confirmation that had in
+        fact been accepted (Codex review round 2, PR #184). That is the same
+        read-modify-write hazard the lock was introduced for in round 3 of
+        PR #182.
+
+        Only the capture's *own* confirmer gets the repeat. Anyone else falls
+        through to the ordinary transition and is refused there, so a second
+        person can never be told their confirmation was accepted -- one
+        decision, by one named trader, exactly as Issue #181 decided.
+        """
+
+        with self._lock:
+            held = self._get_locked(capture_id)
+            if (
+                held.review_status is VCUBCaptureStatus.CONFIRMED
+                and held.reviewed_by == reviewed_by
+            ):
+                return held
+            confirmed = held.confirm(
+                reviewed_by=reviewed_by,
+                reviewed_at=utc_now_iso() if reviewed_at is None else reviewed_at,
+            )
+            self._store_locked(capture_id, confirmed)
+        return confirmed
+
     def reject(
         self, capture_id: str, *, reviewed_by: str, reviewed_at: str | None = None
     ) -> VCUBATMCapture:

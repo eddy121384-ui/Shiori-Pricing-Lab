@@ -133,6 +133,83 @@ def test_rejecting_leaves_the_captured_values_unaccepted(stub_reader) -> None:
     assert store.get(capture_id).accepted_grid is None
 
 
+def test_a_traders_own_confirmation_can_be_repeated_without_raising(stub_reader) -> None:
+    """Issue #183 gave a confirmation a second job: writing the surface.
+
+    That write can fail, so the trader has to be able to press Confirm again
+    to retry it -- which ``confirm`` alone refuses, the state machine being
+    terminal (Codex review, PR #184).
+    """
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+
+    first = store.confirm_idempotent(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+    again = store.confirm_idempotent(capture_id, reviewed_by="Eddy")
+
+    assert first.review_status is VCUBCaptureStatus.CONFIRMED
+    assert again is first
+    assert again.reviewed_at == _REVIEWED_AT
+
+
+def test_a_repeat_is_only_ever_the_capture_s_own_confirmer(stub_reader) -> None:
+    """One decision, by one named trader -- the Issue #181 invariant stands."""
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+    store.confirm_idempotent(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    with pytest.raises(ValueError, match="only a PENDING_REVIEW capture"):
+        store.confirm_idempotent(capture_id, reviewed_by="Someone Else")
+
+    assert store.get(capture_id).reviewed_by == "Eddy"
+
+
+def test_a_rejected_capture_is_never_confirmed_by_a_repeat(stub_reader) -> None:
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+    store.reject(capture_id, reviewed_by="Eddy", reviewed_at=_REVIEWED_AT)
+
+    with pytest.raises(ValueError, match="only a PENDING_REVIEW capture"):
+        store.confirm_idempotent(capture_id, reviewed_by="Eddy")
+
+    assert store.get(capture_id).review_status is VCUBCaptureStatus.REJECTED
+
+
+def test_overlapping_repeats_by_one_trader_all_get_the_same_confirmation(stub_reader) -> None:
+    """Codex review round 2, PR #184.
+
+    The check and the transition have to happen together under the lock. As
+    a read followed by a write, two same-trader requests on a pending
+    capture -- a double click, a browser retrying a timed-out POST -- both
+    saw ``PENDING_REVIEW``, and the loser was then refused for a
+    confirmation that had in fact been accepted.
+    """
+
+    store = VCUBCaptureReviewStore()
+    capture_id, _capture, _notes = _parse(store)
+    barrier = threading.Barrier(8)
+    results: list[object] = []
+
+    def press() -> None:
+        try:
+            barrier.wait(timeout=10)
+            results.append(store.confirm_idempotent(capture_id, reviewed_by="Eddy"))
+        except BaseException as exc:  # noqa: BLE001
+            results.append(exc)
+
+    threads = [threading.Thread(target=press) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert len(results) == 8
+    assert not any(isinstance(result, BaseException) for result in results)
+    # Every presser sees one decision, recorded once, at one instant.
+    assert {result.reviewed_at for result in results} == {store.get(capture_id).reviewed_at}
+
+
 def test_a_blocked_capture_cannot_be_confirmed_through_the_store(monkeypatch) -> None:
     tokens = [token for token in canonical_tokens() if token.text != "Expiry"]
     monkeypatch.setattr(
