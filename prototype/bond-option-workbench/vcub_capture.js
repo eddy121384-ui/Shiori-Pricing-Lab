@@ -47,6 +47,9 @@
     confirmBtn: document.getElementById("capture-confirm-btn"),
     rejectBtn: document.getElementById("capture-reject-btn"),
     reviewStatus: document.getElementById("capture-review-status"),
+    storage: document.getElementById("capture-storage"),
+    storageTitle: document.getElementById("capture-storage-title"),
+    storageDetail: document.getElementById("capture-storage-detail"),
     compareCard: document.getElementById("capture-compare-card"),
     shotImage: document.getElementById("capture-shot-image"),
     gridHead: document.getElementById("capture-grid-head"),
@@ -73,6 +76,41 @@
     PENDING_REVIEW: { text: "Pending review", className: "is-ready" },
     CONFIRMED: { text: "Confirmed", className: "is-confirmed" },
     REJECTED: { text: "Rejected", className: "is-rejected" },
+  };
+
+  // Issue #183 -- what the canonical store did with this confirmed surface.
+  // A fixed, reviewed mapping like METADATA_LABELS above, and the only place
+  // that decides how durability is worded. `saved` drives the status pill:
+  // only a surface that actually reached the store may read "Confirmed &
+  // saved", so a durability failure can never be shown as one.
+  const STORAGE_STATES = {
+    SAVED: {
+      saved: true,
+      className: "is-saved",
+      title: "Confirmed & saved to the local vol-surface store",
+    },
+    ALREADY_SAVED: {
+      saved: true,
+      className: "is-known",
+      title: "Confirmed & saved — this surface was already stored, unchanged",
+    },
+    FAILED: {
+      saved: false,
+      className: "is-failed",
+      title: "Confirmed, but NOT saved — this surface exists only in this session",
+    },
+  };
+
+  // What a confirmed capture reports when the server said nothing about
+  // storage at all -- an older workbench process serving this page. Treated
+  // as "not saved" rather than assumed successful: the whole point of the
+  // block is that the trader can tell session memory from durable data.
+  const STORAGE_UNREPORTED = {
+    saved: false,
+    className: "is-failed",
+    title: "Confirmed, but this workbench did not report a save",
+    detail:
+      "This page expects a storage result from every confirmation and did not get one, so treat this surface as session-only. Restart the workbench from start_shiori.bat so the page and the server are the same revision.",
   };
 
   let selectedFile = null;
@@ -157,6 +195,16 @@
     }
     if (typeof capture.can_confirm !== "boolean") {
       throw new Error('malformed response: "capture.can_confirm" must be a boolean');
+    }
+    // Optional -- /parse does not persist anything and sends none -- but a
+    // malformed one is refused rather than rendered as an unknown state.
+    if (payload.storage !== undefined && payload.storage !== null) {
+      if (typeof payload.storage !== "object" || Array.isArray(payload.storage)) {
+        throw new Error('malformed response: "storage" must be a JSON object');
+      }
+      if (typeof payload.storage.status !== "string" || !payload.storage.status) {
+        throw new Error('malformed response: "storage.status" must be a non-empty string');
+      }
     }
     const grid = capture.grid;
     if (grid !== null) {
@@ -293,14 +341,65 @@
     });
   }
 
+  // Which storage state this response describes, or null when durability is
+  // not part of the answer at all -- a parse, or a rejection, neither of
+  // which offers anything to the canonical store.
+  function storageStateFor(capture, storage) {
+    if (capture.review_status !== "CONFIRMED") return null;
+    if (!storage) return STORAGE_UNREPORTED;
+    if (storage.status === "NOT_ATTEMPTED") return null;
+    return STORAGE_STATES[storage.status] || {
+      saved: false,
+      className: "is-failed",
+      title: `Confirmed, but the workbench reported an unknown storage status (${storage.status})`,
+    };
+  }
+
+  // Every line here is copied from the server's answer; this page derives no
+  // surface id, counts no point, and never words a save the server did not
+  // report.
+  function renderStorage(state, storage) {
+    if (state === null) {
+      els.storage.hidden = true;
+      return;
+    }
+    els.storage.className = "capture-storage " + state.className;
+    els.storageTitle.textContent = state.title;
+    const lines = [];
+    if (state.detail) lines.push(state.detail);
+    if (storage) {
+      if (storage.surface_id) lines.push(`surface_id: ${storage.surface_id}`);
+      if (typeof storage.point_count === "number") lines.push(`points: ${storage.point_count}`);
+      if (storage.database) lines.push(`database: ${storage.database}`);
+      if (storage.error) lines.push(`reason: ${storage.error}`);
+    }
+    els.storageDetail.textContent = "";
+    lines.forEach((line) => {
+      const div = document.createElement("div");
+      div.textContent = line;
+      els.storageDetail.appendChild(div);
+    });
+    els.storage.hidden = false;
+  }
+
   function renderCapture(payload, readerNotes) {
     const capture = payload.capture;
     captureId = payload.capture_id;
 
+    const storageState = storageStateFor(capture, payload.storage);
     const pill = STATUS_PILLS[capture.review_status] || { text: capture.review_status, className: "" };
     const blocked = capture.blocking_errors.length > 0;
-    els.statusPill.className = "capture-status-pill " + (blocked && capture.review_status === "PENDING_REVIEW" ? "is-blocked" : pill.className);
-    els.statusPill.textContent = blocked && capture.review_status === "PENDING_REVIEW" ? "Blocked" : pill.text;
+    let pillText = pill.text;
+    let pillClass = pill.className;
+    if (blocked && capture.review_status === "PENDING_REVIEW") {
+      pillText = "Blocked";
+      pillClass = "is-blocked";
+    } else if (storageState !== null) {
+      pillText = storageState.saved ? "Confirmed & saved" : "Confirmed — not saved";
+      pillClass = storageState.saved ? "is-confirmed" : "is-blocked";
+    }
+    els.statusPill.className = "capture-status-pill " + pillClass;
+    els.statusPill.textContent = pillText;
 
     els.blockers.hidden = !blocked;
     els.blockersTitle.textContent = `${capture.blocking_errors.length} blocking — confirmation is not available`;
@@ -313,12 +412,19 @@
     renderMetadata(capture.metadata);
     renderGrid(capture.grid);
     renderProvenance(capture.provenance, readerNotes);
+    renderStorage(storageState, payload.storage);
 
     renderedCapture = capture;
     applyReviewActionState();
 
     if (capture.review_status === "CONFIRMED") {
-      els.reviewStatus.textContent = `Confirmed by ${capture.reviewed_by} at ${capture.reviewed_at}. These values are recorded as a reviewed capture only — nothing is priced from them.`;
+      // Fails closed: only a state that actually reports a save may claim
+      // durability. Anything else -- including a confirmation that somehow
+      // arrives with no storage state at all -- reads as session-only.
+      const durability = storageState !== null && storageState.saved
+        ? "It survives a workbench restart."
+        : "It exists only in this session's memory and will be lost on restart.";
+      els.reviewStatus.textContent = `Confirmed by ${capture.reviewed_by} at ${capture.reviewed_at}. ${durability} These values are stored as reviewed market data only — nothing is priced from them.`;
     } else if (capture.review_status === "REJECTED") {
       els.reviewStatus.textContent = `Rejected by ${capture.reviewed_by} at ${capture.reviewed_at}. No captured value was accepted.`;
     } else if (blocked) {
@@ -380,6 +486,7 @@
     renderedCapture = null;
     els.reviewCard.hidden = true;
     els.compareCard.hidden = true;
+    els.storage.hidden = true;
     if (selectedFile) {
       selectedObjectUrl = URL.createObjectURL(selectedFile);
       els.shotImage.src = selectedObjectUrl;

@@ -84,3 +84,22 @@
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   word-break: break-all;
 }
+
+/* Issue #183 -- whether this confirmed surface actually reached the canonical
+   local store. Three states, deliberately not sharing a colour: saved (green),
+   already stored (neutral), and not saved (the same red the blockers use), so
+   "confirmed but not durable" can never be mistaken at a glance for "saved". */
+.capture-storage { border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); }
+.capture-storage[hidden] { display: none; }
+.capture-storage.is-saved { background: #eefaf4; border-color: #b6e3cd; }
+.capture-storage.is-saved .capture-storage-title { color: #17794f; }
+.capture-storage.is-known { background: #f5f6f8; border-color: var(--border-strong); }
+.capture-storage.is-known .capture-storage-title { color: #55607a; }
+.capture-storage.is-failed { background: #fff6f6; border-color: #f3c6c6; }
+.capture-storage.is-failed .capture-storage-title { color: #b0362f; }
+.capture-storage-title { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.capture-storage-detail {
+  font-size: 12px; color: var(--muted-2); line-height: 1.7;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  word-break: break-all;
+}

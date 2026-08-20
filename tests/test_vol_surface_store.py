@@ -1,0 +1,449 @@
+"""The local SQLite store for confirmed vol surfaces (Issue #183).
+
+Every test here writes to a ``tmp_path`` database and throws it away. No
+test touches the workbench's real store, and no live Bloomberg value appears
+in any fixture -- the surfaces come from ``test_vol_surface``'s synthetic
+21x15 grid.
+
+The point of this file is durability with no silent loss: a confirmed
+surface survives a restart intact, an exact retry is not a duplicate, a
+conflicting observation is refused rather than overwritten, and a failed
+write leaves nothing behind.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+from test_vol_surface import (
+    CAPTURE_ID,
+    EXPIRY_LABELS,
+    POINT_COUNT,
+    TENOR_LABELS,
+    confirmed_surface,
+    synthetic_value,
+)
+
+import shiori_pricing_lab.data.vol_surface_store as store_module
+from shiori_pricing_lab.data.vol_surface import VolSurfaceType
+from shiori_pricing_lab.data.vol_surface_store import (
+    DEFAULT_DATABASE_PATH,
+    SCHEMA_VERSION,
+    SaveStatus,
+    VolSurfaceConflictError,
+    VolSurfaceSchemaError,
+    VolSurfaceStore,
+    VolSurfaceStoreError,
+    default_database_path,
+)
+
+
+@pytest.fixture()
+def database_path(tmp_path):
+    return tmp_path / "vol_surfaces.sqlite3"
+
+
+@pytest.fixture()
+def store(database_path) -> VolSurfaceStore:
+    return VolSurfaceStore(database_path)
+
+
+class _RefusesToWritePoints(sqlite3.Connection):
+    """A real connection whose bulk insert fails, and nothing else.
+
+    The points are the only bulk insert the store performs, so this fails
+    the write exactly where a partial surface would appear: after the
+    surface row has claimed its primary key inside the same transaction.
+    """
+
+    def executemany(self, *args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+def break_point_writes(monkeypatch) -> None:
+    """Make every write from now on fail partway through its transaction.
+
+    Called rather than taken as a fixture so a test can decide *when* the
+    breakage starts -- one below needs a healthy save first. ``monkeypatch``
+    undoes it, and a test that must read the store back afterwards calls
+    ``monkeypatch.undo()`` itself.
+    """
+
+    real_connect = sqlite3.connect
+
+    def failing_connect(*args, **kwargs):
+        kwargs.pop("factory", None)
+        return real_connect(*args, factory=_RefusesToWritePoints, **kwargs)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", failing_connect)
+
+
+# -- saving -----------------------------------------------------------------
+
+
+def test_a_confirmed_surface_is_saved_with_every_one_of_its_315_points(store) -> None:
+    surface = confirmed_surface()
+
+    outcome = store.save_confirmed_surface(surface)
+
+    assert outcome.status is SaveStatus.SAVED
+    assert outcome.surface_id == surface.surface_id
+    assert outcome.point_count == POINT_COUNT == 315
+
+
+def test_constructing_the_store_touches_no_disk(database_path) -> None:
+    """Importing the workbench must not create a database nobody asked for."""
+
+    VolSurfaceStore(database_path)
+
+    assert not database_path.exists()
+
+
+def test_a_saved_surface_reloads_intact_from_a_brand_new_store(database_path) -> None:
+    """A restart is exactly this: a different object over the same file."""
+
+    surface = confirmed_surface(unresolved_cells=frozenset({(4, 5)}))
+    VolSurfaceStore(database_path).save_confirmed_surface(surface)
+
+    reloaded = VolSurfaceStore(database_path).fetch_surface(surface.surface_id)
+
+    assert reloaded == surface
+    assert reloaded.content_fingerprint == surface.content_fingerprint
+
+
+def test_every_point_reloads_at_exactly_the_coordinate_it_was_saved_at(store) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+
+    points = store.fetch_points(surface.surface_id)
+
+    assert len(points) == POINT_COUNT
+    by_coordinate = {(point.expiry, point.underlying_tenor): point.volatility for point in points}
+    for row_index, expiry in enumerate(EXPIRY_LABELS):
+        for column_index, tenor in enumerate(TENOR_LABELS):
+            assert by_coordinate[(expiry, tenor)] == synthetic_value(row_index, column_index)
+
+
+def test_the_stored_axis_order_is_the_order_the_trader_reviewed(store) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+
+    assert store.fetch_points(surface.surface_id) == surface.points
+
+
+def test_an_unresolved_cell_reloads_as_unresolved_never_as_zero(store) -> None:
+    surface = confirmed_surface(unresolved_cells=frozenset({(2, 3)}))
+    store.save_confirmed_surface(surface)
+
+    points = store.fetch_points(surface.surface_id)
+
+    unresolved = [point for point in points if point.volatility is None]
+    assert [(point.expiry, point.underlying_tenor) for point in unresolved] == [
+        (EXPIRY_LABELS[2], TENOR_LABELS[3])
+    ]
+
+
+def test_unresolved_metadata_reloads_exactly_as_it_was_reviewed(store) -> None:
+    surface = confirmed_surface(metadata_overrides={"source": None, "side": None})
+    store.save_confirmed_surface(surface)
+
+    identity = store.fetch_surface(surface.surface_id).identity
+
+    assert identity.source is None
+    assert identity.side is None
+    assert sorted(identity.unresolved_fields) == ["side", "source"]
+    assert identity.currency == "USD"
+
+
+def test_the_provenance_and_confirmation_survive_the_round_trip(store) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+
+    provenance = store.fetch_surface(surface.surface_id).provenance
+
+    assert provenance == surface.provenance
+    assert provenance.capture_id == CAPTURE_ID
+    assert provenance.source_image_sha256 == "a" * 64
+    assert provenance.confirmed_by == "Eddy"
+
+
+def test_the_screenshot_bytes_are_never_written_into_the_database(store, database_path) -> None:
+    """Only the hash. The image stays operator-local evidence."""
+
+    store.save_confirmed_surface(confirmed_surface())
+
+    assert b"\x89PNG" not in database_path.read_bytes()
+
+
+# -- duplicate policy -------------------------------------------------------
+
+
+def test_saving_the_exact_same_surface_twice_is_an_idempotent_success(store) -> None:
+    surface = confirmed_surface()
+
+    first = store.save_confirmed_surface(surface)
+    second = store.save_confirmed_surface(surface)
+
+    assert first.status is SaveStatus.SAVED
+    assert second.status is SaveStatus.ALREADY_SAVED
+    assert second.surface_id == first.surface_id
+
+
+def test_an_exact_retry_leaves_exactly_one_surface_and_one_set_of_points(
+    store, database_path
+) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    store.save_confirmed_surface(surface)
+
+    assert len(store.list_surfaces()) == 1
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM vol_surface_point").fetchone()[0] == (
+            POINT_COUNT
+        )
+
+
+def test_an_exact_retry_after_a_restart_is_still_recognised(database_path) -> None:
+    """The fingerprint is derived from the data, so it survives the process."""
+
+    surface = confirmed_surface()
+    VolSurfaceStore(database_path).save_confirmed_surface(surface)
+
+    outcome = VolSurfaceStore(database_path).save_confirmed_surface(surface)
+
+    assert outcome.status is SaveStatus.ALREADY_SAVED
+
+
+def test_the_same_identity_with_different_values_is_refused_not_overwritten(store) -> None:
+    stored = confirmed_surface()
+    store.save_confirmed_surface(stored)
+    conflicting = confirmed_surface(unresolved_cells=frozenset({(0, 0)}))
+    assert conflicting.surface_id == stored.surface_id
+
+    with pytest.raises(VolSurfaceConflictError, match="already stored with different content"):
+        store.save_confirmed_surface(conflicting)
+
+    assert store.fetch_surface(stored.surface_id) == stored
+
+
+def test_the_same_identity_from_a_different_screenshot_is_also_a_conflict(store) -> None:
+    """Same numbers, different evidence: which provenance is true is not ours to pick."""
+
+    stored = confirmed_surface()
+    store.save_confirmed_surface(stored)
+
+    with pytest.raises(VolSurfaceConflictError):
+        store.save_confirmed_surface(
+            confirmed_surface(provenance_overrides={"source_image_sha256": "b" * 64})
+        )
+
+    assert store.fetch_surface(stored.surface_id).provenance == stored.provenance
+
+
+def test_a_rejected_conflict_leaves_the_stored_points_untouched(store, database_path) -> None:
+    stored = confirmed_surface()
+    store.save_confirmed_surface(stored)
+
+    with pytest.raises(VolSurfaceConflictError):
+        store.save_confirmed_surface(confirmed_surface(unresolved_cells=frozenset({(0, 0)})))
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM vol_surface_point").fetchone()[0] == (
+            POINT_COUNT
+        )
+    assert store.fetch_points(stored.surface_id) == stored.points
+
+
+def test_a_different_identity_is_a_separate_surface_not_a_conflict(store) -> None:
+    first = confirmed_surface()
+    second = confirmed_surface(metadata_overrides={"quote_date": "08/19/26"})
+
+    store.save_confirmed_surface(first)
+    store.save_confirmed_surface(second)
+
+    assert {summary.surface_id for summary in store.list_surfaces()} == {
+        first.surface_id,
+        second.surface_id,
+    }
+
+
+# -- failure behaviour ------------------------------------------------------
+
+
+def test_a_failed_points_write_leaves_no_partial_surface(store, monkeypatch) -> None:
+    """The surface row is claimed first, so a mid-write failure must undo it too."""
+
+    break_point_writes(monkeypatch)
+    surface = confirmed_surface()
+
+    with pytest.raises(VolSurfaceStoreError, match="refused the write"):
+        store.save_confirmed_surface(surface)
+
+    monkeypatch.undo()
+    assert store.list_surfaces() == ()
+    with pytest.raises(KeyError):
+        store.fetch_surface(surface.surface_id)
+
+
+def test_a_failed_write_leaves_both_tables_empty(store, database_path, monkeypatch) -> None:
+    break_point_writes(monkeypatch)
+
+    with pytest.raises(VolSurfaceStoreError):
+        store.save_confirmed_surface(confirmed_surface())
+
+    monkeypatch.undo()
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM vol_surface").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM vol_surface_point").fetchone()[0] == 0
+
+
+def test_a_failed_write_never_disturbs_a_surface_already_stored(store, monkeypatch) -> None:
+    stored = confirmed_surface()
+    store.save_confirmed_surface(stored)
+
+    break_point_writes(monkeypatch)
+    with pytest.raises(VolSurfaceStoreError):
+        store.save_confirmed_surface(confirmed_surface(metadata_overrides={"currency": "EUR"}))
+
+    monkeypatch.undo()
+    assert [summary.surface_id for summary in store.list_surfaces()] == [stored.surface_id]
+    assert store.fetch_surface(stored.surface_id) == stored
+
+
+def test_fetching_a_surface_the_store_does_not_hold_is_an_error(store) -> None:
+    with pytest.raises(KeyError, match="no vol surface is stored"):
+        store.fetch_surface("0" * 32)
+
+
+def test_a_database_from_a_future_schema_is_refused_rather_than_read(database_path) -> None:
+    VolSurfaceStore(database_path).save_confirmed_surface(confirmed_surface())
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION + 1,))
+
+    with pytest.raises(VolSurfaceSchemaError, match="Refusing to read it"):
+        VolSurfaceStore(database_path).list_surfaces()
+
+
+def test_only_a_canonical_surface_can_be_saved(store) -> None:
+    with pytest.raises(VolSurfaceStoreError, match="only a CanonicalVolSurface"):
+        store.save_confirmed_surface({"points": []})
+
+
+# -- listing ----------------------------------------------------------------
+
+
+def test_an_empty_store_lists_nothing_rather_than_failing(store) -> None:
+    assert store.list_surfaces() == ()
+
+
+def test_the_listing_summarises_a_surface_without_pulling_its_points(store) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+
+    (summary,) = store.list_surfaces()
+
+    assert summary.surface_id == surface.surface_id
+    assert summary.surface_type is VolSurfaceType.ATM_SWAPTION
+    assert summary.point_count == POINT_COUNT
+    assert summary.currency == "USD"
+    assert summary.business_date == "08/18/26"
+    assert summary.confirmed_by == "Eddy"
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        ({"currency": "USD"}, True),
+        ({"currency": "EUR"}, False),
+        ({"business_date": "08/18/26"}, True),
+        ({"business_date": "08/19/26"}, False),
+        ({"surface_type": VolSurfaceType.ATM_SWAPTION}, True),
+    ],
+)
+def test_the_listing_filters_on_resolved_identity_fields(store, filters, expected) -> None:
+    store.save_confirmed_surface(confirmed_surface())
+
+    assert bool(store.list_surfaces(**filters)) is expected
+
+
+def test_a_surface_with_an_unresolved_field_is_never_matched_by_a_value(store) -> None:
+    """An unknown currency must not be assumed into a currency="USD" answer."""
+
+    store.save_confirmed_surface(confirmed_surface(metadata_overrides={"currency": None}))
+
+    assert store.list_surfaces(currency="USD") == ()
+    assert len(store.list_surfaces()) == 1
+
+
+# -- location ---------------------------------------------------------------
+
+
+def test_the_default_database_is_local_runtime_state_outside_version_control() -> None:
+    """``.gitignore`` ignores ``/data/`` and ``*.sqlite3``; both must keep matching."""
+
+    assert DEFAULT_DATABASE_PATH.parent.name == "data"
+    assert DEFAULT_DATABASE_PATH.suffix == ".sqlite3"
+
+
+def test_the_database_path_can_be_pointed_elsewhere_for_one_session(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("SHIORI_VOL_SURFACE_DB", str(tmp_path / "scratch.sqlite3"))
+
+    assert default_database_path() == tmp_path / "scratch.sqlite3"
+    assert VolSurfaceStore().database_path == tmp_path / "scratch.sqlite3"
+
+
+def test_a_blank_override_falls_back_to_the_default(monkeypatch) -> None:
+    monkeypatch.setenv("SHIORI_VOL_SURFACE_DB", "   ")
+
+    assert default_database_path() == DEFAULT_DATABASE_PATH
+
+
+# -- boundaries -------------------------------------------------------------
+
+
+def test_the_canonical_store_never_reaches_the_pricing_package() -> None:
+    """Persistence is not pricing, and pricing must never read SQLite.
+
+    Checked by importing the whole storage slice in a fresh interpreter and
+    looking at what came with it, the same way the capture slice is checked
+    in ``test_vcub_capture_review``.
+    """
+
+    import json
+    import subprocess
+    import sys
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, json;"
+            "import shiori_pricing_lab.data.vol_surface;"
+            "import shiori_pricing_lab.data.vol_surface_store;"
+            "import shiori_pricing_lab.data.vcub_vol_surface_adapter;"
+            "print(json.dumps([name for name in sys.modules "
+            "if name.startswith('shiori_pricing_lab.pricing')]))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(probe.stdout) == []
+
+
+def test_the_pricing_package_never_imports_sqlite_or_the_store() -> None:
+    """The typed repository boundary, asserted against the source itself."""
+
+    from pathlib import Path
+
+    pricing_dir = Path(__file__).resolve().parents[1] / "src" / "shiori_pricing_lab" / "pricing"
+    offenders = [
+        path.name
+        for path in sorted(pricing_dir.glob("*.py"))
+        if "import sqlite3" in path.read_text(encoding="utf-8")
+        or "vol_surface_store" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []

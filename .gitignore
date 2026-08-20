@@ -24,6 +24,9 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Local data and secrets
+# /data/ also holds the canonical vol-surface SQLite store (Issue #183,
+# data/vol_surfaces.sqlite3). It is runtime state built from operator
+# screenshots and must never be committed.
 /data/
 /cache/
 *.db
