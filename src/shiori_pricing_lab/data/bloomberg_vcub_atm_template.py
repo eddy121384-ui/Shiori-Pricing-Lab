@@ -866,6 +866,36 @@ def _resolve_tenor_headers(
     return headers
 
 
+def _lines_below(
+    lines: Sequence[_TextLine], anchor_line: _TextLine
+) -> list[_TextLine]:
+    """The text lines the grouper placed below ``anchor_line``.
+
+    Which line a token belongs to is settled once, by
+    :func:`_group_into_lines`, and those lines come back ordered top to
+    bottom. Asking that question again here -- by testing whether a line's
+    box clears the anchor line's box -- asks a *different* and stricter one,
+    and on a real VCUB grid it is false: the second live capture drew its
+    header band's box touching the first data row's, so ``1Mo`` was dropped
+    from the expiry column and its entire row of values came back as
+    ``NUMERIC_TOKEN_OUTSIDE_ROWS``. Boxes merely meeting, at zero overlap,
+    was enough.
+
+    Note what this does *not* relax. A label the reader genuinely missed
+    still leaves an orphaned row of numbers, and that still fails the
+    capture closed -- this only stops discarding a label that was read.
+    """
+
+    seen_anchor = False
+    below: list[_TextLine] = []
+    for line in lines:
+        if line is anchor_line:
+            seen_anchor = True
+        elif seen_anchor:
+            below.append(line)
+    return below
+
+
 def _resolve_expiry_labels(
     lines: Sequence[_TextLine],
     anchor_line: _TextLine,
@@ -884,8 +914,7 @@ def _resolve_expiry_labels(
     left_bound = anchor.left - anchor.width
     candidates = [
         token
-        for line in lines
-        if line.top > anchor_line.bottom
+        for line in _lines_below(lines, anchor_line)
         for token in line.tokens
         if left_bound <= token.x_center < first_column_left_edge
     ]

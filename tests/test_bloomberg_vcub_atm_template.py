@@ -732,16 +732,33 @@ _DENSE_ROW_PITCH = 11.0
 _DENSE_GLYPH_HEIGHT = 13.0  # taller than the pitch: adjacent boxes overlap
 
 
-def _dense_grid_tokens(glyph_height: float = _DENSE_GLYPH_HEIGHT) -> list[VCUBTextToken]:
+def _dense_grid_tokens(
+    glyph_height: float = _DENSE_GLYPH_HEIGHT,
+    *,
+    header_y: float = _HEADER_Y,
+    header_height: float = _GLYPH_HEIGHT,
+    drop_label: str | None = None,
+) -> list[VCUBTextToken]:
+    """The dense live-screen matrix, with synthetic labels and numbers.
+
+    ``header_y``/``header_height`` place the column-header band; run 2 needs
+    it one row pitch above the first row and deep enough to touch it.
+    ``drop_label`` removes one expiry label while leaving its row of numbers,
+    which is what a reader that missed a label actually hands back.
+    """
+
     tokens = metadata_tokens()
-    tokens.append(_token("Expiry", _ANCHOR_X + 22.0, _HEADER_Y, width=44.0))
+    tokens.append(
+        _token("Expiry", _ANCHOR_X + 22.0, header_y, width=44.0, height=header_height)
+    )
     for column_index, label in enumerate(TENOR_LABELS):
-        tokens.append(_token(label, _column_x(column_index), _HEADER_Y))
+        tokens.append(_token(label, _column_x(column_index), header_y, height=header_height))
     for row_index, label in enumerate(EXPIRY_LABELS):
         row_y = _FIRST_ROW_Y + row_index * _DENSE_ROW_PITCH
-        tokens.append(
-            _token(label, _ANCHOR_X + 14.0, row_y, height=glyph_height)
-        )
+        if label != drop_label:
+            tokens.append(
+                _token(label, _ANCHOR_X + 14.0, row_y, height=glyph_height)
+            )
         for column_index in range(len(TENOR_LABELS)):
             tokens.append(
                 _token(
@@ -752,6 +769,26 @@ def _dense_grid_tokens(glyph_height: float = _DENSE_GLYPH_HEIGHT) -> list[VCUBTe
                 )
             )
     return tokens
+
+
+def _run_two_grid_tokens(*, drop_label: str | None = None) -> list[VCUBTextToken]:
+    """Acceptance run 2: the column headers are one dense row up.
+
+    Nothing special is done to the header here. At this pitch *every* pair of
+    adjacent lines' boxes overlap by 2px, and the header line is simply the
+    row above the first data row -- so its box reaches into the first row's
+    exactly as the data rows reach into each other's. The overlap stays well
+    under the fraction at which two lines read as one, so the grouper still
+    separates them, which is what the live capture's error set showed: the
+    first row's values were reported as unplaceable, not as strays on the
+    header line.
+    """
+
+    return _dense_grid_tokens(
+        header_y=_FIRST_ROW_Y - _DENSE_ROW_PITCH,
+        header_height=_DENSE_GLYPH_HEIGHT,
+        drop_label=drop_label,
+    )
 
 
 def test_a_dense_grid_whose_row_boxes_overlap_still_parses() -> None:
@@ -1018,6 +1055,63 @@ def test_the_live_header_layout_resolves_every_metadata_field() -> None:
     assert metadata.unresolved_fields == ()
     assert metadata.quote_date == "08/19/26"
     assert metadata.tab == "ATM Swaptions"
+
+
+def test_the_run_two_fixture_really_has_a_header_band_touching_its_first_row() -> None:
+    """The condition under test, asserted so the fixture cannot drift out of it.
+
+    Read off the boxes rather than the parser's internals: if this spacing
+    ever drifts apart, the tests below would keep passing while testing
+    nothing at all. That the two are still *separate* lines is covered by the
+    next test asserting no blocking errors -- were they merged, the first
+    row's values would sit on the header line and come back as strays.
+    """
+
+    tokens = _run_two_grid_tokens()
+    anchor = next(token for token in tokens if token.text == "Expiry")
+    first_row_top = min(
+        token.top for token in tokens if token.y_center == _FIRST_ROW_Y
+    )
+
+    assert anchor.bottom >= first_row_top
+
+
+def test_a_header_band_touching_the_first_row_no_longer_loses_it() -> None:
+    """Acceptance run 2: the grid reconstructed, but its first expiry row was
+    gone and every value on that row came back unplaceable.
+
+    The expiry column was read from the lines whose *box* cleared the anchor
+    line's box, a stricter question than the one the grouper had already
+    answered about which tokens share a line. Boxes merely meeting -- zero
+    overlap -- dropped the row, and the whole row's numbers were reported as
+    NUMERIC_TOKEN_OUTSIDE_ROWS.
+    """
+
+    capture = parse(_run_two_grid_tokens())
+
+    assert capture.grid is not None
+    assert capture.grid.expiry_labels == EXPIRY_LABELS
+    assert codes(capture.blocking_errors) == []
+    assert capture.grid.unresolved_cells() == ()
+
+
+@pytest.mark.parametrize("dropped", [EXPIRY_LABELS[0], EXPIRY_LABELS[-1]])
+def test_an_edge_expiry_label_the_reader_missed_still_blocks(dropped: str) -> None:
+    """The other side of the same geometry, and why the fix is narrow.
+
+    Admitting a row whose label merely touches the header band must not admit
+    a row that has no label at all. Nothing about the outer-row guard moved --
+    the fix only stopped discarding a label that *was* read -- so an orphaned
+    row of numbers still fails the capture closed at either edge.
+    """
+
+    capture = parse(_run_two_grid_tokens(drop_label=dropped))
+
+    assert capture.grid is not None
+    assert dropped not in capture.grid.expiry_labels
+    assert set(codes(capture.blocking_errors)) == {"NUMERIC_TOKEN_OUTSIDE_ROWS"}
+    assert len(capture.blocking_errors) == len(TENOR_LABELS)  # the whole orphaned row
+    assert not capture.can_confirm
 
 
 @pytest.mark.parametrize(
