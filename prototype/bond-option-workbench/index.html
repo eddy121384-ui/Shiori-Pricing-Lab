@@ -60,6 +60,10 @@
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V6a2 2 0 0 1 2-2h2"/><path d="M17 4h2a2 2 0 0 1 2 2v2"/><path d="M21 16v2a2 2 0 0 1-2 2h-2"/><path d="M7 20H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="8" width="10" height="8" rx="1"/></svg>
         Capture
       </div>
+      <div class="nav-item" id="nav-capture-otm">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="12" height="10" rx="1"/><rect x="9" y="10" width="12" height="10" rx="1"/></svg>
+        OTM / SABR
+      </div>
       <div class="nav-item">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M12 3a9 9 0 0 1 9 9h-9z" opacity="0.5"/></svg>
         Analytics
@@ -797,6 +801,90 @@
       </section>
 
     </div>
+
+    <!-- ================ OTM/SABR CAPTURE VIEW (Issue #185) ================ -->
+    <div class="main capture-view" id="view-capture-otm" hidden>
+
+      <section class="card capture-header-card">
+        <div class="capture-header-top">
+          <div class="capture-title-block">
+            <div class="capture-title">Bloomberg VCUB &mdash; OTM Swaptions / SABR Capture</div>
+            <div class="capture-subtitle">Reconstructs the <span class="mono">Term &times; Tenor &times; Strike</span> table from the two to four vertically overlapping screenshots you take of one screen. They are parsed independently and merged by row label &mdash; never stitched as images &mdash; and overlapping rows are checked against each other. Nothing is accepted until you confirm it, and a confirmed capture is not wired into pricing.</div>
+          </div>
+          <div class="capture-header-actions">
+            <label class="btn outline" for="otm-file-input">Choose screenshots</label>
+            <input id="otm-file-input" type="file" accept="image/*" multiple hidden />
+            <span class="btn primary is-disabled" id="otm-parse-btn">Parse</span>
+          </div>
+        </div>
+        <div class="otm-dropzone" id="otm-dropzone">
+          <div class="otm-dropzone-title">Drag the screenshots here &mdash; all of them at once</div>
+          <div class="otm-dropzone-note">Read locally by this workbench. The images are never uploaded anywhere and are never written into the repository. Crop each screenshot so its first and last rows are fully visible, and let consecutive screenshots overlap by a row or two.</div>
+        </div>
+        <ul class="otm-file-list" id="otm-file-list" hidden></ul>
+      </section>
+
+      <section class="card markets-status" id="otm-loading" hidden>Reading the screenshots&hellip;</section>
+      <section class="card markets-status markets-status-error" id="otm-error" hidden>
+        <div class="markets-error-title" id="otm-error-title">Unable to read these screenshots</div>
+        <div class="markets-error-detail" id="otm-error-detail">&mdash;</div>
+      </section>
+
+      <section class="card capture-review-card" id="otm-review-card" hidden>
+        <div class="card-head">
+          <div class="card-title">Review</div>
+          <div class="card-head-right"><span class="capture-status-pill" id="otm-status-pill">Pending review</span></div>
+        </div>
+        <div class="card-body">
+          <div class="capture-blockers" id="otm-blockers" hidden>
+            <div class="capture-blockers-title" id="otm-blockers-title">Blocking &mdash; confirmation is not available</div>
+            <ul class="capture-issue-list" id="otm-blocker-list"></ul>
+          </div>
+          <div class="capture-warnings" id="otm-warnings" hidden>
+            <div class="capture-warnings-title" id="otm-warnings-title">Check these against the screenshots</div>
+            <ul class="capture-issue-list" id="otm-warning-list"></ul>
+          </div>
+          <div class="capture-meta-grid" id="otm-meta-grid"></div>
+          <div class="otm-coverage" id="otm-coverage"></div>
+          <div class="capture-review-actions">
+            <label class="capture-review-by-label" for="otm-reviewed-by">Reviewed by</label>
+            <input class="control capture-review-by" id="otm-reviewed-by" type="text" placeholder="Your name or initials" />
+            <span class="btn ghost" id="otm-reject-btn">Reject</span>
+            <span class="btn primary is-disabled" id="otm-confirm-btn">Confirm</span>
+          </div>
+          <div class="capture-storage" id="otm-storage" hidden>
+            <div class="capture-storage-title" id="otm-storage-title">&mdash;</div>
+            <div class="capture-storage-detail" id="otm-storage-detail"></div>
+          </div>
+          <div class="derived-source" id="otm-review-status">Compare every cell against the screenshots before confirming.</div>
+        </div>
+      </section>
+
+      <section class="card capture-compare-card" id="otm-compare-card" hidden>
+        <div class="card-head">
+          <div class="card-title">Source screenshots and reconstructed table</div>
+        </div>
+        <div class="card-body">
+          <div class="otm-compare">
+            <div class="capture-shot-pane">
+              <div class="capture-pane-label">Source screenshots &mdash; in the order supplied</div>
+              <div class="otm-shot-strip" id="otm-shot-strip"></div>
+            </div>
+            <div class="capture-grid-pane">
+              <div class="capture-pane-label">Reconstructed &mdash; Term &times; Tenor down, strike offset across</div>
+              <div class="capture-grid-wrap">
+                <table class="markets-table capture-grid-table otm-grid-table">
+                  <thead><tr id="otm-grid-head"></tr></thead>
+                  <tbody id="otm-grid-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="capture-provenance" id="otm-provenance"></div>
+        </div>
+      </section>
+
+    </div>
   </div>
 
   <!-- ===================== FOOTER ===================== -->
@@ -823,5 +911,6 @@
 </div>
 <script src="script.js"></script>
 <script src="vcub_capture.js"></script>
+<script src="vcub_otm_capture.js"></script>
 </body>
 </html>

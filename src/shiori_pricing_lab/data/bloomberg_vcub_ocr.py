@@ -61,13 +61,22 @@ def sha256_of_image_bytes(raw_image: bytes) -> str:
 
 
 def build_capture_provenance(
-    *, source_reference: str, raw_image: bytes, captured_at: str | None = None
+    *,
+    source_reference: str,
+    raw_image: bytes,
+    captured_at: str | None = None,
+    parser_name: str = PARSER_NAME,
+    parser_version: str = PARSER_VERSION,
 ) -> VCUBCaptureProvenance:
     """Build the provenance record for one operator-supplied image.
 
     ``captured_at`` defaults to the moment this runs, in UTC. The image
     bytes themselves are hashed and then dropped -- this repository is
     public and never stores a live Bloomberg screen.
+
+    ``parser_name``/``parser_version`` default to the ATM template's, which
+    is what read every image before Issue #185; the OTM/SABR template passes
+    its own, so a stored surface names the parser that actually read it.
     """
 
     if captured_at is None:
@@ -79,8 +88,8 @@ def build_capture_provenance(
         source_image_sha256=sha256_of_image_bytes(raw_image),
         source_image_bytes=len(raw_image),
         captured_at=captured_at,
-        parser_name=PARSER_NAME,
-        parser_version=PARSER_VERSION,
+        parser_name=parser_name,
+        parser_version=parser_version,
     )
 
 

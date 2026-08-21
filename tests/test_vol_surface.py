@@ -519,7 +519,11 @@ def test_the_csv_export_has_one_row_per_point_under_the_contracted_columns() -> 
 
 
 def test_the_csv_export_column_names_are_the_contract_itself() -> None:
-    """Pinned literally: a rename breaks every audit script written against it."""
+    """Pinned literally: a rename breaks every audit script written against it.
+
+    Issue #185's two columns sit at the end for the same reason: a script
+    reading the first twenty-two by position still reads exactly what it did.
+    """
 
     assert EXPORT_COLUMNS == (
         "surface_id",
@@ -544,6 +548,8 @@ def test_the_csv_export_column_names_are_the_contract_itself() -> None:
         "parser_version",
         "confirmed_by",
         "confirmed_at",
+        "value_kind",
+        "source_image_count",
     )
 
 

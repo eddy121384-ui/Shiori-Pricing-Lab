@@ -1,12 +1,13 @@
-"""Turn one **confirmed** VCUB ATM capture into a canonical vol surface
-(Issue #183).
+"""Turn one **confirmed** VCUB capture into a canonical vol surface
+(Issues #183 and #185).
 
-The one-way bridge between Issue #181's transcription shapes and Issue
-#183's canonical model. It is a separate module on purpose: the canonical
-model must not know what a screenshot is, and the SQLite store must not know
-what Bloomberg is, so the vendor-specific mapping lives here and nowhere
-else. A later OTM/SABR capture adds its own adapter beside this one and
-reuses the same model and the same store.
+The one-way bridge between the transcription shapes of Issue #181 (ATM
+Swaptions) and Issue #185 (OTM Swaptions / SABR) and Issue #183's canonical
+model. It is a separate module on purpose: the canonical model must not know
+what a screenshot is, and the SQLite store must not know what Bloomberg is,
+so the vendor-specific mapping lives here and nowhere else. The two screens
+share this module, the same canonical model, and the same store -- there is
+no second OTM-only persistence path.
 
 **It transcribes the transcription.** Nothing is renamed, re-based,
 converted, interpolated, or filled in. The screen's own spellings survive:
@@ -31,13 +32,21 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
     VCUBATMCapture,
     VCUBCaptureStatus,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
+    NORMAL_VOL_SKEW_TYPE,
+    OTM_SWAPTIONS_SABR_TAB,
+    SPREAD_DISPLAY_MODE,
+    VCUBOTMCapture,
+)
 from shiori_pricing_lab.data.vol_surface import (
     CanonicalVolSurface,
     StrikeDimension,
     VolSurfaceIdentity,
     VolSurfacePoint,
     VolSurfaceProvenance,
+    VolSurfaceSourceImage,
     VolSurfaceType,
+    VolValueKind,
 )
 
 #: How a capture's metadata field maps onto an identity field. ``quote_date``
@@ -146,5 +155,127 @@ def canonical_surface_from_confirmed_capture(
         # one from the magnitude of the numbers would be exactly the silent
         # unit coercion the capture slice refuses. It stays unresolved until
         # something states it.
+        volatility_unit=None,
+    )
+
+
+def canonical_surface_from_confirmed_otm_capture(
+    capture: VCUBOTMCapture, *, capture_id: str
+) -> CanonicalVolSurface:
+    """Build the canonical surface one confirmed OTM/SABR capture asserts.
+
+    Reads :attr:`VCUBOTMCapture.accepted_table`, never ``table``: a pending
+    or rejected capture exposes no accepted table at all, so its numbers
+    cannot reach the canonical model even by mistake.
+
+    Every intersection of the reviewed table becomes a point, including the
+    ones the parser left unresolved -- those carry ``volatility=None``, for
+    the same reason as on the ATM path.
+
+    **The screen's own semantics decide each point's kind.** The column
+    headed ``ATM`` files as a :attr:`StrikeDimension.ATM` point carrying an
+    absolute vol; every other column files as
+    :attr:`StrikeDimension.YIELD_OFFSET_BP` at the basis-point offset its
+    header states, carrying a :attr:`VolValueKind.SPREAD_TO_ATM`. Nothing
+    here adds the two together, and nothing here converts either.
+
+    **Every screenshot of the session is kept.** The capture's images become
+    the provenance's :attr:`~VolSurfaceProvenance.source_images`, in the
+    order they were supplied, so a stored multi-image surface can name every
+    file that produced it rather than one arbitrary hash.
+    """
+
+    if not isinstance(capture, VCUBOTMCapture):
+        raise TypeError("capture must be a VCUBOTMCapture")
+    if capture.review_status is not VCUBCaptureStatus.CONFIRMED:
+        raise UnconfirmedCaptureError(
+            "only a CONFIRMED capture can be written to the canonical vol-surface store; "
+            f"this one is {capture.review_status.value}"
+        )
+    table = capture.accepted_table
+    if table is None:  # pragma: no cover - unreachable while CONFIRMED implies a table
+        raise UnconfirmedCaptureError(
+            "this capture exposes no accepted table, so there is nothing to store"
+        )
+    metadata = capture.metadata
+    # All three are blocking errors upstream, so a CONFIRMED capture has
+    # them. They are re-checked because they are what makes the numbers
+    # below mean anything: the tab says which screen this is, and Type plus
+    # display mode say that its non-ATM columns are spreads rather than vols.
+    if metadata.tab != OTM_SWAPTIONS_SABR_TAB:
+        raise UnconfirmedCaptureError(
+            f"this adapter only files the {OTM_SWAPTIONS_SABR_TAB!r} screen as "
+            f"{VolSurfaceType.OTM_SWAPTION_SABR.value}; this capture's tab is "
+            f"{metadata.tab!r}"
+        )
+    if metadata.vol_type != NORMAL_VOL_SKEW_TYPE or metadata.display_mode != (
+        SPREAD_DISPLAY_MODE
+    ):
+        raise UnconfirmedCaptureError(
+            f"this adapter only files a {NORMAL_VOL_SKEW_TYPE!r} screen displayed as "
+            f"{SPREAD_DISPLAY_MODE!r}, whose ATM column is an absolute vol and whose other "
+            f"columns are spreads to it; this capture reads {metadata.vol_type!r} / "
+            f"{metadata.display_mode!r}"
+        )
+
+    identity = VolSurfaceIdentity(
+        surface_type=VolSurfaceType.OTM_SWAPTION_SABR,
+        capture_id=capture_id,
+        **{
+            identity_field: getattr(metadata, metadata_field)
+            for metadata_field, identity_field in _METADATA_TO_IDENTITY.items()
+        },
+        unresolved_fields=tuple(
+            identity_field
+            for metadata_field, identity_field in _METADATA_TO_IDENTITY.items()
+            if metadata_field in metadata.unresolved_fields
+        ),
+    )
+    first = capture.sources[0]
+    provenance = VolSurfaceProvenance(
+        capture_id=capture_id,
+        source_reference=first.source_reference,
+        source_image_sha256=first.source_image_sha256,
+        source_image_bytes=first.source_image_bytes,
+        captured_at=first.captured_at,
+        parser_name=first.parser_name,
+        parser_version=first.parser_version,
+        confirmed_by=capture.reviewed_by,
+        confirmed_at=capture.reviewed_at,
+        source_images=tuple(
+            VolSurfaceSourceImage(
+                source_reference=source.source_reference,
+                sha256=source.source_image_sha256,
+                size_bytes=source.source_image_bytes,
+            )
+            for source in capture.sources
+        ),
+    )
+    points = tuple(
+        VolSurfacePoint(
+            expiry=row.term,
+            underlying_tenor=row.tenor,
+            volatility=row.values[column_index],
+            strike_dimension=(
+                StrikeDimension.ATM if strike.is_atm else StrikeDimension.YIELD_OFFSET_BP
+            ),
+            strike_offset=strike.offset_bp,
+            value_kind=(
+                VolValueKind.ABSOLUTE_VOL if strike.is_atm else VolValueKind.SPREAD_TO_ATM
+            ),
+        )
+        # Row-major, in the screen's own axis order, so a stored surface
+        # reads back in the order the trader reviewed it.
+        for row in table.rows
+        for column_index, strike in enumerate(table.strikes)
+    )
+    return CanonicalVolSurface(
+        identity=identity,
+        provenance=provenance,
+        points=points,
+        # The screen states a vol *type* and a display mode but no unit for
+        # the numbers themselves, and inferring one from their magnitude
+        # would be exactly the silent unit coercion the capture slice
+        # refuses. It stays unresolved until something states it.
         volatility_unit=None,
     )
