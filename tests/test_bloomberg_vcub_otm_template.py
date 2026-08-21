@@ -28,6 +28,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
     EXPECTED_ROWS,
+    EXPECTED_STRIKE_OFFSETS_BP,
     NORMAL_VOL_SKEW_TYPE,
     OTM_METADATA_FIELDS,
     OTM_SWAPTIONS_SABR_TAB,
@@ -921,6 +922,136 @@ def test_a_row_outside_the_expected_set_blocks_rather_than_widening_it() -> None
     ]
     assert [issue.row for issue in unexpected] == ["40Yr x 30Yr"]
     assert capture.can_confirm is False
+
+
+def test_the_expected_strike_axis_is_the_screens_own_nine_columns() -> None:
+    assert len(EXPECTED_STRIKE_OFFSETS_BP) == 9
+    assert EXPECTED_STRIKE_OFFSETS_BP == (
+        -200.0,
+        -100.0,
+        -50.0,
+        -25.0,
+        None,
+        25.0,
+        50.0,
+        100.0,
+        200.0,
+    )
+
+
+def test_every_screenshot_cropped_short_of_a_strike_column_blocks() -> None:
+    """The other axis of the same completeness question.
+
+    Cropping the right-hand column off *every* screenshot removes the header
+    and its values together, so no gap is left for the pitch check and no
+    stray number for the outside-column check: the rows are all there, and
+    the surface is still short a coordinate.
+    """
+
+    narrow = STRIKE_LABELS[:-1]
+    capture = merge_vcub_otm_reads(
+        [read(screenshot_tokens(strike_labels=narrow))]
+    )
+
+    assert capture.table is not None
+    assert len(capture.table.rows) == len(EXPECTED_ROWS)  # every row present
+    assert capture.table.missing_expected_rows() == ()
+    assert capture.table.missing_expected_strikes() == ("200bps",)
+    assert "INCOMPLETE_STRIKE_AXIS" in codes(capture.blocking_errors)
+    assert capture.can_confirm is False
+
+
+def test_a_capture_of_the_atm_column_alone_is_not_the_surface() -> None:
+    capture = merge_vcub_otm_reads(
+        [read(screenshot_tokens(strike_labels=("ATM",)))]
+    )
+
+    assert capture.table is not None
+    assert len(capture.table.missing_expected_strikes()) == 8
+    assert capture.can_confirm is False
+
+
+def test_a_strike_column_outside_the_axis_blocks_rather_than_widening_it() -> None:
+    labels = list(STRIKE_LABELS)
+    labels[-1] = "300bps"
+    capture = merge_vcub_otm_reads([read(screenshot_tokens(strike_labels=labels))])
+
+    unexpected = [
+        issue
+        for issue in capture.blocking_errors
+        if issue.code == "UNEXPECTED_STRIKE_COLUMN"
+    ]
+    assert [issue.strike for issue in unexpected] == ["300bps"]
+    assert capture.can_confirm is False
+
+
+def test_a_conflict_names_the_screenshot_the_held_value_actually_came_from() -> None:
+    """Three screenshots: the first leaves a cell unresolved, the second fills
+    it, the third disagrees. The conflict must point at the second."""
+
+    # All three screenshots must show the row, so that the first one showing
+    # it is the one *without* the value.
+    cell = (OVERLAP_BC, 3)
+    reads = [
+        read(
+            screenshot_tokens(
+                rows=range(SLICE_A[0], SLICE_B[-1] + 1), omit_cells=frozenset({cell})
+            ),
+            reference="shot-a.png",
+            digest_seed="a",
+        ),
+        read(
+            screenshot_tokens(rows=SLICE_B),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+        read(
+            screenshot_tokens(rows=SLICE_C, value_overrides={cell: "99.99"}),
+            reference="shot-c.png",
+            digest_seed="c",
+        ),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    conflicts = [
+        issue for issue in capture.blocking_errors if issue.code == "OVERLAP_VALUE_CONFLICT"
+    ]
+    assert len(conflicts) == 1
+    # The value under dispute was supplied by shot-b, never by shot-a.
+    assert "'shot-b.png'" in conflicts[0].message
+    assert "'shot-c.png'" in conflicts[0].message
+    assert "'shot-a.png'" not in conflicts[0].message
+
+
+def test_a_partial_cell_warning_names_every_screenshot_that_lacked_it() -> None:
+    cell = (OVERLAP_AB, 6)
+    reads = [
+        read(
+            screenshot_tokens(rows=SLICE_A, omit_cells=frozenset({cell})),
+            reference="shot-a.png",
+            digest_seed="a",
+        ),
+        read(
+            screenshot_tokens(rows=SLICE_B, omit_cells=frozenset({cell})),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+        read(
+            screenshot_tokens(rows=range(SLICE_A[0], len(ROW_LABELS))),
+            reference="shot-c.png",
+            digest_seed="c",
+        ),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    partials = [
+        issue for issue in capture.warnings if issue.code == "OVERLAP_PARTIAL_CELL"
+    ]
+    filled = [issue for issue in partials if issue.strike == "50bps"]
+    assert filled, partials
+    assert "'shot-c.png'" in filled[-1].message
+    assert "shot-a.png" in filled[-1].message
+    assert "shot-b.png" in filled[-1].message
 
 
 def test_an_incomplete_capture_can_never_be_confirmed_even_by_hand() -> None:

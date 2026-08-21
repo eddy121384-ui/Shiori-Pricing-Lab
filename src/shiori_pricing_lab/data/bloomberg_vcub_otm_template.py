@@ -37,14 +37,16 @@ overlap is an integrity check rather than a nuisance:
   between them, so the capture is refused rather than presented as complete.
 
 **Completeness is measured against the screen, not the file count.** The
-merged surface must hold exactly
-:data:`~shiori_pricing_lab.data.bloomberg_vcub_otm_capture.EXPECTED_ROWS` --
-the 91 ``Term x Tenor`` coordinates this screen is known to carry. A row
-short of that is a partial capture however cleanly each image read, and a row
-outside it is not this screen; both block, and both name the coordinates
-involved. How many screenshots it took to get there is irrelevant: one that
-holds the whole surface passes, and four that between them hold half of it do
-not.
+merged surface must hold exactly the coordinates this screen is known to
+carry -- the 91 ``Term x Tenor`` rows of
+:data:`~shiori_pricing_lab.data.bloomberg_vcub_otm_capture.EXPECTED_ROWS`,
+each with the nine strike columns of
+:data:`~shiori_pricing_lab.data.bloomberg_vcub_otm_capture.EXPECTED_STRIKE_OFFSETS_BP`.
+Short of either axis is a partial capture however cleanly each image read,
+and a coordinate outside either is not this screen; all four cases block, and
+each names what is involved. How many screenshots it took is irrelevant: one
+that holds the whole surface passes, and four that between them hold half of
+it do not.
 
 **What this parser optimises for.** Not OCR recall: the failure that matters
 is a plausible number landing in the wrong ``Term x Tenor x Strike``
@@ -62,6 +64,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from shiori_pricing_lab.data.bloomberg_vcub_capture import (
     VCUBCaptureProvenance,
@@ -69,6 +72,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
     EXPECTED_ROWS,
+    EXPECTED_STRIKE_OFFSETS_BP,
     NORMAL_VOL_SKEW_TYPE,
     OTM_METADATA_FIELDS,
     OTM_SWAPTIONS_SABR_TAB,
@@ -880,6 +884,29 @@ def _check_expected_coverage(table: VCUBOTMTable, issues: _Issues) -> None:
             row=label,
         )
 
+    # The same question along the other axis. A session whose screenshots were
+    # all cropped at the same vertical edge loses a strike column and its
+    # values together, which leaves no gap for the pitch check and no stray
+    # number for the outside-column check -- so without this a table could be
+    # 91 rows deep and still be missing a coordinate (Codex review round 2).
+    missing_strikes = table.missing_expected_strikes()
+    if missing_strikes:
+        issues.block(
+            "INCOMPLETE_STRIKE_AXIS",
+            f"{len(missing_strikes)} of the {len(EXPECTED_STRIKE_OFFSETS_BP)} expected strike "
+            f"columns were not captured: {_named(missing_strikes)}. Every screenshot in this "
+            "session is cropped short of them, so re-take the set wide enough to show the "
+            "whole strike axis",
+        )
+    for label in table.unexpected_strikes():
+        issues.block(
+            "UNEXPECTED_STRIKE_COLUMN",
+            f"{label} is not a strike column this screen is known to carry, so either the "
+            "capture is not the expected screen or a header was misread; the expected axis is "
+            "not widened to fit it",
+            strike=label,
+        )
+
 
 #: How many coordinates a blocking message names before it summarises the
 #: rest. Long enough to act on, short enough to read -- the complete list is
@@ -952,6 +979,24 @@ def _merge_strike_axis(
     return [VCUBOTMStrike(label=label, offset_bp=offset) for label, offset in axis]
 
 
+@dataclass
+class _MergedRow:
+    """One row as the screenshots seen so far have described it.
+
+    ``origins[i]`` names the screenshot the value now held at column ``i``
+    came from, and ``blank_in[i]`` the ones that showed this row with nothing
+    there. Both are per *cell* rather than per row, which is what a conflict
+    message needs to be able to say: with three screenshots, a cell the first
+    left unresolved and the second filled belongs to the second, and naming
+    the first would send the trader to an image that never held that value
+    (Codex review round 2, PR #186).
+    """
+
+    row: VCUBOTMRow
+    origins: list[str | None]
+    blank_in: list[list[str]]
+
+
 def _merge_rows(
     readable: Sequence[VCUBOTMImageRead],
     strikes: Sequence[VCUBOTMStrike],
@@ -959,48 +1004,54 @@ def _merge_rows(
 ) -> dict[tuple[str, str], VCUBOTMRow]:
     """Every screenshot's rows, keyed by coordinate, with overlap checked."""
 
-    merged: dict[tuple[str, str], VCUBOTMRow] = {}
-    seen_in: dict[tuple[str, str], str] = {}
+    merged: dict[tuple[str, str], _MergedRow] = {}
     for read in readable:
         assert read.table is not None
         source = read.provenance.source_reference
         for row in read.table.rows:
             key = (row.term, row.tenor)
-            existing = merged.get(key)
-            if existing is None:
-                merged[key] = row
-                seen_in[key] = source
+            held = merged.get(key)
+            if held is None:
+                merged[key] = _MergedRow(
+                    row=row,
+                    origins=[source if value is not None else None for value in row.values],
+                    blank_in=[[] if value is not None else [source] for value in row.values],
+                )
                 continue
             merged[key] = _merge_overlapping_row(
-                existing, row, strikes, issues, first_source=seen_in[key], source=source
+                held, row, strikes, issues, source=source
             )
-    return merged
+    return {key: held.row for key, held in merged.items()}
 
 
 def _merge_overlapping_row(
-    existing: VCUBOTMRow,
+    held: _MergedRow,
     incoming: VCUBOTMRow,
     strikes: Sequence[VCUBOTMStrike],
     issues: _Issues,
     *,
-    first_source: str,
     source: str,
-) -> VCUBOTMRow:
-    """One row two screenshots both showed.
+) -> _MergedRow:
+    """One row another screenshot also showed.
 
-    Identical readings deduplicate. A cell one image resolved and the other
-    did not is taken from the image that read it, and reported as a warning
-    -- the two images do not disagree about a value there, one of them
-    simply has no reading, and taking it is not preferring a clearer read
-    over a conflicting one. Two *different* values at one coordinate block
-    the whole capture: neither is chosen, neither is averaged, and neither
-    is quietly overwritten.
+    Identical readings deduplicate. A cell nothing has read yet is taken from
+    the image that reads it, and reported as a warning naming both that image
+    and the ones that showed the row without it -- the two do not disagree
+    about a value there, one of them simply has none, and taking it is not
+    preferring a clearer read over a conflicting one. Two *different* values
+    at one coordinate block the whole capture: neither is chosen, neither is
+    averaged, and neither is quietly overwritten.
     """
 
     values: list[float | None] = []
+    origins: list[str | None] = []
+    blank_in: list[list[str]] = []
     for index, strike in enumerate(strikes):
-        first = existing.values[index]
+        first = held.row.values[index]
         second = incoming.values[index]
+        origin = held.origins[index]
+        blanks = list(held.blank_in[index])
+
         if first is not None and second is not None:
             # ``!=`` rather than an approximate comparison on purpose: these
             # are two reads of the same drawn glyphs, so anything but the
@@ -1008,31 +1059,58 @@ def _merge_overlapping_row(
             if first != second:
                 issues.block(
                     "OVERLAP_VALUE_CONFLICT",
-                    f"{existing.label} at {strike.label} reads {first!r} in "
-                    f"{first_source!r} and {second!r} in {source!r}. Two screenshots of one "
-                    "screen cannot hold two values for one coordinate, so the whole capture "
-                    "is refused rather than one of them chosen",
-                    row=existing.label,
+                    f"{held.row.label} at {strike.label} reads {first!r} in {origin!r} and "
+                    f"{second!r} in {source!r}. Two screenshots of one screen cannot hold two "
+                    "values for one coordinate, so the whole capture is refused rather than "
+                    "one of them chosen",
+                    row=held.row.label,
                     strike=strike.label,
                 )
             values.append(first)
+            origins.append(origin)
+            blank_in.append(blanks)
             continue
+
         if first is None and second is None:
+            blanks.append(source)
             values.append(None)
+            origins.append(None)
+            blank_in.append(blanks)
             continue
-        resolved_in, unresolved_in = (
-            (source, first_source) if first is None else (first_source, source)
-        )
+
+        if first is None:
+            issues.warn(
+                "OVERLAP_PARTIAL_CELL",
+                f"{held.row.label} at {strike.label} was read in {source!r} but not in "
+                f"{_named(blanks)}; the value that was read is used. Check it against the "
+                "screenshot",
+                row=held.row.label,
+                strike=strike.label,
+            )
+            values.append(second)
+            origins.append(source)
+            blank_in.append(blanks)
+            continue
+
         issues.warn(
             "OVERLAP_PARTIAL_CELL",
-            f"{existing.label} at {strike.label} was read in {resolved_in!r} but not in "
-            f"{unresolved_in!r}; the value that was read is used. Check it against the "
-            "screenshot",
-            row=existing.label,
+            f"{held.row.label} at {strike.label} was read in {origin!r} but not in "
+            f"{source!r}; the value that was read is used. Check it against the screenshot",
+            row=held.row.label,
             strike=strike.label,
         )
-        values.append(first if first is not None else second)
-    return VCUBOTMRow(term=existing.term, tenor=existing.tenor, values=tuple(values))
+        blanks.append(source)
+        values.append(first)
+        origins.append(origin)
+        blank_in.append(blanks)
+
+    return _MergedRow(
+        row=VCUBOTMRow(
+            term=held.row.term, tenor=held.row.tenor, values=tuple(values)
+        ),
+        origins=origins,
+        blank_in=blank_in,
+    )
 
 
 def _check_coverage_chain(readable: Sequence[VCUBOTMImageRead], issues: _Issues) -> None:

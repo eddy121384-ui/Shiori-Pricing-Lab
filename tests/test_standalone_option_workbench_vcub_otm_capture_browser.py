@@ -100,7 +100,10 @@ def _capture_payload(**overrides) -> dict:
         # nothing about completeness itself.
         "missing_rows": [],
         "unexpected_rows": [],
+        "missing_strikes": [],
+        "unexpected_strikes": [],
         "expected_row_count": len(_ROWS),
+        "expected_strike_count": len(_STRIKES),
         "coverage": [
             {
                 "source_reference": "shot-a.png",
@@ -529,7 +532,7 @@ def test_a_complete_capture_says_so_and_stays_confirmable(page, server_url, tmp_
 
     assert not _is_actually_hidden(page, "otm-completeness")
     title = page.eval_on_selector("#otm-completeness-title", "el => el.textContent")
-    assert title.startswith("Complete")
+    assert title == "Complete — all 3 Term × Tenor rows × 3 strike columns captured"
     assert "is-complete" in page.get_attribute("#otm-completeness", "class")
     assert "is-disabled" not in page.get_attribute("#otm-confirm-btn", "class")
 
@@ -543,10 +546,28 @@ def test_an_incomplete_capture_names_the_missing_rows_and_blocks_confirm(
 
     assert "is-partial" in page.get_attribute("#otm-completeness", "class")
     title = page.eval_on_selector("#otm-completeness-title", "el => el.textContent")
-    assert title == "Incomplete — 3 of 5 expected Term × Tenor rows captured"
+    assert title == "Incomplete — 3 of 5 Term × Tenor rows, 3 of 3 strike columns"
     detail = page.eval_on_selector("#otm-completeness-detail", "el => el.textContent")
+    assert "Missing rows (2)" in detail
     assert "3Mo x 2Yr" in detail
     assert "3Mo x 5Yr" in detail
+    assert "is-disabled" in page.get_attribute("#otm-confirm-btn", "class")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_missing_strike_column_is_named_as_such(page, server_url, tmp_path) -> None:
+    """The other axis of completeness, rendered from the server's answer."""
+
+    payload = _capture_payload()
+    payload["capture"]["missing_strikes"] = ["200bps"]
+    payload["capture"]["expected_strike_count"] = len(_STRIKES) + 1
+    payload["capture"]["can_confirm"] = False
+    _open_otm_view(page, server_url)
+    _parse(page, tmp_path, payload)
+
+    assert "is-partial" in page.get_attribute("#otm-completeness", "class")
+    detail = page.eval_on_selector("#otm-completeness-detail", "el => el.textContent")
+    assert "Missing strike columns (1): 200bps" in detail
     assert "is-disabled" in page.get_attribute("#otm-confirm-btn", "class")
 
 

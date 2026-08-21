@@ -121,6 +121,36 @@ EXPECTED_ROWS: tuple[tuple[str, str], ...] = tuple(
     (term, tenor) for term in EXPECTED_TERMS for tenor in EXPECTED_TENORS
 )
 
+#: The strike axis the complete surface carries, left to right, as yield
+#: offsets from ATM in basis points -- ``None`` being the ATM column itself.
+#: The other half of the same completeness question: a screenshot cropped at
+#: the left or right edge loses a whole strike column cleanly, with no gap for
+#: the pitch check to see and no value left over for the outside-column check
+#: to refuse, so a table can be 91 rows deep and still be missing a column
+#: (Codex review round 2, PR #186). Offsets rather than label text because
+#: the offset is the coordinate; how the screen spells it is not.
+EXPECTED_STRIKE_OFFSETS_BP: tuple[float | None, ...] = (
+    -200.0,
+    -100.0,
+    -50.0,
+    -25.0,
+    None,
+    25.0,
+    50.0,
+    100.0,
+    200.0,
+)
+
+
+def strike_label_for_offset(offset_bp: float | None) -> str:
+    """How this screen heads the column at ``offset_bp``.
+
+    Used only to name a coordinate in a message; a captured column keeps the
+    screen's own header text.
+    """
+
+    return "ATM" if offset_bp is None else f"{offset_bp:g}bps"
+
 _ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
 
 
@@ -473,11 +503,44 @@ class VCUBOTMTable:
         expected = set(EXPECTED_ROWS)
         return tuple(row.label for row in self.rows if (row.term, row.tenor) not in expected)
 
+    def missing_expected_strikes(self) -> tuple[str, ...]:
+        """Which of :data:`EXPECTED_STRIKE_OFFSETS_BP` this table does not hold.
+
+        Checked as its own coordinate: every screenshot of a session can be
+        cropped at the same vertical edge, which removes a strike column
+        *and* its values together and so trips none of the geometry guards.
+        """
+
+        held = {strike.offset_bp for strike in self.strikes}
+        return tuple(
+            strike_label_for_offset(offset)
+            for offset in EXPECTED_STRIKE_OFFSETS_BP
+            if offset not in held
+        )
+
+    def unexpected_strikes(self) -> tuple[str, ...]:
+        """Strike columns this table holds that the expected axis does not name."""
+
+        expected = set(EXPECTED_STRIKE_OFFSETS_BP)
+        return tuple(
+            strike.label for strike in self.strikes if strike.offset_bp not in expected
+        )
+
     @property
     def is_complete(self) -> bool:
-        """Whether this table is exactly the expected surface, no more, no less."""
+        """Whether this table is exactly the expected surface, no more, no less.
 
-        return not self.missing_expected_rows() and not self.unexpected_rows()
+        Both coordinates: the 91 ``Term x Tenor`` rows *and* the nine strike
+        columns each of them carries. A capture short of either is part of
+        the screen rather than the screen.
+        """
+
+        return not (
+            self.missing_expected_rows()
+            or self.unexpected_rows()
+            or self.missing_expected_strikes()
+            or self.unexpected_strikes()
+        )
 
     def unresolved_cells(self) -> tuple[tuple[str, str], ...]:
         """Every ``(row label, strike label)`` intersection with no value."""
@@ -646,13 +709,10 @@ class VCUBOTMCapture:
             # surface cannot become a CONFIRMED capture at all, so it cannot
             # reach the canonical store through any path (Eddy's decision on
             # PR #186).
-            missing = self.table.missing_expected_rows()
-            unexpected = self.table.unexpected_rows()
-            if missing or unexpected:
+            if not self.table.is_complete:
                 raise ValueError(
-                    "a capture whose row set is not the expected surface can never be "
-                    f"CONFIRMED: {len(missing)} expected rows missing, "
-                    f"{len(unexpected)} rows outside the template"
+                    "a capture whose coordinates are not the expected surface can never be "
+                    f"CONFIRMED: {_incompleteness(self.table)}"
                 )
 
     @property
@@ -700,8 +760,7 @@ class VCUBOTMCapture:
         if not self.table.is_complete:
             raise ValueError(
                 "this capture does not hold the complete expected surface and cannot be "
-                f"confirmed: {len(self.table.missing_expected_rows())} expected rows are "
-                f"missing and {len(self.table.unexpected_rows())} are outside the template"
+                f"confirmed: {_incompleteness(self.table)}"
             )
         return _replace_review(
             self,
@@ -741,7 +800,14 @@ class VCUBOTMCapture:
             "unexpected_rows": [] if self.table is None else list(
                 self.table.unexpected_rows()
             ),
+            "missing_strikes": [] if self.table is None else list(
+                self.table.missing_expected_strikes()
+            ),
+            "unexpected_strikes": [] if self.table is None else list(
+                self.table.unexpected_strikes()
+            ),
             "expected_row_count": len(EXPECTED_ROWS),
+            "expected_strike_count": len(EXPECTED_STRIKE_OFFSETS_BP),
             "blocking_errors": [issue.to_dict() for issue in self.blocking_errors],
             "warnings": [issue.to_dict() for issue in self.warnings],
             "review_status": self.review_status.value,
@@ -749,6 +815,17 @@ class VCUBOTMCapture:
             "reviewed_at": self.reviewed_at,
             "can_confirm": self.can_confirm,
         }
+
+
+def _incompleteness(table: VCUBOTMTable) -> str:
+    """How a table falls short of the expected surface, in one sentence."""
+
+    return (
+        f"{len(table.missing_expected_rows())} expected rows missing, "
+        f"{len(table.unexpected_rows())} rows outside the template, "
+        f"{len(table.missing_expected_strikes())} expected strike columns missing, "
+        f"{len(table.unexpected_strikes())} strike columns outside the axis"
+    )
 
 
 def _require_issue_tuples(record: VCUBOTMImageRead | VCUBOTMCapture) -> None:

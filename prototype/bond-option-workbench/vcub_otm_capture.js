@@ -196,7 +196,7 @@
     for (const key of ["sources", "metadata", "coverage", "blocking_errors", "warnings", "review_status"]) {
       if (!(key in capture)) throw new Error(`malformed response: missing "capture.${key}"`);
     }
-    for (const key of ["sources", "coverage", "blocking_errors", "warnings", "missing_rows", "unexpected_rows"]) {
+    for (const key of ["sources", "coverage", "blocking_errors", "warnings", "missing_rows", "unexpected_rows", "missing_strikes", "unexpected_strikes"]) {
       if (!Array.isArray(capture[key])) {
         throw new Error(`malformed response: "capture.${key}" must be an array`);
       }
@@ -361,35 +361,50 @@
   // renders the answer, and the Confirm button's state comes from the same
   // response's `can_confirm`.
   function renderCompleteness(capture) {
-    const missing = capture.missing_rows || [];
-    const unexpected = capture.unexpected_rows || [];
-    const expected = capture.expected_row_count;
     if (!capture.table) {
       els.completeness.hidden = true;
       return;
     }
-    const complete = missing.length === 0 && unexpected.length === 0;
+    const missingRows = capture.missing_rows || [];
+    const unexpectedRows = capture.unexpected_rows || [];
+    const missingStrikes = capture.missing_strikes || [];
+    const unexpectedStrikes = capture.unexpected_strikes || [];
+    const complete =
+      missingRows.length === 0 &&
+      unexpectedRows.length === 0 &&
+      missingStrikes.length === 0 &&
+      unexpectedStrikes.length === 0;
     els.completeness.className = "otm-completeness " + (complete ? "is-complete" : "is-partial");
-    const held = capture.table.rows.length;
+
+    const rows = capture.table.rows.length;
+    const strikes = capture.table.strikes.length;
     els.completenessTitle.textContent = complete
-      ? `Complete — all ${held} expected Term × Tenor rows captured`
-      : `Incomplete — ${held} of ${expected} expected Term × Tenor rows captured`;
+      ? `Complete — all ${rows} Term × Tenor rows × ${strikes} strike columns captured`
+      : `Incomplete — ${rows} of ${capture.expected_row_count} Term × Tenor rows, ` +
+        `${strikes} of ${capture.expected_strike_count} strike columns`;
+
     els.completenessDetail.textContent = "";
-    if (missing.length) {
-      const line = document.createElement("div");
-      line.textContent = `Missing (${missing.length}): ${missing.join(", ")}`;
-      els.completenessDetail.appendChild(line);
+    const line = (text) => {
+      const div = document.createElement("div");
+      div.textContent = text;
+      els.completenessDetail.appendChild(div);
+    };
+    if (missingRows.length) line(`Missing rows (${missingRows.length}): ${missingRows.join(", ")}`);
+    if (missingStrikes.length) {
+      line(`Missing strike columns (${missingStrikes.length}): ${missingStrikes.join(", ")}`);
     }
-    if (unexpected.length) {
-      const line = document.createElement("div");
-      line.textContent = `Not part of this screen (${unexpected.length}): ${unexpected.join(", ")}`;
-      els.completenessDetail.appendChild(line);
+    if (unexpectedRows.length) {
+      line(`Rows not part of this screen (${unexpectedRows.length}): ${unexpectedRows.join(", ")}`);
+    }
+    if (unexpectedStrikes.length) {
+      line(
+        `Strike columns not part of this screen (${unexpectedStrikes.length}): ${unexpectedStrikes.join(", ")}`
+      );
     }
     if (!complete) {
-      const line = document.createElement("div");
-      line.textContent =
-        "Capture the rest in the same sitting, overlapping what you already have, and parse the whole set again.";
-      els.completenessDetail.appendChild(line);
+      line(
+        "Capture the rest in the same sitting, overlapping what you already have, and parse the whole set again."
+      );
     }
     els.completeness.hidden = false;
   }
