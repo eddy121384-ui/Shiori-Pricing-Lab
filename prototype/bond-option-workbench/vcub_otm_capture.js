@@ -48,6 +48,9 @@
     warningsTitle: document.getElementById("otm-warnings-title"),
     metaGrid: document.getElementById("otm-meta-grid"),
     coverage: document.getElementById("otm-coverage"),
+    completeness: document.getElementById("otm-completeness"),
+    completenessTitle: document.getElementById("otm-completeness-title"),
+    completenessDetail: document.getElementById("otm-completeness-detail"),
     reviewedBy: document.getElementById("otm-reviewed-by"),
     confirmBtn: document.getElementById("otm-confirm-btn"),
     rejectBtn: document.getElementById("otm-reject-btn"),
@@ -193,7 +196,7 @@
     for (const key of ["sources", "metadata", "coverage", "blocking_errors", "warnings", "review_status"]) {
       if (!(key in capture)) throw new Error(`malformed response: missing "capture.${key}"`);
     }
-    for (const key of ["sources", "coverage", "blocking_errors", "warnings"]) {
+    for (const key of ["sources", "coverage", "blocking_errors", "warnings", "missing_rows", "unexpected_rows"]) {
       if (!Array.isArray(capture[key])) {
         throw new Error(`malformed response: "capture.${key}" must be an array`);
       }
@@ -261,6 +264,7 @@
     els.reviewCard.hidden = true;
     els.compareCard.hidden = true;
     els.storage.hidden = true;
+    els.completeness.hidden = true;
     clearError();
   }
 
@@ -350,6 +354,44 @@
       item.appendChild(v);
       els.metaGrid.appendChild(item);
     });
+  }
+
+  // Whether the merged capture is the whole screen. Every number here is the
+  // server's: this page counts no rows and decides no completeness -- it
+  // renders the answer, and the Confirm button's state comes from the same
+  // response's `can_confirm`.
+  function renderCompleteness(capture) {
+    const missing = capture.missing_rows || [];
+    const unexpected = capture.unexpected_rows || [];
+    const expected = capture.expected_row_count;
+    if (!capture.table) {
+      els.completeness.hidden = true;
+      return;
+    }
+    const complete = missing.length === 0 && unexpected.length === 0;
+    els.completeness.className = "otm-completeness " + (complete ? "is-complete" : "is-partial");
+    const held = capture.table.rows.length;
+    els.completenessTitle.textContent = complete
+      ? `Complete — all ${held} expected Term × Tenor rows captured`
+      : `Incomplete — ${held} of ${expected} expected Term × Tenor rows captured`;
+    els.completenessDetail.textContent = "";
+    if (missing.length) {
+      const line = document.createElement("div");
+      line.textContent = `Missing (${missing.length}): ${missing.join(", ")}`;
+      els.completenessDetail.appendChild(line);
+    }
+    if (unexpected.length) {
+      const line = document.createElement("div");
+      line.textContent = `Not part of this screen (${unexpected.length}): ${unexpected.join(", ")}`;
+      els.completenessDetail.appendChild(line);
+    }
+    if (!complete) {
+      const line = document.createElement("div");
+      line.textContent =
+        "Capture the rest in the same sitting, overlapping what you already have, and parse the whole set again.";
+      els.completenessDetail.appendChild(line);
+    }
+    els.completeness.hidden = false;
   }
 
   // What each screenshot contributed, and where two of them overlapped --
@@ -548,6 +590,7 @@
     renderIssues(els.warningList, capture.warnings);
 
     renderMetadata(capture.metadata);
+    renderCompleteness(capture);
     renderCoverage(capture.coverage);
     renderTable(capture.table);
     renderShots(capture.sources);
@@ -568,7 +611,7 @@
     } else if (capture.review_status === "REJECTED") {
       els.reviewStatus.textContent = `Rejected by ${capture.reviewed_by} at ${capture.reviewed_at}. No captured value was accepted.`;
     } else if (blocked) {
-      els.reviewStatus.textContent = "The parser could not place every value safely, so this capture cannot be confirmed. Fix what is listed above and parse again, or reject it and recapture the screen.";
+      els.reviewStatus.textContent = "This capture cannot be confirmed: either the parser could not place every value safely, or the reconstructed surface is not the whole screen. Fix what is listed above and parse the whole set again, or reject it and recapture the screen.";
     } else {
       els.reviewStatus.textContent = `${rowCount} Term × Tenor rows reconstructed from ${shotCount} screenshot${shotCount === 1 ? "" : "s"}. Compare every cell against them before confirming — one Confirm stores one snapshot.`;
     }

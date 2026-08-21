@@ -81,6 +81,46 @@ SPREAD_DISPLAY_MODE = "Spread"
 PARSER_NAME = "shiori-vcub-otm-sabr-template"
 PARSER_VERSION = "0.1.0"
 
+#: The complete semantic row set this screen is expected to hold, as the
+#: Cartesian product of the terms and tenors observed on the live
+#: ``OTM Swaptions / SABR`` screen (Eddy's decision on PR #186, replacing a
+#: proposed minimum screenshot count).
+#:
+#: **Why a template rather than a count.** How many screenshots an operator
+#: took proves nothing about coverage: three of them can show half the table
+#: as easily as one can. What does prove it is the row set itself, so a
+#: capture is complete when it holds *these* coordinates and no others.
+#: A row missing from this set blocks the capture and is named; a row outside
+#: it blocks too, rather than silently widening the template to whatever a
+#: screenshot happened to show.
+#:
+#: Both lists are transcribed from the screen, not derived from any tenor
+#: convention, and this is the one place either is written down: a screen
+#: whose rows genuinely differ is corrected by editing these two tuples,
+#: never by relaxing the check that reads them.
+EXPECTED_TERMS: tuple[str, ...] = (
+    "1Mo",
+    "3Mo",
+    "6Mo",
+    "9Mo",
+    "1Yr",
+    "2Yr",
+    "3Yr",
+    "5Yr",
+    "7Yr",
+    "10Yr",
+    "15Yr",
+    "20Yr",
+    "30Yr",
+)
+EXPECTED_TENORS: tuple[str, ...] = ("1Yr", "2Yr", "5Yr", "10Yr", "15Yr", "20Yr", "30Yr")
+
+#: Every ``(term, tenor)`` coordinate the complete surface carries: 13 x 7 =
+#: 91 rows, each with the nine strike columns.
+EXPECTED_ROWS: tuple[tuple[str, str], ...] = tuple(
+    (term, tenor) for term in EXPECTED_TERMS for tenor in EXPECTED_TENORS
+)
+
 _ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
 
 
@@ -407,6 +447,38 @@ class VCUBOTMTable:
                 return row.values[column]
         raise KeyError(f"no such row: {term!r} x {tenor!r}")
 
+    def missing_expected_rows(self) -> tuple[str, ...]:
+        """Which of :data:`EXPECTED_ROWS` this table does not hold, in order.
+
+        The measure of a complete capture. Empty means every coordinate the
+        screen is expected to carry was reconstructed -- from however many
+        screenshots it took, which this check deliberately knows nothing
+        about.
+        """
+
+        held = {(row.term, row.tenor) for row in self.rows}
+        return tuple(
+            f"{term} x {tenor}" for term, tenor in EXPECTED_ROWS if (term, tenor) not in held
+        )
+
+    def unexpected_rows(self) -> tuple[str, ...]:
+        """Rows this table holds that the expected set does not name.
+
+        A row outside the template is not a bonus: it means the screen was
+        not the one this parser knows, or a label was misread into a
+        coordinate that happens to be legal. Either way the template is not
+        widened to fit it.
+        """
+
+        expected = set(EXPECTED_ROWS)
+        return tuple(row.label for row in self.rows if (row.term, row.tenor) not in expected)
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether this table is exactly the expected surface, no more, no less."""
+
+        return not self.missing_expected_rows() and not self.unexpected_rows()
+
     def unresolved_cells(self) -> tuple[tuple[str, str], ...]:
         """Every ``(row label, strike label)`` intersection with no value."""
 
@@ -570,15 +642,33 @@ class VCUBOTMCapture:
                 )
             if self.table is None:
                 raise ValueError("a capture with no reconstructed table can never be CONFIRMED")
+            # Structural, not merely reported: an incomplete or over-wide
+            # surface cannot become a CONFIRMED capture at all, so it cannot
+            # reach the canonical store through any path (Eddy's decision on
+            # PR #186).
+            missing = self.table.missing_expected_rows()
+            unexpected = self.table.unexpected_rows()
+            if missing or unexpected:
+                raise ValueError(
+                    "a capture whose row set is not the expected surface can never be "
+                    f"CONFIRMED: {len(missing)} expected rows missing, "
+                    f"{len(unexpected)} rows outside the template"
+                )
 
     @property
     def can_confirm(self) -> bool:
-        """Whether a trader is allowed to accept this capture at all."""
+        """Whether a trader is allowed to accept this capture at all.
+
+        A partial surface is never confirmable, however cleanly it was read:
+        the merge raises a blocking error for it, and this reads the table
+        itself as well so the two can never disagree.
+        """
 
         return (
             self.review_status is VCUBCaptureStatus.PENDING_REVIEW
             and not self.blocking_errors
             and self.table is not None
+            and self.table.is_complete
         )
 
     @property
@@ -607,6 +697,12 @@ class VCUBOTMCapture:
             )
         if self.table is None:
             raise ValueError("this capture has no reconstructed table and cannot be confirmed")
+        if not self.table.is_complete:
+            raise ValueError(
+                "this capture does not hold the complete expected surface and cannot be "
+                f"confirmed: {len(self.table.missing_expected_rows())} expected rows are "
+                f"missing and {len(self.table.unexpected_rows())} are outside the template"
+            )
         return _replace_review(
             self,
             review_status=VCUBCaptureStatus.CONFIRMED,
@@ -635,6 +731,17 @@ class VCUBOTMCapture:
             "metadata": self.metadata.to_dict(),
             "table": None if self.table is None else self.table.to_dict(),
             "coverage": [item.to_dict() for item in self.coverage],
+            # The rows the expected surface names and this capture does not
+            # hold. Sent even when empty: a review that cannot say "nothing
+            # is missing" is not a review of completeness (Eddy's decision on
+            # PR #186).
+            "missing_rows": [] if self.table is None else list(
+                self.table.missing_expected_rows()
+            ),
+            "unexpected_rows": [] if self.table is None else list(
+                self.table.unexpected_rows()
+            ),
+            "expected_row_count": len(EXPECTED_ROWS),
             "blocking_errors": [issue.to_dict() for issue in self.blocking_errors],
             "warnings": [issue.to_dict() for issue in self.warnings],
             "review_status": self.review_status.value,

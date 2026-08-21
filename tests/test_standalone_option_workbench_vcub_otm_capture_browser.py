@@ -95,6 +95,12 @@ def _capture_payload(**overrides) -> dict:
             "unresolved_fields": ["currency", "curve_config", "side", "quote_date"],
         },
         "table": {"strikes": list(_STRIKES), "rows": list(_ROWS)},
+        # A complete capture in this fixture's own miniature template: the
+        # page renders whatever the server says is missing, and decides
+        # nothing about completeness itself.
+        "missing_rows": [],
+        "unexpected_rows": [],
+        "expected_row_count": len(_ROWS),
         "coverage": [
             {
                 "source_reference": "shot-a.png",
@@ -146,6 +152,24 @@ def _blocked_payload() -> dict:
             "row": "1Mo x 2Yr",
             "strike": "ATM",
             "source": "shot-b.png",
+        }
+    ]
+    payload["capture"]["can_confirm"] = False
+    return payload
+
+
+def _incomplete_payload() -> dict:
+    payload = _capture_payload()
+    payload["capture"]["missing_rows"] = ["3Mo x 2Yr", "3Mo x 5Yr"]
+    payload["capture"]["expected_row_count"] = len(_ROWS) + 2
+    payload["capture"]["blocking_errors"] = [
+        {
+            "code": "INCOMPLETE_SURFACE",
+            "message": "2 of the 5 expected Term x Tenor rows were not captured, so this is "
+            "part of the screen rather than the screen: 3Mo x 2Yr, 3Mo x 5Yr",
+            "row": None,
+            "strike": None,
+            "source": None,
         }
     ]
     payload["capture"]["can_confirm"] = False
@@ -496,6 +520,34 @@ def test_every_source_image_is_listed_in_the_provenance(page, server_url, tmp_pa
     assert "shot-b.png" in provenance
     assert "a" * 64 in provenance
     assert "b" * 64 in provenance
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_complete_capture_says_so_and_stays_confirmable(page, server_url, tmp_path) -> None:
+    _open_otm_view(page, server_url)
+    _parse(page, tmp_path)
+
+    assert not _is_actually_hidden(page, "otm-completeness")
+    title = page.eval_on_selector("#otm-completeness-title", "el => el.textContent")
+    assert title.startswith("Complete")
+    assert "is-complete" in page.get_attribute("#otm-completeness", "class")
+    assert "is-disabled" not in page.get_attribute("#otm-confirm-btn", "class")
+
+
+@_PLAYWRIGHT_SKIP
+def test_an_incomplete_capture_names_the_missing_rows_and_blocks_confirm(
+    page, server_url, tmp_path
+) -> None:
+    _open_otm_view(page, server_url)
+    _parse(page, tmp_path, _incomplete_payload())
+
+    assert "is-partial" in page.get_attribute("#otm-completeness", "class")
+    title = page.eval_on_selector("#otm-completeness-title", "el => el.textContent")
+    assert title == "Incomplete — 3 of 5 expected Term × Tenor rows captured"
+    detail = page.eval_on_selector("#otm-completeness-detail", "el => el.textContent")
+    assert "3Mo x 2Yr" in detail
+    assert "3Mo x 5Yr" in detail
+    assert "is-disabled" in page.get_attribute("#otm-confirm-btn", "class")
 
 
 @_PLAYWRIGHT_SKIP

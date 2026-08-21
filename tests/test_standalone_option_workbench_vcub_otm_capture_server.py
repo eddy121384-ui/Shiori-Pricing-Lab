@@ -170,7 +170,7 @@ def test_the_coverage_block_says_what_each_screenshot_contributed(
 
     coverage = {item["source_reference"]: item for item in payload["capture"]["coverage"]}
     assert coverage["shot-a.png"]["first_row"] == "1Mo x 1Yr"
-    assert coverage["shot-c.png"]["last_row"] == "1Yr x 10Yr"
+    assert coverage["shot-c.png"]["last_row"] == "30Yr x 30Yr"
     assert coverage["shot-b.png"]["shared_row_count"] > 0
 
 
@@ -339,16 +339,20 @@ def test_a_blocked_capture_cannot_be_confirmed_through_the_route(
 ) -> None:
     """Two screenshots that disagree about one coordinate."""
 
+    conflicting = dict(_SLICES)
+
     def _read(raw_image, *, engine=None, **kwargs):
-        if raw_image == _image_bytes("shot-a.png"):
-            return tuple(screenshot_tokens(rows=SLICE_A)), ()
-        return (
-            tuple(screenshot_tokens(rows=SLICE_B, value_overrides={(4, 2): "99.99"})),
-            (),
-        )
+        for name, rows in conflicting.items():
+            if raw_image == _image_bytes(name):
+                overrides = {(35, 2): "99.99"} if name == "shot-b.png" else {}
+                return (
+                    tuple(screenshot_tokens(rows=rows, value_overrides=overrides)),
+                    (),
+                )
+        raise AssertionError(f"unexpected image bytes: {raw_image!r}")
 
     monkeypatch.setattr(review_module, "read_tokens_from_image_bytes", _read)
-    _status, parsed = _parse(server_url, names=("shot-a.png", "shot-b.png"))
+    _status, parsed = _parse(server_url)
     assert parsed["capture"]["can_confirm"] is False
 
     status, payload = _confirm(server_url, parsed["capture_id"])

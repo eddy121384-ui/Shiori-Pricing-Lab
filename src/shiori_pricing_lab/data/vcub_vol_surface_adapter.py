@@ -197,6 +197,17 @@ def canonical_surface_from_confirmed_otm_capture(
         raise UnconfirmedCaptureError(
             "this capture exposes no accepted table, so there is nothing to store"
         )
+    if not table.is_complete:
+        # Unreachable through the review flow -- an incomplete surface cannot
+        # reach CONFIRMED at all -- and re-checked here for the same reason
+        # the screen contract below is: this function is the last gate before
+        # the canonical store, and what it files must be the whole screen
+        # (Eddy's decision on PR #186).
+        raise UnconfirmedCaptureError(
+            "this capture does not hold the complete expected surface: "
+            f"{len(table.missing_expected_rows())} expected rows are missing and "
+            f"{len(table.unexpected_rows())} are outside the template"
+        )
     metadata = capture.metadata
     # All three are blocking errors upstream, so a CONFIRMED capture has
     # them. They are re-checked because they are what makes the numbers

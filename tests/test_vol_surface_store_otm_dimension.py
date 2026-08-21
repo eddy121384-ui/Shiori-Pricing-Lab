@@ -25,6 +25,9 @@ import sqlite3
 import pytest
 from test_bloomberg_vcub_otm_template import (
     ROW_LABELS,
+    SLICE_A,
+    SLICE_B,
+    SLICE_C,
     STRIKE_LABELS,
     _synthetic_value,
     _three_slices,
@@ -197,12 +200,16 @@ def test_an_exact_retry_of_one_multi_image_capture_is_idempotent(store) -> None:
 def test_the_same_capture_with_different_content_fails_closed(store) -> None:
     store.save_confirmed_surface(otm_surface())
 
+    # The same three covering screenshots, one cell of the last one reading
+    # differently -- a complete surface, so only its *content* differs.
     changed = otm_surface(
         reads=[
-            read(screenshot_tokens(rows=range(0, 6)), "shot-a.png", "a"),
-            read(screenshot_tokens(rows=range(4, 10)), "shot-b.png", "b"),
+            read(screenshot_tokens(rows=SLICE_A), "shot-a.png", "a"),
+            read(screenshot_tokens(rows=SLICE_B), "shot-b.png", "b"),
             read(
-                screenshot_tokens(rows=range(8, 12), value_overrides={(11, 8): "1.23"}),
+                screenshot_tokens(
+                    rows=SLICE_C, value_overrides={(len(ROW_LABELS) - 1, 8): "1.23"}
+                ),
                 "shot-c.png",
                 "c",
             ),

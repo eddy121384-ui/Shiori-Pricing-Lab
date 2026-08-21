@@ -36,6 +36,16 @@ overlap is an integrity check rather than a nuisance:
 * screenshots that do not overlap at all cannot prove that no row fell
   between them, so the capture is refused rather than presented as complete.
 
+**Completeness is measured against the screen, not the file count.** The
+merged surface must hold exactly
+:data:`~shiori_pricing_lab.data.bloomberg_vcub_otm_capture.EXPECTED_ROWS` --
+the 91 ``Term x Tenor`` coordinates this screen is known to carry. A row
+short of that is a partial capture however cleanly each image read, and a row
+outside it is not this screen; both block, and both name the coordinates
+involved. How many screenshots it took to get there is irrelevant: one that
+holds the whole surface passes, and four that between them hold half of it do
+not.
+
 **What this parser optimises for.** Not OCR recall: the failure that matters
 is a plausible number landing in the wrong ``Term x Tenor x Strike``
 coordinate, because that survives visual review far more easily than a hole
@@ -58,6 +68,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
     VCUBTextToken,
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
+    EXPECTED_ROWS,
     NORMAL_VOL_SKEW_TYPE,
     OTM_METADATA_FIELDS,
     OTM_SWAPTIONS_SABR_TAB,
@@ -836,7 +847,51 @@ def merge_vcub_otm_reads(reads: Sequence[VCUBOTMImageRead]) -> VCUBOTMCapture:
     except ValueError as exc:
         issues.block("MERGED_TABLE_REFUSED", f"the merged table was refused: {exc}")
         return _capture(reads, metadata, None, coverage, issues)
+    _check_expected_coverage(table, issues)
     return _capture(reads, metadata, table, coverage, issues)
+
+
+def _check_expected_coverage(table: VCUBOTMTable, issues: _Issues) -> None:
+    """Refuse a merged surface that is not the one this screen is known to hold.
+
+    The completeness invariant, checked against the screen's own semantic row
+    set rather than against how many screenshots were supplied (Eddy's
+    decision on PR #186). A capture short of the expected rows is partial
+    however cleanly each image read, and a capture carrying rows the template
+    does not name is not this screen -- both block, and both say exactly
+    which coordinates are involved.
+    """
+
+    missing = table.missing_expected_rows()
+    if missing:
+        issues.block(
+            "INCOMPLETE_SURFACE",
+            f"{len(missing)} of the {len(EXPECTED_ROWS)} expected Term x Tenor rows were not "
+            f"captured, so this is part of the screen rather than the screen: "
+            f"{_named(missing)}. Capture the rest -- in the same sitting, overlapping what "
+            "you already have -- and parse the whole set again",
+        )
+    for label in table.unexpected_rows():
+        issues.block(
+            "UNEXPECTED_ROW",
+            f"{label} is not a row this screen is known to carry, so either the capture is "
+            "not the expected screen or a row label was misread; the expected row set is not "
+            "widened to fit it",
+            row=label,
+        )
+
+
+#: How many coordinates a blocking message names before it summarises the
+#: rest. Long enough to act on, short enough to read -- the complete list is
+#: on the capture itself, which is what the review renders.
+_NAMED_ROW_LIMIT = 12
+
+
+def _named(labels: Sequence[str]) -> str:
+    if len(labels) <= _NAMED_ROW_LIMIT:
+        return ", ".join(labels)
+    shown = ", ".join(labels[:_NAMED_ROW_LIMIT])
+    return f"{shown} and {len(labels) - _NAMED_ROW_LIMIT} more"
 
 
 def _merge_metadata(

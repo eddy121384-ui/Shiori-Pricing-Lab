@@ -27,6 +27,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
     VCUBTextToken,
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
+    EXPECTED_ROWS,
     NORMAL_VOL_SKEW_TYPE,
     OTM_METADATA_FIELDS,
     OTM_SWAPTIONS_SABR_TAB,
@@ -57,22 +58,11 @@ STRIKE_LABELS = (
     "200bps",
 )
 
-#: Twelve ``Term x Tenor`` rows in the screen's own order, spanning three
-#: terms so a screenshot can be sliced anywhere without losing a whole term.
-ROW_LABELS = (
-    ("1Mo", "1Yr"),
-    ("1Mo", "2Yr"),
-    ("1Mo", "5Yr"),
-    ("1Mo", "10Yr"),
-    ("3Mo", "1Yr"),
-    ("3Mo", "2Yr"),
-    ("3Mo", "5Yr"),
-    ("3Mo", "10Yr"),
-    ("1Yr", "1Yr"),
-    ("1Yr", "2Yr"),
-    ("1Yr", "5Yr"),
-    ("1Yr", "10Yr"),
-)
+#: The screen's own complete row set: the 91 ``Term x Tenor`` coordinates
+#: the parser is required to reconstruct before a capture may be confirmed.
+#: Taken from the production constant rather than restated, so a fixture can
+#: never quietly disagree with the template the check reads.
+ROW_LABELS = EXPECTED_ROWS
 
 _HEADER_Y = 110.0
 _FIRST_ROW_Y = 140.0
@@ -93,7 +83,7 @@ def _synthetic_value(row_index: int, column_index: int) -> float:
     the mapping only for positive numbers.
     """
 
-    return round(-4.0 + row_index * 1.5 + column_index * 0.25, 2)
+    return round(-4.0 + row_index * 2.5 + column_index * 0.25, 2)
 
 
 def _token(
@@ -205,11 +195,18 @@ def matrix_tokens(
         tokens.append(
             _token(label, right=_column_right(column_index), y_center=_HEADER_Y)
         )
-    for row_index in row_indices:
+    # Drawn at their position in *this* screenshot, not at their index in the
+    # whole table: a screenshot of rows 40-70 starts at the top of its own
+    # crop, and a screen that genuinely does not carry a row simply draws the
+    # rows it does have one after another. Laying them out by table index
+    # instead would leave a gap wherever a row was left out, which the pitch
+    # check reads -- correctly -- as a row label the reader missed, and no
+    # test of *coverage* could then be told apart from a test of geometry.
+    for position, row_index in enumerate(row_indices):
         term, tenor = ROW_LABELS[row_index]
         if row_index not in omit_row_labels:
             tokens.extend(
-                _word_row((term, "X", tenor), _row_y(row_index), left=_ANCHOR_LEFT)
+                _word_row((term, "X", tenor), _row_y(position), left=_ANCHOR_LEFT)
             )
         for column_index in range(len(strike_labels)):
             if (row_index, column_index) in omit_cells:
@@ -219,7 +216,7 @@ def matrix_tokens(
                 f"{_synthetic_value(row_index, column_index):.2f}",
             )
             tokens.append(
-                _token(text, right=_column_right(column_index), y_center=_row_y(row_index))
+                _token(text, right=_column_right(column_index), y_center=_row_y(position))
             )
     return tokens
 
@@ -282,9 +279,17 @@ def test_the_first_and_last_coordinates_are_exact() -> None:
     table = read(screenshot_tokens()).table
     assert table is not None
 
-    assert table.value_at("1Mo", "1Yr", "-200bps") == pytest.approx(_synthetic_value(0, 0))
-    assert table.value_at("1Mo", "1Yr", "ATM") == pytest.approx(_synthetic_value(0, 4))
-    assert table.value_at("1Yr", "10Yr", "200bps") == pytest.approx(
+    first_term, first_tenor = ROW_LABELS[0]
+    last_term, last_tenor = ROW_LABELS[-1]
+    assert (first_term, first_tenor) == ("1Mo", "1Yr")
+    assert (last_term, last_tenor) == ("30Yr", "30Yr")
+    assert table.value_at(first_term, first_tenor, "-200bps") == pytest.approx(
+        _synthetic_value(0, 0)
+    )
+    assert table.value_at(first_term, first_tenor, "ATM") == pytest.approx(
+        _synthetic_value(0, 4)
+    )
+    assert table.value_at(last_term, last_tenor, "200bps") == pytest.approx(
         _synthetic_value(len(ROW_LABELS) - 1, len(STRIKE_LABELS) - 1)
     )
 
@@ -313,12 +318,13 @@ def test_a_missing_cell_does_not_shift_its_neighbours() -> None:
     table = read(screenshot_tokens(omit_cells=frozenset({(5, 4)}))).table
     assert table is not None
 
-    assert table.value_at("3Mo", "2Yr", "ATM") is None
-    assert table.value_at("3Mo", "2Yr", "-25bps") == pytest.approx(_synthetic_value(5, 3))
-    assert table.value_at("3Mo", "2Yr", "25bps") == pytest.approx(_synthetic_value(5, 5))
+    term, tenor = ROW_LABELS[5]
+    assert table.value_at(term, tenor, "ATM") is None
+    assert table.value_at(term, tenor, "-25bps") == pytest.approx(_synthetic_value(5, 3))
+    assert table.value_at(term, tenor, "25bps") == pytest.approx(_synthetic_value(5, 5))
     # And the rows either side are untouched.
-    assert table.value_at("3Mo", "1Yr", "ATM") == pytest.approx(_synthetic_value(4, 4))
-    assert table.value_at("3Mo", "5Yr", "ATM") == pytest.approx(_synthetic_value(6, 4))
+    assert table.value_at(*ROW_LABELS[4], "ATM") == pytest.approx(_synthetic_value(4, 4))
+    assert table.value_at(*ROW_LABELS[6], "ATM") == pytest.approx(_synthetic_value(6, 4))
 
 
 def test_a_whole_missing_row_of_values_does_not_shift_the_rows_below_it() -> None:
@@ -327,7 +333,7 @@ def test_a_whole_missing_row_of_values_does_not_shift_the_rows_below_it() -> Non
     assert table is not None
 
     assert all(value is None for value in table.rows[6].values)
-    assert table.value_at("3Mo", "10Yr", "-200bps") == pytest.approx(_synthetic_value(7, 0))
+    assert table.value_at(*ROW_LABELS[7], "-200bps") == pytest.approx(_synthetic_value(7, 0))
 
 
 def test_a_dropped_interior_row_label_fails_the_capture_closed() -> None:
@@ -403,17 +409,11 @@ def test_an_unreadable_strike_header_blocks_rather_than_shifting_columns() -> No
 
 
 def test_row_labels_out_of_order_fail_closed() -> None:
-    tokens = [
-        token
-        for token in screenshot_tokens()
-        if not (token.text == "3Mo" and token.left < _FIRST_COLUMN_RIGHT)
-    ]
-    # Put a later term where an earlier one was drawn.
-    tokens += [
-        _left_aligned("5Yr", left=_ANCHOR_LEFT, y_center=_row_y(row_index))
-        for row_index in (4, 5, 6, 7)
-    ]
-    parsed = read(tokens)
+    """The screen's rows must increase in term, then in tenor."""
+
+    swapped = list(range(len(ROW_LABELS)))
+    swapped[3], swapped[4] = swapped[4], swapped[3]
+    parsed = read(screenshot_tokens(rows=swapped))
 
     assert "ROW_LABELS_NOT_MONOTONIC" in codes(parsed.blocking_errors)
 
@@ -558,12 +558,16 @@ def test_a_missing_corner_anchor_blocks_and_reconstructs_nothing() -> None:
 # Several screenshots: one capture
 # ---------------------------------------------------------------------------
 
-#: Three vertically overlapping slices of the same table, the way an
-#: operator takes them: each one starts a couple of rows before the previous
-#: one ended.
-SLICE_A = range(0, 6)
-SLICE_B = range(4, 10)
-SLICE_C = range(8, 12)
+#: Three vertically overlapping slices covering the whole table, the way an
+#: operator takes them: each one starts a few rows before the previous one
+#: ended, and together they hold every expected row.
+SLICE_A = range(0, 38)
+SLICE_B = range(34, 70)
+SLICE_C = range(66, len(ROW_LABELS))
+
+#: A row each pair of adjacent slices both shows, and a row only one shows.
+OVERLAP_AB = 35
+OVERLAP_BC = 67
 
 
 def _three_slices() -> list:
@@ -612,8 +616,11 @@ def test_the_capture_records_what_each_screenshot_contributed() -> None:
     coverage = {item.source_reference: item for item in capture.coverage}
     assert set(coverage) == {"shot-a.png", "shot-b.png", "shot-c.png"}
     assert coverage["shot-a.png"].row_labels[0] == "1Mo x 1Yr"
-    assert set(coverage["shot-a.png"].shared_row_labels) == {"3Mo x 1Yr", "3Mo x 2Yr"}
-    assert set(coverage["shot-c.png"].shared_row_labels) == {"1Yr x 1Yr", "1Yr x 2Yr"}
+    assert coverage["shot-c.png"].row_labels[-1] == "30Yr x 30Yr"
+    # Exactly the rows two screenshots both showed, named as such.
+    shared_ab = {f"{term} x {tenor}" for term, tenor in ROW_LABELS[34:38]}
+    assert set(coverage["shot-a.png"].shared_row_labels) == shared_ab
+    assert shared_ab <= set(coverage["shot-b.png"].shared_row_labels)
 
 
 def test_one_capture_session_keeps_every_source_image() -> None:
@@ -627,36 +634,34 @@ def test_one_capture_session_keeps_every_source_image() -> None:
     assert len({source.source_image_sha256 for source in capture.sources}) == 3
 
 
-def test_two_screenshots_disagreeing_on_a_value_block_the_whole_capture() -> None:
-    reads = [
+def _slices_with(read_b_overrides: dict) -> list:
+    """The three covering slices, with one of them reading a cell differently."""
+
+    return [
         read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
         read(
-            screenshot_tokens(rows=SLICE_B, value_overrides={(4, 2): "99.99"}),
+            screenshot_tokens(rows=SLICE_B, value_overrides=read_b_overrides),
             reference="shot-b.png",
             digest_seed="b",
         ),
+        read(screenshot_tokens(rows=SLICE_C), reference="shot-c.png", digest_seed="c"),
     ]
-    capture = merge_vcub_otm_reads(reads)
+
+
+def test_two_screenshots_disagreeing_on_a_value_block_the_whole_capture() -> None:
+    capture = merge_vcub_otm_reads(_slices_with({(OVERLAP_AB, 2): "99.99"}))
 
     conflicts = [
         issue for issue in capture.blocking_errors if issue.code == "OVERLAP_VALUE_CONFLICT"
     ]
     assert len(conflicts) == 1
-    assert conflicts[0].row == "3Mo x 1Yr"
+    assert conflicts[0].row == f"{ROW_LABELS[OVERLAP_AB][0]} x {ROW_LABELS[OVERLAP_AB][1]}"
     assert conflicts[0].strike == "-50bps"
     assert capture.can_confirm is False
 
 
 def test_a_conflicting_overlap_never_prefers_one_screenshot() -> None:
-    reads = [
-        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
-        read(
-            screenshot_tokens(rows=SLICE_B, value_overrides={(4, 2): "99.99"}),
-            reference="shot-b.png",
-            digest_seed="b",
-        ),
-    ]
-    capture = merge_vcub_otm_reads(reads)
+    capture = merge_vcub_otm_reads(_slices_with({(OVERLAP_AB, 2): "99.99"}))
 
     with pytest.raises(ValueError, match="blocking errors"):
         capture.confirm(reviewed_by="Eddy", reviewed_at="2026-08-21T09:31:00Z")
@@ -665,23 +670,25 @@ def test_a_conflicting_overlap_never_prefers_one_screenshot() -> None:
 def test_a_cell_one_screenshot_missed_is_filled_from_the_one_that_read_it() -> None:
     reads = [
         read(
-            screenshot_tokens(rows=SLICE_A, omit_cells=frozenset({(4, 6)})),
+            screenshot_tokens(rows=SLICE_A, omit_cells=frozenset({(OVERLAP_AB, 6)})),
             reference="shot-a.png",
             digest_seed="a",
         ),
         read(screenshot_tokens(rows=SLICE_B), reference="shot-b.png", digest_seed="b"),
+        read(screenshot_tokens(rows=SLICE_C), reference="shot-c.png", digest_seed="c"),
     ]
     capture = merge_vcub_otm_reads(reads)
 
     assert capture.blocking_errors == ()
+    label = f"{ROW_LABELS[OVERLAP_AB][0]} x {ROW_LABELS[OVERLAP_AB][1]}"
     assert capture.table is not None
-    assert capture.table.value_at("3Mo", "1Yr", "50bps") == pytest.approx(
-        _synthetic_value(4, 6)
+    assert capture.table.value_at(*ROW_LABELS[OVERLAP_AB], "50bps") == pytest.approx(
+        _synthetic_value(OVERLAP_AB, 6)
     )
     partials = [
         issue for issue in capture.warnings if issue.code == "OVERLAP_PARTIAL_CELL"
     ]
-    assert [(issue.row, issue.strike) for issue in partials] == [("3Mo x 1Yr", "50bps")]
+    assert [(issue.row, issue.strike) for issue in partials] == [(label, "50bps")]
 
 
 def test_screenshots_disagreeing_on_the_strike_axis_block() -> None:
@@ -763,14 +770,7 @@ def test_one_screenshot_is_a_perfectly_good_capture_session() -> None:
 
 
 def test_a_screenshot_that_failed_its_own_topology_blocks_the_session() -> None:
-    broken = read(
-        screenshot_tokens(rows=SLICE_B, value_overrides={(5, 1): "8O.15"}),
-        reference="shot-b.png",
-        digest_seed="b",
-    )
-    capture = merge_vcub_otm_reads(
-        [read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"), broken]
-    )
+    capture = merge_vcub_otm_reads(_slices_with({(SLICE_B[1], 1): "8O.15"}))
 
     blockers = [
         issue for issue in capture.blocking_errors if issue.code == "MALFORMED_NUMERIC_CELL"
@@ -801,6 +801,137 @@ def test_a_rejected_capture_accepts_nothing() -> None:
 def test_an_empty_capture_session_is_refused() -> None:
     with pytest.raises(ValueError, match="at least one screenshot"):
         merge_vcub_otm_reads([])
+
+
+# ---------------------------------------------------------------------------
+# Completeness: the whole expected surface, however many screenshots it took
+# ---------------------------------------------------------------------------
+
+
+def _missing_from(capture) -> tuple[str, ...]:
+    assert capture.table is not None
+    return capture.table.missing_expected_rows()
+
+
+def test_the_expected_surface_is_the_screens_own_row_set() -> None:
+    """13 terms x 7 tenors, and the check reads exactly that."""
+
+    assert len(EXPECTED_ROWS) == 91
+    assert EXPECTED_ROWS[0] == ("1Mo", "1Yr")
+    assert EXPECTED_ROWS[-1] == ("30Yr", "30Yr")
+
+
+def test_a_complete_capture_holds_every_expected_row_and_may_be_confirmed() -> None:
+    capture = merge_vcub_otm_reads(_three_slices())
+
+    assert capture.blocking_errors == ()
+    assert _missing_from(capture) == ()
+    assert capture.table is not None
+    assert capture.table.is_complete is True
+    assert len(capture.table.rows) == len(EXPECTED_ROWS) == 91
+    assert capture.can_confirm is True
+
+
+def test_one_screenshot_holding_the_whole_surface_may_be_confirmed() -> None:
+    """The screenshot count is not the contract -- the row set is."""
+
+    capture = merge_vcub_otm_reads([read(screenshot_tokens())])
+
+    assert len(capture.sources) == 1
+    assert capture.blocking_errors == ()
+    assert capture.can_confirm is True
+
+
+def test_a_missing_middle_row_blocks_and_names_it() -> None:
+    absent = 45
+    rows = [index for index in range(len(ROW_LABELS)) if index != absent]
+    capture = merge_vcub_otm_reads([read(screenshot_tokens(rows=rows))])
+
+    label = f"{ROW_LABELS[absent][0]} x {ROW_LABELS[absent][1]}"
+    assert _missing_from(capture) == (label,)
+    blockers = [
+        issue for issue in capture.blocking_errors if issue.code == "INCOMPLETE_SURFACE"
+    ]
+    assert len(blockers) == 1
+    assert label in blockers[0].message
+    assert capture.can_confirm is False
+
+
+def test_a_missing_first_row_blocks_and_names_it() -> None:
+    capture = merge_vcub_otm_reads(
+        [read(screenshot_tokens(rows=range(1, len(ROW_LABELS))))]
+    )
+
+    assert _missing_from(capture) == ("1Mo x 1Yr",)
+    assert "INCOMPLETE_SURFACE" in codes(capture.blocking_errors)
+    assert capture.can_confirm is False
+
+
+def test_a_missing_last_row_blocks_and_names_it() -> None:
+    capture = merge_vcub_otm_reads(
+        [read(screenshot_tokens(rows=range(len(ROW_LABELS) - 1)))]
+    )
+
+    assert _missing_from(capture) == ("30Yr x 30Yr",)
+    assert "INCOMPLETE_SURFACE" in codes(capture.blocking_errors)
+    assert capture.can_confirm is False
+
+
+def test_screenshots_that_overlap_correctly_but_cover_half_the_screen_still_block() -> None:
+    """A clean, well-overlapped, *partial* session is exactly the case a
+    screenshot-count rule would have waved through."""
+
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(screenshot_tokens(rows=SLICE_B), reference="shot-b.png", digest_seed="b"),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    assert "IMAGE_COVERAGE_GAP" not in codes(capture.blocking_errors)  # they do overlap
+    assert "INCOMPLETE_SURFACE" in codes(capture.blocking_errors)
+    covered = len(set(SLICE_A) | set(SLICE_B))
+    assert len(_missing_from(capture)) == len(EXPECTED_ROWS) - covered
+    assert _missing_from(capture)[0] == "15Yr x 1Yr"
+    assert capture.can_confirm is False
+
+
+def test_neither_the_number_of_screenshots_nor_their_order_decides_completeness() -> None:
+    forwards = merge_vcub_otm_reads(_three_slices())
+    backwards = merge_vcub_otm_reads(list(reversed(_three_slices())))
+    one_image = merge_vcub_otm_reads([read(screenshot_tokens())])
+
+    assert _missing_from(forwards) == _missing_from(backwards) == _missing_from(one_image) == ()
+    assert forwards.can_confirm is backwards.can_confirm is one_image.can_confirm is True
+
+
+def test_a_row_outside_the_expected_set_blocks_rather_than_widening_it() -> None:
+    tokens = screenshot_tokens()
+    # A label the template does not name, drawn one row below the last.
+    tokens += _word_row(
+        ("40Yr", "X", "30Yr"), _row_y(len(ROW_LABELS)), left=_ANCHOR_LEFT
+    )
+    tokens += [
+        _token("1.00", right=_column_right(column), y_center=_row_y(len(ROW_LABELS)))
+        for column in range(len(STRIKE_LABELS))
+    ]
+    capture = merge_vcub_otm_reads([read(tokens)])
+
+    unexpected = [
+        issue for issue in capture.blocking_errors if issue.code == "UNEXPECTED_ROW"
+    ]
+    assert [issue.row for issue in unexpected] == ["40Yr x 30Yr"]
+    assert capture.can_confirm is False
+
+
+def test_an_incomplete_capture_can_never_be_confirmed_even_by_hand() -> None:
+    """Structural, not merely reported: the state machine refuses it too."""
+
+    capture = merge_vcub_otm_reads(
+        [read(screenshot_tokens(rows=range(len(ROW_LABELS) - 1)))]
+    )
+
+    with pytest.raises(ValueError, match="blocking errors"):
+        capture.confirm(reviewed_by="Eddy", reviewed_at="2026-08-21T09:31:00Z")
 
 
 def test_the_otm_capture_slice_never_reaches_the_pricing_package() -> None:
