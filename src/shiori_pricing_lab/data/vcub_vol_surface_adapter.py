@@ -38,6 +38,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
     SPREAD_DISPLAY_MODE,
     VCUBOTMCapture,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_screen_reader import normalise_text
 from shiori_pricing_lab.data.vol_surface import (
     CanonicalVolSurface,
     StrikeDimension,
@@ -219,9 +220,11 @@ def canonical_surface_from_confirmed_otm_capture(
             f"{VolSurfaceType.OTM_SWAPTION_SABR.value}; this capture's tab is "
             f"{metadata.tab!r}"
         )
-    if metadata.vol_type != NORMAL_VOL_SKEW_TYPE or metadata.display_mode != (
-        SPREAD_DISPLAY_MODE
-    ):
+    vol_type_matches = (
+        metadata.vol_type is not None
+        and normalise_text(metadata.vol_type).casefold() == NORMAL_VOL_SKEW_TYPE.casefold()
+    )
+    if not vol_type_matches or metadata.display_mode != SPREAD_DISPLAY_MODE:
         raise UnconfirmedCaptureError(
             f"this adapter only files a {NORMAL_VOL_SKEW_TYPE!r} screen displayed as "
             f"{SPREAD_DISPLAY_MODE!r}, whose ATM column is an absolute vol and whose other "
