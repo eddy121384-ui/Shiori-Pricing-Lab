@@ -53,7 +53,7 @@ import json
 import math
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -65,7 +65,9 @@ from shiori_pricing_lab.data.vol_surface import (
     VolSurfaceIdentity,
     VolSurfacePoint,
     VolSurfaceProvenance,
+    VolSurfaceSourceImage,
     VolSurfaceType,
+    VolValueKind,
 )
 
 #: Bumped whenever the tables below change shape, or whenever the derived
@@ -96,6 +98,23 @@ from shiori_pricing_lab.data.vol_surface import (
 #: There is no migration for any of the above -- the store is local runtime
 #: state rebuilt by re-confirming a capture, and this branch has never been
 #: merged.
+#:
+#: **Issue #185 deliberately does not bump this.** It adds a
+#: ``vol_surface_point.value_kind`` column and a ``vol_surface_source_image``
+#: table, both purely additive and both applied to an existing version-3
+#: database by :meth:`VolSurfaceStore._ensure_schema` -- the column with a
+#: default that reproduces exactly what a version-3 row already meant, and
+#: the table empty for every capture that had one image, which is every
+#: capture written before this build. Neither the ``surface_id`` nor the
+#: ``content_fingerprint`` formula changed for such a surface: the two new
+#: model fields serialise only when they say something the older shape could
+#: not (see ``vol_surface``). So a version-3 row still rebuilds into exactly
+#: the surface it stored, which is the property this gate exists to protect,
+#: and refusing those databases would destroy ATM surfaces Issue #185
+#: requires to stay readable. What version 3 no longer promises is the other
+#: direction: a *multi-image* surface written by this build is not readable
+#: by a build that predates it, which fails closed on the fingerprint rather
+#: than being misread.
 SCHEMA_VERSION = 3
 
 #: Where the workbench keeps its store by default: local runtime state under
@@ -156,7 +175,22 @@ _SCHEMA_STATEMENTS = (
         strike_offset    REAL,
         volatility       REAL,
         volatility_sign  INTEGER NOT NULL DEFAULT 1 CHECK (volatility_sign IN (-1, 1)),
+        value_kind       TEXT    NOT NULL DEFAULT 'ABSOLUTE_VOL',
         PRIMARY KEY (surface_id, point_index)
+    )
+    """,
+    # One row per image of a capture that had *more than one* (Issue #185).
+    # Absent for a single-image capture, whose one image the ``vol_surface``
+    # row already names in full -- which is what makes this table additive to
+    # a version-3 database rather than a reshaping of it.
+    """
+    CREATE TABLE IF NOT EXISTS vol_surface_source_image (
+        surface_id          TEXT    NOT NULL REFERENCES vol_surface(surface_id),
+        image_index         INTEGER NOT NULL,
+        source_reference    TEXT    NOT NULL,
+        source_image_sha256 TEXT    NOT NULL,
+        source_image_bytes  INTEGER NOT NULL,
+        PRIMARY KEY (surface_id, image_index)
     )
     """,
     """
@@ -337,6 +371,35 @@ def _volatility_from_row(row: sqlite3.Row) -> float | None:
     return math.copysign(float(value), row["volatility_sign"])
 
 
+#: Columns added to an existing table after its version was settled, as
+#: ``(table, column, definition)``. Only a column whose default reproduces
+#: exactly what a row already meant may be listed here: that is what makes
+#: adding it to an existing database a no-op for every surface stored in it
+#: (see :data:`SCHEMA_VERSION`). Anything that changes what an existing row
+#: means needs a version bump instead.
+_ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("vol_surface_point", "value_kind", "TEXT NOT NULL DEFAULT 'ABSOLUTE_VOL'"),
+)
+
+
+def _add_missing_columns(connection: sqlite3.Connection) -> None:
+    """Bring an older database's tables up to this build's column set.
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves an existing table exactly as it
+    is, so a column added to the statement above never reaches a database
+    that already has the table -- the next insert would fail on a missing
+    column instead (the version-1 case in :data:`SCHEMA_VERSION`). Runs
+    inside :meth:`VolSurfaceStore._ensure_schema`'s write transaction.
+    """
+
+    for table, column, definition in _ADDITIVE_COLUMNS:
+        existing = {
+            row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+        }
+        if existing and column not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 class VolSurfaceStore:
     """A local SQLite database of confirmed volatility surfaces.
 
@@ -398,6 +461,7 @@ class VolSurfaceStore:
                     )
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            _add_missing_columns(connection)
             if row is None:
                 connection.execute(
                     "INSERT INTO schema_version (id, version) VALUES (1, ?)", (SCHEMA_VERSION,)
@@ -458,6 +522,9 @@ class VolSurfaceStore:
                     )
                 self._insert_surface(connection, surface, fingerprint)
                 self._insert_points(connection, surface_id, surface.points)
+                self._insert_source_images(
+                    connection, surface_id, surface.provenance.source_images
+                )
             except Exception:
                 try:
                     connection.execute("ROLLBACK")
@@ -518,8 +585,8 @@ class VolSurfaceStore:
     ) -> None:
         connection.executemany(
             "INSERT INTO vol_surface_point (surface_id, point_index, expiry, underlying_tenor, "
-            "strike_dimension, strike_offset, volatility, volatility_sign) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "strike_dimension, strike_offset, volatility, volatility_sign, value_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     surface_id,
@@ -530,8 +597,34 @@ class VolSurfaceStore:
                     point.strike_offset,
                     point.volatility,
                     _sign_of(point.volatility),
+                    point.value_kind.value,
                 )
                 for index, point in enumerate(points)
+            ],
+        )
+
+    def _insert_source_images(
+        self,
+        connection: sqlite3.Connection,
+        surface_id: str,
+        images: Sequence[VolSurfaceSourceImage],
+    ) -> None:
+        """Record the images of a capture that had more than one.
+
+        A single-image capture writes nothing here: the ``vol_surface`` row
+        already names its one image in full, and a row that merely repeated
+        it would be a second place for the same fact to drift from.
+        """
+
+        if len(images) < 2:
+            return
+        connection.executemany(
+            "INSERT INTO vol_surface_source_image (surface_id, image_index, "
+            "source_reference, source_image_sha256, source_image_bytes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (surface_id, index, image.source_reference, image.sha256, image.size_bytes)
+                for index, image in enumerate(images)
             ],
         )
 
@@ -571,10 +664,16 @@ class VolSurfaceStore:
         surface_id = row["surface_id"]
         point_rows = connection.execute(
             "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility, "
-            "volatility_sign FROM vol_surface_point WHERE surface_id = ? ORDER BY point_index",
+            "volatility_sign, value_kind FROM vol_surface_point WHERE surface_id = ? "
+            "ORDER BY point_index",
             (surface_id,),
         ).fetchall()
-        surface = _surface_from_rows(row, point_rows)
+        image_rows = connection.execute(
+            "SELECT source_reference, source_image_sha256, source_image_bytes "
+            "FROM vol_surface_source_image WHERE surface_id = ? ORDER BY image_index",
+            (surface_id,),
+        ).fetchall()
+        surface = _surface_from_rows(row, point_rows, image_rows)
         stored_fingerprint = row["content_fingerprint"]
         if surface.content_fingerprint != stored_fingerprint:
             raise VolSurfaceIntegrityError(
@@ -649,7 +748,11 @@ class VolSurfaceStore:
         )
 
 
-def _surface_from_rows(row: sqlite3.Row, point_rows: Iterable[sqlite3.Row]) -> CanonicalVolSurface:
+def _surface_from_rows(
+    row: sqlite3.Row,
+    point_rows: Iterable[sqlite3.Row],
+    image_rows: Iterable[sqlite3.Row] = (),
+) -> CanonicalVolSurface:
     """Rebuild the typed surface from its stored rows.
 
     Every invariant is re-checked on the way out, because the dataclasses do
@@ -678,6 +781,17 @@ def _surface_from_rows(row: sqlite3.Row, point_rows: Iterable[sqlite3.Row]) -> C
         parser_version=row["parser_version"],
         confirmed_by=row["confirmed_by"],
         confirmed_at=row["confirmed_at"],
+        # Empty for a single-image capture -- including every surface stored
+        # before Issue #185 -- which the model then fills in from the three
+        # fields above, reproducing exactly the provenance that was saved.
+        source_images=tuple(
+            VolSurfaceSourceImage(
+                source_reference=image["source_reference"],
+                sha256=image["source_image_sha256"],
+                size_bytes=int(image["source_image_bytes"]),
+            )
+            for image in image_rows
+        ),
     )
     points = tuple(
         VolSurfacePoint(
@@ -686,6 +800,7 @@ def _surface_from_rows(row: sqlite3.Row, point_rows: Iterable[sqlite3.Row]) -> C
             volatility=_volatility_from_row(point),
             strike_dimension=StrikeDimension(point["strike_dimension"]),
             strike_offset=point["strike_offset"],
+            value_kind=VolValueKind(point["value_kind"]),
         )
         for point in point_rows
     )
