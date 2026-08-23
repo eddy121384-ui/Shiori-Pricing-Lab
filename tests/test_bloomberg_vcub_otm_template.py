@@ -709,6 +709,48 @@ def test_screenshots_disagreeing_on_the_strike_axis_block() -> None:
     assert capture.table is None
 
 
+def test_strike_headers_with_different_casing_do_not_conflict() -> None:
+    """OCR casing on the ``bps`` suffix must not discard an otherwise
+    agreeing strike axis and its whole merged table (Codex review, PR
+    #186)."""
+
+    uppercase_labels = [label.upper() for label in STRIKE_LABELS]
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(
+            screenshot_tokens(rows=SLICE_B, strike_labels=uppercase_labels),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+        read(screenshot_tokens(rows=SLICE_C), reference="shot-c.png", digest_seed="c"),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    assert "STRIKE_HEADERS_DISAGREE" not in codes(capture.blocking_errors)
+    assert capture.table is not None
+    assert capture.table.strike_labels == STRIKE_LABELS
+    assert capture.can_confirm is True
+
+
+def test_a_genuinely_different_strike_axis_still_conflicts() -> None:
+    """The casing fix must not weaken a real strike-axis disagreement."""
+
+    different_offsets = list(STRIKE_LABELS)
+    different_offsets[0] = "-150bps"
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(
+            screenshot_tokens(rows=SLICE_B, strike_labels=different_offsets),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    assert "STRIKE_HEADERS_DISAGREE" in codes(capture.blocking_errors)
+    assert capture.table is None
+
+
 def test_screenshots_disagreeing_on_metadata_block() -> None:
     other_source = screenshot_tokens(rows=SLICE_B, chrome={"source": "CMPN▾"})
     reads = [

@@ -1014,19 +1014,42 @@ def _merge_vol_type(values: set[str], issues: _Issues) -> str | None:
     return sorted(values)[0]
 
 
+def _canonical_strike_label(offset_bp: float | None) -> str:
+    """The one spelling this template writes for a column's own offset.
+
+    A pure function of ``offset_bp`` -- never of any screenshot's OCR text
+    -- so it is the same string regardless of which screenshot supplied it
+    or how that screenshot happened to case ``bps``.
+    """
+
+    if offset_bp is None:
+        return _ATM_STRIKE_LABEL
+    return f"{int(offset_bp)}bps"
+
+
 def _merge_strike_axis(
     readable: Sequence[VCUBOTMImageRead], issues: _Issues
 ) -> list[VCUBOTMStrike] | None:
-    """The one strike axis every screenshot must agree on, or ``None``."""
+    """The one strike axis every screenshot must agree on, or ``None``.
+
+    Compared by parsed ``offset_bp`` -- the column's real coordinate -- not
+    by the header's own OCR text: ``-200bps`` and ``-200BPS`` name the same
+    column, and a casing difference between screenshots must not discard an
+    otherwise-agreeing axis and its whole merged table. The merged strikes
+    carry :func:`_canonical_strike_label`, so the result is the same string
+    regardless of which screenshot's casing was read first (Codex review,
+    PR #186).
+    """
 
     axes = {
-        tuple((strike.label, strike.offset_bp) for strike in read.table.strikes)
+        tuple(strike.offset_bp for strike in read.table.strikes)
         for read in readable
         if read.table is not None
     }
     if len(axes) > 1:
         rendered = sorted(
-            " | ".join(label for label, _offset in axis) for axis in axes
+            " | ".join(_canonical_strike_label(offset) for offset in axis)
+            for axis in axes
         )
         issues.block(
             "STRIKE_HEADERS_DISAGREE",
@@ -1036,7 +1059,10 @@ def _merge_strike_axis(
         )
         return None
     axis = axes.pop()
-    return [VCUBOTMStrike(label=label, offset_bp=offset) for label, offset in axis]
+    return [
+        VCUBOTMStrike(label=_canonical_strike_label(offset), offset_bp=offset)
+        for offset in axis
+    ]
 
 
 @dataclass
