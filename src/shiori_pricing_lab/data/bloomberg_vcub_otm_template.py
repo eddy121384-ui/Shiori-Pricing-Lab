@@ -143,10 +143,12 @@ _ATM_STRIKE_LABEL = "ATM"
 _ROW_LABEL_RE = re.compile(r"^\s*(\S+?)\s*[x×✕]\s*(\S+?)\s*$", re.IGNORECASE)
 
 #: The display modes this capture knows how to read. One member: the
-#: observed screen's ``Spread``. A mode this parser has never seen leaves the
-#: field unresolved, and an unresolved display mode blocks the capture --
-#: what the selector says decides whether a number is a vol or a spread, and
-#: that is not something to assume.
+#: observed screen's ``Spread``. A mode this parser has never seen is still
+#: captured as a real (if unsupported) reading by :func:`_display_mode_candidate`
+#: rather than collapsed to "unresolved" -- what the selector says decides
+#: whether a number is a vol or a spread, and that is not something to
+#: assume, so both an unrecognised mode and a genuinely missing selector
+#: block the capture, for different reasons and under different codes.
 _DISPLAY_MODE_TEXTS = {"SPREAD": SPREAD_DISPLAY_MODE}
 
 
@@ -219,6 +221,30 @@ def parse_row_label(text: str) -> tuple[str, str] | None:
     return normalise_text(term), normalise_text(tenor)
 
 
+def _display_mode_candidate(lines: Sequence[TextLine]) -> str | None:
+    """The display-mode widget's own raw text, or ``None`` if it is not there.
+
+    The dropdown carries no label of its own, so it cannot be found by
+    content the way ``Type`` is -- it is found by position instead: the
+    screen always draws it as the very next widget after the Source
+    contributor, on the same line. Reading it this way, rather than only
+    when its text happens to match a mode this parser knows, means an
+    unsupported mode reads as a real (if unsupported) value rather than
+    collapsing to the same "unresolved" state a screenshot that never
+    showed the widget at all would produce -- which would let a multi-image
+    merge quietly fill it in from another screenshot showing a genuinely
+    different mode (Codex review, PR #186).
+    """
+
+    candidates: set[str] = set()
+    for line in lines:
+        values = widget_values(line.tokens)
+        for index, value in enumerate(values[:-1]):
+            if value.upper() in KNOWN_SOURCE_TEXTS:
+                candidates.add(values[index + 1])
+    return candidates.pop() if len(candidates) == 1 else None
+
+
 def _resolve_metadata(lines: Sequence[TextLine], tab_resolved: bool) -> VCUBOTMSourceMetadata:
     """Read the screen's header context, marking anything uncertain unresolved.
 
@@ -234,8 +260,9 @@ def _resolve_metadata(lines: Sequence[TextLine], tab_resolved: bool) -> VCUBOTMS
       immediately to the right of the contributor with no label of its own,
       so a labelled-value run would swallow it and store ``BVOL ... Spread``
       as the contributor;
-    * ``display mode`` has no on-screen label at all, so it is only ever a
-      widget whose whole displayed value is one this parser knows.
+    * ``display mode`` has no on-screen label at all, so :func:`_display_mode_candidate`
+      finds it by that same adjacency to Source, and its raw text is kept
+      even when it is not a mode this parser knows.
     """
 
     joins = [join_by_geometry(line.tokens) for line in lines]
@@ -266,10 +293,12 @@ def _resolve_metadata(lines: Sequence[TextLine], tab_resolved: bool) -> VCUBOTMS
     resolved["source"] = unique_member(
         [value.upper() for value in screen_widget_values], KNOWN_SOURCE_TEXTS
     )
-    display = unique_member(
-        [value.upper() for value in screen_widget_values], set(_DISPLAY_MODE_TEXTS)
+    display_candidate = _display_mode_candidate(lines)
+    resolved["display_mode"] = (
+        None
+        if display_candidate is None
+        else _DISPLAY_MODE_TEXTS.get(display_candidate.upper(), display_candidate)
     )
-    resolved["display_mode"] = None if display is None else _DISPLAY_MODE_TEXTS[display]
 
     unresolved = tuple(name for name in OTM_METADATA_FIELDS if resolved[name] is None)
     return VCUBOTMSourceMetadata(**resolved, unresolved_fields=unresolved)

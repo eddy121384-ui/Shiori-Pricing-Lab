@@ -519,9 +519,15 @@ def test_an_unreadable_display_mode_blocks_the_capture() -> None:
 
 
 def test_a_display_mode_this_parser_has_never_seen_blocks_the_capture() -> None:
+    """A mode this parser does not recognise is a real (if unsupported)
+    reading -- distinct from the selector not being on screen at all -- so
+    it names what was actually seen rather than reading as merely
+    unresolved (Codex review, PR #186)."""
+
     parsed = read(screenshot_tokens(chrome={"display_mode": "Absolute▾"}))
 
-    assert "DISPLAY_MODE_UNRESOLVED" in codes(parsed.blocking_errors)
+    assert "UNSUPPORTED_DISPLAY_MODE" in codes(parsed.blocking_errors)
+    assert parsed.metadata.display_mode == "Absolute"
 
 
 def test_an_unsupported_vol_type_blocks_the_capture() -> None:
@@ -782,6 +788,30 @@ def test_a_field_one_screenshot_could_not_read_resolves_from_the_other() -> None
     assert capture.metadata.display_mode == SPREAD_DISPLAY_MODE
     # The second screenshot could not read them on its own, and said so.
     assert "display_mode" in reads[1].metadata.unresolved_fields
+
+
+def test_a_visibly_unsupported_display_mode_still_blocks_even_when_another_resolves() -> None:
+    """A screenshot that omits the display selector is safely filled from
+    another image (the test above); one that *shows* an unsupported mode is
+    a different screen state and must never be silently overridden by
+    another image's supported reading (Codex review, PR #186)."""
+
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(
+            screenshot_tokens(rows=SLICE_B, chrome={"display_mode": "Absolute▾"}),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    conflicts = [
+        issue for issue in capture.blocking_errors if issue.code == "METADATA_CONFLICT"
+    ]
+    assert len(conflicts) == 1
+    assert "display_mode" in conflicts[0].message
+    assert capture.can_confirm is False
 
 
 def test_screenshots_that_do_not_overlap_cannot_prove_nothing_was_skipped() -> None:
