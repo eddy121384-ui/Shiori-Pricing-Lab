@@ -796,6 +796,27 @@ def _image_read(
 # --------------------------------------------------------------------------
 
 
+#: Selector-resolution codes that describe only what *one screenshot's own
+#: crop* could show, not the capture. The intended workflow crops the top
+#: Bloomberg chrome into the first screenshot only -- lower screenshots may
+#: legitimately show nothing but table rows -- so one image leaving Type or
+#: Display unresolved, or reading a value the merged session goes on to
+#: correct, is expected and not on its own a reason to refuse the session.
+#: These codes are therefore dropped from the per-image forwarding below and
+#: re-evaluated exactly once against the *merged* metadata instead, by
+#: :func:`_check_value_semantics`; every other blocking code -- topology,
+#: OCR, numeric, row, strike -- is still carried through untouched (Codex
+#: review, PR #186).
+_SELECTOR_RESOLUTION_CODES = frozenset(
+    {
+        "VOL_TYPE_UNRESOLVED",
+        "UNSUPPORTED_VOL_TYPE",
+        "DISPLAY_MODE_UNRESOLVED",
+        "UNSUPPORTED_DISPLAY_MODE",
+    }
+)
+
+
 def merge_vcub_otm_reads(reads: Sequence[VCUBOTMImageRead]) -> VCUBOTMCapture:
     """Combine independently parsed screenshots into one reviewable capture.
 
@@ -821,10 +842,15 @@ def merge_vcub_otm_reads(reads: Sequence[VCUBOTMImageRead]) -> VCUBOTMCapture:
     issues = _Issues()
     for read in reads:
         source = read.provenance.source_reference
-        issues.blocking.extend(issue.with_source(source) for issue in read.blocking_errors)
+        issues.blocking.extend(
+            issue.with_source(source)
+            for issue in read.blocking_errors
+            if issue.code not in _SELECTOR_RESOLUTION_CODES
+        )
         issues.warnings.extend(issue.with_source(source) for issue in read.warnings)
 
     metadata = _merge_metadata(reads, issues)
+    _check_value_semantics(metadata, issues)
     readable = [read for read in reads if read.table is not None]
     if not readable:
         return _capture(reads, metadata, None, (), issues)
@@ -940,6 +966,10 @@ def _merge_metadata(
             for read in reads
             if (value := getattr(read.metadata, name)) is not None
         }
+        if name == "vol_type":
+            if values:
+                resolved[name] = _merge_vol_type(values, issues)
+            continue
         if len(values) > 1:
             issues.block(
                 "METADATA_CONFLICT",
@@ -952,6 +982,36 @@ def _merge_metadata(
             resolved[name] = values.pop()
     unresolved = tuple(name for name in OTM_METADATA_FIELDS if resolved[name] is None)
     return VCUBOTMSourceMetadata(**resolved, unresolved_fields=unresolved)
+
+
+def _merge_vol_type(values: set[str], issues: _Issues) -> str | None:
+    """The one ``vol_type`` every screenshot's OCR agrees on, or ``None``.
+
+    ``"Normal Vol Skew"`` and ``"NORMAL VOL SKEW"`` are two OCR passes over
+    the same selector, not two screen states, so they are compared the same
+    way every other free-text token this parser reads is compared:
+    :func:`normalise_text` then ``casefold()``. Two readings that still
+    differ after that are genuinely two screen states and still conflict.
+    The canonical spelling :data:`NORMAL_VOL_SKEW_TYPE` is preferred whenever
+    the normalised value matches it, so the merged result is the same string
+    regardless of which screenshot's casing happened to be read first; a
+    normalised value this template does not otherwise support is returned
+    exactly as read, so :func:`_check_value_semantics` still names what was
+    actually seen rather than a value nobody's screenshot showed.
+    """
+
+    normalised = {normalise_text(value).casefold() for value in values}
+    if len(normalised) > 1:
+        issues.block(
+            "METADATA_CONFLICT",
+            "the screenshots disagree about vol_type: "
+            f"{', '.join(repr(value) for value in sorted(values))}. They must all be of one "
+            "screen state, so the capture is refused",
+        )
+        return None
+    if normalised == {normalise_text(NORMAL_VOL_SKEW_TYPE).casefold()}:
+        return NORMAL_VOL_SKEW_TYPE
+    return sorted(values)[0]
 
 
 def _merge_strike_axis(

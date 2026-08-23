@@ -780,6 +780,138 @@ def test_a_screenshot_that_failed_its_own_topology_blocks_the_session() -> None:
     assert blockers[0].source == "shot-b.png"
 
 
+# ---------------------------------------------------------------------------
+# Selector metadata across a session (Codex review, PR #186)
+# ---------------------------------------------------------------------------
+
+
+def _without_type_and_display(rows: Sequence[int]) -> list[VCUBTextToken]:
+    """A crop showing only the tab strip and the table -- no Type, Source, or
+    Display selectors -- the way a lower, table-only screenshot reads. The
+    intended workflow only puts that chrome in the first screenshot."""
+
+    return matrix_tokens(rows=rows) + _word_row(
+        ("14)", "OTM", "Swaptions", "/", "SABR"), 20.0
+    )
+
+
+def _three_slices_with_chrome(chrome_by_slice: dict[int, dict]) -> list:
+    """The three covering slices, each with its own header chrome overrides.
+
+    ``chrome_by_slice`` maps a slice index (0, 1, 2) to the ``chrome=``
+    keyword :func:`screenshot_tokens` accepts for that slice; a slice not
+    named keeps the canonical chrome.
+    """
+
+    slices = (SLICE_A, SLICE_B, SLICE_C)
+    references = ("shot-a.png", "shot-b.png", "shot-c.png")
+    seeds = ("a", "b", "c")
+    return [
+        read(
+            screenshot_tokens(rows=rows, chrome=chrome_by_slice.get(index)),
+            reference=references[index],
+            digest_seed=seeds[index],
+        )
+        for index, rows in enumerate(slices)
+    ]
+
+
+def test_selector_blockers_from_one_image_do_not_survive_a_merge_that_resolves_them() -> None:
+    """Regression A: only the first screenshot carries Type/Display; the two
+    lower screenshots omit both, the way a table-only crop reads. The merged
+    complete 91 x 9 capture has no selector blocker and can Confirm."""
+
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(_without_type_and_display(SLICE_B), reference="shot-b.png", digest_seed="b"),
+        read(_without_type_and_display(SLICE_C), reference="shot-c.png", digest_seed="c"),
+    ]
+    assert "VOL_TYPE_UNRESOLVED" in codes(reads[1].blocking_errors)
+    assert "DISPLAY_MODE_UNRESOLVED" in codes(reads[1].blocking_errors)
+    assert "VOL_TYPE_UNRESOLVED" in codes(reads[2].blocking_errors)
+    assert "DISPLAY_MODE_UNRESOLVED" in codes(reads[2].blocking_errors)
+
+    capture = merge_vcub_otm_reads(reads)
+
+    assert capture.blocking_errors == ()
+    assert capture.can_confirm is True
+    assert capture.table is not None
+    assert capture.table.row_labels == tuple(
+        f"{term} x {tenor}" for term, tenor in ROW_LABELS
+    )
+    assert len(capture.table.row_labels) == 91
+    assert len(capture.table.row_labels) * len(capture.table.strike_labels) == 91 * 9
+
+
+def test_a_session_where_nothing_resolves_type_or_display_still_blocks() -> None:
+    """Regression B: every screenshot omits Type and Display; the merged
+    capture still blocks."""
+
+    reads = [
+        read(_without_type_and_display(SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(_without_type_and_display(SLICE_B), reference="shot-b.png", digest_seed="b"),
+        read(_without_type_and_display(SLICE_C), reference="shot-c.png", digest_seed="c"),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    assert "VOL_TYPE_UNRESOLVED" in codes(capture.blocking_errors)
+    assert "DISPLAY_MODE_UNRESOLVED" in codes(capture.blocking_errors)
+    assert capture.can_confirm is False
+
+
+def test_normal_vol_skew_read_in_a_different_case_does_not_conflict() -> None:
+    """Regression C: "Normal Vol Skew" and "NORMAL VOL SKEW" are one OCR
+    reading, not a metadata conflict, and the merge is deterministic."""
+
+    forwards = merge_vcub_otm_reads(
+        _three_slices_with_chrome({1: {"vol_type": ("NORMAL", "VOL", "SKEW▾")}})
+    )
+    backwards = merge_vcub_otm_reads(
+        list(reversed(_three_slices_with_chrome({1: {"vol_type": ("NORMAL", "VOL", "SKEW▾")}})))
+    )
+
+    assert "METADATA_CONFLICT" not in codes(forwards.blocking_errors)
+    assert forwards.metadata.vol_type == NORMAL_VOL_SKEW_TYPE
+    assert forwards.can_confirm is True
+    assert backwards.metadata.vol_type == NORMAL_VOL_SKEW_TYPE
+
+
+def test_genuinely_different_vol_types_still_conflict() -> None:
+    """Regression D: a real disagreement between screenshots still blocks."""
+
+    capture = merge_vcub_otm_reads(
+        _three_slices_with_chrome({1: {"vol_type": ("Lognormal", "Vol", "Skew▾")}})
+    )
+
+    conflicts = [
+        issue for issue in capture.blocking_errors if issue.code == "METADATA_CONFLICT"
+    ]
+    assert len(conflicts) == 1
+    assert "vol_type" in conflicts[0].message
+    assert capture.can_confirm is False
+
+
+def test_real_per_image_blockers_survive_alongside_an_omitted_selector() -> None:
+    """Regression E: the selector-merge fix must not suppress a genuine
+    topology/OCR/numeric blocker reported by another image in the session."""
+
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(_without_type_and_display(SLICE_B), reference="shot-b.png", digest_seed="b"),
+        read(
+            screenshot_tokens(rows=SLICE_C, value_overrides={(80, 1): "8O.15"}),
+            reference="shot-c.png",
+            digest_seed="c",
+        ),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    assert "MALFORMED_NUMERIC_CELL" in codes(capture.blocking_errors)
+    assert "VOL_TYPE_UNRESOLVED" not in codes(capture.blocking_errors)
+    assert "DISPLAY_MODE_UNRESOLVED" not in codes(capture.blocking_errors)
+    assert capture.can_confirm is False
+
+
 def test_a_capture_starts_pending_and_accepts_nothing_until_confirmed() -> None:
     capture = merge_vcub_otm_reads(_three_slices())
 
