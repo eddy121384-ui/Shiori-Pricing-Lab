@@ -168,6 +168,18 @@ def test_an_empty_detection_list_reads_as_no_tokens() -> None:
 # positive live values (33.92, 34.31, 35.19, 34.25, 1.34, 1.29, 1.39, 0.85).
 # The fix classifies from the LEFTMOST component only, against the token's
 # own fixed height -- never against another component in the same crop.
+#
+# Round 4: the token's own bbox height was itself the wrong reference.
+# RapidOCR's detection box runs noticeably taller than the glyphs actually
+# drawn inside it on the real screenshots (a ~21px box around ~12px digits),
+# so a real digit's height as a fraction of the *box* undershoots the digit
+# threshold -- the same false-ambiguous failure mode, and it also explains
+# the still-failing dropped-minus cells (a genuine 1px minus followed by a
+# 12px digit that, measured against a ~21px box, no longer reads as
+# "digit-height" either). The reference is now a local glyph-height
+# baseline derived from the token's own components (a robust median after
+# discarding components far smaller than a first-pass median), never the
+# bbox and never the single tallest component.
 # ---------------------------------------------------------------------------
 
 _DARK_BACKGROUND = (20, 20, 24)
@@ -222,13 +234,16 @@ def test_two_thin_marks_before_the_real_digit_is_ambiguous() -> None:
     second thin mark, not a digit -- the decision only ever looks at the
     leftmost component and its immediate neighbour, so it does not go
     hunting further right for the real digit, and must block rather than
-    guess which mark (if either) is the sign."""
+    guess which mark (if either) is the sign. Two normal digits are
+    included so the local glyph-height baseline has enough of a normal
+    population to resolve robustly."""
 
     image = _blank_image()
-    token = _digit_token(left=100.0, top=20.0)
+    token = _digit_token(left=100.0, top=20.0, width=60.0)
     _paint(image, top=26, bottom=28, left=101, right=104)
     _paint(image, top=26, bottom=28, left=106, right=109)  # a second, separate mark
-    _paint(image, top=21, bottom=33, left=113, right=121)
+    _paint(image, top=21, bottom=33, left=113, right=121)  # normal digit
+    _paint(image, top=21, bottom=33, left=125, right=133)  # normal digit
 
     assert visual_minus_evidence(image, token) == "ambiguous"
 
@@ -261,14 +276,59 @@ def test_a_positive_control_value_stays_positive() -> None:
     assert visual_minus_evidence(image, token) is None
 
 
-def test_a_blob_too_tall_to_be_a_stroke_is_ambiguous_not_negative() -> None:
-    """Foreground precedes the first digit, but it is not thin enough to
-    read as a stroke -- unreadable as a sign either way."""
+def test_a_dropped_minus_with_bbox_taller_than_its_glyphs_reads_as_negative() -> None:
+    """Round 4 regression: the real shape behind the live failures Eddy
+    diagnosed. RapidOCR's detection box (~21px) runs noticeably taller
+    than the glyphs actually drawn inside it (~12px digits), so a real
+    digit's height as a fraction of the *box* undershoots the digit
+    threshold. The reference must come from the token's own local glyph
+    population, not its bbox: text='2.92', component heights ~[1, 12, 2,
+    12, 12] against a 21px-tall box -- the minus is the 1px leading
+    component, immediately followed by a 12px digit."""
 
     image = _blank_image()
-    token = _digit_token(left=100.0, top=20.0)
+    token = _digit_token(left=100.0, top=20.0, width=44.0, height=21.0)
+    _paint(image, top=30, bottom=31, left=101, right=105)  # minus, 1px
+    _paint(image, top=25, bottom=37, left=108, right=116)  # "2", 12px
+    _paint(image, top=34, bottom=36, left=118, right=120)  # ".", 2px
+    _paint(image, top=25, bottom=37, left=122, right=130)  # "9", 12px
+    _paint(image, top=25, bottom=37, left=132, right=140)  # "2", 12px
+
+    assert visual_minus_evidence(image, token) == "negative"
+
+
+def test_a_positive_value_with_bbox_taller_than_its_glyphs_stays_positive() -> None:
+    """Round 4 regression: the same bbox/glyph mismatch on a clean
+    positive value must not misread the leading digit as too short to be
+    one. Reproduces the shape category behind the live false positives on
+    33.92, 34.31, 35.19, 34.25, 14.69, 10.04, 10.28, 10.91, 10.19, 4.10,
+    1.34, 1.29, 1.39, and 0.85: a ~21px box around ~12px digit glyphs,
+    with no component preceding the leading digit."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=44.0, height=21.0)
+    _paint(image, top=25, bottom=37, left=101, right=109)  # "3", 12px, leading
+    _paint(image, top=25, bottom=37, left=111, right=119)  # "3", 12px
+    _paint(image, top=34, bottom=36, left=121, right=123)  # ".", 2px
+    _paint(image, top=25, bottom=37, left=125, right=133)  # "9", 12px
+    _paint(image, top=25, bottom=37, left=135, right=143)  # "2", 12px
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_blob_too_tall_to_be_a_stroke_is_ambiguous_not_negative() -> None:
+    """Foreground precedes the first digit, but it is not thin enough to
+    read as a stroke, and not tall enough to read as a digit against the
+    local glyph baseline either -- unreadable as a sign, must not guess.
+    A second normal digit is included so the baseline reflects the real
+    glyph population rather than being pulled toward the blob's height by
+    too few data points."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=60.0)
     _paint(image, top=24, bottom=30, left=101, right=106)  # 6 rows: too tall, not thin
-    _paint(image, top=21, bottom=33, left=110, right=118)
+    _paint(image, top=21, bottom=33, left=110, right=118)  # normal digit
+    _paint(image, top=21, bottom=33, left=122, right=130)  # normal digit
 
     assert visual_minus_evidence(image, token) == "ambiguous"
 

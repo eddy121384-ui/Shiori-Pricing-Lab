@@ -201,13 +201,43 @@ def tokens_from_detections(
 #: slightly outside it (round 2, PR #186).
 _MINUS_SEARCH_MARGIN_SCALE = 0.2
 
-#: A component at least this tall, relative to the token's own height, is
-#: read as a digit rather than a sign. Deliberately relative to the
-#: token's own fixed geometry, never to another component found in the
-#: same crop -- an unusually tall later component (a neighbouring digit
-#: with a stray ascender, a merged blob) must never move this baseline
-#: and misclassify a normal leading digit as a sign (round 3, PR #186).
+#: A component at least this tall, relative to the token's own *local
+#: glyph-height baseline* (see ``_glyph_height_baseline``), is read as a
+#: digit rather than a sign. Round 3 measured this against the token's
+#: own bbox height, but Eddy's real screenshots show RapidOCR's detection
+#: box runs noticeably taller than the actual glyphs drawn inside it (a
+#: ~21px box around ~12px digits), so a real digit's height as a fraction
+#: of the *box* is well under this threshold -- false NUMERIC_SIGN_AMBIGUOUS
+#: on clean positives, and the true minus stroke's follower also read as
+#: "not a digit". The baseline must come from the glyphs actually present,
+#: not the box around them (round 4, PR #186).
 _DIGIT_HEIGHT_FRACTION = 0.6
+
+#: A component at least this tall, relative to the crop's own height, is
+#: read as thin/short enough to be a candidate minus stroke.
+_MINUS_THIN_FRACTION = 0.35
+
+
+def _glyph_height_baseline(heights: list[int]) -> float:
+    """A robust local reference for "normal digit height" among this
+    token's own connected components.
+
+    Never the tallest component present (round 2's bug: one outlier
+    inflates the baseline and shadows real digits) and never the token's
+    own bbox height (round 3's bug: RapidOCR's detection box runs taller
+    than the glyphs actually drawn inside it, on the real screenshots).
+    Instead: discard components far smaller than a first-pass median --
+    punctuation, a dropped minus stroke -- and take the median of what is
+    left, so a small minority of tiny or oversized components on either
+    side cannot move the baseline that the leftmost component is judged
+    against.
+    """
+
+    if len(heights) == 1:
+        return float(heights[0])
+    initial_median = float(np.median(heights))
+    normal_sized = [h for h in heights if h >= initial_median * 0.5]
+    return float(np.median(normal_sized))
 
 
 @dataclass(frozen=True)
@@ -290,17 +320,23 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
     The decision looks only at the leftmost connected foreground
     component -- never at "the tallest component present", which an
     unusually tall later component (round 2's bug) can inflate and make
-    a genuine leading digit look too short to be a digit. If the
-    leftmost component is itself tall enough, relative to the token's
-    own height, to read as a digit, there is no sign evidence -- the
-    token's own text stands. Otherwise, if it is horizontally elongated,
-    short relative to the token's own height, sitting near the token's
-    own vertical midline, not wide enough to be a line drawn across the
-    whole cell/grid, and immediately followed by a component tall enough
-    to read as a digit, it reads ``"negative"``. Any other leftmost
-    shape reads ``"ambiguous"`` -- genuinely neither a plausible digit
-    nor a plausible sign, never guessed either way. No foreground at all
-    in the search region reads ``None``.
+    a genuine leading digit look too short to be a digit. Height is
+    judged against a local glyph-height baseline derived from this
+    token's own components (see ``_glyph_height_baseline``), never
+    against the token's own bbox height -- on the real screenshots
+    RapidOCR's detection box runs noticeably taller than the glyphs
+    actually drawn inside it, which made a genuine digit look too short
+    relative to the box (round 3's bug). If the leftmost component is
+    itself tall enough, relative to that local baseline, to read as a
+    digit, there is no sign evidence -- the token's own text stands.
+    Otherwise, if it is horizontally elongated, short relative to the
+    crop's own height, sitting near the crop's own vertical midline, not
+    wide enough to be a line drawn across the whole cell/grid, and
+    immediately followed by a component tall enough (against the same
+    local baseline) to read as a digit, it reads ``"negative"``. Any
+    other leftmost shape reads ``"ambiguous"`` -- genuinely neither a
+    plausible digit nor a plausible sign, never guessed either way. No
+    foreground at all in the search region reads ``None``.
 
     The threshold that separates foreground from background is derived
     from this crop's own dynamic range, not a fixed brightness constant,
@@ -343,17 +379,20 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
         for box_top, box_bottom, box_left, box_right in local_boxes
     )
 
+    component_heights = [box_bottom - box_top for box_top, box_bottom, _l, _r in local_boxes]
+    glyph_baseline = _glyph_height_baseline(component_heights)
+
     leftmost_top, leftmost_bottom, leftmost_left, leftmost_right = local_boxes[0]
     leftmost_box = absolute_boxes[0]
     leftmost_height = leftmost_bottom - leftmost_top
     leftmost_width = leftmost_right - leftmost_left
     leftmost_centre = (leftmost_top + leftmost_bottom) / 2.0
 
-    height_frac = leftmost_height / height
+    baseline_frac = leftmost_height / glyph_baseline
     centre_frac = leftmost_centre / height
     width_frac = leftmost_width / width
 
-    if height_frac >= _DIGIT_HEIGHT_FRACTION:
+    if baseline_frac >= _DIGIT_HEIGHT_FRACTION:
         return MinusEvidence(
             None,
             "leftmost component is itself digit-height; no sign precedes it",
@@ -363,7 +402,7 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
             (),
         )
 
-    thin_enough = height_frac <= 0.35
+    thin_enough = baseline_frac <= _MINUS_THIN_FRACTION
     elongated = leftmost_width > leftmost_height
     midline = 0.20 <= centre_frac <= 0.90
     not_grid_wide = width_frac < 0.90
@@ -372,7 +411,7 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
     next_is_digit = False
     if len(local_boxes) > 1:
         next_top, next_bottom, _next_left, _next_right = local_boxes[1]
-        next_is_digit = ((next_bottom - next_top) / height) >= _DIGIT_HEIGHT_FRACTION
+        next_is_digit = ((next_bottom - next_top) / glyph_baseline) >= _DIGIT_HEIGHT_FRACTION
 
     if thin_enough and elongated and midline and not_grid_wide and next_is_digit:
         return MinusEvidence(
@@ -387,7 +426,7 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
     return MinusEvidence(
         "ambiguous",
         "leftmost component is neither digit-height nor a plausible leading minus "
-        f"(height_frac={height_frac:.2f}, elongated={elongated}, "
+        f"(baseline_frac={baseline_frac:.2f}, elongated={elongated}, "
         f"centre_frac={centre_frac:.2f}, width_frac={width_frac:.2f}, "
         f"followed_by_digit={next_is_digit})",
         search_box,
