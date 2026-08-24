@@ -500,6 +500,150 @@ def test_a_split_strike_header_reads_the_same_as_a_whole_one() -> None:
 
 
 # ---------------------------------------------------------------------------
+# One screenshot: a narrow minus glyph the reader boxed apart from its
+# digits (live-acceptance defect: -2.99 read back as +2.99)
+# ---------------------------------------------------------------------------
+
+
+def _split_sign_cell_tokens(
+    *, minus_glyph: str, digits: str, row_index: int, column_index: int
+) -> list[VCUBTextToken]:
+    """A cell's value drawn as two touching boxes: a lone minus glyph and
+    the unsigned digits, the way a reader may box Bloomberg's narrow minus
+    sign apart from what it negates. Uses the *default*, unsliced
+    screenshot's row geometry, where a table row index and its on-screen
+    position coincide.
+    """
+
+    digit_token = _token(digits, right=_column_right(column_index), y_center=_row_y(row_index))
+    minus_token = _token(minus_glyph, right=digit_token.left, y_center=_row_y(row_index))
+    return [minus_token, digit_token]
+
+
+def test_a_minus_sign_folded_into_the_numeric_token_reads_negative() -> None:
+    """The common, already-correct case: the digit run and its sign share
+    one OCR box. Unaffected by the new geometric reconstruction
+    (live-acceptance defect, PR #186)."""
+
+    table = read(screenshot_tokens()).table
+    assert table is not None
+    term, tenor = ROW_LABELS[0]
+    assert _synthetic_value(0, 0) < 0
+    assert table.value_at(term, tenor, STRIKE_LABELS[0]) == pytest.approx(
+        _synthetic_value(0, 0)
+    )
+
+
+def test_a_minus_sign_emitted_as_a_separate_adjacent_token_still_reads_negative() -> None:
+    """A reader that boxes the minus apart from its digits still yields a
+    negative value: the geometry reconstruction folds the two touching
+    boxes back into one number, the same way a split strike header already
+    rejoins (live-acceptance defect, PR #186)."""
+
+    row_index, column_index = 5, 4
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    tokens += _split_sign_cell_tokens(
+        minus_glyph="-", digits="2.99", row_index=row_index, column_index=column_index
+    )
+    parsed = read(tokens)
+
+    assert parsed.blocking_errors == ()
+    assert parsed.table is not None
+    term, tenor = ROW_LABELS[row_index]
+    assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
+        -2.99
+    )
+
+
+def test_a_narrow_unicode_minus_glyph_is_recognised_as_sign_evidence() -> None:
+    """Bloomberg's narrow minus need not OCR as a plain ASCII hyphen -- the
+    recognised glyph set covers the Unicode minus/dash variants a reader
+    might emit for it, split into its own box the same way (live-acceptance
+    defect, PR #186)."""
+
+    row_index, column_index = 5, 4
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    tokens += _split_sign_cell_tokens(
+        minus_glyph="−", digits="2.99", row_index=row_index, column_index=column_index
+    )
+    parsed = read(tokens)
+
+    assert parsed.blocking_errors == ()
+    assert parsed.table is not None
+    term, tenor = ROW_LABELS[row_index]
+    assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
+        -2.99
+    )
+
+
+def test_a_positive_number_with_no_minus_evidence_stays_positive() -> None:
+    """Nothing about this fix invents a sign where none was read -- a
+    screenshot whose minus glyph is missing entirely, not merely boxed
+    apart, is not distinguishable from a genuinely positive number at the
+    single-image layer, and it is not this layer's job to guess: it stays
+    read exactly as its own token states (live-acceptance defect, PR
+    #186)."""
+
+    row_index, column_index = 5, 4
+    assert _synthetic_value(row_index, column_index) > 0
+
+    table = read(screenshot_tokens()).table
+    assert table is not None
+    term, tenor = ROW_LABELS[row_index]
+    assert table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
+        _synthetic_value(row_index, column_index)
+    )
+
+
+def test_ambiguous_minus_evidence_is_never_guessed_into_a_sign() -> None:
+    """Two candidate minus glyphs both touching the same digit token is
+    evidence this parser cannot read unambiguously -- neither is guessed
+    at, so the reconstruction is dropped rather than picking either
+    (live-acceptance defect, PR #186)."""
+
+    row_index, column_index = 5, 4
+    digit_token = _token(
+        "2.99", right=_column_right(column_index), y_center=_row_y(row_index)
+    )
+    minus_a = _token("-", right=digit_token.left, y_center=_row_y(row_index))
+    minus_b = _token("−", right=digit_token.left, y_center=_row_y(row_index))
+
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    tokens += [digit_token, minus_a, minus_b]
+    parsed = read(tokens)
+
+    # Neither candidate is folded in: the pairing is ambiguous, so both are
+    # left for what they are -- unrecognised tokens on the matrix, which
+    # blocks -- rather than either one silently deciding the digit's sign.
+    assert parsed.blocking_errors != ()
+    term, tenor = ROW_LABELS[row_index]
+    if parsed.table is not None:
+        assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) != pytest.approx(
+            -2.99
+        )
+
+
+def test_a_conflicting_sign_between_overlapping_screenshots_still_blocks() -> None:
+    """The exact live-acceptance failure mode: one screenshot's minus is
+    dropped entirely -- no token evidence survives at all, so the
+    single-image layer cannot and must not reconstruct it -- and the
+    resulting +2.99/-2.99 disagreement between two overlapping screenshots
+    still blocks the whole capture via the unweakened
+    ``OVERLAP_VALUE_CONFLICT`` path. Nothing here infers "negative wins";
+    neither value is preferred (live-acceptance defect, PR #186)."""
+
+    capture = merge_vcub_otm_reads(
+        _slices_with({(OVERLAP_AB, 2): f"{-_synthetic_value(OVERLAP_AB, 2):.2f}"})
+    )
+
+    conflicts = [
+        issue for issue in capture.blocking_errors if issue.code == "OVERLAP_VALUE_CONFLICT"
+    ]
+    assert len(conflicts) == 1
+    assert capture.can_confirm is False
+
+
+# ---------------------------------------------------------------------------
 # One screenshot: metadata and value semantics
 # ---------------------------------------------------------------------------
 

@@ -104,6 +104,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_screen_reader import (
     normalise_text,
     parse_cell_number,
     pitch_irregularity_message,
+    space_between,
     spans_are_orderable,
     starts_a_new_widget,
     tenor_label_nominal_days,
@@ -651,6 +652,79 @@ def _row_sort_key(row: tuple[list[VCUBTextToken], str, str]) -> tuple[float, flo
     return (term_days, tenor_days)
 
 
+#: Glyphs an OCR reader might emit for Bloomberg's narrow minus sign when it
+#: boxes it apart from the digits it belongs to, rather than folding it into
+#: that token's own text (which ``parse_cell_number`` already reads
+#: correctly, unchanged). A closed, narrow set on purpose: reconstruction
+#: below only ever fires on positive visual evidence of a minus sitting
+#: immediately before a numeric token, never a guess (live-acceptance
+#: defect, PR #186).
+_MINUS_GLYPHS = frozenset({"-", "‐", "‑", "‒", "–", "−"})
+
+
+def _looks_like_a_lone_minus(token: VCUBTextToken) -> bool:
+    return normalise_text(token.text) in _MINUS_GLYPHS
+
+
+def _reconstructed_minus_tokens(
+    tokens: Sequence[VCUBTextToken], excluded_ids: set[int]
+) -> dict[int, VCUBTextToken]:
+    """Map a numeric token's ``id()`` to the separate minus-glyph token
+    touching it on the left, for every pairing that is unambiguous.
+
+    A minus sign the reader boxed apart from its digits is still its own
+    token, touching the digits with no space between them -- the same
+    "one visual unit, more than one box" signal :func:`join_by_geometry`
+    already uses to rejoin a split strike header such as ``-200`` + ``bps``.
+    Nothing here infers a sign from anywhere except that one adjacent box:
+    not the other screenshot in the capture session, not the column, not a
+    neighbouring value, not the expected skew shape. A minus glyph that sits
+    next to more than one numeric token, or a numeric token approached by
+    more than one minus glyph, is evidence this parser cannot read
+    unambiguously, so neither is guessed at -- the pairing is simply
+    dropped and the number is read exactly as its own token states, which a
+    conflicting overlapping screenshot can still catch (live-acceptance
+    defect, PR #186).
+    """
+
+    minus_candidates = [
+        token
+        for token in tokens
+        if id(token) not in excluded_ids and _looks_like_a_lone_minus(token)
+    ]
+    if not minus_candidates:
+        return {}
+
+    unsigned_numeric_tokens = [
+        token
+        for token in tokens
+        if id(token) not in excluded_ids
+        and not _looks_like_a_lone_minus(token)
+        and not normalise_text(token.text).startswith(("+", "-"))
+        and parse_cell_number(token.text)[0] is not None
+    ]
+
+    matches_by_number: dict[int, list[VCUBTextToken]] = {}
+    for minus in minus_candidates:
+        touching = [
+            number
+            for number in unsigned_numeric_tokens
+            if minus.left < number.left
+            and minus.top < number.bottom
+            and number.top < minus.bottom
+            and space_between(minus, number) is False
+        ]
+        if len(touching) != 1:
+            continue
+        matches_by_number.setdefault(id(touching[0]), []).append(minus)
+
+    return {
+        number_id: minuses[0]
+        for number_id, minuses in matches_by_number.items()
+        if len(minuses) == 1
+    }
+
+
 def parse_vcub_otm_tokens(
     tokens: Sequence[VCUBTextToken], *, provenance: VCUBCaptureProvenance
 ) -> VCUBOTMImageRead:
@@ -741,13 +815,15 @@ def parse_vcub_otm_tokens(
         id(token) for token in anchor_tokens
     }
     label_ids = {id(token) for tokens, _term, _tenor in rows_found for token in tokens}
+    minus_by_number_id = _reconstructed_minus_tokens(tokens, header_ids | label_ids)
+    minus_token_ids = {id(minus) for minus in minus_by_number_id.values()}
 
     # Every token that lands on an intersection is collected first and only
     # then reduced to a value: when two tokens land on the same one, *neither*
     # is used, which a "first write wins" placement could not express.
     placed: dict[tuple[int, int], list[float]] = {}
     for token in tokens:
-        if id(token) in header_ids or id(token) in label_ids:
+        if id(token) in header_ids or id(token) in label_ids or id(token) in minus_token_ids:
             continue
         row_index, row_ambiguous = assign_band(
             token.y_center, row_centres, row_boundaries, row_outer
@@ -783,11 +859,20 @@ def parse_vcub_otm_tokens(
 
         row_label = row_labels[row_index]
         strike_label = strike_labels[column_index]
+        # A separate minus-glyph token touching this one on the left is
+        # folded in here, and nowhere else -- the same geometry
+        # reconstruction join_by_geometry already applies to a split strike
+        # header, applied to a split sign instead (live-acceptance defect,
+        # PR #186).
+        reconstructed_minus = minus_by_number_id.get(id(token))
+        cell_text = (
+            "-" + normalise_text(token.text) if reconstructed_minus is not None else token.text
+        )
         if row_ambiguous or column_ambiguous:
             axis = "row" if row_ambiguous else "strike column"
             issues.block(
                 "CELL_POSITION_AMBIGUOUS",
-                f"{normalise_text(token.text)!r} sits on a {axis} boundary and could belong "
+                f"{normalise_text(cell_text)!r} sits on a {axis} boundary and could belong "
                 f"to more than one {axis}; it is left unresolved rather than assigned to "
                 f"{row_label} x {strike_label}",
                 row=row_label,
@@ -795,11 +880,11 @@ def parse_vcub_otm_tokens(
             )
             continue
 
-        value, failure_code = parse_cell_number(token.text)
+        value, failure_code = parse_cell_number(cell_text)
         if failure_code is not None:
             issues.block(
                 failure_code,
-                f"{row_label} at {strike_label} reads {normalise_text(token.text)!r}, which "
+                f"{row_label} at {strike_label} reads {normalise_text(cell_text)!r}, which "
                 "is not a usable number",
                 row=row_label,
                 strike=strike_label,
