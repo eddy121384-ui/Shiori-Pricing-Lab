@@ -530,6 +530,22 @@ def test_a_display_mode_this_parser_has_never_seen_blocks_the_capture() -> None:
     assert parsed.metadata.display_mode == "Absolute"
 
 
+def test_an_unsupported_display_mode_is_still_found_beside_a_misread_source() -> None:
+    """The display-mode widget is anchored on the literal ``Source`` label,
+    not on the contributor value matching a known source -- so a misread
+    contributor (``BVOL`` -> ``BV0L``) must not hide an otherwise legible
+    unsupported display-mode reading right next to it (Codex review, PR
+    #186)."""
+
+    parsed = read(
+        screenshot_tokens(chrome={"source": "BV0L▾", "display_mode": "Absolute▾"})
+    )
+
+    assert "UNSUPPORTED_DISPLAY_MODE" in codes(parsed.blocking_errors)
+    assert parsed.metadata.display_mode == "Absolute"
+    assert parsed.metadata.source is None
+
+
 def test_an_unsupported_vol_type_blocks_the_capture() -> None:
     parsed = read(
         screenshot_tokens(chrome={"vol_type": ("Lognormal", "Vol", "Skew▾")})
@@ -811,6 +827,32 @@ def test_a_visibly_unsupported_display_mode_still_blocks_even_when_another_resol
     ]
     assert len(conflicts) == 1
     assert "display_mode" in conflicts[0].message
+    assert capture.can_confirm is False
+
+
+def test_a_visibly_unsupported_display_mode_still_blocks_beside_a_misread_source() -> None:
+    """The exact failure mode above, but with the second image's own Source
+    contributor misread (``BVOL`` -> ``BV0L``) too -- the display-mode
+    reading must still be seen and still block, rather than the misread
+    contributor hiding it and letting the first image's ``Spread`` silently
+    win the merge (Codex review, PR #186)."""
+
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(
+            screenshot_tokens(
+                rows=SLICE_B, chrome={"source": "BV0L▾", "display_mode": "Absolute▾"}
+            ),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    conflicts = [
+        issue for issue in capture.blocking_errors if issue.code == "METADATA_CONFLICT"
+    ]
+    assert any("display_mode" in issue.message for issue in conflicts)
     assert capture.can_confirm is False
 
 

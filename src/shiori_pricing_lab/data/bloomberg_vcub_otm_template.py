@@ -221,27 +221,40 @@ def parse_row_label(text: str) -> tuple[str, str] | None:
     return normalise_text(term), normalise_text(tenor)
 
 
+#: The literal label the ``Source`` widget carries. Anchoring on this word,
+#: rather than on the contributor value that follows it, is what lets
+#: :func:`_display_mode_candidate` find the display-mode widget even when
+#: the contributor itself is misread (``BVOL`` -> ``BV0L``) and so does not
+#: match :data:`~shiori_pricing_lab.data.bloomberg_vcub_screen_reader.KNOWN_SOURCE_TEXTS`
+#: (Codex review, PR #186).
+_SOURCE_LABEL_TEXT = "SOURCE"
+
+
 def _display_mode_candidate(lines: Sequence[TextLine]) -> str | None:
     """The display-mode widget's own raw text, or ``None`` if it is not there.
 
     The dropdown carries no label of its own, so it cannot be found by
     content the way ``Type`` is -- it is found by position instead: the
-    screen always draws it as the very next widget after the Source
-    contributor, on the same line. Reading it this way, rather than only
-    when its text happens to match a mode this parser knows, means an
-    unsupported mode reads as a real (if unsupported) value rather than
-    collapsing to the same "unresolved" state a screenshot that never
-    showed the widget at all would produce -- which would let a multi-image
-    merge quietly fill it in from another screenshot showing a genuinely
-    different mode (Codex review, PR #186).
+    screen always draws it two widgets after the literal ``Source`` label,
+    with the contributor's own value between them, on the same line.
+    Anchoring on the label rather than on the contributor's *value*
+    matters: were it anchored on a recognised contributor, a misread
+    contributor code would hide a perfectly legible display-mode reading
+    right next to it, exactly the same silent-collapse bug this function
+    exists to avoid. Reading the widget this way, rather than only when its
+    text happens to match a mode this parser knows, means an unsupported
+    mode reads as a real (if unsupported) value rather than collapsing to
+    the same "unresolved" state a screenshot that never showed the widget
+    at all would produce -- which would let a multi-image merge quietly
+    fill it in from another screenshot showing a genuinely different mode.
     """
 
     candidates: set[str] = set()
     for line in lines:
         values = widget_values(line.tokens)
-        for index, value in enumerate(values[:-1]):
-            if value.upper() in KNOWN_SOURCE_TEXTS:
-                candidates.add(values[index + 1])
+        for index, value in enumerate(values):
+            if value.strip().upper() == _SOURCE_LABEL_TEXT and index + 2 < len(values):
+                candidates.add(values[index + 2])
     return candidates.pop() if len(candidates) == 1 else None
 
 
