@@ -144,7 +144,7 @@ _ROW_LABEL_RE = re.compile(r"^\s*(\S+?)\s*[x×✕]\s*(\S+?)\s*$", re.IGNORECASE)
 
 #: The display modes this capture knows how to read. One member: the
 #: observed screen's ``Spread``. A mode this parser has never seen is still
-#: captured as a real (if unsupported) reading by :func:`_display_mode_candidate`
+#: captured as a real (if unsupported) reading by :func:`_display_mode_context`
 #: rather than collapsed to "unresolved" -- what the selector says decides
 #: whether a number is a vol or a spread, and that is not something to
 #: assume, so both an unrecognised mode and a genuinely missing selector
@@ -223,42 +223,56 @@ def parse_row_label(text: str) -> tuple[str, str] | None:
 
 #: The literal label the ``Source`` widget carries. Anchoring on this word,
 #: rather than on the contributor value that follows it, is what lets
-#: :func:`_display_mode_candidate` find the display-mode widget even when
-#: the contributor itself is misread (``BVOL`` -> ``BV0L``) and so does not
+#: :func:`_display_mode_context` find the display-mode widget even when the
+#: contributor itself is misread (``BVOL`` -> ``BV0L``) and so does not
 #: match :data:`~shiori_pricing_lab.data.bloomberg_vcub_screen_reader.KNOWN_SOURCE_TEXTS`
 #: (Codex review, PR #186).
 _SOURCE_LABEL_TEXT = "SOURCE"
 
 
-def _display_mode_candidate(lines: Sequence[TextLine]) -> str | None:
-    """The display-mode widget's own raw text, or ``None`` if it is not there.
+def _display_mode_context(lines: Sequence[TextLine]) -> tuple[bool, str | None]:
+    """Whether the ``Source`` label is on screen, and the display-mode widget's
+    own raw text if -- and only if -- its position is unambiguous.
 
-    The dropdown carries no label of its own, so it cannot be found by
-    content the way ``Type`` is -- it is found by position instead: the
-    screen always draws it two widgets after the literal ``Source`` label,
-    with the contributor's own value between them, on the same line.
-    Anchoring on the label rather than on the contributor's *value*
-    matters: were it anchored on a recognised contributor, a misread
-    contributor code would hide a perfectly legible display-mode reading
-    right next to it, exactly the same silent-collapse bug this function
-    exists to avoid. Reading the widget this way, rather than only when its
-    text happens to match a mode this parser knows, means an unsupported
-    mode reads as a real (if unsupported) value rather than collapsing to
-    the same "unresolved" state a screenshot that never showed the widget
-    at all would produce -- which would let a multi-image merge quietly
-    fill it in from another screenshot showing a genuinely different mode.
+    Returns ``(source_label_seen, candidate)``. The dropdown carries no
+    label of its own, so it cannot be found by content the way ``Type`` is
+    -- it is found by position instead: the screen always draws it exactly
+    two widgets after the literal ``Source`` label, with the contributor's
+    own value between them, on the same line. Anchoring on the label rather
+    than on the contributor's *value* matters: were it anchored on a
+    recognised contributor, a misread contributor code would hide a
+    perfectly legible display-mode reading right next to it.
+
+    What this function refuses to do is guess *which* widget is the display
+    mode when that two-widget spacing itself cannot be confirmed -- a
+    screenshot whose OCR dropped the contributor's tokens entirely, or one
+    cropped right after the contributor, both leave only one widget after
+    ``Source`` rather than two, and there is no way to tell from a token
+    stream alone whether that lone widget is the contributor or the display
+    mode. Guessing either way risks misreading a value under the wrong
+    field's meaning, so neither is attempted: ``candidate`` comes back
+    ``None`` in both cases, and it is ``source_label_seen`` that lets the
+    caller tell that apart from a screenshot that never showed this part of
+    the chrome at all (Codex review, PR #186).
     """
 
+    source_label_seen = False
     candidates: set[str] = set()
     for line in lines:
         values = widget_values(line.tokens)
         for index, value in enumerate(values):
-            if value.strip().upper() == _SOURCE_LABEL_TEXT and index + 2 < len(values):
+            if value.strip().upper() != _SOURCE_LABEL_TEXT:
+                continue
+            source_label_seen = True
+            if index + 2 < len(values):
                 candidates.add(values[index + 2])
-    return candidates.pop() if len(candidates) == 1 else None
+    candidate = candidates.pop() if len(candidates) == 1 else None
+    return source_label_seen, candidate
 
 
-def _resolve_metadata(lines: Sequence[TextLine], tab_resolved: bool) -> VCUBOTMSourceMetadata:
+def _resolve_metadata(
+    lines: Sequence[TextLine], tab_resolved: bool
+) -> tuple[VCUBOTMSourceMetadata, bool]:
     """Read the screen's header context, marking anything uncertain unresolved.
 
     The four fields VCUB draws the same way on every tab -- currency,
@@ -273,9 +287,18 @@ def _resolve_metadata(lines: Sequence[TextLine], tab_resolved: bool) -> VCUBOTMS
       immediately to the right of the contributor with no label of its own,
       so a labelled-value run would swallow it and store ``BVOL ... Spread``
       as the contributor;
-    * ``display mode`` has no on-screen label at all, so :func:`_display_mode_candidate`
+    * ``display mode`` has no on-screen label at all, so :func:`_display_mode_context`
       finds it by that same adjacency to Source, and its raw text is kept
       even when it is not a mode this parser knows.
+
+    Returns the metadata and a second, separate flag: whether the ``Source``
+    label was seen on screen but the display-mode widget's own position
+    could not be confirmed. That case is not the same as the selector simply
+    not being in this screenshot's crop -- Source *is* visible, so this is
+    evidence the top chrome was meant to be read here, just not cleanly
+    enough to trust -- and the caller turns it into a blocker of its own
+    rather than folding it into the ordinary unresolved-field bookkeeping
+    below (Codex review, PR #186).
     """
 
     joins = [join_by_geometry(line.tokens) for line in lines]
@@ -306,15 +329,17 @@ def _resolve_metadata(lines: Sequence[TextLine], tab_resolved: bool) -> VCUBOTMS
     resolved["source"] = unique_member(
         [value.upper() for value in screen_widget_values], KNOWN_SOURCE_TEXTS
     )
-    display_candidate = _display_mode_candidate(lines)
+    source_label_seen, display_candidate = _display_mode_context(lines)
     resolved["display_mode"] = (
         None
         if display_candidate is None
         else _DISPLAY_MODE_TEXTS.get(display_candidate.upper(), display_candidate)
     )
+    display_mode_context_ambiguous = source_label_seen and display_candidate is None
 
     unresolved = tuple(name for name in OTM_METADATA_FIELDS if resolved[name] is None)
-    return VCUBOTMSourceMetadata(**resolved, unresolved_fields=unresolved)
+    metadata = VCUBOTMSourceMetadata(**resolved, unresolved_fields=unresolved)
+    return metadata, display_mode_context_ambiguous
 
 
 def _check_value_semantics(metadata: VCUBOTMSourceMetadata, issues: _Issues) -> None:
@@ -649,7 +674,18 @@ def parse_vcub_otm_tokens(
             "image was not recognised as the VCUB OTM Swaptions / SABR layout",
         )
 
-    metadata = _resolve_metadata(lines, tab_resolved=tab_line is not None)
+    metadata, display_mode_context_ambiguous = _resolve_metadata(
+        lines, tab_resolved=tab_line is not None
+    )
+    if display_mode_context_ambiguous:
+        issues.block(
+            "DISPLAY_MODE_CONTEXT_AMBIGUOUS",
+            "the Source selector is visible on this screenshot, but the display-mode widget "
+            "that should sit two widgets after it could not be confirmed -- unlike a screenshot "
+            "that never shows this part of the chrome at all, this one entered the Source/"
+            "display region and its meaning could not be established, so the capture is refused "
+            "rather than guessing which widget is the contributor and which is the display mode",
+        )
     _check_value_semantics(metadata, issues)
 
     anchor_found = _find_anchor_line(lines, issues)

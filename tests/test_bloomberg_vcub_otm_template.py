@@ -172,6 +172,21 @@ def chrome_tokens(
     )
 
 
+def chrome_tokens_with_selector_row(widgets: Sequence[Sequence[str]]) -> list[VCUBTextToken]:
+    """The tab strip plus a hand-built selector widget row.
+
+    For constructing Source/display-mode edge cases :func:`chrome_tokens`
+    cannot represent on its own -- a missing contributor widget, or a row
+    cropped right after it -- by passing exactly the widgets that line
+    should carry (Codex review, PR #186).
+    """
+
+    return _word_row(
+        ("11)", "Configuration", "13)", "ATM", "Swaptions", "14)", "OTM",
+         "Swaptions", "/", "SABR"), 20.0
+    ) + _widget_row(widgets, 50.0)
+
+
 def matrix_tokens(
     *,
     rows: Sequence[int] | None = None,
@@ -544,6 +559,39 @@ def test_an_unsupported_display_mode_is_still_found_beside_a_misread_source() ->
     assert "UNSUPPORTED_DISPLAY_MODE" in codes(parsed.blocking_errors)
     assert parsed.metadata.display_mode == "Absolute"
     assert parsed.metadata.source is None
+
+
+def test_a_missing_contributor_widget_blocks_rather_than_guessing_the_display_mode() -> None:
+    """Regression 3: Source is visible but its contributor widget is
+    entirely absent from OCR (not merely misread), so only one widget
+    follows Source instead of two -- there is no way to tell from the
+    token stream alone whether that lone widget is the missing
+    contributor or the display mode, and this must fail closed rather
+    than guess either way (Eddy's adjudication on Codex's P2, PR #186)."""
+
+    tokens = chrome_tokens_with_selector_row(
+        (("Type",), ("Normal", "Vol", "Skew▾"), ("Source",), ("Absolute▾",))
+    ) + matrix_tokens()
+    parsed = read(tokens)
+
+    assert "DISPLAY_MODE_CONTEXT_AMBIGUOUS" in codes(parsed.blocking_errors)
+    assert parsed.metadata.display_mode is None
+
+
+def test_a_row_cropped_after_the_contributor_never_reads_bvol_as_the_display_mode() -> None:
+    """Regression 4: Source and a legible contributor are both present, but
+    the row is cropped before the display-mode widget -- the same
+    ambiguity as above, from the other direction. This must still block,
+    and must never mistake the contributor's own value (``BVOL``) for the
+    display mode (Eddy's adjudication on Codex's P2, PR #186)."""
+
+    tokens = chrome_tokens_with_selector_row(
+        (("Type",), ("Normal", "Vol", "Skew▾"), ("Source",), ("BVOL▾",))
+    ) + matrix_tokens()
+    parsed = read(tokens)
+
+    assert "DISPLAY_MODE_CONTEXT_AMBIGUOUS" in codes(parsed.blocking_errors)
+    assert parsed.metadata.display_mode is None
 
 
 def test_an_unsupported_vol_type_blocks_the_capture() -> None:
@@ -1023,6 +1071,53 @@ def test_real_per_image_blockers_survive_alongside_an_omitted_selector() -> None
     assert "MALFORMED_NUMERIC_CELL" in codes(capture.blocking_errors)
     assert "VOL_TYPE_UNRESOLVED" not in codes(capture.blocking_errors)
     assert "DISPLAY_MODE_UNRESOLVED" not in codes(capture.blocking_errors)
+    assert capture.can_confirm is False
+
+
+def test_a_lower_screenshot_without_the_source_label_stays_session_resolvable() -> None:
+    """Regression 1: a screenshot that never shows the Source/display region
+    at all -- the intended lower-crop workflow -- is unaffected by the
+    context-gate fix. Its unresolved display mode is still safely filled
+    from another screenshot, and DISPLAY_MODE_CONTEXT_AMBIGUOUS is never
+    raised for it (Eddy's adjudication on Codex's P2, PR #186)."""
+
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(_without_type_and_display(SLICE_B), reference="shot-b.png", digest_seed="b"),
+        read(_without_type_and_display(SLICE_C), reference="shot-c.png", digest_seed="c"),
+    ]
+    assert "DISPLAY_MODE_CONTEXT_AMBIGUOUS" not in codes(reads[1].blocking_errors)
+    assert "DISPLAY_MODE_CONTEXT_AMBIGUOUS" not in codes(reads[2].blocking_errors)
+
+    capture = merge_vcub_otm_reads(reads)
+
+    assert capture.blocking_errors == ()
+    assert capture.can_confirm is True
+
+
+def test_a_display_mode_context_ambiguity_survives_merge_even_when_another_resolves() -> None:
+    """Regression 2: unlike an absent selector, a screenshot that shows
+    Source but cannot confirm the display-mode widget's position must
+    still block the whole session, even when another screenshot resolves
+    Spread cleanly -- DISPLAY_MODE_CONTEXT_AMBIGUOUS is not one of the
+    selector-resolution codes the merge is allowed to drop (Eddy's
+    adjudication on Codex's P2, PR #186)."""
+
+    ambiguous_chrome = chrome_tokens_with_selector_row(
+        (("Type",), ("Normal", "Vol", "Skew▾"), ("Source",), ("Absolute▾",))
+    )
+    reads = [
+        read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+        read(
+            ambiguous_chrome + matrix_tokens(rows=SLICE_B),
+            reference="shot-b.png",
+            digest_seed="b",
+        ),
+        read(screenshot_tokens(rows=SLICE_C), reference="shot-c.png", digest_seed="c"),
+    ]
+    capture = merge_vcub_otm_reads(reads)
+
+    assert "DISPLAY_MODE_CONTEXT_AMBIGUOUS" in codes(capture.blocking_errors)
     assert capture.can_confirm is False
 
 
