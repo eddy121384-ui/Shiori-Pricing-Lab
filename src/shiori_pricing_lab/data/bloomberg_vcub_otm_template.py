@@ -553,6 +553,7 @@ def _resolve_row_labels(
     anchor_line: TextLine,
     anchor_tokens: Sequence[VCUBTextToken],
     first_column_left_edge: float,
+    excluded_ids: set[int],
     issues: _Issues,
 ) -> list[tuple[list[VCUBTextToken], str, str]] | None:
     """Read the ``Term x Tenor`` labels sitting in the anchor's own column.
@@ -563,6 +564,13 @@ def _resolve_row_labels(
     left is ignored. A row label may be several tokens (``1Mo``, ``x``,
     ``1Yr``), so each text line's label-column tokens are joined before they
     are read.
+
+    ``excluded_ids`` keeps a split minus sign in the leftmost strike column
+    out of this scan: a wide enough unsigned number there can place its own
+    separate minus-glyph token's centre inside this same x-range, and
+    without this it would be read as (nonsense) row-label text and corrupt
+    that row's pitch instead of being folded into the cell's value where it
+    belongs (Codex review, PR #186).
     """
 
     anchor_left = min(token.left for token in anchor_tokens)
@@ -575,6 +583,7 @@ def _resolve_row_labels(
             token
             for token in line.tokens
             if left_bound <= token.x_center < first_column_left_edge
+            and id(token) not in excluded_ids
         ]
         if not label_tokens:
             continue
@@ -781,8 +790,20 @@ def parse_vcub_otm_tokens(
     )
     first_column_left_edge = column_edges[0] - column_outer
 
+    header_ids = {id(token) for run in headers for token in run} | {
+        id(token) for token in anchor_tokens
+    }
+    # Resolved before the row labels, not after: a split sign in the
+    # leftmost strike column can sit far enough left of its own digits to
+    # land inside the Term x Tenor label column's own x-range, and
+    # _resolve_row_labels would otherwise absorb it into a row label and
+    # corrupt that row's pitch. Excluding it here, before that scan runs,
+    # is what keeps the two from colliding (Codex review, PR #186).
+    minus_by_number_id = _reconstructed_minus_tokens(tokens, header_ids)
+    minus_token_ids = {id(minus) for minus in minus_by_number_id.values()}
+
     rows_found = _resolve_row_labels(
-        lines, anchor_line, anchor_tokens, first_column_left_edge, issues
+        lines, anchor_line, anchor_tokens, first_column_left_edge, minus_token_ids, issues
     )
     if rows_found is None:
         return _image_read(provenance, metadata, None, issues)
@@ -811,12 +832,7 @@ def parse_vcub_otm_tokens(
     row_labels = [f"{term} x {tenor}" for _tokens, term, tenor in rows_found]
     strike_labels = [strike.label for strike in strikes]
 
-    header_ids = {id(token) for run in headers for token in run} | {
-        id(token) for token in anchor_tokens
-    }
     label_ids = {id(token) for tokens, _term, _tenor in rows_found for token in tokens}
-    minus_by_number_id = _reconstructed_minus_tokens(tokens, header_ids | label_ids)
-    minus_token_ids = {id(minus) for minus in minus_by_number_id.values()}
 
     # Every token that lands on an intersection is collected first and only
     # then reduced to a value: when two tokens land on the same one, *neither*

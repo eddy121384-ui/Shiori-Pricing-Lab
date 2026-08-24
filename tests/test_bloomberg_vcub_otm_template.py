@@ -643,6 +643,29 @@ def test_a_conflicting_sign_between_overlapping_screenshots_still_blocks() -> No
     assert capture.can_confirm is False
 
 
+def test_a_split_sign_in_the_leftmost_strike_column_does_not_corrupt_row_labels() -> None:
+    """A wide enough split negative value in the leftmost strike column can
+    place its separate minus-glyph token's centre inside the Term x Tenor
+    label column's own x-range. The sign must still be folded into the
+    cell's value, and the minus token must never be absorbed as row-label
+    text and corrupt that row's pitch (Codex review, PR #186)."""
+
+    row_index, column_index = 5, 0
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    tokens += _split_sign_cell_tokens(
+        minus_glyph="-", digits="12.34", row_index=row_index, column_index=column_index
+    )
+    parsed = read(tokens)
+
+    assert parsed.blocking_errors == ()
+    assert parsed.table is not None
+    assert parsed.table.row_labels == tuple(f"{term} x {tenor}" for term, tenor in ROW_LABELS)
+    term, tenor = ROW_LABELS[row_index]
+    assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
+        -12.34
+    )
+
+
 # ---------------------------------------------------------------------------
 # One screenshot: metadata and value semantics
 # ---------------------------------------------------------------------------
