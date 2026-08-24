@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 
+import numpy as np
 import pytest
 from test_bloomberg_vcub_atm_template import (
     EXPIRY_LABELS,
@@ -25,6 +26,7 @@ from test_bloomberg_vcub_atm_template import (
 )
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
+from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBTextToken
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     CAPTURE_EXTRA_INSTALL_COMMAND,
     MIN_TOKEN_CONFIDENCE,
@@ -32,6 +34,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     build_capture_provenance,
     read_tokens_from_image_bytes,
     tokens_from_detections,
+    visual_minus_evidence,
 )
 
 _BOX = [(10.0, 20.0), (90.0, 22.0), (90.0, 44.0), (10.0, 42.0)]
@@ -144,6 +147,116 @@ def test_a_valid_confidence_is_carried_through_exactly() -> None:
 
 def test_an_empty_detection_list_reads_as_no_tokens() -> None:
     assert tokens_from_detections([]) == ((), ())
+
+
+# ---------------------------------------------------------------------------
+# Visual sign evidence (live-acceptance defect #3): pixels only, no OCR
+# engine needed -- numpy is a core dependency, so these always run.
+# ---------------------------------------------------------------------------
+
+_DARK_BACKGROUND = (20, 20, 24)
+_LIGHT_FOREGROUND = (220, 220, 225)
+
+
+def _blank_image(width: int = 200, height: int = 60) -> np.ndarray:
+    image = np.empty((height, width, 3), dtype=np.uint8)
+    image[:, :] = _DARK_BACKGROUND
+    return image
+
+
+def _paint(image: np.ndarray, *, top: int, bottom: int, left: int, right: int) -> None:
+    image[top:bottom, left:right] = _LIGHT_FOREGROUND
+
+
+def _digit_token(
+    *, left: float, top: float, width: float = 30.0, height: float = 14.0
+) -> VCUBTextToken:
+    return VCUBTextToken(
+        text="2.99", left=left, top=top, width=width, height=height, confidence=1.0
+    )
+
+
+def test_a_blank_crop_with_no_minus_pixels_is_no_evidence() -> None:
+    """A positive value with nothing drawn to its left stays positive."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_clean_thin_stroke_reads_as_negative() -> None:
+    """The exact shape a narrow Bloomberg minus glyph draws: short, thin,
+    sitting at roughly the digit's mid-height, bounded within the
+    searched margin on both sides."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, height=14.0)
+    # margin = max(2, 14*0.6) = 8.4 -> crop columns [92, 100)
+    _paint(image, top=25, bottom=27, left=94, right=98)
+
+    assert visual_minus_evidence(image, token) == "negative"
+
+
+def test_a_tall_blob_is_ambiguous_not_negative() -> None:
+    """Foreground pixels are there, but they are far taller than a thin
+    stroke -- genuinely unreadable as a sign, so it must block rather
+    than be read either way."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, height=14.0)
+    _paint(image, top=21, bottom=33, left=95, right=98)  # 12 rows tall
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_mark_pinned_to_the_crops_own_top_edge_is_ambiguous() -> None:
+    """Thin, but sitting right at the crop's own top edge rather than the
+    digit's mid-height -- not where a minus/hyphen actually sits."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, height=14.0)
+    _paint(image, top=20, bottom=21, left=94, right=98)
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_gridline_spanning_the_whole_crop_is_not_mistaken_for_a_minus() -> None:
+    """A table/column gridline is drawn wider than one glyph and so
+    touches both edges of the searched crop -- excluded outright, not
+    read as a sign either way."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, height=14.0)
+    _paint(image, top=26, bottom=27, left=0, right=200)  # spans the whole image row
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_the_detector_generalises_across_token_sizes_and_positions() -> None:
+    """No fixed x/y: two tokens of different size, in different parts of
+    the image, each with their own correctly-scaled minus stroke, both
+    read as negative."""
+
+    image = _blank_image(width=300, height=120)
+    small = _digit_token(left=60.0, top=10.0, height=10.0)
+    _paint(image, top=13, bottom=14, left=54, right=58)  # margin = max(2, 6) = 6
+
+    large = _digit_token(left=250.0, top=80.0, height=20.0)
+    _paint(image, top=88, bottom=90, left=239, right=248)  # margin = max(2, 12) = 12
+
+    assert visual_minus_evidence(image, small) == "negative"
+    assert visual_minus_evidence(image, large) == "negative"
+
+
+def test_a_token_flush_against_the_images_own_edge_has_no_crop_to_inspect() -> None:
+    """No room to the left at all -- degenerate, not an error -- stays
+    unevidenced rather than guessed."""
+
+    image = _blank_image()
+    token = _digit_token(left=0.0, top=20.0)
+
+    assert visual_minus_evidence(image, token) is None
 
 
 # ---------------------------------------------------------------------------

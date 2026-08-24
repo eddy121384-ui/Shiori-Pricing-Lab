@@ -23,6 +23,16 @@ dropped and named in a warning rather than passed on as if it were solid --
 and because a dropped header or row label shows up downstream as irregular
 band pitch, dropping one fails the capture closed instead of shifting a
 value into a neighbouring cell.
+
+**Visual sign evidence (live-acceptance defect #3).** :func:`visual_minus_evidence`
+is a narrowly-scoped second pass over one numeric token's own pixels, for the
+case RapidOCR's text recognizer drops Bloomberg's narrow minus glyph from a
+digit token's text while the stroke is still visible in the image. It is not
+yet called from :func:`tokens_from_detections` or
+:func:`read_tokens_from_image_bytes` -- Eddy verifies it against his own
+screenshots via ``tools/bloomberg_vcub_otm_sign_diagnostic.py`` first, and
+only once that verification confirms it does production wiring follow, in a
+later change.
 """
 
 from __future__ import annotations
@@ -31,6 +41,8 @@ import hashlib
 import math
 from collections.abc import Sequence
 from datetime import UTC, datetime
+
+import numpy as np
 
 from shiori_pricing_lab.data.bloomberg_vcub_capture import (
     PARSER_NAME,
@@ -171,6 +183,90 @@ def tokens_from_detections(
             )
         )
     return tuple(tokens), tuple(notes)
+
+
+#: How far left of a numeric token's own box :func:`visual_minus_evidence`
+#: looks for Bloomberg's narrow minus stroke, as a multiple of the token's
+#: own height -- relative to that token's geometry, never a fixed pixel
+#: count or screen coordinate, so the same rule holds across every observed
+#: token size and row position (live-acceptance defect #3, PR #186).
+_MINUS_SEARCH_MARGIN_SCALE = 0.6
+_MINUS_SEARCH_MIN_MARGIN_PX = 2.0
+
+
+def visual_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> str | None:
+    """Inspect the pixels immediately left of ``token``'s own box for
+    Bloomberg's narrow minus stroke, using only that crop's own contrast.
+
+    RapidOCR's text recognizer sometimes returns a numeric token's digits
+    with no sign at all even though the minus stroke is still visually
+    present in the source image -- confirmed against the operator's own
+    screenshots via ``tools/bloomberg_vcub_otm_sign_diagnostic.py``
+    (live-acceptance defect #3). This is the narrowly-scoped second pass
+    that inspects *only* that one token's own pixels to answer it, never
+    another screenshot, another cell, the strike column, or the expected
+    skew shape.
+
+    Returns:
+
+    * ``"negative"`` -- a short, thin, mid-height horizontal mark sits in
+      the crop, and it does not touch both the crop's left and right
+      edges (which would mean it is a line drawn wider than this one
+      glyph, such as a table or column gridline, not a bounded sign);
+    * ``"ambiguous"`` -- the crop holds foreground pixels that do not
+      cleanly match that shape (too tall, too narrow, or sitting at the
+      crop's own top/bottom edge rather than glyph height), so the sign
+      genuinely cannot be read either way and must not be guessed;
+    * ``None`` -- the crop is empty, out of the image's own bounds, or
+      close enough to uniform that nothing is drawn there at all, so
+      there is no sign evidence and the token's own text stands.
+
+    The threshold that separates foreground from background is derived
+    from this crop's own dynamic range, not a fixed brightness constant,
+    so the same rule reads a light-on-dark or dark-on-light Bloomberg
+    theme alike.
+    """
+
+    margin = max(_MINUS_SEARCH_MIN_MARGIN_PX, token.height * _MINUS_SEARCH_MARGIN_SCALE)
+    top = max(0, int(round(token.top)))
+    bottom = min(image.shape[0], int(round(token.bottom)))
+    right = min(image.shape[1], int(round(token.left)))
+    left = max(0, int(round(token.left - margin)))
+    if bottom <= top or right <= left:
+        return None
+
+    crop = image[top:bottom, left:right]
+    gray = crop.astype(np.float64)
+    if gray.ndim == 3:
+        gray = gray.mean(axis=2)
+    height, width = gray.shape
+
+    dynamic_range = float(gray.max() - gray.min())
+    if dynamic_range < 8.0:
+        return None  # nothing meaningfully different from this crop's own background
+
+    background = float(np.median(gray))
+    foreground = np.abs(gray - background) > dynamic_range * 0.35
+    if not foreground.any():
+        return None
+
+    fg_rows = np.where(foreground.any(axis=1))[0]
+    fg_cols = np.where(foreground.any(axis=0))[0]
+    row_span = int(fg_rows.max() - fg_rows.min()) + 1
+    col_span = int(fg_cols.max() - fg_cols.min()) + 1
+
+    touches_both_edges = fg_cols.min() == 0 and fg_cols.max() == width - 1
+    if touches_both_edges:
+        return None
+
+    thin_enough = row_span <= max(2, round(height * 0.35))
+    vertical_centre_frac = float(fg_rows.mean()) / max(height - 1, 1)
+    plausibly_placed = 0.20 <= vertical_centre_frac <= 0.90
+    wide_enough = col_span >= max(2, round(width * 0.15))
+
+    if thin_enough and plausibly_placed and wide_enough:
+        return "negative"
+    return "ambiguous"
 
 
 def _load_engine():

@@ -30,6 +30,30 @@ that coordinate. Reusing the parser's own private functions rather than
 re-deriving the geometry here means this diagnostic cannot silently
 disagree with what the parser actually does.
 
+**Round 2 (live acceptance #3): pixel-level sign evidence.** Confirmed
+root cause -- RapidOCR's text recognizer sometimes drops Bloomberg's
+narrow minus glyph from a numeric token's own text even though the stroke
+is still visible in the source image, with no separate minus token
+produced at all for the previous round's reconstruction to find. Every
+unsigned numeric token printed here is now also run through
+``bloomberg_vcub_ocr.visual_minus_evidence``, which inspects only that
+token's own pixels (never another screenshot, cell, or column), and
+labelled one of:
+
+* ``NEGATIVE_FROM_PIXEL_EVIDENCE`` -- a short, thin, mid-height stroke
+  sits in that token's own left margin;
+* ``NUMERIC_SIGN_AMBIGUOUS (would block in production)`` -- pixels are
+  there but do not cleanly read as a sign or its absence;
+* ``no pixel evidence (stays positive)`` -- nothing meaningful is drawn
+  there.
+
+This is still not wired into production parsing. Confirm against your own
+screenshots first -- every known sign-drop cell should read
+``NEGATIVE_FROM_PIXEL_EVIDENCE``, every known positive cell should read
+``no pixel evidence``, and every already-correct negative should be
+unaffected -- then the detector gets wired into
+``bloomberg_vcub_otm_template.py`` in a follow-up change.
+
 **Nothing here changes production.** The merge, ``OVERLAP_VALUE_CONFLICT``,
 and the single-image parser are untouched by this file. It never infers a
 sign from another screenshot, a column, a neighbouring value, or an
@@ -69,8 +93,10 @@ from pathlib import Path
 from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBTextToken
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     VCUBOCRUnavailableError,
+    _decode_image,  # noqa: PLC2701 -- deliberate: see module docstring
     build_capture_provenance,
     read_tokens_from_image_bytes,
+    visual_minus_evidence,
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import PARSER_NAME, PARSER_VERSION
 from shiori_pricing_lab.data.bloomberg_vcub_otm_template import (
@@ -220,7 +246,7 @@ def _locate_coordinate(
     return row_index, column_index
 
 
-def _describe_token(token: VCUBTextToken, geometry: _ImageGeometry) -> str:
+def _describe_token(token: VCUBTextToken, geometry: _ImageGeometry, image=None) -> str:
     row_index, row_ambiguous = assign_band(
         token.y_center, geometry.row_centres, geometry.row_boundaries, geometry.row_outer
     )
@@ -259,6 +285,18 @@ def _describe_token(token: VCUBTextToken, geometry: _ImageGeometry) -> str:
         flags.append("MINUS-GLYPH-CANDIDATE" + paired_note)
     if has_paired_minus:
         flags.append("HAS-PAIRED-MINUS -> reads as negative in production")
+
+    pixel_evidence_text = ""
+    already_signed = token.text.strip().startswith(("-", "+"))
+    if image is not None and not already_signed and not has_paired_minus and value is not None:
+        evidence = visual_minus_evidence(image, token)
+        if evidence == "negative":
+            pixel_evidence_text = "  NEGATIVE_FROM_PIXEL_EVIDENCE"
+        elif evidence == "ambiguous":
+            pixel_evidence_text = "  NUMERIC_SIGN_AMBIGUOUS (would block in production)"
+        else:
+            pixel_evidence_text = "  no pixel evidence (stays positive)"
+
     flag_text = f"  [{', '.join(flags)}]" if flags else ""
 
     own_number = (
@@ -270,7 +308,7 @@ def _describe_token(token: VCUBTextToken, geometry: _ImageGeometry) -> str:
     return (
         f"    text={token.text!r:>10}  box=(left={token.left:.1f} top={token.top:.1f} "
         f"right={token.right:.1f} bottom={token.bottom:.1f})  confidence={confidence}  "
-        f"{own_number}  {placement}{flag_text}"
+        f"{own_number}  {placement}{flag_text}{pixel_evidence_text}"
     )
 
 
@@ -283,6 +321,7 @@ def _describe_coordinate(
     strike_text: str,
     authoritative_value,
     margin: float | None,
+    image=None,
 ) -> tuple[str, tuple[float, float, float, float] | None]:
     header = f"  {term} x {tenor} / {strike_text}"
     if isinstance(geometry, list):
@@ -319,7 +358,7 @@ def _describe_coordinate(
     if not nearby:
         lines.append("    no OCR tokens at all within the searched box -- OCR saw nothing here")
     for token in nearby:
-        lines.append(_describe_token(token, geometry))
+        lines.append(_describe_token(token, geometry, image))
     return "\n".join(lines), box
 
 
@@ -386,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         raw = Path(image_path).read_bytes()
         try:
             tokens, notes = read_tokens_from_image_bytes(raw)
+            image = _decode_image(raw)
         except VCUBOCRUnavailableError as exc:
             print(f"  {exc}")
             return 1
@@ -411,7 +451,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 authoritative = "<no table: this image's own topology did not resolve>"
             text, box = _describe_coordinate(
-                image_path, tokens, geometry, term, tenor, strike_text, authoritative, args.margin
+                image_path,
+                tokens,
+                geometry,
+                term,
+                tenor,
+                strike_text,
+                authoritative,
+                args.margin,
+                image,
             )
             print(text)
             if crop_dir is not None and box is not None:
