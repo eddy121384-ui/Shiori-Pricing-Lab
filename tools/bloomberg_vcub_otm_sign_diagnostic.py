@@ -95,8 +95,8 @@ from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     VCUBOCRUnavailableError,
     _decode_image,  # noqa: PLC2701 -- deliberate: see module docstring
     build_capture_provenance,
+    diagnose_minus_evidence,
     read_tokens_from_image_bytes,
-    visual_minus_evidence,
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import PARSER_NAME, PARSER_VERSION
 from shiori_pricing_lab.data.bloomberg_vcub_otm_template import (
@@ -206,6 +206,16 @@ def _resolve_geometry(tokens: Sequence[VCUBTextToken]) -> _ImageGeometry | list[
     )
 
 
+def _format_box(box) -> str:
+    """A ``(top, bottom, left, right)`` component box, or ``None``, in a
+    short readable form for the printed evidence detail."""
+
+    if box is None:
+        return "none"
+    top, bottom, left, right = box
+    return f"(top={top} bottom={bottom} left={left} right={right})"
+
+
 def _band_span(index: int, centres: Sequence[float], boundaries: Sequence[float], outer: float):
     lower = boundaries[index - 1] if index > 0 else centres[index] - outer
     upper = boundaries[index] if index < len(boundaries) else centres[index] + outer
@@ -287,15 +297,25 @@ def _describe_token(token: VCUBTextToken, geometry: _ImageGeometry, image=None) 
         flags.append("HAS-PAIRED-MINUS -> reads as negative in production")
 
     pixel_evidence_text = ""
+    evidence_detail = ""
     already_signed = token.text.strip().startswith(("-", "+"))
     if image is not None and not already_signed and not has_paired_minus and value is not None:
-        evidence = visual_minus_evidence(image, token)
-        if evidence == "negative":
+        evidence = diagnose_minus_evidence(image, token)
+        if evidence.classification == "negative":
             pixel_evidence_text = "  NEGATIVE_FROM_PIXEL_EVIDENCE"
-        elif evidence == "ambiguous":
+        elif evidence.classification == "ambiguous":
             pixel_evidence_text = "  NUMERIC_SIGN_AMBIGUOUS (would block in production)"
         else:
             pixel_evidence_text = "  no pixel evidence (stays positive)"
+        search_left, search_top, search_right, search_bottom = evidence.search_box
+        evidence_detail = (
+            f"\n      search_box=(left={search_left} top={search_top} "
+            f"right={search_right} bottom={search_bottom})\n"
+            f"      components={[_format_box(box) for box in evidence.components]}\n"
+            f"      first_digit={_format_box(evidence.first_digit_component)}  "
+            f"prefix={[_format_box(box) for box in evidence.prefix_components]}\n"
+            f"      reason: {evidence.reason}"
+        )
 
     flag_text = f"  [{', '.join(flags)}]" if flags else ""
 
@@ -308,7 +328,7 @@ def _describe_token(token: VCUBTextToken, geometry: _ImageGeometry, image=None) 
     return (
         f"    text={token.text!r:>10}  box=(left={token.left:.1f} top={token.top:.1f} "
         f"right={token.right:.1f} bottom={token.bottom:.1f})  confidence={confidence}  "
-        f"{own_number}  {placement}{flag_text}{pixel_evidence_text}"
+        f"{own_number}  {placement}{flag_text}{pixel_evidence_text}{evidence_detail}"
     )
 
 

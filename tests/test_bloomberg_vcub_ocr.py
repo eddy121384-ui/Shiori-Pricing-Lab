@@ -32,6 +32,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     MIN_TOKEN_CONFIDENCE,
     VCUBOCRUnavailableError,
     build_capture_provenance,
+    diagnose_minus_evidence,
     read_tokens_from_image_bytes,
     tokens_from_detections,
     visual_minus_evidence,
@@ -152,13 +153,21 @@ def test_an_empty_detection_list_reads_as_no_tokens() -> None:
 # ---------------------------------------------------------------------------
 # Visual sign evidence (live-acceptance defect #3): pixels only, no OCR
 # engine needed -- numpy is a core dependency, so these always run.
+#
+# Round 2: Eddy's inspection of his own screenshots found the minus stroke
+# usually sits *inside* RapidOCR's own detection box, at its extreme left
+# edge, not outside it -- the recognizer omitted it from the text without
+# shrinking the box to match. The search region is therefore the token's own
+# box plus only a small margin, and the first digit is found geometrically
+# (the leftmost connected component tall enough to read as a digit); only
+# whatever sits before it is ever considered as the sign.
 # ---------------------------------------------------------------------------
 
 _DARK_BACKGROUND = (20, 20, 24)
 _LIGHT_FOREGROUND = (220, 220, 225)
 
 
-def _blank_image(width: int = 200, height: int = 60) -> np.ndarray:
+def _blank_image(width: int = 350, height: int = 150) -> np.ndarray:
     image = np.empty((height, width, 3), dtype=np.uint8)
     image[:, :] = _DARK_BACKGROUND
     return image
@@ -169,84 +178,122 @@ def _paint(image: np.ndarray, *, top: int, bottom: int, left: int, right: int) -
 
 
 def _digit_token(
-    *, left: float, top: float, width: float = 30.0, height: float = 14.0
+    *, left: float, top: float, width: float = 34.0, height: float = 14.0
 ) -> VCUBTextToken:
     return VCUBTextToken(
         text="2.99", left=left, top=top, width=width, height=height, confidence=1.0
     )
 
 
-def test_a_blank_crop_with_no_minus_pixels_is_no_evidence() -> None:
-    """A positive value with nothing drawn to its left stays positive."""
+def test_a_blank_prefix_with_only_the_digit_is_no_evidence() -> None:
+    """A positive value: only the (tall) first digit is drawn, nothing
+    precedes it, so it stays positive."""
 
     image = _blank_image()
     token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit only
 
     assert visual_minus_evidence(image, token) is None
 
 
-def test_a_clean_thin_stroke_reads_as_negative() -> None:
-    """The exact shape a narrow Bloomberg minus glyph draws: short, thin,
-    sitting at roughly the digit's mid-height, bounded within the
-    searched margin on both sides."""
+def test_a_minus_inside_the_boxs_own_left_edge_reads_as_negative() -> None:
+    """The confirmed real-world shape: the minus stroke sits *inside* the
+    token's own detection box, at its extreme left edge, separated from
+    the first digit -- not outside the box at all."""
 
     image = _blank_image()
-    token = _digit_token(left=100.0, top=20.0, height=14.0)
-    # margin = max(2, 14*0.6) = 8.4 -> crop columns [92, 100)
-    _paint(image, top=25, bottom=27, left=94, right=98)
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=26, bottom=28, left=101, right=106)  # minus, thin, mid-height
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit, tall
 
-    assert visual_minus_evidence(image, token) == "negative"
+    evidence = visual_minus_evidence(image, token)
+    assert evidence == "negative"
 
 
-def test_a_tall_blob_is_ambiguous_not_negative() -> None:
-    """Foreground pixels are there, but they are far taller than a thin
-    stroke -- genuinely unreadable as a sign, so it must block rather
-    than be read either way."""
+def test_two_components_before_the_first_digit_is_ambiguous() -> None:
+    """More than one candidate before the first digit -- genuinely not
+    confidently one sign, so it must block rather than pick one."""
 
     image = _blank_image()
-    token = _digit_token(left=100.0, top=20.0, height=14.0)
-    _paint(image, top=21, bottom=33, left=95, right=98)  # 12 rows tall
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=26, bottom=28, left=101, right=104)
+    _paint(image, top=26, bottom=28, left=106, right=109)  # a second, separate mark
+    _paint(image, top=21, bottom=33, left=113, right=121)
 
     assert visual_minus_evidence(image, token) == "ambiguous"
 
 
-def test_a_mark_pinned_to_the_crops_own_top_edge_is_ambiguous() -> None:
-    """Thin, but sitting right at the crop's own top edge rather than the
-    digit's mid-height -- not where a minus/hyphen actually sits."""
+def test_a_blob_too_tall_to_be_a_stroke_is_ambiguous_not_negative() -> None:
+    """Foreground precedes the first digit, but it is not thin enough to
+    read as a stroke -- unreadable as a sign either way."""
 
     image = _blank_image()
-    token = _digit_token(left=100.0, top=20.0, height=14.0)
-    _paint(image, top=20, bottom=21, left=94, right=98)
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=24, bottom=30, left=101, right=106)  # 6 rows: too tall, not thin
+    _paint(image, top=21, bottom=33, left=110, right=118)
 
     assert visual_minus_evidence(image, token) == "ambiguous"
 
 
-def test_a_gridline_spanning_the_whole_crop_is_not_mistaken_for_a_minus() -> None:
-    """A table/column gridline is drawn wider than one glyph and so
-    touches both edges of the searched crop -- excluded outright, not
-    read as a sign either way."""
+def test_a_mark_pinned_to_the_boxs_own_top_edge_is_ambiguous() -> None:
+    """Thin, but sitting at the token's own top edge rather than its
+    mid-height -- not where a minus/hyphen actually sits."""
 
     image = _blank_image()
-    token = _digit_token(left=100.0, top=20.0, height=14.0)
-    _paint(image, top=26, bottom=27, left=0, right=200)  # spans the whole image row
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=20, bottom=22, left=101, right=106)
+    _paint(image, top=21, bottom=33, left=110, right=118)
 
-    assert visual_minus_evidence(image, token) is None
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_gridline_wider_than_one_glyph_is_ambiguous_not_negative() -> None:
+    """A table/column gridline drawn far wider than one glyph -- present
+    as foreground, but not a bounded sign, so it must not be read as
+    one; it still needs a human look (ambiguous), not a silent guess."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=80.0)  # right = 180
+    _paint(image, top=26, bottom=28, left=97, right=172)  # very wide thin band
+    _paint(image, top=21, bottom=33, left=175, right=179)  # first digit, gap before it
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
 
 
 def test_the_detector_generalises_across_token_sizes_and_positions() -> None:
     """No fixed x/y: two tokens of different size, in different parts of
-    the image, each with their own correctly-scaled minus stroke, both
-    read as negative."""
+    the image, each with their own correctly-scaled minus inside its own
+    box, both read as negative."""
 
-    image = _blank_image(width=300, height=120)
-    small = _digit_token(left=60.0, top=10.0, height=10.0)
-    _paint(image, top=13, bottom=14, left=54, right=58)  # margin = max(2, 6) = 6
+    image = _blank_image()
+    small = _digit_token(left=60.0, top=10.0, width=20.0, height=10.0)
+    _paint(image, top=14, bottom=15, left=61, right=64)
+    _paint(image, top=11, bottom=19, left=67, right=72)
 
-    large = _digit_token(left=250.0, top=80.0, height=20.0)
-    _paint(image, top=88, bottom=90, left=239, right=248)  # margin = max(2, 12) = 12
+    large = _digit_token(left=250.0, top=80.0, width=40.0, height=20.0)
+    _paint(image, top=88, bottom=90, left=248, right=254)
+    _paint(image, top=82, bottom=98, left=258, right=268)
 
     assert visual_minus_evidence(image, small) == "negative"
     assert visual_minus_evidence(image, large) == "negative"
+
+
+def test_diagnose_minus_evidence_reports_the_components_it_found() -> None:
+    """The richer object the diagnostic tool prints from: both boxes, which
+    one was treated as the first digit, and a human-readable reason."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=26, bottom=28, left=101, right=106)
+    _paint(image, top=21, bottom=33, left=110, right=118)
+
+    evidence = diagnose_minus_evidence(image, token)
+
+    assert evidence.classification == "negative"
+    assert evidence.first_digit_component == (21, 33, 110, 118)
+    assert evidence.prefix_components == ((26, 28, 101, 106),)
+    assert set(evidence.components) == {(26, 28, 101, 106), (21, 33, 110, 118)}
+    assert "stroke" in evidence.reason
 
 
 def test_a_token_flush_against_the_images_own_edge_has_no_crop_to_inspect() -> None:

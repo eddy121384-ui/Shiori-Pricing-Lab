@@ -24,15 +24,18 @@ and because a dropped header or row label shows up downstream as irregular
 band pitch, dropping one fails the capture closed instead of shifting a
 value into a neighbouring cell.
 
-**Visual sign evidence (live-acceptance defect #3).** :func:`visual_minus_evidence`
+**Visual sign evidence (live-acceptance defect #3).** :func:`diagnose_minus_evidence`
 is a narrowly-scoped second pass over one numeric token's own pixels, for the
 case RapidOCR's text recognizer drops Bloomberg's narrow minus glyph from a
-digit token's text while the stroke is still visible in the image. It is not
-yet called from :func:`tokens_from_detections` or
-:func:`read_tokens_from_image_bytes` -- Eddy verifies it against his own
-screenshots via ``tools/bloomberg_vcub_otm_sign_diagnostic.py`` first, and
-only once that verification confirms it does production wiring follow, in a
-later change.
+digit token's text while the stroke is still visible in the image -- usually
+*inside* the engine's own detection box, at its extreme left edge, not
+outside it (round 2 of the diagnostic against Eddy's real screenshots). It
+finds the first digit geometrically, by connected-component shape, and reads
+only the component(s) before it. It is not yet called from
+:func:`tokens_from_detections` or :func:`read_tokens_from_image_bytes` --
+Eddy verifies it against his own screenshots via
+``tools/bloomberg_vcub_otm_sign_diagnostic.py`` first, and only once that
+verification confirms it does production wiring follow, in a later change.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import numpy as np
@@ -185,55 +189,127 @@ def tokens_from_detections(
     return tuple(tokens), tuple(notes)
 
 
-#: How far left of a numeric token's own box :func:`visual_minus_evidence`
-#: looks for Bloomberg's narrow minus stroke, as a multiple of the token's
-#: own height -- relative to that token's geometry, never a fixed pixel
-#: count or screen coordinate, so the same rule holds across every observed
-#: token size and row position (live-acceptance defect #3, PR #186).
-_MINUS_SEARCH_MARGIN_SCALE = 0.6
-_MINUS_SEARCH_MIN_MARGIN_PX = 2.0
+#: How far left of a numeric token's own box the search region for
+#: :func:`diagnose_minus_evidence` extends beyond the box itself, as a
+#: multiple of the token's own height -- relative to that token's own
+#: geometry, never a fixed pixel count or screen coordinate. Small on
+#: purpose: Eddy's own inspection of the live screenshots found the minus
+#: stroke usually sits *inside* RapidOCR's own detection box already, at
+#: its extreme left edge -- the recognizer omitted it from the text
+#: without shrinking the box to match -- so the box itself is the primary
+#: search region, and this margin only catches a stroke that spilled
+#: slightly outside it (round 2, PR #186).
+_MINUS_SEARCH_MARGIN_SCALE = 0.2
+
+#: A component at least this tall, relative to the tallest component
+#: found, is read as a digit rather than a sign.
+_DIGIT_HEIGHT_FRACTION = 0.6
 
 
-def visual_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> str | None:
-    """Inspect the pixels immediately left of ``token``'s own box for
-    Bloomberg's narrow minus stroke, using only that crop's own contrast.
+@dataclass(frozen=True)
+class MinusEvidence:
+    """What :func:`diagnose_minus_evidence` found in one token's own prefix.
+
+    ``components`` is every connected foreground component found in the
+    search region, and ``prefix_components`` the ones sitting before
+    ``first_digit_component`` -- both as ``(top, bottom, left, right)``
+    pixel boxes in the image's own coordinates (half-open on the bottom
+    and right), left to right. ``reason`` is a short, human-readable
+    account of how ``classification`` was reached, for
+    ``tools/bloomberg_vcub_otm_sign_diagnostic.py`` to print.
+    """
+
+    classification: str | None
+    reason: str
+    search_box: tuple[float, float, float, float]
+    components: tuple[tuple[int, int, int, int], ...]
+    first_digit_component: tuple[int, int, int, int] | None
+    prefix_components: tuple[tuple[int, int, int, int], ...]
+
+
+def _connected_components(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """8-connected foreground components of a boolean mask, as ``(top,
+    bottom, left, right)`` boxes (half-open), sorted left to right.
+
+    A crop here holds only a handful of characters, so a plain flood fill
+    is simpler -- and just as fast -- as pulling in an image-processing
+    dependency this repository does not otherwise need.
+    """
+
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    boxes: list[tuple[int, int, int, int]] = []
+    for start_y in range(height):
+        for start_x in range(width):
+            if not mask[start_y, start_x] or visited[start_y, start_x]:
+                continue
+            stack = [(start_y, start_x)]
+            visited[start_y, start_x] = True
+            min_y = max_y = start_y
+            min_x = max_x = start_x
+            while stack:
+                y, x = stack.pop()
+                min_y, max_y = min(min_y, y), max(max_y, y)
+                min_x, max_x = min(min_x, x), max(max_x, x)
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny, nx = y + dy, x + dx
+                        if (
+                            0 <= ny < height
+                            and 0 <= nx < width
+                            and mask[ny, nx]
+                            and not visited[ny, nx]
+                        ):
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+            boxes.append((min_y, max_y + 1, min_x, max_x + 1))
+    boxes.sort(key=lambda box: box[2])
+    return boxes
+
+
+def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvidence:
+    """Inspect ``token``'s own leading prefix for Bloomberg's narrow minus
+    stroke, and report exactly what was found.
 
     RapidOCR's text recognizer sometimes returns a numeric token's digits
     with no sign at all even though the minus stroke is still visually
-    present in the source image -- confirmed against the operator's own
-    screenshots via ``tools/bloomberg_vcub_otm_sign_diagnostic.py``
-    (live-acceptance defect #3). This is the narrowly-scoped second pass
-    that inspects *only* that one token's own pixels to answer it, never
-    another screenshot, another cell, the strike column, or the expected
-    skew shape.
+    present -- inside the engine's own detection box, at its extreme left
+    edge -- confirmed against the operator's own screenshots via
+    ``tools/bloomberg_vcub_otm_sign_diagnostic.py`` (live-acceptance
+    defect #3). This is the narrowly-scoped second pass that inspects
+    *only* that one token's own pixels to answer it: never another
+    screenshot, another cell, the strike column, or the expected skew
+    shape.
 
-    Returns:
-
-    * ``"negative"`` -- a short, thin, mid-height horizontal mark sits in
-      the crop, and it does not touch both the crop's left and right
-      edges (which would mean it is a line drawn wider than this one
-      glyph, such as a table or column gridline, not a bounded sign);
-    * ``"ambiguous"`` -- the crop holds foreground pixels that do not
-      cleanly match that shape (too tall, too narrow, or sitting at the
-      crop's own top/bottom edge rather than glyph height), so the sign
-      genuinely cannot be read either way and must not be guessed;
-    * ``None`` -- the crop is empty, out of the image's own bounds, or
-      close enough to uniform that nothing is drawn there at all, so
-      there is no sign evidence and the token's own text stands.
+    The first digit is found geometrically -- the leftmost connected
+    foreground component tall enough, relative to the tallest component
+    present, to read as a digit rather than a sign -- and only the
+    component(s) sitting before it are ever considered as the sign. A
+    single such component that is horizontally elongated, short relative
+    to the token's own height, sitting near the token's own vertical
+    midline, separated from the first digit, and not wide enough to be a
+    line drawn across the whole cell/grid reads ``"negative"``. Any other
+    foreground shape there reads ``"ambiguous"`` -- genuinely unreadable,
+    never guessed either way. No foreground at all in the search region
+    reads ``None`` -- no sign evidence, the token's own text stands.
 
     The threshold that separates foreground from background is derived
     from this crop's own dynamic range, not a fixed brightness constant,
     so the same rule reads a light-on-dark or dark-on-light Bloomberg
-    theme alike.
+    theme alike. All geometry is scaled from the token's own box, never
+    an absolute screen coordinate.
     """
 
-    margin = max(_MINUS_SEARCH_MIN_MARGIN_PX, token.height * _MINUS_SEARCH_MARGIN_SCALE)
+    margin = token.height * _MINUS_SEARCH_MARGIN_SCALE
     top = max(0, int(round(token.top)))
     bottom = min(image.shape[0], int(round(token.bottom)))
-    right = min(image.shape[1], int(round(token.left)))
     left = max(0, int(round(token.left - margin)))
+    right = min(image.shape[1], int(round(token.right)))
+    search_box = (float(left), float(top), float(right), float(bottom))
     if bottom <= top or right <= left:
-        return None
+        return MinusEvidence(None, "no room to search", search_box, (), None, ())
 
     crop = image[top:bottom, left:right]
     gray = crop.astype(np.float64)
@@ -243,30 +319,105 @@ def visual_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> str | None
 
     dynamic_range = float(gray.max() - gray.min())
     if dynamic_range < 8.0:
-        return None  # nothing meaningfully different from this crop's own background
+        return MinusEvidence(
+            None, "crop is uniform; nothing drawn there", search_box, (), None, ()
+        )
 
     background = float(np.median(gray))
     foreground = np.abs(gray - background) > dynamic_range * 0.35
     if not foreground.any():
-        return None
+        return MinusEvidence(
+            None, "no foreground pixels above threshold", search_box, (), None, ()
+        )
 
-    fg_rows = np.where(foreground.any(axis=1))[0]
-    fg_cols = np.where(foreground.any(axis=0))[0]
-    row_span = int(fg_rows.max() - fg_rows.min()) + 1
-    col_span = int(fg_cols.max() - fg_cols.min()) + 1
+    local_boxes = _connected_components(foreground)
+    absolute_boxes = tuple(
+        (top + box_top, top + box_bottom, left + box_left, left + box_right)
+        for box_top, box_bottom, box_left, box_right in local_boxes
+    )
 
-    touches_both_edges = fg_cols.min() == 0 and fg_cols.max() == width - 1
-    if touches_both_edges:
-        return None
+    tallest = max(box_bottom - box_top for box_top, box_bottom, _left, _right in local_boxes)
+    digit_like = [
+        index
+        for index, (t, b, _l, _r) in enumerate(local_boxes)
+        if (b - t) >= tallest * _DIGIT_HEIGHT_FRACTION
+    ]
+    if not digit_like:
+        return MinusEvidence(
+            "ambiguous",
+            "no component reads as a digit; this token's own geometry is unreadable",
+            search_box,
+            absolute_boxes,
+            None,
+            (),
+        )
 
-    thin_enough = row_span <= max(2, round(height * 0.35))
-    vertical_centre_frac = float(fg_rows.mean()) / max(height - 1, 1)
-    plausibly_placed = 0.20 <= vertical_centre_frac <= 0.90
-    wide_enough = col_span >= max(2, round(width * 0.15))
+    first_digit_index = digit_like[0]
+    first_digit_box = absolute_boxes[first_digit_index]
+    prefix_local = local_boxes[:first_digit_index]
+    prefix_absolute = absolute_boxes[:first_digit_index]
 
-    if thin_enough and plausibly_placed and wide_enough:
-        return "negative"
-    return "ambiguous"
+    if not prefix_local:
+        return MinusEvidence(
+            None,
+            "no component precedes the first digit",
+            search_box,
+            absolute_boxes,
+            first_digit_box,
+            (),
+        )
+    if len(prefix_local) > 1:
+        return MinusEvidence(
+            "ambiguous",
+            f"{len(prefix_local)} components precede the first digit; not confidently one sign",
+            search_box,
+            absolute_boxes,
+            first_digit_box,
+            prefix_absolute,
+        )
+
+    candidate_top, candidate_bottom, candidate_left, candidate_right = prefix_local[0]
+    candidate_height = candidate_bottom - candidate_top
+    candidate_width = candidate_right - candidate_left
+    candidate_centre = (candidate_top + candidate_bottom) / 2.0
+
+    height_frac = candidate_height / height
+    centre_frac = candidate_centre / height
+    width_frac = candidate_width / width
+
+    thin_enough = height_frac <= 0.35
+    elongated = candidate_width > candidate_height
+    midline = 0.20 <= centre_frac <= 0.90
+    not_grid_wide = width_frac < 0.90
+
+    if thin_enough and elongated and midline and not_grid_wide:
+        return MinusEvidence(
+            "negative",
+            "short, thin, mid-height stroke separated from the first digit",
+            search_box,
+            absolute_boxes,
+            first_digit_box,
+            prefix_absolute,
+        )
+    return MinusEvidence(
+        "ambiguous",
+        f"prefix component does not read as a minus (height_frac={height_frac:.2f}, "
+        f"centre_frac={centre_frac:.2f}, width_frac={width_frac:.2f}, elongated={elongated})",
+        search_box,
+        absolute_boxes,
+        first_digit_box,
+        prefix_absolute,
+    )
+
+
+def visual_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> str | None:
+    """The tri-state minus classification alone.
+
+    See :func:`diagnose_minus_evidence` for the full evidence -- the
+    component boxes and the reason -- behind this answer.
+    """
+
+    return diagnose_minus_evidence(image, token).classification
 
 
 def _load_engine():
