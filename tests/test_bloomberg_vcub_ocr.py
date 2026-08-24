@@ -158,9 +158,16 @@ def test_an_empty_detection_list_reads_as_no_tokens() -> None:
 # usually sits *inside* RapidOCR's own detection box, at its extreme left
 # edge, not outside it -- the recognizer omitted it from the text without
 # shrinking the box to match. The search region is therefore the token's own
-# box plus only a small margin, and the first digit is found geometrically
-# (the leftmost connected component tall enough to read as a digit); only
-# whatever sits before it is ever considered as the sign.
+# box plus only a small margin.
+#
+# Round 3: round 2 found "the first digit" by comparing every component's
+# height to the *tallest component present* in the crop. A later component
+# unusually taller than the real digits (a merged blob, a stray ascender)
+# inflated that baseline and made genuine leading digits fall below the
+# digit-height threshold, producing false NUMERIC_SIGN_AMBIGUOUS on clean
+# positive live values (33.92, 34.31, 35.19, 34.25, 1.34, 1.29, 1.39, 0.85).
+# The fix classifies from the LEFTMOST component only, against the token's
+# own fixed height -- never against another component in the same crop.
 # ---------------------------------------------------------------------------
 
 _DARK_BACKGROUND = (20, 20, 24)
@@ -210,9 +217,12 @@ def test_a_minus_inside_the_boxs_own_left_edge_reads_as_negative() -> None:
     assert evidence == "negative"
 
 
-def test_two_components_before_the_first_digit_is_ambiguous() -> None:
-    """More than one candidate before the first digit -- genuinely not
-    confidently one sign, so it must block rather than pick one."""
+def test_two_thin_marks_before_the_real_digit_is_ambiguous() -> None:
+    """The leftmost component is thin but the very next component is a
+    second thin mark, not a digit -- the decision only ever looks at the
+    leftmost component and its immediate neighbour, so it does not go
+    hunting further right for the real digit, and must block rather than
+    guess which mark (if either) is the sign."""
 
     image = _blank_image()
     token = _digit_token(left=100.0, top=20.0)
@@ -221,6 +231,34 @@ def test_two_components_before_the_first_digit_is_ambiguous() -> None:
     _paint(image, top=21, bottom=33, left=113, right=121)
 
     assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_later_oversized_component_does_not_shadow_a_normal_leading_digit() -> None:
+    """Round 3 regression: a normal leading digit followed later by a
+    component far taller than any real digit (a merged blob, a stray
+    ascender) must not make the leading digit look too short to be one.
+    This reproduces the shape category behind the live false positives on
+    33.92, 34.31, 35.19, 34.25, 1.34, 1.29, 1.39, and 0.85 -- classifying
+    from the leftmost component alone, against the token's own fixed
+    height, never against the tallest component elsewhere in the crop."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=40.0, height=14.0)
+    _paint(image, top=21, bottom=33, left=101, right=109)  # normal leading digit
+    _paint(image, top=18, bottom=36, left=112, right=120)  # spuriously oversized later blob
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_positive_control_value_stays_positive() -> None:
+    """The live positive control (1Mo x 1Yr / -50bps = 14.69): only the
+    first digit is drawn, nothing precedes it, so it stays positive."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=21, bottom=33, left=101, right=109)  # "1" of 14.69
+
+    assert visual_minus_evidence(image, token) is None
 
 
 def test_a_blob_too_tall_to_be_a_stroke_is_ambiguous_not_negative() -> None:

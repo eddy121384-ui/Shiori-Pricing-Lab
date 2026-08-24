@@ -201,8 +201,12 @@ def tokens_from_detections(
 #: slightly outside it (round 2, PR #186).
 _MINUS_SEARCH_MARGIN_SCALE = 0.2
 
-#: A component at least this tall, relative to the tallest component
-#: found, is read as a digit rather than a sign.
+#: A component at least this tall, relative to the token's own height, is
+#: read as a digit rather than a sign. Deliberately relative to the
+#: token's own fixed geometry, never to another component found in the
+#: same crop -- an unusually tall later component (a neighbouring digit
+#: with a stray ascender, a merged blob) must never move this baseline
+#: and misclassify a normal leading digit as a sign (round 3, PR #186).
 _DIGIT_HEIGHT_FRACTION = 0.6
 
 
@@ -283,17 +287,20 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
     screenshot, another cell, the strike column, or the expected skew
     shape.
 
-    The first digit is found geometrically -- the leftmost connected
-    foreground component tall enough, relative to the tallest component
-    present, to read as a digit rather than a sign -- and only the
-    component(s) sitting before it are ever considered as the sign. A
-    single such component that is horizontally elongated, short relative
-    to the token's own height, sitting near the token's own vertical
-    midline, separated from the first digit, and not wide enough to be a
-    line drawn across the whole cell/grid reads ``"negative"``. Any other
-    foreground shape there reads ``"ambiguous"`` -- genuinely unreadable,
-    never guessed either way. No foreground at all in the search region
-    reads ``None`` -- no sign evidence, the token's own text stands.
+    The decision looks only at the leftmost connected foreground
+    component -- never at "the tallest component present", which an
+    unusually tall later component (round 2's bug) can inflate and make
+    a genuine leading digit look too short to be a digit. If the
+    leftmost component is itself tall enough, relative to the token's
+    own height, to read as a digit, there is no sign evidence -- the
+    token's own text stands. Otherwise, if it is horizontally elongated,
+    short relative to the token's own height, sitting near the token's
+    own vertical midline, not wide enough to be a line drawn across the
+    whole cell/grid, and immediately followed by a component tall enough
+    to read as a digit, it reads ``"negative"``. Any other leftmost
+    shape reads ``"ambiguous"`` -- genuinely neither a plausible digit
+    nor a plausible sign, never guessed either way. No foreground at all
+    in the search region reads ``None``.
 
     The threshold that separates foreground from background is derived
     from this crop's own dynamic range, not a fixed brightness constant,
@@ -336,77 +343,57 @@ def diagnose_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> MinusEvi
         for box_top, box_bottom, box_left, box_right in local_boxes
     )
 
-    tallest = max(box_bottom - box_top for box_top, box_bottom, _left, _right in local_boxes)
-    digit_like = [
-        index
-        for index, (t, b, _l, _r) in enumerate(local_boxes)
-        if (b - t) >= tallest * _DIGIT_HEIGHT_FRACTION
-    ]
-    if not digit_like:
-        return MinusEvidence(
-            "ambiguous",
-            "no component reads as a digit; this token's own geometry is unreadable",
-            search_box,
-            absolute_boxes,
-            None,
-            (),
-        )
+    leftmost_top, leftmost_bottom, leftmost_left, leftmost_right = local_boxes[0]
+    leftmost_box = absolute_boxes[0]
+    leftmost_height = leftmost_bottom - leftmost_top
+    leftmost_width = leftmost_right - leftmost_left
+    leftmost_centre = (leftmost_top + leftmost_bottom) / 2.0
 
-    first_digit_index = digit_like[0]
-    first_digit_box = absolute_boxes[first_digit_index]
-    prefix_local = local_boxes[:first_digit_index]
-    prefix_absolute = absolute_boxes[:first_digit_index]
+    height_frac = leftmost_height / height
+    centre_frac = leftmost_centre / height
+    width_frac = leftmost_width / width
 
-    if not prefix_local:
+    if height_frac >= _DIGIT_HEIGHT_FRACTION:
         return MinusEvidence(
             None,
-            "no component precedes the first digit",
+            "leftmost component is itself digit-height; no sign precedes it",
             search_box,
             absolute_boxes,
-            first_digit_box,
+            leftmost_box,
             (),
         )
-    if len(prefix_local) > 1:
-        return MinusEvidence(
-            "ambiguous",
-            f"{len(prefix_local)} components precede the first digit; not confidently one sign",
-            search_box,
-            absolute_boxes,
-            first_digit_box,
-            prefix_absolute,
-        )
-
-    candidate_top, candidate_bottom, candidate_left, candidate_right = prefix_local[0]
-    candidate_height = candidate_bottom - candidate_top
-    candidate_width = candidate_right - candidate_left
-    candidate_centre = (candidate_top + candidate_bottom) / 2.0
-
-    height_frac = candidate_height / height
-    centre_frac = candidate_centre / height
-    width_frac = candidate_width / width
 
     thin_enough = height_frac <= 0.35
-    elongated = candidate_width > candidate_height
+    elongated = leftmost_width > leftmost_height
     midline = 0.20 <= centre_frac <= 0.90
     not_grid_wide = width_frac < 0.90
 
-    if thin_enough and elongated and midline and not_grid_wide:
+    next_box = absolute_boxes[1] if len(local_boxes) > 1 else None
+    next_is_digit = False
+    if len(local_boxes) > 1:
+        next_top, next_bottom, _next_left, _next_right = local_boxes[1]
+        next_is_digit = ((next_bottom - next_top) / height) >= _DIGIT_HEIGHT_FRACTION
+
+    if thin_enough and elongated and midline and not_grid_wide and next_is_digit:
         return MinusEvidence(
             "negative",
-            "short, thin, mid-height stroke separated from the first digit",
+            "leftmost component is a short, thin, mid-height stroke followed by a "
+            "normal digit-height component",
             search_box,
             absolute_boxes,
-            first_digit_box,
-            prefix_absolute,
+            next_box,
+            (leftmost_box,),
         )
     return MinusEvidence(
         "ambiguous",
-        f"prefix component does not read as a minus (height_frac={height_frac:.2f}, "
-        f"centre_frac={centre_frac:.2f}, width_frac={width_frac:.2f}, elongated={elongated})",
+        "leftmost component is neither digit-height nor a plausible leading minus "
+        f"(height_frac={height_frac:.2f}, elongated={elongated}, "
+        f"centre_frac={centre_frac:.2f}, width_frac={width_frac:.2f}, "
+        f"followed_by_digit={next_is_digit})",
         search_box,
         absolute_boxes,
-        first_digit_box,
-        prefix_absolute,
+        next_box,
+        (leftmost_box,),
     )
 
 
