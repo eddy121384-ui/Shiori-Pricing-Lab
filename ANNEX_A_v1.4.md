@@ -107,7 +107,10 @@ Delta_F   = DF × Φ(d1)            # for Call
 Delta_F   = -DF × Φ(-d1)          # for Put
 Gamma_F   = DF × φ(d1) / (F σ √T)
 Vega      = DF × F × φ(d1) × √T          # per 1.00 vol unit；UI 顯示時除以 100
-Theta     = -DF × F × φ(d1) × σ / (2√T) + r × DF × [F Φ(d1) - K Φ(d2)]   # for Call
+Theta     = -DF × F × φ(d1) × σ / (2√T) + r × PV_per_100   # for Call and Put
+            （PV_per_100 為對應方向的 §A.2.3 Black-76 premium：Call 用 Price Call PV per 100，
+              Put 用 Price Put PV per 100。因 F φ(d1) = K φ(d2)，同一公式的第一項對 Call/Put
+              皆成立，故 Call 與 Put 共用此單一 option-agnostic 表達式，不需分別列式。）
 DV01      = bump-and-revalue ±1bp underlying yield（見 §A.9）
 CS01      = bump-and-revalue ±1bp credit spread（見 §A.9）
 ```
@@ -186,8 +189,10 @@ Yield Delta = DF × Φ(d1) × 10000 × DV01_expiry × N / 100     # for Yield Ca
 Yield Delta = -DF × Φ(-d1) × 10000 × DV01_expiry × N / 100   # for Yield Put
 Vega        = DF × YF × φ(d1) × √T × 10000 × DV01_expiry × N / 100
 
-Price Delta = Yield Delta × (-1 / DV01_underlying)
-              （符號反向：yield ↑ → price ↓）
+Price Delta = Yield Delta × [-1 / (10000 × DV01_underlying)]
+              （符號反向：yield ↑ → price ↓；且需 10000 倍單位換算——Yield Delta 是對
+                1.0 decimal yield 變動定義，DV01_underlying 是對 1bp 變動定義，兩者分母
+                相差 10000 倍，換算時不得省略，否則 Price Delta 會偏差 10000 倍。）
 ```
 
 **優點**：封閉解、與市場 yield vol quote 一致、latency 極短。  
@@ -813,6 +818,22 @@ C_yield - P_yield = DF × (YF - YK) × 10000 × DV01_expiry × N / 100
 
 ---
 
+### A.13.2b MODE_A Price Delta 單位換算檢查
+
+- 適用：`YIELD_OPTION_MODE = MODE_A`。
+- 規則：`Price Delta` 必須依 §A.3.2 使用 `Price Delta = Yield Delta × [-1 / (10000 × DV01_underlying)]`。
+  `Yield Delta` 是對 `1.0` decimal yield 變動定義，`DV01_underlying` 是對 `1bp` 變動定義，
+  換算時不得省略 `10000` 倍率。
+- UAT pin（純示範數字，非市場資料，供實作 MODE_A 時比對）：
+  - 輸入：`Yield Delta = 5.00`、`DV01_underlying = 0.085`（per 1bp，per 100 face）。
+  - 正確結果：`Price Delta = 5.00 × [-1 / (10000 × 0.085)] = -0.0058824`（四捨五入至小數點後 7 位）。
+  - 若誤用 `Price Delta = Yield Delta × (-1 / DV01_underlying)`（漏乘 10000），會得到
+    `-58.8235294`（四捨五入至小數點後 7 位），偏差達 10000 倍。任何實作或人工複核算出
+    此量級的結果即視為單位錯誤，必須攔截。
+- 違反：顯示 critical error，禁止該筆 pricing 進 Internal Pricing Report。
+
+---
+
 ### A.13.3 American ≥ European Lower Bound
 
 - 適用：所有 American option。
@@ -845,7 +866,7 @@ C_yield - P_yield = DF × (YF - YK) × 10000 × DV01_expiry × N / 100
 
 ### A.13.5 Self-validation 報表
 
-- MVP 必做：每次 pricing run，A.13.1 與 A.13.2 自動執行並顯示在 report。
+- MVP 必做：每次 pricing run，A.13.1、A.13.2 與（`MODE_A` 適用時）A.13.2b 自動執行並顯示在 report。
 - Phase 2 補：A.13.3 跨入 American、A.13.4 Bloomberg 對價工具整合到 UAT module。
 
 ---
