@@ -734,6 +734,20 @@ def test_a_surface_stating_a_lognormal_vol_type_blocks() -> None:
         resolve(surface=surface(vol_type="Lognormal Vol (OIS)"))
 
 
+@pytest.mark.parametrize(
+    "vol_type", ["Normal Vol Black", "Normal Vol (OIS) junk", "Normal Volume"]
+)
+def test_a_vol_type_outside_the_vocabulary_blocks(vol_type: str) -> None:
+    """Codex review round 4, PR #189.
+
+    The gate matches the whole stated type, not its opening words: a
+    surface whose type nobody recognises is not a normal-vol surface.
+    """
+
+    with pytest.raises(VolSpaceContractError, match="does not declare normal"):
+        resolve(surface=surface(vol_type=vol_type))
+
+
 def test_the_atm_screens_own_normal_vol_type_is_accepted() -> None:
     # The ATM tab spells it "Normal Vol (OIS)" and the OTM tab spells it
     # "Normal Vol Skew"; both declare normal space in the screen's own

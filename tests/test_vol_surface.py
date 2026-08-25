@@ -252,6 +252,33 @@ def test_a_capture_in_another_vol_space_never_states_bp(vol_type: str) -> None:
     assert surface.volatility_unit is None
 
 
+@pytest.mark.parametrize(
+    "vol_type",
+    ["Normal Vol Black", "Normal Vol garbage", "Normal Vol (OIS) junk", "Normal Volume"],
+)
+def test_a_type_the_vocabulary_does_not_account_for_never_states_bp(vol_type: str) -> None:
+    """Codex review round 4, PR #189.
+
+    This reader stores the text that followed the screen's ``Type`` label
+    when there was one, so what reaches the unit rule is not guaranteed to
+    be a member of the closed vocabulary. An unrecognised type is not a
+    normal one just because it begins like one, and the unit gate stays
+    shut on it.
+    """
+
+    surface = confirmed_surface(metadata_overrides={"vol_type": vol_type})
+
+    assert surface.identity.vol_type == vol_type
+    assert surface.volatility_unit is None
+
+
+@pytest.mark.parametrize("vol_type", ["Normal Vol", "Normal Vol (OIS)", "Normal Vol(OIS)"])
+def test_every_spelling_the_vocabulary_does_account_for_states_bp(vol_type: str) -> None:
+    """Including the one an illegible gap produces (Codex review, PR #182)."""
+
+    assert confirmed_surface(metadata_overrides={"vol_type": vol_type}).volatility_unit == "bp"
+
+
 @pytest.mark.parametrize("decision", ["pending", "rejected"])
 def test_a_capture_nobody_confirmed_cannot_become_a_surface(decision: str) -> None:
     pending = VCUBATMCapture(

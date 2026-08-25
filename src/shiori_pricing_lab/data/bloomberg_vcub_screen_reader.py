@@ -147,26 +147,39 @@ def is_tenor_label(text: str) -> bool:
 
 #: Every VCUB tab draws its ``Type`` from one closed vocabulary --
 #: ``Normal`` / ``Black`` / ``Lognormal`` / ``Shifted Lognormal`` / ``SABR``
-#: followed by ``Vol`` and an optional parenthesised curve suffix (see
-#: ``_VOL_TYPE_RE`` in ``bloomberg_vcub_atm_template``, which reads it off
-#: the screen). Anchored at the start so ``Lognormal Vol`` cannot match on
-#: its tail, and ``\b`` after ``vol`` so a longer word cannot either.
-_NORMAL_VOL_TYPE_RE = re.compile(r"^normal\s+vol\b")
+#: followed by ``Vol``, the OTM tab's ``Skew``, and an optional
+#: parenthesised curve suffix (see ``_VOL_TYPE_RE`` in
+#: ``bloomberg_vcub_atm_template``, which reads it off the screen).
+#:
+#: Matched **whole**, not as a prefix. The ATM reader stores the text that
+#: followed the screen's ``Type`` label when there was one, so what reaches
+#: this predicate is not always a member of the vocabulary: a prefix rule
+#: accepted ``Normal Vol Black`` and ``Normal Vol (OIS) junk`` and would
+#: have opened the unit gate on a type nobody recognises (Codex review
+#: round 4, PR #189). The parenthesis is allowed to arrive with or without
+#: the space before it, because an illegible gap there is known to store
+#: ``Normal Vol(OIS)`` for a screen that shows ``Normal Vol (OIS)``
+#: (Codex review, PR #182).
+_NORMAL_VOL_TYPE_RE = re.compile(r"normal\s+vol(\s+skew)?(\s*\([^)]*\))?")
 
 
 def is_normal_vol_type(text: object) -> bool:
     """Whether a stated vol type declares **normal** volatility space.
 
-    ``Normal Vol (OIS)`` (the ATM tab) and ``Normal Vol Skew`` (the OTM
-    Swaptions / SABR tab) both do; ``Lognormal Vol (OIS)``, ``Black Vol``,
-    and an unresolved type (``None``) do not. Answered from the text the
-    screen stated and from nothing else -- never from the magnitude of the
-    numbers underneath it, and never from which tab they came from.
+    ``Normal Vol``, ``Normal Vol (OIS)`` (the ATM tab) and ``Normal Vol
+    Skew`` (the OTM Swaptions / SABR tab) all do. ``Lognormal Vol (OIS)``,
+    ``Black Vol``, an unresolved type (``None``), and anything carrying text
+    the vocabulary does not account for do not: an unrecognised type is not
+    a normal one just because it starts like one.
+
+    Answered from the text the screen stated and from nothing else -- never
+    from the magnitude of the numbers underneath it, and never from which
+    tab they came from.
     """
 
     if not isinstance(text, str):
         return False
-    return _NORMAL_VOL_TYPE_RE.match(normalise_text(text).casefold()) is not None
+    return _NORMAL_VOL_TYPE_RE.fullmatch(normalise_text(text).casefold()) is not None
 
 
 def tenor_label_nominal_days(text: str) -> float | None:
