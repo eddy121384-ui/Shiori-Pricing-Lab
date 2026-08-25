@@ -537,9 +537,45 @@ Canonical store 必須保留 `ABSOLUTE_VOL` 與 `SPREAD_TO_ATM` 原始語義；�
 **Off-grid rule：** Bloomberg 文件確認 OVME 使用由 VCUB 取得 / interpolated 的 normal swaption vol，但本次 source evidence 未完整公開 VCUB 在 expiry × tenor × strike 三維上的精確 interpolation recipe。故：
 
 - exact node lookup：可直接使用；
-- off-grid interpolation：必須是獨立、版本化、可審計的 resolver methodology；
+- off-grid interpolation：必須是獨立、版本化、可審計的 resolver methodology（見 §A.8.3a）；
 - 在完成 Bloomberg live parity 前，不得宣稱 Shiori interpolation 與 Bloomberg 內部算法相同；
 - 不得以鄰近值、flat vol 或任意 fallback 靜默補值。
+
+### A.8.3a In-grid Resolver Contract：`IN_GRID_BILINEAR_V1`
+
+Bloomberg 2026-06-25 methodology document「Bloomberg Volatility Cube」(DOCS #2063620) 已明確：VCUB 可在 normal volatility space 校準與插值；OTM swaption strike 以 **additive moneyness**（相對 ATM）表示；對 off-grid query `(T*, τ*, K*)`，各 bracketing expiry/tenor corner 使用**相同 additive moneyness** `K_ij − F_ij = K* − F*`；四個 corner vol 再以 **expiry/tenor bilinear interpolation** 合成。
+
+據此，Shiori 定義一個版本化 resolver `IN_GRID_BILINEAR_V1`，輸入為**單一 confirmed canonical VCUB snapshot**，輸出**止於 `σ_vcub`**：
+
+```text
+confirmed canonical VCUB snapshot
+  → ATM absolute + OTM spread 重建（§A.8.3）
+  → 四角同一 additive moneyness μ* = K* − F*
+  → corner smile resolution（PWL）
+  → expiry/tenor bilinear interpolation
+  → resolved σ_vcub + diagnostics / provenance
+```
+
+**明確輸入（不得推測）：**
+
+- **volatility unit**：只讀 canonical surface 明確聲明的 unit；`bp` 依 `1bp = 1e-4` 明確 normalize 為 absolute decimal rate vol。未聲明或無法 pin 的 unit 一律 fail closed，禁止由數值大小推斷（§A.8.1）。
+- **expiry / tenor 數值座標**：由呼叫端以顯式 label → coordinate map 提供，且必須覆蓋 surface 上的每一個 label。本 Annex **不**在此定義 calendar date → VCUB year fraction 之 day-count convention；該問題與 `DCF_VCUB` 同屬未解 RED，resolver 不得代為決定。
+- **smile model**：由呼叫端明確聲明，不得由 surface type、欄位數或數值形狀推得。本版本實作 **PWL**：在 additive moneyness 空間對 **normal vol** 線性插值，captured strike node 必須 exact round-trip。**SABR** 在 Bloomberg calibration contract（DOCS #2063620 Appendix D 之 equal-weighted alpha-error objective 與 `β = 0.5`、`shift = 0.03`、`ρ ∈ [-1, 0.999]`、`ν ∈ [0, 1]` 等 versioned defaults）與 calibrated `α / ρ / ν` 未進入 canonical snapshot 前 **fail closed**，不得以 PWL 冒充 SABR。
+- **corner forward `F_ij`**：canonical snapshot 不儲存 forward。smile 在 moneyness 空間解析，因此 `σ_vcub` 不需要 forward；`K_ij = F_ij + μ*` 僅在呼叫端明確提供 forward 時報告，未提供時 corner strike 記為未知，不得假設。
+
+**Fail-closed 條件（皆 blocking，不得回傳降級數值）：**
+
+- surface 未聲明 volatility unit，或聲明無法 pin 的 unit；
+- query 未聲明 smile model，或聲明本版本未實作的 model；
+- coordinate map 未涵蓋 surface 上的 label，或兩個 label 對應同一座標；
+- query 宣告的 snapshot identity 與傳入 surface 不符（不同 capture / 不同 business date 不得互相插值）；
+- `T*`、`τ*` 或 `μ*` 超出 confirmed surface 覆蓋範圍（`VCUB_EXTRAPOLATION_MODE = FAIL_CLOSED`）；
+- 任一 bracketing node 缺漏或無 resolved value；
+- spread-to-ATM 欄位所需之 ATM absolute vol 缺漏（§A.8.3 重建不成立）。
+
+**Diagnostics / provenance（每一筆 resolved 結果必須可審計）：** canonical snapshot / surface identity、capture 與 confirm 資訊、source unit 與 normalization factor、resolver name/version、smile model/version、`VCUB_EXTRAPOLATION_MODE`、requested `(T*, τ*, μ*)`、四個 bracketing node 與其 ATM/spread 重建細節、各 corner 的 `F_ij`（若有）、`K_ij`（若有）與 corner normal vol、interpolation weights、最終 `σ_vcub`（原始 unit 與 normalized decimal）、fallback flag（accepted 結果恆為 false）。
+
+**邊界：** 本 resolver 只產出 normal swaption vol `σ_vcub`。它不是 bond yield vol，也不是 bond price vol；在 `DCF_VCUB` / `DCF_BondVol` convention RED 解除前（§A.8.5），其輸出不得流入 `λ_vcub` 之後的 `σ_Y^N` / `σ_P` / premium 鏈路。本 resolver 之插值行為為 Shiori 自有 versioned contract，在完成 OVME live parity 前仍不得宣稱與 Bloomberg 內部算法相同。
 
 ### A.8.4 Bond-specific Vol Scaling Factor `λ_vcub`
 
@@ -720,7 +756,7 @@ Internal Pricing Report / audit 必須顯示 Vega type、active source mode、bu
 - VCUB bond-option proxy coordinate 依 §A.8.2：`Texp = TF`、`Ttenor = TB - TF`、strike offset = `KY - FY`。
 - OTM/SABR `Display=Spread` 必須先依 §A.8.3 重建 absolute normal vol。
 - **Exact captured node**：直接使用 canonical node value。
-- **Off-grid expiry / tenor / strike**：v1.4 不再把原先的 `linear variance + linear log-moneyness` 宣稱為 Bloomberg-parity default。精確三維 resolver 必須另行版本化並以 OVME live parity 驗證。
+- **Off-grid expiry / tenor / strike**：v1.4 不再把原先的 `linear variance + linear log-moneyness` 宣稱為 Bloomberg-parity default。精確三維 resolver 必須另行版本化並以 OVME live parity 驗證；目前唯一版本化的 in-grid resolver 為 §A.8.3a `IN_GRID_BILINEAR_V1`（covered range 內：additive-moneyness PWL smile + expiry/tenor bilinear，輸出止於 `σ_vcub`）。
 - **超出 captured surface 範圍**：MVP fail closed；不得 flat extrapolate 或 silent fallback，除非日後另立明確 extrapolation model/version。
 
 ---
@@ -771,7 +807,7 @@ d2 = d1 - σY √T
 | `CRR_STEPS` | `HIGH(500)` | `FAST(100)` / `STD(250)` / `HIGH(500)` / `ULTRA(1000)` / `MAX(2000)` | Trader (per pricing) | ✅ |
 | `ENABLE_SHIFTED_BLACK` | `false` | `true` / `false` | Trader (per pricing) | ✅ |
 | `SHIFTED_BLACK_EPSILON` | `3.00%` | 0.00% – 5.00% | Trader (per pricing) | ✅ |
-| `VCUB_RESOLVER_VERSION` | `EXACT_NODE_ONLY` | `EXACT_NODE_ONLY` / future approved resolver versions | Trading Desk Lead | ✅ |
+| `VCUB_RESOLVER_VERSION` | `EXACT_NODE_ONLY` | `EXACT_NODE_ONLY` / `IN_GRID_BILINEAR_V1`（§A.8.3a，輸出止於 `σ_vcub`）/ future approved resolver versions | Trading Desk Lead | ✅ |
 | `VCUB_EXTRAPOLATION_MODE` | `FAIL_CLOSED` | `FAIL_CLOSED` / future approved extrapolation versions | Trading Desk Lead | ✅ |
 | `CURVE_INTERP` | `LINEAR_ZERO` | `LINEAR_ZERO` / `LINEAR_DF` | Trading Desk Lead | ✅ |
 | `AMERICAN_GREEKS_TREE_STEPS` | `FAST(100)` | `FAST(100)` / `STD(250)` | Trader (per pricing) | ✅ |
