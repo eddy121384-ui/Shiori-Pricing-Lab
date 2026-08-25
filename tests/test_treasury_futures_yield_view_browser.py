@@ -127,6 +127,28 @@ def _fill_ctd(page) -> None:
     page.fill("#fy-as-of", CTD_ENTRY["as_of"])
 
 
+# Delays only the named API response, in the page's own network layer, so the
+# module's real request/await path runs exactly as it does against a slow
+# server. Nothing about the module is stubbed.
+_DELAY_RESPONSE_SCRIPT = """
+([path, delayMs]) => {
+  const originalFetch = window.fetch;
+  window.fetch = (input, init) => {
+    const promise = originalFetch(input, init);
+    if (String(input).includes(path)) {
+      return promise.then(
+        (response) =>
+          new Promise((resolve) => setTimeout(() => resolve(response), delayMs))
+      );
+    }
+    return promise;
+  };
+}
+"""
+
+_IN_FLIGHT_DELAY_MS = 1500
+
+
 @_PLAYWRIGHT_SKIP
 def test_the_nav_item_switches_to_the_view_and_pricing_switches_back(page, server_url) -> None:
     _open_futures_yield(page, server_url)
@@ -320,6 +342,55 @@ def test_a_typo_in_a_ctd_number_is_reported_as_a_typo_not_as_a_missing_field(
     detail = page.text_content("#fy-error-detail")
     assert "conversion_factor" in detail
     assert "missing" not in detail.lower()
+
+
+@_PLAYWRIGHT_SKIP
+def test_an_in_flight_conversion_never_repaints_after_the_contract_changes(
+    page, server_url
+) -> None:
+    """Codex review, PR #191 (P1), second round.
+
+    Clearing the DOM does not cancel a request already awaiting a response.
+    Without a request-identity fence, a conversion started for ZN resolves
+    after the switch to ZB and repaints ZN's yield, CTD and conversion factor
+    beside ZB's inputs -- a stale answer that looks freshly computed.
+    """
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.evaluate(_DELAY_RESPONSE_SCRIPT, ["/api/treasury-futures/convert", _IN_FLIGHT_DELAY_MS])
+
+    page.click("#fy-convert-btn")
+    page.select_option("#fy-contract-select", "ZB")  # while the request is still in flight
+    page.wait_for_timeout(_IN_FLIGHT_DELAY_MS + 1500)
+
+    assert page.text_content("#fy-implied-yield").strip() == "—"
+    assert page.text_content("#fy-futures-price-out").strip() == "—"
+    assert page.text_content("#fy-detail-ctd").strip() == "—"
+    assert page.text_content("#fy-detail-cf").strip() == "—"
+    assert "No CTD loaded" in page.text_content("#fy-source-pill")
+    assert page.input_value("#fy-conversion-factor") == ""
+
+
+@_PLAYWRIGHT_SKIP
+def test_an_in_flight_conversion_never_repaints_after_an_input_is_edited(
+    page, server_url
+) -> None:
+    """Same fence, the ordinary case: the trader retypes the price mid-request."""
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.evaluate(_DELAY_RESPONSE_SCRIPT, ["/api/treasury-futures/convert", _IN_FLIGHT_DELAY_MS])
+
+    page.click("#fy-convert-btn")
+    page.fill("#fy-futures-price", "118-165")  # while the request is still in flight
+    page.wait_for_timeout(_IN_FLIGHT_DELAY_MS + 1500)
+
+    # The answer on screen must never be the one computed for 112-165.
+    assert page.text_content("#fy-implied-yield").strip() == "—"
+    assert page.text_content("#fy-implied-yield-note").strip() == "—"
 
 
 @_PLAYWRIGHT_SKIP

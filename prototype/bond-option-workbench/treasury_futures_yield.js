@@ -71,6 +71,26 @@
   let contracts = [];
   let contractsLoaded = false;
 
+  // Request-identity fence (Codex review, PR #191). Clearing the DOM does not
+  // cancel a request already awaiting a response: without this, a conversion
+  // started for ZN could resolve *after* the trader switched to ZB and
+  // repaint ZN's yield, CTD and conversion factor beside ZB's inputs -- a
+  // stale answer that looks freshly computed, which is the one failure this
+  // panel must not have. Every action that invalidates what is on screen
+  // bumps this token, and every awaited continuation drops its result unless
+  // the token is still the one it started with. Same idea as the Pricing
+  // module's own `conventionProfileGeneration` fence.
+  let requestGeneration = 0;
+
+  function beginRequest() {
+    requestGeneration += 1;
+    return requestGeneration;
+  }
+
+  function isCurrentRequest(generation) {
+    return generation === requestGeneration;
+  }
+
   function contractByCode(code) {
     return contracts.find((contract) => contract.code === code) || null;
   }
@@ -225,18 +245,22 @@
   async function loadBloombergCtd() {
     const contract = selectedContract();
     if (!contract) return;
+    const generation = beginRequest();
     clearError();
     els.automaticNote.hidden = true;
     try {
       const payload = await postJson("/api/treasury-futures/ctd", {
         contract_code: contract.code,
       });
+      if (!isCurrentRequest(generation)) return;
       fillCtdFields(payload);
       renderCtdDetail(payload);
     } catch (error) {
       // The automatic path being unavailable is an answer, not a crash: show
       // exactly what the server said is missing and leave the manual fields
-      // usable.
+      // usable. Still fenced: this note names a contract, and a note about
+      // the contract the trader has already navigated away from is wrong.
+      if (!isCurrentRequest(generation)) return;
       els.automaticNote.textContent = error.message;
       els.automaticNote.hidden = false;
     }
@@ -284,6 +308,9 @@
   }
 
   async function convert() {
+    // Starting a conversion also supersedes any earlier one still in flight,
+    // so two rapid clicks can never race each other onto the screen.
+    const generation = beginRequest();
     clearError();
     clearAnswers();
     const futuresPrice = els.futuresPrice.value.trim();
@@ -301,10 +328,12 @@
         // and answer nothing, instead of telling the trader what is wrong.
         target_yield_percent: targetYield || null,
       });
+      if (!isCurrentRequest(generation)) return;
       renderCtdDetail(payload.ctd);
       renderImpliedYield(payload);
       renderFuturesPrice(payload);
     } catch (error) {
+      if (!isCurrentRequest(generation)) return;
       showError(error.message);
     }
   }
@@ -338,6 +367,7 @@
     // "change" -- and the CTD maturity and delivery dates are date fields.
     ["input", "change"].forEach((eventName) => {
       els[key].addEventListener(eventName, () => {
+        beginRequest();
         clearAnswers();
         clearError();
       });
@@ -353,6 +383,7 @@
   // vendor contract symbol against, and a half-migrated CTD is exactly the
   // silent-wrong-answer this utility must not give.
   els.contractSelect.addEventListener("change", () => {
+    beginRequest();
     renderTickSummary();
     clearCtdFields();
     clearAnswers();
@@ -372,4 +403,5 @@
   // Read-only accessors for the browser tests, mirroring the pattern the
   // Pricing module already uses. No production behavior depends on them.
   window.__shioriTestFuturesYieldContracts = () => contracts;
+  window.__shioriTestFuturesYieldRequestGeneration = () => requestGeneration;
 })();
