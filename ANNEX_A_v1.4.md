@@ -577,7 +577,7 @@ confirmed canonical VCUB snapshot
 - spread-to-ATM 欄位所需之 ATM absolute vol 缺漏（§A.8.3 重建不成立）；
 - 重建後之 absolute normal vol 為負（normal vol 非負；此時應視為 capture 或 spread 語義有誤，不得輸出）。
 
-**Diagnostics / provenance（每一筆 resolved 結果必須可審計）：** canonical snapshot / surface identity、capture 與 confirm 資訊、source unit 與 normalization factor、resolver name/version、smile model/version、`VCUB_EXTRAPOLATION_MODE`、requested `(T*, τ*, μ*)`、四個 bracketing node 與其 ATM/spread 重建細節、各 corner 的 `F_ij`（若有）、`K_ij`（若有）與 corner normal vol、interpolation weights、最終 `σ_vcub`（原始 unit 與 normalized decimal）、fallback flag（accepted 結果恆為 false）。
+**Diagnostics / provenance（每一筆 resolved 結果必須可審計）：** canonical snapshot / surface identity、capture 與 confirm 資訊、source unit 與 normalization factor、resolver name/version、smile model/version、`VCUB_EXTRAPOLATION_MODE`、requested `(T*, τ*, μ*)`、四個 bracketing node 與其 ATM/spread 重建細節、各 corner 的 `F_ij`（若有）、`K_ij`（若有）與 corner normal vol、interpolation weights、最終 `σ_vcub`（raw 值標示 source unit、normalized 值標示 `decimal`；兩個 value/unit 配對不得互換，避免已 normalize 的值被再乘一次 `1e-4`）、fallback flag（accepted 結果恆為 false）。
 
 **邊界：** 本 resolver 只產出 normal swaption vol `σ_vcub`。它不是 bond yield vol，也不是 bond price vol；在 `DCF_VCUB` / `DCF_BondVol` convention RED 解除前（§A.8.5），其輸出不得流入 `λ_vcub` 之後的 `σ_Y^N` / `σ_P` / premium 鏈路。本 resolver 之插值行為為 Shiori 自有 versioned contract，在完成 OVME live parity 前仍不得宣稱與 Bloomberg 內部算法相同。
 

@@ -252,6 +252,23 @@ def test_a_stated_bp_unit_normalizes_at_one_basis_point_to_1e_minus_4() -> None:
     assert resolution.volatility == resolution.volatility_raw * 1e-4
 
 
+def test_each_value_is_labelled_with_its_own_unit() -> None:
+    """Codex review, PR #189.
+
+    ``volatility`` is already normalized, so labelling it with the source's
+    ``bp`` would invite a consumer reading the serialized result as a
+    value/unit pair to scale 0.008 by another 1e-4.
+    """
+
+    resolution = resolve()
+
+    assert resolution.volatility_raw == 80.0
+    assert resolution.source_volatility_unit == "bp"
+    assert resolution.volatility == 0.008
+    assert resolution.volatility_unit == "decimal"
+    assert resolution.volatility_unit != resolution.source_volatility_unit
+
+
 def test_a_stated_decimal_unit_is_carried_through_unscaled() -> None:
     decimal_atm = {node: value * 1e-4 for node, value in ATM_BP.items()}
     decimal_spreads = {
@@ -264,6 +281,9 @@ def test_a_stated_decimal_unit_is_carried_through_unscaled() -> None:
 
     assert resolution.unit_scale_to_decimal == 1.0
     assert resolution.volatility == pytest.approx(0.008, abs=1e-15)
+    # A surface already stating decimal has both units agree, which is the
+    # same convention rather than an exception to it.
+    assert resolution.source_volatility_unit == resolution.volatility_unit == "decimal"
 
 
 def test_a_surface_stating_no_unit_blocks_instead_of_being_read_as_bp() -> None:
@@ -596,7 +616,7 @@ def test_a_resolution_carries_the_snapshot_and_resolver_provenance() -> None:
     assert payload["tenor_bracket_labels"] == ["5Yr", "10Yr"]
     assert len(payload["corners"]) == 4
     assert payload["corners"][0]["smile_nodes"][0]["value_kind"] == "SPREAD_TO_ATM"
-    assert payload["volatility_unit"] == "bp"
+    assert payload["volatility_unit"] == "decimal"
 
 
 def test_an_accepted_resolution_never_reports_a_fallback() -> None:

@@ -103,6 +103,12 @@ EXTRAPOLATION_MODE = "FAIL_CLOSED"
 #: (Annex A.8.1, SPEC §3.3).
 BASIS_POINT_IN_DECIMAL = 1e-4
 
+#: The unit of every normalized value this module returns, and the unit
+#: :attr:`VCUBNormalVolResolution.volatility_unit` names. Reported rather
+#: than left implicit so a serialized result never has a value beside a unit
+#: that belongs to a different number (Codex review, PR #189).
+NORMALIZED_VOLATILITY_UNIT = "decimal"
+
 #: The volatility units a surface may *state*, and what one of its numbers
 #: is worth as an absolute decimal rate vol. A surface stating anything else
 #: -- or nothing at all -- fails closed: the magnitude of the numbers is
@@ -423,6 +429,16 @@ class VCUBNormalVolResolution:
     four nodes answered it, what each of them reconstructed from, how they
     were weighted, and what the final number is in both the surface's stated
     unit and absolute decimal.
+
+    **Each value sits beside its own unit.** :attr:`volatility` is the
+    normalized absolute decimal rate vol and :attr:`volatility_unit` is
+    always :data:`NORMALIZED_VOLATILITY_UNIT`; :attr:`volatility_raw` is the
+    same quantity in the surface's stated unit, which
+    :attr:`source_volatility_unit` names. The two pairs are never crossed:
+    reading ``volatility`` against the *source* unit would invite a consumer
+    to scale an already-normalized 0.008 by another 1e-4 (Codex review, PR
+    #189). Every other raw/normalized pair in this record -- on a corner and
+    on a smile node -- follows the same convention.
 
     :attr:`corners` is ordered ``(expiry low, tenor low)``, ``(expiry low,
     tenor high)``, ``(expiry high, tenor low)``, ``(expiry high, tenor
@@ -952,5 +968,5 @@ def resolve_vcub_normal_vol(
         corners=tuple(corners),
         volatility=volatility_raw * scale,
         volatility_raw=volatility_raw,
-        volatility_unit=unit,
+        volatility_unit=NORMALIZED_VOLATILITY_UNIT,
     )
