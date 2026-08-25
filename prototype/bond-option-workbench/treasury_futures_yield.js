@@ -364,13 +364,28 @@
     renderCtdDetail(null);
   }
 
-  // Every input the answer depends on. Editing any of them invalidates the
-  // answer on screen: a yield sitting next to a futures price that did not
-  // produce it is a number a trader can read off and act on, which is the
-  // one failure this panel must not have (Codex review, PR #191).
-  const CALCULATION_INPUT_KEYS = [...CTD_FIELD_KEYS, "futuresPrice", "targetYield"];
+  // The invariant, stated once so a future edit reasons from it rather than
+  // from a list of cases (Codex review, PR #191): **every element showing a
+  // result of the last submitted request is cleared as soon as any input
+  // that fed that request changes.** A number a trader can read off next to
+  // inputs that did not produce it is the one failure this panel must not
+  // have, and "result" means the CTD small print and source pill just as
+  // much as the two headline answers -- both are rendered from the response.
+  //
+  // Which inputs feed which result is what makes the two lists differ:
+  //
+  // - the answers depend on the futures price, the target yield, every CTD
+  //   field and the contract;
+  // - the CTD small print, summary and source pill depend on the CTD fields
+  //   and the contract, but *not* on the price or the target yield, so
+  //   retyping a price must not blank the CTD that is still perfectly
+  //   current;
+  // - the tick readout depends on the contract alone and is re-rendered by
+  //   `renderTickSummary`, so it is deliberately not cleared here.
+  const CTD_INPUT_KEYS = CTD_FIELD_KEYS;
+  const ANSWER_ONLY_INPUT_KEYS = ["futuresPrice", "targetYield"];
 
-  CALCULATION_INPUT_KEYS.forEach((key) => {
+  function invalidateOnInput(key, alsoClearCtdDetail) {
     // Both events: a text field reports "input" per keystroke, while a date
     // field picked from the browser's own calendar widget can report only
     // "change" -- and the CTD maturity and delivery dates are date fields.
@@ -379,9 +394,13 @@
         beginRequest();
         clearAnswers();
         clearError();
+        if (alsoClearCtdDetail) renderCtdDetail(null);
       });
     });
-  });
+  }
+
+  CTD_INPUT_KEYS.forEach((key) => invalidateOnInput(key, true));
+  ANSWER_ONLY_INPUT_KEYS.forEach((key) => invalidateOnInput(key, false));
 
   // Changing the contract is not an edit, it is a different instrument. The
   // CTD fields belong to the contract they were entered or loaded for, and

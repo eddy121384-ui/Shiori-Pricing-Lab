@@ -467,6 +467,72 @@ def test_a_failed_automatic_ctd_load_leaves_a_valid_answer_alone(page, server_ur
 
 
 @_PLAYWRIGHT_SKIP
+def test_editing_a_ctd_field_also_invalidates_the_ctd_small_print(page, server_url) -> None:
+    """Codex review, PR #191 (P2), fourth round.
+
+    The small print and source pill are rendered from the response just as
+    much as the two headline answers are, so a CTD edit that leaves them
+    showing the previously submitted identifier, coupon, factor and as-of
+    presents two conflicting CTD snapshots at once.
+    """
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-detail-ctd").strip() == CTD_ENTRY["ctd_identifier"])
+
+    page.fill("#fy-conversion-factor", "0.7654")
+
+    assert page.text_content("#fy-implied-yield").strip() == "—"
+    assert page.text_content("#fy-detail-ctd").strip() == "—"
+    assert page.text_content("#fy-detail-coupon").strip() == "—"
+    assert page.text_content("#fy-detail-cf").strip() == "—"
+    assert page.text_content("#fy-detail-as-of").strip() == "—"
+    assert page.text_content("#fy-ctd-summary").strip() == "—"
+    assert "No CTD loaded" in page.text_content("#fy-source-pill")
+
+
+@_PLAYWRIGHT_SKIP
+def test_editing_a_price_leaves_the_still_current_ctd_small_print_alone(
+    page, server_url
+) -> None:
+    """The other half of the same invariant.
+
+    The CTD small print does not depend on the futures price or the target
+    yield, so retyping a price must not blank a CTD that is still current --
+    over-clearing would cost the trader the reference data they need to read
+    the next answer.
+    """
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-detail-ctd").strip() == CTD_ENTRY["ctd_identifier"])
+
+    page.fill("#fy-futures-price", "118-165")
+
+    assert page.text_content("#fy-implied-yield").strip() == "—"  # the answer is stale
+    assert page.text_content("#fy-detail-ctd").strip() == CTD_ENTRY["ctd_identifier"]
+    assert page.text_content("#fy-detail-cf").strip() == str(CTD_ENTRY["conversion_factor"])
+    assert "NOT confirmed" in page.text_content("#fy-source-pill")
+
+    page.fill("#fy-target-yield", "4.2")
+    assert page.text_content("#fy-detail-ctd").strip() == CTD_ENTRY["ctd_identifier"]
+
+
+@_PLAYWRIGHT_SKIP
+def test_the_tick_readout_survives_a_ctd_edit_because_it_depends_on_the_contract(
+    page, server_url
+) -> None:
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-ctd-coupon", "3.5")
+    assert "1/64 point" in page.text_content("#fy-detail-tick")
+
+
+@_PLAYWRIGHT_SKIP
 def test_the_automatic_bloomberg_path_reports_exactly_what_is_missing(page, server_url) -> None:
     _open_futures_yield(page, server_url)
     page.click("#fy-load-bloomberg-btn")
