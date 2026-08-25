@@ -1,0 +1,313 @@
+// Futures Yield view (Issue #190) -- Treasury futures <-> CTD implied yield.
+//
+// A fifth self-contained IIFE, sharing no state with the Pricing, Markets or
+// Capture modules and touching nothing any of them owns.
+//
+// **This file performs no bond mathematics whatsoever.** It does not parse a
+// futures quote, apply a conversion factor, build a coupon schedule, accrue
+// interest, discount a cashflow, solve a yield, or round a price to a tick.
+// Every one of those is `pricing/treasury_futures_implied_yield` and
+// `pricing/treasury_futures_contract`, reached through
+// POST /api/treasury-futures/convert, and rendered here exactly as received.
+// That is the whole point of Issue #190's canonical-path requirement: PR #9
+// re-implemented the entire bond pricer in browser JavaScript, so the page
+// and Python could silently disagree. Even the tick size and the legal
+// sub-32nd digits shown next to the input come from
+// GET /api/treasury-futures/contracts rather than a constant in this file.
+//
+// The CTD source status is rendered from the server's own
+// `is_confirmed_source` flag, never inferred here, and an unconfirmed source
+// is always visible next to the answer it produced.
+(function () {
+  "use strict";
+
+  const navFuturesYield = document.getElementById("nav-futures-yield");
+  const viewFuturesYield = document.getElementById("view-futures-yield");
+  if (!navFuturesYield || !viewFuturesYield) return; // view not present on this page
+
+  const els = {
+    sourcePill: document.getElementById("fy-source-pill"),
+    errorSection: document.getElementById("fy-error"),
+    errorDetail: document.getElementById("fy-error-detail"),
+    contractSelect: document.getElementById("fy-contract-select"),
+    ctdSummary: document.getElementById("fy-ctd-summary"),
+    tickSummary: document.getElementById("fy-tick-summary"),
+    loadBloombergBtn: document.getElementById("fy-load-bloomberg-btn"),
+    automaticNote: document.getElementById("fy-automatic-note"),
+    contractSymbol: document.getElementById("fy-contract-symbol"),
+    ctdIdentifier: document.getElementById("fy-ctd-identifier"),
+    ctdCoupon: document.getElementById("fy-ctd-coupon"),
+    ctdMaturity: document.getElementById("fy-ctd-maturity"),
+    conversionFactor: document.getElementById("fy-conversion-factor"),
+    lastDelivery: document.getElementById("fy-last-delivery"),
+    asOf: document.getElementById("fy-as-of"),
+    futuresPrice: document.getElementById("fy-futures-price"),
+    targetYield: document.getElementById("fy-target-yield"),
+    convertBtn: document.getElementById("fy-convert-btn"),
+    impliedYield: document.getElementById("fy-implied-yield"),
+    impliedYieldNote: document.getElementById("fy-implied-yield-note"),
+    futuresPriceOut: document.getElementById("fy-futures-price-out"),
+    futuresPriceNote: document.getElementById("fy-futures-price-note"),
+    detailCtd: document.getElementById("fy-detail-ctd"),
+    detailCoupon: document.getElementById("fy-detail-coupon"),
+    detailMaturity: document.getElementById("fy-detail-maturity"),
+    detailCf: document.getElementById("fy-detail-cf"),
+    detailDelivery: document.getElementById("fy-detail-delivery"),
+    detailTick: document.getElementById("fy-detail-tick"),
+    detailSource: document.getElementById("fy-detail-source"),
+    detailAsOf: document.getElementById("fy-detail-as-of"),
+  };
+
+  const NBSP_DASH = "—";
+
+  // Deliberately explicit, never a generic string-humanizer: these are the
+  // only two source values the server sends, so the label is a reviewed
+  // mapping. An unrecognized value falls back to the raw string, verbatim.
+  const SOURCE_LABELS = {
+    BLOOMBERG_DAPI: "Bloomberg DAPI",
+    MANUAL_UNCONFIRMED: "Manual — unconfirmed",
+  };
+
+  let contracts = [];
+  let contractsLoaded = false;
+
+  function contractByCode(code) {
+    return contracts.find((contract) => contract.code === code) || null;
+  }
+
+  function selectedContract() {
+    return contractByCode(els.contractSelect.value);
+  }
+
+  function showError(detail) {
+    els.errorDetail.textContent = detail;
+    els.errorSection.hidden = false;
+  }
+
+  function clearError() {
+    els.errorSection.hidden = true;
+  }
+
+  function renderTickSummary() {
+    const contract = selectedContract();
+    if (!contract) {
+      els.tickSummary.textContent = NBSP_DASH;
+      els.detailTick.textContent = NBSP_DASH;
+      return;
+    }
+    const digits = contract.sub_32nd_digits.join(", ");
+    // The label is the server's, not derived from minimum_tick here: this
+    // module does no arithmetic at all, display arithmetic included.
+    const tick = contract.minimum_tick_label;
+    els.tickSummary.textContent = `${contract.code} tick ${tick} — sub-32nd digits ${digits}`;
+    els.detailTick.textContent = `${tick} (${contract.minimum_tick})`;
+  }
+
+  function renderSourceStatus(ctd) {
+    if (!ctd) {
+      els.sourcePill.textContent = "No CTD loaded";
+      els.sourcePill.classList.remove("is-unconfirmed", "is-confirmed");
+      return;
+    }
+    const label = SOURCE_LABELS[ctd.source] || ctd.source;
+    els.sourcePill.textContent = ctd.is_confirmed_source
+      ? `${label} — confirmed`
+      : `${label} — NOT confirmed current market data`;
+    els.sourcePill.classList.toggle("is-unconfirmed", !ctd.is_confirmed_source);
+    els.sourcePill.classList.toggle("is-confirmed", Boolean(ctd.is_confirmed_source));
+  }
+
+  function renderCtdDetail(ctd) {
+    renderSourceStatus(ctd);
+    if (!ctd) {
+      els.ctdSummary.textContent = NBSP_DASH;
+      return;
+    }
+    els.ctdSummary.textContent = `${ctd.contract_symbol} — CTD ${ctd.ctd_identifier}`;
+    els.detailCtd.textContent = ctd.ctd_identifier;
+    els.detailCoupon.textContent = `${ctd.ctd_coupon_percent}%`;
+    els.detailMaturity.textContent = ctd.ctd_maturity_date;
+    els.detailCf.textContent = String(ctd.conversion_factor);
+    els.detailDelivery.textContent = ctd.last_delivery_date;
+    els.detailSource.textContent = SOURCE_LABELS[ctd.source] || ctd.source;
+    els.detailAsOf.textContent = ctd.as_of;
+  }
+
+  function fillCtdFields(ctd) {
+    els.contractSymbol.value = ctd.contract_symbol || "";
+    els.ctdIdentifier.value = ctd.ctd_identifier || "";
+    els.ctdCoupon.value = ctd.ctd_coupon_percent == null ? "" : String(ctd.ctd_coupon_percent);
+    els.ctdMaturity.value = ctd.ctd_maturity_date || "";
+    els.conversionFactor.value =
+      ctd.conversion_factor == null ? "" : String(ctd.conversion_factor);
+    els.lastDelivery.value = ctd.last_delivery_date || "";
+    els.asOf.value = ctd.as_of || "";
+  }
+
+  // A typed value that is not a number is forwarded as the text it is, not
+  // as `NaN` -- `JSON.stringify(NaN)` is `null`, which the server would read
+  // as "this field was left blank" and report as missing rather than as the
+  // typo it is.
+  function numberOrRaw(text) {
+    if (text === "") return null;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : text;
+  }
+
+  // Sent verbatim. A blank field stays blank rather than becoming 0 or
+  // today's date: the server rejects an incomplete CTD, and a fabricated
+  // default is exactly the silent-wrong-answer this utility must not give.
+  function ctdRequestPayload() {
+    const contract = selectedContract();
+    return {
+      contract_code: contract ? contract.code : null,
+      contract_symbol: els.contractSymbol.value.trim() || null,
+      ctd_identifier: els.ctdIdentifier.value.trim() || null,
+      ctd_coupon_percent: numberOrRaw(els.ctdCoupon.value.trim()),
+      ctd_maturity_date: els.ctdMaturity.value || null,
+      conversion_factor: numberOrRaw(els.conversionFactor.value.trim()),
+      last_delivery_date: els.lastDelivery.value || null,
+      as_of: els.asOf.value.trim() || null,
+    };
+  }
+
+  async function postJson(path, body) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (parseError) {
+      throw new Error(`${path} returned a non-JSON response (HTTP ${response.status})`);
+    }
+    if (!response.ok) {
+      throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+    }
+    return payload;
+  }
+
+  async function loadContracts() {
+    if (contractsLoaded) return;
+    const response = await fetch("/api/treasury-futures/contracts");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (!payload || !Array.isArray(payload.contracts) || payload.contracts.length === 0) {
+      throw new Error('malformed response: expected a non-empty "contracts" array');
+    }
+    contracts = payload.contracts;
+    contractsLoaded = true;
+    els.contractSelect.innerHTML = "";
+    contracts.forEach((contract) => {
+      const option = document.createElement("option");
+      option.value = contract.code;
+      option.textContent = `${contract.code} — ${contract.name}`;
+      els.contractSelect.appendChild(option);
+    });
+    renderTickSummary();
+  }
+
+  async function loadBloombergCtd() {
+    const contract = selectedContract();
+    if (!contract) return;
+    clearError();
+    els.automaticNote.hidden = true;
+    try {
+      const payload = await postJson("/api/treasury-futures/ctd", {
+        contract_code: contract.code,
+      });
+      fillCtdFields(payload);
+      renderCtdDetail(payload);
+    } catch (error) {
+      // The automatic path being unavailable is an answer, not a crash: show
+      // exactly what the server said is missing and leave the manual fields
+      // usable.
+      els.automaticNote.textContent = error.message;
+      els.automaticNote.hidden = false;
+    }
+  }
+
+  function renderImpliedYield(payload) {
+    if (!payload.implied_yield) {
+      els.impliedYield.textContent = NBSP_DASH;
+      els.impliedYieldNote.textContent = payload.implied_yield_error || NBSP_DASH;
+      return;
+    }
+    const result = payload.implied_yield;
+    els.impliedYield.textContent = `${result.implied_yield_percent.toFixed(4)}%`;
+    const offTick = result.on_tick
+      ? ""
+      : ` — off-tick, nearest exchange price ${result.exchange_quote}`;
+    els.impliedYieldNote.textContent =
+      `${result.exchange_quote} = ${result.futures_price} → CTD clean ` +
+      `${result.converted_clean_price.toFixed(6)}, accrued ` +
+      `${result.accrued_interest.toFixed(6)}, settled ${result.settlement_date}${offTick}`;
+  }
+
+  function renderFuturesPrice(payload) {
+    if (!payload.futures_price) {
+      els.futuresPriceOut.textContent = NBSP_DASH;
+      els.futuresPriceNote.textContent = payload.futures_price_error || NBSP_DASH;
+      return;
+    }
+    const result = payload.futures_price;
+    els.futuresPriceOut.textContent = result.exchange_quote;
+    els.futuresPriceNote.textContent =
+      `raw ${result.futures_price.toFixed(6)} — CTD clean ` +
+      `${result.converted_clean_price.toFixed(6)}, min tick ${result.minimum_tick_label}, ` +
+      `settled ${result.settlement_date}`;
+  }
+
+  function clearAnswers() {
+    // A stale answer next to an error banner is the one genuinely dangerous
+    // state this panel can be in: the number would still look current. Both
+    // answers are cleared before every attempt, successful or not.
+    els.impliedYield.textContent = NBSP_DASH;
+    els.impliedYieldNote.textContent = NBSP_DASH;
+    els.futuresPriceOut.textContent = NBSP_DASH;
+    els.futuresPriceNote.textContent = NBSP_DASH;
+  }
+
+  async function convert() {
+    clearError();
+    clearAnswers();
+    const futuresPrice = els.futuresPrice.value.trim();
+    const targetYield = els.targetYield.value.trim();
+    if (!futuresPrice && !targetYield) {
+      showError("Enter a futures price, a target yield, or both.");
+      return;
+    }
+    try {
+      const payload = await postJson("/api/treasury-futures/convert", {
+        ctd: ctdRequestPayload(),
+        futures_price: futuresPrice || null,
+        // Sent as typed. `Number("abc")` is NaN, and JSON.stringify turns
+        // that into null -- which the server would read as "no target yield"
+        // and answer nothing, instead of telling the trader what is wrong.
+        target_yield_percent: targetYield || null,
+      });
+      renderCtdDetail(payload.ctd);
+      renderImpliedYield(payload);
+      renderFuturesPrice(payload);
+    } catch (error) {
+      showError(error.message);
+    }
+  }
+
+  els.contractSelect.addEventListener("change", renderTickSummary);
+  els.loadBloombergBtn.addEventListener("click", () => loadBloombergCtd());
+  els.convertBtn.addEventListener("click", () => convert());
+
+  document.addEventListener("shiori:viewchange", (event) => {
+    if (!event.detail || event.detail.view !== "futures-yield") return;
+    loadContracts().catch((error) => {
+      showError(`Unable to load the supported contracts: ${error.message}`);
+    });
+  });
+
+  // Read-only accessors for the browser tests, mirroring the pattern the
+  // Pricing module already uses. No production behavior depends on them.
+  window.__shioriTestFuturesYieldContracts = () => contracts;
+})();

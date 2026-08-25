@@ -5018,22 +5018,31 @@
   // visibility, and each capture view's own module does its own work.
   const navCaptureOtm = document.getElementById("nav-capture-otm");
   const viewCaptureOtm = document.getElementById("view-capture-otm");
+  // Issue #190 added a fifth view (the Treasury futures yield desk utility).
+  // Same rule as the other four: the router owns visibility only, and that
+  // view's own module (treasury_futures_yield.js) does all of its work.
+  const navFuturesYield = document.getElementById("nav-futures-yield");
+  const viewFuturesYield = document.getElementById("view-futures-yield");
 
   function switchToView(view) {
     const showMarkets = view === "markets";
     const showCapture = view === "capture";
     const showCaptureOtm = view === "capture-otm";
-    const showPricing = !showMarkets && !showCapture && !showCaptureOtm;
+    const showFuturesYield = view === "futures-yield";
+    const showPricing =
+      !showMarkets && !showCapture && !showCaptureOtm && !showFuturesYield;
     viewMarkets.hidden = !showMarkets;
     viewPricing.hidden = !showPricing;
     if (viewCapture) viewCapture.hidden = !showCapture;
     if (viewCaptureOtm) viewCaptureOtm.hidden = !showCaptureOtm;
+    if (viewFuturesYield) viewFuturesYield.hidden = !showFuturesYield;
     // The footer's Price/Clear/Export actions are Pricing-only.
     if (els.footer) els.footer.hidden = !showPricing;
     navMarkets.classList.toggle("active", showMarkets);
     navPricing.classList.toggle("active", showPricing);
     if (navCapture) navCapture.classList.toggle("active", showCapture);
     if (navCaptureOtm) navCaptureOtm.classList.toggle("active", showCaptureOtm);
+    if (navFuturesYield) navFuturesYield.classList.toggle("active", showFuturesYield);
     setPricingContextSuppressed(!showPricing);
 
     if (showMarkets && !lastSuccessfulCurve && !isLoadingCurve) {
@@ -5047,6 +5056,9 @@
   if (navCapture) navCapture.addEventListener("click", () => switchToView("capture"));
   if (navCaptureOtm) {
     navCaptureOtm.addEventListener("click", () => switchToView("capture-otm"));
+  }
+  if (navFuturesYield) {
+    navFuturesYield.addEventListener("click", () => switchToView("futures-yield"));
   }
   els.refreshBtn.addEventListener("click", () => loadCurve());
 

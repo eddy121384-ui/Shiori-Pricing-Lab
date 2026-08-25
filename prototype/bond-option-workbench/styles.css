@@ -824,3 +824,60 @@ select.control:focus { border-color: var(--blue); }
 .markets-table td { padding: 7px 10px; border-bottom: 1px solid #f1f2f5; color: var(--text); font-variant-numeric: tabular-nums; }
 .markets-table tbody tr:hover { background: #f9fafc; }
 .markets-table td.unavailable { color: var(--muted-2); }
+
+/* ===== Futures Yield view (Issue #190) =====
+   A compact desk utility, deliberately narrow: two inputs, two answers and
+   the CTD small print underneath. It reuses .card/.form-row/.control and the
+   Markets view's status banners rather than introducing a second visual
+   language for one panel. */
+.futures-yield-view { max-width: 940px; }
+
+.fy-subtitle { font-size: 13px; color: var(--muted); line-height: 1.55; }
+
+.fy-source-pill {
+  display: inline-flex; align-items: center; height: 22px; padding: 0 10px;
+  border-radius: 11px; font-size: 12px; font-weight: 600;
+  background: var(--field-bg); color: var(--muted); border: 1px solid var(--field-border);
+}
+/* An unconfirmed CTD source is loud on purpose: every number in this panel is
+   only as current as the metadata behind it (Issue #190). */
+.fy-source-pill.is-unconfirmed { background: #fff6ec; color: #a15a12; border-color: #f0d3ae; }
+.fy-source-pill.is-confirmed { background: #eaf7f0; color: #1c7a4c; border-color: #bfe6d0; }
+
+.fy-inline-note { margin-top: 8px; }
+
+.fy-manual-grid {
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 22px;
+}
+
+.fy-convert-row {
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+}
+.fy-convert-row:last-of-type { border-bottom: none; }
+
+.fy-answer { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
+.fy-answer-label { font-size: 13px; color: var(--muted); min-width: 146px; }
+.fy-answer-value {
+  font-size: 24px; font-weight: 650; color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.fy-answer-note {
+  margin-top: 3px; margin-left: 156px; font-size: 12px; color: var(--muted-2);
+  line-height: 1.5;
+}
+
+.fy-actions { margin: 12px 0 4px; }
+
+.fy-detail-strip {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 18px;
+}
+.fy-detail-strip dt { font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.03em; }
+.fy-detail-strip dd { font-size: 13px; color: var(--text); word-break: break-all; }
+
+@media (max-width: 860px) {
+  .fy-manual-grid { grid-template-columns: 1fr; }
+  .fy-detail-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fy-answer-note { margin-left: 0; }
+}
