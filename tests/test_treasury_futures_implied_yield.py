@@ -28,6 +28,8 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
     minimum_tick,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+    _YIELD_SOLVE_LOWER,
+    _YIELD_SOLVE_UPPER,
     TREASURY_DAY_COUNT,
     TreasuryFuturesYieldError,
     accrued_interest_per_100,
@@ -337,6 +339,28 @@ def test_a_non_positive_conversion_factor_is_refused(conversion_factor) -> None:
         converted_clean_price(110.5, conversion_factor)
     with pytest.raises(TreasuryFuturesYieldError):
         futures_price_from_clean_price(90.0, conversion_factor)
+
+
+@pytest.mark.parametrize(
+    "bound_percent", [_YIELD_SOLVE_LOWER * 100.0, _YIELD_SOLVE_UPPER * 100.0]
+)
+def test_a_yield_sitting_exactly_on_a_bracket_endpoint_is_returned_not_bisected_past(
+    bound_percent,
+) -> None:
+    """Codex review, PR #191 (P2), fifth round.
+
+    A zero residual is not greater than zero, so the sign test read a root at
+    the lower bound as "same side as the midpoint" and moved past it. The
+    observed symptom was that the price produced at -20% solved back to
+    +100% -- a wrong answer with no error, which is the failure mode this
+    module exists to avoid.
+    """
+
+    settlement, maturity, coupon = date(2026, 12, 31), date(2034, 5, 15), 4.25
+    price = clean_price_from_yield(bound_percent, settlement, maturity, coupon)
+    assert yield_from_clean_price(price, settlement, maturity, coupon) == pytest.approx(
+        bound_percent, abs=1e-9
+    )
 
 
 def test_a_price_outside_the_solvable_yield_bracket_is_refused() -> None:

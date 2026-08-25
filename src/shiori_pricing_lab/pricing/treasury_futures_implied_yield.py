@@ -383,6 +383,21 @@ def yield_from_clean_price(
     high_percent = _YIELD_SOLVE_UPPER * 100.0
     low_residual = residual(low_percent)
     high_residual = residual(high_percent)
+
+    # A root sitting exactly *on* a bracket endpoint is returned here rather
+    # than bisected for (Codex review, PR #191). The endpoint is the answer,
+    # and the sign test below cannot see it: a zero residual is not greater
+    # than zero, so `(low_residual > 0) == (mid_residual > 0)` reads a root at
+    # the lower bound as "same side as the midpoint" and moves `low` past it,
+    # discarding the very root it was asked for -- the observed symptom was
+    # `yield_from_clean_price(clean_price_from_yield(-20, ...))` returning
+    # +100%. Handling both endpoints also leaves the product test below
+    # comparing two genuinely non-zero residuals, which is the only case it
+    # is a correct bracket test for.
+    if low_residual == 0.0:
+        return low_percent
+    if high_residual == 0.0:
+        return high_percent
     if low_residual * high_residual > 0:
         raise TreasuryFuturesYieldError(
             f"clean price {clean_price} implies a yield outside {low_percent}%..."
