@@ -117,10 +117,23 @@
     els.sourcePill.classList.toggle("is-confirmed", Boolean(ctd.is_confirmed_source));
   }
 
+  const CTD_DETAIL_ELEMENT_KEYS = [
+    "detailCtd",
+    "detailCoupon",
+    "detailMaturity",
+    "detailCf",
+    "detailDelivery",
+    "detailSource",
+    "detailAsOf",
+  ];
+
   function renderCtdDetail(ctd) {
     renderSourceStatus(ctd);
     if (!ctd) {
       els.ctdSummary.textContent = NBSP_DASH;
+      CTD_DETAIL_ELEMENT_KEYS.forEach((key) => {
+        els[key].textContent = NBSP_DASH;
+      });
       return;
     }
     els.ctdSummary.textContent = `${ctd.contract_symbol} — CTD ${ctd.ctd_identifier}`;
@@ -296,7 +309,56 @@
     }
   }
 
-  els.contractSelect.addEventListener("change", renderTickSummary);
+  const CTD_FIELD_KEYS = [
+    "contractSymbol",
+    "ctdIdentifier",
+    "ctdCoupon",
+    "ctdMaturity",
+    "conversionFactor",
+    "lastDelivery",
+    "asOf",
+  ];
+
+  function clearCtdFields() {
+    CTD_FIELD_KEYS.forEach((key) => {
+      els[key].value = "";
+    });
+    renderCtdDetail(null);
+  }
+
+  // Every input the answer depends on. Editing any of them invalidates the
+  // answer on screen: a yield sitting next to a futures price that did not
+  // produce it is a number a trader can read off and act on, which is the
+  // one failure this panel must not have (Codex review, PR #191).
+  const CALCULATION_INPUT_KEYS = [...CTD_FIELD_KEYS, "futuresPrice", "targetYield"];
+
+  CALCULATION_INPUT_KEYS.forEach((key) => {
+    // Both events: a text field reports "input" per keystroke, while a date
+    // field picked from the browser's own calendar widget can report only
+    // "change" -- and the CTD maturity and delivery dates are date fields.
+    ["input", "change"].forEach((eventName) => {
+      els[key].addEventListener(eventName, () => {
+        clearAnswers();
+        clearError();
+      });
+    });
+  });
+
+  // Changing the contract is not an edit, it is a different instrument. The
+  // CTD fields belong to the contract they were entered or loaded for, and
+  // `contract_code` is taken from this selector -- so leaving them behind
+  // would submit, say, ZN's CTD and conversion factor as ZB, and format the
+  // answer on ZB's tick (Codex review, PR #191). They are cleared outright
+  // rather than carried over and validated: there is nothing to validate a
+  // vendor contract symbol against, and a half-migrated CTD is exactly the
+  // silent-wrong-answer this utility must not give.
+  els.contractSelect.addEventListener("change", () => {
+    renderTickSummary();
+    clearCtdFields();
+    clearAnswers();
+    clearError();
+    els.automaticNote.hidden = true;
+  });
   els.loadBloombergBtn.addEventListener("click", () => loadBloombergCtd());
   els.convertBtn.addEventListener("click", () => convert());
 

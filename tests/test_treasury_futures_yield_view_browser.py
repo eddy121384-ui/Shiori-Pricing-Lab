@@ -230,6 +230,74 @@ def test_a_failed_second_conversion_never_leaves_the_first_answer_on_screen(
 
 
 @_PLAYWRIGHT_SKIP
+def test_editing_any_calculation_input_invalidates_the_answer_on_screen(
+    page, server_url
+) -> None:
+    """Codex review, PR #191 (P2).
+
+    A yield sitting next to a futures price that did not produce it is a
+    number a trader can read off and act on.
+    """
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+
+    for selector, value in (
+        ("#fy-futures-price", "113-165"),
+        ("#fy-ctd-coupon", "4.5"),
+        ("#fy-conversion-factor", "0.81"),
+        ("#fy-ctd-maturity", "2034-11-15"),
+        ("#fy-last-delivery", "2027-03-31"),
+        ("#fy-target-yield", "4.3"),
+    ):
+        page.click("#fy-convert-btn")
+        _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+        page.fill(selector, value)
+        assert page.text_content("#fy-implied-yield").strip() == "—", selector
+        assert page.text_content("#fy-futures-price-out").strip() == "—", selector
+
+
+@_PLAYWRIGHT_SKIP
+def test_changing_the_contract_clears_the_previous_contracts_ctd(page, server_url) -> None:
+    """Codex review, PR #191 (P1).
+
+    `contract_code` comes from the selector while the CTD fields come from the
+    form, so a leftover CTD would be submitted as -- and tick-formatted for --
+    a contract it does not belong to.
+    """
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+
+    page.select_option("#fy-contract-select", "ZB")
+
+    for selector in (
+        "#fy-contract-symbol",
+        "#fy-ctd-identifier",
+        "#fy-ctd-coupon",
+        "#fy-ctd-maturity",
+        "#fy-conversion-factor",
+        "#fy-last-delivery",
+        "#fy-as-of",
+    ):
+        assert page.input_value(selector) == "", selector
+    assert page.text_content("#fy-implied-yield").strip() == "—"
+    assert page.text_content("#fy-detail-ctd").strip() == "—"
+    assert page.text_content("#fy-detail-cf").strip() == "—"
+    assert "No CTD loaded" in page.text_content("#fy-source-pill")
+
+    # And the answer it would now give is refused outright, not computed off
+    # the previous contract's CTD.
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "fy-error"))
+    assert page.text_content("#fy-implied-yield").strip() == "—"
+
+
+@_PLAYWRIGHT_SKIP
 def test_an_off_tick_quote_for_this_contract_is_refused_in_the_panel(page, server_url) -> None:
     _open_futures_yield(page, server_url)
     _fill_ctd(page)
