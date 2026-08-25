@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 
+import numpy as np
 import pytest
 from test_bloomberg_vcub_atm_template import (
     EXPIRY_LABELS,
@@ -25,13 +26,17 @@ from test_bloomberg_vcub_atm_template import (
 )
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
+from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBTextToken
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     CAPTURE_EXTRA_INSTALL_COMMAND,
     MIN_TOKEN_CONFIDENCE,
     VCUBOCRUnavailableError,
     build_capture_provenance,
+    diagnose_minus_evidence,
+    load_ocr_engine,
     read_tokens_from_image_bytes,
     tokens_from_detections,
+    visual_minus_evidence,
 )
 
 _BOX = [(10.0, 20.0), (90.0, 22.0), (90.0, 44.0), (10.0, 42.0)]
@@ -147,8 +152,290 @@ def test_an_empty_detection_list_reads_as_no_tokens() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Visual sign evidence (live-acceptance defect #3): pixels only, no OCR
+# engine needed -- numpy is a core dependency, so these always run.
+#
+# Round 2: Eddy's inspection of his own screenshots found the minus stroke
+# usually sits *inside* RapidOCR's own detection box, at its extreme left
+# edge, not outside it -- the recognizer omitted it from the text without
+# shrinking the box to match. The search region is therefore the token's own
+# box plus only a small margin.
+#
+# Round 3: round 2 found "the first digit" by comparing every component's
+# height to the *tallest component present* in the crop. A later component
+# unusually taller than the real digits (a merged blob, a stray ascender)
+# inflated that baseline and made genuine leading digits fall below the
+# digit-height threshold, producing false NUMERIC_SIGN_AMBIGUOUS on clean
+# positive live values (33.92, 34.31, 35.19, 34.25, 1.34, 1.29, 1.39, 0.85).
+# The fix classifies from the LEFTMOST component only, against the token's
+# own fixed height -- never against another component in the same crop.
+#
+# Round 4: the token's own bbox height was itself the wrong reference.
+# RapidOCR's detection box runs noticeably taller than the glyphs actually
+# drawn inside it on the real screenshots (a ~21px box around ~12px digits),
+# so a real digit's height as a fraction of the *box* undershoots the digit
+# threshold -- the same false-ambiguous failure mode, and it also explains
+# the still-failing dropped-minus cells (a genuine 1px minus followed by a
+# 12px digit that, measured against a ~21px box, no longer reads as
+# "digit-height" either). The reference is now a local glyph-height
+# baseline derived from the token's own components (a robust median after
+# discarding components far smaller than a first-pass median), never the
+# bbox and never the single tallest component.
+# ---------------------------------------------------------------------------
+
+_DARK_BACKGROUND = (20, 20, 24)
+_LIGHT_FOREGROUND = (220, 220, 225)
+
+
+def _blank_image(width: int = 350, height: int = 150) -> np.ndarray:
+    image = np.empty((height, width, 3), dtype=np.uint8)
+    image[:, :] = _DARK_BACKGROUND
+    return image
+
+
+def _paint(image: np.ndarray, *, top: int, bottom: int, left: int, right: int) -> None:
+    image[top:bottom, left:right] = _LIGHT_FOREGROUND
+
+
+def _digit_token(
+    *, left: float, top: float, width: float = 34.0, height: float = 14.0
+) -> VCUBTextToken:
+    return VCUBTextToken(
+        text="2.99", left=left, top=top, width=width, height=height, confidence=1.0
+    )
+
+
+def test_a_blank_prefix_with_only_the_digit_is_no_evidence() -> None:
+    """A positive value: only the (tall) first digit is drawn, nothing
+    precedes it, so it stays positive."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit only
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_minus_inside_the_boxs_own_left_edge_reads_as_negative() -> None:
+    """The confirmed real-world shape: the minus stroke sits *inside* the
+    token's own detection box, at its extreme left edge, separated from
+    the first digit -- not outside the box at all."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=26, bottom=28, left=101, right=106)  # minus, thin, mid-height
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit, tall
+
+    evidence = visual_minus_evidence(image, token)
+    assert evidence == "negative"
+
+
+def test_two_thin_marks_before_the_real_digit_is_ambiguous() -> None:
+    """The leftmost component is thin but the very next component is a
+    second thin mark, not a digit -- the decision only ever looks at the
+    leftmost component and its immediate neighbour, so it does not go
+    hunting further right for the real digit, and must block rather than
+    guess which mark (if either) is the sign. Two normal digits are
+    included so the local glyph-height baseline has enough of a normal
+    population to resolve robustly."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=60.0)
+    _paint(image, top=26, bottom=28, left=101, right=104)
+    _paint(image, top=26, bottom=28, left=106, right=109)  # a second, separate mark
+    _paint(image, top=21, bottom=33, left=113, right=121)  # normal digit
+    _paint(image, top=21, bottom=33, left=125, right=133)  # normal digit
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_later_oversized_component_does_not_shadow_a_normal_leading_digit() -> None:
+    """Round 3 regression: a normal leading digit followed later by a
+    component far taller than any real digit (a merged blob, a stray
+    ascender) must not make the leading digit look too short to be one.
+    This reproduces the shape category behind the live false positives on
+    33.92, 34.31, 35.19, 34.25, 1.34, 1.29, 1.39, and 0.85 -- classifying
+    from the leftmost component alone, against the token's own fixed
+    height, never against the tallest component elsewhere in the crop."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=40.0, height=14.0)
+    _paint(image, top=21, bottom=33, left=101, right=109)  # normal leading digit
+    _paint(image, top=18, bottom=36, left=112, right=120)  # spuriously oversized later blob
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_positive_control_value_stays_positive() -> None:
+    """The live positive control (1Mo x 1Yr / -50bps = 14.69): only the
+    first digit is drawn, nothing precedes it, so it stays positive."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=21, bottom=33, left=101, right=109)  # "1" of 14.69
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_dropped_minus_with_bbox_taller_than_its_glyphs_reads_as_negative() -> None:
+    """Round 4 regression: the real shape behind the live failures Eddy
+    diagnosed. RapidOCR's detection box (~21px) runs noticeably taller
+    than the glyphs actually drawn inside it (~12px digits), so a real
+    digit's height as a fraction of the *box* undershoots the digit
+    threshold. The reference must come from the token's own local glyph
+    population, not its bbox: text='2.92', component heights ~[1, 12, 2,
+    12, 12] against a 21px-tall box -- the minus is the 1px leading
+    component, immediately followed by a 12px digit."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=44.0, height=21.0)
+    _paint(image, top=30, bottom=31, left=101, right=105)  # minus, 1px
+    _paint(image, top=25, bottom=37, left=108, right=116)  # "2", 12px
+    _paint(image, top=34, bottom=36, left=118, right=120)  # ".", 2px
+    _paint(image, top=25, bottom=37, left=122, right=130)  # "9", 12px
+    _paint(image, top=25, bottom=37, left=132, right=140)  # "2", 12px
+
+    assert visual_minus_evidence(image, token) == "negative"
+
+
+def test_a_positive_value_with_bbox_taller_than_its_glyphs_stays_positive() -> None:
+    """Round 4 regression: the same bbox/glyph mismatch on a clean
+    positive value must not misread the leading digit as too short to be
+    one. Reproduces the shape category behind the live false positives on
+    33.92, 34.31, 35.19, 34.25, 14.69, 10.04, 10.28, 10.91, 10.19, 4.10,
+    1.34, 1.29, 1.39, and 0.85: a ~21px box around ~12px digit glyphs,
+    with no component preceding the leading digit."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=44.0, height=21.0)
+    _paint(image, top=25, bottom=37, left=101, right=109)  # "3", 12px, leading
+    _paint(image, top=25, bottom=37, left=111, right=119)  # "3", 12px
+    _paint(image, top=34, bottom=36, left=121, right=123)  # ".", 2px
+    _paint(image, top=25, bottom=37, left=125, right=133)  # "9", 12px
+    _paint(image, top=25, bottom=37, left=135, right=143)  # "2", 12px
+
+    assert visual_minus_evidence(image, token) is None
+
+
+def test_a_blob_too_tall_to_be_a_stroke_is_ambiguous_not_negative() -> None:
+    """Foreground precedes the first digit, but it is not thin enough to
+    read as a stroke, and not tall enough to read as a digit against the
+    local glyph baseline either -- unreadable as a sign, must not guess.
+    A second normal digit is included so the baseline reflects the real
+    glyph population rather than being pulled toward the blob's height by
+    too few data points."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=60.0)
+    _paint(image, top=24, bottom=30, left=101, right=106)  # 6 rows: too tall, not thin
+    _paint(image, top=21, bottom=33, left=110, right=118)  # normal digit
+    _paint(image, top=21, bottom=33, left=122, right=130)  # normal digit
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_mark_pinned_to_the_boxs_own_top_edge_is_ambiguous() -> None:
+    """Thin, but sitting at the token's own top edge rather than its
+    mid-height -- not where a minus/hyphen actually sits."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=20, bottom=22, left=101, right=106)
+    _paint(image, top=21, bottom=33, left=110, right=118)
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_a_gridline_wider_than_one_glyph_is_ambiguous_not_negative() -> None:
+    """A table/column gridline drawn far wider than one glyph -- present
+    as foreground, but not a bounded sign, so it must not be read as
+    one; it still needs a human look (ambiguous), not a silent guess."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0, width=80.0)  # right = 180
+    _paint(image, top=26, bottom=28, left=97, right=172)  # very wide thin band
+    _paint(image, top=21, bottom=33, left=175, right=179)  # first digit, gap before it
+
+    assert visual_minus_evidence(image, token) == "ambiguous"
+
+
+def test_the_detector_generalises_across_token_sizes_and_positions() -> None:
+    """No fixed x/y: two tokens of different size, in different parts of
+    the image, each with their own correctly-scaled minus inside its own
+    box, both read as negative."""
+
+    image = _blank_image()
+    small = _digit_token(left=60.0, top=10.0, width=20.0, height=10.0)
+    _paint(image, top=14, bottom=15, left=61, right=64)
+    _paint(image, top=11, bottom=19, left=67, right=72)
+
+    large = _digit_token(left=250.0, top=80.0, width=40.0, height=20.0)
+    _paint(image, top=88, bottom=90, left=248, right=254)
+    _paint(image, top=82, bottom=98, left=258, right=268)
+
+    assert visual_minus_evidence(image, small) == "negative"
+    assert visual_minus_evidence(image, large) == "negative"
+
+
+def test_diagnose_minus_evidence_reports_the_components_it_found() -> None:
+    """The richer object the diagnostic tool prints from: both boxes, which
+    one was treated as the first digit, and a human-readable reason."""
+
+    image = _blank_image()
+    token = _digit_token(left=100.0, top=20.0)
+    _paint(image, top=26, bottom=28, left=101, right=106)
+    _paint(image, top=21, bottom=33, left=110, right=118)
+
+    evidence = diagnose_minus_evidence(image, token)
+
+    assert evidence.classification == "negative"
+    assert evidence.first_digit_component == (21, 33, 110, 118)
+    assert evidence.prefix_components == ((26, 28, 101, 106),)
+    assert set(evidence.components) == {(26, 28, 101, 106), (21, 33, 110, 118)}
+    assert "stroke" in evidence.reason
+
+
+def test_a_token_flush_against_the_images_own_edge_has_no_crop_to_inspect() -> None:
+    """No room to the left at all -- degenerate, not an error -- stays
+    unevidenced rather than guessed."""
+
+    image = _blank_image()
+    token = _digit_token(left=0.0, top=20.0)
+
+    assert visual_minus_evidence(image, token) is None
+
+
+# ---------------------------------------------------------------------------
 # Missing optional dependency
 # ---------------------------------------------------------------------------
+
+
+def test_load_ocr_engine_resolves_the_same_reader_read_tokens_would(monkeypatch) -> None:
+    """A caller that wants to build one reader up front for a multi-image
+    session (:meth:`VCUBCaptureReviewStore.parse_images`) gets exactly the
+    reader :func:`read_tokens_from_image_bytes` would have loaded lazily
+    itself (Codex review, PR #186)."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module, "_load_engine", lambda: "the-one-reader")
+
+    assert load_ocr_engine() == "the-one-reader"
+
+
+def test_load_ocr_engine_reports_the_same_unavailable_error(monkeypatch) -> None:
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    def _no_engine():
+        raise VCUBOCRUnavailableError(
+            "Visual capture needs the optional OCR reader, which is not installed. "
+            f"From the repository root, run: {CAPTURE_EXTRA_INSTALL_COMMAND}"
+        )
+
+    monkeypatch.setattr(ocr_module, "_load_engine", _no_engine)
+
+    with pytest.raises(VCUBOCRUnavailableError, match=r"pip install -e"):
+        load_ocr_engine()
 
 
 def test_a_missing_reader_reports_the_exact_command_that_installs_it(monkeypatch) -> None:
@@ -183,6 +470,130 @@ def test_an_injected_reader_is_used_instead_of_the_optional_dependency(monkeypat
 def test_reading_refuses_empty_input() -> None:
     with pytest.raises(ValueError, match="non-empty bytes"):
         read_tokens_from_image_bytes(b"")
+
+
+# ---------------------------------------------------------------------------
+# Production wiring: read_tokens_from_image_bytes attaches pixel sign
+# evidence to every unsigned numeric token it detects (live-acceptance
+# defect #3, PR #186). tokens_from_detections on its own is untouched by
+# this -- it has no image, only the detections list, so its own tests above
+# never see sign_evidence set.
+# ---------------------------------------------------------------------------
+
+_SIGN_EVIDENCE_BOX = [(100.0, 20.0), (134.0, 20.0), (134.0, 34.0), (100.0, 34.0)]
+
+
+def test_read_tokens_from_image_bytes_attaches_negative_pixel_sign_evidence(monkeypatch) -> None:
+    """The exact live-acceptance shape, exercised through the full
+    ``read_tokens_from_image_bytes`` path rather than the standalone
+    detector: an OCR detection whose recognised text carries no sign, but
+    whose own pixels show a minus stroke immediately before the first
+    digit, comes back with ``sign_evidence="negative"`` attached."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=26, bottom=28, left=101, right=106)  # minus, thin, mid-height
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit, tall
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
+    )
+
+    assert [token.sign_evidence for token in tokens] == ["negative"]
+
+
+def test_read_tokens_from_image_bytes_leaves_sign_evidence_off_by_default(monkeypatch) -> None:
+    """The pixel-evidence pass is opt-in: a caller that never asks for it
+    (the ATM path, in production) pays for none of the connected-component
+    scanning and gets ``sign_evidence=None`` even on the exact shape that
+    would otherwise classify negative (Codex review, PR #186)."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=26, bottom=28, left=101, right=106)  # minus, thin, mid-height
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit, tall
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+    )
+
+    assert [token.sign_evidence for token in tokens] == [None]
+
+
+def test_read_tokens_from_image_bytes_attaches_ambiguous_pixel_sign_evidence(monkeypatch) -> None:
+    """Same path, for pixel evidence that is genuinely unreadable rather
+    than a clean minus: the token comes back with ``sign_evidence=
+    "ambiguous"`` rather than silently staying positive."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=24, bottom=30, left=101, right=106)  # too tall to be a stroke
+    _paint(image, top=21, bottom=33, left=110, right=118)  # normal digit
+    _paint(image, top=21, bottom=33, left=122, right=130)  # normal digit
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
+    )
+
+    assert [token.sign_evidence for token in tokens] == ["ambiguous"]
+
+
+def test_read_tokens_from_image_bytes_leaves_no_evidence_tokens_alone(monkeypatch) -> None:
+    """A clean positive token with nothing drawn before its first digit
+    comes back with ``sign_evidence=None`` -- the pixel check ran and found
+    nothing, so the token's own positive text stands, exactly as it always
+    has."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=21, bottom=33, left=101, right=109)  # only the first digit
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
+    )
+
+    assert [token.sign_evidence for token in tokens] == [None]
+
+
+def test_read_tokens_from_image_bytes_never_inspects_an_already_signed_token(
+    monkeypatch,
+) -> None:
+    """A token whose own OCR text already carries an explicit sign is never
+    sent through the pixel check at all -- there is nothing for it to add,
+    and it must not accidentally turn into ``NUMERIC_SIGN_AMBIGUOUS``."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()  # nothing drawn at all: would misdetect if inspected
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "-2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
+    )
+
+    assert [token.sign_evidence for token in tokens] == [None]
+    assert tokens[0].text == "-2.92"
 
 
 # ---------------------------------------------------------------------------

@@ -81,6 +81,15 @@ def _require_iso_timestamp(value: object, field_name: str) -> str:
     return value
 
 
+#: The values :attr:`VCUBTextToken.sign_evidence` may carry -- what a
+#: narrowly-scoped pixel inspection of this token's own box found about a
+#: leading minus stroke OCR's recognised text may have dropped. ``None``
+#: means no such inspection was run, or it found nothing there; the token's
+#: own text is the only sign evidence in that case, exactly as before this
+#: field existed.
+SIGN_EVIDENCE_VALUES = frozenset({"negative", "ambiguous"})
+
+
 @dataclass(frozen=True)
 class VCUBTextToken:
     """One piece of text the capture saw, with its axis-aligned pixel box.
@@ -94,6 +103,17 @@ class VCUBTextToken:
     are never used as absolute constants by the parser -- only relative to
     other tokens' boxes (see ``bloomberg_vcub_atm_template``), which is what
     makes the capture tolerant of crop, DPI, and window-position changes.
+
+    ``sign_evidence`` carries what
+    :func:`shiori_pricing_lab.data.bloomberg_vcub_ocr.visual_minus_evidence`
+    found in this token's own pixels, when the reader ran that check --
+    ``"negative"`` (a minus stroke was found immediately before the digits,
+    even though the recognised text has none), ``"ambiguous"`` (something is
+    there but it does not read as a plausible minus or a plausible digit),
+    or ``None`` (no such evidence, or the check was not run at all). It is
+    still just pixel evidence attached to this one token's own box, never a
+    judgement about the cell it will land in -- that stays the template
+    parser's job (live-acceptance defect, PR #186).
     """
 
     text: str
@@ -102,6 +122,7 @@ class VCUBTextToken:
     width: float
     height: float
     confidence: float | None = None
+    sign_evidence: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_blank(self.text, "text")
@@ -117,6 +138,11 @@ class VCUBTextToken:
             confidence = _require_finite(self.confidence, "confidence")
             if not 0.0 <= confidence <= 1.0:
                 raise ValueError(f"confidence must be within [0, 1], got {self.confidence!r}")
+        if self.sign_evidence is not None and self.sign_evidence not in SIGN_EVIDENCE_VALUES:
+            raise ValueError(
+                f"sign_evidence must be one of {sorted(SIGN_EVIDENCE_VALUES)} or None, "
+                f"got {self.sign_evidence!r}"
+            )
 
     @property
     def right(self) -> float:
@@ -142,6 +168,7 @@ class VCUBTextToken:
             "width": self.width,
             "height": self.height,
             "confidence": self.confidence,
+            "sign_evidence": self.sign_evidence,
         }
 
 

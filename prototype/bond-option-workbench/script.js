@@ -5014,19 +5014,26 @@
   // rather than by being called from in here.
   const navCapture = document.getElementById("nav-capture");
   const viewCapture = document.getElementById("view-capture");
+  // Issue #185 added a fourth view. The router still owns nothing but
+  // visibility, and each capture view's own module does its own work.
+  const navCaptureOtm = document.getElementById("nav-capture-otm");
+  const viewCaptureOtm = document.getElementById("view-capture-otm");
 
   function switchToView(view) {
     const showMarkets = view === "markets";
     const showCapture = view === "capture";
-    const showPricing = !showMarkets && !showCapture;
+    const showCaptureOtm = view === "capture-otm";
+    const showPricing = !showMarkets && !showCapture && !showCaptureOtm;
     viewMarkets.hidden = !showMarkets;
     viewPricing.hidden = !showPricing;
     if (viewCapture) viewCapture.hidden = !showCapture;
+    if (viewCaptureOtm) viewCaptureOtm.hidden = !showCaptureOtm;
     // The footer's Price/Clear/Export actions are Pricing-only.
     if (els.footer) els.footer.hidden = !showPricing;
     navMarkets.classList.toggle("active", showMarkets);
     navPricing.classList.toggle("active", showPricing);
     if (navCapture) navCapture.classList.toggle("active", showCapture);
+    if (navCaptureOtm) navCaptureOtm.classList.toggle("active", showCaptureOtm);
     setPricingContextSuppressed(!showPricing);
 
     if (showMarkets && !lastSuccessfulCurve && !isLoadingCurve) {
@@ -5038,6 +5045,9 @@
   navMarkets.addEventListener("click", () => switchToView("markets"));
   navPricing.addEventListener("click", () => switchToView("pricing"));
   if (navCapture) navCapture.addEventListener("click", () => switchToView("capture"));
+  if (navCaptureOtm) {
+    navCaptureOtm.addEventListener("click", () => switchToView("capture-otm"));
+  }
   els.refreshBtn.addEventListener("click", () => loadCurve());
 
   function formatPercent(value, digits) {

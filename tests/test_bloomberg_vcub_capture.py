@@ -238,6 +238,32 @@ def test_a_text_token_confidence_must_be_a_probability() -> None:
         VCUBTextToken(text="1Mo", left=0.0, top=0.0, width=10.0, height=10.0, confidence=1.4)
 
 
+def test_a_text_token_sign_evidence_defaults_to_none() -> None:
+    token = VCUBTextToken(text="2.99", left=0.0, top=0.0, width=10.0, height=10.0)
+
+    assert token.sign_evidence is None
+    assert token.to_dict()["sign_evidence"] is None
+
+
+def test_a_text_token_sign_evidence_accepts_negative_and_ambiguous() -> None:
+    negative = VCUBTextToken(
+        text="2.99", left=0.0, top=0.0, width=10.0, height=10.0, sign_evidence="negative"
+    )
+    ambiguous = VCUBTextToken(
+        text="2.99", left=0.0, top=0.0, width=10.0, height=10.0, sign_evidence="ambiguous"
+    )
+
+    assert negative.sign_evidence == "negative"
+    assert ambiguous.to_dict()["sign_evidence"] == "ambiguous"
+
+
+def test_a_text_token_rejects_an_unknown_sign_evidence_value() -> None:
+    with pytest.raises(ValueError, match="sign_evidence must be one of"):
+        VCUBTextToken(
+            text="2.99", left=0.0, top=0.0, width=10.0, height=10.0, sign_evidence="positive"
+        )
+
+
 def test_the_provenance_default_reader_identity_is_this_parser() -> None:
     built = VCUBCaptureProvenance(
         source_reference="x.png",

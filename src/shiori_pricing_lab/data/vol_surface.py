@@ -22,11 +22,25 @@ time stays ``None`` here and is named in
 ``VCUBSourceMetadata`` enforces, kept structural so an unresolved identity
 field can never be quietly filled in on the way into the store.
 
-**Extensible to OTM/SABR without a second storage model.** Every point
-carries a strike dimension and an optional strike offset. Today the only
-dimension is :attr:`StrikeDimension.ATM`, whose offset must be ``None``; a
-later OTM/SABR capture adds a dimension and populates the offset, and the
-row shape does not change.
+**OTM/SABR without a second storage model (Issue #185).** Every point
+carries a strike dimension and an optional strike offset:
+:attr:`StrikeDimension.ATM` with no offset is the ATM screen, and
+:attr:`StrikeDimension.YIELD_OFFSET_BP` with an offset in basis points is
+the OTM Swaptions / SABR screen's third coordinate. That screen also states
+that its non-ATM numbers are *spreads* to its ATM vol rather than vols, so a
+point says which it holds through :attr:`VolSurfacePoint.value_kind`. A
+spread is never stored as though it were a volatility, and nothing here adds
+one to the other.
+
+**An extension that leaves every stored surface exactly as it was.** A
+surface's fingerprint is a digest of what it asserts, so a new field that
+serialised unconditionally would change the fingerprint of every ATM surface
+already in the store and make it unreadable. Both fields added for Issue
+#185 therefore serialise only when they say something the Issue #183 shape
+could not: :attr:`VolSurfacePoint.value_kind` appears only when it is not
+``ABSOLUTE_VOL``, and :attr:`VolSurfaceProvenance.source_images` only when a
+capture had more than one image. A surface stored before either existed
+hashes today exactly as it hashed then.
 
 **A stored surface is one capture, not the only surface allowed for a day**
 (Eddy's PR #184 decision #1). :attr:`VolSurfaceIdentity.capture_id` is a
@@ -58,22 +72,52 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 class VolSurfaceType(StrEnum):
     """Which screen's surface this is.
 
-    One member today. A later OTM/SABR or Caps/Floors capture adds its own
-    member and reuses everything else in this module.
+    One member per observed screen. A later Caps/Floors capture adds its own
+    and reuses everything else in this module.
     """
 
     ATM_SWAPTION = "ATM_SWAPTION"
+    OTM_SWAPTION_SABR = "OTM_SWAPTION_SABR"
 
 
 class StrikeDimension(StrEnum):
     """How a point's strike is expressed.
 
-    ``ATM`` is the whole of Issue #183. It is spelled out rather than left
-    implicit so an ATM row and a future OTM row are distinguishable in the
-    store without a schema change.
+    ``ATM`` was the whole of Issue #183. It is spelled out rather than left
+    implicit so an ATM row and an OTM row are distinguishable in the store
+    without a schema change.
+
+    ``YIELD_OFFSET_BP`` is Issue #185's third coordinate, and it is named
+    after what the screen itself states: the VCUB OTM Swaptions / SABR tab
+    heads its columns ``-200bps ... 25bps ... 200bps`` around an ``ATM``
+    column, so the offset is a yield offset from ATM **in basis points**.
+    The unit is transcribed, never inferred from the magnitude of the
+    numbers, and no other strike convention is added here for screens this
+    repository has not observed.
     """
 
     ATM = "ATM"
+    YIELD_OFFSET_BP = "YIELD_OFFSET_BP"
+
+
+class VolValueKind(StrEnum):
+    """What the number at a point *is*.
+
+    Issue #183's points were all absolute vols, so nothing had to say so.
+    Issue #185's screen states ``Normal Vol Skew`` with display ``Spread``:
+    its ATM column holds an absolute vol and every other column holds a
+    spread to that vol -- which is why several of them are negative. Both
+    kinds are numbers, and treating one as the other would be exactly the
+    silent reinterpretation this model exists to prevent, so each point says
+    which it is.
+
+    Nothing in the capture or storage slice adds a spread to an ATM vol. A
+    consumer that wants an absolute OTM vol must combine them deliberately,
+    and that belongs to the later vol-cube issue.
+    """
+
+    ABSOLUTE_VOL = "ABSOLUTE_VOL"
+    SPREAD_TO_ATM = "SPREAD_TO_ATM"
 
 
 #: The fields that identify one logical surface, alongside the required
@@ -140,6 +184,14 @@ class VolSurfacePoint:
     "this cell could not be read" indistinguishable from "this cell is not
     part of the surface" -- the coordinate grid must survive a round trip
     exactly as the trader reviewed it. ``None`` never means zero.
+
+    ``value_kind`` says what the number is. It defaults to
+    :attr:`VolValueKind.ABSOLUTE_VOL`, which is what every Issue #183 point
+    was; an OTM/SABR skew point off the ATM column is a
+    :attr:`VolValueKind.SPREAD_TO_ATM`, and the field is what stops the two
+    being read as the same quantity. ``volatility`` is still the number the
+    trader confirmed against the screen -- this field says which quantity
+    that number is, and no arithmetic anywhere in this slice relates them.
     """
 
     expiry: str
@@ -147,17 +199,31 @@ class VolSurfacePoint:
     volatility: float | None
     strike_dimension: StrikeDimension = StrikeDimension.ATM
     strike_offset: float | None = None
+    value_kind: VolValueKind = VolValueKind.ABSOLUTE_VOL
 
     def __post_init__(self) -> None:
         _require_non_blank(self.expiry, "expiry")
         _require_non_blank(self.underlying_tenor, "underlying_tenor")
         if not isinstance(self.strike_dimension, StrikeDimension):
             raise ValueError("strike_dimension must be a StrikeDimension")
+        if not isinstance(self.value_kind, VolValueKind):
+            raise ValueError("value_kind must be a VolValueKind")
         if self.strike_dimension is StrikeDimension.ATM and self.strike_offset is not None:
             raise ValueError(
                 "an ATM point carries no strike offset; "
                 f"got strike_offset={self.strike_offset!r}"
             )
+        if self.strike_dimension is StrikeDimension.YIELD_OFFSET_BP:
+            if self.strike_offset is None:
+                raise ValueError(
+                    "a YIELD_OFFSET_BP point is defined by its offset from ATM and must "
+                    "carry one; a point with no offset is an ATM point"
+                )
+            if self.strike_offset == 0:
+                raise ValueError(
+                    "a 0bp offset cannot be told apart from the ATM point at the same "
+                    "coordinate; the ATM point carries no offset at all"
+                )
         # Normalised to ``float``, not merely validated. A caller may hand in
         # an ``int`` -- ``_require_finite`` accepts one -- and keeping it an
         # ``int`` made the point serialise as JSON ``80`` while the same point
@@ -181,13 +247,23 @@ class VolSurfacePoint:
         )
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "expiry": self.expiry,
             "underlying_tenor": self.underlying_tenor,
             "strike_dimension": self.strike_dimension.value,
             "strike_offset": self.strike_offset,
             "volatility": self.volatility,
         }
+        # Emitted only when it says something the Issue #183 shape could not.
+        # This dict is what a surface's fingerprint is computed from, so a
+        # key added unconditionally would change the fingerprint of every ATM
+        # surface already stored under PR #184 and make it fail its own
+        # integrity check on the next read (Issue #185: existing ATM surfaces
+        # must remain readable and unchanged). An absolute vol is what a
+        # point without this key has always been.
+        if self.value_kind is not VolValueKind.ABSOLUTE_VOL:
+            payload["value_kind"] = self.value_kind.value
+        return payload
 
 
 @dataclass(frozen=True)
@@ -281,13 +357,55 @@ class VolSurfaceIdentity:
 
 
 @dataclass(frozen=True)
+class VolSurfaceSourceImage:
+    """One image a capture was read from.
+
+    The bytes themselves are never here: the screenshot stays operator-local
+    evidence and only its reference, its SHA-256, and its size are kept, as
+    in Issue #181.
+    """
+
+    source_reference: str
+    sha256: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        _require_non_blank(self.source_reference, "source_reference")
+        _require_non_blank(self.sha256, "sha256")
+        if not _SHA256_HEX_RE.match(self.sha256):
+            raise ValueError(
+                f"sha256 must be 64 lower-case hex characters, got {self.sha256!r}"
+            )
+        if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int):
+            raise ValueError(f"size_bytes must be an int, got {self.size_bytes!r}")
+        if self.size_bytes <= 0:
+            raise ValueError(f"size_bytes must be positive, got {self.size_bytes!r}")
+
+    def to_dict(self) -> dict:
+        return {
+            "source_reference": self.source_reference,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+        }
+
+
+@dataclass(frozen=True)
 class VolSurfaceProvenance:
     """Where a stored surface came from, and who accepted it.
 
     Enough to answer Issue #183's audit questions -- which screen, when,
-    which parser, whose confirmation, which exact image -- without the image
-    itself: the screenshot stays operator-local evidence and only its
-    SHA-256 is kept, as in Issue #181.
+    which parser, whose confirmation, which exact images -- without the
+    images themselves.
+
+    **A capture may have been read from several screenshots** (Issue #185:
+    the VCUB OTM/SABR table is longer than one viewport, so an operator
+    captures it as two to four overlapping images in one session).
+    :attr:`source_images` is the complete ordered set, and it is the field to
+    read: ``source_reference``/``source_image_sha256``/``source_image_bytes``
+    describe its **first** image, which for a single-image capture is its
+    only one. Nothing here ever stands one hash in for a set -- an audit can
+    name every file that produced the surface -- and the two views are kept
+    consistent by construction rather than by convention.
     """
 
     capture_id: str
@@ -299,6 +417,7 @@ class VolSurfaceProvenance:
     parser_version: str
     confirmed_by: str
     confirmed_at: str
+    source_images: tuple[VolSurfaceSourceImage, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_blank(self.capture_id, "capture_id")
@@ -324,9 +443,47 @@ class VolSurfaceProvenance:
         _require_non_blank(self.parser_version, "parser_version")
         _require_non_blank(self.confirmed_by, "confirmed_by")
         _require_iso_timestamp(self.confirmed_at, "confirmed_at")
+        object.__setattr__(self, "source_images", self._validated_source_images())
+
+    def _validated_source_images(self) -> tuple[VolSurfaceSourceImage, ...]:
+        """The complete image set, defaulted from the single-image fields.
+
+        Left empty by a caller that has one image, so every Issue #183
+        construction keeps working unchanged and still ends up with a
+        populated set. When a caller does supply one, its first entry must
+        *be* the image the scalar fields name: the two are one fact seen
+        twice, and letting them disagree would store a surface whose
+        provenance contradicts itself.
+        """
+
+        first = VolSurfaceSourceImage(
+            source_reference=self.source_reference,
+            sha256=self.source_image_sha256,
+            size_bytes=self.source_image_bytes,
+        )
+        if not isinstance(self.source_images, tuple):
+            raise ValueError("source_images must be a tuple of VolSurfaceSourceImage")
+        if not self.source_images:
+            return (first,)
+        if any(
+            not isinstance(image, VolSurfaceSourceImage) for image in self.source_images
+        ):
+            raise ValueError("source_images must be a tuple of VolSurfaceSourceImage")
+        if self.source_images[0] != first:
+            raise ValueError(
+                "source_images[0] must be the image source_reference/source_image_sha256/"
+                f"source_image_bytes name, got {self.source_images[0]!r}"
+            )
+        digests = [image.sha256 for image in self.source_images]
+        if len(set(digests)) != len(digests):
+            raise ValueError(
+                "one capture cannot list the same image twice: "
+                f"{sorted({digest for digest in digests if digests.count(digest) > 1})}"
+            )
+        return self.source_images
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "capture_id": self.capture_id,
             "source_reference": self.source_reference,
             "source_image_sha256": self.source_image_sha256,
@@ -337,6 +494,17 @@ class VolSurfaceProvenance:
             "confirmed_by": self.confirmed_by,
             "confirmed_at": self.confirmed_at,
         }
+        # Emitted only for a capture that really had more than one image --
+        # for a single-image capture the three fields above already say
+        # everything this would repeat. The reason it is conditional rather
+        # than always present is the same as for a point's ``value_kind``:
+        # this dict is what a surface's fingerprint is computed from, and an
+        # unconditional key would change the fingerprint of every surface
+        # stored under PR #184 (Issue #185: existing ATM surfaces must remain
+        # readable and unchanged).
+        if len(self.source_images) > 1:
+            payload["source_images"] = [image.to_dict() for image in self.source_images]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -439,7 +607,10 @@ class CanonicalVolSurface:
 
 #: The export column order, stable by contract: Issue #183 requires CSV and
 #: JSON exports to keep the same column names across releases so an audit or
-#: research script written against one export still reads the next.
+#: research script written against one export still reads the next. Issue
+#: #185's two columns are therefore *appended* rather than slotted in beside
+#: the fields they belong with: every column a script already reads keeps its
+#: name and its position.
 EXPORT_COLUMNS: tuple[str, ...] = (
     "surface_id",
     "surface_type",
@@ -463,6 +634,8 @@ EXPORT_COLUMNS: tuple[str, ...] = (
     "parser_version",
     "confirmed_by",
     "confirmed_at",
+    "value_kind",
+    "source_image_count",
 )
 
 
@@ -493,6 +666,11 @@ def export_rows(surface: CanonicalVolSurface) -> tuple[dict, ...]:
         "parser_version": provenance.parser_version,
         "confirmed_by": provenance.confirmed_by,
         "confirmed_at": provenance.confirmed_at,
+        # So a flat row can never imply a single screenshot produced a
+        # capture that several did. Which images those were is in the JSON
+        # export's nested ``surface.provenance.source_images``; a CSV cell
+        # is the wrong place for a list of hashes.
+        "source_image_count": len(provenance.source_images),
     }
     return tuple(
         {
@@ -502,6 +680,11 @@ def export_rows(surface: CanonicalVolSurface) -> tuple[dict, ...]:
             "strike_dimension": point.strike_dimension.value,
             "strike_offset": point.strike_offset,
             "volatility": point.volatility,
+            # Always written, unlike in ``VolSurfacePoint.to_dict``: an
+            # export is read by a person or a script rather than hashed, and
+            # a column that appeared only sometimes would be worse than
+            # useless to both.
+            "value_kind": point.value_kind.value,
         }
         for point in surface.points
     )

@@ -333,8 +333,10 @@ from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
 )
 from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
+from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import VCUBOTMCapture
 from shiori_pricing_lab.data.vcub_vol_surface_adapter import (
     canonical_surface_from_confirmed_capture,
+    canonical_surface_from_confirmed_otm_capture,
 )
 from shiori_pricing_lab.data.vol_surface_store import VolSurfaceStore
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
@@ -377,6 +379,10 @@ _STATIC_FILES = {
     "/script.js": ("script.js", "application/javascript; charset=utf-8"),
     "/vcub_capture.css": ("vcub_capture.css", "text/css; charset=utf-8"),
     "/vcub_capture.js": ("vcub_capture.js", "application/javascript; charset=utf-8"),
+    "/vcub_otm_capture.js": (
+        "vcub_otm_capture.js",
+        "application/javascript; charset=utf-8",
+    ),
 }
 
 DEFAULT_HOST = "127.0.0.1"
@@ -513,6 +519,13 @@ DEFAULT_PORT = 8765
 # process would still refuse every interim-coupon horizon, and a stale -v18
 # page would render neither.
 #
+# Bumped to -v23 for Issue #185's VCUB OTM Swaptions / SABR capture: the
+# server gained POST /api/vcub/otm/parse (several screenshots in one
+# request), /confirm and /reject, plus the OTM capture view's static file.
+# A stale -v22 process serves this commit's page -- which has an OTM/SABR
+# nav item -- against a route table that 404s every one of those routes, so
+# the view would look available and capture nothing.
+#
 # Bumped to -v22 for Issue #183's canonical vol-surface store: a confirmed
 # capture is now persisted to local SQLite and POST /api/vcub/atm/confirm
 # answers with a "storage" block naming the surface it saved. A stale -v21
@@ -539,7 +552,7 @@ DEFAULT_PORT = 8765
 # page last put in that field -- including one derived against a spot quote
 # the refresh has since replaced -- which is precisely the stale-Forward
 # failure this contract exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v22"
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v23"
 
 
 def load_base_case() -> dict:
@@ -2423,10 +2436,23 @@ VCUB_CAPTURE_REVIEW_STORE = VCUBCaptureReviewStore()
 #: appears on the first confirmed save.
 VOL_SURFACE_STORE = VolSurfaceStore()
 
+#: The OTM Swaptions / SABR half of the same flow (Issue #185). Its own
+#: store instance rather than a shared one, so a capture id minted by the
+#: OTM parse route is unknown to the ATM review routes and vice versa: a
+#: capture can only ever be reviewed through the screen that produced it.
+VCUB_OTM_CAPTURE_REVIEW_STORE = VCUBCaptureReviewStore()
+
 #: An upper bound on one posted screenshot. A full-screen PNG is a few
 #: megabytes; this only stops a mis-picked file from tying up the local
 #: bridge, and is not a claim about what the parser can read.
 MAX_CAPTURE_IMAGE_BYTES = 25 * 1024 * 1024
+
+#: How many screenshots one OTM/SABR capture session may carry. The operator
+#: workflow is two to four vertically overlapping images of one screen; this
+#: leaves generous headroom above that and only stops a mis-picked folder
+#: from tying up the local bridge. It is not a statement about how many
+#: images the merge can reconcile.
+MAX_CAPTURE_SESSION_IMAGES = 12
 
 
 def parse_vcub_atm_screenshot(source_reference: str, image_base64: str) -> dict:
@@ -2448,6 +2474,54 @@ def parse_vcub_atm_screenshot(source_reference: str, image_base64: str) -> dict:
     capture_id, capture, reader_notes = VCUB_CAPTURE_REVIEW_STORE.parse_image(
         source_reference=source_reference, raw_image=raw_image
     )
+    return {
+        "capture_id": capture_id,
+        "capture": capture.to_dict(),
+        "reader_notes": list(reader_notes),
+    }
+
+
+def _decoded_capture_image(image: object, index: int) -> tuple[str, bytes]:
+    """One posted ``{source_reference, image_base64}`` as bytes, or raise."""
+
+    if not isinstance(image, dict):
+        raise ValueError(f"images[{index}] must be a JSON object")
+    source_reference = image.get("source_reference")
+    image_base64 = image.get("image_base64")
+    _require_non_blank_field(source_reference, f"images[{index}].source_reference")
+    _require_non_blank_field(image_base64, f"images[{index}].image_base64")
+    try:
+        raw_image = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"images[{index}].image_base64 is not valid base64: {exc}") from exc
+    if not raw_image:
+        raise ValueError(f"images[{index}].image_base64 decoded to an empty file")
+    if len(raw_image) > MAX_CAPTURE_IMAGE_BYTES:
+        raise ValueError(
+            f"images[{index}].image_base64 decoded to {len(raw_image)} bytes, above the "
+            f"{MAX_CAPTURE_IMAGE_BYTES}-byte limit for one screenshot"
+        )
+    return source_reference, raw_image
+
+
+def parse_vcub_otm_screenshots(images: object) -> dict:
+    """Read one OTM/SABR capture session's screenshots and file it for review.
+
+    Several images, one capture: they are the vertically overlapping
+    screenshots of one screen state, so the merge -- and the trader's single
+    Confirm -- happens over the whole set. Nothing here parses anything
+    itself; it decodes what was posted and hands it to the review store.
+    """
+
+    if not isinstance(images, list) or not images:
+        raise ValueError("images must be a non-empty list of screenshots")
+    if len(images) > MAX_CAPTURE_SESSION_IMAGES:
+        raise ValueError(
+            f"{len(images)} screenshots were posted, above the "
+            f"{MAX_CAPTURE_SESSION_IMAGES} one capture session may carry"
+        )
+    decoded = [_decoded_capture_image(image, index) for index, image in enumerate(images)]
+    capture_id, capture, reader_notes = VCUB_OTM_CAPTURE_REVIEW_STORE.parse_images(decoded)
     return {
         "capture_id": capture_id,
         "capture": capture.to_dict(),
@@ -2515,6 +2589,51 @@ def _persist_confirmed_capture(capture_id: str, capture: VCUBATMCapture) -> dict
 
     try:
         surface = canonical_surface_from_confirmed_capture(capture, capture_id=capture_id)
+        outcome = VOL_SURFACE_STORE.save_confirmed_surface(surface)
+    except Exception as exc:  # noqa: BLE001
+        return _storage_result(STORAGE_FAILED, error=str(exc))
+    return _storage_result(
+        outcome.status.value, surface_id=outcome.surface_id, point_count=outcome.point_count
+    )
+
+
+def review_vcub_otm_capture(capture_id: str, reviewed_by: str, *, confirm: bool) -> dict:
+    """Confirm or reject one OTM/SABR capture session, on a named trader's behalf.
+
+    The same contract as :func:`review_vcub_atm_capture`, over a capture
+    that several screenshots produced: one session, one decision, one
+    durable snapshot. The review decision is recorded first and is never
+    rolled back by a storage failure, and ``storage.status`` is reported
+    verbatim rather than assumed.
+    """
+
+    _require_non_blank_field(capture_id, "capture_id")
+    _require_non_blank_field(reviewed_by, "reviewed_by")
+    store = VCUB_OTM_CAPTURE_REVIEW_STORE
+    reviewed = (
+        store.confirm_idempotent(capture_id, reviewed_by=reviewed_by)
+        if confirm
+        else store.reject(capture_id, reviewed_by=reviewed_by)
+    )
+    storage = (
+        _persist_confirmed_otm_capture(capture_id, reviewed)
+        if confirm
+        else _storage_result(STORAGE_NOT_ATTEMPTED)
+    )
+    return {"capture_id": capture_id, "capture": reviewed.to_dict(), "storage": storage}
+
+
+def _persist_confirmed_otm_capture(capture_id: str, capture: VCUBOTMCapture) -> dict:
+    """Write one confirmed OTM/SABR capture to the canonical store.
+
+    Every failure comes back as a ``FAILED`` block carrying the reason
+    verbatim, for the same reason as on the ATM path: the confirmation
+    already happened, and the honest answer to "did this persist?" is "no,
+    because ...", not a 500 that leaves the page guessing.
+    """
+
+    try:
+        surface = canonical_surface_from_confirmed_otm_capture(capture, capture_id=capture_id)
         outcome = VOL_SURFACE_STORE.save_confirmed_surface(surface)
     except Exception as exc:  # noqa: BLE001
         return _storage_result(STORAGE_FAILED, error=str(exc))
@@ -2840,6 +2959,48 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, payload)
 
+    def _handle_api_vcub_otm_parse(self, raw_body: bytes) -> None:
+        body = self._decoded_object(raw_body, ("images",))
+        if body is None:
+            return
+        try:
+            payload = parse_vcub_otm_screenshots(body["images"])
+        except VCUBCaptureStoreFullError as exc:
+            # Not a bad request: see the ATM parse handler above.
+            self._write_json(507, {"error": str(exc)})
+            return
+        except VCUBOCRUnavailableError as exc:
+            self._write_json(501, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            # Includes the duplicate-screenshot refusal: the operator picked
+            # one file twice, which is an input mistake with a clear fix.
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
+    def _handle_vcub_otm_review(self, raw_body: bytes, *, confirm: bool) -> None:
+        body = self._decoded_object(raw_body, ("capture_id", "reviewed_by"))
+        if body is None:
+            return
+        try:
+            payload = review_vcub_otm_capture(
+                body["capture_id"], body["reviewed_by"], confirm=confirm
+            )
+        except KeyError as exc:
+            self._write_json(404, {"error": str(exc.args[0])})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
+    def _handle_api_vcub_otm_confirm(self, raw_body: bytes) -> None:
+        self._handle_vcub_otm_review(raw_body, confirm=True)
+
+    def _handle_api_vcub_otm_reject(self, raw_body: bytes) -> None:
+        self._handle_vcub_otm_review(raw_body, confirm=False)
+
     def _handle_vcub_atm_review(self, raw_body: bytes, *, confirm: bool) -> None:
         body = self._decoded_object(raw_body, ("capture_id", "reviewed_by"))
         if body is None:
@@ -2904,6 +3065,9 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/vcub/atm/parse": _handle_api_vcub_atm_parse,
         "/api/vcub/atm/confirm": _handle_api_vcub_atm_confirm,
         "/api/vcub/atm/reject": _handle_api_vcub_atm_reject,
+        "/api/vcub/otm/parse": _handle_api_vcub_otm_parse,
+        "/api/vcub/otm/confirm": _handle_api_vcub_otm_confirm,
+        "/api/vcub/otm/reject": _handle_api_vcub_otm_reject,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }

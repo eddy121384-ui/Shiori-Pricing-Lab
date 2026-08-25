@@ -1,4 +1,4 @@
-"""Server-side review state for VCUB ATM visual captures (Issue #181).
+"""Server-side review state for VCUB visual captures (Issues #181 and #185).
 
 The workbench keeps parsed captures **here**, not in the browser, and the
 confirm/reject routes name a capture by id rather than posting one back. That
@@ -38,6 +38,17 @@ subsystem. Durable retention and audit persistence belong to a later
 production market-data ingestion issue, not to this prototype. A decision
 that must outlive the process must be recorded outside it.
 
+**Two screens, one store class, two instances.** Issue #185 added the OTM
+Swaptions / SABR capture, whose parse takes *several* images in one session
+(:meth:`VCUBCaptureReviewStore.parse_images`) against the ATM path's one
+(:meth:`VCUBCaptureReviewStore.parse_image`). Everything else -- the slot
+policy, the retention rules, the lock, the confirm/reject transitions -- is
+the same question for both, so it is answered once here. The workbench keeps
+one instance per screen rather than one shared instance, which keeps their
+capture ids in separate spaces: an id minted by one screen's parse route is
+simply unknown to the other screen's confirm route, instead of reaching an
+adapter that cannot file it.
+
 Nothing in this module imports :mod:`shiori_pricing_lab.pricing` or the
 workbench's pricing entry point. Parsing an image and confirming a capture
 do not price anything, do not touch the trader's ticket, and do not feed any
@@ -53,6 +64,7 @@ import os
 import secrets
 import threading
 from collections import OrderedDict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from shiori_pricing_lab.data.bloomberg_vcub_atm_template import parse_vcub_atm_tokens
@@ -62,8 +74,28 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
 )
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     build_capture_provenance,
+    load_ocr_engine,
     read_tokens_from_image_bytes,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
+    PARSER_NAME as OTM_PARSER_NAME,
+)
+from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
+    PARSER_VERSION as OTM_PARSER_VERSION,
+)
+from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
+    VCUBOTMCapture,
+)
+from shiori_pricing_lab.data.bloomberg_vcub_otm_template import (
+    merge_vcub_otm_reads,
+    parse_vcub_otm_tokens,
+)
+
+#: What this store holds. Both capture types answer the same three
+#: questions -- what would a client be shown, may this be confirmed, and
+#: what does confirming or rejecting produce -- which is the whole of what
+#: the slot policy below needs.
+ReviewableCapture = VCUBATMCapture | VCUBOTMCapture
 
 #: How many captures one workbench session holds at once. Under the
 #: retention policy above a decided capture is never evicted, so this is
@@ -90,7 +122,7 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def response_fingerprint(capture: VCUBATMCapture) -> str:
+def response_fingerprint(capture: ReviewableCapture) -> str:
     """Exactly what a client would receive for ``capture``, as one string.
 
     Slot reuse turns on "is this read the same as the one a client is already
@@ -154,6 +186,28 @@ def capture_id_for(source_image_sha256: str, captured_at: str) -> str:
     return digest.hexdigest()[:32]
 
 
+def image_session_key(source_image_sha256s: Sequence[str]) -> str:
+    """The single key a whole session of images is identified by.
+
+    :func:`capture_id_for` mints an id from one image hash and an instant;
+    an OTM/SABR session has several images and one instant, so its hashes
+    become one key here and the id derivation is otherwise unchanged. Every
+    guarantee that id carries -- re-parsing the same files in the same
+    second reuses the same review slot, no other process mints the same id
+    -- carries over.
+
+    The order the files were supplied in is part of the key. That is the
+    honest reading -- a differently ordered selection is a different capture
+    session, which files as a *new* snapshot rather than colliding with the
+    first -- and it is also the safe one: a stored surface's provenance
+    lists its images in the order they were given, so an order-blind key
+    could hand two genuinely different records the same identity and turn a
+    second, perfectly legitimate capture into a conflict.
+    """
+
+    return "|".join(source_image_sha256s)
+
+
 class VCUBCaptureReviewStore:
     """The captures this workbench process currently has under review."""
 
@@ -161,7 +215,7 @@ class VCUBCaptureReviewStore:
         if capacity < 1:
             raise ValueError(f"capacity must be at least 1, got {capacity!r}")
         self._capacity = capacity
-        self._captures: OrderedDict[str, VCUBATMCapture] = OrderedDict()
+        self._captures: OrderedDict[str, ReviewableCapture] = OrderedDict()
         # Every id this store has ever handed out, including ones whose
         # capture has since been evicted. An id is never recycled: see
         # :meth:`_find_identifier`. One 32-character string per parse that
@@ -214,6 +268,67 @@ class VCUBCaptureReviewStore:
             self._store_locked(identifier, capture)
         return identifier, capture, reader_notes
 
+    def parse_images(
+        self,
+        images: Sequence[tuple[str, bytes]],
+        *,
+        captured_at: str | None = None,
+        engine=None,
+    ) -> tuple[str, VCUBOTMCapture, tuple[str, ...]]:
+        """Read one OTM/SABR capture session's screenshots and file the result.
+
+        ``images`` is ``[(source_reference, raw_image), ...]`` -- the two to
+        four vertically overlapping screenshots of one screen state that
+        Issue #185's operator workflow produces. Every image is read
+        independently and the reads are merged by coordinate; the session
+        gets **one** capture id, one review slot, and one Confirm.
+
+        Returns ``(capture_id, capture, reader_notes)``. Each reader note
+        names the file it came from, since with several images "which one"
+        is part of the note. The image bytes are hashed for provenance and
+        then dropped -- they are never stored here and never written to disk
+        by this module.
+
+        The whole read happens outside the lock, as on the ATM path: it is
+        the slow step and touches nothing shared. One reader is resolved
+        before the loop and reused for every screenshot in the session,
+        rather than letting each of the two to twelve images build (and
+        discard) its own -- unlike the ATM path's single image, a session
+        here means the reader construction cost would otherwise repeat once
+        per screenshot (Codex review, PR #186).
+        """
+
+        if not images:
+            raise ValueError("a capture session needs at least one screenshot")
+        captured_at = utc_now_iso() if captured_at is None else captured_at
+        resolved_engine = load_ocr_engine() if engine is None else engine
+        reads = []
+        reader_notes: list[str] = []
+        for source_reference, raw_image in images:
+            provenance = build_capture_provenance(
+                source_reference=source_reference,
+                raw_image=raw_image,
+                captured_at=captured_at,
+                parser_name=OTM_PARSER_NAME,
+                parser_version=OTM_PARSER_VERSION,
+            )
+            tokens, notes = read_tokens_from_image_bytes(
+                raw_image, engine=resolved_engine, attach_sign_evidence=True
+            )
+            reader_notes.extend(f"{source_reference}: {note}" for note in notes)
+            reads.append(parse_vcub_otm_tokens(tokens, provenance=provenance))
+        capture = merge_vcub_otm_reads(reads)
+        session_key = image_session_key(
+            [read.provenance.source_image_sha256 for read in reads]
+        )
+        with self._lock:
+            identifier = self._find_identifier(session_key, captured_at, capture)
+            if identifier not in self._captures:
+                self._make_room_locked()
+            self._issued_identifiers.add(identifier)
+            self._store_locked(identifier, capture)
+        return identifier, capture, tuple(reader_notes)
+
     def _make_room_locked(self) -> None:
         """Free one slot by evicting the oldest pending capture, or refuse.
 
@@ -242,7 +357,7 @@ class VCUBCaptureReviewStore:
             del self._captures[oldest_pending]
 
     def _find_identifier(
-        self, source_image_sha256: str, captured_at: str, capture: VCUBATMCapture
+        self, source_image_sha256: str, captured_at: str, capture: ReviewableCapture
     ) -> str:
         """An id for this read that cannot displace a capture someone else holds.
 
@@ -289,11 +404,11 @@ class VCUBCaptureReviewStore:
             attempt += 1
             identifier = capture_id_for(source_image_sha256, f"{captured_at}#{attempt}")
 
-    def get(self, capture_id: str) -> VCUBATMCapture:
+    def get(self, capture_id: str) -> ReviewableCapture:
         with self._lock:
             return self._get_locked(capture_id)
 
-    def _get_locked(self, capture_id: str) -> VCUBATMCapture:
+    def _get_locked(self, capture_id: str) -> ReviewableCapture:
         try:
             return self._captures[capture_id]
         except KeyError as exc:
@@ -301,7 +416,7 @@ class VCUBCaptureReviewStore:
 
     def confirm(
         self, capture_id: str, *, reviewed_by: str, reviewed_at: str | None = None
-    ) -> VCUBATMCapture:
+    ) -> ReviewableCapture:
         """Accept a capture on a named trader's behalf, or raise if it is blocked."""
 
         with self._lock:
@@ -314,7 +429,7 @@ class VCUBCaptureReviewStore:
 
     def confirm_idempotent(
         self, capture_id: str, *, reviewed_by: str, reviewed_at: str | None = None
-    ) -> VCUBATMCapture:
+    ) -> ReviewableCapture:
         """Accept a capture, or hand back the confirmation this trader already made.
 
         The same decision as :meth:`confirm`, made once, but safe to repeat.
@@ -356,7 +471,7 @@ class VCUBCaptureReviewStore:
 
     def reject(
         self, capture_id: str, *, reviewed_by: str, reviewed_at: str | None = None
-    ) -> VCUBATMCapture:
+    ) -> ReviewableCapture:
         """Refuse a capture on a named trader's behalf, leaving its values unaccepted."""
 
         with self._lock:
@@ -367,7 +482,7 @@ class VCUBCaptureReviewStore:
             self._store_locked(capture_id, rejected)
         return rejected
 
-    def _store_locked(self, capture_id: str, capture: VCUBATMCapture) -> None:
+    def _store_locked(self, capture_id: str, capture: ReviewableCapture) -> None:
         """Caller must hold ``self._lock``.
 
         Never evicts. Making room is :meth:`_make_room_locked`'s job and
