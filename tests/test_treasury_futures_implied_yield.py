@@ -18,7 +18,7 @@ never real current market data for any contract.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -376,3 +376,101 @@ def test_a_price_outside_the_solvable_yield_bracket_is_refused() -> None:
 def test_a_non_numeric_target_yield_is_refused(bad_target) -> None:
     with pytest.raises(TreasuryFuturesYieldError):
         futures_price_from_target_yield(_ctd(), bad_target)
+
+
+# --------------------------------------------------------------------------
+# Property sweep over the coupon grid
+#
+# The worked examples above pin specific known-good answers. This sweeps the
+# structural invariants across every maturity day-of-month shape a Treasury
+# can have -- the 15th, and the 28th/29th/30th/31st across leap and non-leap
+# Februaries -- against settlements spread through a coupon period. It is
+# what would have caught the forward-stepping grid drift by construction
+# rather than by someone thinking of the case.
+# --------------------------------------------------------------------------
+
+
+def _sweep_maturities() -> list[date]:
+    maturities = []
+    for year in (2028, 2029, 2030, 2031, 2032):
+        for month in (1, 2, 3, 8, 12):
+            for day in (15, 28, 29, 30, 31):
+                try:
+                    maturities.append(date(year, month, day))
+                except ValueError:  # 31 Feb and friends
+                    continue
+    return maturities
+
+
+_SWEEP_SETTLEMENTS = [
+    date(2026, 9, 30) + timedelta(days=offset)
+    for offset in (0, 45, 91, 181, 182, 200, 365)
+]
+
+
+def test_the_two_grid_views_never_disagree_about_the_same_schedule() -> None:
+    checked = 0
+    for maturity in _sweep_maturities():
+        for settlement in _SWEEP_SETTLEMENTS:
+            if settlement >= maturity:
+                continue
+            previous, following = coupon_period_bounds(settlement, maturity)
+            remaining = remaining_coupon_dates(settlement, maturity)
+            checked += 1
+            # Accrual is prorated on `coupon_period_bounds`; discounting is
+            # exponentiated on `remaining_coupon_dates`. If the two ever came
+            # from different schedules, clean <-> dirty would be inconsistent.
+            assert remaining[0] == following, (settlement, maturity)
+            assert previous <= settlement < following, (settlement, maturity)
+            assert remaining[-1] == maturity, (settlement, maturity)
+            assert remaining == sorted(remaining), (settlement, maturity)
+            assert len(set(remaining)) == len(remaining), (settlement, maturity)
+            # Every gap must be a real semiannual period. This is the
+            # assertion with teeth: a grid that drifts off its anchor (a
+            # 29th/30th/31st schedule clamped in February and stepped
+            # forward from there) still starts and ends correctly and is
+            # still sorted and unique -- it betrays itself only as a final
+            # pair one day apart. 181-184 actual days is the true range of a
+            # semiannual period; the bounds here are one day wider on each
+            # side and still catch that by a mile.
+            gaps = [
+                (later - earlier).days
+                for earlier, later in zip(remaining, remaining[1:], strict=False)
+            ]
+            assert all(180 <= gap <= 185 for gap in gaps), (settlement, maturity, gaps)
+            # ... and the first gap must be a period from the period start,
+            # not from settlement, so the grid is anchored the same way at
+            # both ends.
+            assert 180 <= (following - previous).days <= 185, (settlement, maturity)
+    assert checked > 500  # the sweep is actually sweeping
+
+
+@pytest.mark.parametrize("coupon_percent", [0.0, 4.25, 9.5])
+def test_accrued_interest_never_leaves_its_own_coupon_period(coupon_percent) -> None:
+    for maturity in _sweep_maturities():
+        for settlement in _SWEEP_SETTLEMENTS:
+            if settlement >= maturity:
+                continue
+            accrued = accrued_interest_per_100(settlement, maturity, coupon_percent)
+            # Never negative, and never more than the coupon it is accruing
+            # towards -- the invariant that makes clean <-> dirty safe.
+            assert 0.0 <= accrued <= coupon_percent / 2, (settlement, maturity)
+
+
+def test_price_is_strictly_decreasing_in_yield_and_invertible_across_the_sweep() -> None:
+    yields = (0.5, 2.0, 4.25, 6.0, 9.0)
+    for maturity in _sweep_maturities()[::3]:  # every third shape keeps this quick
+        for settlement in _SWEEP_SETTLEMENTS[::2]:
+            if settlement >= maturity:
+                continue
+            try:
+                prices = [
+                    clean_price_from_yield(y, settlement, maturity, 4.25) for y in yields
+                ]
+            except TreasuryFuturesYieldError:
+                continue  # final coupon period, refused by design
+            assert prices == sorted(prices, reverse=True), (settlement, maturity)
+            for target, price in zip(yields, prices, strict=True):
+                assert yield_from_clean_price(
+                    price, settlement, maturity, 4.25
+                ) == pytest.approx(target, abs=1e-7), (settlement, maturity, target)
