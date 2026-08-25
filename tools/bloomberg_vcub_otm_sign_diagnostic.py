@@ -444,7 +444,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"=== {image_path} ===")
         raw = Path(image_path).read_bytes()
         try:
-            tokens, notes = read_tokens_from_image_bytes(raw)
+            tokens, notes = read_tokens_from_image_bytes(raw, attach_sign_evidence=True)
             image = _decode_image(raw)
         except VCUBOCRUnavailableError as exc:
             print(f"  {exc}")

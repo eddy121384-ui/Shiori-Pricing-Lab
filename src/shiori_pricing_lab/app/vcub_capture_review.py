@@ -74,6 +74,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
 )
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     build_capture_provenance,
+    load_ocr_engine,
     read_tokens_from_image_bytes,
 )
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
@@ -289,12 +290,18 @@ class VCUBCaptureReviewStore:
         by this module.
 
         The whole read happens outside the lock, as on the ATM path: it is
-        the slow step and touches nothing shared.
+        the slow step and touches nothing shared. One reader is resolved
+        before the loop and reused for every screenshot in the session,
+        rather than letting each of the two to twelve images build (and
+        discard) its own -- unlike the ATM path's single image, a session
+        here means the reader construction cost would otherwise repeat once
+        per screenshot (Codex review, PR #186).
         """
 
         if not images:
             raise ValueError("a capture session needs at least one screenshot")
         captured_at = utc_now_iso() if captured_at is None else captured_at
+        resolved_engine = load_ocr_engine() if engine is None else engine
         reads = []
         reader_notes: list[str] = []
         for source_reference, raw_image in images:
@@ -305,7 +312,9 @@ class VCUBCaptureReviewStore:
                 parser_name=OTM_PARSER_NAME,
                 parser_version=OTM_PARSER_VERSION,
             )
-            tokens, notes = read_tokens_from_image_bytes(raw_image, engine=engine)
+            tokens, notes = read_tokens_from_image_bytes(
+                raw_image, engine=resolved_engine, attach_sign_evidence=True
+            )
             reader_notes.extend(f"{source_reference}: {note}" for note in notes)
             reads.append(parse_vcub_otm_tokens(tokens, provenance=provenance))
         capture = merge_vcub_otm_reads(reads)

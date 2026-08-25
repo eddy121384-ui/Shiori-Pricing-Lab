@@ -33,6 +33,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_ocr import (
     VCUBOCRUnavailableError,
     build_capture_provenance,
     diagnose_minus_evidence,
+    load_ocr_engine,
     read_tokens_from_image_bytes,
     tokens_from_detections,
     visual_minus_evidence,
@@ -409,6 +410,34 @@ def test_a_token_flush_against_the_images_own_edge_has_no_crop_to_inspect() -> N
 # ---------------------------------------------------------------------------
 
 
+def test_load_ocr_engine_resolves_the_same_reader_read_tokens_would(monkeypatch) -> None:
+    """A caller that wants to build one reader up front for a multi-image
+    session (:meth:`VCUBCaptureReviewStore.parse_images`) gets exactly the
+    reader :func:`read_tokens_from_image_bytes` would have loaded lazily
+    itself (Codex review, PR #186)."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module, "_load_engine", lambda: "the-one-reader")
+
+    assert load_ocr_engine() == "the-one-reader"
+
+
+def test_load_ocr_engine_reports_the_same_unavailable_error(monkeypatch) -> None:
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    def _no_engine():
+        raise VCUBOCRUnavailableError(
+            "Visual capture needs the optional OCR reader, which is not installed. "
+            f"From the repository root, run: {CAPTURE_EXTRA_INSTALL_COMMAND}"
+        )
+
+    monkeypatch.setattr(ocr_module, "_load_engine", _no_engine)
+
+    with pytest.raises(VCUBOCRUnavailableError, match=r"pip install -e"):
+        load_ocr_engine()
+
+
 def test_a_missing_reader_reports_the_exact_command_that_installs_it(monkeypatch) -> None:
     import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
 
@@ -470,10 +499,33 @@ def test_read_tokens_from_image_bytes_attaches_negative_pixel_sign_evidence(monk
     monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
 
     tokens, _notes = read_tokens_from_image_bytes(
-        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
     )
 
     assert [token.sign_evidence for token in tokens] == ["negative"]
+
+
+def test_read_tokens_from_image_bytes_leaves_sign_evidence_off_by_default(monkeypatch) -> None:
+    """The pixel-evidence pass is opt-in: a caller that never asks for it
+    (the ATM path, in production) pays for none of the connected-component
+    scanning and gets ``sign_evidence=None`` even on the exact shape that
+    would otherwise classify negative (Codex review, PR #186)."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=26, bottom=28, left=101, right=106)  # minus, thin, mid-height
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit, tall
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+    )
+
+    assert [token.sign_evidence for token in tokens] == [None]
 
 
 def test_read_tokens_from_image_bytes_attaches_ambiguous_pixel_sign_evidence(monkeypatch) -> None:
@@ -491,7 +543,9 @@ def test_read_tokens_from_image_bytes_attaches_ambiguous_pixel_sign_evidence(mon
     monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
 
     tokens, _notes = read_tokens_from_image_bytes(
-        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
     )
 
     assert [token.sign_evidence for token in tokens] == ["ambiguous"]
@@ -511,7 +565,9 @@ def test_read_tokens_from_image_bytes_leaves_no_evidence_tokens_alone(monkeypatc
     monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
 
     tokens, _notes = read_tokens_from_image_bytes(
-        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
     )
 
     assert [token.sign_evidence for token in tokens] == [None]
@@ -531,7 +587,9 @@ def test_read_tokens_from_image_bytes_never_inspects_an_already_signed_token(
     monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
 
     tokens, _notes = read_tokens_from_image_bytes(
-        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "-2.92", 1.0]], 0.01)
+        b"pretend-image",
+        engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "-2.92", 1.0]], 0.01),
+        attach_sign_evidence=True,
     )
 
     assert [token.sign_evidence for token in tokens] == [None]

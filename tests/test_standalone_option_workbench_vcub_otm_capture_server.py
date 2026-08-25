@@ -90,6 +90,10 @@ def stub_reader(monkeypatch):
         raise AssertionError(f"unexpected image bytes: {raw_image!r}")
 
     monkeypatch.setattr(review_module, "read_tokens_from_image_bytes", _read)
+    # parse_images resolves one engine up front to reuse across the
+    # session's screenshots (Codex review, PR #186) -- stubbed here too, so
+    # this never tries to construct a real RapidOCR reader in tests.
+    monkeypatch.setattr(review_module, "load_ocr_engine", lambda: None)
 
 
 def _post_json(url: str, payload: object) -> tuple[int, dict]:
@@ -174,6 +178,39 @@ def test_the_coverage_block_says_what_each_screenshot_contributed(
     assert coverage["shot-b.png"]["shared_row_count"] > 0
 
 
+def test_one_ocr_engine_is_reused_across_every_screenshot_in_a_session(
+    server_url, monkeypatch
+) -> None:
+    """A session's two-to-twelve screenshots share one OCR engine instance
+    rather than each building (and discarding) its own (Codex review, PR
+    #186)."""
+
+    engine_build_count = 0
+
+    def _load_engine():
+        nonlocal engine_build_count
+        engine_build_count += 1
+        return f"engine-{engine_build_count}"
+
+    engines_seen: list[object] = []
+
+    def _read(raw_image, *, engine=None, **kwargs):
+        engines_seen.append(engine)
+        for name, rows in _SLICES.items():
+            if raw_image == _image_bytes(name):
+                return tuple(screenshot_tokens(rows=rows)), ()
+        raise AssertionError(f"unexpected image bytes: {raw_image!r}")
+
+    monkeypatch.setattr(review_module, "load_ocr_engine", _load_engine)
+    monkeypatch.setattr(review_module, "read_tokens_from_image_bytes", _read)
+
+    status, _payload = _parse(server_url)
+
+    assert status == 200
+    assert engine_build_count == 1
+    assert engines_seen == ["engine-1", "engine-1", "engine-1"]
+
+
 def test_the_same_screenshot_twice_is_refused_as_a_bad_request(server_url, stub_reader) -> None:
     status, payload = _parse(server_url, names=("shot-a.png", "shot-a.png"))
 
@@ -220,6 +257,7 @@ def test_a_missing_ocr_reader_is_reported_as_unavailable_not_as_a_bad_request(
         raise VCUBOCRUnavailableError("Visual capture needs the optional OCR reader")
 
     monkeypatch.setattr(review_module, "read_tokens_from_image_bytes", _unavailable)
+    monkeypatch.setattr(review_module, "load_ocr_engine", lambda: None)
     status, payload = _parse(server_url, names=("shot-a.png",))
 
     assert status == 501
@@ -352,6 +390,7 @@ def test_a_blocked_capture_cannot_be_confirmed_through_the_route(
         raise AssertionError(f"unexpected image bytes: {raw_image!r}")
 
     monkeypatch.setattr(review_module, "read_tokens_from_image_bytes", _read)
+    monkeypatch.setattr(review_module, "load_ocr_engine", lambda: None)
     _status, parsed = _parse(server_url)
     assert parsed["capture"]["can_confirm"] is False
 

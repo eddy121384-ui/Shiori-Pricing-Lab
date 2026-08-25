@@ -35,11 +35,14 @@ components (never the token's bbox height, and never the single tallest
 component -- both were tried and both broke on Eddy's real screenshots
 across four rounds of the diagnostic). :func:`read_tokens_from_image_bytes`
 calls it, through :func:`attach_visual_sign_evidence`, on every unsigned
-numeric token it detects; :func:`tokens_from_detections` on its own never
-touches it, since it has no image. A cell's own template parser
-(:mod:`bloomberg_vcub_otm_template`) is what turns ``"negative"`` into a
-resigned value and ``"ambiguous"`` into a blocking ``NUMERIC_SIGN_AMBIGUOUS``
--- this module only ever attaches the raw pixel evidence to the token.
+numeric token it detects -- but only when a caller opts in with
+``attach_sign_evidence=True``, since only the OTM/SABR path's template
+reads the result; the ATM path leaves it off and pays nothing for it.
+:func:`tokens_from_detections` on its own never touches it, since it has no
+image. A cell's own template parser (:mod:`bloomberg_vcub_otm_template`) is
+what turns ``"negative"`` into a resigned value and ``"ambiguous"`` into a
+blocking ``NUMERIC_SIGN_AMBIGUOUS`` -- this module only ever attaches the
+raw pixel evidence to the token.
 """
 
 from __future__ import annotations
@@ -518,8 +521,25 @@ def _decode_image(raw_image: bytes):
         raise ValueError("the supplied file is not a readable image") from exc
 
 
+def load_ocr_engine():
+    """Construct the RapidOCR reader once.
+
+    A caller that will read several images in one session --
+    :meth:`VCUBCaptureReviewStore.parse_images`'s OTM/SABR multi-screenshot
+    loop, in particular -- resolves this once and passes it as ``engine`` to
+    every :func:`read_tokens_from_image_bytes` call, instead of letting each
+    call build (and discard) its own reader (Codex review, PR #186).
+    """
+
+    return _load_engine()
+
+
 def read_tokens_from_image_bytes(
-    raw_image: bytes, *, engine=None, min_confidence: float = MIN_TOKEN_CONFIDENCE
+    raw_image: bytes,
+    *,
+    engine=None,
+    min_confidence: float = MIN_TOKEN_CONFIDENCE,
+    attach_sign_evidence: bool = False,
 ) -> tuple[tuple[VCUBTextToken, ...], tuple[str, ...]]:
     """Detect text in ``raw_image`` and return ``(tokens, dropped-token notes)``.
 
@@ -527,13 +547,14 @@ def read_tokens_from_image_bytes(
     without the optional dependency; left unset, the RapidOCR reader is
     loaded lazily so importing this module never requires it.
 
-    Every unsigned numeric token is then passed through
-    :func:`attach_visual_sign_evidence`, the only place this happens: this
-    is the one call in the capture slice that both decodes the image *and*
-    hands tokens onward, so it is where the pixel-evidence second pass runs
-    (live-acceptance defect, PR #186). :func:`tokens_from_detections` on its
-    own is never touched by this -- it has no image to inspect, and every
-    token it returns keeps ``sign_evidence=None``.
+    ``attach_sign_evidence`` is ``False`` by default: the pixel-evidence
+    second pass (:func:`attach_visual_sign_evidence`) is only useful to a
+    caller whose template actually reads ``sign_evidence`` off the token --
+    today, only the OTM/SABR path. The ATM path never does, so it must not
+    pay for hundreds of unnecessary connected-component scans over its own
+    unsigned tokens; a caller opts in explicitly instead (Codex review, PR
+    #186). :func:`tokens_from_detections` on its own is never touched by
+    this either way -- it has no image to inspect.
     """
 
     if not isinstance(raw_image, (bytes, bytearray)) or not raw_image:
@@ -542,4 +563,6 @@ def read_tokens_from_image_bytes(
     reader = _load_engine() if engine is None else engine
     detections, _elapsed = reader(image)
     tokens, notes = tokens_from_detections(detections or (), min_confidence=min_confidence)
-    return attach_visual_sign_evidence(image, tokens), notes
+    if attach_sign_evidence:
+        tokens = attach_visual_sign_evidence(image, tokens)
+    return tokens, notes
