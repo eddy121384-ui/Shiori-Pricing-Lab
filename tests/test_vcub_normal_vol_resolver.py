@@ -34,6 +34,7 @@ from shiori_pricing_lab.data.vcub_normal_vol_resolver import (
     EXTRAPOLATION_MODE,
     RESOLVER_VERSION,
     GridCoordinateContractError,
+    NegativeVolatilityError,
     SmileContractError,
     SmileModel,
     SpreadReconstructionError,
@@ -41,6 +42,7 @@ from shiori_pricing_lab.data.vcub_normal_vol_resolver import (
     SurfaceIdentityError,
     VCUBGridCoordinates,
     VCUBVolQuery,
+    VolSpaceContractError,
     VolUnitContractError,
     resolve_vcub_normal_vol,
 )
@@ -94,7 +96,8 @@ COORDINATES = VCUBGridCoordinates(
 def points(
     *,
     atm: dict[tuple[str, str], float | None] | None = None,
-    spreads: dict[tuple[str, str], dict[float, float]] | None = None,
+    spreads: dict[tuple[str, str], dict[float, float] | dict[float, float | None]]
+    | None = None,
     drop: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[VolSurfacePoint, ...]:
     atm_values: dict[tuple[str, str], float | None] = dict(ATM_BP if atm is None else atm)
@@ -131,6 +134,7 @@ def surface(
     volatility_unit: str | None = "bp",
     capture_id: str = CAPTURE_ID,
     business_date: str = "08/18/26",
+    vol_type: str | None = "Normal Vol Skew",
     **point_overrides,
 ) -> CanonicalVolSurface:
     return CanonicalVolSurface(
@@ -141,8 +145,9 @@ def surface(
             currency="USD",
             curve_config="USD (30/360, S/A) vs. SOFR",
             side="Mid",
-            vol_type="Normal Vol Skew",
+            vol_type=vol_type,
             source="CMPN",
+            unresolved_fields=() if vol_type is not None else ("vol_type",),
         ),
         provenance=VolSurfaceProvenance(
             capture_id=capture_id,
@@ -601,6 +606,117 @@ def test_an_accepted_resolution_never_reports_a_fallback() -> None:
     assert resolution.blocking is False
 
 
+def test_a_query_across_an_unresolved_captured_column_blocks() -> None:
+    """Codex review, PR #189.
+
+    The +10bp column exists on the screen and the capture could not read
+    it. Answering a +10bp query from the resolved ATM and +25bp columns
+    either side would return 82.00bp -- a number at a coordinate the
+    snapshot explicitly failed to read -- and report no fallback.
+    """
+
+    holed = dict(SPREADS_BP)
+    holed[("1Yr", "5Yr")] = {-25.0: -3.0, 10.0: None, 25.0: 5.0}
+
+    with pytest.raises(SurfaceCoverageError, match="left unresolved"):
+        resolve(surface=surface(spreads=holed), moneyness_bp=10.0)
+
+
+def test_a_query_reaching_across_an_unresolved_column_blocks_too() -> None:
+    holed = dict(SPREADS_BP)
+    holed[("1Yr", "5Yr")] = {-25.0: -3.0, 10.0: None, 25.0: 5.0}
+
+    # 12bp brackets [0, 25], which spans the unreadable 10bp column.
+    with pytest.raises(SurfaceCoverageError, match="left unresolved"):
+        resolve(surface=surface(spreads=holed), moneyness_bp=12.0)
+
+
+def test_a_query_clear_of_an_unresolved_column_still_resolves() -> None:
+    # The hole is on the payer wing; a -25bp query brackets [-25, 0] and
+    # never touches it. Fail-closed is not fail-everything.
+    holed = dict(SPREADS_BP)
+    holed[("1Yr", "5Yr")] = {-25.0: -3.0, 10.0: None, 25.0: 5.0}
+
+    assert resolve(surface=surface(spreads=holed), moneyness_bp=-25.0).volatility_raw == 77.0
+
+
+def test_an_unresolved_atm_blocks_a_query_that_brackets_it() -> None:
+    # Every non-ATM column here is an absolute vol rather than a spread, so
+    # the spread-reconstruction guard does not fire and the unresolved ATM
+    # coordinate itself is what blocks.
+    absolute_wings = tuple(
+        VolSurfacePoint(
+            expiry="1Yr",
+            underlying_tenor="5Yr",
+            volatility=volatility,
+            strike_dimension=StrikeDimension.YIELD_OFFSET_BP,
+            strike_offset=offset,
+            value_kind=VolValueKind.ABSOLUTE_VOL,
+        )
+        for offset, volatility in ((-25.0, 77.0), (25.0, 85.0))
+    )
+    unresolved_atm = VolSurfacePoint(
+        expiry="1Yr",
+        underlying_tenor="5Yr",
+        volatility=None,
+        strike_dimension=StrikeDimension.ATM,
+    )
+    one_node = CanonicalVolSurface(
+        identity=surface().identity,
+        provenance=surface().provenance,
+        points=(unresolved_atm, *absolute_wings),
+        volatility_unit="bp",
+    )
+
+    with pytest.raises(SurfaceCoverageError, match="left unresolved"):
+        resolve_vcub_normal_vol(
+            one_node,
+            query(expiry_coordinate=1.0, tenor_coordinate=5.0, moneyness_bp=0.0),
+            coordinates=COORDINATES,
+        )
+
+
+def test_a_reconstruction_that_goes_negative_blocks() -> None:
+    """Codex review, PR #189.
+
+    80.00 ATM against a -90.00 spread is not a 10bp-low vol, it is evidence
+    that the numbers or their spread semantics are not what they claim. A
+    normal vol is non-negative and this one would be handed downstream as a
+    model input.
+    """
+
+    impossible = dict(SPREADS_BP)
+    impossible[("1Yr", "5Yr")] = {-25.0: -90.0, 25.0: 5.0}
+
+    with pytest.raises(NegativeVolatilityError, match="is not a volatility"):
+        resolve(surface=surface(spreads=impossible), moneyness_bp=-25.0)
+
+
+# --------------------------------------------------------------------------
+# The volatility-space contract (Codex review, PR #189)
+# --------------------------------------------------------------------------
+
+
+def test_a_surface_that_states_no_vol_type_blocks() -> None:
+    with pytest.raises(VolSpaceContractError, match="leaves vol_type unresolved"):
+        resolve(surface=surface(vol_type=None))
+
+
+def test_a_surface_stating_a_lognormal_vol_type_blocks() -> None:
+    # sigma_vcub is a normal vol. A lognormal surface's numbers are not that
+    # quantity, and normalizing them at 1bp = 1e-4 would relabel rather than
+    # convert them.
+    with pytest.raises(VolSpaceContractError, match="does not declare normal"):
+        resolve(surface=surface(vol_type="Lognormal Vol (OIS)"))
+
+
+def test_the_atm_screens_own_normal_vol_type_is_accepted() -> None:
+    # The ATM tab spells it "Normal Vol (OIS)" and the OTM tab spells it
+    # "Normal Vol Skew"; both declare normal space in the screen's own
+    # closed vocabulary.
+    assert resolve(surface=surface(vol_type="Normal Vol (OIS)")).vol_type == "Normal Vol (OIS)"
+
+
 def test_the_resolver_never_reaches_the_bond_option_pricing_or_dcf_bridge() -> None:
     """Issue #188's hard boundary, checked structurally.
 
@@ -626,6 +742,7 @@ def test_the_resolver_never_reaches_the_bond_option_pricing_or_dcf_bridge() -> N
     assert imported <= {
         "__future__",
         "math",
+        "re",
         "collections.abc",
         "dataclasses",
         "enum",

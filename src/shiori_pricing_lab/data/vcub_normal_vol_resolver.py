@@ -39,11 +39,23 @@ than a convention to remember.
   contract that is missing, because the canonical snapshot carries no
   calibrated ``alpha/rho/nu`` and this repository holds no pinned copy of
   the Bloomberg calibration objective to reproduce them from.
+* *The volatility space* is read from the surface's stated ``vol_type``.
+  ``sigma_vcub`` is a normal vol, and a surface stating a lognormal or
+  Black type -- or stating none -- is refused rather than relabelled. The
+  canonical model is vendor-neutral, so ``surface_type`` names a screen and
+  is not on its own evidence of which space the numbers live in.
 * *The corner forwards* ``F_ij`` are optional caller inputs. The smile is
   resolved in additive-moneyness space, so no forward is needed to *compute*
   ``sigma_vcub``; a forward is needed only to report the absolute corner
   strike ``K_ij = F_ij + mu*``, and a corner strike is left unreported
   rather than invented when the caller has no forward to state.
+
+**An unreadable cell is not a gap to interpolate over.** A captured strike
+coordinate the capture could not read stays in the resolver's view of the
+node as *unresolved*, and a query landing on or reaching across one blocks.
+Answering it from the resolved columns either side would present a number at
+a coordinate the snapshot explicitly failed to read, with no fallback flag
+to say so.
 
 **Out-of-range stays fail-closed** (``VCUB_EXTRAPOLATION_MODE =
 FAIL_CLOSED``). Bloomberg's own VCUB flat-extrapolates expiry and tenor
@@ -64,6 +76,7 @@ module.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -71,6 +84,7 @@ from enum import StrEnum
 from shiori_pricing_lab.data.vol_surface import (
     CanonicalVolSurface,
     StrikeDimension,
+    VolSurfaceType,
     VolValueKind,
 )
 
@@ -98,6 +112,26 @@ STATED_UNIT_SCALES: Mapping[str, float] = {
     "bps": BASIS_POINT_IN_DECIMAL,
     "decimal": 1.0,
 }
+
+
+#: The surfaces this resolver is entitled to read. Both of today's members
+#: are swaption screens, which is what ``sigma_vcub`` *is*; the model
+#: anticipates a later Caps/Floors member, and a resolver that labels its
+#: output a swaption normal vol must not read one (Codex review, PR #189).
+RESOLVABLE_SURFACE_TYPES: frozenset[VolSurfaceType] = frozenset(
+    {VolSurfaceType.ATM_SWAPTION, VolSurfaceType.OTM_SWAPTION_SABR}
+)
+
+#: What a surface must state for its numbers to *be* normal volatilities.
+#: The VCUB screens draw their vol type from one closed vocabulary --
+#: ``Normal`` / ``Black`` / ``Lognormal`` / ``Shifted Lognormal`` / ``SABR``,
+#: optionally with a parenthesised curve suffix -- so ``Normal Vol (OIS)``
+#: and ``Normal Vol Skew`` both declare normal space and ``Lognormal Vol``
+#: declares that it is not. Matched on the stated text rather than assumed
+#: from the surface type: :class:`CanonicalVolSurface` is vendor-neutral and
+#: an ``OTM_SWAPTION_SABR`` surface is a *screen*, not a promise about which
+#: volatility space its numbers live in (Codex review, PR #189).
+_NORMAL_VOL_TYPE_RE = re.compile(r"^normal\s+vol\b")
 
 
 class SmileModel(StrEnum):
@@ -134,6 +168,14 @@ class VolUnitContractError(VCUBResolverError):
 
 class SmileContractError(VCUBResolverError):
     """The query names no smile model, or one this version cannot reproduce."""
+
+
+class VolSpaceContractError(VCUBResolverError):
+    """The surface does not state that its numbers are normal volatilities."""
+
+
+class NegativeVolatilityError(VCUBResolverError):
+    """A reconstruction produced a negative absolute normal volatility."""
 
 
 class GridCoordinateContractError(VCUBResolverError):
@@ -482,13 +524,57 @@ class VCUBNormalVolResolution:
 
 @dataclass(frozen=True)
 class _Node:
-    """The captured column set at one ``(expiry, tenor)`` coordinate."""
+    """The captured column set at one ``(expiry, tenor)`` coordinate.
+
+    :attr:`unresolved_offsets` are the coordinates the surface *holds* but
+    the capture could not read. They are kept rather than dropped because
+    dropping them would let a query at -- or across -- an unreadable column
+    be answered by interpolating its resolved neighbours, and returned as a
+    resolution with no fallback flag (Codex review, PR #189). The stored
+    surface says that column exists and says its value is unknown; both
+    halves have to survive into the resolver.
+    """
 
     expiry_label: str
     tenor_label: str
     atm_raw: float | None
     #: ``moneyness_bp -> (raw value, kind)`` for every resolved non-ATM column.
     offsets: Mapping[float, tuple[float, VolValueKind]]
+    unresolved_offsets: tuple[float, ...] = ()
+
+
+def _require_normal_vol_space(surface: CanonicalVolSurface) -> str:
+    """The surface's stated vol type, once it is known to be a normal one.
+
+    Read before any number is: this resolver labels what it returns a normal
+    swaption volatility, and a surface that states a lognormal or Black vol
+    type -- or states none at all -- would have that label applied to
+    numbers that are not that quantity. The canonical model is deliberately
+    vendor-neutral and its ``surface_type`` names a *screen*, so the vol
+    space has to come from what the surface states about its own values.
+    """
+
+    identity = surface.identity
+    if identity.surface_type not in RESOLVABLE_SURFACE_TYPES:
+        raise VolSpaceContractError(
+            f"this resolver returns a swaption normal vol and reads only "
+            f"{sorted(surface_type.value for surface_type in RESOLVABLE_SURFACE_TYPES)}; "
+            f"this surface is {identity.surface_type.value}"
+        )
+    stated = identity.vol_type
+    if stated is None:
+        raise VolSpaceContractError(
+            "this surface leaves vol_type unresolved, so nothing states that its numbers "
+            "are normal volatilities; sigma_vcub is a normal swaption vol and this "
+            "resolver will not assert that of values whose space is unknown"
+        )
+    if _NORMAL_VOL_TYPE_RE.match(" ".join(stated.split()).casefold()) is None:
+        raise VolSpaceContractError(
+            f"this surface states vol_type={stated!r}, which does not declare normal "
+            "volatility space; a lognormal, Black, or shifted-lognormal surface is not "
+            "sigma_vcub and is never normalized as though it were"
+        )
+    return stated
 
 
 def _unit_scale(surface: CanonicalVolSurface) -> tuple[str, float]:
@@ -528,9 +614,11 @@ def _node_index(surface: CanonicalVolSurface) -> dict[tuple[str, str], _Node]:
 
     atm: dict[tuple[str, str], float | None] = {}
     offsets: dict[tuple[str, str], dict[float, tuple[float, VolValueKind]]] = {}
+    unresolved: dict[tuple[str, str], set[float]] = {}
     for point in surface.points:
         key = (point.expiry, point.underlying_tenor)
         offsets.setdefault(key, {})
+        unresolved.setdefault(key, set())
         if point.strike_dimension is StrikeDimension.ATM:
             if point.value_kind is not VolValueKind.ABSOLUTE_VOL:
                 raise SpreadReconstructionError(
@@ -538,15 +626,21 @@ def _node_index(surface: CanonicalVolSurface) -> dict[tuple[str, str], _Node]:
                     "is the absolute vol every spread at that node is reconstructed from"
                 )
             atm[key] = point.volatility
-        elif point.volatility is not None:
+            if point.volatility is None:
+                unresolved[key].add(0.0)
+        else:
             assert point.strike_offset is not None  # enforced by VolSurfacePoint
-            offsets[key][point.strike_offset] = (point.volatility, point.value_kind)
+            if point.volatility is None:
+                unresolved[key].add(point.strike_offset)
+            else:
+                offsets[key][point.strike_offset] = (point.volatility, point.value_kind)
     return {
         key: _Node(
             expiry_label=key[0],
             tenor_label=key[1],
             atm_raw=atm.get(key),
             offsets=node_offsets,
+            unresolved_offsets=tuple(sorted(unresolved[key])),
         )
         for key, node_offsets in offsets.items()
     }
@@ -581,6 +675,25 @@ def _bracket(
     return low, high, (value - coordinates[low]) / (coordinates[high] - coordinates[low])
 
 
+def _require_non_negative_volatility(value: float, node: _Node, offset: float) -> float:
+    """Refuse a reconstruction that is not a volatility at all.
+
+    A normal volatility is non-negative, so a spread whose magnitude exceeds
+    the ATM vol it is a spread to -- 80.00 ATM against a -90.00 spread --
+    has not produced a low vol, it has produced evidence that the capture or
+    its spread semantics are wrong. Returning it would hand an impossible
+    model input downstream under a resolved label (Codex review, PR #189).
+    """
+
+    if value < 0:
+        raise NegativeVolatilityError(
+            f"reconstructing {node.expiry_label!r} x {node.tenor_label!r} at {offset!r}bp "
+            f"gives {value!r}, which is not a volatility; a normal vol is non-negative, so "
+            "this surface's values or its spread-to-ATM semantics are not what they claim"
+        )
+    return value
+
+
 def _smile_nodes(node: _Node, scale: float) -> tuple[VCUBSmileNode, ...]:
     """Every resolved column of ``node`` as an absolute normal vol.
 
@@ -592,6 +705,7 @@ def _smile_nodes(node: _Node, scale: float) -> tuple[VCUBSmileNode, ...]:
 
     reconstructed: list[VCUBSmileNode] = []
     if node.atm_raw is not None:
+        _require_non_negative_volatility(node.atm_raw, node, 0.0)
         reconstructed.append(
             VCUBSmileNode(
                 moneyness_bp=0.0,
@@ -613,6 +727,7 @@ def _smile_nodes(node: _Node, scale: float) -> tuple[VCUBSmileNode, ...]:
             absolute = node.atm_raw + raw
         else:
             absolute = raw
+        _require_non_negative_volatility(absolute, node, offset)
         reconstructed.append(
             VCUBSmileNode(
                 moneyness_bp=offset,
@@ -659,6 +774,19 @@ def _resolve_corner(
         "additive moneyness (bp)",
         context=f" of the node {node.expiry_label!r} x {node.tenor_label!r}",
     )
+    blocked = [
+        offset
+        for offset in node.unresolved_offsets
+        if moneyness[low] <= offset <= moneyness[high]
+    ]
+    if blocked:
+        raise SurfaceCoverageError(
+            f"the node {node.expiry_label!r} x {node.tenor_label!r} holds the captured "
+            f"strike coordinate(s) {blocked} that the capture left unresolved, and the "
+            f"requested moneyness {query.moneyness_bp!r}bp falls on or across them; "
+            "interpolating over an unreadable column would answer from its neighbours and "
+            "report no fallback"
+        )
     volatility_raw = (1.0 - smile_weight) * smile_nodes[low].volatility_raw + (
         smile_weight * smile_nodes[high].volatility_raw
     )
@@ -744,6 +872,7 @@ def resolve_vcub_normal_vol(
             f"resolved. Supported: {sorted(model.value for model in SMILE_MODEL_VERSIONS)}"
         )
 
+    vol_type = _require_normal_vol_space(surface)
     unit, scale = _unit_scale(surface)
     nodes = _node_index(surface)
     expiry_labels = {label for label, _ in nodes}
@@ -795,7 +924,7 @@ def resolve_vcub_normal_vol(
         currency=identity.currency,
         curve_config=identity.curve_config,
         side=identity.side,
-        vol_type=identity.vol_type,
+        vol_type=vol_type,
         source=identity.source,
         unresolved_identity_fields=identity.unresolved_fields,
         captured_at=provenance.captured_at,

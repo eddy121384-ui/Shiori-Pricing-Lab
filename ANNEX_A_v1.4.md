@@ -561,17 +561,21 @@ confirmed canonical VCUB snapshot
 - **volatility unit**：只讀 canonical surface 明確聲明的 unit；`bp` 依 `1bp = 1e-4` 明確 normalize 為 absolute decimal rate vol。未聲明或無法 pin 的 unit 一律 fail closed，禁止由數值大小推斷（§A.8.1）。
 - **expiry / tenor 數值座標**：由呼叫端以顯式 label → coordinate map 提供，且必須覆蓋 surface 上的每一個 label。本 Annex **不**在此定義 calendar date → VCUB year fraction 之 day-count convention；該問題與 `DCF_VCUB` 同屬未解 RED，resolver 不得代為決定。
 - **smile model**：由呼叫端明確聲明，不得由 surface type、欄位數或數值形狀推得。本版本實作 **PWL**：在 additive moneyness 空間對 **normal vol** 線性插值，captured strike node 必須 exact round-trip。**SABR** 在 Bloomberg calibration contract（DOCS #2063620 Appendix D 之 equal-weighted alpha-error objective 與 `β = 0.5`、`shift = 0.03`、`ρ ∈ [-1, 0.999]`、`ν ∈ [0, 1]` 等 versioned defaults）與 calibrated `α / ρ / ν` 未進入 canonical snapshot 前 **fail closed**，不得以 PWL 冒充 SABR。
+- **volatility space**：只接受 canonical surface 明確聲明為 normal vol 的 surface（`vol_type` 屬 `Normal Vol ...` 系列，如 `Normal Vol (OIS)` / `Normal Vol Skew`）。`vol_type` 未解析、或為 lognormal / Black / shifted-lognormal 者一律 fail closed；`surface_type` 只說明來源畫面，不足以證明數值所處的 vol space。
 - **corner forward `F_ij`**：canonical snapshot 不儲存 forward。smile 在 moneyness 空間解析，因此 `σ_vcub` 不需要 forward；`K_ij = F_ij + μ*` 僅在呼叫端明確提供 forward 時報告，未提供時 corner strike 記為未知，不得假設。
 
 **Fail-closed 條件（皆 blocking，不得回傳降級數值）：**
 
+- surface 未聲明 normal volatility space（`vol_type` 未解析，或非 normal vol）；
 - surface 未聲明 volatility unit，或聲明無法 pin 的 unit；
 - query 未聲明 smile model，或聲明本版本未實作的 model；
 - coordinate map 未涵蓋 surface 上的 label，或兩個 label 對應同一座標；
 - query 宣告的 snapshot identity 與傳入 surface 不符（不同 capture / 不同 business date 不得互相插值）；
 - `T*`、`τ*` 或 `μ*` 超出 confirmed surface 覆蓋範圍（`VCUB_EXTRAPOLATION_MODE = FAIL_CLOSED`）；
 - 任一 bracketing node 缺漏或無 resolved value；
-- spread-to-ATM 欄位所需之 ATM absolute vol 缺漏（§A.8.3 重建不成立）。
+- 所需 smile bracket 落在或跨越 capture **未解析**的 strike coordinate（不得以左右鄰欄插補補洞）；
+- spread-to-ATM 欄位所需之 ATM absolute vol 缺漏（§A.8.3 重建不成立）；
+- 重建後之 absolute normal vol 為負（normal vol 非負；此時應視為 capture 或 spread 語義有誤，不得輸出）。
 
 **Diagnostics / provenance（每一筆 resolved 結果必須可審計）：** canonical snapshot / surface identity、capture 與 confirm 資訊、source unit 與 normalization factor、resolver name/version、smile model/version、`VCUB_EXTRAPOLATION_MODE`、requested `(T*, τ*, μ*)`、四個 bracketing node 與其 ATM/spread 重建細節、各 corner 的 `F_ij`（若有）、`K_ij`（若有）與 corner normal vol、interpolation weights、最終 `σ_vcub`（原始 unit 與 normalized decimal）、fallback flag（accepted 結果恆為 false）。
 
