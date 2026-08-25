@@ -20,6 +20,7 @@ The CTD typed in below is an arbitrary test input, never real market data.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import threading
 import time
@@ -391,6 +392,78 @@ def test_an_in_flight_conversion_never_repaints_after_an_input_is_edited(
     # The answer on screen must never be the one computed for 112-165.
     assert page.text_content("#fy-implied-yield").strip() == "—"
     assert page.text_content("#fy-implied-yield-note").strip() == "—"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_successful_automatic_ctd_load_clears_the_previous_answers(page, server_url) -> None:
+    """Codex review, PR #191 (P2), third round.
+
+    `fillCtdFields` assigns values programmatically, and a programmatic
+    `value =` does not fire the `input`/`change` listeners that invalidate the
+    answers -- so a successful automatic load would otherwise leave the
+    previous yield and futures quote visible beside a different CTD.
+
+    The automatic route fails closed today (no confirmed Bloomberg mnemonic),
+    so its success branch is reached here by fulfilling that one request with
+    a real `as_display_payload()` envelope built by the production builder --
+    the exact shape the server will send once the mnemonics are confirmed.
+    """
+
+    loaded_ctd = treasury_futures_ctd_from_manual_entry(
+        dict(
+            CTD_ENTRY,
+            contract_symbol="TYH7",
+            ctd_identifier="US91282COTHER",
+            ctd_coupon_percent=3.5,
+            ctd_maturity_date="2033-11-15",
+            conversion_factor=0.7654,
+        )
+    ).as_display_payload()
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+
+    page.route(
+        "**/api/treasury-futures/ctd",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(loaded_ctd),
+        ),
+    )
+    page.click("#fy-load-bloomberg-btn")
+    _wait_until(lambda: page.input_value("#fy-ctd-identifier") == "US91282COTHER")
+
+    # A yield computed from the previous CTD must not survive beside the new one.
+    assert page.text_content("#fy-implied-yield").strip() == "—"
+    assert page.text_content("#fy-implied-yield-note").strip() == "—"
+    assert page.text_content("#fy-futures-price-out").strip() == "—"
+    assert page.text_content("#fy-detail-ctd").strip() == "US91282COTHER"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_failed_automatic_ctd_load_leaves_a_valid_answer_alone(page, server_url) -> None:
+    """The other half of the same rule.
+
+    A failed load changes no CTD input, so whatever is on screen is still the
+    answer to the inputs beside it. Clearing it would destroy a valid result.
+    """
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+    answer = page.text_content("#fy-implied-yield").strip()
+
+    page.click("#fy-load-bloomberg-btn")  # the real route, which fails closed
+    _wait_until(lambda: not _is_actually_hidden(page, "fy-automatic-note"))
+
+    assert page.input_value("#fy-conversion-factor") == str(CTD_ENTRY["conversion_factor"])
+    assert page.text_content("#fy-implied-yield").strip() == answer
 
 
 @_PLAYWRIGHT_SKIP

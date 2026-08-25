@@ -253,6 +253,15 @@
         contract_code: contract.code,
       });
       if (!isCurrentRequest(generation)) return;
+      // A successful load replaces every CTD input, and a programmatic
+      // `value =` assignment does not fire the `input`/`change` listeners
+      // that would otherwise invalidate the answers -- so the answers are
+      // cleared here explicitly (Codex review, PR #191). Deliberately only
+      // on this branch: a *failed* load leaves the CTD fields exactly as the
+      // trader left them, so whatever is on screen is still the answer to
+      // the inputs beside it, and clearing it would destroy a valid result
+      // for nothing.
+      clearAnswers();
       fillCtdFields(payload);
       renderCtdDetail(payload);
     } catch (error) {
