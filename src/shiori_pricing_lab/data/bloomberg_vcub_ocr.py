@@ -29,13 +29,17 @@ is a narrowly-scoped second pass over one numeric token's own pixels, for the
 case RapidOCR's text recognizer drops Bloomberg's narrow minus glyph from a
 digit token's text while the stroke is still visible in the image -- usually
 *inside* the engine's own detection box, at its extreme left edge, not
-outside it (round 2 of the diagnostic against Eddy's real screenshots). It
-finds the first digit geometrically, by connected-component shape, and reads
-only the component(s) before it. It is not yet called from
-:func:`tokens_from_detections` or :func:`read_tokens_from_image_bytes` --
-Eddy verifies it against his own screenshots via
-``tools/bloomberg_vcub_otm_sign_diagnostic.py`` first, and only once that
-verification confirms it does production wiring follow, in a later change.
+outside it. It classifies from the leftmost connected component only,
+against a local glyph-height baseline derived from the token's own
+components (never the token's bbox height, and never the single tallest
+component -- both were tried and both broke on Eddy's real screenshots
+across four rounds of the diagnostic). :func:`read_tokens_from_image_bytes`
+calls it, through :func:`attach_visual_sign_evidence`, on every unsigned
+numeric token it detects; :func:`tokens_from_detections` on its own never
+touches it, since it has no image. A cell's own template parser
+(:mod:`bloomberg_vcub_otm_template`) is what turns ``"negative"`` into a
+resigned value and ``"ambiguous"`` into a blocking ``NUMERIC_SIGN_AMBIGUOUS``
+-- this module only ever attaches the raw pixel evidence to the token.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import numpy as np
@@ -54,6 +58,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import (
     VCUBCaptureProvenance,
     VCUBTextToken,
 )
+from shiori_pricing_lab.data.bloomberg_vcub_screen_reader import normalise_text, parse_cell_number
 
 #: Detections weaker than this are not trusted enough to place a value.
 MIN_TOKEN_CONFIDENCE = 0.30
@@ -446,6 +451,44 @@ def visual_minus_evidence(image: np.ndarray, token: VCUBTextToken) -> str | None
     return diagnose_minus_evidence(image, token).classification
 
 
+def _is_unsigned_numeric_text(text: str) -> bool:
+    """Whether ``text`` is a plausible cell number carrying no sign of its
+    own -- the same gate :mod:`bloomberg_vcub_otm_template`'s separate-minus-
+    token reconstruction already uses, reused rather than restated so the
+    two sign-evidence paths can never quietly diverge on what counts as
+    "unsigned"."""
+
+    normalised = normalise_text(text)
+    return not normalised.startswith(("+", "-")) and parse_cell_number(text)[0] is not None
+
+
+def attach_visual_sign_evidence(
+    image: np.ndarray, tokens: Sequence[VCUBTextToken]
+) -> tuple[VCUBTextToken, ...]:
+    """Run :func:`visual_minus_evidence` over every unsigned numeric token
+    and return the same tokens with ``sign_evidence`` filled in where it
+    found something.
+
+    Only unsigned numeric tokens are inspected -- a header, a row label, or
+    a token whose own text already carries an explicit sign has nothing for
+    this pixel check to add. A token this leaves alone comes back unchanged
+    (``sign_evidence`` stays ``None``), so a caller that never runs this
+    pass at all -- :func:`tokens_from_detections`, tested with no image --
+    sees exactly the tokens it always has (live-acceptance defect, PR #186).
+    """
+
+    inspected: list[VCUBTextToken] = []
+    for token in tokens:
+        if not _is_unsigned_numeric_text(token.text):
+            inspected.append(token)
+            continue
+        classification = visual_minus_evidence(image, token)
+        inspected.append(
+            token if classification is None else replace(token, sign_evidence=classification)
+        )
+    return tuple(inspected)
+
+
 def _load_engine():
     try:
         from rapidocr_onnxruntime import RapidOCR
@@ -483,6 +526,14 @@ def read_tokens_from_image_bytes(
     ``engine`` is injectable so the conversion contract can be tested
     without the optional dependency; left unset, the RapidOCR reader is
     loaded lazily so importing this module never requires it.
+
+    Every unsigned numeric token is then passed through
+    :func:`attach_visual_sign_evidence`, the only place this happens: this
+    is the one call in the capture slice that both decodes the image *and*
+    hands tokens onward, so it is where the pixel-evidence second pass runs
+    (live-acceptance defect, PR #186). :func:`tokens_from_detections` on its
+    own is never touched by this -- it has no image to inspect, and every
+    token it returns keeps ``sign_evidence=None``.
     """
 
     if not isinstance(raw_image, (bytes, bytearray)) or not raw_image:
@@ -490,4 +541,5 @@ def read_tokens_from_image_bytes(
     image = _decode_image(raw_image)
     reader = _load_engine() if engine is None else engine
     detections, _elapsed = reader(image)
-    return tokens_from_detections(detections or (), min_confidence=min_confidence)
+    tokens, notes = tokens_from_detections(detections or (), min_confidence=min_confidence)
+    return attach_visual_sign_evidence(image, tokens), notes

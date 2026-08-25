@@ -444,6 +444,101 @@ def test_reading_refuses_empty_input() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Production wiring: read_tokens_from_image_bytes attaches pixel sign
+# evidence to every unsigned numeric token it detects (live-acceptance
+# defect #3, PR #186). tokens_from_detections on its own is untouched by
+# this -- it has no image, only the detections list, so its own tests above
+# never see sign_evidence set.
+# ---------------------------------------------------------------------------
+
+_SIGN_EVIDENCE_BOX = [(100.0, 20.0), (134.0, 20.0), (134.0, 34.0), (100.0, 34.0)]
+
+
+def test_read_tokens_from_image_bytes_attaches_negative_pixel_sign_evidence(monkeypatch) -> None:
+    """The exact live-acceptance shape, exercised through the full
+    ``read_tokens_from_image_bytes`` path rather than the standalone
+    detector: an OCR detection whose recognised text carries no sign, but
+    whose own pixels show a minus stroke immediately before the first
+    digit, comes back with ``sign_evidence="negative"`` attached."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=26, bottom=28, left=101, right=106)  # minus, thin, mid-height
+    _paint(image, top=21, bottom=33, left=110, right=118)  # first digit, tall
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+    )
+
+    assert [token.sign_evidence for token in tokens] == ["negative"]
+
+
+def test_read_tokens_from_image_bytes_attaches_ambiguous_pixel_sign_evidence(monkeypatch) -> None:
+    """Same path, for pixel evidence that is genuinely unreadable rather
+    than a clean minus: the token comes back with ``sign_evidence=
+    "ambiguous"`` rather than silently staying positive."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=24, bottom=30, left=101, right=106)  # too tall to be a stroke
+    _paint(image, top=21, bottom=33, left=110, right=118)  # normal digit
+    _paint(image, top=21, bottom=33, left=122, right=130)  # normal digit
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+    )
+
+    assert [token.sign_evidence for token in tokens] == ["ambiguous"]
+
+
+def test_read_tokens_from_image_bytes_leaves_no_evidence_tokens_alone(monkeypatch) -> None:
+    """A clean positive token with nothing drawn before its first digit
+    comes back with ``sign_evidence=None`` -- the pixel check ran and found
+    nothing, so the token's own positive text stands, exactly as it always
+    has."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()
+    _paint(image, top=21, bottom=33, left=101, right=109)  # only the first digit
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "2.92", 1.0]], 0.01)
+    )
+
+    assert [token.sign_evidence for token in tokens] == [None]
+
+
+def test_read_tokens_from_image_bytes_never_inspects_an_already_signed_token(
+    monkeypatch,
+) -> None:
+    """A token whose own OCR text already carries an explicit sign is never
+    sent through the pixel check at all -- there is nothing for it to add,
+    and it must not accidentally turn into ``NUMERIC_SIGN_AMBIGUOUS``."""
+
+    import shiori_pricing_lab.data.bloomberg_vcub_ocr as ocr_module
+
+    image = _blank_image()  # nothing drawn at all: would misdetect if inspected
+
+    monkeypatch.setattr(ocr_module, "_decode_image", lambda raw: image)
+
+    tokens, _notes = read_tokens_from_image_bytes(
+        b"pretend-image", engine=lambda decoded: ([[_SIGN_EVIDENCE_BOX, "-2.92", 1.0]], 0.01)
+    )
+
+    assert [token.sign_evidence for token in tokens] == [None]
+    assert tokens[0].text == "-2.92"
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: a synthetic image, the real reader, the real template
 # ---------------------------------------------------------------------------
 

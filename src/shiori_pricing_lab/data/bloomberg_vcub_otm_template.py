@@ -879,10 +879,22 @@ def parse_vcub_otm_tokens(
         # folded in here, and nowhere else -- the same geometry
         # reconstruction join_by_geometry already applies to a split strike
         # header, applied to a split sign instead (live-acceptance defect,
-        # PR #186).
+        # PR #186). A token's own pixel evidence (attached upstream by
+        # bloomberg_vcub_ocr.attach_visual_sign_evidence, for the case OCR
+        # drops the minus stroke from the recognised text entirely, with no
+        # separate token to reconstruct from) is the second, independent
+        # source of a sign -- checked only when the token-adjacency
+        # reconstruction above found nothing, so a token that already has
+        # real evidence from one channel is never second-guessed by
+        # uncertainty from the other.
         reconstructed_minus = minus_by_number_id.get(id(token))
+        pixel_sign_negative = (
+            reconstructed_minus is None and token.sign_evidence == "negative"
+        )
         cell_text = (
-            "-" + normalise_text(token.text) if reconstructed_minus is not None else token.text
+            "-" + normalise_text(token.text)
+            if reconstructed_minus is not None or pixel_sign_negative
+            else token.text
         )
         if row_ambiguous or column_ambiguous:
             axis = "row" if row_ambiguous else "strike column"
@@ -891,6 +903,18 @@ def parse_vcub_otm_tokens(
                 f"{normalise_text(cell_text)!r} sits on a {axis} boundary and could belong "
                 f"to more than one {axis}; it is left unresolved rather than assigned to "
                 f"{row_label} x {strike_label}",
+                row=row_label,
+                strike=strike_label,
+            )
+            continue
+
+        if reconstructed_minus is None and token.sign_evidence == "ambiguous":
+            issues.block(
+                "NUMERIC_SIGN_AMBIGUOUS",
+                f"{normalise_text(token.text)!r} at {row_label} x {strike_label} carries no "
+                "sign in its own OCR text, and the pixels immediately before it are not "
+                "clearly a minus stroke either -- it is left unresolved rather than assumed "
+                "positive",
                 row=row_label,
                 strike=strike_label,
             )

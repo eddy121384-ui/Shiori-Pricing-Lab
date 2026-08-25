@@ -17,6 +17,7 @@ two overlapping screenshots disagree -- is decided from those boxes alone.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 
 import pytest
@@ -664,6 +665,143 @@ def test_a_split_sign_in_the_leftmost_strike_column_does_not_corrupt_row_labels(
     assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
         -12.34
     )
+
+
+# ---------------------------------------------------------------------------
+# One screenshot: pixel sign evidence (live-acceptance defect #3, PR #186).
+# Unlike the split-sign-token tests above, OCR here drops the minus stroke
+# from the recognised text *entirely* -- no separate token survives to
+# reconstruct from -- so the only evidence is the token's own
+# ``sign_evidence``, attached upstream by
+# ``bloomberg_vcub_ocr.attach_visual_sign_evidence`` from that token's own
+# pixels. These tests set it directly, the same way the OCR-layer tests
+# prove the pixel classification itself; this layer's job is only to prove
+# what the template parser does with that classification once attached.
+# ---------------------------------------------------------------------------
+
+
+def _with_sign_evidence(token: VCUBTextToken, sign_evidence: str) -> VCUBTextToken:
+    return dataclasses.replace(token, sign_evidence=sign_evidence)
+
+
+def test_pixel_sign_evidence_negative_on_an_unsigned_token_reads_negative() -> None:
+    """OCR's own text carries no sign at all, but the token's own pixels
+    were classified NEGATIVE_FROM_PIXEL_EVIDENCE upstream -- the value is
+    written negative, the same outcome as the split-token reconstruction,
+    reached through the second, independent evidence channel."""
+
+    row_index, column_index = 5, 4
+    assert _synthetic_value(row_index, column_index) > 0
+
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    digit_token = _with_sign_evidence(
+        _token(
+            f"{_synthetic_value(row_index, column_index):.2f}",
+            right=_column_right(column_index),
+            y_center=_row_y(row_index),
+        ),
+        "negative",
+    )
+    tokens.append(digit_token)
+    parsed = read(tokens)
+
+    assert parsed.blocking_errors == ()
+    assert parsed.table is not None
+    term, tenor = ROW_LABELS[row_index]
+    assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
+        -_synthetic_value(row_index, column_index)
+    )
+
+
+def test_pixel_sign_evidence_ambiguous_blocks_rather_than_assuming_positive() -> None:
+    """The token's own pixels were classified NUMERIC_SIGN_AMBIGUOUS
+    upstream -- the cell is refused rather than silently kept positive,
+    which is exactly the case a bare OCR confidence of 1.0 must never
+    paper over."""
+
+    row_index, column_index = 5, 4
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    digit_token = _with_sign_evidence(
+        _token(
+            f"{_synthetic_value(row_index, column_index):.2f}",
+            right=_column_right(column_index),
+            y_center=_row_y(row_index),
+        ),
+        "ambiguous",
+    )
+    tokens.append(digit_token)
+    parsed = read(tokens)
+
+    assert "NUMERIC_SIGN_AMBIGUOUS" in codes(parsed.blocking_errors)
+    assert parsed.table is not None
+    term, tenor = ROW_LABELS[row_index]
+    assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) is None
+
+
+def test_a_reconstructed_minus_token_is_not_second_guessed_by_ambiguous_pixel_evidence() -> None:
+    """A token already proven negative by the separate-minus-token
+    reconstruction must not be blocked by uncertainty from the other,
+    independent evidence channel -- real evidence from one channel is
+    never overridden by mere uncertainty from the other."""
+
+    row_index, column_index = 5, 4
+    digit_token = _with_sign_evidence(
+        _token("2.99", right=_column_right(column_index), y_center=_row_y(row_index)),
+        "ambiguous",
+    )
+    minus_token = _token("-", right=digit_token.left, y_center=_row_y(row_index))
+
+    tokens = screenshot_tokens(omit_cells=frozenset({(row_index, column_index)}))
+    tokens += [minus_token, digit_token]
+    parsed = read(tokens)
+
+    assert parsed.blocking_errors == ()
+    assert parsed.table is not None
+    term, tenor = ROW_LABELS[row_index]
+    assert parsed.table.value_at(term, tenor, STRIKE_LABELS[column_index]) == pytest.approx(
+        -2.99
+    )
+
+
+def test_overlap_conflict_from_pixel_recovered_sign_still_blocks() -> None:
+    """The pixel-evidence sign recovery operates entirely within one
+    screenshot's own read and must not let two overlapping screenshots
+    quietly disagree: recovering a negative sign from one image's own
+    token pixels, while the other two images read the same cell as a plain
+    positive number, is a genuine disagreement between reads and still
+    blocks via the unweakened OVERLAP_VALUE_CONFLICT path -- nothing here
+    infers "negative wins"."""
+
+    row_index, column_index = OVERLAP_AB, 2
+    assert _synthetic_value(row_index, column_index) > 0
+    position_in_b = list(SLICE_B).index(row_index)
+
+    slice_b_tokens = screenshot_tokens(
+        rows=SLICE_B, omit_cells=frozenset({(row_index, column_index)})
+    )
+    recovered_token = _with_sign_evidence(
+        _token(
+            f"{_synthetic_value(row_index, column_index):.2f}",
+            right=_column_right(column_index),
+            y_center=_row_y(position_in_b),
+        ),
+        "negative",
+    )
+    slice_b_tokens.append(recovered_token)
+
+    capture = merge_vcub_otm_reads(
+        [
+            read(screenshot_tokens(rows=SLICE_A), reference="shot-a.png", digest_seed="a"),
+            read(slice_b_tokens, reference="shot-b.png", digest_seed="b"),
+            read(screenshot_tokens(rows=SLICE_C), reference="shot-c.png", digest_seed="c"),
+        ]
+    )
+
+    conflicts = [
+        issue for issue in capture.blocking_errors if issue.code == "OVERLAP_VALUE_CONFLICT"
+    ]
+    assert len(conflicts) == 1
+    assert capture.can_confirm is False
 
 
 # ---------------------------------------------------------------------------
