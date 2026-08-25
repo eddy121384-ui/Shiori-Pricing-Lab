@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 from test_bloomberg_vcub_otm_template import (
@@ -36,6 +37,7 @@ from test_bloomberg_vcub_otm_template import (
 )
 from test_vol_surface import confirmed_surface
 
+from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import NORMAL_VOL_SKEW_TYPE
 from shiori_pricing_lab.data.bloomberg_vcub_otm_template import merge_vcub_otm_reads
 from shiori_pricing_lab.data.vcub_vol_surface_adapter import (
     UnconfirmedCaptureError,
@@ -129,8 +131,39 @@ def test_the_strike_offset_is_the_basis_point_number_the_screen_stated() -> None
         assert by_offset[offset] == pytest.approx(_synthetic_value(0, column_index))
 
 
-def test_a_capture_sourced_otm_surface_never_asserts_a_volatility_unit() -> None:
-    assert otm_surface().volatility_unit is None
+def test_a_confirmed_normal_vol_skew_capture_states_bp() -> None:
+    """``Normal Vol Skew`` is a stated normal-vol type, so the unit is stated too.
+
+    Bloomberg's volatility-cube methodology document (DOCS #2063620) states
+    that normal volatility quotes are in basis points, and this adapter
+    already refuses any screen whose Type is not ``Normal Vol Skew``. Both
+    the ATM column's absolute vol and the spreads to it carry that unit --
+    a spread to a bp vol is a bp spread (Eddy's decision on PR #189).
+    """
+
+    surface = otm_surface()
+
+    assert surface.identity.vol_type == NORMAL_VOL_SKEW_TYPE
+    assert surface.volatility_unit == "bp"
+
+
+def test_the_otm_adapter_still_refuses_a_screen_in_another_vol_space() -> None:
+    """The unit rule did not widen what this adapter accepts.
+
+    A non-normal Type never reaches the unit decision at all: the screen
+    contract refuses it first, so there is no path on which a lognormal
+    OTM capture could be filed with or without a unit.
+    """
+
+    capture = merge_vcub_otm_reads(_three_slices()).confirm(
+        reviewed_by="Eddy", reviewed_at=CONFIRMED_AT
+    )
+    lognormal = replace(
+        capture, metadata=replace(capture.metadata, vol_type="Lognormal Vol Skew")
+    )
+
+    with pytest.raises(UnconfirmedCaptureError, match=NORMAL_VOL_SKEW_TYPE):
+        canonical_surface_from_confirmed_otm_capture(lognormal, capture_id=OTM_CAPTURE_ID)
 
 
 def test_every_screenshot_of_the_session_reaches_the_provenance() -> None:

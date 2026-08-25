@@ -20,11 +20,14 @@ than a convention to remember.
 **Every convention this resolver cannot prove is an input, not a guess.**
 
 * *The volatility unit* is read from the surface's stated
-  ``volatility_unit`` and from nowhere else. A VCUB capture states no unit,
-  so such a surface fails closed here rather than having ``bp`` inferred
-  from the magnitude of its numbers -- exactly the silent unit coercion
-  Annex A.8.1 forbids. A stated ``bp`` normalizes explicitly at ``1bp =
-  1e-4``.
+  ``volatility_unit`` and from nowhere else. A confirmed VCUB *normal*-vol
+  capture states ``bp`` (see ``vcub_vol_surface_adapter``: the screens state
+  their volatility space, and DOCS #2063620 states that normal quotes are in
+  basis points), which normalizes explicitly at ``1bp = 1e-4``. A surface
+  that states no unit -- one whose vol type was unresolved, or in another
+  space -- fails closed here rather than having ``bp`` inferred from the
+  magnitude of its numbers, exactly the silent unit coercion Annex A.8.1
+  forbids.
 * *The expiry/tenor axis coordinates* come from a
   :class:`VCUBGridCoordinates` map the caller supplies and tests prove. The
   screen's labels (``"18Mo"``, ``"10Yr"``) are text; turning a calendar date
@@ -76,11 +79,11 @@ module.
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from shiori_pricing_lab.data.bloomberg_vcub_screen_reader import is_normal_vol_type
 from shiori_pricing_lab.data.vol_surface import (
     CanonicalVolSurface,
     StrikeDimension,
@@ -127,18 +130,6 @@ STATED_UNIT_SCALES: Mapping[str, float] = {
 RESOLVABLE_SURFACE_TYPES: frozenset[VolSurfaceType] = frozenset(
     {VolSurfaceType.ATM_SWAPTION, VolSurfaceType.OTM_SWAPTION_SABR}
 )
-
-#: What a surface must state for its numbers to *be* normal volatilities.
-#: The VCUB screens draw their vol type from one closed vocabulary --
-#: ``Normal`` / ``Black`` / ``Lognormal`` / ``Shifted Lognormal`` / ``SABR``,
-#: optionally with a parenthesised curve suffix -- so ``Normal Vol (OIS)``
-#: and ``Normal Vol Skew`` both declare normal space and ``Lognormal Vol``
-#: declares that it is not. Matched on the stated text rather than assumed
-#: from the surface type: :class:`CanonicalVolSurface` is vendor-neutral and
-#: an ``OTM_SWAPTION_SABR`` surface is a *screen*, not a promise about which
-#: volatility space its numbers live in (Codex review, PR #189).
-_NORMAL_VOL_TYPE_RE = re.compile(r"^normal\s+vol\b")
-
 
 class SmileModel(StrEnum):
     """Which smile methodology a query asks for.
@@ -570,6 +561,9 @@ def _require_normal_vol_space(surface: CanonicalVolSurface) -> str:
     space has to come from what the surface states about its own values.
     """
 
+    # The same predicate the capture adapter uses to decide the stored
+    # unit, so a surface cannot be filed as normal-vol on one rule and read
+    # as normal-vol on another.
     identity = surface.identity
     if identity.surface_type not in RESOLVABLE_SURFACE_TYPES:
         raise VolSpaceContractError(
@@ -584,7 +578,7 @@ def _require_normal_vol_space(surface: CanonicalVolSurface) -> str:
             "are normal volatilities; sigma_vcub is a normal swaption vol and this "
             "resolver will not assert that of values whose space is unknown"
         )
-    if _NORMAL_VOL_TYPE_RE.match(" ".join(stated.split()).casefold()) is None:
+    if not is_normal_vol_type(stated):
         raise VolSpaceContractError(
             f"this surface states vol_type={stated!r}, which does not declare normal "
             "volatility space; a lognormal, Black, or shifted-lognormal surface is not "
@@ -596,10 +590,12 @@ def _require_normal_vol_space(surface: CanonicalVolSurface) -> str:
 def _unit_scale(surface: CanonicalVolSurface) -> tuple[str, float]:
     """The surface's stated unit and what one of its numbers is worth.
 
-    The whole of this module's unit handling. A capture states no unit, so a
-    capture-sourced surface stops here -- which is the point: Annex A.8.1
-    forbids reading ``bp`` off the size of the numbers, and a surface whose
-    unit nobody has stated has no meaning to normalize.
+    The whole of this module's unit handling. A surface whose unit nobody
+    stated stops here -- which is the point: Annex A.8.1 forbids reading
+    ``bp`` off the size of the numbers, and an unstated unit has no meaning
+    to normalize. What makes a captured VCUB surface resolvable is that its
+    stated *vol type* pins its unit at the adapter, not anything this
+    module works out for itself.
     """
 
     stated = surface.volatility_unit

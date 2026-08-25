@@ -218,10 +218,38 @@ def test_the_provenance_carries_the_screenshot_hash_parser_and_confirmation() ->
     }
 
 
-def test_a_capture_sourced_surface_never_asserts_a_volatility_unit() -> None:
-    """The VCUB ATM screen states a vol type, not a unit. Guessing one is forbidden."""
+def test_a_confirmed_normal_vol_capture_states_bp() -> None:
+    """The screen states a vol *type*, and the type is what pins the unit.
 
-    assert confirmed_surface().volatility_unit is None
+    Bloomberg's volatility-cube methodology document (DOCS #2063620) states
+    that normal volatility quotes are expressed in basis points, and this
+    screen states ``Normal Vol (OIS)`` on its face. The unit is therefore
+    stated by the source rather than guessed from the numbers -- which is
+    what Annex A.8.1 requires before any of them can be normalized (Eddy's
+    decision on PR #189).
+    """
+
+    assert confirmed_surface().volatility_unit == "bp"
+
+
+def test_a_capture_whose_vol_type_is_unresolved_states_no_unit() -> None:
+    """No stated space, no stated unit. 80.0 is not evidence of anything."""
+
+    surface = confirmed_surface(metadata_overrides={"vol_type": None})
+
+    assert surface.identity.vol_type is None
+    assert "vol_type" in surface.identity.unresolved_fields
+    assert surface.volatility_unit is None
+
+
+@pytest.mark.parametrize("vol_type", ["Lognormal Vol (OIS)", "Black Vol", "SABR Vol"])
+def test_a_capture_in_another_vol_space_never_states_bp(vol_type: str) -> None:
+    """The bp evidence is about *normal* vol and says nothing about any other space."""
+
+    surface = confirmed_surface(metadata_overrides={"vol_type": vol_type})
+
+    assert surface.identity.vol_type == vol_type
+    assert surface.volatility_unit is None
 
 
 @pytest.mark.parametrize("decision", ["pending", "rejected"])
@@ -562,7 +590,10 @@ def test_an_unresolved_value_exports_as_an_empty_cell_never_as_a_number() -> Non
 
     assert rows[0]["volatility"] == ""
     assert rows[0]["source"] == ""
-    assert rows[0]["volatility_unit"] == ""
+    # The unit is not one of the empty cells: this capture's ``Normal Vol
+    # (OIS)`` type states it. An empty cell means "nobody stated this",
+    # which is the distinction this test is about.
+    assert rows[0]["volatility_unit"] == "bp"
     assert rows[1]["volatility"] == str(synthetic_value(0, 1))
 
 

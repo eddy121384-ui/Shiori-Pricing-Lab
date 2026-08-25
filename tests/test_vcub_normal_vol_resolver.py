@@ -27,6 +27,8 @@ import inspect
 import math
 
 import pytest
+from test_vol_surface import confirmed_surface as confirmed_atm_surface
+from test_vol_surface_store_otm_dimension import otm_surface
 
 from shiori_pricing_lab.data import vcub_normal_vol_resolver
 from shiori_pricing_lab.data.vcub_normal_vol_resolver import (
@@ -55,6 +57,7 @@ from shiori_pricing_lab.data.vol_surface import (
     VolSurfaceType,
     VolValueKind,
 )
+from shiori_pricing_lab.data.vol_surface_store import VolSurfaceStore
 
 CAPTURE_ID = "0123456789abcdef0123456789abcdef"
 OTHER_CAPTURE_ID = "fedcba9876543210fedcba9876543210"
@@ -287,8 +290,9 @@ def test_a_stated_decimal_unit_is_carried_through_unscaled() -> None:
 
 
 def test_a_surface_stating_no_unit_blocks_instead_of_being_read_as_bp() -> None:
-    # The capture path states no unit, and 80.0 looks like bp only to a
-    # reader who already assumed it. Nothing here infers from magnitude.
+    # A capture whose vol type pins no unit leaves this unresolved, and
+    # 80.0 looks like bp only to a reader who already assumed it. Nothing
+    # here infers a unit from magnitude.
     with pytest.raises(VolUnitContractError, match="states no volatility_unit"):
         resolve(surface=surface(volatility_unit=None))
 
@@ -737,6 +741,170 @@ def test_the_atm_screens_own_normal_vol_type_is_accepted() -> None:
     assert resolve(surface=surface(vol_type="Normal Vol (OIS)")).vol_type == "Normal Vol (OIS)"
 
 
+# --------------------------------------------------------------------------
+# The real capture -> canonical store -> resolver path (Eddy's decision on
+# PR #189: a stored VCUB normal-vol surface must resolve as stored, with no
+# unit injected by hand)
+# --------------------------------------------------------------------------
+
+#: The captured screens' own axis labels, given the numeric coordinates this
+#: test resolves against. Stated here rather than derived: Issue #188 keeps
+#: the calendar-date / label -> VCUB year-fraction convention out of scope,
+#: so this map is the caller's contract, not a day count the repository
+#: claims. It covers every label the captured surface carries, which the
+#: resolver requires.
+CAPTURED_GRID = VCUBGridCoordinates(
+    expiry={
+        "1Mo": 1.0 / 12.0,
+        "3Mo": 0.25,
+        "6Mo": 0.5,
+        "9Mo": 0.75,
+        "1Yr": 1.0,
+        "2Yr": 2.0,
+        "3Yr": 3.0,
+        "5Yr": 5.0,
+        "7Yr": 7.0,
+        "10Yr": 10.0,
+        "15Yr": 15.0,
+        "20Yr": 20.0,
+        "30Yr": 30.0,
+    },
+    tenor={
+        "1Yr": 1.0,
+        "2Yr": 2.0,
+        "5Yr": 5.0,
+        "10Yr": 10.0,
+        "15Yr": 15.0,
+        "20Yr": 20.0,
+        "30Yr": 30.0,
+    },
+)
+
+
+def test_a_confirmed_otm_capture_resolves_straight_out_of_the_store(tmp_path) -> None:
+    """The operational Definition of Done, end to end.
+
+    A surface built by the real merge -> confirm -> adapter path, saved to
+    the real store and fetched back, resolves with no unit injected by the
+    test. Before Eddy's PR #189 decision this was impossible: the adapter
+    left ``volatility_unit`` unresolved and the resolver refused every
+    surface the capture path could produce.
+
+    The fixture's ``1Yr x 5Yr`` ATM cell is synthetic value
+    ``-4.00 + 30 x 2.50 + 4 x 0.25 = 72.00``bp, so an exact-node query at
+    that coordinate is that number, normalized at ``1bp = 1e-4``.
+    """
+
+    captured = otm_surface()
+    store = VolSurfaceStore(tmp_path / "vol_surfaces.sqlite3")
+    store.save_confirmed_surface(captured)
+    surface = store.fetch_surface(captured.surface_id)
+
+    assert surface.volatility_unit == "bp"
+
+    resolution = resolve_vcub_normal_vol(
+        surface,
+        VCUBVolQuery(
+            expiry_coordinate=1.0,
+            tenor_coordinate=5.0,
+            moneyness_bp=0.0,
+            smile_model=SmileModel.PWL,
+            expected_surface_id=captured.surface_id,
+        ),
+        coordinates=CAPTURED_GRID,
+    )
+
+    assert resolution.source_volatility_unit == "bp"
+    assert resolution.unit_scale_to_decimal == 1e-4
+    assert resolution.volatility_raw == 72.0
+    assert resolution.volatility == pytest.approx(0.0072, abs=1e-15)
+    assert resolution.volatility_unit == "decimal"
+    assert resolution.fallback_used is False
+
+
+def test_a_stored_capture_also_resolves_off_grid_on_both_axes(tmp_path) -> None:
+    """The same stored surface, bilinearly interpolated.
+
+    ``1.50`` sits halfway between the ``1Yr`` and ``2Yr`` terms and ``7.50``
+    halfway between the ``5Yr`` and ``10Yr`` tenors, so each corner takes a
+    quarter of the weight. The four ATM cells are rows 30, 31, 37 and 38 of
+    the fixture -- ``72.00``, ``74.50``, ``89.50`` and ``92.00``bp -- and
+    ``(72.00 + 74.50 + 89.50 + 92.00) / 4 = 82.00``bp.
+    """
+
+    captured = otm_surface()
+    store = VolSurfaceStore(tmp_path / "vol_surfaces.sqlite3")
+    store.save_confirmed_surface(captured)
+    surface = store.fetch_surface(captured.surface_id)
+
+    resolution = resolve_vcub_normal_vol(
+        surface,
+        VCUBVolQuery(
+            expiry_coordinate=1.5,
+            tenor_coordinate=7.5,
+            moneyness_bp=0.0,
+            smile_model=SmileModel.PWL,
+        ),
+        coordinates=CAPTURED_GRID,
+    )
+
+    assert [corner.atm_volatility_raw for corner in resolution.corners] == [
+        72.0,
+        74.5,
+        89.5,
+        92.0,
+    ]
+    assert [corner.weight for corner in resolution.corners] == [0.25] * 4
+    assert resolution.volatility_raw == pytest.approx(82.0, abs=1e-12)
+    assert resolution.volatility == pytest.approx(0.0082, abs=1e-15)
+
+
+def test_a_confirmed_atm_capture_resolves_at_its_own_atm_coordinate() -> None:
+    """The ATM screen states ``Normal Vol (OIS)``, so it states ``bp`` too.
+
+    That surface carries only ATM points, so it answers a ``mu* = 0`` query
+    and nothing else -- which is the honest extent of what an ATM-only
+    capture knows.
+    """
+
+    surface = confirmed_atm_surface()
+    coordinates = VCUBGridCoordinates(
+        expiry={f"{months}Mo": months / 12.0 for months in range(1, 22)},
+        tenor={f"{years}Yr": float(years) for years in range(1, 16)},
+    )
+
+    assert surface.volatility_unit == "bp"
+
+    resolution = resolve_vcub_normal_vol(
+        surface,
+        VCUBVolQuery(
+            expiry_coordinate=1.0 / 12.0,
+            tenor_coordinate=1.0,
+            moneyness_bp=0.0,
+            smile_model=SmileModel.PWL,
+        ),
+        coordinates=coordinates,
+    )
+
+    # The ATM fixture's (0, 0) cell is 80.00.
+    assert resolution.volatility_raw == 80.0
+    assert resolution.volatility == pytest.approx(0.008, abs=1e-15)
+
+    # And it cannot answer anything off the ATM column, because it holds no
+    # other column to answer from.
+    with pytest.raises(SurfaceCoverageError, match="additive moneyness"):
+        resolve_vcub_normal_vol(
+            surface,
+            VCUBVolQuery(
+                expiry_coordinate=1.0 / 12.0,
+                tenor_coordinate=1.0,
+                moneyness_bp=25.0,
+                smile_model=SmileModel.PWL,
+            ),
+            coordinates=coordinates,
+        )
+
+
 def test_the_resolver_never_reaches_the_bond_option_pricing_or_dcf_bridge() -> None:
     """Issue #188's hard boundary, checked structurally.
 
@@ -762,9 +930,9 @@ def test_the_resolver_never_reaches_the_bond_option_pricing_or_dcf_bridge() -> N
     assert imported <= {
         "__future__",
         "math",
-        "re",
         "collections.abc",
         "dataclasses",
         "enum",
+        "shiori_pricing_lab.data.bloomberg_vcub_screen_reader",
         "shiori_pricing_lab.data.vol_surface",
     }

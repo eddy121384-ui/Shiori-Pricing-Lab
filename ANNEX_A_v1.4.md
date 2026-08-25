@@ -480,6 +480,7 @@ lognormal bond price vol (σ_P)
 - `σ_P`：Black pricing 所需的 annualized **lognormal bond price volatility**。
 - `σ_vcub` 或 `σ_Y^N` **不是 price vol**，不可直接送進 §A.2。
 - 若 ingestion source 以 bp 顯示 normal vol，進 pricing math 前必須明確 normalize 為 absolute decimal yield units（`1 bp = 1e-4`）；禁止依 numeric magnitude 猜 unit。
+- Bloomberg DOCS #2063620 明載 normal volatility quote 以 basis point 表示，且 VCUB 兩個畫面都在畫面上聲明其 vol space（`Normal Vol (OIS)` / `Normal Vol Skew`）。因此**已確認的 VCUB normal-vol capture 於 canonical store 落地時即記錄 `volatility_unit = bp`**，unit 由「已聲明的 vol type」決定，不由數值大小推得。vol type unresolved、或屬 Black / lognormal / shifted-lognormal 者，unit 維持 unresolved（下游 resolver fail closed）。
 
 Bloomberg BVOL/VCUB 的 normal-volatility basis 亦由 Bloomberg negative-rate methodology document 支持；Shiori 優先使用已確認的 `Normal Vol (OIS)` / `Normal Vol Skew` capture。
 
@@ -558,7 +559,7 @@ confirmed canonical VCUB snapshot
 
 **明確輸入（不得推測）：**
 
-- **volatility unit**：只讀 canonical surface 明確聲明的 unit；`bp` 依 `1bp = 1e-4` 明確 normalize 為 absolute decimal rate vol。未聲明或無法 pin 的 unit 一律 fail closed，禁止由數值大小推斷（§A.8.1）。
+- **volatility unit**：只讀 canonical surface 明確聲明的 unit；`bp` 依 `1bp = 1e-4` 明確 normalize 為 absolute decimal rate vol。已確認的 VCUB normal-vol capture 依 §A.8.1 於落地時即聲明 `bp`，因此可直接解析，無須人工補 unit。未聲明或無法 pin 的 unit 一律 fail closed，禁止由數值大小推斷（§A.8.1）。
 - **expiry / tenor 數值座標**：由呼叫端以顯式 label → coordinate map 提供，且必須覆蓋 surface 上的每一個 label。本 Annex **不**在此定義 calendar date → VCUB year fraction 之 day-count convention；該問題與 `DCF_VCUB` 同屬未解 RED，resolver 不得代為決定。
 - **smile model**：由呼叫端明確聲明，不得由 surface type、欄位數或數值形狀推得。本版本實作 **PWL**：在 additive moneyness 空間對 **normal vol** 線性插值，captured strike node 必須 exact round-trip。**SABR** 在 Bloomberg calibration contract（DOCS #2063620 Appendix D 之 equal-weighted alpha-error objective 與 `β = 0.5`、`shift = 0.03`、`ρ ∈ [-1, 0.999]`、`ν ∈ [0, 1]` 等 versioned defaults）與 calibrated `α / ρ / ν` 未進入 canonical snapshot 前 **fail closed**，不得以 PWL 冒充 SABR。
 - **volatility space**：只接受 canonical surface 明確聲明為 normal vol 的 surface（`vol_type` 屬 `Normal Vol ...` 系列，如 `Normal Vol (OIS)` / `Normal Vol Skew`）。`vol_type` 未解析、或為 lognormal / Black / shifted-lognormal 者一律 fail closed；`surface_type` 只說明來源畫面，不足以證明數值所處的 vol space。

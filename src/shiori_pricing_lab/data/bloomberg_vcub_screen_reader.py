@@ -145,6 +145,30 @@ def is_tenor_label(text: str) -> bool:
     return _TENOR_LABEL_RE.match(normalise_text(text)) is not None
 
 
+#: Every VCUB tab draws its ``Type`` from one closed vocabulary --
+#: ``Normal`` / ``Black`` / ``Lognormal`` / ``Shifted Lognormal`` / ``SABR``
+#: followed by ``Vol`` and an optional parenthesised curve suffix (see
+#: ``_VOL_TYPE_RE`` in ``bloomberg_vcub_atm_template``, which reads it off
+#: the screen). Anchored at the start so ``Lognormal Vol`` cannot match on
+#: its tail, and ``\b`` after ``vol`` so a longer word cannot either.
+_NORMAL_VOL_TYPE_RE = re.compile(r"^normal\s+vol\b")
+
+
+def is_normal_vol_type(text: object) -> bool:
+    """Whether a stated vol type declares **normal** volatility space.
+
+    ``Normal Vol (OIS)`` (the ATM tab) and ``Normal Vol Skew`` (the OTM
+    Swaptions / SABR tab) both do; ``Lognormal Vol (OIS)``, ``Black Vol``,
+    and an unresolved type (``None``) do not. Answered from the text the
+    screen stated and from nothing else -- never from the magnitude of the
+    numbers underneath it, and never from which tab they came from.
+    """
+
+    if not isinstance(text, str):
+        return False
+    return _NORMAL_VOL_TYPE_RE.match(normalise_text(text).casefold()) is not None
+
+
 def tenor_label_nominal_days(text: str) -> float | None:
     """Nominal-day ordering key for a bucket label, or ``None`` if it is not one.
 
