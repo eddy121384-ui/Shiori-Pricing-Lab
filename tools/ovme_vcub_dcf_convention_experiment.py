@@ -506,6 +506,11 @@ def render_report(
     if sigma_yield is not None:
         header += f" {'abs err':>12} {'rel err':>12} {'survives':>9}"
     lines.append("Candidate table")
+    if sigma_yield is not None:
+        lines.append(
+            "  (abs / rel err are stated against the implied ratio interval's centre; "
+            "'survives' is interval intersection, never the smallest error)"
+        )
     lines.append("  " + header)
     ordered = sorted(pairs, key=lambda pair: (pair.ratio, pair.vcub_label, pair.bondvol_label))
     for pair in ordered:
