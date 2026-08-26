@@ -546,20 +546,49 @@ def test_report_states_that_it_pins_nothing_and_lists_the_survivors():
     assert "Do not pick one from this list." in report
 
 
-def test_a_design_run_without_an_observation_reports_no_survivors_section():
+def test_a_design_run_reports_separability_only_for_a_stated_yield_precision():
     roles = build_date_roles(pricing_date=date(2026, 8, 26), expiry_date=date(2028, 12, 31))
-    candidates = candidate_year_fractions(roles)
-    report = render_report(
+    pairs = candidate_pairs(*(candidate_year_fractions(roles),) * 2)
+
+    without_precision = render_report(
         roles=roles,
-        pairs=candidate_pairs(candidates, candidates),
+        pairs=pairs,
         sigma_vcub=DisplayedVol(100.0, 0.01),
         lambda_vcub=1.0,
         sigma_yield=None,
     )
+    assert "design run" in without_precision
+    assert "Surviving candidates:" not in without_precision
+    # sigma_vcub's own quantum is never borrowed to stand in for the screen
+    # precision of a vol this run has not seen.
+    assert "can never separate" not in without_precision
+    assert "Separability not reported" in without_precision
 
-    assert "design run" in report
-    assert "Surviving candidates:" not in report
-    assert "can never separate" in report
+    with_precision = render_report(
+        roles=roles,
+        pairs=pairs,
+        sigma_vcub=DisplayedVol(100.0, 0.01),
+        lambda_vcub=1.0,
+        sigma_yield=None,
+        sigma_yield_quantum=0.1,
+    )
+    assert "sigma_Y^N quantum 0.1" in with_precision
+    assert "can never separate" in with_precision
+
+
+def test_an_observed_yield_vol_and_a_design_quantum_cannot_both_be_supplied():
+    roles = build_date_roles(pricing_date=date(2026, 8, 26), expiry_date=date(2028, 12, 31))
+    pairs = candidate_pairs(*(candidate_year_fractions(roles),) * 2)
+
+    with pytest.raises(ValueError, match="design run only"):
+        render_report(
+            roles=roles,
+            pairs=pairs,
+            sigma_vcub=DisplayedVol(100.0, 0.01),
+            lambda_vcub=1.0,
+            sigma_yield=DisplayedVol(100.0, 0.01),
+            sigma_yield_quantum=0.01,
+        )
 
 
 def test_cli_runs_a_design_pass(capsys):
@@ -580,6 +609,30 @@ def test_cli_runs_a_design_pass(capsys):
 
     assert exit_code == 0
     assert "design run" in capsys.readouterr().out
+
+
+def test_cli_accepts_a_design_quantum_without_an_observation(capsys):
+    exit_code = main(
+        [
+            "--pricing-date",
+            "2026-08-26",
+            "--expiry-date",
+            "2028-12-31",
+            "--sigma-vcub",
+            "100.0",
+            "--sigma-vcub-quantum",
+            "0.01",
+            "--sigma-yield-quantum",
+            "0.1",
+            "--lambda-vcub",
+            "1.0",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "design run" in output
+    assert "sigma_Y^N quantum 0.1" in output
 
 
 def test_cli_requires_the_observed_vol_and_its_quantum_together():

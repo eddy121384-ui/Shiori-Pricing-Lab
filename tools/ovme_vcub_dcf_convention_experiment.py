@@ -62,8 +62,9 @@ annualization convention.
         --sigma-yield 89.20 --sigma-yield-quantum 0.01 \\
         --lambda-vcub 1.0
 
-Omit `--sigma-yield` to get the design half alone (candidate ratios and
-what the display precision could ever separate) before spending a live
+Omit `--sigma-yield` to get the design half alone: the candidate ratios,
+and -- if `--sigma-yield-quantum` says what precision the screen will
+have -- what that precision could ever separate, before spending a live
 capture.
 """
 
@@ -447,8 +448,21 @@ def render_report(
     sigma_vcub: DisplayedVol,
     lambda_vcub: float,
     sigma_yield: DisplayedVol | None,
+    sigma_yield_quantum: float | None = None,
 ) -> str:
-    """Return the human-readable experiment report."""
+    """Return the human-readable experiment report.
+
+    `sigma_yield_quantum` supplies the `σ_Y^N` display precision for a
+    design run that has no observation yet. It is never guessed from
+    `σ_vcub`'s own quantum: without it a design run reports the candidate
+    ratios and says the separability question needs that precision.
+    """
+
+    if sigma_yield is not None and sigma_yield_quantum is not None:
+        raise ValueError(
+            "sigma_yield_quantum is for a design run only; an observed sigma_yield "
+            "already carries its own display quantum"
+        )
 
     lines: list[str] = []
     lines.append("OVME DCF_VCUB / DCF_BondVol candidate-convention experiment (Issue #192)")
@@ -533,7 +547,13 @@ def render_report(
             )
         lines.append("")
 
-    quantum = sigma_yield.quantum if sigma_yield is not None else sigma_vcub.quantum
+    quantum = sigma_yield.quantum if sigma_yield is not None else sigma_yield_quantum
+    if quantum is None:
+        lines.append(
+            "Separability not reported: it needs the sigma_Y^N display quantum, and "
+            "this run supplied neither an observed sigma_Y^N nor --sigma-yield-quantum."
+        )
+        return "\n".join(lines) + "\n"
     unseparated = indistinguishable_pairs(
         ordered,
         sigma_vcub=sigma_vcub,
@@ -603,7 +623,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sigma-yield-quantum",
         type=float,
         default=None,
-        help="the smallest increment that vol's display can show; required with --sigma-yield",
+        help=(
+            "the smallest increment OVME's normal yield vol display can show; required "
+            "with --sigma-yield, and usable alone to ask a design run what that "
+            "precision could ever separate"
+        ),
     )
     parser.add_argument(
         "--lambda-vcub",
@@ -618,8 +642,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if (args.sigma_yield is None) != (args.sigma_yield_quantum is None):
-        parser.error("--sigma-yield and --sigma-yield-quantum must be supplied together")
+    if args.sigma_yield is not None and args.sigma_yield_quantum is None:
+        parser.error("--sigma-yield needs --sigma-yield-quantum: its display precision")
 
     try:
         roles = build_date_roles(
@@ -642,6 +666,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sigma_vcub=sigma_vcub,
             lambda_vcub=args.lambda_vcub,
             sigma_yield=sigma_yield,
+            sigma_yield_quantum=None if sigma_yield is not None else args.sigma_yield_quantum,
         )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
