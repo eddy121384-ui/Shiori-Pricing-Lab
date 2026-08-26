@@ -394,12 +394,76 @@ def _reference_data_fields(security: str, fields: list[str]) -> dict[str, str]:
 
 
 def _require_answered(answered: dict[str, str], field: str, security: str) -> str:
+    """Return a required field's value, stripped, or raise.
+
+    Whitespace is as missing as an absent element (Codex review, PR #191). A
+    field that is *present but semantically empty* is the more dangerous of
+    the two: it survives a truthiness check and reaches the record as an
+    empty string on an otherwise confirmed-source result.
+    """
+
     raw_value = answered.get(field)
-    if raw_value is None:
+    if raw_value is None or not raw_value.strip():
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI response for {security!r} is missing {field}"
         )
-    return raw_value
+    return raw_value.strip()
+
+
+#: Standard futures delivery-month letters. Treasury futures use the
+#: quarterly subset, but the full set is what makes this a shape check rather
+#: than a second assertion about which months these contracts list.
+_FUTURES_DELIVERY_MONTH_CODES = "FGHJKMNQUVXZ"
+_ISIN_LENGTH = 12
+
+
+def _require_isin(raw_value: str, field: str, security: str) -> str:
+    """Require an ISIN-shaped identifier: 12 alphanumeric characters.
+
+    Bloomberg can answer a field with a sentinel (``#N/A N/A``) or a
+    placeholder that is neither absent nor blank. Such a value would reach the
+    record as the CTD's identity on an ``is_confirmed_source: true`` result --
+    a live-confirmed record that does not identify a bond (Codex review, PR
+    #191). Same 12-alphanumeric rule ``bloomberg_bond_quote.parse_bond_identifier``
+    already applies to a trader-entered ISIN.
+    """
+
+    identifier = raw_value.strip().upper()
+    if len(identifier) != _ISIN_LENGTH or not identifier.isalnum():
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} did not return a 12-character "
+            f"alphanumeric ISIN: {raw_value!r}"
+        )
+    return identifier
+
+
+def _require_delivery_ticker(contract_symbol: str, contract_code: str, security: str) -> str:
+    """Require the resolved delivery month to belong to the contract asked for.
+
+    Stage one asks ``TY1 Comdty`` which delivery month it currently is. If it
+    answered anything else -- a different root, a malformed symbol -- stage two
+    would fetch that *other* contract's perfectly valid CTD and this module
+    would return it labelled with the requested ``contract_code``, so pricing
+    would apply one contract's quote convention to another's CTD metadata
+    (Codex review, PR #191). The root is the check that matters; the month
+    letter and year digits are a shape check on top.
+    """
+
+    symbol = contract_symbol.strip().upper()
+    expected_root = BLOOMBERG_FUTURES_TICKER_ROOTS[contract_code]
+    remainder = symbol[len(expected_root) :]
+    if (
+        not symbol.startswith(expected_root)
+        or len(remainder) < 2
+        or remainder[0] not in _FUTURES_DELIVERY_MONTH_CODES
+        or not remainder[1:].isdigit()
+    ):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI resolved {security!r} to {contract_symbol!r}, which is not a "
+            f"{contract_code} delivery month (expected the {expected_root} root followed by "
+            "a delivery-month letter and year digits)"
+        )
+    return symbol
 
 
 def _parse_bloomberg_float(raw_value: str, field: str, security: str) -> float:
@@ -469,9 +533,13 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
     generic_answered = _reference_data_fields(
         generic_security, [BLOOMBERG_GENERIC_CONTRACT_FIELD]
     )
-    contract_symbol = _require_answered(
-        generic_answered, BLOOMBERG_GENERIC_CONTRACT_FIELD, generic_security
-    ).strip()
+    contract_symbol = _require_delivery_ticker(
+        _require_answered(
+            generic_answered, BLOOMBERG_GENERIC_CONTRACT_FIELD, generic_security
+        ),
+        normalized_code,
+        generic_security,
+    )
     delivery_security = bloomberg_delivery_month_security(contract_symbol)
 
     # Stage two: that delivery month's CTD.
@@ -492,7 +560,11 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
     maturity_field = BLOOMBERG_CTD_FIELD_MAP["ctd_maturity_date"]
     delivery_field = BLOOMBERG_CTD_FIELD_MAP["last_delivery_date"]
 
-    ctd_identifier = _required("ctd_identifier").strip().upper()
+    ctd_identifier = _require_isin(
+        _required("ctd_identifier"),
+        BLOOMBERG_CTD_FIELD_MAP["ctd_identifier"],
+        delivery_security,
+    )
     coupon_percent = _parse_bloomberg_float(
         _required("ctd_coupon_percent"), coupon_field, delivery_security
     )

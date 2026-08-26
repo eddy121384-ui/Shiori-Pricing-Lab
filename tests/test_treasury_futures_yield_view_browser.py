@@ -582,6 +582,80 @@ def test_editing_a_ctd_field_drops_the_source_mode_back_to_manual(page, server_u
 
 
 @_PLAYWRIGHT_SKIP
+def test_a_live_conversion_refreshes_the_editable_ctd_fields(page, server_url) -> None:
+    """Codex review, PR #191 (P2).
+
+    A BLOOMBERG-sourced conversion re-fetches server-side, so the CTD can roll
+    between Load and Convert. If the form kept the older record, editing one
+    field would drop to MANUAL and submit the *stale* record plus that edit --
+    the form and the answer must never describe different records.
+    """
+
+    loaded = treasury_futures_ctd_from_manual_entry(dict(CTD_ENTRY)).as_display_payload()
+    rolled = treasury_futures_ctd_from_manual_entry(
+        dict(
+            CTD_ENTRY,
+            contract_symbol="TYZ6",
+            ctd_identifier="US91282CROLL1",
+            ctd_coupon_percent=3.875,
+            conversion_factor=0.8123,
+        )
+    ).as_display_payload()
+
+    _open_futures_yield(page, server_url)
+    page.route(
+        "**/api/treasury-futures/ctd",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(dict(loaded, source="BLOOMBERG_DAPI", is_confirmed_source=True)),
+        ),
+    )
+    page.click("#fy-load-bloomberg-btn")
+    _wait_until(lambda: page.input_value("#fy-ctd-identifier") == CTD_ENTRY["ctd_identifier"])
+
+    # The CTD rolls between Load and Convert.
+    page.route(
+        "**/api/treasury-futures/convert",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "ctd": dict(rolled, source="BLOOMBERG_DAPI", is_confirmed_source=True),
+                    "implied_yield": None,
+                    "futures_price": None,
+                    "implied_yield_error": "stubbed",
+                }
+            ),
+        ),
+    )
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.input_value("#fy-ctd-identifier") == "US91282CROLL1")
+
+    # Form and small print now describe the same record.
+    assert page.input_value("#fy-contract-symbol") == "TYZ6"
+    assert page.input_value("#fy-conversion-factor") == "0.8123"
+    assert page.text_content("#fy-detail-ctd").strip() == "US91282CROLL1"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_manual_conversion_never_overwrites_the_traders_own_ctd_fields(
+    page, server_url
+) -> None:
+    """The other half: in MANUAL mode those fields are the trader's input."""
+
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+    assert page.input_value("#fy-ctd-identifier") == CTD_ENTRY["ctd_identifier"]
+    assert page.input_value("#fy-conversion-factor") == str(CTD_ENTRY["conversion_factor"])
+
+
+@_PLAYWRIGHT_SKIP
 def test_changing_the_contract_drops_the_source_mode_back_to_manual(page, server_url) -> None:
     loaded_ctd = treasury_futures_ctd_from_manual_entry(dict(CTD_ENTRY)).as_display_payload()
     _open_futures_yield(page, server_url)

@@ -354,6 +354,14 @@
         target_yield_percent: targetYield || null,
       });
       if (!isCurrentRequest(generation)) return;
+      // A BLOOMBERG-sourced conversion re-fetches the CTD server-side, and the
+      // delivery month or the CTD itself can have rolled since Load. Refresh
+      // the editable fields from what was actually priced, so the form and the
+      // answer can never describe different records -- otherwise editing one
+      // field would drop to MANUAL and submit the *stale* record plus the edit
+      // (Codex review, PR #191). Only in BLOOMBERG mode: in MANUAL mode these
+      // fields are the trader's own input and must never be overwritten.
+      if (payload.ctd && payload.ctd.is_confirmed_source) fillCtdFields(payload.ctd);
       renderCtdDetail(payload.ctd);
       renderImpliedYield(payload);
       renderFuturesPrice(payload);

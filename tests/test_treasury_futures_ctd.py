@@ -424,13 +424,106 @@ def test_a_missing_required_ctd_field_fails_closed(monkeypatch, missing_field) -
     "missing_field",
     ["FUT_CTD_ISIN", "FUT_CTD_CPN", "FUT_CTD_MTY", "FUT_CNVS_FACTOR", "FUT_DLV_DT_LAST"],
 )
+@pytest.mark.parametrize("blank", ["", "   ", "\t", "\n "])
 def test_a_blank_required_ctd_field_is_as_missing_as_an_absent_one(
-    monkeypatch, missing_field
+    monkeypatch, missing_field, blank
 ) -> None:
-    fields = dict(LIVE_ZN_STAGE_TWO, **{missing_field: ""})
+    """Codex review, PR #191 (P1).
+
+    Whitespace is the dangerous half: it survives a truthiness check, so
+    before this it reached the record as an empty identifier on an otherwise
+    `is_confirmed_source: true` result -- a live-confirmed record naming no
+    bond at all.
+    """
+
+    fields = dict(LIVE_ZN_STAGE_TWO, **{missing_field: blank})
     _install_fake_blpapi(monkeypatch, _two_stage_responder(stage_two_fields=fields))
-    with pytest.raises(TreasuryFuturesCTDBloombergError):
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
         load_bloomberg_ctd_metadata("ZN")
+    assert missing_field in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "bogus_identifier",
+    [
+        "#N/A N/A",          # a Bloomberg sentinel
+        "#N/A Field Not Applicable",
+        "nope",              # too short
+        "US91282CQT1",       # 11 characters
+        "US91282CQT178",     # 13 characters
+        "US91282CQT1!",      # non-alphanumeric
+        "US91282C QT17",     # embedded space
+    ],
+)
+def test_an_identifier_that_is_not_isin_shaped_is_refused(
+    monkeypatch, bogus_identifier
+) -> None:
+    """Codex review, PR #191 (P1).
+
+    A present-but-meaningless identifier must never reach a confirmed-source
+    record. Same 12-alphanumeric rule the workbench's own bond-identifier
+    parser applies to a trader-entered ISIN.
+    """
+
+    fields = dict(LIVE_ZN_STAGE_TWO, FUT_CTD_ISIN=bogus_identifier)
+    _install_fake_blpapi(monkeypatch, _two_stage_responder(stage_two_fields=fields))
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
+        load_bloomberg_ctd_metadata("ZN")
+    assert "FUT_CTD_ISIN" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "resolved",
+    [
+        "USU6",     # a different contract's delivery month entirely
+        "FVU6",
+        "GARBAGE",
+        "TY6",      # no delivery-month letter
+        "TYU",      # no year digits
+        "TY",       # bare root
+        "TYUX",     # non-numeric year
+    ],
+)
+def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, resolved) -> None:
+    """Codex review, PR #191 (P1).
+
+    Stage one asks `TY1 Comdty` which delivery month it is. Any other answer
+    would send stage two to a different contract, whose perfectly valid CTD
+    would come back labelled ZN -- so pricing would apply ZN's quote
+    convention to another contract's CTD metadata.
+    """
+
+    _install_fake_blpapi(
+        monkeypatch,
+        _two_stage_responder(
+            generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            delivery=f"{resolved} Comdty",
+        ),
+    )
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
+        load_bloomberg_ctd_metadata("ZN")
+    assert "not a ZN delivery month" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "contract_code, resolved",
+    [("ZT", "TUU6"), ("ZF", "FVU6"), ("ZN", "TYU6"), ("ZB", "USU6")],
+)
+def test_each_contracts_own_delivery_month_is_accepted(
+    monkeypatch, contract_code, resolved
+) -> None:
+    # The four Eddy's live run actually returned.
+    _install_fake_blpapi(
+        monkeypatch,
+        _two_stage_responder(
+            generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            generic=bloomberg_generic_front_contract(contract_code),
+            delivery=f"{resolved} Comdty",
+        ),
+    )
+    ctd = load_bloomberg_ctd_metadata(contract_code)
+    assert ctd.contract_symbol == resolved
+    assert ctd.contract_code == contract_code
 
 
 def test_a_display_only_field_is_optional_and_never_blocks_the_load(monkeypatch) -> None:
