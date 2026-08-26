@@ -9,8 +9,18 @@ so the vendor-specific mapping lives here and nowhere else. The two screens
 share this module, the same canonical model, and the same store -- there is
 no second OTM-only persistence path.
 
-**It transcribes the transcription.** Nothing is renamed, re-based,
-converted, interpolated, or filled in. The screen's own spellings survive:
+**One thing it states rather than transcribes** (Eddy's decision on PR
+#189): the volatility *unit*. Neither screen prints one, but both print
+which volatility space their numbers live in, and Bloomberg's
+volatility-cube methodology document (DOCS #2063620) states that normal
+volatility quotes are expressed in basis points. A capture whose stated type
+is a normal one therefore files with ``volatility_unit = "bp"``; one whose
+type is unresolved, or is Black/lognormal/shifted-lognormal, files with the
+unit still unresolved. The unit follows the *stated type*, never the
+magnitude of the values -- see :data:`BLOOMBERG_NORMAL_VOL_UNIT`.
+
+**Otherwise it transcribes the transcription.** Nothing is renamed,
+re-based, converted, interpolated, or filled in. The screen's own spellings survive:
 ``"18Mo"`` stays ``"18Mo"``, ``"Normal Vol (OIS)"`` stays that string, and
 the quote date stays the text the screen drew (``"08/18/26"``) rather than
 becoming a parsed calendar date. An unresolved metadata field arrives here
@@ -38,7 +48,10 @@ from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import (
     SPREAD_DISPLAY_MODE,
     VCUBOTMCapture,
 )
-from shiori_pricing_lab.data.bloomberg_vcub_screen_reader import normalise_text
+from shiori_pricing_lab.data.bloomberg_vcub_screen_reader import (
+    is_normal_vol_type,
+    normalise_text,
+)
 from shiori_pricing_lab.data.vol_surface import (
     CanonicalVolSurface,
     StrikeDimension,
@@ -54,6 +67,22 @@ from shiori_pricing_lab.data.vol_surface import (
 #: becomes ``business_date``: same value, the canonical name for it. ``tab``
 #: is not carried across -- it decides ``surface_type`` below and would
 #: otherwise be the same fact stored twice.
+#: What a VCUB **normal** vol is quoted in. Bloomberg's volatility-cube
+#: methodology document (DOCS #2063620) states that normal volatility quotes
+#: are expressed in basis points, and both VCUB screens state on their face
+#: which space their numbers live in -- ``Normal Vol (OIS)`` on the ATM tab,
+#: ``Normal Vol Skew`` on the OTM Swaptions / SABR tab. A surface whose type
+#: says *normal* therefore carries a unit that was stated by the source,
+#: which is the one thing Annex A.8.1 requires before a number can be
+#: normalized (Eddy's decision on PR #189).
+#:
+#: This is emitted **only** for a stated normal-vol type. An unresolved type,
+#: or a Black/lognormal/shifted-lognormal one, leaves the unit unresolved --
+#: the evidence above says what a *normal* vol is quoted in and says nothing
+#: about any other space, and the magnitude of the numbers is never evidence
+#: of anything.
+BLOOMBERG_NORMAL_VOL_UNIT = "bp"
+
 _METADATA_TO_IDENTITY: dict[str, str] = {
     "quote_date": "business_date",
     "currency": "currency",
@@ -62,6 +91,17 @@ _METADATA_TO_IDENTITY: dict[str, str] = {
     "vol_type": "vol_type",
     "source": "source",
 }
+
+
+def _stated_volatility_unit(vol_type: str | None) -> str | None:
+    """The unit a capture's stated vol *type* pins, or ``None`` if none does.
+
+    The single rule both screens use. It reads the type and nothing else --
+    not the tab, not the column count, and above all not the size of the
+    numbers.
+    """
+
+    return BLOOMBERG_NORMAL_VOL_UNIT if is_normal_vol_type(vol_type) else None
 
 
 class UnconfirmedCaptureError(ValueError):
@@ -152,11 +192,13 @@ def canonical_surface_from_confirmed_capture(
         identity=identity,
         provenance=provenance,
         points=points,
-        # The VCUB ATM screen states a vol *type* but no unit, and inferring
-        # one from the magnitude of the numbers would be exactly the silent
-        # unit coercion the capture slice refuses. It stays unresolved until
-        # something states it.
-        volatility_unit=None,
+        # The screen states a vol *type* rather than a unit in so many
+        # words, but the type is what pins the unit: a stated *normal* vol
+        # is quoted in basis points (DOCS #2063620). A screen stating any
+        # other space -- or leaving the type unresolved -- still leaves the
+        # unit unresolved, because nothing has stated it and the magnitude
+        # of the numbers never will.
+        volatility_unit=_stated_volatility_unit(metadata.vol_type),
     )
 
 
@@ -287,9 +329,10 @@ def canonical_surface_from_confirmed_otm_capture(
         identity=identity,
         provenance=provenance,
         points=points,
-        # The screen states a vol *type* and a display mode but no unit for
-        # the numbers themselves, and inferring one from their magnitude
-        # would be exactly the silent unit coercion the capture slice
-        # refuses. It stays unresolved until something states it.
-        volatility_unit=None,
+        # ``Normal Vol Skew`` is checked above, so this screen always states
+        # normal space and therefore always yields ``bp`` -- the same rule
+        # as the ATM path rather than a second one. Both the ATM column's
+        # absolute vol and the other columns' spreads to it are in that
+        # unit: a spread to a bp vol is a bp spread.
+        volatility_unit=_stated_volatility_unit(metadata.vol_type),
     )
