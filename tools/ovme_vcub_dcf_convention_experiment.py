@@ -34,8 +34,15 @@ quantitatively. This module is that experiment's deterministic half:
 Point 3 is the part the issue insists on: a candidate is never chosen for
 "looking closest". A candidate pair is reported as surviving only if its
 predicted `σ_Y^N` interval intersects the displayed `σ_Y^N` interval, and
-two candidates are reported as distinguishable only if their predicted
-intervals are further apart than the display quantum.
+two candidates are reported as *guaranteed* separable only if their
+predicted intervals are further apart than the display quantum -- and
+candidates sharing a multiplier exactly are reported as permanently
+indistinguishable, which is the only "never" this experiment can state.
+
+**Display rounding.** Whether a screen rounds to nearest or truncates
+changes which interval a displayed number stands for, so the rule is a
+required input: `--display-rounding unknown` takes the union of both and
+can only ever fail to exclude a convention, never exclude one wrongly.
 
 **Units.** Every volatility here is in the operator's own display unit
 (Bloomberg quotes VCUB normal vol in basis points, per Annex A §A.8.1) and
@@ -60,6 +67,7 @@ annualization convention.
         --forward-settlement-date 2029-01-02 \\
         --sigma-vcub 89.15 --sigma-vcub-quantum 0.01 \\
         --sigma-yield 89.20 --sigma-yield-quantum 0.01 \\
+        --display-rounding unknown \\
         --lambda-vcub 1.0
 
 Omit `--sigma-yield` to get the design half alone: the candidate ratios,
@@ -75,6 +83,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from enum import Enum
 from math import isfinite, sqrt
 from pathlib import Path
 
@@ -220,18 +229,35 @@ def candidate_pairs(
     return tuple(pairs)
 
 
+class DisplayRounding(Enum):
+    """How a screen turns a full-precision number into the digits shown.
+
+    The rule is an input, never an assumption: round-to-nearest and
+    truncation put the true value in *different* intervals, so guessing it
+    can exclude a convention that the evidence does not exclude.
+    `UNKNOWN` is the honest default posture -- it takes the union of both,
+    which is wider and can only ever fail to exclude.
+    """
+
+    NEAREST = "nearest"
+    TRUNCATED = "truncated"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class DisplayedVol:
-    """A volatility as Bloomberg displayed it, with its display quantum.
+    """A volatility as Bloomberg displayed it, with its display precision.
 
     `quantum` is the smallest increment the screen can show (`0.01` for a
-    value displayed as `89.15` in basis points). The displayed value is
-    treated as the centre of a half-quantum rounding interval; nothing here
-    assumes the screen carries more precision than it shows.
+    value displayed as `89.15` in basis points). `rounding` says how the
+    screen produced those digits and must be stated: nothing here assumes
+    the screen carries more precision than it shows, and nothing here
+    assumes which way it dropped the rest.
     """
 
     value: float
     quantum: float
+    rounding: DisplayRounding
 
     def __post_init__(self) -> None:
         if not (isfinite(self.value) and self.value > 0):
@@ -240,6 +266,11 @@ class DisplayedVol:
             )
         if not (isfinite(self.quantum) and self.quantum > 0):
             raise ValueError(f"display quantum must be finite and positive, got {self.quantum!r}")
+        if not isinstance(self.rounding, DisplayRounding):
+            raise ValueError(
+                f"rounding must be a DisplayRounding, got {self.rounding!r}: the display "
+                "convention is evidence, not a default"
+            )
         if self.quantum >= 2 * self.value:
             raise ValueError(
                 f"display quantum ({self.quantum!r}) is too coarse for the displayed "
@@ -248,8 +279,19 @@ class DisplayedVol:
 
     @property
     def interval(self) -> tuple[float, float]:
+        """Return the closed interval the true value can lie in.
+
+        Round-to-nearest puts it within half a quantum either side;
+        truncation puts it at or above the digits shown; an unconfirmed
+        rule takes the union of the two rather than picking one.
+        """
+
         half = self.quantum / 2.0
-        return (self.value - half, self.value + half)
+        if self.rounding is DisplayRounding.NEAREST:
+            return (self.value - half, self.value + half)
+        if self.rounding is DisplayRounding.TRUNCATED:
+            return (self.value, self.value + self.quantum)
+        return (self.value - half, self.value + self.quantum)
 
 
 def _require_positive_lambda(lambda_vcub: float) -> float:
@@ -341,12 +383,15 @@ class Separation:
     yield_quantum: float
 
     @property
-    def distinguishable(self) -> bool:
-        """Whether *any* displayed `σ_Y^N` could exclude one of the two.
+    def guaranteed_separable(self) -> bool:
+        """Whether *every* possible displayed `σ_Y^N` excludes one of the two.
 
-        True only when the two predicted intervals are further apart than
-        the `σ_Y^N` display quantum: otherwise some displayed value is
-        consistent with both, and this observation can never separate them.
+        True only when the predicted intervals are further apart than the
+        `σ_Y^N` display quantum, so no displayed value can be consistent
+        with both. False is the weaker statement it sounds like: separation
+        is not *guaranteed*, and a particular capture may still land where
+        one candidate is excluded. It is never a claim that the two can
+        never be separated -- only an identical multiplier is that.
         """
 
         return self.clear_gap > self.yield_quantum
@@ -385,19 +430,37 @@ def separation(
     )
 
 
-def indistinguishable_pairs(
+def identical_multiplier_groups(
+    pairs: Sequence[CandidatePair],
+) -> tuple[tuple[CandidatePair, ...], ...]:
+    """Return the groups of candidates no vol capture can ever separate.
+
+    Candidates sharing a volatility multiplier exactly -- ACT/360 on both
+    legs and ACT/365F on both legs, for instance -- produce the same
+    `σ_Y^N` for every input, at every precision. This is the only genuine
+    "never": these convention pairs are permanently indistinguishable by
+    this experiment, and they are reported rather than dropped, because
+    that is exactly the ambiguity Issue #192 must not hide.
+    """
+
+    grouped: dict[float, list[CandidatePair]] = {}
+    for pair in pairs:
+        grouped.setdefault(pair.vol_multiplier, []).append(pair)
+    return tuple(tuple(group) for group in grouped.values() if len(group) > 1)
+
+
+def pairs_without_guaranteed_separation(
     pairs: Sequence[CandidatePair],
     *,
     sigma_vcub: DisplayedVol,
     sigma_yield_quantum: float,
     lambda_vcub: float,
 ) -> tuple[Separation, ...]:
-    """Return every pair of candidates this observation could never separate.
+    """Return every pair of candidates this precision cannot be relied on to separate.
 
-    Candidates that share a volatility multiplier exactly (the same ratio
-    reached by a different label) are excluded: they are not two hypotheses
-    the experiment could distinguish even with an exact screen, and
-    reporting them as an ambiguity would misstate the evidence.
+    Candidates sharing a multiplier exactly are excluded here and reported
+    by :func:`identical_multiplier_groups` instead: they are a permanent
+    ambiguity, not a precision one, and mixing the two would misstate both.
     """
 
     unseparated: list[Separation] = []
@@ -412,7 +475,7 @@ def indistinguishable_pairs(
                 sigma_yield_quantum=sigma_yield_quantum,
                 lambda_vcub=lambda_vcub,
             )
-            if not gap.distinguishable:
+            if not gap.guaranteed_separable:
                 unseparated.append(gap)
     return tuple(unseparated)
 
@@ -552,6 +615,17 @@ def render_report(
             )
         lines.append("")
 
+    permanent = identical_multiplier_groups(ordered)
+    lines.append(
+        f"Convention pairs no capture can ever separate (identical multiplier): "
+        f"{len(permanent)} group(s)"
+    )
+    for group in permanent:
+        lines.append(f"  multiplier {group[0].vol_multiplier!r}:")
+        for pair in group:
+            lines.append(f"    DCF_VCUB = {pair.vcub_label}   DCF_BondVol = {pair.bondvol_label}")
+    lines.append("")
+
     quantum = sigma_yield.quantum if sigma_yield is not None else sigma_yield_quantum
     if quantum is None:
         lines.append(
@@ -559,15 +633,19 @@ def render_report(
             "this run supplied neither an observed sigma_Y^N nor --sigma-yield-quantum."
         )
         return "\n".join(lines) + "\n"
-    unseparated = indistinguishable_pairs(
+    unseparated = pairs_without_guaranteed_separation(
         ordered,
         sigma_vcub=sigma_vcub,
         sigma_yield_quantum=quantum,
         lambda_vcub=lambda_vcub,
     )
     lines.append(
-        f"Candidate pairs this display precision (sigma_Y^N quantum {quantum!r}) "
-        f"can never separate: {len(unseparated)}"
+        f"Candidate pairs this display precision (sigma_Y^N quantum {quantum!r}) is not "
+        f"guaranteed to separate: {len(unseparated)}"
+    )
+    lines.append(
+        "  (a capture may still exclude one of a pair listed here; what it cannot do is "
+        "be relied on to)"
     )
     for gap in unseparated[:20]:
         lines.append(
@@ -635,6 +713,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--display-rounding",
+        required=True,
+        choices=[rule.value for rule in DisplayRounding],
+        help=(
+            "how OVME's displays produce the digits shown: 'nearest', 'truncated', or "
+            "'unknown' for the conservative union of both. Applies to every displayed "
+            "volatility in this run; it is never assumed"
+        ),
+    )
+    parser.add_argument(
         "--lambda-vcub",
         required=True,
         type=float,
@@ -659,11 +747,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         candidates = candidate_year_fractions(roles)
         pairs = candidate_pairs(candidates, candidates)
-        sigma_vcub = DisplayedVol(args.sigma_vcub, args.sigma_vcub_quantum)
+        rounding = DisplayRounding(args.display_rounding)
+        sigma_vcub = DisplayedVol(args.sigma_vcub, args.sigma_vcub_quantum, rounding)
         sigma_yield = (
             None
             if args.sigma_yield is None
-            else DisplayedVol(args.sigma_yield, args.sigma_yield_quantum)
+            else DisplayedVol(args.sigma_yield, args.sigma_yield_quantum, rounding)
         )
         report = render_report(
             roles=roles,

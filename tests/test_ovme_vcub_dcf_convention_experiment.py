@@ -37,18 +37,22 @@ from ovme_vcub_dcf_convention_experiment import (  # noqa: E402
     CandidatePair,
     DateRole,
     DisplayedVol,
+    DisplayRounding,
     build_date_roles,
     candidate_pairs,
     candidate_year_fractions,
+    identical_multiplier_groups,
     implied_ratio_interval,
-    indistinguishable_pairs,
     is_consistent,
     main,
+    pairs_without_guaranteed_separation,
     predicted_yield_vol_interval,
     render_report,
     separation,
     surviving_candidates,
 )
+
+NEAREST = DisplayRounding.NEAREST
 
 ACT_ACT = CANDIDATE_DAY_COUNTS["ACT/ACT ISDA"]
 ACT_365F = CANDIDATE_DAY_COUNTS["ACT/365F"]
@@ -296,10 +300,38 @@ def test_candidate_pairs_refuses_a_non_positive_year_fraction():
 # --------------------------------------------------------------------------
 
 
-def test_displayed_vol_rounding_interval_is_half_a_quantum_either_side():
-    displayed = DisplayedVol(100.0, 0.01)
+def test_displayed_vol_rounding_interval_follows_the_stated_display_rule():
+    """A truncating screen and a rounding screen mean different intervals."""
 
-    assert displayed.interval == (99.995, 100.005)
+    assert DisplayedVol(100.0, 0.01, NEAREST).interval == (99.995, 100.005)
+    # Truncation: the digits shown are a floor, so the true value is at or
+    # above them -- an interval a nearest-rounding assumption would exclude.
+    assert DisplayedVol(100.0, 0.01, DisplayRounding.TRUNCATED).interval == (100.0, 100.01)
+    # Unconfirmed: the union, which can only ever fail to exclude.
+    assert DisplayedVol(100.0, 0.01, DisplayRounding.UNKNOWN).interval == (99.995, 100.01)
+
+
+def test_an_unconfirmed_display_rule_never_excludes_what_either_rule_allows():
+    pair = CandidatePair("v", "b", 59 / 365, 59 / 366)
+    sigma_vcub = DisplayedVol(100.0, 0.01, DisplayRounding.UNKNOWN)
+    truncation_only_case = DisplayedVol(100.15, 0.01, DisplayRounding.UNKNOWN)
+
+    # Under a nearest-rounding assumption this observation would exclude the
+    # candidate; with the rule unconfirmed it must not.
+    assert not is_consistent(
+        pair,
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
+        sigma_yield=DisplayedVol(100.15, 0.01, NEAREST),
+        lambda_vcub=1.0,
+    )
+    assert is_consistent(
+        pair, sigma_vcub=sigma_vcub, sigma_yield=truncation_only_case, lambda_vcub=1.0
+    )
+
+
+def test_the_display_rounding_rule_must_be_stated():
+    with pytest.raises(ValueError, match="not a default"):
+        DisplayedVol(100.0, 0.01, "nearest")
 
 
 @pytest.mark.parametrize(
@@ -308,17 +340,17 @@ def test_displayed_vol_rounding_interval_is_half_a_quantum_either_side():
 )
 def test_displayed_vol_refuses_a_value_or_quantum_that_is_not_positive_and_finite(value, quantum):
     with pytest.raises(ValueError):
-        DisplayedVol(value, quantum)
+        DisplayedVol(value, quantum, NEAREST)
 
 
 def test_displayed_vol_refuses_a_quantum_that_swallows_the_value():
     with pytest.raises(ValueError, match="too coarse"):
-        DisplayedVol(0.004, 0.01)
+        DisplayedVol(0.004, 0.01, NEAREST)
 
 
 def test_implied_ratio_interval_is_widest_high_yield_over_low_vcub():
-    sigma_vcub = DisplayedVol(100.0, 0.01)
-    sigma_yield = DisplayedVol(100.0, 0.01)
+    sigma_vcub = DisplayedVol(100.0, 0.01, NEAREST)
+    sigma_yield = DisplayedVol(100.0, 0.01, NEAREST)
 
     low, high = implied_ratio_interval(
         sigma_vcub=sigma_vcub, sigma_yield=sigma_yield, lambda_vcub=1.0
@@ -330,8 +362,8 @@ def test_implied_ratio_interval_is_widest_high_yield_over_low_vcub():
 
 
 def test_implied_ratio_interval_scales_with_lambda():
-    sigma_vcub = DisplayedVol(50.0, 0.01)
-    sigma_yield = DisplayedVol(100.0, 0.01)
+    sigma_vcub = DisplayedVol(50.0, 0.01, NEAREST)
+    sigma_yield = DisplayedVol(100.0, 0.01, NEAREST)
 
     low, high = implied_ratio_interval(
         sigma_vcub=sigma_vcub, sigma_yield=sigma_yield, lambda_vcub=2.0
@@ -345,8 +377,8 @@ def test_implied_ratio_interval_scales_with_lambda():
 def test_a_non_positive_lambda_is_refused(lambda_vcub):
     with pytest.raises(ValueError, match="lambda_vcub"):
         implied_ratio_interval(
-            sigma_vcub=DisplayedVol(100.0, 0.01),
-            sigma_yield=DisplayedVol(100.0, 0.01),
+            sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
+            sigma_yield=DisplayedVol(100.0, 0.01, NEAREST),
             lambda_vcub=lambda_vcub,
         )
 
@@ -354,7 +386,7 @@ def test_a_non_positive_lambda_is_refused(lambda_vcub):
 def test_predicted_yield_vol_interval_carries_the_vcub_display_width():
     pair = CandidatePair("v", "b", 59 / 365, 59 / 366)
     low, high = predicted_yield_vol_interval(
-        pair, sigma_vcub=DisplayedVol(100.0, 0.01), lambda_vcub=1.0
+        pair, sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST), lambda_vcub=1.0
     )
 
     multiplier = (366 / 365) ** 0.5
@@ -364,10 +396,10 @@ def test_predicted_yield_vol_interval_carries_the_vcub_display_width():
 
 def test_a_candidate_survives_only_when_the_two_intervals_meet():
     pair = CandidatePair("v", "b", 59 / 365, 59 / 366)  # multiplier 1.0013690...
-    sigma_vcub = DisplayedVol(100.0, 0.01)
+    sigma_vcub = DisplayedVol(100.0, 0.01, NEAREST)
 
-    on_top_of_the_prediction = DisplayedVol(100.137, 0.01)
-    a_long_way_off = DisplayedVol(100.0, 0.01)
+    on_top_of_the_prediction = DisplayedVol(100.137, 0.01, NEAREST)
+    a_long_way_off = DisplayedVol(100.0, 0.01, NEAREST)
 
     assert is_consistent(
         pair, sigma_vcub=sigma_vcub, sigma_yield=on_top_of_the_prediction, lambda_vcub=1.0
@@ -382,8 +414,8 @@ def test_surviving_candidates_keeps_only_the_consistent_pairs():
     leap_mismatch = CandidatePair("v", "b2", 59 / 365, 59 / 366)
     survivors = surviving_candidates(
         [equal_conventions, leap_mismatch],
-        sigma_vcub=DisplayedVol(100.0, 0.01),
-        sigma_yield=DisplayedVol(100.0, 0.01),
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
+        sigma_yield=DisplayedVol(100.0, 0.01, NEAREST),
         lambda_vcub=1.0,
     )
 
@@ -395,10 +427,10 @@ def test_surviving_candidates_keeps_only_the_consistent_pairs():
 # --------------------------------------------------------------------------
 
 
-def test_two_candidates_are_distinguishable_only_beyond_the_display_quantum():
+def test_separation_is_guaranteed_only_beyond_the_display_quantum():
     ratio_one = CandidatePair("v", "b", 59 / 365, 59 / 365)
     leap_mismatch = CandidatePair("v", "b2", 59 / 365, 59 / 366)
-    sigma_vcub = DisplayedVol(100.0, 0.01)
+    sigma_vcub = DisplayedVol(100.0, 0.01, NEAREST)
 
     # 100 x (multiplier - 1) = 0.1369 apart, minus the two half-widths (0.01).
     fine_screen = separation(
@@ -410,7 +442,7 @@ def test_two_candidates_are_distinguishable_only_beyond_the_display_quantum():
     )
     assert fine_screen.centre_gap == pytest.approx(0.13690, rel=1e-3)
     assert fine_screen.clear_gap == pytest.approx(0.13690 - 0.01, rel=1e-2)
-    assert fine_screen.distinguishable
+    assert fine_screen.guaranteed_separable
 
     coarse_screen = separation(
         ratio_one,
@@ -419,7 +451,7 @@ def test_two_candidates_are_distinguishable_only_beyond_the_display_quantum():
         sigma_yield_quantum=1.0,
         lambda_vcub=1.0,
     )
-    assert not coarse_screen.distinguishable
+    assert not coarse_screen.guaranteed_separable
 
 
 def test_separation_refuses_a_non_positive_quantum():
@@ -428,28 +460,42 @@ def test_separation_refuses_a_non_positive_quantum():
         separation(
             pair,
             pair,
-            sigma_vcub=DisplayedVol(100.0, 0.01),
+            sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
             sigma_yield_quantum=0.0,
             lambda_vcub=1.0,
         )
 
 
-def test_candidates_sharing_a_multiplier_are_not_reported_as_an_ambiguity():
-    """Two labels reaching the same ratio are one hypothesis, not two."""
+def test_candidates_sharing_a_multiplier_are_reported_as_permanently_ambiguous():
+    """Same multiplier, different conventions: no capture can ever separate them.
+
+    ACT/360 on both legs and ACT/365F on both legs are distinct convention
+    hypotheses that produce the same `σ_Y^N` at every precision. They must
+    be reported as a permanent ambiguity, not dropped and not counted as a
+    precision problem.
+    """
 
     left = CandidatePair("t0->TE ACT/365F", "t0->TE ACT/365F", 2.0, 2.0)
     right = CandidatePair("t0->TE ACT/360", "t0->TE ACT/360", 3.0, 3.0)
 
     assert left.vol_multiplier == right.vol_multiplier
+    assert identical_multiplier_groups([left, right]) == ((left, right),)
+    # ... and they are not double-counted as a display-precision ambiguity.
     assert (
-        indistinguishable_pairs(
+        pairs_without_guaranteed_separation(
             [left, right],
-            sigma_vcub=DisplayedVol(100.0, 0.01),
+            sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
             sigma_yield_quantum=0.01,
             lambda_vcub=1.0,
         )
         == ()
     )
+
+
+def test_a_multiplier_reached_by_only_one_candidate_is_not_a_permanent_ambiguity():
+    only_one = CandidatePair("t0->TE ACT/365F", "t0->TE ACT/ACT ISDA", 59 / 365, 59 / 366)
+
+    assert identical_multiplier_groups([only_one]) == ()
 
 
 def test_a_present_day_two_year_expiry_cannot_separate_act_act_from_act_365f_at_one_bp_display():
@@ -474,7 +520,7 @@ def test_a_present_day_two_year_expiry_cannot_separate_act_act_from_act_365f_at_
         candidates["t0->TE ACT/365F"],
         candidates["t0->TE ACT/365F"],
     )
-    sigma_vcub = DisplayedVol(100.0, 0.01)  # synthetic 100 bp
+    sigma_vcub = DisplayedVol(100.0, 0.01, NEAREST)  # synthetic 100 bp
 
     coarse = separation(
         act_365f_over_act_act,
@@ -484,7 +530,7 @@ def test_a_present_day_two_year_expiry_cannot_separate_act_act_from_act_365f_at_
         lambda_vcub=1.0,
     )
     assert coarse.centre_gap == pytest.approx(0.0582, rel=1e-2)
-    assert not coarse.distinguishable
+    assert not coarse.guaranteed_separable
 
     fine = separation(
         act_365f_over_act_act,
@@ -493,7 +539,7 @@ def test_a_present_day_two_year_expiry_cannot_separate_act_act_from_act_365f_at_
         sigma_yield_quantum=0.01,
         lambda_vcub=1.0,
     )
-    assert fine.distinguishable
+    assert fine.guaranteed_separable
 
 
 def test_a_one_day_end_date_shift_is_worth_as_much_as_the_whole_leap_effect():
@@ -534,9 +580,9 @@ def test_report_states_that_it_pins_nothing_and_lists_the_survivors():
     report = render_report(
         roles=roles,
         pairs=candidate_pairs(candidates, candidates),
-        sigma_vcub=DisplayedVol(100.0, 0.01),
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
         lambda_vcub=1.0,
-        sigma_yield=DisplayedVol(100.0, 0.01),
+        sigma_yield=DisplayedVol(100.0, 0.01, NEAREST),
     )
 
     assert "pins nothing" in report
@@ -553,7 +599,7 @@ def test_a_design_run_reports_separability_only_for_a_stated_yield_precision():
     without_precision = render_report(
         roles=roles,
         pairs=pairs,
-        sigma_vcub=DisplayedVol(100.0, 0.01),
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
         lambda_vcub=1.0,
         sigma_yield=None,
     )
@@ -561,19 +607,20 @@ def test_a_design_run_reports_separability_only_for_a_stated_yield_precision():
     assert "Surviving candidates:" not in without_precision
     # sigma_vcub's own quantum is never borrowed to stand in for the screen
     # precision of a vol this run has not seen.
-    assert "can never separate" not in without_precision
+    assert "not\nguaranteed" not in without_precision
+    assert "is not guaranteed to separate" not in without_precision
     assert "Separability not reported" in without_precision
 
     with_precision = render_report(
         roles=roles,
         pairs=pairs,
-        sigma_vcub=DisplayedVol(100.0, 0.01),
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
         lambda_vcub=1.0,
         sigma_yield=None,
         sigma_yield_quantum=0.1,
     )
     assert "sigma_Y^N quantum 0.1" in with_precision
-    assert "can never separate" in with_precision
+    assert "is not guaranteed to separate" in with_precision
 
 
 def test_an_observed_yield_vol_and_a_design_quantum_cannot_both_be_supplied():
@@ -584,9 +631,9 @@ def test_an_observed_yield_vol_and_a_design_quantum_cannot_both_be_supplied():
         render_report(
             roles=roles,
             pairs=pairs,
-            sigma_vcub=DisplayedVol(100.0, 0.01),
+            sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
             lambda_vcub=1.0,
-            sigma_yield=DisplayedVol(100.0, 0.01),
+            sigma_yield=DisplayedVol(100.0, 0.01, NEAREST),
             sigma_yield_quantum=0.01,
         )
 
@@ -602,6 +649,8 @@ def test_cli_runs_a_design_pass(capsys):
             "100.0",
             "--sigma-vcub-quantum",
             "0.01",
+            "--display-rounding",
+            "unknown",
             "--lambda-vcub",
             "1.0",
         ]
@@ -624,6 +673,8 @@ def test_cli_accepts_a_design_quantum_without_an_observation(capsys):
             "0.01",
             "--sigma-yield-quantum",
             "0.1",
+            "--display-rounding",
+            "unknown",
             "--lambda-vcub",
             "1.0",
         ]
@@ -666,6 +717,8 @@ def test_cli_reports_an_invalid_input_as_an_error_not_a_traceback(capsys):
             "100.0",
             "--sigma-vcub-quantum",
             "0.01",
+            "--display-rounding",
+            "unknown",
             "--lambda-vcub",
             "1.0",
         ]
