@@ -266,7 +266,7 @@ MVP 規則：
    - smile model 由呼叫端明確聲明；本版本僅實作 PWL，SABR 在 Bloomberg calibration contract 與 calibrated parameters 未 pin 前 fail closed，不得以 PWL 冒充。
    - `VCUB_EXTRAPOLATION_MODE` 維持 `FAIL_CLOSED`，不得 flat extrapolate。
    - resolver 輸出在 `DCF_VCUB` / `DCF_BondVol` RED 解除前不得流入 `σ_Y^N` / `σ_P` / premium。
-7. 當 `BOND_VOL_SOURCE_MODE = VCUB_NORMAL_PROXY` 時，`DCF_VCUB` 與 `DCF_BondVol` 的 **convention identifiers 與對應 year-fraction 計算規則都必須已 pin 且可審計**；任一 unresolved 時，在推導 `σ_Y^N` 前即 Market Data Blocking，禁止假設 ratio = 1、禁止猜測 convention、禁止省略 total-variance adjustment。
+7. 當 `BOND_VOL_SOURCE_MODE = VCUB_NORMAL_PROXY` 時，`DCF_VCUB` 與 `DCF_BondVol` 的 **convention identifiers 與對應 year-fraction 計算規則都必須已 pin 且可審計**；任一 unresolved 時，在推導 `σ_Y^N` 前即 Market Data Blocking，禁止假設 ratio = 1、禁止猜測 convention、禁止省略 total-variance adjustment。此處的 convention 同時包含 day count 與 start / end date roles（start 為 `t0` 抑或 spot settlement date、end 為 `TE` 抑或 `TF`）；兩者必須一起 pin，只 pin day count 不足以解除 blocking（Annex A §A.8.5）。
 8. 不得 silent fallback 到 flat vol、鄰近 vol 或任意插補。唯一可繞過 VCUB unresolved/blocking 的路徑是 Trader 明確選擇且可審計的 approved `DIRECT_PRICE_VOL` override；切換 source mode 不得修改或偽造 unresolved VCUB convention。
 
 ---
