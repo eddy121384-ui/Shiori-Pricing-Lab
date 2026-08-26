@@ -335,6 +335,7 @@ from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import VCUBOTMCapture
 from shiori_pricing_lab.data.treasury_futures_ctd import (
+    TreasuryFuturesCTDBloombergError,
     TreasuryFuturesCTDError,
     TreasuryFuturesCTDFieldsUnconfirmedError,
     load_bloomberg_ctd_metadata,
@@ -580,7 +581,16 @@ DEFAULT_PORT = 8765
 # index.html/styles.css/treasury_futures_yield.js are new served content. A
 # stale -v23 process would 404 all three, leaving a visible view whose every
 # control fails -- and would not serve the new static file at all.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v24"
+#
+# Bumped to -v25 for Issue #190's confirmed Bloomberg CTD path: POST
+# /api/treasury-futures/ctd now performs a real two-stage live lookup and
+# its response gained ctd_cusip/ctd_description, and POST
+# /api/treasury-futures/convert gained 'ctd_source' + 'contract_code' so a
+# BLOOMBERG-sourced conversion is fetched server-side. A stale -v24 process
+# would ignore 'ctd_source' entirely and rebuild every conversion as
+# MANUAL_UNCONFIRMED -- live data silently displayed as unconfirmed, which
+# is precisely the provenance failure this contract exists to prevent.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v25"
 
 
 def load_base_case() -> dict:
@@ -2766,19 +2776,60 @@ def treasury_futures_contract_catalogue() -> dict:
 
 
 def load_treasury_futures_ctd(body: dict) -> dict:
-    """Try the automatic Bloomberg CTD path for one contract.
+    """Load the current CTD for one contract from Bloomberg DAPI.
 
-    Fails closed today, by design: no Bloomberg field mnemonic for the CTD /
-    conversion-factor / last-delivery facts has been confirmed on a live
-    workstation yet, so this raises with the exact unresolved fields and the
-    probe that resolves them rather than inventing a mapping or silently
-    substituting manual data.
+    Two requests behind this (see ``data/treasury_futures_ctd``): the generic
+    front contract resolves the delivery month, then that delivery month
+    answers the CTD fields. Fails closed on anything missing or unparseable,
+    and never falls back to manual, cached or synthetic data -- so a caller
+    either gets a confirmed live record or an error naming what Bloomberg did
+    not give.
     """
 
     if not isinstance(body, dict) or not body.get("contract_code"):
         raise ValueError("request body must be a JSON object with 'contract_code'")
     get_contract(str(body["contract_code"]))
     return load_bloomberg_ctd_metadata(str(body["contract_code"])).as_display_payload()
+
+
+#: How the CTD for a conversion is sourced. ``BLOOMBERG`` re-fetches it
+#: server-side; ``MANUAL`` reads the operator-supplied fields in the request.
+TREASURY_FUTURES_CTD_SOURCE_MODES = ("BLOOMBERG", "MANUAL")
+
+
+def _resolve_conversion_ctd(body: dict):
+    """Resolve the CTD a conversion runs against, by declared source mode.
+
+    **A confirmed provenance is never taken from the request.** The panel puts
+    a loaded CTD into editable fields, so whatever comes back is operator
+    input whatever its origin -- and a client that could assert
+    ``BLOOMBERG_DAPI`` on a payload could make an edited or invented CTD
+    display as confirmed live market data. So ``BLOOMBERG`` mode sends only
+    the contract code and the server fetches the CTD itself; the numbers never
+    round-trip through the browser. ``MANUAL`` mode reads the supplied fields
+    and stamps them ``MANUAL_UNCONFIRMED``, exactly as before.
+
+    Mode defaults to ``MANUAL`` when absent, so a request carrying only a
+    ``ctd`` object behaves as it always has.
+    """
+
+    source_mode = str(body.get("ctd_source") or "MANUAL").strip().upper()
+    if source_mode not in TREASURY_FUTURES_CTD_SOURCE_MODES:
+        raise ValueError(
+            f"'ctd_source' must be one of {', '.join(TREASURY_FUTURES_CTD_SOURCE_MODES)}, "
+            f"got {body.get('ctd_source')!r}"
+        )
+    if source_mode == "MANUAL":
+        return treasury_futures_ctd_from_manual_entry(body.get("ctd"))
+
+    contract_code = body.get("contract_code")
+    if not contract_code:
+        raise ValueError(
+            "a BLOOMBERG-sourced conversion needs 'contract_code' -- the CTD is fetched "
+            "server-side and is never read from the request"
+        )
+    get_contract(str(contract_code))
+    return load_bloomberg_ctd_metadata(str(contract_code))
 
 
 def convert_treasury_futures(body: dict) -> dict:
@@ -2788,11 +2839,14 @@ def convert_treasury_futures(body: dict) -> dict:
     optional; at least one is required. Each direction's failure is reported
     on its own key so a bad target yield never hides a good implied yield --
     the trader keeps whichever answer is actually computable.
+
+    The CTD comes from :func:`_resolve_conversion_ctd`, which decides between
+    a server-side live fetch and operator-supplied fields.
     """
 
     if not isinstance(body, dict):
         raise ValueError("request body must be a JSON object")
-    ctd = treasury_futures_ctd_from_manual_entry(body.get("ctd"))
+    ctd = _resolve_conversion_ctd(body)
 
     futures_price = body.get("futures_price")
     target_yield = body.get("target_yield_percent")
@@ -3197,10 +3251,14 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = load_treasury_futures_ctd(body)
-        except TreasuryFuturesCTDFieldsUnconfirmedError as exc:
-            # Not a bridge fault: the automatic path is genuinely unavailable
-            # until the Bloomberg fields are confirmed, and the panel renders
-            # this text verbatim so the trader sees exactly what is missing.
+        except (
+            TreasuryFuturesCTDBloombergError,
+            TreasuryFuturesCTDFieldsUnconfirmedError,
+        ) as exc:
+            # Not a bridge fault: Bloomberg is unreachable, unentitled, or did
+            # not return a usable CTD. The panel renders this text verbatim so
+            # the trader sees exactly what failed rather than a bare 502, and
+            # keeps the manual fields usable.
             self._write_json(502, {"error": str(exc), "automatic_source_available": False})
             return
         except (TreasuryFuturesContractError, ValueError) as exc:
@@ -3216,6 +3274,14 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = convert_treasury_futures(body)
+        except (
+            TreasuryFuturesCTDBloombergError,
+            TreasuryFuturesCTDFieldsUnconfirmedError,
+        ) as exc:
+            # A BLOOMBERG-sourced conversion whose live fetch failed: the same
+            # answer the CTD route gives, for the same reason.
+            self._write_json(502, {"error": str(exc), "automatic_source_available": False})
+            return
         except (TreasuryFuturesCTDError, TreasuryFuturesContractError, ValueError) as exc:
             self._write_json(400, {"error": str(exc)})
             return

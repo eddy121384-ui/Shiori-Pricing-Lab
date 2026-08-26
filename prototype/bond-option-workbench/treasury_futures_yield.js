@@ -71,6 +71,14 @@
   let contracts = [];
   let contractsLoaded = false;
 
+  // Which source the *next* conversion should use. A confirmed provenance
+  // is never asserted by this page: the server re-fetches the CTD itself in
+  // BLOOMBERG mode, because everything loaded here lands in editable fields
+  // and could have been changed since. This flag only says which of the two
+  // the server should do, and any edit to a CTD field or the contract drops
+  // it back to MANUAL.
+  let ctdSourceMode = "MANUAL";
+
   // Request-identity fence (Codex review, PR #191). Clearing the DOM does not
   // cancel a request already awaiting a response: without this, a conversion
   // started for ZN could resolve *after* the trader switched to ZB and
@@ -156,7 +164,9 @@
       });
       return;
     }
-    els.ctdSummary.textContent = `${ctd.contract_symbol} — CTD ${ctd.ctd_identifier}`;
+    els.ctdSummary.textContent = ctd.ctd_description
+      ? `${ctd.contract_symbol} — ${ctd.ctd_description} (${ctd.ctd_identifier})`
+      : `${ctd.contract_symbol} — CTD ${ctd.ctd_identifier}`;
     els.detailCtd.textContent = ctd.ctd_identifier;
     els.detailCoupon.textContent = `${ctd.ctd_coupon_percent}%`;
     els.detailMaturity.textContent = ctd.ctd_maturity_date;
@@ -264,6 +274,9 @@
       clearAnswers();
       fillCtdFields(payload);
       renderCtdDetail(payload);
+      // The server just fetched this; the next Convert may ask it to fetch
+      // again rather than send these values back as operator input.
+      ctdSourceMode = "BLOOMBERG";
     } catch (error) {
       // The automatic path being unavailable is an answer, not a crash: show
       // exactly what the server said is missing and leave the manual fields
@@ -329,7 +342,10 @@
       return;
     }
     try {
+      const contract = selectedContract();
       const payload = await postJson("/api/treasury-futures/convert", {
+        ctd_source: ctdSourceMode,
+        contract_code: contract ? contract.code : null,
         ctd: ctdRequestPayload(),
         futures_price: futuresPrice || null,
         // Sent as typed. `Number("abc")` is NaN, and JSON.stringify turns
@@ -394,7 +410,11 @@
         beginRequest();
         clearAnswers();
         clearError();
-        if (alsoClearCtdDetail) renderCtdDetail(null);
+        if (alsoClearCtdDetail) {
+          renderCtdDetail(null);
+          // Edited by hand, so it is operator input now whatever it was.
+          ctdSourceMode = "MANUAL";
+        }
       });
     });
   }
@@ -412,6 +432,7 @@
   // silent-wrong-answer this utility must not give.
   els.contractSelect.addEventListener("change", () => {
     beginRequest();
+    ctdSourceMode = "MANUAL";
     renderTickSummary();
     clearCtdFields();
     clearAnswers();
@@ -432,4 +453,5 @@
   // Pricing module already uses. No production behavior depends on them.
   window.__shioriTestFuturesYieldContracts = () => contracts;
   window.__shioriTestFuturesYieldRequestGeneration = () => requestGeneration;
+  window.__shioriTestFuturesYieldCtdSourceMode = () => ctdSourceMode;
 })();

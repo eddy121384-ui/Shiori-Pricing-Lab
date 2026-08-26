@@ -2,60 +2,59 @@
 
 Standalone diagnostic CLI -- **not** part of the production pricing or
 workbench path, and never imported by either. It exists to answer one
-question on a real Bloomberg workstation, empirically:
+question on a real Bloomberg workstation, empirically: which Bloomberg field
+mnemonic actually returns each fact ``data/treasury_futures_ctd`` needs?
 
-    which Bloomberg field mnemonic actually returns each of the six facts
-    ``data/treasury_futures_ctd`` needs for a Treasury futures contract?
+**Resolution history (Issue #190).** Eddy probed all four current active
+contracts on his own Bloomberg Terminal, and every required field is now
+resolved -- so the default candidate list below is empty, exactly as
+``bloomberg_dapi_probe``'s own became once its candidates were resolved.
 
-Those six are ``contract_symbol``, ``ctd_identifier``, ``ctd_coupon_percent``,
-``ctd_maturity_date``, ``conversion_factor`` and ``last_delivery_date``
-(``REQUIRED_BLOOMBERG_CTD_FIELDS``). Today **none of them has a confirmed
-mnemonic**, so ``BLOOMBERG_CTD_FIELD_MAP`` is empty and Shiori's automatic
-CTD path fails closed. Issue #190 and AGENTS.md rule 7 both forbid closing
-that gap by guessing, so this script proves or disproves a candidate instead.
-It changes no production mapping by itself and writes nothing to disk.
+Confirmed and wired into ``data/treasury_futures_ctd.BLOOMBERG_CTD_FIELD_MAP``:
 
-**Every mnemonic below is an UNCONFIRMED candidate.** None has been seen to
-return a value from a live DAPI response. The point of running this is to
-find out which ones do; a candidate that comes back ``absent`` or
-``field_exception`` is a *result*, not a failure of the run.
+- ``FUT_CUR_GEN_TICKER`` -> ``contract_symbol``, resolving the generic front
+  contract to the actual delivery month (``TU1 Comdty`` -> ``TUU6``,
+  ``FV1`` -> ``FVU6``, ``TY1`` -> ``TYU6``, ``US1`` -> ``USU6``).
+- ``FUT_CTD_ISIN`` -> ``ctd_identifier`` (the canonical identifier).
+- ``FUT_CTD_CPN`` -> ``ctd_coupon_percent``.
+- ``FUT_CTD_MTY`` -> ``ctd_maturity_date``.
+- ``FUT_CNVS_FACTOR`` -> ``conversion_factor``.
+- ``FUT_DLV_DT_LAST`` -> ``last_delivery_date``.
 
-**What it does.** For each candidate it asks Bloomberg twice:
+Confirmed to return a value and wired into
+``BLOOMBERG_CTD_DISPLAY_FIELD_MAP`` as display-only -- never the identifier a
+calculation keys on: ``FUT_CTD_CUSIP``, ``FUT_CTD_TICKER``.
 
-1. ``//blp/apiflds`` -- does Bloomberg's own field dictionary even define
-   this mnemonic, and what does it say the field is? (``describe_fields``)
-2. ``//blp/refdata`` -- does it return a value for this actual contract?
-   (``probe_fields``)
+The live values behind each are recorded in ``data/treasury_futures_ctd``'s
+own module docstring, as evidence of the mnemonic rather than as data.
 
-Both come from ``tools/bloomberg_dapi_probe.py``; this script adds no second
-session, request or event-loop implementation. It also reuses
-``bloomberg_input_sourcing_probe.sanitize_external_text`` so Bloomberg-
-authored text is scrubbed of workstation/session detail before it is printed.
+**Superseded candidates.** The original list carried several candidates per
+destination so one run could be conclusive: ``FUT_ACT_DEF_GEN_TICKER``,
+``PARSEKYABLE_DES``, ``CTD_ISIN``, ``CTD_CUSIP``, ``CTD_CPN``, ``CTD_MTY``,
+``FUT_CTD_MATURITY``, ``CTD_CONVERSION_FACTOR``, ``FUT_CTD_CNVS_FACTOR``,
+``LAST_DELIVERY_DT``, ``FUT_LAST_DLV_DT``. A confirmed mnemonic was found for
+every required field, so none is wired. They are recorded as **superseded,
+not as confirmed rejections** -- no per-field ``BAD_FLD`` evidence was
+reported for them individually, so nothing here claims any of them is
+invalid. Re-adding one still needs its own confirmation.
 
-**The security probed.** Bloomberg's generic front-contract ticker for each
-root -- ``TU1 Comdty`` (ZT), ``FV1 Comdty`` (ZF), ``TY1 Comdty`` (ZN),
-``US1 Comdty`` (ZB) -- is the default, and the exact string is printed before
-the request so there is no doubt what was asked. That default is a
-convenience, not an assertion: pass ``--security`` to probe an explicit
-delivery-month ticker (e.g. ``"TYZ6 Comdty"``) verbatim instead, and the
-script sends exactly what it was given without appending or rewriting a
-yellow key.
+**This script still confirms nothing by itself.** It reports what Bloomberg
+returns; wiring a mapping is a separate, reviewed change. Pass ``--fields``
+explicitly to probe a genuinely new candidate.
 
-**Running it.** On a Bloomberg-networked Windows workstation, with
-Bloomberg's official ``blpapi`` package installed and the Terminal logged
-in::
+**Running it.** On a Bloomberg-networked workstation with ``blpapi``
+installed and the Terminal logged in::
 
-    python tools/bloomberg_treasury_futures_ctd_probe.py --contract ZN
-    python tools/bloomberg_treasury_futures_ctd_probe.py --contract ZT,ZF,ZN,ZB
-    python tools/bloomberg_treasury_futures_ctd_probe.py --security "TYZ6 Comdty"
-    python tools/bloomberg_treasury_futures_ctd_probe.py --contract ZN --fields FUT_CTD_CPN
+    python tools/bloomberg_treasury_futures_ctd_probe.py --contract ZN --fields FUT_CTD_ISIN
+    python tools/bloomberg_treasury_futures_ctd_probe.py --security "TYZ6 Comdty" \
+        --fields FUT_CNVS_FACTOR
 
-Paste the output into Issue #190. A candidate that returns a plausible value
-for all four contracts is then wired into
-``data/treasury_futures_ctd.BLOOMBERG_CTD_FIELD_MAP`` with its evidence
-recorded there -- exactly the way ``data/bloomberg_bond_quote``'s own field
-maps record theirs -- in a separate, reviewed change. Nothing here does that
-wiring automatically.
+It asks ``//blp/apiflds`` whether each mnemonic exists at all, then
+``//blp/refdata`` whether it returns a value, and prints ``returned`` /
+``absent`` / ``field_exception`` per field. It reuses
+``bloomberg_dapi_probe``'s session plumbing and
+``bloomberg_input_sourcing_probe.sanitize_external_text``; it adds no second
+session implementation and writes nothing to disk.
 """
 
 from __future__ import annotations
@@ -67,72 +66,33 @@ from bloomberg_dapi_probe import describe_fields, probe_fields
 from bloomberg_input_sourcing_probe import sanitize_external_text
 
 from shiori_pricing_lab.data.treasury_futures_ctd import (
+    BLOOMBERG_CTD_DISPLAY_FIELD_MAP,
     BLOOMBERG_CTD_FIELD_MAP,
     REQUIRED_BLOOMBERG_CTD_FIELDS,
+    bloomberg_generic_front_contract,
     unresolved_bloomberg_ctd_fields,
 )
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
     SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES,
-    get_contract,
 )
 
-# Bloomberg's generic front-contract suffix and the ticker root per Shiori
-# contract code. Only used to build the default --security string, which is
-# always printed before the request is sent, and deliberately kept here
-# rather than in `pricing/treasury_futures_contract`: that package is guarded
-# against vendor plumbing, and these roots are this probe's convenience, not
-# a confirmed field mapping.
-_GENERIC_FRONT_CONTRACT_SUFFIX = "1 Comdty"
-_BLOOMBERG_TICKER_ROOTS = {"ZT": "TU", "ZF": "FV", "ZN": "TY", "ZB": "US"}
-
-# Candidate Bloomberg field mnemonics -- UNCONFIRMED against any live DAPI
-# response, every single one. Grouped by the `treasury_futures_ctd` field
-# each would feed if it turns out to work. Several candidates per destination
-# on purpose: the naming families Bloomberg uses for futures reference data
-# are not consistent, and probing four cheap candidates in one request is
-# what makes a single workstation run conclusive instead of the first of
-# four round trips. Remove a candidate only once it is confirmed rejected,
-# and record that rejection here when you do.
-_CANDIDATE_CTD_FIELDS: dict[str, str] = {
-    # contract_symbol -- which delivery month the generic ticker resolves to
-    "FUT_CUR_GEN_TICKER": "contract_symbol",
-    "FUT_ACT_DEF_GEN_TICKER": "contract_symbol",
-    "PARSEKYABLE_DES": "contract_symbol",
-    # ctd_identifier
-    "FUT_CTD_ISIN": "ctd_identifier",
-    "FUT_CTD_CUSIP": "ctd_identifier",
-    "CTD_ISIN": "ctd_identifier",
-    "CTD_CUSIP": "ctd_identifier",
-    "FUT_CTD_TICKER": "ctd_identifier",
-    # ctd_coupon_percent
-    "FUT_CTD_CPN": "ctd_coupon_percent",
-    "CTD_CPN": "ctd_coupon_percent",
-    # ctd_maturity_date
-    "FUT_CTD_MTY": "ctd_maturity_date",
-    "CTD_MTY": "ctd_maturity_date",
-    "FUT_CTD_MATURITY": "ctd_maturity_date",
-    # conversion_factor
-    "FUT_CNVS_FACTOR": "conversion_factor",
-    "CTD_CONVERSION_FACTOR": "conversion_factor",
-    "FUT_CTD_CNVS_FACTOR": "conversion_factor",
-    # last_delivery_date
-    "FUT_DLV_DT_LAST": "last_delivery_date",
-    "LAST_DELIVERY_DT": "last_delivery_date",
-    "FUT_LAST_DLV_DT": "last_delivery_date",
-}
+# Candidate Bloomberg field mnemonics still to be probed. Empty: every
+# required CTD field is resolved (see the module docstring's resolution
+# history). Add an entry here only for a genuinely new, not-yet-probed
+# candidate -- the confirmed mnemonics live in
+# `data/treasury_futures_ctd`, not here, and re-probing them proves nothing.
+_CANDIDATE_CTD_FIELDS: dict[str, str] = {}
 
 
 def default_security(contract_code: str) -> str:
-    """Bloomberg generic front-contract ticker for one supported contract code."""
+    """Bloomberg generic front-contract ticker for one supported contract code.
 
-    contract = get_contract(contract_code)  # rejects an unsupported code
-    root = _BLOOMBERG_TICKER_ROOTS.get(contract.code)
-    if root is None:
-        raise ValueError(
-            f"no Bloomberg ticker root recorded for {contract.code} -- pass --security "
-            "with the exact ticker to probe instead"
-        )
-    return f"{root}{_GENERIC_FRONT_CONTRACT_SUFFIX}"
+    Defers to `data/treasury_futures_ctd`'s own confirmed root table rather
+    than keeping a second copy: the roots are production data now, and two
+    copies could disagree about which contract this probe is reporting on.
+    """
+
+    return bloomberg_generic_front_contract(contract_code)
 
 
 def _print_field_dictionary(fields: list[str]) -> None:
@@ -233,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         codes = [code.strip().upper() for code in args.contract.split(",") if code.strip()]
         try:
             securities = [default_security(code) for code in codes]
-        except ValueError as exc:
+        except ValueError as exc:  # includes TreasuryFuturesCTDError
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if not securities:
@@ -242,9 +202,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Treasury futures CTD field probe (Issue #190)")
     print(f"Required CTD fields:   {', '.join(REQUIRED_BLOOMBERG_CTD_FIELDS)}")
-    print(f"Confirmed today:       {sorted(BLOOMBERG_CTD_FIELD_MAP) or 'none'}")
+    for logical_field, mnemonic in sorted(BLOOMBERG_CTD_FIELD_MAP.items()):
+        print(f"  confirmed: {logical_field:<22}{mnemonic}")
+    for logical_field, mnemonic in sorted(BLOOMBERG_CTD_DISPLAY_FIELD_MAP.items()):
+        print(f"  confirmed: {logical_field:<22}{mnemonic}  (display only)")
     print(f"Still unresolved:      {', '.join(unresolved_bloomberg_ctd_fields()) or 'none'}")
-    print("Every mnemonic below is an UNCONFIRMED candidate.")
+    print("Every mnemonic probed below is an UNCONFIRMED candidate.")
     print()
 
     _print_field_dictionary(fields)

@@ -533,15 +533,73 @@ def test_the_tick_readout_survives_a_ctd_edit_because_it_depends_on_the_contract
 
 
 @_PLAYWRIGHT_SKIP
-def test_the_automatic_bloomberg_path_reports_exactly_what_is_missing(page, server_url) -> None:
+def test_an_unreachable_bloomberg_reports_the_failure_and_fills_nothing(page, server_url) -> None:
+    # `blpapi` is genuinely absent in this environment, exactly as on any
+    # non-Bloomberg machine, so the automatic path fails for real here.
     _open_futures_yield(page, server_url)
     page.click("#fy-load-bloomberg-btn")
     _wait_until(lambda: not _is_actually_hidden(page, "fy-automatic-note"))
-    note = page.text_content("#fy-automatic-note")
-    assert "conversion_factor" in note
-    assert "bloomberg_treasury_futures_ctd_probe.py" in note
+    assert "blpapi is not installed" in page.text_content("#fy-automatic-note")
     # Nothing was filled in from a fallback.
     assert page.input_value("#fy-conversion-factor") == ""
+    assert page.input_value("#fy-ctd-identifier") == ""
+    assert "No CTD loaded" in page.text_content("#fy-source-pill")
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_manual_ctd_converts_as_an_unconfirmed_source(page, server_url) -> None:
+    _open_futures_yield(page, server_url)
+    _fill_ctd(page)
+    page.fill("#fy-futures-price", "112-165")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+    assert page.evaluate("window.__shioriTestFuturesYieldCtdSourceMode()") == "MANUAL"
+    assert "NOT confirmed" in page.text_content("#fy-source-pill")
+
+
+@_PLAYWRIGHT_SKIP
+def test_editing_a_ctd_field_drops_the_source_mode_back_to_manual(page, server_url) -> None:
+    """A loaded CTD lands in editable fields, so an edit makes it operator
+    input again -- the next conversion must not ask the server to treat it as
+    freshly fetched."""
+
+    loaded_ctd = treasury_futures_ctd_from_manual_entry(dict(CTD_ENTRY)).as_display_payload()
+    _open_futures_yield(page, server_url)
+    page.route(
+        "**/api/treasury-futures/ctd",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(dict(loaded_ctd, source="BLOOMBERG_DAPI", is_confirmed_source=True)),
+        ),
+    )
+    page.click("#fy-load-bloomberg-btn")
+    _wait_until(lambda: page.input_value("#fy-ctd-identifier") == CTD_ENTRY["ctd_identifier"])
+    assert page.evaluate("window.__shioriTestFuturesYieldCtdSourceMode()") == "BLOOMBERG"
+
+    page.fill("#fy-conversion-factor", "0.7654")
+    assert page.evaluate("window.__shioriTestFuturesYieldCtdSourceMode()") == "MANUAL"
+
+
+@_PLAYWRIGHT_SKIP
+def test_changing_the_contract_drops_the_source_mode_back_to_manual(page, server_url) -> None:
+    loaded_ctd = treasury_futures_ctd_from_manual_entry(dict(CTD_ENTRY)).as_display_payload()
+    _open_futures_yield(page, server_url)
+    page.route(
+        "**/api/treasury-futures/ctd",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(dict(loaded_ctd, source="BLOOMBERG_DAPI", is_confirmed_source=True)),
+        ),
+    )
+    page.click("#fy-load-bloomberg-btn")
+    _wait_until(
+        lambda: page.evaluate("window.__shioriTestFuturesYieldCtdSourceMode()") == "BLOOMBERG"
+    )
+
+    page.select_option("#fy-contract-select", "ZB")
+    assert page.evaluate("window.__shioriTestFuturesYieldCtdSourceMode()") == "MANUAL"
 
 
 @_PLAYWRIGHT_SKIP

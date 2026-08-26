@@ -1,9 +1,10 @@
 """The workbench bridge's Treasury futures yield routes (Issue #190).
 
 Every test drives the real ``ThreadingHTTPServer`` over loopback, the same
-way the served page does. There is no Bloomberg seam to stub: the automatic
-CTD path is unavailable by construction until its field mnemonics are
-confirmed, and this file asserts that it says so rather than inventing data.
+way the served page does. The automatic CTD route now performs a real
+two-stage Bloomberg lookup, so it is exercised here against the same fake
+``blpapi`` ``test_treasury_futures_ctd`` uses -- the server runs in a thread
+in this process, so a ``sys.modules`` stand-in reaches it.
 
 The other half of this file is the canonical-path guard. Issue #190's
 architecture requirement is that the browser must not carry a second
@@ -23,6 +24,12 @@ import urllib.request
 from collections.abc import Iterator
 
 import pytest
+from test_treasury_futures_ctd import (
+    DELIVERY_ZN,
+    GENERIC_ZN,
+    _install_fake_blpapi,
+    _two_stage_responder,
+)
 
 from shiori_pricing_lab.app.standalone_option_workbench_server import (
     PROTOTYPE_DIR,
@@ -125,19 +132,145 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
 # ---------------------------------------------------------------------------
 
 
+def test_the_automatic_ctd_route_returns_a_confirmed_live_record(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    status, payload = _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
+    assert status == 200
+    assert payload["contract_symbol"] == "TYU6"
+    assert payload["ctd_identifier"] == "US91282CQT17"
+    assert payload["conversion_factor"] == 0.9069
+    assert payload["last_delivery_date"] == "2026-09-30"
+    assert payload["source"] == "BLOOMBERG_DAPI"
+    assert payload["is_confirmed_source"] is True
+    # Display extras ride along, never as the identifier.
+    assert payload["ctd_cusip"] == "91282CQT1"
+
+
+def test_a_bloomberg_sourced_conversion_fetches_the_ctd_server_side(
+    server_url: str, monkeypatch
+) -> None:
+    harness = _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd_source": "BLOOMBERG", "contract_code": "ZN", "futures_price": "112-165"},
+    )
+    assert status == 200
+    assert payload["implied_yield"]["implied_yield_percent"] > 0
+    # Confirmed because the server just fetched it, not because a client said so.
+    assert payload["ctd"]["is_confirmed_source"] is True
+    assert payload["ctd"]["source"] == "BLOOMBERG_DAPI"
+    assert payload["ctd"]["ctd_identifier"] == "US91282CQT17"
+    assert [security for security, _ in harness["requests"]] == [GENERIC_ZN, DELIVERY_ZN]
+
+
+def test_a_client_can_never_assert_a_confirmed_source_on_a_conversion(
+    server_url: str, monkeypatch
+) -> None:
+    """The panel puts a loaded CTD into editable fields, so anything coming
+    back is operator input whatever its origin. A payload claiming
+    ``BLOOMBERG_DAPI`` must not make edited or invented numbers display as
+    confirmed live market data."""
+
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    _, live_ctd = _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
+    assert live_ctd["is_confirmed_source"] is True
+
+    tampered = dict(live_ctd, conversion_factor=0.5, source="BLOOMBERG_DAPI")
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd": tampered, "futures_price": "112-165"},
+    )
+    assert status == 200
+    assert payload["ctd"]["is_confirmed_source"] is False
+    assert payload["ctd"]["source"] == "MANUAL_UNCONFIRMED"
+
+
+def test_a_bloomberg_sourced_conversion_never_reads_a_ctd_from_the_request(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {
+            "ctd_source": "BLOOMBERG",
+            "contract_code": "ZN",
+            "ctd": dict(CTD, conversion_factor=0.123, ctd_identifier="USNOTREAL000"),
+            "futures_price": "112-165",
+        },
+    )
+    assert status == 200
+    # The request's own CTD is ignored entirely.
+    assert payload["ctd"]["conversion_factor"] == 0.9069
+    assert payload["ctd"]["ctd_identifier"] == "US91282CQT17"
+
+
+def test_a_bloomberg_sourced_conversion_needs_a_contract_code(server_url: str) -> None:
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd_source": "BLOOMBERG", "futures_price": "112-165"},
+    )
+    assert status == 400
+    assert "contract_code" in payload["error"]
+
+
+def test_an_unknown_ctd_source_mode_is_refused(server_url: str) -> None:
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd_source": "GUESS", "ctd": dict(CTD), "futures_price": "112-165"},
+    )
+    assert status == 400
+    assert "ctd_source" in payload["error"]
+
+
+def test_a_bloomberg_sourced_conversion_reports_a_failed_fetch_rather_than_answering(
+    server_url: str,
+) -> None:
+    # No fake installed: the live fetch cannot succeed here.
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd_source": "BLOOMBERG", "contract_code": "ZN", "futures_price": "112-165"},
+    )
+    assert status == 502
+    assert payload["automatic_source_available"] is False
+    assert "implied_yield" not in payload
+
+
 @pytest.mark.parametrize("contract_code", SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES)
-def test_the_automatic_ctd_route_reports_unavailable_rather_than_inventing_data(
+def test_an_unreachable_bloomberg_reports_the_failure_rather_than_inventing_data(
     server_url: str, contract_code
 ) -> None:
+    # No fake installed: `blpapi` is genuinely absent here, exactly as it is
+    # on any non-Bloomberg machine.
     status, payload = _post(
         f"{server_url}/api/treasury-futures/ctd", {"contract_code": contract_code}
     )
     assert status == 502
     assert payload["automatic_source_available"] is False
-    assert "conversion_factor" in payload["error"]
-    assert "bloomberg_treasury_futures_ctd_probe.py" in payload["error"]
+    assert "blpapi is not installed" in payload["error"]
     # No CTD numbers come back at all -- there is nothing to mistake for data.
     assert "ctd_identifier" not in payload
+
+
+def test_a_bloomberg_response_missing_a_required_field_is_reported_not_patched(
+    server_url: str, monkeypatch
+) -> None:
+    _install_fake_blpapi(
+        monkeypatch, _two_stage_responder(stage_two_fields={"FUT_CTD_ISIN": "US91282CQT17"})
+    )
+    status, payload = _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
+    assert status == 502
+    assert "is missing FUT_" in payload["error"]
+    assert "ctd_identifier" not in payload
+
+
+def test_the_route_asks_bloomberg_for_the_contract_the_caller_named(
+    server_url: str, monkeypatch
+) -> None:
+    harness = _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
+    assert [security for security, _ in harness["requests"]] == [GENERIC_ZN, DELIVERY_ZN]
 
 
 def test_the_automatic_ctd_route_rejects_an_unsupported_contract(server_url: str) -> None:

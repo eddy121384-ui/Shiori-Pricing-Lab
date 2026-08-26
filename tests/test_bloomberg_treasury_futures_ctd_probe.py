@@ -5,14 +5,14 @@ These tests prove only what matters about a field-discovery probe:
 
 - it reuses the existing DAPI probe plumbing rather than opening its own
   session;
-- it probes a candidate for every required CTD field, so one workstation run
-  is conclusive;
+- its default candidate list is empty now that every required CTD field is
+  confirmed, so a run cannot silently re-probe a resolved field;
 - it prints exactly which security it asked about, so nobody has to guess
   what produced the evidence;
 - it reports a bad/absent field instead of aborting the run -- that outcome
   is the result, not a failure;
-- and it confirms nothing on its own: no candidate here is wired into
-  `BLOOMBERG_CTD_FIELD_MAP` by running it.
+- and it confirms nothing on its own: running it wires nothing into
+  `BLOOMBERG_CTD_FIELD_MAP`.
 
 No network access and no real `blpapi`: the two DAPI entry points the script
 uses are replaced with stand-ins.
@@ -76,22 +76,34 @@ def fake_dapi(monkeypatch):
     return calls
 
 
-def test_a_candidate_exists_for_every_required_ctd_field() -> None:
-    # One workstation run has to be able to resolve all six, or the probe
-    # sends Eddy back to the terminal a second time for no reason.
-    destinations = set(module._CANDIDATE_CTD_FIELDS.values())
-    assert set(REQUIRED_BLOOMBERG_CTD_FIELDS).issubset(destinations)
+def test_the_candidate_list_is_empty_now_that_every_field_is_confirmed() -> None:
+    # Same shape `bloomberg_dapi_probe`'s own list took once its candidates
+    # were resolved: the confirmed mnemonics live in the production module,
+    # and re-probing them proves nothing.
+    assert module._CANDIDATE_CTD_FIELDS == {}
+    assert set(REQUIRED_BLOOMBERG_CTD_FIELDS).issubset(set(BLOOMBERG_CTD_FIELD_MAP))
 
 
 def test_every_candidate_destination_is_a_real_required_field() -> None:
+    # Vacuous while the list is empty, and the guard that matters the moment a
+    # genuinely new candidate is added back.
     for field, destination in module._CANDIDATE_CTD_FIELDS.items():
         assert destination in REQUIRED_BLOOMBERG_CTD_FIELDS, field
 
 
+def test_a_run_with_no_explicit_fields_probes_nothing(fake_dapi) -> None:
+    # With every field resolved there is nothing to probe by default, so the
+    # run refuses rather than re-asking Bloomberg about confirmed mnemonics.
+    assert module.main(["--contract", "ZN"]) == 2
+    assert fake_dapi["probe"] == []
+
+
 def test_running_the_probe_confirms_nothing_on_its_own(fake_dapi) -> None:
-    # The RED gate: a probe run reports evidence, it does not wire a mapping.
-    assert module.main(["--contract", "ZN"]) == 0
-    assert BLOOMBERG_CTD_FIELD_MAP == {}
+    # The discipline that outlives the RED gate: a probe run reports evidence,
+    # it never wires a mapping.
+    before = dict(BLOOMBERG_CTD_FIELD_MAP)
+    assert module.main(["--contract", "ZN", "--fields", "SOME_NEW_CANDIDATE"]) == 0
+    assert BLOOMBERG_CTD_FIELD_MAP == before
 
 
 def test_the_default_security_is_the_generic_front_contract_per_code() -> None:
@@ -106,14 +118,14 @@ def test_an_unsupported_contract_code_is_refused_not_guessed() -> None:
         module.default_security("ZQ")
 
 
-def test_the_default_run_probes_all_four_mvp_contracts(fake_dapi) -> None:
-    assert module.main([]) == 0
+def test_all_four_mvp_contracts_are_probed_when_fields_are_given(fake_dapi) -> None:
+    assert module.main(["--fields", "SOME_NEW_CANDIDATE"]) == 0
     probed = [security for security, _ in fake_dapi["probe"]]
     assert probed == ["TU1 Comdty", "FV1 Comdty", "TY1 Comdty", "US1 Comdty"]
 
 
 def test_an_explicit_security_is_sent_verbatim(fake_dapi) -> None:
-    assert module.main(["--security", "TYZ6 Comdty"]) == 0
+    assert module.main(["--security", "TYZ6 Comdty", "--fields", "SOME_NEW_CANDIDATE"]) == 0
     assert [security for security, _ in fake_dapi["probe"]] == ["TYZ6 Comdty"]
 
 
@@ -123,7 +135,7 @@ def test_explicit_fields_override_the_candidate_list(fake_dapi) -> None:
 
 
 def test_the_probed_security_and_every_field_outcome_are_printed(fake_dapi, capsys) -> None:
-    module.main(["--contract", "ZN"])
+    module.main(["--contract", "ZN", "--fields", "CAND_A,CAND_B,CAND_C"])
     output = capsys.readouterr().out
     assert "TY1 Comdty" in output
     # A returned value, an absent field and a field exception all appear --
@@ -131,16 +143,23 @@ def test_the_probed_security_and_every_field_outcome_are_printed(fake_dapi, caps
     assert "returned" in output
     assert "absent" in output
     assert "field_exception" in output
-    for field in module._CANDIDATE_CTD_FIELDS:
+    for field in ("CAND_A", "CAND_B", "CAND_C"):
         assert field in output
 
 
-def test_the_run_states_that_nothing_is_confirmed_yet(fake_dapi, capsys) -> None:
-    module.main(["--contract", "ZN"])
+def test_the_run_prints_the_confirmed_mapping_and_says_what_is_still_unresolved(
+    fake_dapi, capsys
+) -> None:
+    module.main(["--contract", "ZN", "--fields", "SOME_NEW_CANDIDATE"])
     output = capsys.readouterr().out
+    # Every confirmed destination and its mnemonic, so a run always states
+    # what is already wired before reporting anything new.
+    for logical_field, mnemonic in BLOOMBERG_CTD_FIELD_MAP.items():
+        assert logical_field in output
+        assert mnemonic in output
+    assert "Still unresolved:      none" in output
+    # Anything actually probed is still labelled unconfirmed.
     assert "UNCONFIRMED candidate" in output
-    for field in REQUIRED_BLOOMBERG_CTD_FIELDS:
-        assert field in output
 
 
 def test_a_dictionary_lookup_failure_does_not_stop_the_reference_probe(
@@ -150,7 +169,7 @@ def test_a_dictionary_lookup_failure_does_not_stop_the_reference_probe(
         raise RuntimeError("apiflds unavailable")
 
     monkeypatch.setattr(module, "describe_fields", _raise)
-    assert module.main(["--contract", "ZN"]) == 0
+    assert module.main(["--contract", "ZN", "--fields", "SOME_NEW_CANDIDATE"]) == 0
     assert "apiflds unavailable" in capsys.readouterr().out
 
 
@@ -162,6 +181,6 @@ def test_a_missing_blpapi_is_reported_as_a_workstation_prerequisite(
 
     monkeypatch.setattr(module, "describe_fields", _raise_import)
     monkeypatch.setattr(module, "probe_fields", _raise_import)
-    assert module.main(["--contract", "ZN"]) == 2
+    assert module.main(["--contract", "ZN", "--fields", "SOME_NEW_CANDIDATE"]) == 2
     captured = capsys.readouterr()
     assert "Bloomberg-networked" in captured.err
