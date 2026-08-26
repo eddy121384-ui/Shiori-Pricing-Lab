@@ -41,6 +41,7 @@ from ovme_vcub_dcf_convention_experiment import (  # noqa: E402
     build_date_roles,
     candidate_pairs,
     candidate_year_fractions,
+    display_interval_width,
     identical_multiplier_groups,
     implied_ratio_interval,
     is_consistent,
@@ -438,10 +439,12 @@ def test_separation_is_guaranteed_only_beyond_the_display_quantum():
         leap_mismatch,
         sigma_vcub=sigma_vcub,
         sigma_yield_quantum=0.01,
+        sigma_yield_rounding=NEAREST,
         lambda_vcub=1.0,
     )
     assert fine_screen.centre_gap == pytest.approx(0.13690, rel=1e-3)
     assert fine_screen.clear_gap == pytest.approx(0.13690 - 0.01, rel=1e-2)
+    assert fine_screen.yield_interval_width == 0.01
     assert fine_screen.guaranteed_separable
 
     coarse_screen = separation(
@@ -449,19 +452,82 @@ def test_separation_is_guaranteed_only_beyond_the_display_quantum():
         leap_mismatch,
         sigma_vcub=sigma_vcub,
         sigma_yield_quantum=1.0,
+        sigma_yield_rounding=NEAREST,
         lambda_vcub=1.0,
     )
     assert not coarse_screen.guaranteed_separable
 
 
+def test_an_unconfirmed_rounding_rule_needs_a_wider_gap_before_separation_is_guaranteed():
+    """One displayed value spans 1.5 quanta when the rounding rule is unknown."""
+
+    assert display_interval_width(0.01, NEAREST) == 0.01
+    assert display_interval_width(0.01, DisplayRounding.TRUNCATED) == 0.01
+    assert display_interval_width(0.01, DisplayRounding.UNKNOWN) == 0.015
+
+    ratio_one = CandidatePair("v", "b", 2.0, 2.0)
+    # Chosen so the clear gap lands between one quantum and one and a half:
+    # separable under a known rule, not under an unconfirmed one.
+    just_above_one_quantum = CandidatePair("v", "b2", 2.0 * 1.00012**2, 2.0)
+    sigma_vcub = DisplayedVol(100.0, 0.001, NEAREST)
+
+    known_rule = separation(
+        ratio_one,
+        just_above_one_quantum,
+        sigma_vcub=sigma_vcub,
+        sigma_yield_quantum=0.01,
+        sigma_yield_rounding=NEAREST,
+        lambda_vcub=1.0,
+    )
+    unknown_rule = separation(
+        ratio_one,
+        just_above_one_quantum,
+        sigma_vcub=sigma_vcub,
+        sigma_yield_quantum=0.01,
+        sigma_yield_rounding=DisplayRounding.UNKNOWN,
+        lambda_vcub=1.0,
+    )
+
+    assert 0.01 < known_rule.clear_gap < 0.015
+    assert known_rule.guaranteed_separable
+    assert not unknown_rule.guaranteed_separable
+
+
+def test_algebraically_equal_multipliers_group_even_a_bit_apart():
+    """`(34/360)/(34/365)` and `(35/360)/(35/365)` are both `365/360`.
+
+    They differ in the last bit of a float. Grouping on float identity
+    would report a permanent ambiguity as a mere precision problem.
+    """
+
+    thirty_four_days = CandidatePair("v34", "b34", 34 / 360, 34 / 365)
+    thirty_five_days = CandidatePair("v35", "b35", 35 / 360, 35 / 365)
+
+    assert thirty_four_days.vol_multiplier != thirty_five_days.vol_multiplier
+    assert identical_multiplier_groups([thirty_four_days, thirty_five_days]) == (
+        (thirty_four_days, thirty_five_days),
+    )
+    assert (
+        pairs_without_guaranteed_separation(
+            [thirty_four_days, thirty_five_days],
+            sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
+            sigma_yield_quantum=0.01,
+            sigma_yield_rounding=NEAREST,
+            lambda_vcub=1.0,
+        )
+        == ()
+    )
+
+
 def test_separation_refuses_a_non_positive_quantum():
     pair = CandidatePair("v", "b", 1.0, 1.0)
-    with pytest.raises(ValueError, match="sigma_yield_quantum"):
+    with pytest.raises(ValueError, match="display quantum"):
         separation(
             pair,
             pair,
             sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
             sigma_yield_quantum=0.0,
+            sigma_yield_rounding=NEAREST,
             lambda_vcub=1.0,
         )
 
@@ -486,6 +552,7 @@ def test_candidates_sharing_a_multiplier_are_reported_as_permanently_ambiguous()
             [left, right],
             sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
             sigma_yield_quantum=0.01,
+            sigma_yield_rounding=NEAREST,
             lambda_vcub=1.0,
         )
         == ()
@@ -527,6 +594,7 @@ def test_a_present_day_two_year_expiry_cannot_separate_act_act_from_act_365f_at_
         ratio_one,
         sigma_vcub=sigma_vcub,
         sigma_yield_quantum=0.1,
+        sigma_yield_rounding=NEAREST,
         lambda_vcub=1.0,
     )
     assert coarse.centre_gap == pytest.approx(0.0582, rel=1e-2)
@@ -537,6 +605,7 @@ def test_a_present_day_two_year_expiry_cannot_separate_act_act_from_act_365f_at_
         ratio_one,
         sigma_vcub=sigma_vcub,
         sigma_yield_quantum=0.01,
+        sigma_yield_rounding=NEAREST,
         lambda_vcub=1.0,
     )
     assert fine.guaranteed_separable
@@ -618,6 +687,7 @@ def test_a_design_run_reports_separability_only_for_a_stated_yield_precision():
         lambda_vcub=1.0,
         sigma_yield=None,
         sigma_yield_quantum=0.1,
+        sigma_yield_rounding=NEAREST,
     )
     assert "sigma_Y^N quantum 0.1" in with_precision
     assert "is not guaranteed to separate" in with_precision
@@ -635,6 +705,7 @@ def test_an_observed_yield_vol_and_a_design_quantum_cannot_both_be_supplied():
             lambda_vcub=1.0,
             sigma_yield=DisplayedVol(100.0, 0.01, NEAREST),
             sigma_yield_quantum=0.01,
+            sigma_yield_rounding=NEAREST,
         )
 
 

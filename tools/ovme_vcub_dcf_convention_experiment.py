@@ -294,6 +294,31 @@ class DisplayedVol:
         return (self.value - half, self.value + self.quantum)
 
 
+#: Multipliers this close together are the same hypothesis. Algebraically
+#: equal ratios reached through different day counts can differ in the last
+#: bit or two of a float (`(34/360)/(34/365)` against `(35/360)/(35/365)`),
+#: and that difference is arithmetic noise, not a distinguishable convention:
+#: it sits ~1e-12 below the smallest real candidate difference this
+#: experiment ever has to resolve.
+MULTIPLIER_EQUIVALENCE_RELATIVE_TOLERANCE = 1e-12
+
+
+def display_interval_width(quantum: float, rounding: DisplayRounding) -> float:
+    """Return how wide one displayed value's interval is under `rounding`.
+
+    Round-to-nearest and truncation both span one quantum; an unconfirmed
+    rule spans one and a half, because it is the union of the two. This is
+    the width that decides whether one displayed value can be consistent
+    with two candidates at once -- the quantum alone understates it.
+    """
+
+    if not (isfinite(quantum) and quantum > 0):
+        raise ValueError(f"display quantum must be finite and positive, got {quantum!r}")
+    if not isinstance(rounding, DisplayRounding):
+        raise ValueError(f"rounding must be a DisplayRounding, got {rounding!r}")
+    return quantum * (1.5 if rounding is DisplayRounding.UNKNOWN else 1.0)
+
+
 def _require_positive_lambda(lambda_vcub: float) -> float:
     if not (isfinite(lambda_vcub) and lambda_vcub > 0):
         raise ValueError(f"lambda_vcub must be finite and positive, got {lambda_vcub!r}")
@@ -380,21 +405,22 @@ class Separation:
     right: CandidatePair
     centre_gap: float
     clear_gap: float
-    yield_quantum: float
+    yield_interval_width: float
 
     @property
     def guaranteed_separable(self) -> bool:
         """Whether *every* possible displayed `σ_Y^N` excludes one of the two.
 
-        True only when the predicted intervals are further apart than the
-        `σ_Y^N` display quantum, so no displayed value can be consistent
-        with both. False is the weaker statement it sounds like: separation
+        True only when the predicted intervals are further apart than one
+        displayed value's own interval -- one quantum when the rounding
+        rule is known, one and a half when it is not -- so no displayed
+        value can be consistent with both. False is the weaker statement it sounds like: separation
         is not *guaranteed*, and a particular capture may still land where
         one candidate is excluded. It is never a claim that the two can
         never be separated -- only an identical multiplier is that.
         """
 
-        return self.clear_gap > self.yield_quantum
+        return self.clear_gap > self.yield_interval_width
 
 
 def separation(
@@ -403,14 +429,12 @@ def separation(
     *,
     sigma_vcub: DisplayedVol,
     sigma_yield_quantum: float,
+    sigma_yield_rounding: DisplayRounding,
     lambda_vcub: float,
 ) -> Separation:
     """Return the separation between two candidate pairs' predicted `σ_Y^N`."""
 
-    if not (isfinite(sigma_yield_quantum) and sigma_yield_quantum > 0):
-        raise ValueError(
-            f"sigma_yield_quantum must be finite and positive, got {sigma_yield_quantum!r}"
-        )
+    width = display_interval_width(sigma_yield_quantum, sigma_yield_rounding)
     left_low, left_high = predicted_yield_vol_interval(
         left, sigma_vcub=sigma_vcub, lambda_vcub=lambda_vcub
     )
@@ -426,27 +450,55 @@ def separation(
         right=right,
         centre_gap=centre_gap,
         clear_gap=centre_gap - half_widths,
-        yield_quantum=sigma_yield_quantum,
+        yield_interval_width=width,
     )
+
+
+def _multiplier_clusters(
+    pairs: Sequence[CandidatePair], relative_tolerance: float
+) -> tuple[tuple[CandidatePair, ...], ...]:
+    """Group candidates whose multipliers are equal within `relative_tolerance`."""
+
+    if not (isfinite(relative_tolerance) and relative_tolerance > 0):
+        raise ValueError(
+            f"relative_tolerance must be finite and positive, got {relative_tolerance!r}"
+        )
+    clusters: list[list[CandidatePair]] = []
+    for pair in sorted(pairs, key=lambda candidate: candidate.vol_multiplier):
+        multiplier = pair.vol_multiplier
+        if clusters:
+            anchor = clusters[-1][0].vol_multiplier
+            tolerance = relative_tolerance * max(abs(multiplier), abs(anchor))
+            if abs(multiplier - anchor) <= tolerance:
+                clusters[-1].append(pair)
+                continue
+        clusters.append([pair])
+    return tuple(tuple(cluster) for cluster in clusters)
 
 
 def identical_multiplier_groups(
     pairs: Sequence[CandidatePair],
+    *,
+    relative_tolerance: float = MULTIPLIER_EQUIVALENCE_RELATIVE_TOLERANCE,
 ) -> tuple[tuple[CandidatePair, ...], ...]:
     """Return the groups of candidates no vol capture can ever separate.
 
-    Candidates sharing a volatility multiplier exactly -- ACT/360 on both
-    legs and ACT/365F on both legs, for instance -- produce the same
-    `σ_Y^N` for every input, at every precision. This is the only genuine
-    "never": these convention pairs are permanently indistinguishable by
-    this experiment, and they are reported rather than dropped, because
-    that is exactly the ambiguity Issue #192 must not hide.
+    Candidates sharing a volatility multiplier -- ACT/360 on both legs and
+    ACT/365F on both legs, for instance -- produce the same `σ_Y^N` for
+    every input, at every precision. This is the only genuine "never":
+    these convention pairs are permanently indistinguishable by this
+    experiment, and they are reported rather than dropped, because that is
+    exactly the ambiguity Issue #192 must not hide.
+
+    Equality is `relative_tolerance`, not float identity: the same ratio
+    reached through different day counts can land a bit or two apart, and
+    calling that a distinguishable pair would report a permanent ambiguity
+    as a precision problem.
     """
 
-    grouped: dict[float, list[CandidatePair]] = {}
-    for pair in pairs:
-        grouped.setdefault(pair.vol_multiplier, []).append(pair)
-    return tuple(tuple(group) for group in grouped.values() if len(group) > 1)
+    return tuple(
+        cluster for cluster in _multiplier_clusters(pairs, relative_tolerance) if len(cluster) > 1
+    )
 
 
 def pairs_without_guaranteed_separation(
@@ -454,7 +506,9 @@ def pairs_without_guaranteed_separation(
     *,
     sigma_vcub: DisplayedVol,
     sigma_yield_quantum: float,
+    sigma_yield_rounding: DisplayRounding,
     lambda_vcub: float,
+    relative_tolerance: float = MULTIPLIER_EQUIVALENCE_RELATIVE_TOLERANCE,
 ) -> tuple[Separation, ...]:
     """Return every pair of candidates this precision cannot be relied on to separate.
 
@@ -463,16 +517,22 @@ def pairs_without_guaranteed_separation(
     ambiguity, not a precision one, and mixing the two would misstate both.
     """
 
+    cluster_of = {
+        id(pair): index
+        for index, cluster in enumerate(_multiplier_clusters(pairs, relative_tolerance))
+        for pair in cluster
+    }
     unseparated: list[Separation] = []
     for index, left in enumerate(pairs):
         for right in pairs[index + 1 :]:
-            if left.vol_multiplier == right.vol_multiplier:
+            if cluster_of[id(left)] == cluster_of[id(right)]:
                 continue
             gap = separation(
                 left,
                 right,
                 sigma_vcub=sigma_vcub,
                 sigma_yield_quantum=sigma_yield_quantum,
+                sigma_yield_rounding=sigma_yield_rounding,
                 lambda_vcub=lambda_vcub,
             )
             if not gap.guaranteed_separable:
@@ -512,6 +572,7 @@ def render_report(
     lambda_vcub: float,
     sigma_yield: DisplayedVol | None,
     sigma_yield_quantum: float | None = None,
+    sigma_yield_rounding: DisplayRounding | None = None,
 ) -> str:
     """Return the human-readable experiment report.
 
@@ -521,10 +582,17 @@ def render_report(
     ratios and says the separability question needs that precision.
     """
 
-    if sigma_yield is not None and sigma_yield_quantum is not None:
+    if sigma_yield is not None and (
+        sigma_yield_quantum is not None or sigma_yield_rounding is not None
+    ):
         raise ValueError(
-            "sigma_yield_quantum is for a design run only; an observed sigma_yield "
-            "already carries its own display quantum"
+            "sigma_yield_quantum / sigma_yield_rounding are for a design run only; an "
+            "observed sigma_yield already carries its own display precision"
+        )
+    if (sigma_yield_quantum is None) != (sigma_yield_rounding is None):
+        raise ValueError(
+            "a design run needs both sigma_yield_quantum and sigma_yield_rounding: how "
+            "coarse the screen is and how it rounds both decide what it can separate"
         )
 
     lines: list[str] = []
@@ -627,9 +695,10 @@ def render_report(
     lines.append("")
 
     quantum = sigma_yield.quantum if sigma_yield is not None else sigma_yield_quantum
-    if quantum is None:
+    rounding = sigma_yield.rounding if sigma_yield is not None else sigma_yield_rounding
+    if quantum is None or rounding is None:
         lines.append(
-            "Separability not reported: it needs the sigma_Y^N display quantum, and "
+            "Separability not reported: it needs the sigma_Y^N display precision, and "
             "this run supplied neither an observed sigma_Y^N nor --sigma-yield-quantum."
         )
         return "\n".join(lines) + "\n"
@@ -637,10 +706,13 @@ def render_report(
         ordered,
         sigma_vcub=sigma_vcub,
         sigma_yield_quantum=quantum,
+        sigma_yield_rounding=rounding,
         lambda_vcub=lambda_vcub,
     )
+    width = display_interval_width(quantum, rounding)
     lines.append(
-        f"Candidate pairs this display precision (sigma_Y^N quantum {quantum!r}) is not "
+        f"Candidate pairs this display precision (sigma_Y^N quantum {quantum!r}, "
+        f"{rounding.value} rounding -> one displayed value spans {width!r}) is not "
         f"guaranteed to separate: {len(unseparated)}"
     )
     lines.append(
@@ -649,7 +721,7 @@ def render_report(
     )
     for gap in unseparated[:20]:
         lines.append(
-            f"  gap {gap.clear_gap:+.6f} <= quantum {gap.yield_quantum!r}: "
+            f"  gap {gap.clear_gap:+.6f} <= displayed width {gap.yield_interval_width!r}: "
             f"({gap.left.vcub_label} / {gap.left.bondvol_label}) vs "
             f"({gap.right.vcub_label} / {gap.right.bondvol_label})"
         )
@@ -761,6 +833,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             lambda_vcub=args.lambda_vcub,
             sigma_yield=sigma_yield,
             sigma_yield_quantum=None if sigma_yield is not None else args.sigma_yield_quantum,
+            sigma_yield_rounding=(
+                None
+                if sigma_yield is not None or args.sigma_yield_quantum is None
+                else rounding
+            ),
         )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
