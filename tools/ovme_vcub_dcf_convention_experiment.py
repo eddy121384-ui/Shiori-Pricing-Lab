@@ -1,0 +1,896 @@
+"""OVME `DCF_VCUB` / `DCF_BondVol` candidate-convention experiment (Issue #192).
+
+Bounded, **offline**, read-only methodology diagnostic -- not part of the
+production pricing path, never imported by it, and it pins nothing. It
+contains no Bloomberg number, no Bloomberg connection, and no default
+convention: every value it reports is either supplied by the operator or
+computed from supplied dates.
+
+Annex A §A.8.5 states Bloomberg's OVME total-variance bridge
+
+```text
+(σ_Y^N)^2 × DCF_BondVol(t0, TE) = (λ_vcub × σ_vcub)^2 × DCF_VCUB(t0, TE)
+```
+
+and keeps both day-count conventions RED: Shiori may not assume they are
+equal, may not default the ratio to 1, and may not guess. Issue #192 asks
+for the *controlled experiment* that would discriminate the candidates
+quantitatively. This module is that experiment's deterministic half:
+
+1. it builds every **candidate year fraction** as an explicit
+   (date role × day-count convention) pair -- the day count alone is not a
+   candidate, because a one-day difference in the end date (`TE` vs the
+   forward settlement date `TF`) moves the volatility multiplier by as much
+   as the whole ACT/ACT-vs-ACT/365F effect at the same horizon;
+2. it crosses the two legs into candidate pairs and reports each pair's
+   `DCF_VCUB`, `DCF_BondVol`, ratio and volatility multiplier
+   `sqrt(DCF_VCUB / DCF_BondVol)`;
+3. given one live OVME observation (`σ_vcub`, `σ_Y^N`, `λ_vcub`, and the
+   **display quantum** of each volatility), it reports the implied ratio as
+   an *interval* built from the display rounding, marks which candidate
+   pairs survive it, and reports, pair by pair, whether the display
+   precision could have separated them at all.
+
+Point 3 is the part the issue insists on: a candidate is never chosen for
+"looking closest". A candidate pair is reported as surviving only if its
+predicted `σ_Y^N` interval intersects the displayed `σ_Y^N` interval, and
+two candidates are reported as *guaranteed* separable only if their
+predicted intervals are further apart than the display quantum -- and
+candidates sharing a multiplier exactly are reported as permanently
+indistinguishable, which is the only "never" this experiment can state.
+
+**Display rounding.** Whether a screen rounds to nearest or truncates
+changes which interval a displayed number stands for, so the rule is a
+required input: `--display-rounding unknown` takes the union of both and
+can only ever fail to exclude a convention, never exclude one wrongly.
+
+**Units.** Every volatility here is in the operator's own display unit
+(Bloomberg quotes VCUB normal vol in basis points, per Annex A §A.8.1) and
+is never converted: the ratio is scale-invariant, so the arithmetic is
+valid in any single consistent unit, and refusing to convert keeps this
+diagnostic out of the `bp` / decimal normalization contract that belongs to
+the canonical store.
+
+**Day counts.** The ACT/ACT (ISDA) and ACT/365F year fractions reuse the
+existing `pricing/bli_valuation_time.py` helpers rather than re-deriving
+leap-year arithmetic. ACT/360 is computed here as `days / 360`; the
+existing `pricing/bli_repo_carry_forward.py` ACT/360 helper is deliberately
+**not** reused, because that one is the repo *accrual* term -- a different
+contract that this issue explicitly forbids conflating with a volatility
+annualization convention.
+
+**One command, run wherever the OVME numbers were written down**::
+
+    python tools/ovme_vcub_dcf_convention_experiment.py \\
+        --pricing-date 2026-08-26 \\
+        --expiry-date 2028-12-31 \\
+        --forward-settlement-date 2029-01-02 \\
+        --sigma-vcub 89.15 --sigma-vcub-quantum 0.01 \\
+        --sigma-yield 89.20 --sigma-yield-quantum 0.01 \\
+        --display-rounding unknown \\
+        --lambda-vcub 1.0
+
+Omit `--sigma-yield` to get the design half alone: the candidate ratios,
+and -- if `--sigma-yield-quantum` says what precision the screen will
+have -- what that precision could ever separate, before spending a live
+capture.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from enum import Enum
+from math import isfinite, sqrt
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from shiori_pricing_lab.pricing.bli_valuation_time import (  # noqa: E402
+    actual_actual_isda_year_fraction_between_datetimes,
+    year_fraction_to_expiry,
+)
+
+#: ACT/360's fixed denominator, named here so the number never appears bare.
+#: Deliberately *not* imported from the repo-carry module: that constant is
+#: the repo accrual basis, and Issue #192 forbids inferring a volatility
+#: annualization convention from an accrual convention.
+ACT_360_BASIS_DAYS = 360.0
+
+
+def _act_act_isda_year_fraction(start: date, end: date) -> float:
+    """Return the date-based ACT/ACT (ISDA) year fraction."""
+
+    return actual_actual_isda_year_fraction_between_datetimes(
+        datetime(start.year, start.month, start.day, tzinfo=UTC),
+        datetime(end.year, end.month, end.day, tzinfo=UTC),
+    )
+
+
+def _act_365f_year_fraction(start: date, end: date) -> float:
+    """Return the ACT/365F year fraction."""
+
+    return year_fraction_to_expiry(start.isoformat(), end.isoformat())
+
+
+def _act_360_year_fraction(start: date, end: date) -> float:
+    """Return the ACT/360 year fraction (`days / 360`)."""
+
+    if end <= start:
+        raise ValueError(f"end ({end.isoformat()!r}) must be strictly after {start.isoformat()!r}")
+    return (end - start).days / ACT_360_BASIS_DAYS
+
+
+#: The candidate day counts Issue #192 names. No entry is a default and no
+#: entry is evidence: this is the set the experiment discriminates between.
+CANDIDATE_DAY_COUNTS: dict[str, Callable[[date, date], float]] = {
+    "ACT/ACT ISDA": _act_act_isda_year_fraction,
+    "ACT/365F": _act_365f_year_fraction,
+    "ACT/360": _act_360_year_fraction,
+}
+
+
+@dataclass(frozen=True)
+class DateRole:
+    """One start/end date-role candidate, e.g. `t0 -> TE`.
+
+    The role is part of the candidate, not a fixed input: Issue #192 asks
+    for the start/end date semantics to be pinned alongside the day count,
+    and at every horizon reachable from a present-day pricing date the
+    `TE` / `TF` choice is worth at least as much volatility as the choice
+    between ACT/ACT ISDA and ACT/365F.
+    """
+
+    name: str
+    start: date
+    end: date
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("DateRole.name must not be empty")
+        if self.end <= self.start:
+            raise ValueError(
+                f"DateRole {self.name!r}: end ({self.end.isoformat()}) must be strictly "
+                f"after start ({self.start.isoformat()})"
+            )
+
+    @property
+    def calendar_days(self) -> int:
+        return (self.end - self.start).days
+
+
+def candidate_year_fractions(
+    roles: Sequence[DateRole],
+    day_counts: Mapping[str, Callable[[date, date], float]] = CANDIDATE_DAY_COUNTS,
+) -> dict[str, float]:
+    """Return `{"<role> <day count>": year fraction}` for every combination.
+
+    Raises `ValueError` on a duplicate role name, so two different date
+    pairs can never hide behind one label in a report.
+    """
+
+    seen: set[str] = set()
+    candidates: dict[str, float] = {}
+    for role in roles:
+        if role.name in seen:
+            raise ValueError(f"duplicate date-role name: {role.name!r}")
+        seen.add(role.name)
+        for convention, year_fraction in day_counts.items():
+            candidates[f"{role.name} {convention}"] = year_fraction(role.start, role.end)
+    if not candidates:
+        raise ValueError("at least one date role and one day count are required")
+    return candidates
+
+
+@dataclass(frozen=True)
+class CandidatePair:
+    """One `(DCF_VCUB, DCF_BondVol)` convention hypothesis."""
+
+    vcub_label: str
+    bondvol_label: str
+    dcf_vcub: float
+    dcf_bondvol: float
+
+    @property
+    def ratio(self) -> float:
+        """`DCF_VCUB / DCF_BondVol`."""
+
+        return self.dcf_vcub / self.dcf_bondvol
+
+    @property
+    def vol_multiplier(self) -> float:
+        """`sqrt(DCF_VCUB / DCF_BondVol)` -- the factor applied to `λ σ_vcub`."""
+
+        return sqrt(self.ratio)
+
+
+def candidate_pairs(
+    vcub_candidates: Mapping[str, float],
+    bondvol_candidates: Mapping[str, float],
+) -> tuple[CandidatePair, ...]:
+    """Return every `(VCUB leg, BondVol leg)` combination of the two candidate sets."""
+
+    if not vcub_candidates or not bondvol_candidates:
+        raise ValueError("both legs need at least one candidate year fraction")
+    pairs: list[CandidatePair] = []
+    for vcub_label, dcf_vcub in vcub_candidates.items():
+        for bondvol_label, dcf_bondvol in bondvol_candidates.items():
+            if not (dcf_vcub > 0 and dcf_bondvol > 0):
+                raise ValueError(
+                    "candidate year fractions must be strictly positive "
+                    f"({vcub_label!r}={dcf_vcub!r}, {bondvol_label!r}={dcf_bondvol!r})"
+                )
+            pairs.append(CandidatePair(vcub_label, bondvol_label, dcf_vcub, dcf_bondvol))
+    return tuple(pairs)
+
+
+class DisplayRounding(Enum):
+    """How a screen turns a full-precision number into the digits shown.
+
+    The rule is an input, never an assumption: round-to-nearest and
+    truncation put the true value in *different* intervals, so guessing it
+    can exclude a convention that the evidence does not exclude.
+    `UNKNOWN` is the honest default posture -- it takes the union of both,
+    which is wider and can only ever fail to exclude.
+    """
+
+    NEAREST = "nearest"
+    TRUNCATED = "truncated"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class DisplayedVol:
+    """A volatility as Bloomberg displayed it, with its display precision.
+
+    `quantum` is the smallest increment the screen can show (`0.01` for a
+    value displayed as `89.15` in basis points). `rounding` says how the
+    screen produced those digits and must be stated: nothing here assumes
+    the screen carries more precision than it shows, and nothing here
+    assumes which way it dropped the rest.
+
+    `reconstruction_uncertainty` widens the interval by that much either
+    side, for a volatility this run *reconstructed* rather than read off a
+    screen. `sigma_vcub` is the case in point: it is interpolated out of a
+    VCUB surface, so how far apart two defensible interpolations of the same
+    capture sit is a real uncertainty, and on a live case it can dwarf the
+    display quantum by two orders of magnitude -- far enough to change which
+    candidates survive. Leaving it at zero would let this diagnostic report
+    a one-candidate survivor set that is an artifact of one interpolation
+    choice. It is
+    stated by the caller and never inferred: this module cannot know how
+    Bloomberg interpolates its own cube.
+    """
+
+    value: float
+    quantum: float
+    rounding: DisplayRounding
+    reconstruction_uncertainty: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not (isfinite(self.value) and self.value > 0):
+            raise ValueError(
+                f"displayed volatility must be finite and positive, got {self.value!r}"
+            )
+        if not (isfinite(self.quantum) and self.quantum > 0):
+            raise ValueError(f"display quantum must be finite and positive, got {self.quantum!r}")
+        if not (isfinite(self.reconstruction_uncertainty) and self.reconstruction_uncertainty >= 0):
+            raise ValueError(
+                "reconstruction_uncertainty must be finite and non-negative, got "
+                f"{self.reconstruction_uncertainty!r}"
+            )
+        if not isinstance(self.rounding, DisplayRounding):
+            raise ValueError(
+                f"rounding must be a DisplayRounding, got {self.rounding!r}: the display "
+                "convention is evidence, not a default"
+            )
+        # Checked on the *widened* interval, not on the quantum alone: a
+        # reconstruction uncertainty can push the lower bound to zero or
+        # below on its own, and a non-positive volatility has no ratio --
+        # `implied_ratio_interval` would divide by it.
+        low, _high = self.interval
+        if low <= 0:
+            raise ValueError(
+                f"display quantum ({self.quantum!r}) and reconstruction uncertainty "
+                f"({self.reconstruction_uncertainty!r}) are too coarse for the displayed "
+                f"value ({self.value!r}): the interval reaches {low!r}, and a volatility "
+                "interval that touches zero has no ratio"
+            )
+
+    @property
+    def interval(self) -> tuple[float, float]:
+        """Return the closed interval the true value can lie in.
+
+        Round-to-nearest puts it within half a quantum either side;
+        truncation puts it at or above the digits shown; an unconfirmed
+        rule takes the union of the two rather than picking one. Any
+        stated `reconstruction_uncertainty` widens the result either side.
+        """
+
+        half = self.quantum / 2.0
+        spread = self.reconstruction_uncertainty
+        if self.rounding is DisplayRounding.NEAREST:
+            low, high = self.value - half, self.value + half
+        elif self.rounding is DisplayRounding.TRUNCATED:
+            low, high = self.value, self.value + self.quantum
+        else:
+            low, high = self.value - half, self.value + self.quantum
+        return (low - spread, high + spread)
+
+
+#: Multipliers this close together are the same hypothesis. Algebraically
+#: equal ratios reached through different day counts can differ in the last
+#: bit or two of a float (`(34/360)/(34/365)` against `(35/360)/(35/365)`),
+#: and that difference is arithmetic noise, not a distinguishable convention:
+#: it sits ~1e-12 below the smallest real candidate difference this
+#: experiment ever has to resolve.
+MULTIPLIER_EQUIVALENCE_RELATIVE_TOLERANCE = 1e-12
+
+
+def display_interval_width(quantum: float, rounding: DisplayRounding) -> float:
+    """Return how wide one displayed value's interval is under `rounding`.
+
+    Round-to-nearest and truncation both span one quantum; an unconfirmed
+    rule spans one and a half, because it is the union of the two. This is
+    the width that decides whether one displayed value can be consistent
+    with two candidates at once -- the quantum alone understates it.
+    """
+
+    if not (isfinite(quantum) and quantum > 0):
+        raise ValueError(f"display quantum must be finite and positive, got {quantum!r}")
+    if not isinstance(rounding, DisplayRounding):
+        raise ValueError(f"rounding must be a DisplayRounding, got {rounding!r}")
+    return quantum * (1.5 if rounding is DisplayRounding.UNKNOWN else 1.0)
+
+
+def _require_positive_lambda(lambda_vcub: float) -> float:
+    if not (isfinite(lambda_vcub) and lambda_vcub > 0):
+        raise ValueError(f"lambda_vcub must be finite and positive, got {lambda_vcub!r}")
+    return lambda_vcub
+
+
+def implied_ratio_interval(
+    *,
+    sigma_vcub: DisplayedVol,
+    sigma_yield: DisplayedVol,
+    lambda_vcub: float,
+) -> tuple[float, float]:
+    """Return the `DCF_VCUB / DCF_BondVol` interval implied by one observation.
+
+    From Annex A §A.8.5, `ratio = (σ_Y^N / (λ_vcub × σ_vcub))^2`. Both
+    volatilities are displayed, so the implied ratio is an interval, not a
+    number: it is widest when a high `σ_Y^N` meets a low `σ_vcub`.
+    """
+
+    scale = _require_positive_lambda(lambda_vcub)
+    vcub_low, vcub_high = sigma_vcub.interval
+    yield_low, yield_high = sigma_yield.interval
+    return (
+        (yield_low / (scale * vcub_high)) ** 2,
+        (yield_high / (scale * vcub_low)) ** 2,
+    )
+
+
+def predicted_yield_vol_interval(
+    pair: CandidatePair, *, sigma_vcub: DisplayedVol, lambda_vcub: float
+) -> tuple[float, float]:
+    """Return the `σ_Y^N` interval this candidate pair predicts.
+
+    The width comes from `σ_vcub`'s own display rounding: a candidate
+    predicts an interval, so a candidate can only ever be excluded beyond
+    that width.
+    """
+
+    scale = _require_positive_lambda(lambda_vcub)
+    low, high = sigma_vcub.interval
+    multiplier = pair.vol_multiplier
+    return (scale * multiplier * low, scale * multiplier * high)
+
+
+def is_consistent(
+    pair: CandidatePair,
+    *,
+    sigma_vcub: DisplayedVol,
+    sigma_yield: DisplayedVol,
+    lambda_vcub: float,
+) -> bool:
+    """Return whether the candidate's predicted interval meets the displayed one."""
+
+    predicted_low, predicted_high = predicted_yield_vol_interval(
+        pair, sigma_vcub=sigma_vcub, lambda_vcub=lambda_vcub
+    )
+    observed_low, observed_high = sigma_yield.interval
+    return predicted_low <= observed_high and observed_low <= predicted_high
+
+
+def surviving_candidates(
+    pairs: Sequence[CandidatePair],
+    *,
+    sigma_vcub: DisplayedVol,
+    sigma_yield: DisplayedVol,
+    lambda_vcub: float,
+) -> tuple[CandidatePair, ...]:
+    """Return the candidate pairs one observation cannot exclude."""
+
+    return tuple(
+        pair
+        for pair in pairs
+        if is_consistent(
+            pair, sigma_vcub=sigma_vcub, sigma_yield=sigma_yield, lambda_vcub=lambda_vcub
+        )
+    )
+
+
+@dataclass(frozen=True)
+class Separation:
+    """How far apart two candidate pairs' predicted `σ_Y^N` are."""
+
+    left: CandidatePair
+    right: CandidatePair
+    centre_gap: float
+    clear_gap: float
+    yield_interval_width: float
+
+    @property
+    def guaranteed_separable(self) -> bool:
+        """Whether *every* possible displayed `σ_Y^N` excludes one of the two.
+
+        True only when the predicted intervals are further apart than one
+        displayed value's own interval -- one quantum when the rounding
+        rule is known, one and a half when it is not -- so no displayed
+        value can be consistent with both. False is the weaker statement it sounds like: separation
+        is not *guaranteed*, and a particular capture may still land where
+        one candidate is excluded. It is never a claim that the two can
+        never be separated -- only an identical multiplier is that.
+        """
+
+        return self.clear_gap > self.yield_interval_width
+
+
+def separation(
+    left: CandidatePair,
+    right: CandidatePair,
+    *,
+    sigma_vcub: DisplayedVol,
+    sigma_yield_quantum: float,
+    sigma_yield_rounding: DisplayRounding,
+    lambda_vcub: float,
+) -> Separation:
+    """Return the separation between two candidate pairs' predicted `σ_Y^N`."""
+
+    width = display_interval_width(sigma_yield_quantum, sigma_yield_rounding)
+    left_low, left_high = predicted_yield_vol_interval(
+        left, sigma_vcub=sigma_vcub, lambda_vcub=lambda_vcub
+    )
+    right_low, right_high = predicted_yield_vol_interval(
+        right, sigma_vcub=sigma_vcub, lambda_vcub=lambda_vcub
+    )
+    left_centre = (left_low + left_high) / 2.0
+    right_centre = (right_low + right_high) / 2.0
+    centre_gap = abs(left_centre - right_centre)
+    half_widths = (left_high - left_low) / 2.0 + (right_high - right_low) / 2.0
+    return Separation(
+        left=left,
+        right=right,
+        centre_gap=centre_gap,
+        clear_gap=centre_gap - half_widths,
+        yield_interval_width=width,
+    )
+
+
+def _multiplier_clusters(
+    pairs: Sequence[CandidatePair], relative_tolerance: float
+) -> tuple[tuple[CandidatePair, ...], ...]:
+    """Group candidates whose multipliers are equal within `relative_tolerance`."""
+
+    if not (isfinite(relative_tolerance) and relative_tolerance > 0):
+        raise ValueError(
+            f"relative_tolerance must be finite and positive, got {relative_tolerance!r}"
+        )
+    clusters: list[list[CandidatePair]] = []
+    for pair in sorted(pairs, key=lambda candidate: candidate.vol_multiplier):
+        multiplier = pair.vol_multiplier
+        if clusters:
+            anchor = clusters[-1][0].vol_multiplier
+            tolerance = relative_tolerance * max(abs(multiplier), abs(anchor))
+            if abs(multiplier - anchor) <= tolerance:
+                clusters[-1].append(pair)
+                continue
+        clusters.append([pair])
+    return tuple(tuple(cluster) for cluster in clusters)
+
+
+def identical_multiplier_groups(
+    pairs: Sequence[CandidatePair],
+    *,
+    relative_tolerance: float = MULTIPLIER_EQUIVALENCE_RELATIVE_TOLERANCE,
+) -> tuple[tuple[CandidatePair, ...], ...]:
+    """Return the groups of candidates no vol capture can ever separate.
+
+    Candidates sharing a volatility multiplier -- ACT/360 on both legs and
+    ACT/365F on both legs, for instance -- produce the same `σ_Y^N` for
+    every input, at every precision. This is the only genuine "never":
+    these convention pairs are permanently indistinguishable by this
+    experiment, and they are reported rather than dropped, because that is
+    exactly the ambiguity Issue #192 must not hide.
+
+    Equality is `relative_tolerance`, not float identity: the same ratio
+    reached through different day counts can land a bit or two apart, and
+    calling that a distinguishable pair would report a permanent ambiguity
+    as a precision problem.
+    """
+
+    return tuple(
+        cluster for cluster in _multiplier_clusters(pairs, relative_tolerance) if len(cluster) > 1
+    )
+
+
+def pairs_without_guaranteed_separation(
+    pairs: Sequence[CandidatePair],
+    *,
+    sigma_vcub: DisplayedVol,
+    sigma_yield_quantum: float,
+    sigma_yield_rounding: DisplayRounding,
+    lambda_vcub: float,
+    relative_tolerance: float = MULTIPLIER_EQUIVALENCE_RELATIVE_TOLERANCE,
+) -> tuple[Separation, ...]:
+    """Return every pair of candidates this precision cannot be relied on to separate.
+
+    Candidates sharing a multiplier exactly are excluded here and reported
+    by :func:`identical_multiplier_groups` instead: they are a permanent
+    ambiguity, not a precision one, and mixing the two would misstate both.
+    """
+
+    cluster_of = {
+        id(pair): index
+        for index, cluster in enumerate(_multiplier_clusters(pairs, relative_tolerance))
+        for pair in cluster
+    }
+    unseparated: list[Separation] = []
+    for index, left in enumerate(pairs):
+        for right in pairs[index + 1 :]:
+            if cluster_of[id(left)] == cluster_of[id(right)]:
+                continue
+            gap = separation(
+                left,
+                right,
+                sigma_vcub=sigma_vcub,
+                sigma_yield_quantum=sigma_yield_quantum,
+                sigma_yield_rounding=sigma_yield_rounding,
+                lambda_vcub=lambda_vcub,
+            )
+            if not gap.guaranteed_separable:
+                unseparated.append(gap)
+    return tuple(unseparated)
+
+
+def build_date_roles(
+    *,
+    pricing_date: date,
+    expiry_date: date,
+    forward_settlement_date: date | None = None,
+    spot_settlement_date: date | None = None,
+) -> tuple[DateRole, ...]:
+    """Return the date-role candidates implied by the supplied dates.
+
+    `t0 -> TE` always exists. Each optional date adds the roles it makes
+    possible; nothing is invented, and no settlement lag is derived from a
+    calendar this diagnostic does not have.
+    """
+
+    roles = [DateRole("t0->TE", pricing_date, expiry_date)]
+    if forward_settlement_date is not None:
+        roles.append(DateRole("t0->TF", pricing_date, forward_settlement_date))
+    if spot_settlement_date is not None:
+        roles.append(DateRole("spot->TE", spot_settlement_date, expiry_date))
+        if forward_settlement_date is not None:
+            roles.append(DateRole("spot->TF", spot_settlement_date, forward_settlement_date))
+    return tuple(roles)
+
+
+def render_report(
+    *,
+    roles: Sequence[DateRole],
+    pairs: Sequence[CandidatePair],
+    sigma_vcub: DisplayedVol,
+    lambda_vcub: float,
+    sigma_yield: DisplayedVol | None,
+    sigma_yield_quantum: float | None = None,
+    sigma_yield_rounding: DisplayRounding | None = None,
+) -> str:
+    """Return the human-readable experiment report.
+
+    `sigma_yield_quantum` supplies the `σ_Y^N` display precision for a
+    design run that has no observation yet. It is never guessed from
+    `σ_vcub`'s own quantum: without it a design run reports the candidate
+    ratios and says the separability question needs that precision.
+    """
+
+    if sigma_yield is not None and (
+        sigma_yield_quantum is not None or sigma_yield_rounding is not None
+    ):
+        raise ValueError(
+            "sigma_yield_quantum / sigma_yield_rounding are for a design run only; an "
+            "observed sigma_yield already carries its own display precision"
+        )
+    if (sigma_yield_quantum is None) != (sigma_yield_rounding is None):
+        raise ValueError(
+            "a design run needs both sigma_yield_quantum and sigma_yield_rounding: how "
+            "coarse the screen is and how it rounds both decide what it can separate"
+        )
+
+    lines: list[str] = []
+    lines.append("OVME DCF_VCUB / DCF_BondVol candidate-convention experiment (Issue #192)")
+    lines.append("")
+    lines.append("This report pins nothing. It states what the supplied dates imply and,")
+    lines.append("if an observation was supplied, which candidates it cannot exclude.")
+    lines.append("")
+
+    lines.append("Date roles")
+    for role in roles:
+        lines.append(
+            f"  {role.name:<10} {role.start.isoformat()} -> {role.end.isoformat()}  "
+            f"calendar days = {role.calendar_days}"
+        )
+    lines.append("")
+
+    lines.append(f"lambda_vcub = {lambda_vcub!r}")
+    lines.append(
+        f"sigma_vcub  = {sigma_vcub.value!r} (display quantum {sigma_vcub.quantum!r}, "
+        f"reconstruction uncertainty {sigma_vcub.reconstruction_uncertainty!r}, "
+        f"interval [{sigma_vcub.interval[0]!r}, {sigma_vcub.interval[1]!r}])"
+    )
+    if sigma_yield is None:
+        lines.append("sigma_Y^N   = not supplied (design run: candidate ratios only)")
+        implied: tuple[float, float] | None = None
+    else:
+        lines.append(
+            f"sigma_Y^N   = {sigma_yield.value!r} (display quantum {sigma_yield.quantum!r}, "
+            f"rounding interval [{sigma_yield.interval[0]!r}, {sigma_yield.interval[1]!r}])"
+        )
+        implied = implied_ratio_interval(
+            sigma_vcub=sigma_vcub, sigma_yield=sigma_yield, lambda_vcub=lambda_vcub
+        )
+        lines.append(f"implied ratio interval = [{implied[0]!r}, {implied[1]!r}]")
+    lines.append("")
+
+    header = (
+        f"{'candidate DCF_VCUB':<26} {'candidate DCF_BondVol':<26} "
+        f"{'DCF_VCUB':>12} {'DCF_BondVol':>12} {'ratio':>12} {'multiplier':>12} "
+        f"{'predicted sigma_Y^N':>22}"
+    )
+    if sigma_yield is not None:
+        header += f" {'abs err':>12} {'rel err':>12} {'survives':>9}"
+    lines.append("Candidate table")
+    if sigma_yield is not None:
+        lines.append(
+            "  (abs / rel err are stated against the implied ratio interval's centre; "
+            "'survives' is interval intersection, never the smallest error)"
+        )
+    lines.append("  " + header)
+    ordered = sorted(pairs, key=lambda pair: (pair.ratio, pair.vcub_label, pair.bondvol_label))
+    for pair in ordered:
+        low, high = predicted_yield_vol_interval(
+            pair, sigma_vcub=sigma_vcub, lambda_vcub=lambda_vcub
+        )
+        row = (
+            f"{pair.vcub_label:<26} {pair.bondvol_label:<26} "
+            f"{pair.dcf_vcub:>12.8f} {pair.dcf_bondvol:>12.8f} {pair.ratio:>12.8f} "
+            f"{pair.vol_multiplier:>12.8f} {f'[{low:.4f}, {high:.4f}]':>22}"
+        )
+        if sigma_yield is not None and implied is not None:
+            implied_centre = (implied[0] + implied[1]) / 2.0
+            absolute_error = abs(pair.ratio - implied_centre)
+            survives = is_consistent(
+                pair,
+                sigma_vcub=sigma_vcub,
+                sigma_yield=sigma_yield,
+                lambda_vcub=lambda_vcub,
+            )
+            row += (
+                f" {absolute_error:>12.8f} {absolute_error / implied_centre:>12.8f} "
+                f"{('yes' if survives else 'no'):>9}"
+            )
+        lines.append("  " + row)
+    lines.append("")
+
+    if sigma_yield is not None:
+        survivors = surviving_candidates(
+            ordered, sigma_vcub=sigma_vcub, sigma_yield=sigma_yield, lambda_vcub=lambda_vcub
+        )
+        lines.append(f"Surviving candidates: {len(survivors)} of {len(ordered)}")
+        for pair in survivors:
+            lines.append(f"  DCF_VCUB = {pair.vcub_label}   DCF_BondVol = {pair.bondvol_label}")
+        if len(survivors) != 1:
+            lines.append(
+                "  This observation does not identify a single convention pair. "
+                "Do not pick one from this list."
+            )
+        lines.append("")
+
+    permanent = identical_multiplier_groups(ordered)
+    lines.append(
+        f"Convention pairs no capture can ever separate (identical multiplier): "
+        f"{len(permanent)} group(s)"
+    )
+    for group in permanent:
+        lines.append(f"  multiplier {group[0].vol_multiplier!r}:")
+        for pair in group:
+            lines.append(f"    DCF_VCUB = {pair.vcub_label}   DCF_BondVol = {pair.bondvol_label}")
+    lines.append("")
+
+    quantum = sigma_yield.quantum if sigma_yield is not None else sigma_yield_quantum
+    rounding = sigma_yield.rounding if sigma_yield is not None else sigma_yield_rounding
+    if quantum is None or rounding is None:
+        lines.append(
+            "Separability not reported: it needs the sigma_Y^N display precision, and "
+            "this run supplied neither an observed sigma_Y^N nor --sigma-yield-quantum."
+        )
+        return "\n".join(lines) + "\n"
+    unseparated = pairs_without_guaranteed_separation(
+        ordered,
+        sigma_vcub=sigma_vcub,
+        sigma_yield_quantum=quantum,
+        sigma_yield_rounding=rounding,
+        lambda_vcub=lambda_vcub,
+    )
+    width = display_interval_width(quantum, rounding)
+    lines.append(
+        f"Candidate pairs this display precision (sigma_Y^N quantum {quantum!r}, "
+        f"{rounding.value} rounding -> one displayed value spans {width!r}) is not "
+        f"guaranteed to separate: {len(unseparated)}"
+    )
+    lines.append(
+        "  (a capture may still exclude one of a pair listed here; what it cannot do is "
+        "be relied on to)"
+    )
+    for gap in unseparated[:20]:
+        lines.append(
+            f"  gap {gap.clear_gap:+.6f} <= displayed width {gap.yield_interval_width!r}: "
+            f"({gap.left.vcub_label} / {gap.left.bondvol_label}) vs "
+            f"({gap.right.vcub_label} / {gap.right.bondvol_label})"
+        )
+    if len(unseparated) > 20:
+        lines.append(f"  ... and {len(unseparated) - 20} more")
+    return "\n".join(lines) + "\n"
+
+
+def _parse_date(value: str) -> date:
+    return date.fromisoformat(value)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Deterministic OVME DCF_VCUB / DCF_BondVol candidate-convention experiment "
+            "(Issue #192). Pins nothing; reports what the supplied dates and one "
+            "supplied observation can and cannot establish."
+        )
+    )
+    parser.add_argument("--pricing-date", required=True, type=_parse_date, help="t0 (YYYY-MM-DD)")
+    parser.add_argument("--expiry-date", required=True, type=_parse_date, help="TE (YYYY-MM-DD)")
+    parser.add_argument(
+        "--forward-settlement-date",
+        type=_parse_date,
+        default=None,
+        help="TF, the bond forward settlement date, if it is known for this case",
+    )
+    parser.add_argument(
+        "--spot-settlement-date",
+        type=_parse_date,
+        default=None,
+        help="the spot settlement date, if the start-date role is also in question",
+    )
+    parser.add_argument(
+        "--sigma-vcub",
+        required=True,
+        type=float,
+        help="the resolved VCUB normal swaption vol, in its own display unit",
+    )
+    parser.add_argument(
+        "--sigma-vcub-quantum",
+        required=True,
+        type=float,
+        help="the smallest increment that vol's display can show (e.g. 0.01)",
+    )
+    parser.add_argument(
+        "--sigma-yield",
+        type=float,
+        default=None,
+        help="OVME's displayed normal bond yield vol, in the same unit as --sigma-vcub",
+    )
+    parser.add_argument(
+        "--sigma-yield-quantum",
+        type=float,
+        default=None,
+        help=(
+            "the smallest increment OVME's normal yield vol display can show; required "
+            "with --sigma-yield, and usable alone to ask a design run what that "
+            "precision could ever separate"
+        ),
+    )
+    parser.add_argument(
+        "--sigma-vcub-reconstruction-uncertainty",
+        type=float,
+        default=0.0,
+        help=(
+            "how far a defensible alternative interpolation of the same VCUB capture "
+            "moves --sigma-vcub, in the same unit. Widens the sigma_vcub interval either "
+            "side; state it whenever sigma_vcub was interpolated rather than read off a cell"
+        ),
+    )
+    parser.add_argument(
+        "--display-rounding",
+        required=True,
+        choices=[rule.value for rule in DisplayRounding],
+        help=(
+            "how OVME's displays produce the digits shown: 'nearest', 'truncated', or "
+            "'unknown' for the conservative union of both. Applies to every displayed "
+            "volatility in this run; it is never assumed"
+        ),
+    )
+    parser.add_argument(
+        "--lambda-vcub",
+        required=True,
+        type=float,
+        help="the bond-specific scaling factor actually in force for the observed case",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.sigma_yield is not None and args.sigma_yield_quantum is None:
+        parser.error("--sigma-yield needs --sigma-yield-quantum: its display precision")
+
+    try:
+        roles = build_date_roles(
+            pricing_date=args.pricing_date,
+            expiry_date=args.expiry_date,
+            forward_settlement_date=args.forward_settlement_date,
+            spot_settlement_date=args.spot_settlement_date,
+        )
+        candidates = candidate_year_fractions(roles)
+        pairs = candidate_pairs(candidates, candidates)
+        rounding = DisplayRounding(args.display_rounding)
+        sigma_vcub = DisplayedVol(
+            args.sigma_vcub,
+            args.sigma_vcub_quantum,
+            rounding,
+            args.sigma_vcub_reconstruction_uncertainty,
+        )
+        sigma_yield = (
+            None
+            if args.sigma_yield is None
+            else DisplayedVol(args.sigma_yield, args.sigma_yield_quantum, rounding)
+        )
+        report = render_report(
+            roles=roles,
+            pairs=pairs,
+            sigma_vcub=sigma_vcub,
+            lambda_vcub=args.lambda_vcub,
+            sigma_yield=sigma_yield,
+            sigma_yield_quantum=None if sigma_yield is not None else args.sigma_yield_quantum,
+            sigma_yield_rounding=(
+                None
+                if sigma_yield is not None or args.sigma_yield_quantum is None
+                else rounding
+            ),
+        )
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    print(report, end="")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    raise SystemExit(main())

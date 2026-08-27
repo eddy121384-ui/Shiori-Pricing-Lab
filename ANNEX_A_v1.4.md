@@ -621,6 +621,8 @@ Bloomberg 的精確關係以 total variance 對齊兩邊 day-count convention：
 
 **RED stop condition：** Bloomberg source evidence 在本版尚未把 `DCF_BondVol` 與 `DCF_VCUB` 的具體 day-count convention 完整 pin 下。當 `BOND_VOL_SOURCE_MODE = VCUB_NORMAL_PROXY` 時，兩個 convention identifiers 與 year-fraction 規則在未被 evidence / live parity 明確確認前，**pricing 必須在推導 `σ_Y^N` 之前 fail closed**。實作不得自行假設二者相同、不得默認 ratio = 1、不得猜測 convention、也不得直接省略 ratio。若 Trader 要繞過此 VCUB blocker，只能顯式切換到經核准且完整 audit 的 `DIRECT_PRICE_VOL` source mode；不得以 override 方式偽造 VCUB convention。
 
+**Date-role semantics 同屬未 pin（Issue #192）：** 上式括號中的 `(t0, TE)` 只是記號，不代表 start / end date role 已被 evidence 確認。start 端（valuation date `t0` 抑或 spot settlement date）與 end 端（option expiry `TE` 抑或 bond forward settlement date `TF`）在本版同樣 unresolved，且必須與 day-count convention **一起** pin：量化上，以當前 pricing date 可達的到期日而言，end date 相差一個日曆日對 `σ_Y^N` 的影響，與 ACT/ACT ISDA 對 ACT/365F 的整體差異同一量級，因此只 pin 其中之一並不能決定 ratio。此量化比較與 candidate 判別可由 `tools/ovme_vcub_dcf_convention_experiment.py`（offline、不進 pricing path）重現。
+
 ### A.8.6 Normal Yield Vol → Lognormal Bond Price Vol
 
 Bloomberg OVME 採 first-order duration approximation：
