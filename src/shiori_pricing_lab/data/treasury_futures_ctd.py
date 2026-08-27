@@ -58,6 +58,43 @@ confirmed rejections** -- the run reported no per-field ``BAD_FLD`` evidence
 for them individually, so this module does not claim any of them is invalid.
 Re-adding one still requires its own confirmation.
 
+**Deliberately NOT validated: the CTD's deliverable-maturity window.** A
+coherent CTD belonging to a *different* Treasury contract would still pass
+every guard above -- the identifier is checksum-valid, the numbers are sane,
+the delivery date precedes maturity -- because nothing here ties the CTD's
+maturity to the contract it is supposed to be deliverable into. That gap is
+real (Codex review, PR #191). It is left open on purpose, because closing it
+on inferred conventions demonstrably breaks live data:
+
+The CBOT windows are measured from the **first day of the delivery month**,
+not from the last delivery day. ``FUT_DLV_DT_LAST`` is the only date this
+module receives, and for ZT and ZF the last delivery day falls in the month
+*after* the delivery month. Measuring from it is therefore off by one month,
+and against Eddy's own confirmed CTDs that one month is decisive:
+
+=====  =========================  =========================  ==============
+Code   From 1st of delivery month  From last delivery day     Window
+=====  =========================  =========================  ==============
+ZT     1y 9m  (in window)          1y 8m  (REJECTED)          >= 1y 9m
+ZF     4y 2m  (in window)          4y 1m  (REJECTED)          >= 4y 2m
+ZN     6y 8m  (in window)          6y 8m  (in window)         6.5y - 10y
+ZB     18y 8m (in window)          18y 7m (in window)         15y - 25y
+=====  =========================  =========================  ==============
+
+Two of the four real CTDs sit exactly on their window's lower bound, so any
+error in the bound, the measurement basis, or the month arithmetic turns a
+correct live load into a hard failure -- an outage on a desk tool, from a
+guard meant to prevent a rarer fault. Adding it needs Eddy to confirm, per
+contract: the exact window bounds, the reference date they are measured from,
+and whether the original-issue-maturity leg applies. That is a pricing-method
+input under AGENTS.md rule 7, not something this module may infer.
+
+What already narrows the gap: stage one's resolved symbol must carry this
+contract's own root and a quarterly delivery month, and every response's
+``security`` element must equal the security requested -- so the record is
+tied to the delivery-month contract that was asked about. What is not caught
+is Bloomberg answering that specific contract with another contract's CTD.
+
 **Manual entry remains a first-class debug/fallback path, and is always
 visibly unconfirmed.** A record built that way carries
 ``TreasuryFuturesCTDSource.MANUAL_UNCONFIRMED`` and its own operator-supplied
