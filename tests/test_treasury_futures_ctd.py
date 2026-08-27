@@ -453,16 +453,24 @@ def test_a_blank_required_ctd_field_is_as_missing_as_an_absent_one(
         "US91282CQT178",     # 13 characters
         "US91282CQT1!",      # non-alphanumeric
         "US91282C QT17",     # embedded space
+        # Codex review, PR #191 (second round): 12 alphanumeric characters is
+        # not enough. These all pass a shape check.
+        "US91282CQT18",      # transposed/mistyped check digit
+        "US91282CQT10",
+        "US91282CQT16",
+        "DE91282CQT17",      # a non-U.S. country prefix
+        "GB0002634946",      # a real, checksum-valid, non-U.S. ISIN
     ],
 )
-def test_an_identifier_that_is_not_isin_shaped_is_refused(
+def test_an_identifier_that_is_not_a_valid_us_isin_is_refused(
     monkeypatch, bogus_identifier
 ) -> None:
-    """Codex review, PR #191 (P1).
+    """Codex review, PR #191 (P1, then P2).
 
     A present-but-meaningless identifier must never reach a confirmed-source
-    record. Same 12-alphanumeric rule the workbench's own bond-identifier
-    parser applies to a trader-entered ISIN.
+    record. Shape alone is not enough: a wrong check digit or a non-U.S.
+    country prefix both pass 12-alphanumeric, and the CTD of a U.S. Treasury
+    futures contract is by definition a checksum-valid U.S. Treasury ISIN.
     """
 
     fields = dict(LIVE_ZN_STAGE_TWO, FUT_CTD_ISIN=bogus_identifier)
@@ -470,6 +478,23 @@ def test_an_identifier_that_is_not_isin_shaped_is_refused(
     with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
         load_bloomberg_ctd_metadata("ZN")
     assert "FUT_CTD_ISIN" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "live_isin",
+    ["US91282CHK09", "US91282CPN55", "US91282CQT17", "US912810UL07"],
+)
+def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_isin) -> None:
+    """The guard against getting the ISO 6166 parity backwards.
+
+    Doubling from the wrong digit makes *every* real ISIN look invalid, which
+    would fail every live load closed. These are the four CTD ISINs Eddy's
+    workstation run actually returned; all four must pass.
+    """
+
+    fields = dict(LIVE_ZN_STAGE_TWO, FUT_CTD_ISIN=live_isin)
+    _install_fake_blpapi(monkeypatch, _two_stage_responder(stage_two_fields=fields))
+    assert load_bloomberg_ctd_metadata("ZN").ctd_identifier == live_isin
 
 
 @pytest.mark.parametrize(
@@ -482,6 +507,13 @@ def test_an_identifier_that_is_not_isin_shaped_is_refused(
         "TYU",      # no year digits
         "TY",       # bare root
         "TYUX",     # non-numeric year
+        # Codex review, PR #191: standard futures months these contracts do
+        # not list. The full twelve-month alphabet admitted these.
+        "TYF7",     # January
+        "TYG7",     # February
+        "TYJ7",     # April
+        "TYN6",     # July
+        "TYV6",     # October
     ],
 )
 def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, resolved) -> None:
@@ -507,12 +539,24 @@ def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, res
 
 @pytest.mark.parametrize(
     "contract_code, resolved",
-    [("ZT", "TUU6"), ("ZF", "FVU6"), ("ZN", "TYU6"), ("ZB", "USU6")],
+    [
+        ("ZT", "TUU6"),
+        ("ZF", "FVU6"),
+        ("ZN", "TYU6"),
+        ("ZB", "USU6"),
+        # The rest of the quarterly cycle these contracts list, so the guard
+        # cannot be narrowed to the one month the live run happened to be in.
+        ("ZN", "TYH7"),
+        ("ZN", "TYM7"),
+        ("ZN", "TYZ6"),
+        ("ZB", "USH7"),
+        ("ZT", "TUZ6"),
+    ],
 )
 def test_each_contracts_own_delivery_month_is_accepted(
     monkeypatch, contract_code, resolved
 ) -> None:
-    # The four Eddy's live run actually returned.
+    # The four Eddy's live run returned, plus the rest of the quarterly cycle.
     _install_fake_blpapi(
         monkeypatch,
         _two_stage_responder(

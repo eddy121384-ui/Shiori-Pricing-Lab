@@ -410,22 +410,72 @@ def _require_answered(answered: dict[str, str], field: str, security: str) -> st
     return raw_value.strip()
 
 
-#: Standard futures delivery-month letters. Treasury futures use the
-#: quarterly subset, but the full set is what makes this a shape check rather
-#: than a second assertion about which months these contracts list.
-_FUTURES_DELIVERY_MONTH_CODES = "FGHJKMNQUVXZ"
+#: The delivery months the four supported CBOT Treasury futures actually
+#: list: the quarterly March/June/September/December cycle (Codex review, PR
+#: #191). Deliberately narrower than the standard twelve-month futures
+#: alphabet, which admitted symbols such as ``TYF7`` that are not ZN delivery
+#: contracts at all.
+#:
+#: This is a *guard against a malformed stage-one response*, not an
+#: authoritative statement of the listing cycle -- all four confirmed samples
+#: are ``U`` (September), so the quarterly restriction rests on the contracts'
+#: published cycle rather than on four observations. If Bloomberg ever
+#: legitimately answers with a serial month, this fails closed naming that
+#: month, which is a visible error to act on rather than a silent wrong
+#: answer.
+TREASURY_FUTURES_DELIVERY_MONTH_CODES = "HMUZ"
+
 _ISIN_LENGTH = 12
+
+#: Every U.S. Treasury carries a ``US``-prefixed ISIN, and the CTD of a U.S.
+#: Treasury futures contract is by definition a U.S. Treasury. All four
+#: confirmed CTDs are ``US...``.
+_US_ISIN_COUNTRY_PREFIX = "US"
+
+
+def _isin_check_digit_is_valid(identifier: str) -> bool:
+    """ISO 6166 check digit: expand letters to two-digit values, then Luhn.
+
+    Doubling starts at the second digit **from the right** -- the check digit
+    itself is never doubled. (Getting that parity backwards makes every real
+    ISIN look invalid, which is how this implementation was verified: against
+    the four CTD ISINs Eddy's live run returned, all of which must pass.)
+    """
+
+    digits = "".join(str(int(character, 36)) for character in identifier)
+    total = 0
+    double = False
+    for character in reversed(digits):
+        value = int(character)
+        if double:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+        double = not double
+    return total % 10 == 0
 
 
 def _require_isin(raw_value: str, field: str, security: str) -> str:
-    """Require an ISIN-shaped identifier: 12 alphanumeric characters.
+    """Require a genuine U.S. ISIN, not merely an ISIN-shaped string.
 
     Bloomberg can answer a field with a sentinel (``#N/A N/A``) or a
-    placeholder that is neither absent nor blank. Such a value would reach the
-    record as the CTD's identity on an ``is_confirmed_source: true`` result --
-    a live-confirmed record that does not identify a bond (Codex review, PR
-    #191). Same 12-alphanumeric rule ``bloomberg_bond_quote.parse_bond_identifier``
-    already applies to a trader-entered ISIN.
+    placeholder that is neither absent nor blank, and a 12-alphanumeric shape
+    check alone still admits a transposed or mistyped identifier whose check
+    digit is wrong (Codex review, PR #191). Any of those would reach the
+    record as the CTD's identity on an ``is_confirmed_source: true`` result.
+    Three checks, in order of how much they narrow:
+
+    1. 12 alphanumeric characters -- the shape
+       ``bloomberg_bond_quote.parse_bond_identifier`` already requires;
+    2. the ``US`` country prefix -- the CTD of a U.S. Treasury futures
+       contract is a U.S. Treasury;
+    3. the ISO 6166 check digit.
+
+    Deliberately stricter than the trader-entry parser, which checks only the
+    shape. A trader's typo is visible to them and correctable on the spot; a
+    silently wrong identifier arriving from a live feed is stamped confirmed
+    and shown as market data.
     """
 
     identifier = raw_value.strip().upper()
@@ -433,6 +483,17 @@ def _require_isin(raw_value: str, field: str, security: str) -> str:
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI field {field} on {security!r} did not return a 12-character "
             f"alphanumeric ISIN: {raw_value!r}"
+        )
+    if not identifier.startswith(_US_ISIN_COUNTRY_PREFIX):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned a non-U.S. ISIN "
+            f"{identifier!r} -- the CTD of a U.S. Treasury futures contract must be a "
+            "U.S. Treasury"
+        )
+    if not _isin_check_digit_is_valid(identifier):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned {identifier!r}, whose "
+            "ISO 6166 check digit is invalid"
         )
     return identifier
 
@@ -445,8 +506,10 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
     would fetch that *other* contract's perfectly valid CTD and this module
     would return it labelled with the requested ``contract_code``, so pricing
     would apply one contract's quote convention to another's CTD metadata
-    (Codex review, PR #191). The root is the check that matters; the month
-    letter and year digits are a shape check on top.
+    (Codex review, PR #191). The root is the check that matters; the delivery
+    month must be one these contracts actually list -- the quarterly
+    ``HMUZ`` cycle, not the full twelve-month futures alphabet, which admitted
+    symbols such as ``TYF7``.
     """
 
     symbol = contract_symbol.strip().upper()
@@ -455,13 +518,14 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
     if (
         not symbol.startswith(expected_root)
         or len(remainder) < 2
-        or remainder[0] not in _FUTURES_DELIVERY_MONTH_CODES
+        or remainder[0] not in TREASURY_FUTURES_DELIVERY_MONTH_CODES
         or not remainder[1:].isdigit()
     ):
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI resolved {security!r} to {contract_symbol!r}, which is not a "
             f"{contract_code} delivery month (expected the {expected_root} root followed by "
-            "a delivery-month letter and year digits)"
+            f"one of the quarterly delivery months {TREASURY_FUTURES_DELIVERY_MONTH_CODES} "
+            "and year digits)"
         )
     return symbol
 
