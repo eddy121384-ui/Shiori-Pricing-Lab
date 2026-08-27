@@ -289,10 +289,17 @@ class DisplayedVol:
                 f"rounding must be a DisplayRounding, got {self.rounding!r}: the display "
                 "convention is evidence, not a default"
             )
-        if self.quantum >= 2 * self.value:
+        # Checked on the *widened* interval, not on the quantum alone: a
+        # reconstruction uncertainty can push the lower bound to zero or
+        # below on its own, and a non-positive volatility has no ratio --
+        # `implied_ratio_interval` would divide by it.
+        low, _high = self.interval
+        if low <= 0:
             raise ValueError(
-                f"display quantum ({self.quantum!r}) is too coarse for the displayed "
-                f"value ({self.value!r}): the rounding interval would reach zero"
+                f"display quantum ({self.quantum!r}) and reconstruction uncertainty "
+                f"({self.reconstruction_uncertainty!r}) are too coarse for the displayed "
+                f"value ({self.value!r}): the interval reaches {low!r}, and a volatility "
+                "interval that touches zero has no ratio"
             )
 
     @property

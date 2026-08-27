@@ -427,6 +427,26 @@ def test_displayed_vol_refuses_a_quantum_that_swallows_the_value():
         DisplayedVol(0.004, 0.01, NEAREST)
 
 
+@pytest.mark.parametrize("uncertainty", [0.995, 1.5])
+def test_a_reconstruction_uncertainty_that_reaches_zero_is_refused(uncertainty):
+    """A widened interval touching zero has no ratio -- it must not reach the arithmetic.
+
+    At equality the lower bound is exactly zero, which
+    `implied_ratio_interval` would divide by; beyond it the bound goes
+    negative and squaring would hand back a finite but meaningless ratio.
+    """
+
+    with pytest.raises(ValueError, match="too coarse"):
+        DisplayedVol(1.0, 0.01, NEAREST, uncertainty)
+
+
+def test_a_reconstruction_uncertainty_just_short_of_zero_is_allowed():
+    kept = DisplayedVol(1.0, 0.01, NEAREST, 0.99)
+
+    assert kept.interval[0] > 0
+    assert kept.interval == pytest.approx((0.005, 1.995), abs=1e-12)
+
+
 def test_implied_ratio_interval_is_widest_high_yield_over_low_vcub():
     sigma_vcub = DisplayedVol(100.0, 0.01, NEAREST)
     sigma_yield = DisplayedVol(100.0, 0.01, NEAREST)
