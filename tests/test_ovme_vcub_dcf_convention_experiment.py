@@ -352,12 +352,12 @@ def test_a_candidate_excluded_on_display_alone_can_survive_a_stated_reconstructi
     """
 
     pair = CandidatePair("v", "b", 2.0, 2.0)  # ratio 1: predicts sigma_vcub itself
-    sigma_yield = DisplayedVol(82.0, 0.001, NEAREST)
+    sigma_yield = DisplayedVol(100.0, 0.001, NEAREST)  # synthetic
 
-    exact = DisplayedVol(82.66, 0.01, NEAREST)
+    exact = DisplayedVol(100.66, 0.01, NEAREST)
     assert not is_consistent(pair, sigma_vcub=exact, sigma_yield=sigma_yield, lambda_vcub=1.0)
 
-    reconstructed = DisplayedVol(82.66, 0.01, NEAREST, 0.70)
+    reconstructed = DisplayedVol(100.66, 0.01, NEAREST, 0.70)
     assert is_consistent(
         pair, sigma_vcub=reconstructed, sigma_yield=sigma_yield, lambda_vcub=1.0
     )
@@ -795,13 +795,13 @@ def test_cli_accepts_and_reports_a_reconstruction_uncertainty(capsys):
             "--expiry-date",
             "2028-12-22",
             "--sigma-vcub",
-            "82.4",
+            "100.0",
             "--sigma-vcub-quantum",
             "0.01",
             "--sigma-vcub-reconstruction-uncertainty",
             "0.26",
             "--sigma-yield",
-            "82.0",
+            "100.0",
             "--sigma-yield-quantum",
             "0.001",
             "--display-rounding",

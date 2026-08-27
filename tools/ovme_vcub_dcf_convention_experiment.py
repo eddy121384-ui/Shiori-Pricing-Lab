@@ -259,10 +259,10 @@ class DisplayedVol:
     screen. `sigma_vcub` is the case in point: it is interpolated out of a
     VCUB surface, so how far apart two defensible interpolations of the same
     capture sit is a real uncertainty, and on a live case it can dwarf the
-    display quantum -- the 2026-08-27 evidence put two admissible
-    reconstructions 0.52 bp apart while the screen quantum was 0.01 bp.
-    Leaving it at zero would let this diagnostic report a one-candidate
-    survivor set that is an artifact of one interpolation choice. It is
+    display quantum by two orders of magnitude -- far enough to change which
+    candidates survive. Leaving it at zero would let this diagnostic report
+    a one-candidate survivor set that is an artifact of one interpolation
+    choice. It is
     stated by the caller and never inferred: this module cannot know how
     Bloomberg interpolates its own cube.
     """
