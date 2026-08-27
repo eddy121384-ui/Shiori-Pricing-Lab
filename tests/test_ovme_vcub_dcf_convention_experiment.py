@@ -312,6 +312,84 @@ def test_displayed_vol_rounding_interval_follows_the_stated_display_rule():
     assert DisplayedVol(100.0, 0.01, DisplayRounding.UNKNOWN).interval == (99.995, 100.01)
 
 
+def test_reconstruction_uncertainty_widens_the_interval_either_side():
+    """A reconstructed vol carries more than its display quantum.
+
+    `sigma_vcub` is interpolated out of a surface, so the distance between
+    two defensible interpolations of one capture is a real uncertainty that
+    the display quantum does not describe.
+    """
+
+    assert DisplayedVol(100.0, 0.01, NEAREST).interval == (99.995, 100.005)
+    widened = DisplayedVol(100.0, 0.01, NEAREST, 0.25).interval
+    assert widened == pytest.approx((99.745, 100.255), abs=1e-12)
+
+    truncating = DisplayedVol(100.0, 0.01, DisplayRounding.TRUNCATED, 0.25).interval
+    assert truncating == pytest.approx((99.75, 100.26), abs=1e-12)
+
+    unknown = DisplayedVol(100.0, 0.01, DisplayRounding.UNKNOWN, 0.25).interval
+    assert unknown == pytest.approx((99.745, 100.26), abs=1e-12)
+
+
+def test_reconstruction_uncertainty_defaults_to_none_at_all():
+    assert DisplayedVol(100.0, 0.01, NEAREST).reconstruction_uncertainty == 0.0
+
+
+@pytest.mark.parametrize("bad", [-0.1, float("nan"), float("inf")])
+def test_a_negative_or_non_finite_reconstruction_uncertainty_is_refused(bad):
+    with pytest.raises(ValueError, match="reconstruction_uncertainty"):
+        DisplayedVol(100.0, 0.01, NEAREST, bad)
+
+
+def test_a_candidate_excluded_on_display_alone_can_survive_a_stated_reconstruction_spread():
+    """The live-evidence regression: excluding on an unmodelled spread is false confidence.
+
+    A candidate whose predicted `sigma_Y^N` sits well outside the observed
+    display interval is excluded when `sigma_vcub` is treated as exact to
+    its quantum, and must stop being excluded once the caller states that a
+    different, equally defensible interpolation of the same capture moves
+    `sigma_vcub` by more than that gap.
+    """
+
+    pair = CandidatePair("v", "b", 2.0, 2.0)  # ratio 1: predicts sigma_vcub itself
+    sigma_yield = DisplayedVol(82.0, 0.001, NEAREST)
+
+    exact = DisplayedVol(82.66, 0.01, NEAREST)
+    assert not is_consistent(pair, sigma_vcub=exact, sigma_yield=sigma_yield, lambda_vcub=1.0)
+
+    reconstructed = DisplayedVol(82.66, 0.01, NEAREST, 0.70)
+    assert is_consistent(
+        pair, sigma_vcub=reconstructed, sigma_yield=sigma_yield, lambda_vcub=1.0
+    )
+
+
+def test_reconstruction_uncertainty_shrinks_the_guaranteed_separation_gap():
+    left = CandidatePair("v", "b", 2.0, 2.0)
+    right = CandidatePair("v", "b2", 2.0 * 1.004, 2.0)
+
+    tight = separation(
+        left,
+        right,
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST),
+        sigma_yield_quantum=0.01,
+        sigma_yield_rounding=NEAREST,
+        lambda_vcub=1.0,
+    )
+    loose = separation(
+        left,
+        right,
+        sigma_vcub=DisplayedVol(100.0, 0.01, NEAREST, 0.30),
+        sigma_yield_quantum=0.01,
+        sigma_yield_rounding=NEAREST,
+        lambda_vcub=1.0,
+    )
+
+    assert tight.centre_gap == pytest.approx(loose.centre_gap, rel=1e-12)
+    assert tight.guaranteed_separable
+    assert loose.clear_gap < tight.clear_gap
+    assert not loose.guaranteed_separable
+
+
 def test_an_unconfirmed_display_rule_never_excludes_what_either_rule_allows():
     pair = CandidatePair("v", "b", 59 / 365, 59 / 366)
     sigma_vcub = DisplayedVol(100.0, 0.01, DisplayRounding.UNKNOWN)
@@ -707,6 +785,35 @@ def test_an_observed_yield_vol_and_a_design_quantum_cannot_both_be_supplied():
             sigma_yield_quantum=0.01,
             sigma_yield_rounding=NEAREST,
         )
+
+
+def test_cli_accepts_and_reports_a_reconstruction_uncertainty(capsys):
+    exit_code = main(
+        [
+            "--pricing-date",
+            "2026-08-27",
+            "--expiry-date",
+            "2028-12-22",
+            "--sigma-vcub",
+            "82.4",
+            "--sigma-vcub-quantum",
+            "0.01",
+            "--sigma-vcub-reconstruction-uncertainty",
+            "0.26",
+            "--sigma-yield",
+            "82.0",
+            "--sigma-yield-quantum",
+            "0.001",
+            "--display-rounding",
+            "unknown",
+            "--lambda-vcub",
+            "1.0",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "reconstruction uncertainty 0.26" in output
 
 
 def test_cli_runs_a_design_pass(capsys):

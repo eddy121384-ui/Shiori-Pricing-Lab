@@ -253,11 +253,24 @@ class DisplayedVol:
     screen produced those digits and must be stated: nothing here assumes
     the screen carries more precision than it shows, and nothing here
     assumes which way it dropped the rest.
+
+    `reconstruction_uncertainty` widens the interval by that much either
+    side, for a volatility this run *reconstructed* rather than read off a
+    screen. `sigma_vcub` is the case in point: it is interpolated out of a
+    VCUB surface, so how far apart two defensible interpolations of the same
+    capture sit is a real uncertainty, and on a live case it can dwarf the
+    display quantum -- the 2026-08-27 evidence put two admissible
+    reconstructions 0.52 bp apart while the screen quantum was 0.01 bp.
+    Leaving it at zero would let this diagnostic report a one-candidate
+    survivor set that is an artifact of one interpolation choice. It is
+    stated by the caller and never inferred: this module cannot know how
+    Bloomberg interpolates its own cube.
     """
 
     value: float
     quantum: float
     rounding: DisplayRounding
+    reconstruction_uncertainty: float = 0.0
 
     def __post_init__(self) -> None:
         if not (isfinite(self.value) and self.value > 0):
@@ -266,6 +279,11 @@ class DisplayedVol:
             )
         if not (isfinite(self.quantum) and self.quantum > 0):
             raise ValueError(f"display quantum must be finite and positive, got {self.quantum!r}")
+        if not (isfinite(self.reconstruction_uncertainty) and self.reconstruction_uncertainty >= 0):
+            raise ValueError(
+                "reconstruction_uncertainty must be finite and non-negative, got "
+                f"{self.reconstruction_uncertainty!r}"
+            )
         if not isinstance(self.rounding, DisplayRounding):
             raise ValueError(
                 f"rounding must be a DisplayRounding, got {self.rounding!r}: the display "
@@ -283,15 +301,19 @@ class DisplayedVol:
 
         Round-to-nearest puts it within half a quantum either side;
         truncation puts it at or above the digits shown; an unconfirmed
-        rule takes the union of the two rather than picking one.
+        rule takes the union of the two rather than picking one. Any
+        stated `reconstruction_uncertainty` widens the result either side.
         """
 
         half = self.quantum / 2.0
+        spread = self.reconstruction_uncertainty
         if self.rounding is DisplayRounding.NEAREST:
-            return (self.value - half, self.value + half)
-        if self.rounding is DisplayRounding.TRUNCATED:
-            return (self.value, self.value + self.quantum)
-        return (self.value - half, self.value + self.quantum)
+            low, high = self.value - half, self.value + half
+        elif self.rounding is DisplayRounding.TRUNCATED:
+            low, high = self.value, self.value + self.quantum
+        else:
+            low, high = self.value - half, self.value + self.quantum
+        return (low - spread, high + spread)
 
 
 #: Multipliers this close together are the same hypothesis. Algebraically
@@ -613,7 +635,8 @@ def render_report(
     lines.append(f"lambda_vcub = {lambda_vcub!r}")
     lines.append(
         f"sigma_vcub  = {sigma_vcub.value!r} (display quantum {sigma_vcub.quantum!r}, "
-        f"rounding interval [{sigma_vcub.interval[0]!r}, {sigma_vcub.interval[1]!r}])"
+        f"reconstruction uncertainty {sigma_vcub.reconstruction_uncertainty!r}, "
+        f"interval [{sigma_vcub.interval[0]!r}, {sigma_vcub.interval[1]!r}])"
     )
     if sigma_yield is None:
         lines.append("sigma_Y^N   = not supplied (design run: candidate ratios only)")
@@ -785,6 +808,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--sigma-vcub-reconstruction-uncertainty",
+        type=float,
+        default=0.0,
+        help=(
+            "how far a defensible alternative interpolation of the same VCUB capture "
+            "moves --sigma-vcub, in the same unit. Widens the sigma_vcub interval either "
+            "side; state it whenever sigma_vcub was interpolated rather than read off a cell"
+        ),
+    )
+    parser.add_argument(
         "--display-rounding",
         required=True,
         choices=[rule.value for rule in DisplayRounding],
@@ -820,7 +853,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidates = candidate_year_fractions(roles)
         pairs = candidate_pairs(candidates, candidates)
         rounding = DisplayRounding(args.display_rounding)
-        sigma_vcub = DisplayedVol(args.sigma_vcub, args.sigma_vcub_quantum, rounding)
+        sigma_vcub = DisplayedVol(
+            args.sigma_vcub,
+            args.sigma_vcub_quantum,
+            rounding,
+            args.sigma_vcub_reconstruction_uncertainty,
+        )
         sigma_yield = (
             None
             if args.sigma_yield is None
