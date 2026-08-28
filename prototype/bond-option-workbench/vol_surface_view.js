@@ -103,7 +103,13 @@
   // own. A value in exponential form is left exactly as it came.
   function storedValueText(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) return null;
-    const exact = String(value);
+    // `String(-0)` is "0", which would show a confirmed -0.00 cell as 0.00.
+    // The store keeps a whole `volatility_sign` column so that sign survives
+    // SQLite's REAL round trip, because the capture slice treats -0.00 and
+    // 0.00 as different readings a trader must not confirm for each other --
+    // dropping it here would undo that at the last step (Codex review,
+    // PR #195).
+    const exact = Object.is(value, -0) ? "-0" : String(value);
     if (!/^-?\d+(\.\d+)?$/.test(exact)) return exact;
     const dot = exact.indexOf(".");
     const decimals = dot === -1 ? 0 : exact.length - dot - 1;

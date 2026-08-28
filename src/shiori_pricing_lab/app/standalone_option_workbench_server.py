@@ -286,9 +286,17 @@ canonical store the confirm routes write to:
   longer match the fingerprint confirmed with them) is HTTP 400 carrying
   that refusal verbatim.
 
-Neither route writes to the store, captures, OCRs, confirms, rejects,
-prices, or calls the VCUB normal-vol resolver, and neither computes a
-volatility: every number they return is one a trader confirmed.
+Neither route stores anything, captures, OCRs, confirms, rejects, prices,
+or calls the VCUB normal-vol resolver, and neither computes a volatility:
+every number they return is one a trader confirmed. One gap remains in the
+stronger "touches no byte" reading, and it is the store's rather than these
+routes': opening a database written before Issue #185 runs that build's
+additive schema catch-up, so a browse of such a store adds the
+``value_kind`` column and the ``vol_surface_source_image`` table before
+reading it. Nothing stored changes meaning -- the catch-up is additive by
+construction -- but it is a write, and closing it needs a read-only
+connection path in ``vol_surface_store`` carrying its own schema-version
+gate (Codex review, PR #195; open for Eddy's decision).
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -2705,7 +2713,10 @@ def _storage_result(
 # confirms, rejects, OCRs, fetches Bloomberg, or prices, and neither one
 # touches the VCUB normal-vol resolver -- the Markets view draws the stored
 # nodes themselves, so no interpolated value exists to be produced, let alone
-# persisted.
+# persisted. See the module docstring for the one remaining way a browse can
+# still write: a pre-Issue-#185 database gets this build's additive schema
+# catch-up on open, which is the store's connection lifecycle rather than
+# anything these two do.
 #
 # Only ATM surfaces are offered. Everything in the store is confirmed by
 # construction (``CanonicalVolSurface`` cannot be built without a confirmer),

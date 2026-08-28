@@ -411,6 +411,42 @@ def test_every_cell_is_the_exact_stored_value_never_a_rounding(server_url, page)
     assert rows[2][2] == "82.40"
 
 
+def test_a_confirmed_negative_zero_keeps_its_sign(server_url, page) -> None:
+    # Codex review (PR #195): the store carries a whole `volatility_sign`
+    # column so -0.0 survives SQLite's REAL round trip, because the capture
+    # slice treats -0.00 and 0.00 as different readings a trader must not
+    # confirm for each other. `String(-0)` is "0", so the view was undoing
+    # that at the last step.
+    signed = {
+        **_SURFACE_A,
+        "grid": {
+            "expiries": _EXPIRIES,
+            "underlying_tenors": _TENORS,
+            "rows": [[-0.0, 0.0, *_ROWS[0][2:]], *_ROWS[1:]],
+        },
+    }
+    _route_curve_away(page)
+    _route_vol_surface(page, surfaces={"surface-a": signed})
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    first_row = page.eval_on_selector_all(
+        "#vol-surface-table-body tr:nth-child(1) td",
+        "cells => cells.map(c => c.textContent)",
+    )
+    assert first_row[0] == "-0.00"
+    assert first_row[1] == "0.00"
+
+    target = page.evaluate(
+        """() => window.__shioriTestVolSurfaceProjectedNodes()
+             .find(n => n.expiry === '1Mo' && n.tenor === '1Yr')"""
+    )
+    page.evaluate(
+        "([x, y]) => window.__shioriTestVolSurfaceHoverAt(x, y)", [target["sx"], target["sy"]]
+    )
+    assert "1Mo × 1Yr = -0.00 bp" in page.inner_text("#vol-surface-tooltip")
+
+
 def test_an_unresolved_cell_reads_as_unresolved_never_as_zero(server_url, page) -> None:
     _route_curve_away(page)
     _route_vol_surface(page)

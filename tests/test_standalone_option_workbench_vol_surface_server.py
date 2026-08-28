@@ -297,7 +297,12 @@ def test_confirming_still_creates_the_database_the_browse_would_not_have(
     assert row["surface_id"] == surface.surface_id
 
 
-def test_neither_route_writes_anything_to_the_store(server_url, store) -> None:
+def test_neither_route_writes_a_byte_to_a_current_schema_store(server_url, store) -> None:
+    # Scope, stated because Codex review (PR #195) found where it ends: this
+    # holds for a store this build wrote. Opening one written before Issue
+    # #185 runs the store's additive schema catch-up, which is a write no
+    # guard here can prevent from the route side -- see the server module's
+    # docstring.
     surface = confirmed_surface()
     store.save_confirmed_surface(surface)
     before = store.database_path.read_bytes()
