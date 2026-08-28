@@ -527,7 +527,9 @@ def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_
     workstation run actually returned; all four must pass.
     """
 
-    fields = dict(LIVE_ZN_STAGE_TWO, FUT_CTD_ISIN=live_isin)
+    # The CUSIP must travel with its own ISIN: they are not independent
+    # identifiers, and leaving ZN's behind would name a different bond.
+    fields = dict(LIVE_ZN_STAGE_TWO, FUT_CTD_ISIN=live_isin, FUT_CTD_CUSIP=live_isin[2:11])
     _install_fake_blpapi(monkeypatch, _two_stage_responder(stage_two_fields=fields))
     assert load_bloomberg_ctd_metadata("ZN").ctd_identifier == live_isin
 
@@ -793,6 +795,53 @@ def test_the_accepted_last_delivery_span_is_contract_specific(
     else:
         with pytest.raises(TreasuryFuturesCTDBloombergError):
             _load_with(monkeypatch, contract_code, stage_two=fields)
+
+
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
+def test_the_live_cusip_and_isin_name_the_same_bond(contract_code) -> None:
+    """A U.S. ISIN is ``US`` + CUSIP + check digit, so the two must agree.
+
+    Pinned across all four confirmed live CTDs: this is an identity of the
+    identifiers, so the guard below cannot reject a coherent response.
+    """
+
+    live = LIVE_STAGE_TWO[contract_code]
+    assert live["FUT_CTD_ISIN"][2:11] == live["FUT_CTD_CUSIP"]
+
+
+@pytest.mark.parametrize(
+    "cusip",
+    [
+        "91282CQT2",  # one character off -- a different security
+        "912810UL0",  # the confirmed ZB CUSIP against ZN's ISIN
+        "91282CQT",  # truncated
+        "#N/A N/A",
+    ],
+)
+def test_a_cusip_that_contradicts_the_isin_is_refused(monkeypatch, cusip) -> None:
+    """Codex review, PR #191 (P2).
+
+    A checksum-valid ISIN plus another Treasury's CUSIP named two bonds at
+    once and was still stamped confirmed. The acceptance script prints both,
+    so a parity run could be set up against the wrong one -- and the coupon,
+    maturity and factor that produced the yield might belong to the other.
+    """
+
+    fields = dict(LIVE_STAGE_TWO["ZN"], FUT_CTD_CUSIP=cusip)
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
+        _load_with(monkeypatch, "ZN", stage_two=fields)
+    assert "naming different securities" in str(exc.value)
+
+
+@pytest.mark.parametrize("cusip", ["", "   "])
+def test_a_missing_cusip_is_still_fine_only_a_contradictory_one_is_refused(
+    monkeypatch, cusip
+) -> None:
+    """The CUSIP is display-only and optional; absence must not block a load."""
+
+    fields = dict(LIVE_STAGE_TWO["ZN"], FUT_CTD_CUSIP=cusip)
+    ctd = _load_with(monkeypatch, "ZN", stage_two=fields)
+    assert ctd.ctd_identifier == "US91282CQT17"
 
 
 def test_a_wrong_day_in_the_right_month_is_still_accepted(monkeypatch) -> None:

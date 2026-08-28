@@ -750,6 +750,41 @@ def _require_remaining_maturity_plausible(
         )
 
 
+def _require_cusip_agrees_with_isin(
+    ctd_identifier: str, ctd_cusip: str | None, security: str
+) -> None:
+    """Require the display CUSIP, when present, to name the same bond as the ISIN.
+
+    A U.S. ISIN is ``US`` + the nine-character CUSIP + a check digit, so the
+    two identifiers are not independent: characters 3-11 of the ISIN *are* the
+    CUSIP. If Bloomberg answers with a checksum-valid ISIN and a CUSIP
+    belonging to a different Treasury, the record names two bonds at once and
+    was still stamped confirmed (Codex review, PR #191). The acceptance script
+    prints both, so a parity run could be set up against whichever the reader
+    happened to key in -- and the coupon, maturity and conversion factor that
+    produced the yield might belong to the other one.
+
+    This is an arithmetic identity of the identifiers, not an inferred market
+    convention, so it cannot reject a coherent response: all four confirmed
+    live CTDs satisfy it exactly. The CUSIP stays optional -- a *missing* one
+    is fine, only a *contradictory* one is refused.
+    """
+
+    if ctd_cusip is None:
+        return
+    cusip = ctd_cusip.strip().upper()
+    if not cusip:
+        return
+    embedded = ctd_identifier[2:11]
+    if cusip != embedded:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned CTD identifiers naming different securities for "
+            f"{security!r}: {BLOOMBERG_CTD_FIELD_MAP['ctd_identifier']} {ctd_identifier} "
+            f"embeds CUSIP {embedded}, but "
+            f"{BLOOMBERG_CTD_DISPLAY_FIELD_MAP['ctd_cusip']} returned {cusip}"
+        )
+
+
 def _parse_bloomberg_float(raw_value: str, field: str, security: str) -> float:
     try:
         value = float(raw_value)
@@ -881,6 +916,12 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
             f"after the CTD's maturity {ctd_maturity_date.isoformat()} for "
             f"{delivery_security!r}"
         )
+
+    _require_cusip_agrees_with_isin(
+        ctd_identifier,
+        ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_cusip"]),
+        delivery_security,
+    )
 
     # Ties the CTD to the contract it was fetched for. Live path only: a manual
     # record is always visibly MANUAL_UNCONFIRMED and never claims to be
