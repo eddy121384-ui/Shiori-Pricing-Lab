@@ -89,6 +89,7 @@
   let payload = null;
   let listLoaded = false;
   let inFlight = false;
+  let loadGeneration = 0;
   const requestedRoutes = [];
 
   // ---- Rendering the stored values -----------------------------------------
@@ -155,6 +156,22 @@
   tabVol.addEventListener("click", () => selectMarketView("vol-surface"));
 
   // ---- Loading ---------------------------------------------------------------
+
+  // Every load takes a generation, and only the newest one may touch the
+  // page. A refresh and a surface fetch can be in flight at once -- picking a
+  // snapshot starts one, and Refresh starts the other -- and an answer to a
+  // request nobody is waiting for any more must not land on top of a newer
+  // one. Without this, a listing that failed could be quietly replaced by an
+  // older surface fetch arriving after it, so a failed refresh would look
+  // like a successful load of data that is now stale (Codex review, PR #195).
+  function beginLoad() {
+    loadGeneration += 1;
+    return loadGeneration;
+  }
+
+  function isCurrentLoad(generation) {
+    return generation === loadGeneration;
+  }
 
   async function postJson(route, body) {
     requestedRoutes.push(route);
@@ -231,10 +248,12 @@
   async function loadSurfaceList() {
     if (inFlight) return;
     inFlight = true;
+    const generation = beginLoad();
     els.refreshBtn.classList.add("is-disabled");
     showOnly("loading");
     try {
       const listed = await postJson(LIST_ROUTE, {});
+      if (!isCurrentLoad(generation)) return;
       if (!listed || !Array.isArray(listed.surfaces)) {
         throw new Error('malformed response: "surfaces" must be an array');
       }
@@ -269,10 +288,13 @@
         showOnly("empty", CHOOSE_SNAPSHOT_TEXT);
       }
     } catch (error) {
+      if (!isCurrentLoad(generation)) return;
       summaries = [];
       renderSnapshotOptions();
       fail(error.message);
     } finally {
+      // Always, whichever generation this was: the button and the re-entrancy
+      // flag belong to *this* call, not to whoever superseded it.
       inFlight = false;
       els.refreshBtn.classList.remove("is-disabled");
     }
@@ -281,17 +303,17 @@
   async function loadSelectedSurface() {
     if (!selectedSurfaceId) return;
     const requestedId = selectedSurfaceId;
+    const generation = beginLoad();
     showOnly("loading");
     try {
       const fetched = await postJson(SURFACE_ROUTE, { surface_id: requestedId });
       validateSurfacePayload(fetched, requestedId);
-      // A slower earlier request must never overwrite a later selection.
-      if (selectedSurfaceId !== requestedId) return;
+      if (!isCurrentLoad(generation)) return;
       payload = fetched;
       renderSurface();
       showOnly("surface");
     } catch (error) {
-      if (selectedSurfaceId !== requestedId) return;
+      if (!isCurrentLoad(generation)) return;
       fail(error.message);
     }
   }
@@ -350,6 +372,9 @@
     selectedSurfaceId = chosen === PLACEHOLDER_VALUE ? null : chosen;
     selectionIsTraders = selectedSurfaceId !== null;
     if (!selectedSurfaceId) {
+      // Choosing the placeholder is an intent too: it supersedes whatever is
+      // still in flight, so nothing lands on the page afterwards.
+      beginLoad();
       payload = null;
       showOnly("empty", CHOOSE_SNAPSHOT_TEXT);
       return;
@@ -460,7 +485,10 @@
   let volMin = 0;
   let volMax = 0;
   let projectedNodes = [];
-  let paintOrder = [];
+  // Exactly what was painted, in the order it was painted: quads and node
+  // dots interleaved back to front. Picking walks it in reverse, so what the
+  // pointer selects is what the trader can see there.
+  let paintedItems = [];
   let hoveredNode = null;
 
   function buildSurfaceNodes() {
@@ -621,11 +649,7 @@
       painted.push({ dot: projectedNode, depth: depth - DEPTH_EPSILON });
     }
     painted.sort((a, b) => b.depth - a.depth);
-    paintOrder = painted.map((item) =>
-      item.quad
-        ? { kind: "quad", i: item.quad.i, j: item.quad.j, depth: item.depth }
-        : { kind: "dot", i: item.dot.node.i, j: item.dot.node.j, depth: item.depth }
-    );
+    paintedItems = painted;
     for (const item of painted) {
       if (item.quad) {
         ctx.beginPath();
@@ -831,19 +855,44 @@
     };
   }
 
-  function nodeAt(x, y) {
-    let best = null;
-    let bestDistance = PICK_RADIUS * PICK_RADIUS;
-    for (const projectedNode of projectedNodes) {
-      const dx = projectedNode.sx - x;
-      const dy = projectedNode.sy - y;
-      const distance = dx * dx + dy * dy;
-      if (distance <= bestDistance) {
-        bestDistance = distance;
-        best = projectedNode;
+  // Ray casting rather than a convexity test: a cell's four corners carry
+  // four independent vols, so they are not coplanar and their projection is
+  // not reliably convex.
+  function pointInQuad(corners, x, y) {
+    let inside = false;
+    for (let index = 0, previous = corners.length - 1; index < corners.length; index += 1) {
+      const a = corners[index];
+      const b = corners[previous];
+      if (
+        a.sy > y !== b.sy > y &&
+        x < ((b.sx - a.sx) * (y - a.sy)) / (b.sy - a.sy) + a.sx
+      ) {
+        inside = !inside;
       }
+      previous = index;
     }
-    return best;
+    return inside;
+  }
+
+  // What the pointer is over, decided by walking the paint order from the
+  // front. The first node dot within the pick radius is a hit; a quad
+  // covering the pointer first is a stop, because a node behind it is not
+  // visible and reporting its coordinates would name a point the trader
+  // cannot see (Codex review, PR #195). A node's dot is painted in front of
+  // every quad it is a corner of, so its own mesh never blocks it -- only a
+  // genuine fold in the foreground does.
+  function nodeAt(x, y) {
+    for (let index = paintedItems.length - 1; index >= 0; index -= 1) {
+      const item = paintedItems[index];
+      if (item.dot) {
+        const dx = item.dot.sx - x;
+        const dy = item.dot.sy - y;
+        if (dx * dx + dy * dy <= PICK_RADIUS * PICK_RADIUS) return item.dot;
+        continue;
+      }
+      if (pointInQuad(item.quad.projectedCorners, x, y)) return null;
+    }
+    return null;
   }
 
   function tooltipRow(key, value) {
@@ -974,5 +1023,35 @@
       : null;
   };
   window.__shioriTestVolSurfaceRequestedRoutes = () => requestedRoutes.slice();
-  window.__shioriTestVolSurfacePaintOrder = () => paintOrder.slice();
+  window.__shioriTestVolSurfaceLoadGeneration = () => loadGeneration;
+  window.__shioriTestVolSurfaceLoadSelected = () => loadSelectedSurface();
+  // The painted scene, for tests that check the ordering and the occlusion
+  // rule independently rather than by asking the picker about itself.
+  window.__shioriTestVolSurfacePaintOrder = () =>
+    paintedItems.map((item) =>
+      item.quad
+        ? { kind: "quad", i: item.quad.i, j: item.quad.j, depth: item.depth }
+        : { kind: "dot", i: item.dot.node.i, j: item.dot.node.j, depth: item.depth }
+    );
+  window.__shioriTestVolSurfacePaintedGeometry = () =>
+    paintedItems.map((item) =>
+      item.quad
+        ? {
+            kind: "quad",
+            i: item.quad.i,
+            j: item.quad.j,
+            depth: item.depth,
+            corners: item.quad.projectedCorners.map((corner) => [corner.sx, corner.sy]),
+          }
+        : {
+            kind: "dot",
+            i: item.dot.node.i,
+            j: item.dot.node.j,
+            depth: item.depth,
+            expiry: item.dot.node.expiry,
+            tenor: item.dot.node.tenor,
+            sx: item.dot.sx,
+            sy: item.dot.sy,
+          }
+    );
 })();

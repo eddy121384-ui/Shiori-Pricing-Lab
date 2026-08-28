@@ -754,6 +754,97 @@ def test_hovering_a_node_reports_its_exact_stored_value_and_unit(server_url, pag
     assert "Swap Tenor:" in tooltip
 
 
+# A deliberately folded surface: a ridge across the expiry axis, so at a low
+# camera elevation the near slope stands in front of the far slope's nodes.
+_RIDGE_EXPIRIES = [f"{n}Mo" for n in range(1, 10)]
+_RIDGE_TENORS = [f"{n}Yr" for n in range(1, 8)]
+_RIDGE_ROWS = [
+    [round(60 + 40 * (1 - abs(i - 4) / 4) + j, 2) for j in range(len(_RIDGE_TENORS))]
+    for i in range(len(_RIDGE_EXPIRIES))
+]
+_RIDGE_SURFACE = {
+    **_SURFACE_A,
+    "point_count": len(_RIDGE_EXPIRIES) * len(_RIDGE_TENORS),
+    "grid": {
+        "expiries": _RIDGE_EXPIRIES,
+        "underlying_tenors": _RIDGE_TENORS,
+        "rows": _RIDGE_ROWS,
+    },
+}
+
+
+def _point_in_polygon(corners, x, y) -> bool:
+    """Ray casting, written here so the test does its own geometry."""
+
+    inside = False
+    previous = len(corners) - 1
+    for index in range(len(corners)):
+        ax, ay = corners[index]
+        bx, by = corners[previous]
+        if (ay > y) != (by > y) and x < (bx - ax) * (y - ay) / (by - ay) + ax:
+            inside = not inside
+        previous = index
+    return inside
+
+
+def test_a_node_hidden_behind_a_fold_is_never_what_hovering_reports(server_url, page) -> None:
+    # Codex review (PR #195): hit testing considered every node by projected
+    # distance alone, so hovering the pixels of a foreground fold could report
+    # the expiry, tenor and volatility of a node hidden behind it -- a reading
+    # for a point the trader cannot see.
+    #
+    # The check below is independent of the picker: it reads the painted
+    # scene and does its own point-in-polygon test, then asserts that whatever
+    # hovering reports is never covered by geometry painted in front of it.
+    _route_curve_away(page)
+    _route_vol_surface(page, surfaces={"surface-a": _RIDGE_SURFACE})
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+    # Down to a low elevation, where the ridge actually occludes.
+    page.evaluate("() => window.__shioriTestVolSurfaceRotateBy(40, -70)")
+
+    scene = page.evaluate("() => window.__shioriTestVolSurfacePaintedGeometry()")
+    dots = [(index, item) for index, item in enumerate(scene) if item["kind"] == "dot"]
+    assert dots, "no nodes were painted"
+
+    occlusions_found = 0
+    for dot_index, dot in dots:
+        # Probe the node's own centre: what a trader aiming at it would hover.
+        x, y = dot["sx"], dot["sy"]
+        covering = [
+            item
+            for item in scene[dot_index + 1 :]
+            if item["kind"] == "quad" and _point_in_polygon(item["corners"], x, y)
+        ]
+        picked = page.evaluate(
+            "([px, py]) => window.__shioriTestVolSurfaceHoverAt(px, py)", [x, y]
+        )
+        if covering:
+            occlusions_found += 1
+            # Something opaque is in front of this node at this pixel, so the
+            # node must not be what the pointer selects there.
+            assert picked != {
+                "expiry": dot["expiry"],
+                "tenor": dot["tenor"],
+                "volatility": next(
+                    value
+                    for row_index, row in enumerate(_RIDGE_ROWS)
+                    for column, value in enumerate(row)
+                    if (row_index, column) == (dot["i"], dot["j"])
+                ),
+            }, f"hovering reported the hidden node {dot['expiry']} x {dot['tenor']}"
+        else:
+            # Nothing in front of it: aiming at a visible node still works.
+            assert picked is not None, (
+                f"the visible node {dot['expiry']} x {dot['tenor']} could not be hovered"
+            )
+
+    assert occlusions_found > 0, (
+        "this fixture and rotation produced no occluded node, so the test proves nothing "
+        "-- pick a fold or a camera angle that does"
+    )
+
+
 def test_hovering_empty_space_reports_nothing_rather_than_a_nearest_guess(
     server_url, page
 ) -> None:
@@ -787,6 +878,79 @@ def test_a_surface_with_no_stated_unit_never_invents_one(server_url, page) -> No
 
 
 # --- Failing closed and staying read-only -------------------------------------
+
+
+def test_a_surface_fetch_a_refresh_overtook_never_lands_on_the_page(server_url, page) -> None:
+    # Codex review (PR #195): only list loads set `inFlight`, so a Refresh
+    # clicked while a surface fetch is still pending runs alongside it. If the
+    # listing then fails and the older surface fetch succeeds afterwards, an
+    # id-only guard still accepts it -- `showOnly("surface")` hides the
+    # refresh error and the trader is left looking at stale data that appears
+    # freshly loaded.
+    #
+    # The interleaving is made exact rather than raced: the page's own `fetch`
+    # is wrapped so the surface request can be held open until after the
+    # listing has failed, which is precisely the order that triggers the bug.
+    _route_curve_away(page)
+    list_should_fail = {"now": False}
+
+    def _handle_list(route):
+        if list_should_fail["now"]:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"error": "the local store could not be opened"}),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"surfaces": [_SUMMARY_A], "database": "test"}),
+        )
+
+    page.route("**/api/vol-surface/atm/list", _handle_list)
+    page.route(
+        "**/api/vol-surface/atm/surface",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_SURFACE_A)
+        ),
+    )
+
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    # Hold the next surface request open, in the page, until the test releases
+    # it. Nothing in the view is patched -- only the browser's own fetch.
+    page.evaluate(
+        """() => {
+             const realFetch = window.fetch;
+             window.__testReleaseSurface = null;
+             window.fetch = (url, init) => {
+               if (String(url).includes('/api/vol-surface/atm/surface')) {
+                 return new Promise((resolve) => {
+                   window.__testReleaseSurface = () => resolve(realFetch(url, init));
+                 });
+               }
+               return realFetch(url, init);
+             };
+           }"""
+    )
+
+    list_should_fail["now"] = True
+    page.evaluate("() => { window.__shioriTestVolSurfaceLoadSelected(); }")
+    _wait_until(lambda: page.evaluate("() => window.__testReleaseSurface !== null"))
+    page.evaluate("() => { window.__shioriTestVolSurfaceLoadList(); }")
+
+    # The refresh fails while the surface fetch is still open.
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-error"))
+    assert "the local store could not be opened" in page.inner_text("#vol-surface-error-detail")
+
+    # Now the overtaken fetch answers, successfully. It must change nothing.
+    page.evaluate("() => { window.__testReleaseSurface(); }")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestVolSurfacePayload() === null"))
+    assert not _is_actually_hidden(page, "vol-surface-error")
+    assert _is_actually_hidden(page, "vol-surface-table-card")
+    assert _is_actually_hidden(page, "vol-surface-chart-card")
 
 
 def test_a_failed_listing_is_an_error_not_an_empty_surface(server_url, page) -> None:
