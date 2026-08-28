@@ -239,6 +239,28 @@ def _wait_for_surface(page) -> None:
     _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-table-card"))
 
 
+def _routes_called(page) -> list[str]:
+    """The routes the view has fetched, read from the page itself.
+
+    Deliberately not the Python-side counter the ``page.route`` handlers
+    keep: waiting on that in a ``_wait_until`` loop only sleeps, and the
+    sync Playwright dispatcher pumps its handlers when a Playwright call is
+    made -- so a wait that touches nothing in the browser can spin until it
+    times out while the request it is waiting for has never been served.
+    Every wait below goes through the page for that reason.
+    """
+
+    return page.evaluate("() => window.__shioriTestVolSurfaceRequestedRoutes()")
+
+
+def _refresh_and_wait(page, expected_routes: list[str]) -> None:
+    """Click Refresh and wait for exactly the fetches it should provoke."""
+
+    already = len(_routes_called(page))
+    page.click("#vol-surface-refresh-btn")
+    _wait_until(lambda: _routes_called(page)[already:] == expected_routes)
+
+
 def _displayed(value: float) -> str:
     """What the page must show for one stored value.
 
@@ -514,7 +536,9 @@ def test_a_second_confirmed_snapshot_takes_back_the_automatic_choice(server_url,
 
     # A second capture is confirmed elsewhere; the trader refreshes.
     listings["summaries"] = (_SUMMARY_A, _SUMMARY_B)
-    page.click("#vol-surface-refresh-btn")
+    # The refresh re-lists and stops there: no surface is fetched, because
+    # there is no longer a snapshot the trader has chosen.
+    _refresh_and_wait(page, ["/api/vol-surface/atm/list"])
     _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-empty"))
 
     assert calls["surface"] == ["surface-a"]  # nothing new was fetched
@@ -533,8 +557,9 @@ def test_a_choice_the_trader_made_survives_a_refresh(server_url, page) -> None:
     page.select_option("#vol-surface-select", "surface-b")
     _wait_for_surface(page)
 
-    page.click("#vol-surface-refresh-btn")
-    _wait_until(lambda: len(calls["surface"]) == 2)
+    _refresh_and_wait(
+        page, ["/api/vol-surface/atm/list", "/api/vol-surface/atm/surface"]
+    )
     _wait_for_surface(page)
 
     assert calls["surface"] == ["surface-b", "surface-b"]
