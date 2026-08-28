@@ -726,6 +726,59 @@ def test_cross_substituted_live_ctds_fail_closed(monkeypatch, requested, donor) 
 
 
 @pytest.mark.parametrize(
+    "last_delivery",
+    [
+        # Codex review, PR #191 (P2). `TYU6` delivers in September 2026, so a
+        # last delivery day years away contradicts the symbol. Resolving the
+        # decade by nearest match alone silently guessed one:
+        "2031-09-30",  # exactly between 2026 and 2036 -- was resolved to 2036
+        "2030-09-30",  # not a tie at all -- was resolved to 2026
+        "2021-09-30",
+        # Still before the CTD's maturity, so the delivery-before-maturity
+        # check cannot be what refuses it -- this is the decade check firing.
+        "2029-09-30",
+    ],
+)
+def test_a_last_delivery_day_that_contradicts_the_delivery_month_fails_closed(
+    monkeypatch, last_delivery
+) -> None:
+    """The delivery year must be resolvable, not guessed.
+
+    Both source dates come from the same response, so a pair that cannot both
+    be true is an incoherent answer. Left guessing, an inconsistent pair could
+    yield a window that some maturity satisfies, and the record would come back
+    stamped as confirmed.
+    """
+
+    fields = dict(LIVE_STAGE_TWO["ZN"], FUT_DLV_DT_LAST=last_delivery)
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
+        _load_with(monkeypatch, "ZN", stage_two=fields)
+    assert "unresolvable" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "last_delivery, accepted",
+    [
+        # ZN/TYU6 delivers September 2026, so the accepted span is
+        # [2026-09-01, 2026-11-01).
+        ("2026-08-31", False),  # the day before the delivery month opens
+        ("2026-09-01", True),  # the first day of the delivery month
+        ("2026-10-31", True),  # ZT/ZF-style spill into the following month
+        ("2026-11-01", False),  # two whole months out
+    ],
+)
+def test_the_accepted_last_delivery_span_around_the_delivery_month(
+    monkeypatch, last_delivery, accepted
+) -> None:
+    fields = dict(LIVE_STAGE_TWO["ZN"], FUT_DLV_DT_LAST=last_delivery)
+    if accepted:
+        assert _load_with(monkeypatch, "ZN", stage_two=fields) is not None
+    else:
+        with pytest.raises(TreasuryFuturesCTDBloombergError):
+            _load_with(monkeypatch, "ZN", stage_two=fields)
+
+
+@pytest.mark.parametrize(
     "contract_code, maturity, accepted",
     [
         # ZN/TYU6, reference 2026-09-01, window [2033-03-01, 2036-09-01].

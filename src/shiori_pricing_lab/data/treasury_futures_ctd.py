@@ -599,22 +599,32 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
 
 
 def _delivery_month_first_day(
-    contract_symbol: str, contract_code: str, last_delivery_date: date
+    contract_symbol: str, contract_code: str, last_delivery_date: date, security: str = ""
 ) -> date:
     """First calendar day of the delivery month the resolved symbol names.
 
     The month comes from the symbol's delivery code (``TUU6`` -> ``U`` ->
     September). The symbol carries only the *last digit(s)* of the year, so the
-    decade is resolved by taking the matching year nearest ``last_delivery_date``
-    -- candidates are a full modulus apart, so exactly one lies within half a
-    modulus and the choice is unambiguous. This also stays correct for a ``Z``
-    contract whose last delivery day falls in January of the following year.
+    decade is taken from the matching year nearest ``last_delivery_date`` and
+    then **verified against it**: last delivery is the last business day of the
+    delivery month, or a few business days into the following month for ZT and
+    ZF, so it always falls inside the two months that open the delivery month.
+    The four confirmed live contracts sit 29-35 days out.
 
-    ``last_delivery_date`` is used **only** to place the decade. It is never the
-    reference date for the maturity window: for ZT and ZF the last delivery day
-    falls in the month *after* the delivery month, which shifts every
-    measurement by a month and, against the four confirmed live CTDs, rejected
-    two of them.
+    Verifying rather than trusting the nearest match matters, because nearest
+    alone silently guesses (Codex review, PR #191). ``TYU6`` reported with a
+    2031 last delivery is exactly between 2026 and 2036 and was resolved to
+    2036; reported with a 2030 one it was resolved to 2026. Both pairs are
+    self-contradictory and must fail closed rather than pick a decade. The
+    candidates are a full modulus apart and the accepted span is two months, so
+    at most one candidate can satisfy the check and the result stays
+    deterministic.
+
+    ``last_delivery_date`` is used **only** to place and confirm the decade. It
+    is never the reference date for the maturity window: for ZT and ZF the last
+    delivery day falls in the month *after* the delivery month, which shifts
+    every measurement by a month and, against the four confirmed live CTDs,
+    rejected two of them.
     """
 
     remainder = contract_symbol[len(BLOOMBERG_FUTURES_TICKER_ROOTS[contract_code]) :]
@@ -625,7 +635,17 @@ def _delivery_month_first_day(
     year = anchor + ((int(digits) - anchor) % modulus)
     if year - anchor > modulus // 2:
         year -= modulus
-    return date(year, month, 1)
+
+    reference = date(year, month, 1)
+    if not reference <= last_delivery_date < _add_months_to_first_day(reference, 2):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned last delivery {last_delivery_date.isoformat()} for "
+            f"{security or contract_symbol!r}, which does not belong to the "
+            f"{contract_symbol} delivery month: the delivery year is unresolvable from a "
+            f"last delivery day outside {reference.isoformat()} to "
+            f"{_add_months_to_first_day(reference, 2).isoformat()}"
+        )
+    return reference
 
 
 def _add_months_to_first_day(reference: date, months: int) -> date:
@@ -673,7 +693,9 @@ def _require_remaining_maturity_plausible(
     lower_months, upper_months, upper_inclusive = (
         TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS[contract_code]
     )
-    reference = _delivery_month_first_day(contract_symbol, contract_code, last_delivery_date)
+    reference = _delivery_month_first_day(
+        contract_symbol, contract_code, last_delivery_date, security
+    )
     earliest = _add_months_to_first_day(reference, lower_months)
     latest = _add_months_to_first_day(reference, upper_months)
 
