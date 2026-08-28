@@ -118,6 +118,40 @@ def test_an_off_tick_price_is_reported_as_off_tick_not_silently_rounded(
     assert "off-tick" in output
 
 
+def test_the_benchmark_is_told_the_price_the_yield_was_actually_computed_from(
+    monkeypatch, capsys
+) -> None:
+    """Codex review, PR #191 (P2).
+
+    The reported yield comes from the entered decimal, so the benchmark must be
+    set to that same decimal. Naming the rounded exchange quote here compared
+    two yields from different inputs -- 0.03 bp apart on this price, before the
+    benchmark is even read -- which breaks the identical-input rule this script
+    states for itself and quietly spends part of the 0.5 bp budget.
+    """
+
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    module.main(["--price", "ZN=112.5137"])
+    output = capsys.readouterr().out
+
+    instruction = next(line for line in output.splitlines() if "and read its Yield" in line)
+    assert "112.5137" in instruction
+    assert "112-165" not in instruction  # the rounded quote is not the priced input
+    # And the mismatch is called out rather than left for the reader to notice.
+    assert "not an exchange-tradable level" in output
+
+
+def test_an_on_tick_price_needs_no_off_tick_warning(monkeypatch, capsys) -> None:
+    """The guard above must not fire on the normal case."""
+
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    module.main(["--price", "ZN=112-165"])
+    output = capsys.readouterr().out
+    assert "not an exchange-tradable level" not in output
+    instruction = next(line for line in output.splitlines() if "and read its Yield" in line)
+    assert "112.515625" in instruction
+
+
 def test_a_failed_live_load_is_reported_and_exits_non_zero(capsys) -> None:
     # No fake installed: the live fetch cannot succeed here.
     assert module.main(["--price", "ZN=112-165"]) == 1

@@ -170,7 +170,17 @@ def _report_contract(contract_code: str, futures_price: str) -> int:
     print(f"    On CME Treasury Analytics / Bloomberg, set contract {ctd.contract_symbol},")
     print(f"    CTD {ctd.ctd_identifier} (CF {ctd.conversion_factor}), settlement "
           f"{ctd.last_delivery_date.isoformat()},")
-    print(f"    futures price {forward.quote.exchange_quote}, and read its Yield.")
+    # The yield above is computed from decimal_price, so the benchmark must be
+    # set to decimal_price. Naming exchange_quote here would have compared two
+    # yields from different inputs whenever the entered price is off-tick,
+    # breaking this script's own identical-input rule (Codex review, PR #191).
+    print(f"    futures price {forward.quote.decimal_price!r}, and read its Yield.")
+    if not forward.quote.on_tick:
+        print(f"    NOTE: {forward.quote.decimal_price!r} is off-tick for {contract_code} "
+              f"(minimum tick {forward.quote.minimum_tick}).")
+        print(f"    It is not an exchange-tradable level, and it is NOT "
+              f"{forward.quote.exchange_quote}.")
+        print("    Use the decimal above on both sides, or re-run on an on-tick price.")
     print(f"    Issue #190 acceptance: |benchmark - {forward.implied_yield_percent:.6f}| "
           "<= 0.5 bp (0.005%).")
     print()
