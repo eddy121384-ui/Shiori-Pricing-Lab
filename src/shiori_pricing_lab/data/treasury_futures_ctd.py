@@ -58,42 +58,41 @@ confirmed rejections** -- the run reported no per-field ``BAD_FLD`` evidence
 for them individually, so this module does not claim any of them is invalid.
 Re-adding one still requires its own confirmation.
 
-**Deliberately NOT validated: the CTD's deliverable-maturity window.** A
-coherent CTD belonging to a *different* Treasury contract would still pass
-every guard above -- the identifier is checksum-valid, the numbers are sane,
-the delivery date precedes maturity -- because nothing here ties the CTD's
-maturity to the contract it is supposed to be deliverable into. That gap is
-real (Codex review, PR #191). It is left open on purpose, because closing it
-on inferred conventions demonstrably breaks live data:
+**Remaining-maturity plausibility / cross-contract guard.** Every guard above
+checks the record against *itself*, so a coherent CTD belonging to a
+*different* Treasury contract passed them all and was stamped as confirmed
+(Codex review, PR #191). ``_require_remaining_maturity_plausible`` closes that
+by requiring the CTD's remaining maturity to fall inside the contract's
+published window, measured from the **first calendar day of the delivery month
+named by the resolved symbol** -- ``TUU6`` -> September 2026 -> ``2026-09-01``.
 
-The CBOT windows are measured from the **first day of the delivery month**,
-not from the last delivery day. ``FUT_DLV_DT_LAST`` is the only date this
-module receives, and for ZT and ZF the last delivery day falls in the month
-*after* the delivery month. Measuring from it is therefore off by one month,
-and against Eddy's own confirmed CTDs that one month is decisive:
+The measurement basis is the whole game here, and it is Eddy's methodology
+decision (Issue #190). ``FUT_DLV_DT_LAST`` is *not* the reference: for ZT and
+ZF the last delivery day falls in the month *after* the delivery month, and
+that one month rejects two of the four confirmed live CTDs. Measured from the
+first of the delivery month instead, all four clear their lower bound with
+about a month to spare:
 
-=====  =========================  =========================  ==============
-Code   From 1st of delivery month  From last delivery day     Window
-=====  =========================  =========================  ==============
-ZT     1y 9m  (in window)          1y 8m  (REJECTED)          >= 1y 9m
-ZF     4y 2m  (in window)          4y 1m  (REJECTED)          >= 4y 2m
-ZN     6y 8m  (in window)          6y 8m  (in window)         6.5y - 10y
-ZB     18y 8m (in window)          18y 7m (in window)         15y - 25y
-=====  =========================  =========================  ==============
+=====  ==========  ============  ==========================  =========
+Code   Reference   CTD maturity  Window                      Result
+=====  ==========  ============  ==========================  =========
+ZT     2026-09-01  2028-06-30    [2028-06-01, 2028-09-01]    in window
+ZF     2026-09-01  2030-11-30    [2030-11-01, 2031-12-01]    in window
+ZN     2026-09-01  2033-05-31    [2033-03-01, 2036-09-01]    in window
+ZB     2026-09-01  2045-05-15    [2041-09-01, 2051-09-01)    in window
+=====  ==========  ============  ==========================  =========
 
-Two of the four real CTDs sit exactly on their window's lower bound, so any
-error in the bound, the measurement basis, or the month arithmetic turns a
-correct live load into a hard failure -- an outage on a desk tool, from a
-guard meant to prevent a rarer fault. Adding it needs Eddy to confirm, per
-contract: the exact window bounds, the reference date they are measured from,
-and whether the original-issue-maturity leg applies. That is a pricing-method
-input under AGENTS.md rule 7, not something this module may infer.
+Every cross-substitution of one confirmed CTD into another contract's request
+fails closed, including Codex's counterexample (ZN/``TYU6`` answered with the
+ZB CTD).
 
-What already narrows the gap: stage one's resolved symbol must carry this
-contract's own root and a quarterly delivery month, and every response's
-``security`` element must equal the security requested -- so the record is
-tied to the delivery-month contract that was asked about. What is not caught
-is Bloomberg answering that specific contract with another contract's CTD.
+**This is a plausibility guard, not proof of CME deliverability.** ZT and ZF
+eligibility also has an *original term to maturity* leg, which needs an issue
+date or original term that the CTD data contract does not carry and no
+confirmed mnemonic supplies. Inventing either would be fabricating reference
+data (AGENTS.md rule 6), so that leg is deliberately absent: a bond can
+satisfy this guard and still not be genuinely deliverable. What it rules out
+is another contract's CTD arriving labelled as this one's.
 
 **Manual entry remains a first-class debug/fallback path, and is always
 visibly unconfirmed.** A record built that way carries
@@ -462,6 +461,33 @@ def _require_answered(answered: dict[str, str], field: str, security: str) -> st
 #: answer.
 TREASURY_FUTURES_DELIVERY_MONTH_CODES = "HMUZ"
 
+#: The calendar month each quarterly delivery code names. Keyed by the same
+#: codes as ``TREASURY_FUTURES_DELIVERY_MONTH_CODES``.
+_DELIVERY_MONTH_NUMBERS: dict[str, int] = {"H": 3, "M": 6, "U": 9, "Z": 12}
+
+#: Remaining-maturity plausibility windows, as ``(lower_months, upper_months,
+#: upper_inclusive)`` measured from the **first calendar day of the named
+#: delivery month** (Eddy's methodology decision, Issue #190).
+#:
+#: These encode the published remaining-maturity leg of each contract's
+#: deliverable grade, and nothing else. ZT and ZF additionally carry an
+#: *original term to maturity* leg that this module cannot evaluate: the CTD
+#: data contract has no issue date or original term, and no Bloomberg mnemonic
+#: for one is confirmed. Inventing either would be fabricating reference data
+#: under AGENTS.md rule 6, so the original-term leg is deliberately absent and
+#: this guard is **not** proof of full CME deliverability -- see
+#: ``_require_remaining_maturity_plausible``.
+TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[str, tuple[int, int, bool]] = {
+    # Not less than 1 year 9 months, not more than 2 years.
+    "ZT": (21, 24, True),
+    # Not less than 4 years 2 months, not more than 5 years 3 months.
+    "ZF": (50, 63, True),
+    # 6 years 6 months through 10 years.
+    "ZN": (78, 120, True),
+    # At least 15 years and strictly less than 25 years.
+    "ZB": (180, 300, False),
+}
+
 _ISIN_LENGTH = 12
 
 #: Every U.S. Treasury carries a ``US``-prefixed ISIN, and the CTD of a U.S.
@@ -554,7 +580,12 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
     remainder = symbol[len(expected_root) :]
     if (
         not symbol.startswith(expected_root)
-        or len(remainder) < 2
+        # One or two year digits -- the two conventions Bloomberg uses
+        # (``TYU6``, ``TYU26``). Unbounded digits are not a wider contract, they
+        # are a malformed answer, and they make the delivery year unresolvable:
+        # the derived year would land outside `datetime.date`'s range and raise
+        # a bare ValueError instead of failing closed as a named error.
+        or len(remainder) not in (2, 3)
         or remainder[0] not in TREASURY_FUTURES_DELIVERY_MONTH_CODES
         or not remainder[1:].isdigit()
     ):
@@ -565,6 +596,97 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
             "and year digits)"
         )
     return symbol
+
+
+def _delivery_month_first_day(
+    contract_symbol: str, contract_code: str, last_delivery_date: date
+) -> date:
+    """First calendar day of the delivery month the resolved symbol names.
+
+    The month comes from the symbol's delivery code (``TUU6`` -> ``U`` ->
+    September). The symbol carries only the *last digit(s)* of the year, so the
+    decade is resolved by taking the matching year nearest ``last_delivery_date``
+    -- candidates are a full modulus apart, so exactly one lies within half a
+    modulus and the choice is unambiguous. This also stays correct for a ``Z``
+    contract whose last delivery day falls in January of the following year.
+
+    ``last_delivery_date`` is used **only** to place the decade. It is never the
+    reference date for the maturity window: for ZT and ZF the last delivery day
+    falls in the month *after* the delivery month, which shifts every
+    measurement by a month and, against the four confirmed live CTDs, rejected
+    two of them.
+    """
+
+    remainder = contract_symbol[len(BLOOMBERG_FUTURES_TICKER_ROOTS[contract_code]) :]
+    month = _DELIVERY_MONTH_NUMBERS[remainder[0]]
+    digits = remainder[1:]
+    modulus = 10 ** len(digits)
+    anchor = last_delivery_date.year
+    year = anchor + ((int(digits) - anchor) % modulus)
+    if year - anchor > modulus // 2:
+        year -= modulus
+    return date(year, month, 1)
+
+
+def _add_months_to_first_day(reference: date, months: int) -> date:
+    """Advance a first-of-month date by whole months.
+
+    ``reference`` is always the first of a month, so this never needs the
+    day-of-month clamping the coupon grid does -- the first of a month exists in
+    every month.
+    """
+
+    total = reference.year * 12 + (reference.month - 1) + months
+    year, month_index = divmod(total, 12)
+    return date(year, month_index + 1, 1)
+
+
+def _require_remaining_maturity_plausible(
+    contract_code: str,
+    contract_symbol: str,
+    ctd_maturity_date: date,
+    last_delivery_date: date,
+    security: str,
+) -> None:
+    """Remaining-maturity plausibility / cross-contract guard.
+
+    Every other guard checks the CTD record against *itself*: the identifier is
+    checksum-valid, the numbers are sane, delivery precedes maturity. None of
+    them ties the CTD to the contract it is supposed to be deliverable into, so
+    a coherent CTD belonging to a *different* Treasury contract passed them all
+    and was stamped as confirmed -- pricing would then apply one contract's
+    quote convention to another's CTD (Codex review, PR #191).
+
+    This closes that gap by the narrowest check that does: the CTD's remaining
+    maturity, measured from the first calendar day of the delivery month the
+    resolved symbol names, must fall in that contract's published
+    remaining-maturity window.
+
+    **This is a plausibility / cross-contract guard, not proof of CME
+    deliverability.** It deliberately omits the original-term leg of ZT and ZF
+    eligibility, which needs an issue date or original term the CTD data
+    contract does not carry. A bond can therefore satisfy this guard and still
+    not be genuinely deliverable; what it rules out is another contract's CTD
+    arriving labelled as this one's.
+    """
+
+    lower_months, upper_months, upper_inclusive = (
+        TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS[contract_code]
+    )
+    reference = _delivery_month_first_day(contract_symbol, contract_code, last_delivery_date)
+    earliest = _add_months_to_first_day(reference, lower_months)
+    latest = _add_months_to_first_day(reference, upper_months)
+
+    too_short = ctd_maturity_date < earliest
+    too_long = ctd_maturity_date > latest if upper_inclusive else ctd_maturity_date >= latest
+    if too_short or too_long:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned a CTD maturing {ctd_maturity_date.isoformat()} for "
+            f"{security!r}, which is outside {contract_code}'s remaining-maturity window "
+            f"[{earliest.isoformat()}, {latest.isoformat()}"
+            f"{']' if upper_inclusive else ')'} measured from {reference.isoformat()}, the "
+            f"first day of the {contract_symbol} delivery month"
+        )
 
 
 def _parse_bloomberg_float(raw_value: str, field: str, security: str) -> float:
@@ -698,6 +820,17 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
             f"after the CTD's maturity {ctd_maturity_date.isoformat()} for "
             f"{delivery_security!r}"
         )
+
+    # Ties the CTD to the contract it was fetched for. Live path only: a manual
+    # record is always visibly MANUAL_UNCONFIRMED and never claims to be
+    # market data, which is the provenance this guard protects.
+    _require_remaining_maturity_plausible(
+        normalized_code,
+        contract_symbol,
+        ctd_maturity_date,
+        last_delivery_date,
+        delivery_security,
+    )
 
     return TreasuryFuturesCTD(
         contract_code=normalized_code,

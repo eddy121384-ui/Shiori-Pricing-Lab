@@ -69,6 +69,41 @@ LIVE_ZN_STAGE_TWO = {
 GENERIC_ZN = "TY1 Comdty"
 DELIVERY_ZN = "TYU6 Comdty"
 
+# All four contracts as Eddy's live run returned them, keyed by contract code.
+# Pinned as literals: these are real confirmed records, and the
+# remaining-maturity guard must never reject one of them.
+LIVE_STAGE_TWO: dict[str, dict[str, str]] = {
+    "ZT": {
+        "FUT_CTD_ISIN": "US91282CHK09",
+        "FUT_CTD_CUSIP": "91282CHK0",
+        "FUT_CTD_TICKER": "T 4 06/30/28",
+        "FUT_CTD_CPN": "4.000000",
+        "FUT_CTD_MTY": "2028-06-30",
+        "FUT_CNVS_FACTOR": "0.967200",
+        "FUT_DLV_DT_LAST": "2026-10-05",
+    },
+    "ZF": {
+        "FUT_CTD_ISIN": "US91282CPN55",
+        "FUT_CTD_CUSIP": "91282CPN5",
+        "FUT_CTD_TICKER": "T 3.5 11/30/30",
+        "FUT_CTD_CPN": "3.500000",
+        "FUT_CTD_MTY": "2030-11-30",
+        "FUT_CNVS_FACTOR": "0.909000",
+        "FUT_DLV_DT_LAST": "2026-10-05",
+    },
+    "ZN": dict(LIVE_ZN_STAGE_TWO),
+    "ZB": {
+        "FUT_CTD_ISIN": "US912810UL07",
+        "FUT_CTD_CUSIP": "912810UL0",
+        "FUT_CTD_TICKER": "T 5 05/15/45",
+        "FUT_CTD_CPN": "5.000000",
+        "FUT_CTD_MTY": "2045-05-15",
+        "FUT_CNVS_FACTOR": "0.889200",
+        "FUT_DLV_DT_LAST": "2026-09-30",
+    },
+}
+LIVE_DELIVERY_SYMBOL = {"ZT": "TUU6", "ZF": "FVU6", "ZN": "TYU6", "ZB": "USU6"}
+
 
 # ---------------------------------------------------------------------------
 # Fake blpapi
@@ -514,6 +549,10 @@ def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_
         "TYJ7",     # April
         "TYN6",     # July
         "TYV6",     # October
+        # An unbounded run of year digits is a malformed answer, not a wider
+        # contract. Left unbounded it makes the delivery year unresolvable and
+        # the load raises a bare ValueError instead of failing closed.
+        "TYU202699",
     ],
 )
 def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, resolved) -> None:
@@ -538,29 +577,43 @@ def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, res
 
 
 @pytest.mark.parametrize(
-    "contract_code, resolved",
+    "contract_code, resolved, maturity, last_delivery",
     [
-        ("ZT", "TUU6"),
-        ("ZF", "FVU6"),
-        ("ZN", "TYU6"),
-        ("ZB", "USU6"),
+        # The four Eddy's live run returned, with their own real CTDs.
+        ("ZT", "TUU6", "2028-06-30", "2026-10-05"),
+        ("ZF", "FVU6", "2030-11-30", "2026-10-05"),
+        ("ZN", "TYU6", "2033-05-31", "2026-09-30"),
+        ("ZB", "USU6", "2045-05-15", "2026-09-30"),
         # The rest of the quarterly cycle these contracts list, so the guard
         # cannot be narrowed to the one month the live run happened to be in.
-        ("ZN", "TYH7"),
-        ("ZN", "TYM7"),
-        ("ZN", "TYZ6"),
-        ("ZB", "USH7"),
-        ("ZT", "TUZ6"),
+        # Each maturity is hand-computed to sit inside that month's window.
+        ("ZN", "TYH7", "2034-05-15", "2027-03-31"),  # ref 2027-03-01
+        ("ZN", "TYM7", "2034-05-15", "2027-06-30"),  # ref 2027-06-01
+        ("ZN", "TYZ6", "2034-05-15", "2026-12-31"),  # ref 2026-12-01
+        ("ZB", "USH7", "2045-05-15", "2027-03-31"),  # ref 2027-03-01
+        # A Z contract whose last delivery day falls in *January of the next
+        # year*: the delivery month is still 2026-12, so the year digit must be
+        # resolved against the nearest matching year, not read off the last
+        # delivery date's year.
+        ("ZT", "TUZ6", "2028-10-31", "2027-01-05"),  # ref 2026-12-01
+        # Bloomberg's two-digit year convention, so the digit-count cap that
+        # keeps the year resolvable cannot be tightened to one digit only.
+        ("ZN", "TYU26", "2033-05-31", "2026-09-30"),  # ref 2026-09-01
     ],
 )
 def test_each_contracts_own_delivery_month_is_accepted(
-    monkeypatch, contract_code, resolved
+    monkeypatch, contract_code, resolved, maturity, last_delivery
 ) -> None:
-    # The four Eddy's live run returned, plus the rest of the quarterly cycle.
+    fields = dict(
+        LIVE_STAGE_TWO[contract_code],
+        FUT_CTD_MTY=maturity,
+        FUT_DLV_DT_LAST=last_delivery,
+    )
     _install_fake_blpapi(
         monkeypatch,
         _two_stage_responder(
             generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            stage_two_fields=fields,
             generic=bloomberg_generic_front_contract(contract_code),
             delivery=f"{resolved} Comdty",
         ),
@@ -568,6 +621,152 @@ def test_each_contracts_own_delivery_month_is_accepted(
     ctd = load_bloomberg_ctd_metadata(contract_code)
     assert ctd.contract_symbol == resolved
     assert ctd.contract_code == contract_code
+
+
+# ---------------------------------------------------------------------------
+# Remaining-maturity plausibility / cross-contract guard
+# ---------------------------------------------------------------------------
+
+
+def _load_with(monkeypatch, contract_code, *, symbol=None, stage_two=None):
+    """Run the live loader for one contract with a chosen stage-two payload."""
+
+    resolved = symbol or LIVE_DELIVERY_SYMBOL[contract_code]
+    _install_fake_blpapi(
+        monkeypatch,
+        _two_stage_responder(
+            generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            stage_two_fields=dict(stage_two or LIVE_STAGE_TWO[contract_code]),
+            generic=bloomberg_generic_front_contract(contract_code),
+            delivery=f"{resolved} Comdty",
+        ),
+    )
+    return load_bloomberg_ctd_metadata(contract_code)
+
+
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
+def test_every_confirmed_live_ctd_passes_the_remaining_maturity_guard(
+    monkeypatch, contract_code
+) -> None:
+    """Eddy's four confirmed live CTDs must all load.
+
+    The guard exists to reject another contract's CTD, and a guard that
+    rejects real data is an outage, not a safeguard. These four are the
+    evidence that the window bounds and the measurement basis are right.
+    """
+
+    ctd = _load_with(monkeypatch, contract_code)
+    assert ctd.contract_code == contract_code
+    assert ctd.ctd_identifier == LIVE_STAGE_TWO[contract_code]["FUT_CTD_ISIN"]
+
+
+@pytest.mark.parametrize(
+    "contract_code, last_delivery_month",
+    [("ZT", 10), ("ZF", 10)],
+)
+def test_the_window_is_measured_from_the_delivery_month_not_the_last_delivery_day(
+    monkeypatch, contract_code, last_delivery_month
+) -> None:
+    """The heart of Eddy's methodology decision (Issue #190).
+
+    ZT and ZF deliver in September but their last delivery day falls in
+    October. Measuring the window from `FUT_DLV_DT_LAST` therefore shifts it a
+    month later and rejects both of these real CTDs. Measured from the first
+    day of the delivery month the symbol names, both load.
+    """
+
+    live = LIVE_STAGE_TWO[contract_code]
+    assert date.fromisoformat(live["FUT_DLV_DT_LAST"]).month == last_delivery_month
+    assert LIVE_DELIVERY_SYMBOL[contract_code][2] == "U"  # September delivery
+
+    ctd = _load_with(monkeypatch, contract_code)
+    assert ctd.ctd_identifier == live["FUT_CTD_ISIN"]
+
+
+def test_the_codex_counterexample_fails_closed(monkeypatch) -> None:
+    """Codex review, PR #191 (P1).
+
+    A ZN/`TYU6` request answered with the confirmed ZB CTD: checksum-valid
+    identifier, sane numbers, delivery before maturity. Every other guard
+    passes it, and it would have been stamped as a confirmed ZN record and
+    priced on ZN's 1/64 tick.
+    """
+
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
+        _load_with(monkeypatch, "ZN", stage_two=LIVE_STAGE_TWO["ZB"])
+    message = str(exc.value)
+    assert "2045-05-15" in message
+    assert "ZN's remaining-maturity window" in message
+    assert "2026-09-01" in message  # first day of the TYU6 delivery month
+
+
+@pytest.mark.parametrize("requested", ["ZT", "ZF", "ZN", "ZB"])
+@pytest.mark.parametrize("donor", ["ZT", "ZF", "ZN", "ZB"])
+def test_cross_substituted_live_ctds_fail_closed(monkeypatch, requested, donor) -> None:
+    """Every off-diagonal pairing of the four real CTDs must be refused.
+
+    Each of these is a coherent, checksum-valid, internally consistent record
+    -- just the wrong contract's. The diagonal must still load, so the guard
+    cannot pass this by rejecting everything.
+    """
+
+    donor_fields = dict(
+        LIVE_STAGE_TWO[donor],
+        # Keep the requested contract's own delivery date, so the only thing
+        # that differs is the maturity being tested.
+        FUT_DLV_DT_LAST=LIVE_STAGE_TWO[requested]["FUT_DLV_DT_LAST"],
+    )
+    if requested == donor:
+        assert _load_with(monkeypatch, requested, stage_two=donor_fields) is not None
+        return
+
+    with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
+        _load_with(monkeypatch, requested, stage_two=donor_fields)
+    assert f"{requested}'s remaining-maturity window" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "contract_code, maturity, accepted",
+    [
+        # ZN/TYU6, reference 2026-09-01, window [2033-03-01, 2036-09-01].
+        ("ZN", "2033-02-28", False),  # one day below the lower bound
+        ("ZN", "2033-03-01", True),  # exactly the lower bound, inclusive
+        ("ZN", "2036-09-01", True),  # exactly the upper bound, inclusive
+        ("ZN", "2036-09-02", False),  # one day above the upper bound
+    ],
+)
+def test_zn_window_boundaries_measured_from_the_first_of_the_delivery_month(
+    monkeypatch, contract_code, maturity, accepted
+) -> None:
+    fields = dict(LIVE_STAGE_TWO[contract_code], FUT_CTD_MTY=maturity)
+    if accepted:
+        assert _load_with(monkeypatch, contract_code, stage_two=fields) is not None
+    else:
+        with pytest.raises(TreasuryFuturesCTDBloombergError):
+            _load_with(monkeypatch, contract_code, stage_two=fields)
+
+
+@pytest.mark.parametrize(
+    "maturity, accepted",
+    [
+        # ZB/USU6, reference 2026-09-01, window [2041-09-01, 2051-09-01).
+        ("2041-08-31", False),  # one day below the lower bound
+        ("2041-09-01", True),  # exactly the lower bound, inclusive
+        ("2051-08-31", True),  # last day inside the exclusive upper bound
+        ("2051-09-01", False),  # exactly 25 years -- excluded
+    ],
+)
+def test_zb_upper_bound_is_exclusive_at_twenty_five_years(
+    monkeypatch, maturity, accepted
+) -> None:
+    """ZB is `at least 15 years and less than 25 years`, so 25y exactly is out."""
+
+    fields = dict(LIVE_STAGE_TWO["ZB"], FUT_CTD_MTY=maturity)
+    if accepted:
+        assert _load_with(monkeypatch, "ZB", stage_two=fields) is not None
+    else:
+        with pytest.raises(TreasuryFuturesCTDBloombergError):
+            _load_with(monkeypatch, "ZB", stage_two=fields)
 
 
 def test_a_display_only_field_is_optional_and_never_blocks_the_load(monkeypatch) -> None:
