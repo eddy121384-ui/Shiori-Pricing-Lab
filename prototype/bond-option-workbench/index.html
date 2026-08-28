@@ -657,6 +657,18 @@
     <!-- ===================== MARKETS VIEW (Issue #167) ===================== -->
     <div class="main markets-view" id="view-markets" hidden>
 
+      <!-- Market-view selector (Issue #194): which market the Markets page is
+           showing. The Option Discount Curve panel below is unchanged; the
+           Swaption Vol Surface panel after it is the new read-only view. -->
+      <section class="card markets-view-switch">
+        <div class="markets-view-tabs" role="tablist" aria-label="Market view">
+          <button type="button" class="markets-view-tab is-active" id="markets-tab-curve" role="tab" aria-selected="true">Option Discount Curve</button>
+          <button type="button" class="markets-view-tab" id="markets-tab-vol-surface" role="tab" aria-selected="false">Swaption Vol Surface</button>
+        </div>
+      </section>
+
+      <div class="markets-panel" id="markets-panel-curve">
+
       <section class="card markets-header-card">
         <div class="markets-header-top">
           <div class="markets-title-block">
@@ -717,6 +729,90 @@
           </div>
         </div>
       </section>
+
+      </div>
+      <!-- /#markets-panel-curve -->
+
+      <!-- ===== Swaption Vol Surface panel (Issue #194) =====
+           Read-only. Shows a previously confirmed canonical VCUB ATM
+           snapshot: the stored Expiry x Swap Tenor matrix, and the same
+           stored nodes as an interactive 3D surface. Nothing here captures,
+           confirms, prices, or fetches Bloomberg, and the surface mesh is
+           drawn locally with no charting library and no CDN. -->
+      <div class="markets-panel" id="markets-panel-vol-surface" hidden>
+
+        <section class="card markets-header-card">
+          <div class="markets-header-top">
+            <div class="markets-title-block">
+              <div class="markets-title">Swaption Vol Surface</div>
+              <div class="markets-meta" id="vol-surface-meta">&mdash;</div>
+            </div>
+            <div class="vol-surface-picker">
+              <label class="vol-surface-picker-label" for="vol-surface-select">Confirmed ATM snapshot</label>
+              <select class="control vol-surface-select" id="vol-surface-select"></select>
+              <span class="btn primary" id="vol-surface-refresh-btn">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                Refresh
+              </span>
+            </div>
+          </div>
+          <div class="vol-surface-provenance" id="vol-surface-provenance" hidden>
+            <div class="vsp-item"><span class="vsp-k">Currency</span><span class="vsp-v" id="vol-surface-currency">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Curve / Config</span><span class="vsp-v" id="vol-surface-curve-config">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Quote Side</span><span class="vsp-v" id="vol-surface-side">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Business Date</span><span class="vsp-v" id="vol-surface-business-date">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Tab / Type</span><span class="vsp-v" id="vol-surface-vol-type">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Source</span><span class="vsp-v" id="vol-surface-source">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Vol Unit</span><span class="vsp-v" id="vol-surface-unit">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Captured At</span><span class="vsp-v" id="vol-surface-captured-at">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Confirmed By</span><span class="vsp-v" id="vol-surface-confirmed-by">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Points</span><span class="vsp-v" id="vol-surface-point-count">&mdash;</span></div>
+            <div class="vsp-item vsp-wide"><span class="vsp-k">Surface ID</span><span class="vsp-v mono" id="vol-surface-id">&mdash;</span></div>
+          </div>
+        </section>
+
+        <section class="card markets-status" id="vol-surface-loading" hidden>Loading confirmed ATM surfaces&hellip;</section>
+        <section class="card markets-status" id="vol-surface-empty" hidden>
+          No confirmed ATM surface is stored yet. Confirm a VCUB ATM Swaptions capture in the Capture view and it will appear here.
+        </section>
+        <section class="card markets-status markets-status-error" id="vol-surface-error" hidden>
+          <div class="markets-error-title">Unable to show a confirmed ATM surface</div>
+          <div class="markets-error-detail" id="vol-surface-error-detail">&mdash;</div>
+        </section>
+
+        <section class="card vol-surface-chart-card" id="vol-surface-chart-card" hidden>
+          <div class="card-head">
+            <div class="card-title">Normal Vol Surface &mdash; Swap Tenor &times; Option Expiry</div>
+            <div class="vol-surface-hint">Drag to rotate &middot; scroll to zoom &middot; hover a node for its stored value</div>
+          </div>
+          <div class="card-body">
+            <div class="vol-surface-canvas-wrap" id="vol-surface-canvas-wrap">
+              <canvas id="vol-surface-canvas" width="1000" height="540" aria-label="Interactive 3D normal volatility surface"></canvas>
+              <div class="markets-chart-tooltip vol-surface-tooltip" id="vol-surface-tooltip" hidden></div>
+            </div>
+            <div class="vol-surface-axis-note">
+              X = Swap Tenor &middot; Y = Option Expiry &middot; Z = Normal Vol<span id="vol-surface-axis-unit"></span>.
+              The mesh between nodes is display geometry only &mdash; it is not market data and is never stored.
+            </div>
+          </div>
+        </section>
+
+        <section class="card markets-table-card" id="vol-surface-table-card" hidden>
+          <div class="card-head">
+            <div class="card-title">Confirmed ATM Matrix &mdash; Option Expiry &times; Swap Tenor</div>
+          </div>
+          <div class="card-body">
+            <div class="markets-table-wrap vol-surface-table-wrap">
+              <table class="markets-table vol-surface-table">
+                <thead><tr id="vol-surface-table-head"></tr></thead>
+                <tbody id="vol-surface-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+      </div>
+      <!-- /#markets-panel-vol-surface -->
 
     </div>
 
@@ -916,5 +1012,6 @@
 <script src="script.js"></script>
 <script src="vcub_capture.js"></script>
 <script src="vcub_otm_capture.js"></script>
+<script src="vol_surface_view.js"></script>
 </body>
 </html>

@@ -266,6 +266,30 @@ trader to key it manually.
   fails the whole response rather than returning a curve with only the
   other loader's data.
 
+**Issue #194: reading confirmed ATM surfaces back out.** Two read-only
+routes behind the Markets Swaption Vol Surface view, both over the same
+canonical store the confirm routes write to:
+
+- ``POST /api/vol-surface/atm/list`` -- body ignored. Returns
+  ``{"surfaces": [...], "database": "..."}``, one summary row per confirmed
+  ATM surface the local store holds, newest save first. ``capture_id`` is on
+  every row, so two captures of the same screen on the same business date
+  are two distinguishable snapshots rather than one arbitrary pick.
+- ``POST /api/vol-surface/atm/surface`` -- body is ``{"surface_id"}``.
+  Returns ``{"surface_id", "identity", "provenance", "volatility_unit",
+  "point_count", "grid"}``, where ``grid`` is
+  ``{"expiries", "underlying_tenors", "rows"}`` -- the stored points
+  reshaped into the Expiry x Swap Tenor matrix they were read from, with
+  ``null`` wherever the capture left an intersection unresolved. An id the
+  store does not hold is HTTP 404; a surface it holds but cannot show as a
+  complete ATM matrix (wrong surface type, a hole in the grid, rows that no
+  longer match the fingerprint confirmed with them) is HTTP 400 carrying
+  that refusal verbatim.
+
+Neither route writes to the store, captures, OCRs, confirms, rejects,
+prices, or calls the VCUB normal-vol resolver, and neither computes a
+volatility: every number they return is one a trader confirmed.
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -338,6 +362,8 @@ from shiori_pricing_lab.data.vcub_vol_surface_adapter import (
     canonical_surface_from_confirmed_capture,
     canonical_surface_from_confirmed_otm_capture,
 )
+from shiori_pricing_lab.data.vol_surface import VolSurfaceType
+from shiori_pricing_lab.data.vol_surface_grid import atm_grid_from_surface
 from shiori_pricing_lab.data.vol_surface_store import VolSurfaceStore
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
@@ -381,6 +407,10 @@ _STATIC_FILES = {
     "/vcub_capture.js": ("vcub_capture.js", "application/javascript; charset=utf-8"),
     "/vcub_otm_capture.js": (
         "vcub_otm_capture.js",
+        "application/javascript; charset=utf-8",
+    ),
+    "/vol_surface_view.js": (
+        "vol_surface_view.js",
         "application/javascript; charset=utf-8",
     ),
 }
@@ -526,6 +556,13 @@ DEFAULT_PORT = 8765
 # nav item -- against a route table that 404s every one of those routes, so
 # the view would look available and capture nothing.
 #
+# Bumped to -v24 for Issue #194's Markets Swaption Vol Surface view: the
+# server gained the two read-only routes POST /api/vol-surface/atm/list and
+# POST /api/vol-surface/atm/surface, plus that view's own static file. A
+# stale -v23 process serves this commit's page -- which has a Swaption Vol
+# Surface market-view selector -- against a route table that 404s both, so
+# the view would offer a snapshot picker that can never list anything.
+#
 # Bumped to -v22 for Issue #183's canonical vol-surface store: a confirmed
 # capture is now persisted to local SQLite and POST /api/vcub/atm/confirm
 # answers with a "storage" block naming the surface it saved. A stale -v21
@@ -552,7 +589,7 @@ DEFAULT_PORT = 8765
 # page last put in that field -- including one derived against a spot quote
 # the refresh has since replaced -- which is precisely the stale-Forward
 # failure this contract exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v23"
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v24"
 
 
 def load_base_case() -> dict:
@@ -2660,6 +2697,71 @@ def _storage_result(
     }
 
 
+# --------------------------------------------------------------------------
+# Issue #194 -- reading confirmed ATM surfaces back out, for the Markets view
+#
+# Two functions, both read-only, both over the same ``VOL_SURFACE_STORE`` the
+# confirm routes above write to. They list and fetch; nothing here saves,
+# confirms, rejects, OCRs, fetches Bloomberg, or prices, and neither one
+# touches the VCUB normal-vol resolver -- the Markets view draws the stored
+# nodes themselves, so no interpolated value exists to be produced, let alone
+# persisted.
+#
+# Only ATM surfaces are offered. Everything in the store is confirmed by
+# construction (``CanonicalVolSurface`` cannot be built without a confirmer),
+# so "confirmed ATM surfaces" is exactly the ATM_SWAPTION rows.
+# --------------------------------------------------------------------------
+
+
+def list_confirmed_atm_vol_surfaces() -> dict:
+    """Every confirmed ATM surface the local store holds, newest save first.
+
+    Summaries only -- identity, provenance stamps and a point count, no
+    points -- which is what a snapshot picker needs, and what keeps listing
+    a browse rather than a load of every grid in the database.
+
+    ``capture_id`` rides along on each row so two captures of the same screen
+    on the same business date are two distinguishable snapshots in the
+    picker, never one arbitrarily chosen for the trader.
+    """
+
+    summaries = VOL_SURFACE_STORE.list_surfaces(surface_type=VolSurfaceType.ATM_SWAPTION)
+    return {
+        "surfaces": [summary.to_dict() for summary in summaries],
+        "database": str(VOL_SURFACE_STORE.database_path),
+    }
+
+
+def fetch_confirmed_atm_vol_surface(surface_id: str) -> dict:
+    """One stored ATM surface: its provenance, and its points as a matrix.
+
+    The store verifies the surface against the fingerprint saved with it
+    before handing it back, so a row edited under the workbench's feet fails
+    here rather than being drawn. The grid is a reshape of exactly those
+    verified points (see :func:`atm_grid_from_surface`) -- no value is
+    recomputed, smoothed, or filled in, and an incomplete matrix is refused
+    rather than completed.
+    """
+
+    _require_non_blank_field(surface_id, "surface_id")
+    surface = VOL_SURFACE_STORE.fetch_surface(surface_id)
+    if surface.identity.surface_type is not VolSurfaceType.ATM_SWAPTION:
+        raise ValueError(
+            f"surface {surface_id} is a {surface.identity.surface_type.value} surface; "
+            "the Swaption Vol Surface view shows ATM_SWAPTION surfaces only"
+        )
+    grid = atm_grid_from_surface(surface)
+    return {
+        "surface_id": surface.surface_id,
+        "identity": surface.identity.to_dict(),
+        "provenance": surface.provenance.to_dict(),
+        "volatility_unit": surface.volatility_unit,
+        "point_count": len(surface.points),
+        "grid": grid.to_dict(),
+    }
+
+
+
 def _require_non_blank_field(value: object, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-blank string")
@@ -3045,6 +3147,44 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return None
         return body
 
+    def _handle_api_vol_surface_atm_list(self, raw_body: bytes) -> None:
+        """List the confirmed ATM surfaces. Reads the store; writes nothing.
+
+        The body is ignored -- the listing has no parameters -- and the page
+        posts ``{}``, matching the other read-only route on this bridge
+        (``/api/bloomberg/option-discount-curve``).
+        """
+
+        try:
+            payload = list_confirmed_atm_vol_surfaces()
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(500, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
+    def _handle_api_vol_surface_atm_surface(self, raw_body: bytes) -> None:
+        """Fetch one confirmed ATM surface by id. Reads the store; writes nothing.
+
+        An id the store does not hold is HTTP 404. A surface it holds but
+        cannot show as a complete ATM matrix -- wrong surface type, a hole in
+        the grid, rows that no longer match the fingerprint confirmed with
+        them -- is HTTP 400 carrying the refusal verbatim, never a repaired
+        grid.
+        """
+
+        body = self._decoded_object(raw_body, ("surface_id",))
+        if body is None:
+            return
+        try:
+            payload = fetch_confirmed_atm_vol_surface(body["surface_id"])
+        except KeyError as exc:
+            self._write_json(404, {"error": str(exc.args[0])})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
     def _handle_api_export_json(self, raw_body: bytes) -> None:
         self._handle_export(raw_body, export_current_run_as_json)
 
@@ -3068,6 +3208,8 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/vcub/otm/parse": _handle_api_vcub_otm_parse,
         "/api/vcub/otm/confirm": _handle_api_vcub_otm_confirm,
         "/api/vcub/otm/reject": _handle_api_vcub_otm_reject,
+        "/api/vol-surface/atm/list": _handle_api_vol_surface_atm_list,
+        "/api/vol-surface/atm/surface": _handle_api_vol_surface_atm_surface,
         "/api/export/json": _handle_api_export_json,
         "/api/export/markdown": _handle_api_export_markdown,
     }
