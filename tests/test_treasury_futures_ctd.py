@@ -757,25 +757,55 @@ def test_a_last_delivery_day_that_contradicts_the_delivery_month_fails_closed(
 
 
 @pytest.mark.parametrize(
-    "last_delivery, accepted",
+    "contract_code, last_delivery, accepted",
     [
-        # ZN/TYU6 delivers September 2026, so the accepted span is
-        # [2026-09-01, 2026-11-01).
-        ("2026-08-31", False),  # the day before the delivery month opens
-        ("2026-09-01", True),  # the first day of the delivery month
-        ("2026-10-31", True),  # ZT/ZF-style spill into the following month
-        ("2026-11-01", False),  # two whole months out
+        # Codex review, PR #191 (P2). ZN and ZB last deliver on the last
+        # business day of the delivery month, so a date in the *following*
+        # month is an incoherent response -- and `last_delivery_date` is the
+        # settlement date the yield is computed on, so accepting one a month
+        # late silently moves the answer.
+        ("ZN", "2026-08-31", False),  # the day before the delivery month opens
+        ("ZN", "2026-09-01", True),  # the first day of the delivery month
+        ("ZN", "2026-09-30", True),  # the last day of the delivery month
+        ("ZN", "2026-10-01", False),  # into the following month -- not ZN's
+        ("ZB", "2026-09-30", True),
+        ("ZB", "2026-10-01", False),
+        # ZT and ZF settle a few business days after the last trading day, so
+        # for them the following month is exactly right.
+        ("ZT", "2026-08-31", False),
+        ("ZT", "2026-09-01", True),
+        ("ZT", "2026-10-05", True),  # the confirmed live value
+        ("ZT", "2026-10-31", True),  # still the following month
+        ("ZT", "2026-11-01", False),  # two whole months out
+        ("ZF", "2026-10-05", True),
+        ("ZF", "2026-11-01", False),
     ],
 )
-def test_the_accepted_last_delivery_span_around_the_delivery_month(
-    monkeypatch, last_delivery, accepted
+def test_the_accepted_last_delivery_span_is_contract_specific(
+    monkeypatch, contract_code, last_delivery, accepted
 ) -> None:
-    fields = dict(LIVE_STAGE_TWO["ZN"], FUT_DLV_DT_LAST=last_delivery)
+    fields = dict(LIVE_STAGE_TWO[contract_code], FUT_DLV_DT_LAST=last_delivery)
     if accepted:
-        assert _load_with(monkeypatch, "ZN", stage_two=fields) is not None
+        assert _load_with(monkeypatch, contract_code, stage_two=fields) is not None
     else:
         with pytest.raises(TreasuryFuturesCTDBloombergError):
-            _load_with(monkeypatch, "ZN", stage_two=fields)
+            _load_with(monkeypatch, contract_code, stage_two=fields)
+
+
+def test_every_confirmed_live_last_delivery_day_sits_inside_its_contracts_span() -> None:
+    """The spans must not be narrower than the real contracts.
+
+    ZN and ZB last deliver inside the delivery month; ZT and ZF a few business
+    days into the next one. Pinned so the spans cannot be tightened onto real
+    data.
+    """
+
+    for contract_code, symbol in LIVE_DELIVERY_SYMBOL.items():
+        last_delivery = date.fromisoformat(LIVE_STAGE_TWO[contract_code]["FUT_DLV_DT_LAST"])
+        reference = module._delivery_month_first_day(symbol, contract_code, last_delivery)
+        assert reference == date(2026, 9, 1)
+        expected_month = 9 if contract_code in {"ZN", "ZB"} else 10
+        assert last_delivery.month == expected_month
 
 
 @pytest.mark.parametrize(
