@@ -770,13 +770,16 @@ def test_a_last_delivery_day_that_contradicts_the_delivery_month_fails_closed(
         ("ZN", "2026-10-01", False),  # into the following month -- not ZN's
         ("ZB", "2026-09-30", True),
         ("ZB", "2026-10-01", False),
-        # ZT and ZF settle a few business days after the last trading day, so
-        # for them the following month is exactly right.
+        # ZT and ZF last deliver a few business days after the delivery
+        # month's last business day, so their date is always in the *following*
+        # month -- never in the delivery month itself.
         ("ZT", "2026-08-31", False),
-        ("ZT", "2026-09-01", True),
+        ("ZT", "2026-09-01", False),  # the delivery month is not ZT's
+        ("ZT", "2026-09-30", False),
+        ("ZT", "2026-10-01", True),
         ("ZT", "2026-10-05", True),  # the confirmed live value
-        ("ZT", "2026-10-31", True),  # still the following month
         ("ZT", "2026-11-01", False),  # two whole months out
+        ("ZF", "2026-09-01", False),
         ("ZF", "2026-10-05", True),
         ("ZF", "2026-11-01", False),
     ],
@@ -790,6 +793,24 @@ def test_the_accepted_last_delivery_span_is_contract_specific(
     else:
         with pytest.raises(TreasuryFuturesCTDBloombergError):
             _load_with(monkeypatch, contract_code, stage_two=fields)
+
+
+def test_a_wrong_day_in_the_right_month_is_still_accepted(monkeypatch) -> None:
+    """Pins the residual exposure, so it is documented rather than forgotten.
+
+    The span validates the delivery *month*, not the day. Checking the day
+    means knowing which days are business days, and this repository has no
+    holiday calendar -- authoring one would be inventing market data, and
+    inferring a day bound is what made the first deliverable-window attempt
+    reject two of four real CTDs. Escalated to Eddy instead of guessed.
+
+    If a holiday calendar ever lands and the day is validated, this test should
+    flip to asserting a refusal.
+    """
+
+    fields = dict(LIVE_STAGE_TWO["ZT"], FUT_DLV_DT_LAST="2026-10-31")
+    ctd = _load_with(monkeypatch, "ZT", stage_two=fields)
+    assert ctd.last_delivery_date == date(2026, 10, 31)  # not the real 2026-10-05
 
 
 def test_every_confirmed_live_last_delivery_day_sits_inside_its_contracts_span() -> None:

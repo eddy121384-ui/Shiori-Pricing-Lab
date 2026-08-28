@@ -488,25 +488,28 @@ TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[str, tuple[int, int, boo
     "ZB": (180, 300, False),
 }
 
-#: How many months, counted from the first day of the delivery month, the
-#: reported last delivery day may fall within. Contract-specific because the
-#: contracts genuinely differ (Codex review, PR #191):
+#: Which month the reported last delivery day must fall in, as
+#: ``(start, end)`` months counted from the first day of the delivery month and
+#: half-open. Contract-specific because the contracts genuinely differ (Codex
+#: review, PR #191):
 #:
-#: * ZT and ZF settle a few business days *after* the last trading day, which
-#:   is itself the last business day of the delivery month -- so their last
-#:   delivery day always lands in the following month (both confirmed samples
-#:   are 2026-10-05 for a September contract);
-#: * ZN and ZB last deliver on the last business day of the delivery month, so
-#:   a date in the following month is an incoherent response.
+#: * ZN and ZB last deliver on the **last business day of the delivery month**,
+#:   so their last delivery day is in that month -- ``(0, 1)``;
+#: * ZT and ZF last deliver a few business days *after* the last trading day,
+#:   which is itself the last business day of the delivery month. Any business
+#:   day after the month's last one necessarily falls in the next month, so
+#:   their last delivery day is never in the delivery month -- ``(1, 2)``. Both
+#:   confirmed samples are 2026-10-05 for a September contract.
 #:
 #: This matters beyond provenance: ``last_delivery_date`` *is* the settlement
-#: date the implied yield is computed on, so accepting one a month late moves
-#: the answer.
-TREASURY_FUTURES_LAST_DELIVERY_SPAN_MONTHS: dict[str, int] = {
-    "ZT": 2,
-    "ZF": 2,
-    "ZN": 1,
-    "ZB": 1,
+#: date the implied yield is computed on, so accepting the wrong one moves the
+#: answer. See ``_delivery_month_first_day`` for what this deliberately does
+#: **not** check.
+TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN: dict[str, tuple[int, int]] = {
+    "ZT": (1, 2),
+    "ZF": (1, 2),
+    "ZN": (0, 1),
+    "ZB": (0, 1),
 }
 
 _ISIN_LENGTH = 12
@@ -627,11 +630,22 @@ def _delivery_month_first_day(
     The month comes from the symbol's delivery code (``TUU6`` -> ``U`` ->
     September). The symbol carries only the *last digit(s)* of the year, so the
     decade is taken from the matching year nearest ``last_delivery_date`` and
-    then **verified against it**, over the span
-    ``TREASURY_FUTURES_LAST_DELIVERY_SPAN_MONTHS`` allows that contract: the
-    delivery month alone for ZN and ZB, which last deliver on its last business
-    day, and the following month too for ZT and ZF, which settle a few business
-    days later.
+    then **verified against it**, over the month
+    ``TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN`` allows that contract: the
+    delivery month for ZN and ZB, the following month for ZT and ZF.
+
+    **This validates the month, not the day, and that leaves real exposure.**
+    ``last_delivery_date`` is the settlement date the yield is priced on, so a
+    response naming the right month but the wrong day still prices wrongly: on
+    the confirmed ZT sample at ``103-000``, 2026-10-31 instead of its real
+    2026-10-05 moves the implied yield +0.96 bp, past Issue #190's 0.5 bp
+    parity budget (Codex review, PR #191). Checking the *day* means knowing
+    which days are business days, and this repository has no holiday calendar
+    -- only a ``BusinessDayConvention`` enum. Authoring one here would be
+    inventing market data (AGENTS.md rule 6) and inferring a bound, which is
+    the same move that made the first deliverable-window attempt reject two of
+    the four real CTDs. So it is escalated to Eddy rather than guessed, and the
+    residual is recorded here rather than left invisible.
 
     Verifying rather than trusting the nearest match matters, because nearest
     alone silently guesses (Codex review, PR #191). ``TYU6`` reported with a
@@ -659,15 +673,15 @@ def _delivery_month_first_day(
         year -= modulus
 
     reference = date(year, month, 1)
-    span_end = _add_months_to_first_day(
-        reference, TREASURY_FUTURES_LAST_DELIVERY_SPAN_MONTHS[contract_code]
-    )
-    if not reference <= last_delivery_date < span_end:
+    start_months, end_months = TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN[contract_code]
+    span_start = _add_months_to_first_day(reference, start_months)
+    span_end = _add_months_to_first_day(reference, end_months)
+    if not span_start <= last_delivery_date < span_end:
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI returned last delivery {last_delivery_date.isoformat()} for "
             f"{security or contract_symbol!r}, which does not belong to the "
             f"{contract_symbol} delivery month: {contract_code} last delivers between "
-            f"{reference.isoformat()} and {span_end.isoformat()}, so the delivery year is "
+            f"{span_start.isoformat()} and {span_end.isoformat()}, so the delivery year is "
             "unresolvable and the settlement date it would price on is unusable"
         )
     return reference
