@@ -81,6 +81,11 @@
 
   let summaries = [];
   let selectedSurfaceId = null;
+  // Whether the trader picked the current selection themselves. A selection
+  // Shiori made for them -- which it only ever does when the store holds
+  // exactly one snapshot -- is not a choice, and must not be treated as one
+  // later.
+  let selectionIsTraders = false;
   let payload = null;
   let listLoaded = false;
   let inFlight = false;
@@ -232,10 +237,18 @@
       // One stored snapshot is not a choice, so it is shown. More than one is
       // a choice, and it is the trader's: nothing is selected until they make
       // it (Issue #194).
-      const keepSelection =
+      //
+      // A selection carries over a refresh only if it is still stored *and*
+      // it was a real choice. An automatic one is valid exactly while the
+      // store holds the single snapshot it was made from: once a second
+      // capture is confirmed, keeping it would draw one of two snapshots the
+      // trader has never chosen between -- the silent pick among duplicates
+      // this view exists to refuse (Codex review, PR #195).
+      const stillStored =
         selectedSurfaceId && summaries.some((s) => s.surface_id === selectedSurfaceId);
-      if (!keepSelection) {
+      if (!stillStored || !(selectionIsTraders || summaries.length === 1)) {
         selectedSurfaceId = summaries.length === 1 ? summaries[0].surface_id : null;
+        selectionIsTraders = false;
       }
       renderSnapshotOptions();
       if (summaries.length === 0) {
@@ -329,6 +342,7 @@
   els.select.addEventListener("change", () => {
     const chosen = els.select.value;
     selectedSurfaceId = chosen === PLACEHOLDER_VALUE ? null : chosen;
+    selectionIsTraders = selectedSurfaceId !== null;
     if (!selectedSurfaceId) {
       payload = null;
       showOnly("empty", CHOOSE_SNAPSHOT_TEXT);
@@ -440,6 +454,7 @@
   let volMin = 0;
   let volMax = 0;
   let projectedNodes = [];
+  let paintOrder = [];
   let hoveredNode = null;
 
   function buildSurfaceNodes() {
@@ -543,6 +558,9 @@
     // carry a stored vol: the mesh never bridges a cell the capture could not
     // read, because doing so would require inventing the missing node.
     const quads = [];
+    // Per node, the depth of the nearest quad it is a corner of. It is what
+    // decides where the node's dot lands in the paint order below.
+    const nearestQuadDepth = new Map();
     const lookup = new Map();
     for (const node of modelNodes) lookup.set(`${node.i}|${node.j}`, node);
     const cornerOf = (i, j) => lookup.get(`${i}|${j}`) || null;
@@ -562,20 +580,46 @@
         const height =
           corners.reduce((total, corner) => total + normalizedHeight(corner.volatility), 0) /
           corners.length;
-        quads.push({ projectedCorners, depth, height });
+        // ``i``/``j`` name the cell, so a quad's four corners are
+        // (i, j), (i, j+1), (i+1, j+1) and (i+1, j) -- the identity the
+        // node ordering below and its regression test both work from.
+        quads.push({ projectedCorners, depth, height, i, j });
+        for (const corner of corners) {
+          const key = `${corner.i}|${corner.j}`;
+          const nearest = nearestQuadDepth.get(key);
+          if (nearest === undefined || depth < nearest) nearestQuadDepth.set(key, depth);
+        }
       }
     }
     // Quads and node dots painted together, farthest first, so a node on the
     // far side of a fold is hidden by the near side rather than showing
-    // through it. Each dot is biased a hair towards the viewer so it still
-    // wins against the four quads it is a corner of -- they share its depth,
-    // and without the bias a node would vanish under its own mesh.
-    const DOT_DEPTH_BIAS = 0.03;
+    // through it.
+    //
+    // A dot is placed just in front of the nearest quad it is a corner of,
+    // so every quad it helped draw is already down by the time it lands,
+    // while a quad nearer than all of them -- an unrelated fold in the
+    // foreground -- still paints over it. A fixed nudge cannot promise that:
+    // a quad's centroid differs from its corner in expiry, tenor and height
+    // at once, so on a steep enough slope it projects further forward than
+    // that corner by more than any constant (Codex review, PR #195).
+    const DEPTH_EPSILON = 1e-9;
     const painted = quads.map((quad) => ({ quad, depth: quad.depth }));
     for (const projectedNode of projectedNodes) {
-      painted.push({ dot: projectedNode, depth: projectedNode.depth - DOT_DEPTH_BIAS });
+      const nearestQuad = nearestQuadDepth.get(
+        `${projectedNode.node.i}|${projectedNode.node.j}`
+      );
+      // A node with no quad at all -- an isolated stored value, or one whose
+      // every neighbouring cell is unread -- keeps its own depth.
+      const depth =
+        nearestQuad === undefined ? projectedNode.depth : Math.min(projectedNode.depth, nearestQuad);
+      painted.push({ dot: projectedNode, depth: depth - DEPTH_EPSILON });
     }
     painted.sort((a, b) => b.depth - a.depth);
+    paintOrder = painted.map((item) =>
+      item.quad
+        ? { kind: "quad", i: item.quad.i, j: item.quad.j, depth: item.depth }
+        : { kind: "dot", i: item.dot.node.i, j: item.dot.node.j, depth: item.depth }
+    );
     for (const item of painted) {
       if (item.quad) {
         ctx.beginPath();
@@ -924,4 +968,5 @@
       : null;
   };
   window.__shioriTestVolSurfaceRequestedRoutes = () => requestedRoutes.slice();
+  window.__shioriTestVolSurfacePaintOrder = () => paintOrder.slice();
 })();

@@ -258,6 +258,45 @@ def test_a_surface_edited_under_the_workbench_fails_visibly(server_url, store) -
 # --- What these routes must never do ------------------------------------------
 
 
+def test_a_fresh_installation_is_not_given_a_database_by_browsing(
+    monkeypatch, tmp_path
+) -> None:
+    # Codex review (PR #195): opening the store creates it -- parent
+    # directory, schema, version row -- which is right for the first confirm
+    # and wrong for a browse. A trader who opened Markets before confirming
+    # anything must not leave a populated SQLite file behind.
+    database_path = tmp_path / "never-created" / "vol_surfaces.sqlite3"
+    monkeypatch.setattr(server_module, "VOL_SURFACE_STORE", VolSurfaceStore(database_path))
+
+    listed = server_module.list_confirmed_atm_vol_surfaces()
+    with pytest.raises(KeyError):
+        server_module.fetch_confirmed_atm_vol_surface("any-surface-id")
+
+    assert listed["surfaces"] == []
+    assert listed["database"] == str(database_path)
+    assert not database_path.exists()
+    assert not database_path.parent.exists()
+
+
+def test_confirming_still_creates_the_database_the_browse_would_not_have(
+    monkeypatch, tmp_path
+) -> None:
+    # The other half of the same rule: the read-only guard must not have
+    # taken the write path's ability to bring the database into existence.
+    database_path = tmp_path / "made-by-the-first-save" / "vol_surfaces.sqlite3"
+    fresh = VolSurfaceStore(database_path)
+    monkeypatch.setattr(server_module, "VOL_SURFACE_STORE", fresh)
+    assert server_module.list_confirmed_atm_vol_surfaces()["surfaces"] == []
+    assert not database_path.exists()
+
+    surface = confirmed_surface()
+    fresh.save_confirmed_surface(surface)
+
+    assert database_path.exists()
+    (row,) = server_module.list_confirmed_atm_vol_surfaces()["surfaces"]
+    assert row["surface_id"] == surface.surface_id
+
+
 def test_neither_route_writes_anything_to_the_store(server_url, store) -> None:
     surface = confirmed_surface()
     store.save_confirmed_surface(surface)

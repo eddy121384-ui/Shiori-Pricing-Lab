@@ -2713,6 +2713,22 @@ def _storage_result(
 # --------------------------------------------------------------------------
 
 
+def _canonical_store_exists() -> bool:
+    """Whether the canonical store has a database on disk yet.
+
+    Both read-only routes ask this first. Opening the store *creates* it --
+    :meth:`VolSurfaceStore._connect` makes the parent directory and writes
+    the schema in a transaction -- which is exactly right on the confirm
+    path, where the first save has to be able to bring the database into
+    existence, and exactly wrong on a browse: a trader who opened Markets on
+    a fresh installation would leave a populated SQLite file behind having
+    confirmed nothing (Codex review, PR #195). No file means no confirmed
+    surface, and both routes can say so without touching the disk at all.
+    """
+
+    return VOL_SURFACE_STORE.database_path.exists()
+
+
 def list_confirmed_atm_vol_surfaces() -> dict:
     """Every confirmed ATM surface the local store holds, newest save first.
 
@@ -2725,7 +2741,11 @@ def list_confirmed_atm_vol_surfaces() -> dict:
     picker, never one arbitrarily chosen for the trader.
     """
 
-    summaries = VOL_SURFACE_STORE.list_surfaces(surface_type=VolSurfaceType.ATM_SWAPTION)
+    summaries = (
+        VOL_SURFACE_STORE.list_surfaces(surface_type=VolSurfaceType.ATM_SWAPTION)
+        if _canonical_store_exists()
+        else ()
+    )
     return {
         "surfaces": [summary.to_dict() for summary in summaries],
         "database": str(VOL_SURFACE_STORE.database_path),
@@ -2744,6 +2764,11 @@ def fetch_confirmed_atm_vol_surface(surface_id: str) -> dict:
     """
 
     _require_non_blank_field(surface_id, "surface_id")
+    if not _canonical_store_exists():
+        # Word for word what the store itself raises for an id it does not
+        # hold, so "nothing is stored yet" and "not this id" are the same
+        # answer to the page -- which they are.
+        raise KeyError(f"no vol surface is stored with id {surface_id!r}")
     surface = VOL_SURFACE_STORE.fetch_surface(surface_id)
     if surface.identity.surface_type is not VolSurfaceType.ATM_SWAPTION:
         raise ValueError(

@@ -480,6 +480,67 @@ def test_two_captures_of_one_screen_are_distinguishable_in_the_picker(server_url
     assert any("bbbb2222" in label for label in labels)
 
 
+def test_a_second_confirmed_snapshot_takes_back_the_automatic_choice(server_url, page) -> None:
+    # Codex review (PR #195): the one-snapshot auto-selection is only a
+    # choice while there is nothing to choose between. Once a second capture
+    # is confirmed and the trader refreshes, carrying the old implicit pick
+    # forward would draw one of two snapshots they have never chosen among.
+    _route_curve_away(page)
+    listings = {"summaries": (_SUMMARY_A,)}
+    calls = {"surface": []}
+
+    def _handle_list(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"surfaces": list(listings["summaries"]), "database": "test"}),
+        )
+
+    def _handle_surface(route):
+        requested = json.loads(route.request.post_data)["surface_id"]
+        calls["surface"].append(requested)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"surface-a": _SURFACE_A, "surface-b": _SURFACE_B}[requested]),
+        )
+
+    page.route("**/api/vol-surface/atm/list", _handle_list)
+    page.route("**/api/vol-surface/atm/surface", _handle_surface)
+
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+    assert calls["surface"] == ["surface-a"]
+
+    # A second capture is confirmed elsewhere; the trader refreshes.
+    listings["summaries"] = (_SUMMARY_A, _SUMMARY_B)
+    page.click("#vol-surface-refresh-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-empty"))
+
+    assert calls["surface"] == ["surface-a"]  # nothing new was fetched
+    assert _is_actually_hidden(page, "vol-surface-table-card")
+    assert page.eval_on_selector("#vol-surface-select", "el => el.value") == ""
+    assert "does not pick a snapshot for you" in page.inner_text("#vol-surface-empty")
+
+
+def test_a_choice_the_trader_made_survives_a_refresh(server_url, page) -> None:
+    # The other half of the same rule: their own pick is not thrown away
+    # just because several snapshots are stored.
+    _route_curve_away(page)
+    calls = _route_vol_surface(page, summaries=(_SUMMARY_A, _SUMMARY_B))
+    _open_vol_surface(page, server_url)
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-empty"))
+    page.select_option("#vol-surface-select", "surface-b")
+    _wait_for_surface(page)
+
+    page.click("#vol-surface-refresh-btn")
+    _wait_until(lambda: len(calls["surface"]) == 2)
+    _wait_for_surface(page)
+
+    assert calls["surface"] == ["surface-b", "surface-b"]
+    assert page.eval_on_selector("#vol-surface-id", "el => el.textContent") == "surface-b"
+
+
 def test_choosing_a_snapshot_updates_the_table_and_the_surface_together(server_url, page) -> None:
     _route_curve_away(page)
     _route_vol_surface(page, summaries=(_SUMMARY_A, _SUMMARY_B))
@@ -528,6 +589,39 @@ def test_the_surface_draws_one_node_per_stored_value(server_url, page) -> None:
     # The unresolved intersection has no node at all -- it is never plotted at
     # zero, and never interpolated from its neighbours.
     assert ("1Yr", "1Yr") not in {(n["expiry"], n["tenor"]) for n in nodes}
+
+
+def test_a_node_is_painted_after_every_quad_it_is_a_corner_of(server_url, page) -> None:
+    # Codex review (PR #195): a node must never be hidden by the mesh it
+    # helped draw. A quad's centroid differs from its corner in expiry, tenor
+    # *and* height, so on a slope it can project further forward than that
+    # corner by more than any fixed nudge -- the ordering has to be derived
+    # from the incident quads themselves, at every camera angle.
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    for rotation in ((0, 0), (140, -30), (-260, 55), (70, 90)):
+        page.evaluate("([dx, dy]) => window.__shioriTestVolSurfaceRotateBy(dx, dy)", rotation)
+        order = page.evaluate("() => window.__shioriTestVolSurfacePaintOrder()")
+        quads_at = {}
+        dot_at = {}
+        for index, item in enumerate(order):
+            if item["kind"] == "quad":
+                i, j = item["i"], item["j"]
+                for cell in ((i, j), (i, j + 1), (i + 1, j + 1), (i + 1, j)):
+                    quads_at.setdefault(cell, []).append(index)
+            else:
+                dot_at[(item["i"], item["j"])] = index
+        assert dot_at, "no nodes were painted"
+        assert quads_at, "no quads were painted"
+        for cell, dot_index in dot_at.items():
+            for quad_index in quads_at.get(cell, ()):
+                assert quad_index < dot_index, (
+                    f"at rotation {rotation}, the quad at index {quad_index} paints over the "
+                    f"node {cell} it has as a corner (node at index {dot_index})"
+                )
 
 
 def test_dragging_rotates_and_the_nodes_move_with_it(server_url, page) -> None:
