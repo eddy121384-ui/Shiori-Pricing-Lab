@@ -108,6 +108,7 @@ data, not a market as-of, and it is labelled as such wherever it is shown.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -785,6 +786,53 @@ def _require_cusip_agrees_with_isin(
         )
 
 
+#: ``FUT_CTD_TICKER`` as all four confirmed contracts return it: ``T``, the
+#: coupon, and the maturity as ``mm/dd/yy`` (``T 4.25 05/31/33``).
+_CTD_DESCRIPTION_PATTERN = re.compile(
+    r"^T\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]{2})/([0-9]{2})/([0-9]{2})$"
+)
+
+
+def _coherent_ctd_description(
+    raw_description: str | None, coupon_percent: float, maturity: date
+) -> str | None:
+    """Keep the display description only if it names the bond that was priced.
+
+    ``FUT_CTD_TICKER`` encodes a coupon and a maturity of its own, and pricing
+    uses the structured fields instead -- so a contradictory description is a
+    second bond shown beside the first. It is rendered in the workbench summary
+    and printed by the acceptance script under "use these exact values on the
+    benchmark side", where a reader could key it into the benchmark instead of
+    the ISIN (Codex review, PR #191).
+
+    Dropped rather than refused. The field is display-only and already
+    optional, so losing it costs nothing, while failing the load on it would
+    stake availability on my reading of a vendor display format -- and an
+    unrecognised-but-valid format would then be an outage. The structured
+    fields remain authoritative either way.
+
+    The two-digit year is compared against ``maturity.year % 100`` rather than
+    expanded, so no century rule is inferred: this only ever *confirms*
+    agreement with a maturity already parsed from ``FUT_CTD_MTY``.
+    """
+
+    if raw_description is None:
+        return None
+    description = raw_description.strip()
+    if not description:
+        return None
+
+    match = _CTD_DESCRIPTION_PATTERN.match(description)
+    if match is None:
+        return None
+    if abs(float(match.group(1)) - coupon_percent) > 1e-9:
+        return None
+    month, day, year_digits = (int(match.group(index)) for index in (2, 3, 4))
+    if (month, day, year_digits) != (maturity.month, maturity.day, maturity.year % 100):
+        return None
+    return description
+
+
 def _parse_bloomberg_float(raw_value: str, field: str, security: str) -> float:
     try:
         value = float(raw_value)
@@ -945,7 +993,11 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
         source=TreasuryFuturesCTDSource.BLOOMBERG_DAPI,
         as_of=_acquisition_now(),
         ctd_cusip=ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_cusip"]),
-        ctd_description=ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_description"]),
+        ctd_description=_coherent_ctd_description(
+            ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_description"]),
+            coupon_percent,
+            ctd_maturity_date,
+        ),
     )
 
 

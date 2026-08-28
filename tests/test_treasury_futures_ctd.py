@@ -798,6 +798,53 @@ def test_the_accepted_last_delivery_span_is_contract_specific(
 
 
 @pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
+def test_every_live_description_is_kept_because_it_agrees(monkeypatch, contract_code) -> None:
+    """The four confirmed descriptions must survive the coherence check.
+
+    A guard that silently dropped real display metadata would be its own small
+    regression, so all four are pinned.
+    """
+
+    ctd = _load_with(monkeypatch, contract_code)
+    assert ctd.ctd_description == LIVE_STAGE_TWO[contract_code]["FUT_CTD_TICKER"]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "T 4.5 05/31/33",  # coupon disagrees with FUT_CTD_CPN
+        "T 4.25 05/31/34",  # year disagrees with FUT_CTD_MTY
+        "T 4.25 06/30/33",  # month and day disagree
+        "T 5 05/15/45",  # the confirmed ZB description against ZN's fields
+        "#N/A N/A",  # a sentinel, not a description
+        "GARBAGE",
+    ],
+)
+def test_a_description_that_contradicts_the_priced_fields_is_dropped(
+    monkeypatch, description
+) -> None:
+    """Codex review, PR #191 (P2).
+
+    `FUT_CTD_TICKER` carries a coupon and maturity of its own while pricing
+    uses the structured fields, so a contradictory one is a second bond shown
+    beside the first -- in the workbench summary, and in the acceptance
+    script under "use these exact values on the benchmark side".
+
+    Dropped, not refused: it is display-only and already optional, so losing
+    it costs nothing, whereas failing the load would stake availability on my
+    reading of a vendor display format. The load still succeeds and the
+    priced fields are untouched.
+    """
+
+    fields = dict(LIVE_STAGE_TWO["ZN"], FUT_CTD_TICKER=description)
+    ctd = _load_with(monkeypatch, "ZN", stage_two=fields)
+    assert ctd.ctd_description is None
+    assert ctd.ctd_identifier == "US91282CQT17"  # the priced record is unaffected
+    assert ctd.ctd_coupon_percent == 4.25
+    assert ctd.ctd_maturity_date == date(2033, 5, 31)
+
+
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
 def test_the_live_cusip_and_isin_name_the_same_bond(contract_code) -> None:
     """A U.S. ISIN is ``US`` + CUSIP + check digit, so the two must agree.
 
