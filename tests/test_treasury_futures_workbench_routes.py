@@ -346,6 +346,24 @@ def test_a_target_yield_typed_with_a_percent_sign_is_read(server_url: str) -> No
     assert payload["futures_price"]["target_yield_percent"] == 4.2
 
 
+@pytest.mark.parametrize("typo", ["4.20%%", "4.20%%%", "4.20 % %"])
+def test_a_repeated_percent_sign_is_refused_not_silently_read(server_url: str, typo) -> None:
+    """Codex review, PR #191 (P2).
+
+    `rstrip("%")` removed a whole run of percent signs, so `4.20%%` was priced
+    as 4.20% -- an unreadable input answered with an apparently valid futures
+    price, which is the silent-wrong-answer this route's fail-visible contract
+    exists to prevent. One optional suffix is stripped, not a run.
+    """
+
+    status, payload = _convert(server_url, futures_price="112-165", target_yield_percent=typo)
+    assert status == 200
+    assert payload["futures_price"] is None
+    assert payload["futures_price_error"]
+    # The other direction still answers -- a bad target yield must not hide it.
+    assert payload["implied_yield"] is not None
+
+
 def test_an_off_tick_fractional_quote_is_reported_against_this_contract(
     server_url: str,
 ) -> None:

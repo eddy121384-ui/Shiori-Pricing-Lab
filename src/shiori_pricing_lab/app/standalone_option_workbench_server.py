@@ -2885,8 +2885,14 @@ def _parse_target_yield_percent(raw: object) -> float:
         raise TreasuryFuturesYieldError(f"target yield must be a number in percent, got {raw!r}")
     if isinstance(raw, (int, float)):
         return float(raw)
+    # One optional trailing '%', not a run of them: `rstrip("%")` turned `4%%`
+    # into `4` and priced the typo as 4.0%, which is an unreadable input
+    # answered with an apparently valid futures price (Codex review, PR #191).
+    text = str(raw).strip()
+    if text.endswith("%"):
+        text = text[:-1].strip()
     try:
-        return float(str(raw).strip().rstrip("%"))
+        return float(text)
     except ValueError as exc:
         raise TreasuryFuturesYieldError(
             f"target yield must be a number in percent, got {raw!r}"
