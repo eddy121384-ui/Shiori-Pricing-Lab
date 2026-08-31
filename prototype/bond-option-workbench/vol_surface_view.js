@@ -62,6 +62,13 @@
     canvas: document.getElementById("vol-surface-canvas"),
     tooltip: document.getElementById("vol-surface-tooltip"),
     axisUnit: document.getElementById("vol-surface-axis-unit"),
+    slicesCard: document.getElementById("vol-surface-slices-card"),
+    sliceTenorSelect: document.getElementById("vol-surface-slice-tenor"),
+    sliceExpirySelect: document.getElementById("vol-surface-slice-expiry"),
+    chartVsExpiry: document.getElementById("vol-surface-chart-vs-expiry"),
+    chartVsTenor: document.getElementById("vol-surface-chart-vs-tenor"),
+    chartUnavailable: document.getElementById("vol-surface-chart-unavailable"),
+    chartUnavailableDetail: document.getElementById("vol-surface-chart-unavailable-detail"),
     tableCard: document.getElementById("vol-surface-table-card"),
     tableHead: document.getElementById("vol-surface-table-head"),
     tableBody: document.getElementById("vol-surface-table-body"),
@@ -136,6 +143,52 @@
     }
   }
 
+  // ---- Tenor labels as elapsed time ------------------------------------------
+  //
+  // Issue #194 UAT: spacing Expiry and Swap Tenor as equally-wide categories
+  // draws 1Mo->2Mo the same width as 20Yr->30Yr, which misstates the term
+  // structure the surface exists to show. Both horizontal axes are therefore
+  // positioned by how much time each label names.
+  //
+  // **This is a drawing scale, not a day count.** The divisors below place a
+  // label on an axis and nothing else: no stored value is changed by them, no
+  // year fraction computed here ever reaches pricing, and nothing in this file
+  // may be read as a convention for accruing anything. The unit is read from
+  // the label the capture transcribed -- never inferred from the size of the
+  // number, and never from the label's position among its neighbours.
+  //
+  // Only the four unit spellings the VCUB screens actually write are
+  // recognised. A label in any other form is not guessed at: the charts
+  // refuse (see `axisFromLabels`), because a chart that silently fell back to
+  // equal spacing would be making exactly the misstatement this change fixes.
+  const TENOR_LABEL = /^\s*(\d+(?:\.\d+)?)\s*(Dy|Wk|Mo|Yr)\s*$/i;
+  const UNIT_YEARS = { dy: 1 / 365, wk: 1 / 52, mo: 1 / 12, yr: 1 };
+
+  function tenorYears(label) {
+    if (typeof label !== "string") return null;
+    const match = TENOR_LABEL.exec(label);
+    if (match === null) return null;
+    const years = Number(match[1]) * UNIT_YEARS[match[2].toLowerCase()];
+    return Number.isFinite(years) && years > 0 ? years : null;
+  }
+
+  // One axis: every label's elapsed time, and its position in [-1, 1] scaled
+  // linearly by that time. `error` names the first label that could not be
+  // read, in which case there are no coordinates at all -- the caller shows
+  // the matrix and refuses the charts rather than drawing a scale it cannot
+  // honour.
+  function axisFromLabels(labels) {
+    const years = labels.map(tenorYears);
+    const unreadable = labels.find((label, index) => years[index] === null);
+    if (unreadable !== undefined) return { error: unreadable };
+    const lowest = Math.min(...years);
+    const highest = Math.max(...years);
+    const coordinates = years.map((value) =>
+      highest === lowest ? 0 : ((value - lowest) / (highest - lowest)) * 2 - 1
+    );
+    return { labels, years, coordinates, lowest, highest };
+  }
+
   // ---- The market-view selector --------------------------------------------
 
   let activeMarketView = "curve";
@@ -198,7 +251,15 @@
     if (section === "empty" && emptyText) els.empty.textContent = emptyText;
     els.error.hidden = section !== "error";
     const showSurface = section === "surface";
-    els.chartCard.hidden = !showSurface;
+    // The three chart cards are only ever hidden from here. Which of them
+    // shows when a surface *is* on screen is `applyChartAvailability`'s to
+    // decide -- a surface whose labels carry no readable tenor shows its
+    // matrix and no chart -- and it runs first, so this must not undo it.
+    if (!showSurface) {
+      els.chartCard.hidden = true;
+      els.slicesCard.hidden = true;
+      els.chartUnavailable.hidden = true;
+    }
     els.tableCard.hidden = !showSurface;
     els.provenance.hidden = !showSurface;
   }
@@ -411,8 +472,53 @@
     els.axisUnit.textContent = payload.volatility_unit ? ` (${payload.volatility_unit})` : "";
 
     renderTable();
+    buildAxes();
+    if (axisError !== null) {
+      // The matrix above is unaffected: it needs no scale, only the stored
+      // values, so it still shows every one of them. Nothing of the previous
+      // surface may be left behind for a picker or a hook to report.
+      modelNodes = [];
+      projectedNodes = [];
+      paintedItems = [];
+      hoveredNode = null;
+      els.tooltip.hidden = true;
+      applyChartAvailability();
+      return;
+    }
     buildSurfaceNodes();
+    applyChartAvailability();
     drawSurface();
+    renderSliceSelectors();
+    renderSlices();
+  }
+
+  function buildAxes() {
+    const { expiries, underlying_tenors: tenors } = payload.grid;
+    const tenor = axisFromLabels(tenors);
+    const expiry = axisFromLabels(expiries);
+    const failed = tenor.error !== undefined ? tenor : expiry.error !== undefined ? expiry : null;
+    if (failed !== null) {
+      tenorAxis = null;
+      expiryAxis = null;
+      axisError = failed.error;
+      return;
+    }
+    tenorAxis = tenor;
+    expiryAxis = expiry;
+    axisError = null;
+  }
+
+  function applyChartAvailability() {
+    const drawable = axisError === null;
+    els.chartCard.hidden = !drawable;
+    els.slicesCard.hidden = !drawable;
+    els.chartUnavailable.hidden = drawable;
+    if (!drawable) {
+      els.chartUnavailableDetail.textContent =
+        `The axes are spaced by elapsed tenor, and "${axisError}" is not a tenor this build ` +
+        "can read. Rather than fall back to equal spacing -- which would misstate the term " +
+        "structure -- the charts are not drawn.";
+    }
   }
 
   function renderTable() {
@@ -481,6 +587,12 @@
   const DEFAULT_CAMERA = { yaw: -0.62, pitch: 0.48, zoom: 1 };
 
   const camera = { ...DEFAULT_CAMERA };
+  // The two horizontal axes of the current surface, time-scaled. Null until a
+  // surface is rendered; `axisError` names a label neither could be built
+  // from, which is what makes the charts refuse.
+  let tenorAxis = null;
+  let expiryAxis = null;
+  let axisError = null;
   let modelNodes = [];
   let volMin = 0;
   let volMax = 0;
@@ -505,8 +617,9 @@
           expiry: expiries[i],
           tenor: tenors[j],
           volatility: value,
-          x: tenors.length === 1 ? 0 : (j / (tenors.length - 1)) * 2 - 1,
-          y: expiries.length === 1 ? 0 : (i / (expiries.length - 1)) * 2 - 1,
+          // Positioned by elapsed tenor, not by column index.
+          x: tenorAxis.coordinates[j],
+          y: expiryAxis.coordinates[i],
         });
       });
     });
@@ -683,9 +796,10 @@
     drawVolAxis(ctx, project);
   }
 
-  const floorX = (j, tenors) => (tenors.length === 1 ? 0 : (j / (tenors.length - 1)) * 2 - 1);
-  const floorY = (i, expiries) =>
-    expiries.length === 1 ? 0 : (i / (expiries.length - 1)) * 2 - 1;
+  // The same time-scaled coordinates the nodes sit on, so a gridline always
+  // passes through the column it labels.
+  const floorX = (j) => tenorAxis.coordinates[j];
+  const floorY = (i) => expiryAxis.coordinates[i];
 
   // The reference grid the surface floats above, at the bottom of the vol
   // axis. Drawn before the mesh, since it belongs behind it.
@@ -693,8 +807,8 @@
     const z = -Z_HALF;
     ctx.strokeStyle = "#dfe4ec";
     ctx.lineWidth = 1;
-    const xAt = (j) => floorX(j, tenors);
-    const yAt = (i) => floorY(i, expiries);
+    const xAt = (j) => floorX(j);
+    const yAt = (i) => floorY(i);
 
     for (let i = 0; i < expiries.length; i += 1) {
       const a = project(-1, yAt(i), z);
@@ -719,8 +833,8 @@
   // rotated nearly edge-on.
   function drawFloorLabels(ctx, project, expiries, tenors) {
     const z = -Z_HALF;
-    const xAt = (j) => floorX(j, tenors);
-    const yAt = (i) => floorY(i, expiries);
+    const xAt = (j) => floorX(j);
+    const yAt = (i) => floorY(i);
     ctx.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
     ctx.fillStyle = "#6b7385";
     ctx.textAlign = "center";
@@ -844,6 +958,238 @@
     plateText(ctx, unit ? `Normal Vol (${unit})` : "Normal Vol", top.sx, top.sy - 16);
   }
 
+  // ---- Cross-sections --------------------------------------------------------
+  //
+  // Two 2D slices of the same stored surface: vol against option expiry at one
+  // swap tenor, and vol against swap tenor at one option expiry. Both read the
+  // very same `payload.grid` the matrix and the 3D surface do, so all three
+  // can only ever show one confirmed snapshot. Both x axes are the
+  // time-scaled ones above.
+  //
+  // A cell the capture left unresolved is drawn as a gap: no marker, and the
+  // line stops on one side of it and starts again on the other. Bridging it
+  // would be inventing the node this whole slice refuses to invent.
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const SLICE_WIDTH = 560;
+  const SLICE_HEIGHT = 260;
+  const SLICE_MARGIN = { top: 14, right: 18, bottom: 34, left: 54 };
+  //: The slice a surface opens on, following the Bloomberg example Eddy
+  //: worked from. A surface that does not store these labels opens on its
+  //: first stored one instead -- a stated fallback, not a silent pick among
+  //: equals, and the selector shows which it landed on either way.
+  const DEFAULT_SLICE_TENOR = "1Yr";
+  const DEFAULT_SLICE_EXPIRY = "1Mo";
+
+  let sliceTenor = null;
+  let sliceExpiry = null;
+
+  function defaultedSlice(labels, preferred) {
+    return labels.includes(preferred) ? preferred : labels[0];
+  }
+
+  function renderSliceSelectors() {
+    const { expiries, underlying_tenors: tenors } = payload.grid;
+    if (!tenors.includes(sliceTenor)) sliceTenor = defaultedSlice(tenors, DEFAULT_SLICE_TENOR);
+    if (!expiries.includes(sliceExpiry)) {
+      sliceExpiry = defaultedSlice(expiries, DEFAULT_SLICE_EXPIRY);
+    }
+    fillSelect(els.sliceTenorSelect, tenors, sliceTenor);
+    fillSelect(els.sliceExpirySelect, expiries, sliceExpiry);
+  }
+
+  function fillSelect(select, labels, selected) {
+    select.textContent = "";
+    for (const label of labels) {
+      const option = document.createElement("option");
+      option.value = label;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+    select.value = selected;
+  }
+
+  function renderSlices() {
+    const { expiries, underlying_tenors: tenors, rows } = payload.grid;
+    const tenorIndex = tenors.indexOf(sliceTenor);
+    const expiryIndex = expiries.indexOf(sliceExpiry);
+
+    // Vol against option expiry, down one column of the stored matrix.
+    renderSliceChart(
+      els.chartVsExpiry,
+      expiries.map((label, i) => ({
+        label,
+        years: expiryAxis.years[i],
+        value: rows[i][tenorIndex],
+      })),
+      `Option Expiry (years) at ${sliceTenor}`
+    );
+
+    // Vol against swap tenor, along one row of it.
+    renderSliceChart(
+      els.chartVsTenor,
+      tenors.map((label, j) => ({
+        label,
+        years: tenorAxis.years[j],
+        value: rows[expiryIndex][j],
+      })),
+      `Swap Tenor (years) at ${sliceExpiry}`
+    );
+  }
+
+  function niceTicks(lowest, highest) {
+    if (!(highest > lowest)) return [lowest];
+    const step = Math.pow(10, Math.floor(Math.log10((highest - lowest) / 4)));
+    const residual = (highest - lowest) / 4 / step;
+    const nice = (residual > 5 ? 10 : residual > 2 ? 5 : residual > 1 ? 2 : 1) * step;
+    const ticks = [];
+    for (let value = Math.ceil(lowest / nice) * nice; value <= highest; value += nice) {
+      ticks.push(Math.round(value * 1e6) / 1e6);
+    }
+    return ticks.length ? ticks : [lowest, highest];
+  }
+
+  function renderSliceChart(container, points, xAxisTitle) {
+    container.textContent = "";
+    const resolved = points.filter(
+      (point) => typeof point.value === "number" && Number.isFinite(point.value)
+    );
+    if (!resolved.length) {
+      const empty = document.createElement("div");
+      empty.className = "vs-slice-empty";
+      empty.textContent = "Every node on this slice was left unresolved by the capture.";
+      container.appendChild(empty);
+      return;
+    }
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${SLICE_WIDTH} ${SLICE_HEIGHT}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", xAxisTitle);
+    const plotWidth = SLICE_WIDTH - SLICE_MARGIN.left - SLICE_MARGIN.right;
+    const plotHeight = SLICE_HEIGHT - SLICE_MARGIN.top - SLICE_MARGIN.bottom;
+
+    const xLowest = Math.min(...points.map((point) => point.years));
+    const xHighest = Math.max(...points.map((point) => point.years));
+    const values = resolved.map((point) => point.value);
+    let yLowest = Math.min(...values);
+    let yHighest = Math.max(...values);
+    const span = yHighest - yLowest;
+    const pad = span === 0 ? Math.max(Math.abs(yLowest) * 0.05, 0.5) : span * 0.12;
+    yLowest -= pad;
+    yHighest += pad;
+
+    // Time-scaled, exactly like the surface's own axes.
+    const xFor = (years) =>
+      SLICE_MARGIN.left +
+      (xHighest === xLowest ? plotWidth / 2 : ((years - xLowest) / (xHighest - xLowest)) * plotWidth);
+    const yFor = (value) =>
+      SLICE_MARGIN.top + plotHeight - ((value - yLowest) / (yHighest - yLowest)) * plotHeight;
+
+    for (const tick of niceTicks(yLowest, yHighest)) {
+      const y = yFor(tick);
+      const gridline = document.createElementNS(SVG_NS, "line");
+      gridline.setAttribute("x1", String(SLICE_MARGIN.left));
+      gridline.setAttribute("x2", String(SLICE_WIDTH - SLICE_MARGIN.right));
+      gridline.setAttribute("y1", String(y));
+      gridline.setAttribute("y2", String(y));
+      gridline.setAttribute("stroke", "#eef0f4");
+      gridline.setAttribute("stroke-dasharray", "3 3");
+      svg.appendChild(gridline);
+
+      const label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("x", String(SLICE_MARGIN.left - 8));
+      label.setAttribute("y", String(y + 4));
+      label.setAttribute("text-anchor", "end");
+      label.setAttribute("font-size", "11");
+      label.setAttribute("fill", "#99a1b0");
+      label.textContent = String(Math.round(tick * 100) / 100);
+      svg.appendChild(label);
+    }
+
+    // The stored tenor strings stay the tick labels; only their positions are
+    // time-scaled. Thinned so they never overlap at the crowded short end.
+    let lastLabelX = -Infinity;
+    for (const point of points) {
+      const x = xFor(point.years);
+      if (x - lastLabelX < 34) continue;
+      lastLabelX = x;
+      const label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("x", String(x));
+      label.setAttribute("y", String(SLICE_HEIGHT - SLICE_MARGIN.bottom + 16));
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("font-size", "11");
+      label.setAttribute("fill", "#99a1b0");
+      label.textContent = point.label;
+      svg.appendChild(label);
+    }
+
+    const axisTitle = document.createElementNS(SVG_NS, "text");
+    axisTitle.setAttribute("x", String(SLICE_MARGIN.left + plotWidth / 2));
+    axisTitle.setAttribute("y", String(SLICE_HEIGHT - 4));
+    axisTitle.setAttribute("text-anchor", "middle");
+    axisTitle.setAttribute("font-size", "11.5");
+    axisTitle.setAttribute("fill", "#99a1b0");
+    axisTitle.textContent = xAxisTitle;
+    svg.appendChild(axisTitle);
+
+    // One polyline per unbroken run of stored nodes. An unresolved cell ends
+    // the run it interrupts, so no segment ever spans one.
+    let run = [];
+    const flushRun = () => {
+      if (run.length > 1) {
+        const polyline = document.createElementNS(SVG_NS, "polyline");
+        polyline.setAttribute("points", run.join(" "));
+        polyline.setAttribute("fill", "none");
+        polyline.setAttribute("stroke", "var(--chart-line)");
+        polyline.setAttribute("stroke-width", "2");
+        svg.appendChild(polyline);
+      }
+      run = [];
+    };
+    for (const point of points) {
+      if (typeof point.value !== "number" || !Number.isFinite(point.value)) {
+        flushRun();
+        continue;
+      }
+      run.push(`${xFor(point.years)},${yFor(point.value)}`);
+    }
+    flushRun();
+
+    for (const point of resolved) {
+      const dot = document.createElementNS(SVG_NS, "circle");
+      dot.setAttribute("class", "vs-dot");
+      dot.setAttribute("cx", String(xFor(point.years)));
+      dot.setAttribute("cy", String(yFor(point.value)));
+      dot.setAttribute("r", "3");
+      const title = document.createElementNS(SVG_NS, "title");
+      title.textContent = `${point.label} = ${volText(point.value)}`;
+      dot.appendChild(title);
+      svg.appendChild(dot);
+    }
+
+    container.appendChild(svg);
+  }
+
+  els.sliceTenorSelect.addEventListener("change", () => {
+    sliceTenor = els.sliceTenorSelect.value;
+    renderSlices();
+  });
+  els.sliceExpirySelect.addEventListener("change", () => {
+    sliceExpiry = els.sliceExpirySelect.value;
+    renderSlices();
+  });
+
+  // Clicking a node on the surface moves both slices to it, so the three
+  // views stay one reading of one snapshot.
+  function selectSliceNode(node) {
+    sliceTenor = node.tenor;
+    sliceExpiry = node.expiry;
+    els.sliceTenorSelect.value = sliceTenor;
+    els.sliceExpirySelect.value = sliceExpiry;
+    renderSlices();
+  }
+
   // ---- Rotate, zoom, pick ----------------------------------------------------
 
   function canvasPointFromEvent(event) {
@@ -938,23 +1284,40 @@
   }
 
   let dragOrigin = null;
+  // Where the press started and how far it travelled, so a rotate is never
+  // mistaken for a click on a node.
+  let pressOrigin = null;
+  const CLICK_SLOP = 4;
 
   els.canvas.addEventListener("mousedown", (event) => {
     dragOrigin = { x: event.clientX, y: event.clientY };
+    pressOrigin = { x: event.clientX, y: event.clientY, travelled: 0 };
     els.canvas.classList.add("is-dragging");
     els.tooltip.hidden = true;
     hoveredNode = null;
   });
 
-  window.addEventListener("mouseup", () => {
+  window.addEventListener("mouseup", (event) => {
+    const wasClick =
+      pressOrigin !== null &&
+      Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) <= CLICK_SLOP &&
+      pressOrigin.travelled <= CLICK_SLOP;
     dragOrigin = null;
+    pressOrigin = null;
     els.canvas.classList.remove("is-dragging");
+    if (!wasClick || !payload || axisError !== null) return;
+    const point = canvasPointFromEvent(event);
+    const picked = nodeAt(point.x, point.y);
+    if (picked) selectSliceNode(picked.node);
   });
 
   els.canvas.addEventListener("mousemove", (event) => {
     if (!payload) return;
     if (dragOrigin) {
-      rotateBy(event.clientX - dragOrigin.x, event.clientY - dragOrigin.y);
+      const dx = event.clientX - dragOrigin.x;
+      const dy = event.clientY - dragOrigin.y;
+      if (pressOrigin) pressOrigin.travelled += Math.hypot(dx, dy);
+      rotateBy(dx, dy);
       dragOrigin = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -1024,6 +1387,35 @@
   };
   window.__shioriTestVolSurfaceRequestedRoutes = () => requestedRoutes.slice();
   window.__shioriTestVolSurfaceLoadGeneration = () => loadGeneration;
+  window.__shioriTestVolSurfaceTenorYears = (label) => tenorYears(label);
+  window.__shioriTestVolSurfaceAxes = () =>
+    axisError !== null
+      ? { error: axisError }
+      : {
+          tenor: { labels: [...tenorAxis.labels], years: [...tenorAxis.years],
+                   coordinates: [...tenorAxis.coordinates] },
+          expiry: { labels: [...expiryAxis.labels], years: [...expiryAxis.years],
+                    coordinates: [...expiryAxis.coordinates] },
+        };
+  window.__shioriTestVolSurfaceSlices = () => ({ tenor: sliceTenor, expiry: sliceExpiry });
+  window.__shioriTestVolSurfaceSliceChart = (which) => {
+    const container = which === "vs-tenor" ? els.chartVsTenor : els.chartVsExpiry;
+    const svg = container.querySelector("svg");
+    if (svg === null) return null;
+    return {
+      dots: Array.from(svg.querySelectorAll(".vs-dot")).map((dot) => ({
+        cx: Number(dot.getAttribute("cx")),
+        cy: Number(dot.getAttribute("cy")),
+        title: dot.querySelector("title").textContent,
+      })),
+      polylines: Array.from(svg.querySelectorAll("polyline")).map((line) =>
+        line.getAttribute("points")
+      ),
+      tickLabels: Array.from(svg.querySelectorAll("text"))
+        .map((text) => text.textContent)
+        .filter((text) => TENOR_LABEL.test(text)),
+    };
+  };
   window.__shioriTestVolSurfaceLoadSelected = () => loadSelectedSurface();
   // The painted scene, for tests that check the ordering and the occlusion
   // rule independently rather than by asking the picker about itself.

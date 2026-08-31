@@ -877,6 +877,268 @@ def test_a_surface_with_no_stated_unit_never_invents_one(server_url, page) -> No
     assert "bp" not in tooltip
 
 
+# --- Time-scaled axes and the cross-sections (Issue #194 UAT) -----------------
+
+
+def test_both_horizontal_axes_are_spaced_by_elapsed_tenor(server_url, page) -> None:
+    # UAT: equal categorical spacing drew 1Mo->3Mo as wide as 5Yr->10Yr, which
+    # misstates the term structure. Positions must follow elapsed time.
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    axes = page.evaluate("() => window.__shioriTestVolSurfaceAxes()")
+    assert axes["tenor"]["labels"] == _TENORS
+    assert axes["expiry"]["labels"] == _EXPIRIES
+    # Eddy's own examples, to the year.
+    assert axes["tenor"]["years"] == [1.0, 2.0, 5.0, 10.0]
+    assert axes["expiry"]["years"] == pytest.approx([1 / 12, 3 / 12, 0.5, 1.0, 2.0])
+
+    # Non-uniform: consecutive gaps differ, and they differ in the same
+    # proportion the durations do.
+    tenor_gaps = [
+        b - a
+        for a, b in zip(
+            axes["tenor"]["coordinates"], axes["tenor"]["coordinates"][1:], strict=False
+        )
+    ]
+    # 1->2Yr is one year of the nine the axis spans, 2->5Yr three, 5->10Yr five.
+    assert tenor_gaps == pytest.approx([1 / 9 * 2, 3 / 9 * 2, 5 / 9 * 2])
+    assert axes["tenor"]["coordinates"][0] == pytest.approx(-1.0)
+    assert axes["tenor"]["coordinates"][-1] == pytest.approx(1.0)
+
+
+def test_the_surface_nodes_sit_on_the_time_scaled_coordinates(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    # Two tenors one year apart must project closer together than two five
+    # years apart, whatever the camera is doing.
+    nodes = page.evaluate("() => window.__shioriTestVolSurfaceProjectedNodes()")
+    at = {(node["expiry"], node["tenor"]): node for node in nodes}
+    one_year_apart = abs(at[("1Mo", "1Yr")]["sx"] - at[("1Mo", "2Yr")]["sx"])
+    five_years_apart = abs(at[("1Mo", "5Yr")]["sx"] - at[("1Mo", "10Yr")]["sx"])
+    assert five_years_apart > one_year_apart * 2
+
+
+def test_the_tick_labels_are_still_the_stored_tenor_strings(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    chart = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert chart["tickLabels"] == _TENORS
+
+
+def test_the_cross_sections_open_on_the_bloomberg_default_slices(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    assert page.evaluate("() => window.__shioriTestVolSurfaceSlices()") == {
+        "tenor": "1Yr",
+        "expiry": "1Mo",
+    }
+    assert page.eval_on_selector("#vol-surface-slice-tenor", "el => el.value") == "1Yr"
+    assert page.eval_on_selector("#vol-surface-slice-expiry", "el => el.value") == "1Mo"
+
+
+def test_each_cross_section_plots_the_exact_stored_nodes_of_its_slice(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    # Vol x Swap Tenor at expiry 1Mo is row 0 of the stored matrix.
+    vs_tenor = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert [dot["title"] for dot in vs_tenor["dots"]] == [
+        f"{tenor} = {_displayed(value)} bp" for tenor, value in zip(_TENORS, _ROWS[0], strict=True)
+    ]
+
+    # Vol x Option Expiry at tenor 1Yr is column 0 -- which carries the
+    # unresolved cell, so it has one fewer dot than it has expiries.
+    vs_expiry = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-expiry')")
+    column = [row[0] for row in _ROWS]
+    assert [dot["title"] for dot in vs_expiry["dots"]] == [
+        f"{expiry} = {_displayed(value)} bp"
+        for expiry, value in zip(_EXPIRIES, column, strict=True)
+        if value is not None
+    ]
+
+
+def test_an_unresolved_node_is_a_gap_the_line_never_bridges(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    vs_expiry = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-expiry')")
+    column = [row[0] for row in _ROWS]
+    assert column[3] is None  # the fixture's hole, mid-slice
+    assert len(vs_expiry["dots"]) == len([value for value in column if value is not None]) == 4
+
+    # The line covers only the unbroken run before the hole. The node after it
+    # is drawn as a dot and joined to nothing -- a single point is not a line,
+    # and connecting it across the gap would be drawing the missing node.
+    plotted = [
+        len(line.split(" ")) for line in vs_expiry["polylines"]
+    ]
+    assert plotted == [3]
+    assert sum(plotted) < len(vs_expiry["dots"])
+
+
+def test_changing_a_slice_selector_replots_from_the_same_stored_matrix(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    page.select_option("#vol-surface-slice-expiry", "6Mo")
+    vs_tenor = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert [dot["title"] for dot in vs_tenor["dots"]] == [
+        f"{tenor} = {_displayed(value)} bp" for tenor, value in zip(_TENORS, _ROWS[2], strict=True)
+    ]
+
+    page.select_option("#vol-surface-slice-tenor", "5Yr")
+    vs_expiry = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-expiry')")
+    column = [row[2] for row in _ROWS]
+    assert [dot["title"] for dot in vs_expiry["dots"]] == [
+        f"{expiry} = {_displayed(value)} bp"
+        for expiry, value in zip(_EXPIRIES, column, strict=True)
+    ]
+
+    # The matrix is untouched by any of it.
+    rows = page.eval_on_selector_all(
+        "#vol-surface-table-body tr",
+        "rows => rows.map(r => Array.from(r.children).slice(1).map(c => c.textContent))",
+    )
+    for row_index, stored_row in enumerate(_ROWS):
+        for column_index, stored in enumerate(stored_row):
+            expected = "—" if stored is None else _displayed(stored)
+            assert rows[row_index][column_index] == expected
+
+
+def test_clicking_a_node_moves_both_slices_to_it(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    target = page.evaluate(
+        """() => window.__shioriTestVolSurfaceProjectedNodes()
+             .find(n => n.expiry === '6Mo' && n.tenor === '5Yr')"""
+    )
+    box = page.eval_on_selector(
+        "#vol-surface-canvas",
+        "el => { const r = el.getBoundingClientRect(); "
+        "return { x: r.x, y: r.y, w: r.width, h: r.height, cw: el.width, ch: el.height }; }",
+    )
+    page.mouse.click(
+        box["x"] + target["sx"] * box["w"] / box["cw"],
+        box["y"] + target["sy"] * box["h"] / box["ch"],
+    )
+
+    assert page.evaluate("() => window.__shioriTestVolSurfaceSlices()") == {
+        "tenor": "5Yr",
+        "expiry": "6Mo",
+    }
+    assert page.eval_on_selector("#vol-surface-slice-tenor", "el => el.value") == "5Yr"
+    assert page.eval_on_selector("#vol-surface-slice-expiry", "el => el.value") == "6Mo"
+    vs_tenor = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert [dot["title"] for dot in vs_tenor["dots"]] == [
+        f"{tenor} = {_displayed(value)} bp" for tenor, value in zip(_TENORS, _ROWS[2], strict=True)
+    ]
+
+
+def test_rotating_the_surface_is_not_taken_for_a_click(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    box = page.eval_on_selector(
+        "#vol-surface-canvas",
+        "el => { const r = el.getBoundingClientRect(); "
+        "return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }",
+    )
+    page.mouse.move(box["x"], box["y"])
+    page.mouse.down()
+    page.mouse.move(box["x"] + 120, box["y"] + 40, steps=6)
+    page.mouse.up()
+
+    assert page.evaluate("() => window.__shioriTestVolSurfaceSlices()") == {
+        "tenor": "1Yr",
+        "expiry": "1Mo",
+    }
+
+
+def test_the_slices_follow_the_selected_snapshot(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page, summaries=(_SUMMARY_A, _SUMMARY_B))
+    _open_vol_surface(page, server_url)
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-empty"))
+    page.select_option("#vol-surface-select", "surface-b")
+    _wait_for_surface(page)
+
+    # surface-b is every value of surface-a plus ten.
+    vs_tenor = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert [dot["title"] for dot in vs_tenor["dots"]] == [
+        f"{tenor} = {_displayed(value + 10)} bp"
+        for tenor, value in zip(_TENORS, _ROWS[0], strict=True)
+    ]
+    payload = page.evaluate("() => window.__shioriTestVolSurfacePayload()")
+    assert payload["surface_id"] == "surface-b"
+
+
+def test_a_label_that_is_not_a_tenor_refuses_the_charts_and_keeps_the_matrix(
+    server_url, page
+) -> None:
+    # Equal spacing is exactly the misstatement this change removes, so a
+    # label the scale cannot read must not silently fall back to it.
+    unreadable = {
+        **_SURFACE_A,
+        "grid": {
+            "expiries": ["1Mo", "3Mo", "MID", "1Yr", "2Yr"],
+            "underlying_tenors": _TENORS,
+            "rows": _ROWS,
+        },
+    }
+    _route_curve_away(page)
+    _route_vol_surface(page, surfaces={"surface-a": unreadable})
+    _open_vol_surface(page, server_url)
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-chart-unavailable"))
+
+    assert '"MID" is not a tenor' in page.inner_text("#vol-surface-chart-unavailable-detail")
+    assert _is_actually_hidden(page, "vol-surface-chart-card")
+    assert _is_actually_hidden(page, "vol-surface-slices-card")
+    # The matrix is unaffected -- it needs no scale, only the stored values.
+    assert not _is_actually_hidden(page, "vol-surface-table-card")
+    assert page.eval_on_selector_all("#vol-surface-table-body tr", "rows => rows.length") == 5
+    assert page.evaluate("() => window.__shioriTestVolSurfaceProjectedNodes()") == []
+
+
+def test_the_tenor_scale_reads_only_the_units_the_screens_write(server_url, page) -> None:
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    read = page.evaluate(
+        """(labels) => labels.map(l => window.__shioriTestVolSurfaceTenorYears(l))""",
+        ["1Mo", "6Mo", "9Mo", "18Mo", "1Yr", "30Yr", "1Wk", "1Dy", "1M", "ATM", "", "-1Yr"],
+    )
+    assert read[:8] == pytest.approx(
+        [1 / 12, 0.5, 0.75, 1.5, 1.0, 30.0, 1 / 52, 1 / 365]
+    )
+    # Nothing else is guessed at.
+    assert read[8:] == [None, None, None, None]
+
+
 # --- Failing closed and staying read-only -------------------------------------
 
 

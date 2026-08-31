@@ -792,7 +792,46 @@
             </div>
             <div class="vol-surface-axis-note">
               X = Swap Tenor &middot; Y = Option Expiry &middot; Z = Normal Vol<span id="vol-surface-axis-unit"></span>.
-              The mesh between nodes is display geometry only &mdash; it is not market data and is never stored.
+              Both horizontal axes are spaced by elapsed tenor, so the term structure reads at its true
+              proportions. The mesh between nodes is display geometry only &mdash; it is not market data
+              and is never stored.
+            </div>
+          </div>
+        </section>
+
+        <section class="card markets-status markets-status-warning" id="vol-surface-chart-unavailable" hidden>
+          <div class="markets-error-title">Charts unavailable for this surface</div>
+          <div class="markets-error-detail" id="vol-surface-chart-unavailable-detail">&mdash;</div>
+          The stored matrix below is unaffected and shows every confirmed value.
+        </section>
+
+        <section class="card vol-surface-slices-card" id="vol-surface-slices-card" hidden>
+          <div class="card-head">
+            <div class="card-title">Cross-sections &mdash; stored nodes only</div>
+            <div class="vol-surface-hint">Click a node on the surface above to move both slices to it</div>
+          </div>
+          <div class="card-body">
+            <div class="vol-surface-slices">
+              <div class="vol-surface-slice">
+                <div class="vs-slice-head">
+                  <span class="vs-slice-title">Normal Vol &times; Option Expiry</span>
+                  <label class="vol-surface-picker-label" for="vol-surface-slice-tenor">at Swap Tenor</label>
+                  <select class="control vol-surface-slice-select" id="vol-surface-slice-tenor"></select>
+                </div>
+                <div class="vs-slice-chart" id="vol-surface-chart-vs-expiry"></div>
+              </div>
+              <div class="vol-surface-slice">
+                <div class="vs-slice-head">
+                  <span class="vs-slice-title">Normal Vol &times; Swap Tenor</span>
+                  <label class="vol-surface-picker-label" for="vol-surface-slice-expiry">at Option Expiry</label>
+                  <select class="control vol-surface-slice-select" id="vol-surface-slice-expiry"></select>
+                </div>
+                <div class="vs-slice-chart" id="vol-surface-chart-vs-tenor"></div>
+              </div>
+            </div>
+            <div class="vol-surface-axis-note">
+              Both x axes are spaced by elapsed tenor, not by column position. A node the capture
+              left unresolved is a gap &mdash; the line never bridges it.
             </div>
           </div>
         </section>
