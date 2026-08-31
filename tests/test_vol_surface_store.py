@@ -14,6 +14,7 @@ write leaves nothing behind.
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import threading
 
@@ -32,8 +33,11 @@ from shiori_pricing_lab.data.vol_surface import (
     CanonicalVolSurface,
     VolSurfacePoint,
     VolSurfaceType,
+    VolValueKind,
 )
 from shiori_pricing_lab.data.vol_surface_store import (
+    _ADDITIVE_COLUMNS,
+    _READ_ONLY_COLUMN_DEFAULTS,
     DEFAULT_DATABASE_PATH,
     SCHEMA_VERSION,
     SaveStatus,
@@ -431,19 +435,28 @@ def test_only_one_schema_version_row_can_ever_exist(store, database_path) -> Non
 
 
 def test_concurrent_first_opens_agree_on_one_version(database_path) -> None:
-    """Eight threads racing to initialise one brand-new database."""
+    """Eight threads racing to initialise one brand-new database.
+
+    Driven through the first *save* since Issue #194: a read no longer opens
+    a database for writing, so saving is the only thing that can create one,
+    and it is therefore the only place this race can still happen. Eight
+    distinct captures rather than one, so the race under test is the version
+    insert and not the duplicate policy.
+    """
 
     barrier = threading.Barrier(8)
     failures: list[BaseException] = []
 
-    def initialise() -> None:
+    def initialise(index: int) -> None:
         try:
             barrier.wait(timeout=10)
-            VolSurfaceStore(database_path).list_surfaces()
+            VolSurfaceStore(database_path).save_confirmed_surface(
+                confirmed_surface(capture_id=f"{index:032x}")
+            )
         except BaseException as exc:  # noqa: BLE001
             failures.append(exc)
 
-    threads = [threading.Thread(target=initialise) for _ in range(8)]
+    threads = [threading.Thread(target=initialise, args=(index,)) for index in range(8)]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -454,6 +467,7 @@ def test_concurrent_first_opens_agree_on_one_version(database_path) -> None:
         assert connection.execute("SELECT version FROM schema_version").fetchall() == [
             (SCHEMA_VERSION,)
         ]
+    assert len(VolSurfaceStore(database_path).list_surfaces()) == 8
 
 
 # -- duplicate policy -------------------------------------------------------
@@ -678,6 +692,212 @@ def test_a_database_from_a_future_schema_is_refused_rather_than_read(database_pa
 def test_only_a_canonical_surface_can_be_saved(store) -> None:
     with pytest.raises(VolSurfaceStoreError, match="only a CanonicalVolSurface"):
         store.save_confirmed_surface({"points": []})
+
+
+# -- reading never writes (Issue #194 / Codex review, PR #195) ---------------
+#
+# Browsing the Markets view reads this store. A read that had to migrate a
+# database before it could answer would not be a read: it rewrote a store the
+# trader only wanted to look at, and it failed outright against one on a
+# read-only mount.
+
+
+def _make_legacy_pre_185(database_path) -> None:
+    """Roll a store back to the shape a build before Issue #185 wrote.
+
+    Version 3 either way -- #185's column and table are additive and
+    deliberately did not bump it -- so this is a *supported* older database,
+    not a refused one. ``VACUUM`` rewrites the file so the comparison below
+    is against a settled one rather than free pages left by the DDL.
+    """
+
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("ALTER TABLE vol_surface_point DROP COLUMN value_kind")
+        connection.execute("DROP TABLE vol_surface_source_image")
+        connection.execute("VACUUM")
+
+
+def test_browsing_a_current_store_changes_not_one_byte(store, database_path) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    before = database_path.read_bytes()
+
+    reader = VolSurfaceStore(database_path)
+    assert len(reader.list_surfaces()) == 1
+    assert reader.fetch_surface(surface.surface_id) == surface
+
+    assert database_path.read_bytes() == before
+
+
+def test_browsing_a_supported_older_store_neither_migrates_nor_misreads_it(
+    store, database_path
+) -> None:
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    _make_legacy_pre_185(database_path)
+    before = database_path.read_bytes()
+
+    reader = VolSurfaceStore(database_path)
+    (row,) = reader.list_surfaces()
+    reloaded = reader.fetch_surface(surface.surface_id)
+
+    # Read as it stands: no column added, no table created, no byte changed.
+    assert database_path.read_bytes() == before
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            info[1] for info in connection.execute("PRAGMA table_info(vol_surface_point)")
+        }
+        tables = {
+            name
+            for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert "value_kind" not in columns
+    assert "vol_surface_source_image" not in tables
+
+    # And the surface it rebuilds is exactly the one that was stored --
+    # value_kind stood in for by the default that makes the column additive,
+    # the image set rebuilt from the row's own single image. The fingerprint
+    # check inside fetch_surface is what proves the substitution is faithful:
+    # a wrong stand-in would not rebuild the digest saved beside the surface.
+    assert reloaded == surface
+    assert row.surface_id == surface.surface_id
+    assert all(point.value_kind is VolValueKind.ABSOLUTE_VOL for point in reloaded.points)
+    assert len(reloaded.provenance.source_images) == 1
+
+
+def test_a_supported_older_store_is_readable_with_no_write_access_at_all(
+    store, database_path, tmp_path
+) -> None:
+    """The failure a migrating read could not avoid: a read-only mount.
+
+    Approximated with permissions -- the directory too, since SQLite needs to
+    create a journal beside the file to write it.
+    """
+
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    _make_legacy_pre_185(database_path)
+
+    os.chmod(database_path, 0o444)
+    os.chmod(tmp_path, 0o555)
+    try:
+        reader = VolSurfaceStore(database_path)
+        assert len(reader.list_surfaces()) == 1
+        assert reader.fetch_surface(surface.surface_id) == surface
+    finally:
+        os.chmod(tmp_path, 0o755)
+        os.chmod(database_path, 0o644)
+
+
+def test_reading_a_store_that_does_not_exist_yet_creates_nothing(tmp_path) -> None:
+    database_path = tmp_path / "never-created" / "vol_surfaces.sqlite3"
+    store = VolSurfaceStore(database_path)
+
+    assert store.list_surfaces() == ()
+    with pytest.raises(KeyError):
+        store.fetch_surface("any-surface-id")
+
+    assert not database_path.exists()
+    assert not database_path.parent.exists()
+
+
+def test_the_first_save_still_creates_the_database_a_read_would_not_have(tmp_path) -> None:
+    """The other half: only the write path brings the store into existence."""
+
+    database_path = tmp_path / "made-by-the-first-save" / "vol_surfaces.sqlite3"
+    store = VolSurfaceStore(database_path)
+    assert store.list_surfaces() == ()
+    assert not database_path.exists()
+
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+
+    assert database_path.exists()
+    assert store.fetch_surface(surface.surface_id) == surface
+
+
+def test_saving_into_a_supported_older_store_still_brings_its_schema_up(
+    store, database_path
+) -> None:
+    """Reads stopped migrating; writes must not have.
+
+    A save into a pre-Issue-#185 database still needs the column it inserts
+    into, so the catch-up has to happen on the way in.
+    """
+
+    store.save_confirmed_surface(confirmed_surface())
+    _make_legacy_pre_185(database_path)
+
+    second = confirmed_surface(capture_id="f" * 32)
+    VolSurfaceStore(database_path).save_confirmed_surface(second)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            info[1] for info in connection.execute("PRAGMA table_info(vol_surface_point)")
+        }
+    assert "value_kind" in columns
+    assert len(VolSurfaceStore(database_path).list_surfaces()) == 2
+
+
+def test_a_newer_schema_version_is_refused_by_a_read_not_repaired(store, database_path) -> None:
+    store.save_confirmed_surface(confirmed_surface())
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION + 1,))
+    before = database_path.read_bytes()
+
+    reader = VolSurfaceStore(database_path)
+    with pytest.raises(VolSurfaceSchemaError, match=f"schema version {SCHEMA_VERSION + 1}"):
+        reader.list_surfaces()
+    with pytest.raises(VolSurfaceSchemaError, match=f"schema version {SCHEMA_VERSION + 1}"):
+        reader.fetch_surface("any-surface-id")
+
+    assert database_path.read_bytes() == before
+
+
+def test_a_store_recording_no_schema_version_is_refused_rather_than_stamped(
+    store, database_path
+) -> None:
+    store.save_confirmed_surface(confirmed_surface())
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("DELETE FROM schema_version")
+    before = database_path.read_bytes()
+
+    with pytest.raises(VolSurfaceSchemaError, match="records no vol-surface schema version"):
+        VolSurfaceStore(database_path).list_surfaces()
+
+    assert database_path.read_bytes() == before
+
+
+def test_a_file_that_is_not_a_vol_surface_store_is_refused_rather_than_filled_in(
+    database_path,
+) -> None:
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("CREATE TABLE something_else (x INTEGER)")
+    before = database_path.read_bytes()
+
+    with pytest.raises(VolSurfaceSchemaError, match="not a vol-surface store"):
+        VolSurfaceStore(database_path).list_surfaces()
+
+    assert database_path.read_bytes() == before
+
+
+def test_every_additive_column_tells_a_read_what_to_stand_in_for() -> None:
+    """The read path cannot silently fall behind the write path.
+
+    A column added to ``_ADDITIVE_COLUMNS`` without a matching stand-in here
+    would leave a read against a database lacking it failing on a missing
+    column -- or, worse, quietly reshaping what an older row meant.
+    """
+
+    for table, column, definition in _ADDITIVE_COLUMNS:
+        assert (table, column) in _READ_ONLY_COLUMN_DEFAULTS, (
+            f"{table}.{column} is additive but no read-only stand-in is declared for it"
+        )
+        # The stand-in must be the column's own DEFAULT -- that default is
+        # what makes the column additive, so anything else would be a value
+        # this layer invented.
+        stand_in = _READ_ONLY_COLUMN_DEFAULTS[(table, column)]
+        assert f"DEFAULT '{stand_in}'" in definition
 
 
 # -- listing ----------------------------------------------------------------

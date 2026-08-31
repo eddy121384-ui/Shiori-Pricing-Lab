@@ -288,15 +288,14 @@ canonical store the confirm routes write to:
 
 Neither route stores anything, captures, OCRs, confirms, rejects, prices,
 or calls the VCUB normal-vol resolver, and neither computes a volatility:
-every number they return is one a trader confirmed. One gap remains in the
-stronger "touches no byte" reading, and it is the store's rather than these
-routes': opening a database written before Issue #185 runs that build's
-additive schema catch-up, so a browse of such a store adds the
-``value_kind`` column and the ``vol_surface_source_image`` table before
-reading it. Nothing stored changes meaning -- the catch-up is additive by
-construction -- but it is a write, and closing it needs a read-only
-connection path in ``vol_surface_store`` carrying its own schema-version
-gate (Codex review, PR #195; open for Eddy's decision).
+every number they return is one a trader confirmed. Neither writes a byte
+either, on any database this build will read: the store's read path opens
+the file read-only and never migrates it, so browsing a store written
+before Issue #185 reads it as it stands instead of bringing it up to this
+build's shape (Codex review, PR #195). A database this build cannot read --
+a newer schema version, a missing one, a file that is not a vol-surface
+store -- is refused rather than repaired, and a store with no database file
+yet simply holds nothing.
 
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
@@ -2713,31 +2712,14 @@ def _storage_result(
 # confirms, rejects, OCRs, fetches Bloomberg, or prices, and neither one
 # touches the VCUB normal-vol resolver -- the Markets view draws the stored
 # nodes themselves, so no interpolated value exists to be produced, let alone
-# persisted. See the module docstring for the one remaining way a browse can
-# still write: a pre-Issue-#185 database gets this build's additive schema
-# catch-up on open, which is the store's connection lifecycle rather than
-# anything these two do.
+# persisted. Nor does either write: the store reads through a connection
+# opened read-only, so a browse never migrates a database, whatever shape a
+# supported older build left it in.
 #
 # Only ATM surfaces are offered. Everything in the store is confirmed by
 # construction (``CanonicalVolSurface`` cannot be built without a confirmer),
 # so "confirmed ATM surfaces" is exactly the ATM_SWAPTION rows.
 # --------------------------------------------------------------------------
-
-
-def _canonical_store_exists() -> bool:
-    """Whether the canonical store has a database on disk yet.
-
-    Both read-only routes ask this first. Opening the store *creates* it --
-    :meth:`VolSurfaceStore._connect` makes the parent directory and writes
-    the schema in a transaction -- which is exactly right on the confirm
-    path, where the first save has to be able to bring the database into
-    existence, and exactly wrong on a browse: a trader who opened Markets on
-    a fresh installation would leave a populated SQLite file behind having
-    confirmed nothing (Codex review, PR #195). No file means no confirmed
-    surface, and both routes can say so without touching the disk at all.
-    """
-
-    return VOL_SURFACE_STORE.database_path.exists()
 
 
 def list_confirmed_atm_vol_surfaces() -> dict:
@@ -2750,13 +2732,13 @@ def list_confirmed_atm_vol_surfaces() -> dict:
     ``capture_id`` rides along on each row so two captures of the same screen
     on the same business date are two distinguishable snapshots in the
     picker, never one arbitrarily chosen for the trader.
+
+    Reads through the store's read-only path: a store with no database yet
+    lists nothing without creating one, and one written by a supported older
+    build is read as it stands rather than migrated.
     """
 
-    summaries = (
-        VOL_SURFACE_STORE.list_surfaces(surface_type=VolSurfaceType.ATM_SWAPTION)
-        if _canonical_store_exists()
-        else ()
-    )
+    summaries = VOL_SURFACE_STORE.list_surfaces(surface_type=VolSurfaceType.ATM_SWAPTION)
     return {
         "surfaces": [summary.to_dict() for summary in summaries],
         "database": str(VOL_SURFACE_STORE.database_path),
@@ -2775,11 +2757,6 @@ def fetch_confirmed_atm_vol_surface(surface_id: str) -> dict:
     """
 
     _require_non_blank_field(surface_id, "surface_id")
-    if not _canonical_store_exists():
-        # Word for word what the store itself raises for an id it does not
-        # hold, so "nothing is stored yet" and "not this id" are the same
-        # answer to the page -- which they are.
-        raise KeyError(f"no vol surface is stored with id {surface_id!r}")
     surface = VOL_SURFACE_STORE.fetch_surface(surface_id)
     if surface.identity.surface_type is not VolSurfaceType.ATM_SWAPTION:
         raise ValueError(

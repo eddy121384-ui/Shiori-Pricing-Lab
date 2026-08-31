@@ -15,6 +15,7 @@ no OCR, no pricing, no resolver call, no repaired grid.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -231,8 +232,6 @@ def test_a_surface_edited_under_the_workbench_fails_visibly(server_url, store) -
     # silently repaired. The store verifies against the fingerprint it saved,
     # so a row changed behind its back is refused -- and the route must pass
     # that refusal on rather than draw the altered grid.
-    import sqlite3
-
     surface = confirmed_surface()
     store.save_confirmed_surface(surface)
     connection = sqlite3.connect(store.database_path)
@@ -256,6 +255,74 @@ def test_a_surface_edited_under_the_workbench_fails_visibly(server_url, store) -
 
 
 # --- What these routes must never do ------------------------------------------
+
+
+def test_browsing_a_store_from_before_issue_185_leaves_it_exactly_as_it_was(
+    server_url, store
+) -> None:
+    # Codex review (PR #195): the routes promised not to mutate the store,
+    # but opening a database written before Issue #185 ran that build's
+    # additive schema catch-up -- so merely listing or fetching added the
+    # value_kind column and the source-image table, and the same browse
+    # failed outright against a read-only mount. Reads now go through the
+    # store's read-only connection and stand in for what such a database
+    # lacks instead of adding it.
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    database_path = store.database_path
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("ALTER TABLE vol_surface_point DROP COLUMN value_kind")
+        connection.execute("DROP TABLE vol_surface_source_image")
+        connection.execute("VACUUM")
+    before = database_path.read_bytes()
+
+    status, listed = _post_json(f"{server_url}/api/vol-surface/atm/list", {})
+    assert status == 200
+    assert [row["surface_id"] for row in listed["surfaces"]] == [surface.surface_id]
+
+    status, fetched = _post_json(
+        f"{server_url}/api/vol-surface/atm/surface", {"surface_id": surface.surface_id}
+    )
+    assert status == 200
+    assert fetched["point_count"] == 315
+    for row_index, row in enumerate(fetched["grid"]["rows"]):
+        assert row == [
+            synthetic_value(row_index, column_index) for column_index in range(len(TENOR_LABELS))
+        ]
+
+    assert database_path.read_bytes() == before
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            info[1] for info in connection.execute("PRAGMA table_info(vol_surface_point)")
+        }
+        tables = {
+            name
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert "value_kind" not in columns
+    assert "vol_surface_source_image" not in tables
+
+
+def test_a_store_this_build_cannot_read_is_refused_not_repaired(server_url, store) -> None:
+    store.save_confirmed_surface(confirmed_surface())
+    database_path = store.database_path
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("UPDATE schema_version SET version = 99")
+    before = database_path.read_bytes()
+
+    status, listed = _post_json(f"{server_url}/api/vol-surface/atm/list", {})
+    assert status == 500
+    assert "schema version 99" in listed["error"]
+
+    status, fetched = _post_json(
+        f"{server_url}/api/vol-surface/atm/surface", {"surface_id": "any-surface-id"}
+    )
+    assert status == 400
+    assert "schema version 99" in fetched["error"]
+
+    assert database_path.read_bytes() == before
 
 
 def test_a_fresh_installation_is_not_given_a_database_by_browsing(
@@ -297,12 +364,7 @@ def test_confirming_still_creates_the_database_the_browse_would_not_have(
     assert row["surface_id"] == surface.surface_id
 
 
-def test_neither_route_writes_a_byte_to_a_current_schema_store(server_url, store) -> None:
-    # Scope, stated because Codex review (PR #195) found where it ends: this
-    # holds for a store this build wrote. Opening one written before Issue
-    # #185 runs the store's additive schema catch-up, which is a write no
-    # guard here can prevent from the route side -- see the server module's
-    # docstring.
+def test_neither_route_writes_a_byte_to_the_store(server_url, store) -> None:
     surface = confirmed_surface()
     store.save_confirmed_surface(surface)
     before = store.database_path.read_bytes()
