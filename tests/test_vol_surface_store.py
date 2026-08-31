@@ -871,6 +871,13 @@ def test_a_store_recording_no_schema_version_is_refused_rather_than_stamped(
 def test_a_file_that_is_not_a_vol_surface_store_is_refused_rather_than_filled_in(
     database_path,
 ) -> None:
+    """Also the other side of the empty-store rule.
+
+    A database with no tables at all reads as an empty store (see the
+    first-save test above). One that *has* a table is never mistaken for
+    one: it is either a vol-surface store this build can read, or a refusal.
+    """
+
     with sqlite3.connect(database_path, isolation_level=None) as connection:
         connection.execute("CREATE TABLE something_else (x INTEGER)")
     before = database_path.read_bytes()
@@ -881,23 +888,104 @@ def test_a_file_that_is_not_a_vol_surface_store_is_refused_rather_than_filled_in
     assert database_path.read_bytes() == before
 
 
-def test_every_additive_column_tells_a_read_what_to_stand_in_for() -> None:
-    """The read path cannot silently fall behind the write path.
+@pytest.mark.parametrize(("table", "column", "definition"), _ADDITIVE_COLUMNS)
+def test_each_additive_column_is_stood_in_for_by_an_actual_read(
+    store, database_path, table, column, definition
+) -> None:
+    """Every additive column, dropped for real and read back through the store.
 
-    A column added to ``_ADDITIVE_COLUMNS`` without a matching stand-in here
-    would leave a read against a database lacking it failing on a missing
-    column -- or, worse, quietly reshaping what an older row meant.
+    Codex review (PR #195): asserting only that the mapping has an entry let
+    a later column pass this file while legacy reads still failed on it, since
+    the query named ``value_kind`` itself. Parametrised over
+    :data:`_ADDITIVE_COLUMNS` and exercising the real read, so a column added
+    without a working stand-in fails here rather than in front of a trader.
     """
 
-    for table, column, definition in _ADDITIVE_COLUMNS:
-        assert (table, column) in _READ_ONLY_COLUMN_DEFAULTS, (
-            f"{table}.{column} is additive but no read-only stand-in is declared for it"
-        )
-        # The stand-in must be the column's own DEFAULT -- that default is
-        # what makes the column additive, so anything else would be a value
-        # this layer invented.
-        stand_in = _READ_ONLY_COLUMN_DEFAULTS[(table, column)]
-        assert f"DEFAULT '{stand_in}'" in definition
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        connection.execute("VACUUM")
+    before = database_path.read_bytes()
+
+    reader = VolSurfaceStore(database_path)
+
+    # The surface rebuilds unchanged -- the fingerprint check inside
+    # fetch_surface is what proves the stand-in is the value the column's
+    # absence already meant -- and the database is not repaired on the way.
+    assert reader.fetch_surface(surface.surface_id) == surface
+    assert len(reader.list_surfaces()) == 1
+    assert database_path.read_bytes() == before
+
+    # And the declared stand-in really is that column's own DEFAULT.
+    assert (table, column) in _READ_ONLY_COLUMN_DEFAULTS
+    assert f"DEFAULT '{_READ_ONLY_COLUMN_DEFAULTS[(table, column)]}'" in definition
+
+
+def test_a_column_with_no_declared_stand_in_fails_closed(store, database_path) -> None:
+    """A column this build cannot read past is a refusal, not a raw SQL error.
+
+    ``volatility_sign`` is part of version 3 rather than additive, so nothing
+    declares a value to read in its place; a database without it is one this
+    build cannot rebuild a surface from.
+    """
+
+    surface = confirmed_surface()
+    store.save_confirmed_surface(surface)
+    with sqlite3.connect(database_path, isolation_level=None) as connection:
+        connection.execute("ALTER TABLE vol_surface_point DROP COLUMN volatility_sign")
+
+    with pytest.raises(VolSurfaceSchemaError, match="declares no value to read in its place"):
+        VolSurfaceStore(database_path).fetch_surface(surface.surface_id)
+
+
+def test_browsing_while_the_very_first_save_is_still_open_reports_an_empty_store(
+    database_path, monkeypatch
+) -> None:
+    """Codex review (PR #195): the read must not trip over a store being born.
+
+    ``sqlite3.connect`` creates the file, but nothing is committed until
+    ``_ensure_schema``'s transaction ends -- so a browse overlapping the very
+    first save sees a database with no tables in it. Reading through the write
+    path used to serialise behind that transaction; a read-only connection
+    sees it as it is, and the honest answer at that instant is that the store
+    holds nothing, not that it is unreadable.
+
+    The pause is taken inside that transaction, so the overlap is exact rather
+    than raced.
+    """
+
+    inside_transaction = threading.Event()
+    may_finish = threading.Event()
+    real_add_missing_columns = store_module._add_missing_columns
+
+    def paused(connection) -> None:
+        real_add_missing_columns(connection)
+        inside_transaction.set()
+        assert may_finish.wait(timeout=10)
+
+    monkeypatch.setattr(store_module, "_add_missing_columns", paused)
+
+    surface = confirmed_surface()
+    saver = threading.Thread(
+        target=lambda: VolSurfaceStore(database_path).save_confirmed_surface(surface)
+    )
+    saver.start()
+    try:
+        assert inside_transaction.wait(timeout=10)
+        assert database_path.exists()
+
+        reader = VolSurfaceStore(database_path)
+        assert reader.list_surfaces() == ()
+        with pytest.raises(KeyError):
+            reader.fetch_surface(surface.surface_id)
+    finally:
+        may_finish.set()
+        saver.join(timeout=10)
+
+    # And once the save lands, the same reader sees it.
+    assert len(VolSurfaceStore(database_path).list_surfaces()) == 1
+    assert VolSurfaceStore(database_path).fetch_surface(surface.surface_id) == surface
 
 
 # -- listing ----------------------------------------------------------------

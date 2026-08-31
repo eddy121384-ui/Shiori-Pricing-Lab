@@ -420,6 +420,30 @@ _READ_ONLY_COLUMN_DEFAULTS: dict[tuple[str, str], str] = {
 _REQUIRED_TABLES: tuple[str, ...] = ("vol_surface", "vol_surface_point")
 
 
+#: The columns a point is rebuilt from, in the order ``_surface_from_rows``
+#: reads them. Named here rather than inline so the read can be built from
+#: the list rather than hard-coding which of them a supported older database
+#: might be missing.
+_POINT_COLUMNS: tuple[str, ...] = (
+    "expiry",
+    "underlying_tenor",
+    "strike_dimension",
+    "strike_offset",
+    "volatility",
+    "volatility_sign",
+    "value_kind",
+)
+
+
+def _has_any_table(connection: sqlite3.Connection) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+        ).fetchone()
+        is not None
+    )
+
+
 def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return (
         connection.execute(
@@ -429,8 +453,39 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     )
 
 
-def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(row["name"] == column for row in connection.execute(f"PRAGMA table_info({table})"))
+def _select_with_stand_ins(
+    connection: sqlite3.Connection, table: str, columns: Sequence[str], path: Path
+) -> tuple[str, tuple[object, ...]]:
+    """The select list for ``columns``, standing in for what ``table`` lacks.
+
+    Built from :data:`_READ_ONLY_COLUMN_DEFAULTS` rather than from a
+    hard-coded column name, so a column added to :data:`_ADDITIVE_COLUMNS`
+    later is stood in for by the same machinery instead of making every read
+    of a database that predates it fail on a missing column (Codex review,
+    PR #195). A column that is absent and has *no* declared stand-in is a
+    database this build cannot read, and says so rather than letting a bare
+    ``no such column`` out.
+
+    The column names come from this module's own constants, never from a
+    caller, and every substituted value is bound rather than interpolated.
+    """
+
+    present = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    fragments: list[str] = []
+    parameters: list[object] = []
+    for column in columns:
+        if column in present:
+            fragments.append(column)
+            continue
+        if (table, column) not in _READ_ONLY_COLUMN_DEFAULTS:
+            raise VolSurfaceSchemaError(
+                f"{path} has no {table}.{column} column and this build declares no value to "
+                f"read in its place. Refusing to rebuild a surface from a shape it does not "
+                "have rather than guessing what the column would have said."
+            )
+        fragments.append(f"? AS {column}")
+        parameters.append(_READ_ONLY_COLUMN_DEFAULTS[(table, column)])
+    return ", ".join(fragments), tuple(parameters)
 
 
 def _add_missing_columns(connection: sqlite3.Connection) -> None:
@@ -508,6 +563,38 @@ class VolSurfaceStore:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA query_only = 1")
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
+    def _open_for_reading(self) -> sqlite3.Connection | None:
+        """A verified read-only connection, or ``None`` if the store is empty.
+
+        ``None`` means the store provably holds no surface: either there is
+        no database file, or there is one with no tables in it at all. The
+        second case is not only an empty file -- it is exactly what a
+        concurrent reader sees while the very first save is still inside
+        ``_ensure_schema``'s transaction, since the file is created on
+        connect and nothing is committed until that transaction ends (Codex
+        review, PR #195). Reading through the write path used to serialise
+        behind that transaction; a read-only connection sees the database as
+        it was, which is empty, and answering "nothing is stored" is the
+        truth at that instant rather than a refusal a trader would have to
+        interpret.
+
+        A file that *does* have tables is a different thing: it either is a
+        vol-surface store this build can read, or it is refused. Nothing
+        with a table in it is ever mistaken for an empty store.
+        """
+
+        if not self._path.exists():
+            return None
+        connection = self._read_only_connection()
+        try:
+            if not _has_any_table(connection):
+                connection.close()
+                return None
             self._require_readable_schema(connection)
         except Exception:
             connection.close()
@@ -780,9 +867,9 @@ class VolSurfaceStore:
         one that was never saved.
         """
 
-        if not self._path.exists():
+        connection = self._open_for_reading()
+        if connection is None:
             raise KeyError(f"no vol surface is stored with id {surface_id!r}")
-        connection = self._read_only_connection()
         try:
             row = connection.execute(
                 f"SELECT {', '.join(_SURFACE_COLUMNS)} FROM vol_surface WHERE surface_id = ?",
@@ -809,21 +896,20 @@ class VolSurfaceStore:
         surface_id = row["surface_id"]
         # A supported older database (version 3 written before Issue #185)
         # has neither the ``value_kind`` column nor the image table. Since a
-        # read may not add them, it selects the column's own ``DEFAULT`` in
-        # its place -- the value that makes the column additive, and the one
-        # such a row has always meant -- and reads no images, which is
-        # exactly what a single-image capture stored. Both substitutions
-        # rebuild the surface the older build saved, fingerprint included;
-        # neither invents anything, and the check below still has to agree.
-        has_value_kind = _column_exists(connection, "vol_surface_point", "value_kind")
-        value_kind_expression = "value_kind" if has_value_kind else "?"
-        value_kind_default = _READ_ONLY_COLUMN_DEFAULTS[("vol_surface_point", "value_kind")]
-        value_kind_parameters = () if has_value_kind else (value_kind_default,)
+        # read may not add them, it selects each missing column's own
+        # ``DEFAULT`` in its place -- the value that makes the column
+        # additive, and the one such a row has always meant -- and reads no
+        # images, which is exactly what a single-image capture stored. Both
+        # substitutions rebuild the surface the older build saved,
+        # fingerprint included; neither invents anything, and the check below
+        # still has to agree.
+        point_select, point_parameters = _select_with_stand_ins(
+            connection, "vol_surface_point", _POINT_COLUMNS, self._path
+        )
         point_rows = connection.execute(
-            "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility, "
-            f"volatility_sign, {value_kind_expression} AS value_kind FROM vol_surface_point "
+            f"SELECT {point_select} FROM vol_surface_point "
             "WHERE surface_id = ? ORDER BY point_index",
-            (*value_kind_parameters, surface_id),
+            (*point_parameters, surface_id),
         ).fetchall()
         image_rows = (
             connection.execute(
@@ -869,8 +955,6 @@ class VolSurfaceStore:
         the first confirmed save is.
         """
 
-        if not self._path.exists():
-            return ()
 
         clauses: list[str] = []
         parameters: list[object] = []
@@ -884,7 +968,9 @@ class VolSurfaceStore:
             clauses.append("s.business_date = ?")
             parameters.append(business_date)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        connection = self._read_only_connection()
+        connection = self._open_for_reading()
+        if connection is None:
+            return ()
         try:
             rows = connection.execute(
                 "SELECT s.surface_id, s.surface_type, s.capture_id, s.business_date, "
