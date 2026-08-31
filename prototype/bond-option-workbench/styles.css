@@ -824,3 +824,106 @@ select.control:focus { border-color: var(--blue); }
 .markets-table td { padding: 7px 10px; border-bottom: 1px solid #f1f2f5; color: var(--text); font-variant-numeric: tabular-nums; }
 .markets-table tbody tr:hover { background: #f9fafc; }
 .markets-table td.unavailable { color: var(--muted-2); }
+
+/* ---------- Markets: market-view selector + Swaption Vol Surface (Issue #194) ---------- */
+/* #markets-panel-* group each market view's sections so the selector can show
+   one at a time. `display: contents` means the wrapper contributes no box at
+   all: its sections stay direct flex children of .markets-view, keeping the
+   Option Discount Curve layout (and its 9px gap) byte-for-byte what it was
+   before the wrapper existed. That explicit `display` ties the UA
+   `[hidden] { display: none }` rule in specificity and, being the later
+   author rule, would win -- so the same `[hidden]` override this file already
+   uses for .main/.footer/.workspace is needed here too. */
+.markets-panel { display: contents; }
+.markets-panel[hidden] { display: none; }
+
+.markets-view-switch { padding: 8px; }
+.markets-view-tabs { display: flex; gap: 6px; }
+.markets-view-tab {
+  font: inherit; font-size: 13.5px; font-weight: 600; color: var(--muted);
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  padding: 8px 16px; cursor: pointer;
+}
+.markets-view-tab:hover { background: #f4f6fa; }
+.markets-view-tab.is-active { background: #eef4ff; border-color: #bcd3f7; color: var(--blue); }
+
+.vol-surface-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.vol-surface-picker-label { font-size: 12px; color: var(--muted); }
+.vol-surface-select {
+  font: inherit; font-size: 13px; height: 36px; min-width: 340px; max-width: 560px;
+  padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: #fff; color: var(--text); cursor: pointer;
+}
+.vol-surface-select:disabled { color: var(--muted-2); cursor: not-allowed; }
+
+.vol-surface-provenance {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px 18px;
+}
+.vol-surface-provenance[hidden] { display: none; }
+.vsp-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.vsp-item.vsp-wide { grid-column: span 3; }
+.vsp-k { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.vsp-v { font-size: 13.5px; font-weight: 600; color: var(--text-strong); overflow-wrap: anywhere; }
+.vsp-v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; }
+/* An identity field the capture left unresolved. Never blank, never guessed:
+   it reads as unresolved so a trader can see the surface is missing it. */
+.vsp-v.unresolved { color: var(--muted-2); font-weight: 500; font-style: italic; }
+
+.vol-surface-hint { margin-left: auto; font-size: 12px; color: var(--muted-2); }
+.vol-surface-chart-card .card-head { display: flex; align-items: baseline; gap: 12px; }
+.vol-surface-chart-card .card-body { display: flex; flex-direction: column; gap: 10px; }
+.vol-surface-canvas-wrap { position: relative; width: 100%; min-width: 0; }
+.vol-surface-canvas-wrap canvas {
+  display: block; width: 100%; height: auto; cursor: grab; touch-action: none;
+  background: #fbfcfe; border: 1px solid var(--border); border-radius: 8px;
+}
+.vol-surface-canvas-wrap canvas.is-dragging { cursor: grabbing; }
+.vol-surface-tooltip { white-space: nowrap; }
+.vol-surface-tooltip .tt-headline {
+  font-weight: 700; font-size: 13px; margin-bottom: 4px;
+  padding-bottom: 4px; border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+}
+.vol-surface-axis-note { font-size: 12px; color: var(--muted); }
+
+/* Cross-sections (Issue #194 UAT): two linked slices of the same stored
+   surface, side by side, stacking on a narrow viewport. */
+.vol-surface-slices-card .card-head { display: flex; align-items: baseline; gap: 12px; }
+.vol-surface-slices-card .card-body { display: flex; flex-direction: column; gap: 10px; }
+.vol-surface-slices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+@media (max-width: 1200px) { .vol-surface-slices { grid-template-columns: minmax(0, 1fr); } }
+.vol-surface-slice { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.vs-slice-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vs-slice-title { font-size: 13.5px; font-weight: 700; color: var(--text-strong); margin-right: auto; }
+.vol-surface-slice-select {
+  font: inherit; font-size: 12.5px; height: 30px; min-width: 96px;
+  padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 7px;
+  background: #fff; color: var(--text); cursor: pointer;
+}
+.vs-slice-chart { position: relative; min-width: 0; }
+.vs-slice-chart svg { display: block; width: 100%; height: auto; }
+.vs-slice-chart .vs-dot { fill: var(--chart-line); }
+/* An intersection the capture left unresolved has no marker and no line
+   through it: the gap is the point. */
+.vs-slice-empty { font-size: 12.5px; color: var(--muted-2); padding: 18px 0; }
+
+/* The full 21 x 15 matrix: the header row and the expiry column stay put
+   while the rest scrolls in both directions. */
+.vol-surface-table-wrap { max-height: 560px; overflow: auto; }
+.vol-surface-table { font-size: 12.5px; border-collapse: separate; border-spacing: 0; }
+.vol-surface-table th, .vol-surface-table td { white-space: nowrap; }
+.vol-surface-table thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--card);
+  text-align: right; padding: 7px 10px;
+}
+.vol-surface-table thead th:first-child { left: 0; z-index: 3; text-align: left; }
+.vol-surface-table tbody th {
+  position: sticky; left: 0; z-index: 1; background: var(--card);
+  text-align: left; font-size: 12px; font-weight: 700; color: var(--text-strong);
+  text-transform: none; letter-spacing: normal;
+  padding: 6px 10px; border-bottom: 1px solid #f1f2f5;
+}
+.vol-surface-table td { text-align: right; padding: 6px 10px; }
+/* An intersection the capture left unresolved. Stored as "unread", shown as
+   unread -- never zero, never interpolated from its neighbours. */
+.vol-surface-table td.unresolved { color: var(--muted-2); }

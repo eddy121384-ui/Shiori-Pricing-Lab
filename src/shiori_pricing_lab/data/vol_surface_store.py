@@ -45,6 +45,22 @@ a perfectly legal :class:`CanonicalVolSurface`, so without this nothing
 downstream would notice it was no longer the grid a trader signed off on
 (Codex review, PR #184). ``list_surfaces`` deliberately does not check: it
 reads no points, and is a browse rather than a source of data.
+
+**A read never writes.** ``list_surfaces`` and ``fetch_surface`` open the
+database read-only and take no part in creating or upgrading it: creating
+the file, creating the tables, and bringing an older database's additive
+columns up to this build's shape all belong to ``save_confirmed_surface``
+alone. Reading through the write path meant that merely browsing the Markets
+view rewrote a store written before Issue #185, and that the same browse
+failed outright against a read-only file (Codex review, PR #195). A store
+with no database yet therefore lists nothing rather than bringing one into
+existence, and a supported older database is read as it stands -- the read
+substituting the additive column's own ``DEFAULT`` (see
+:data:`_READ_ONLY_COLUMN_DEFAULTS`) rather than adding the column. The
+fail-closed gate is not skipped on the way: the read has its own copy of the
+schema-version check, because the write path's lives inside the transaction
+it guards and a read that skipped it would answer from a database written by
+a newer build using this build's meanings.
 """
 
 from __future__ import annotations
@@ -381,6 +397,96 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("vol_surface_point", "value_kind", "TEXT NOT NULL DEFAULT 'ABSOLUTE_VOL'"),
 )
 
+#: What a *read* substitutes for an additive column a supported older
+#: database does not have yet, as ``(table, column) -> value``.
+#:
+#: A read never migrates (see :meth:`VolSurfaceStore._read_only_connection`),
+#: so it has to stand in for the column itself. The value here must be
+#: exactly the ``DEFAULT`` its entry in :data:`_ADDITIVE_COLUMNS` carries --
+#: that default is what makes the column additive at all, since it reproduces
+#: what a row written before the column existed already meant. Anything else
+#: would be this layer inventing a value for data a trader confirmed.
+#:
+#: Every entry of :data:`_ADDITIVE_COLUMNS` must appear here, so a column
+#: added later cannot silently leave the read path guessing; a test asserts
+#: the two agree.
+_READ_ONLY_COLUMN_DEFAULTS: dict[tuple[str, str], str] = {
+    ("vol_surface_point", "value_kind"): VolValueKind.ABSOLUTE_VOL.value,
+}
+
+#: The tables this build cannot read a surface without. A database whose
+#: version row says it is readable but which lacks one of these is malformed,
+#: and saying so is better than letting a bare "no such table" out.
+_REQUIRED_TABLES: tuple[str, ...] = ("vol_surface", "vol_surface_point")
+
+
+#: The columns a point is rebuilt from, in the order ``_surface_from_rows``
+#: reads them. Named here rather than inline so the read can be built from
+#: the list rather than hard-coding which of them a supported older database
+#: might be missing.
+_POINT_COLUMNS: tuple[str, ...] = (
+    "expiry",
+    "underlying_tenor",
+    "strike_dimension",
+    "strike_offset",
+    "volatility",
+    "volatility_sign",
+    "value_kind",
+)
+
+
+def _has_any_table(connection: sqlite3.Connection) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+        ).fetchone()
+        is not None
+    )
+
+
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _select_with_stand_ins(
+    connection: sqlite3.Connection, table: str, columns: Sequence[str], path: Path
+) -> tuple[str, tuple[object, ...]]:
+    """The select list for ``columns``, standing in for what ``table`` lacks.
+
+    Built from :data:`_READ_ONLY_COLUMN_DEFAULTS` rather than from a
+    hard-coded column name, so a column added to :data:`_ADDITIVE_COLUMNS`
+    later is stood in for by the same machinery instead of making every read
+    of a database that predates it fail on a missing column (Codex review,
+    PR #195). A column that is absent and has *no* declared stand-in is a
+    database this build cannot read, and says so rather than letting a bare
+    ``no such column`` out.
+
+    The column names come from this module's own constants, never from a
+    caller, and every substituted value is bound rather than interpolated.
+    """
+
+    present = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    fragments: list[str] = []
+    parameters: list[object] = []
+    for column in columns:
+        if column in present:
+            fragments.append(column)
+            continue
+        if (table, column) not in _READ_ONLY_COLUMN_DEFAULTS:
+            raise VolSurfaceSchemaError(
+                f"{path} has no {table}.{column} column and this build declares no value to "
+                f"read in its place. Refusing to rebuild a surface from a shape it does not "
+                "have rather than guessing what the column would have said."
+            )
+        fragments.append(f"? AS {column}")
+        parameters.append(_READ_ONLY_COLUMN_DEFAULTS[(table, column)])
+    return ", ".join(fragments), tuple(parameters)
+
 
 def _add_missing_columns(connection: sqlite3.Connection) -> None:
     """Bring an older database's tables up to this build's column set.
@@ -431,6 +537,131 @@ class VolSurfaceStore:
             raise
         return connection
 
+    def _read_only_connection(self) -> sqlite3.Connection:
+        """Open the store for reading, creating and changing nothing.
+
+        A read never migrates. :meth:`_connect` is the *write* path's door:
+        it makes the directory, creates every table, and brings an older
+        database's additive columns up to this build's shape -- all correct
+        for a save, and all wrong for a browse. Reading through it meant that
+        merely listing the store on a machine whose database predates Issue
+        #185 rewrote that database, and that the same listing failed outright
+        against a genuinely read-only file (Codex review, PR #195).
+
+        ``mode=ro`` is SQLite's own refusal rather than a convention this
+        module has to keep, and ``query_only`` says the same thing a second
+        way on the connection itself: neither the schema catch-up nor any
+        other statement can write through this handle even by mistake.
+        """
+
+        try:
+            connection = sqlite3.connect(
+                f"{self._path.resolve().as_uri()}?mode=ro", uri=True, isolation_level=None
+            )
+        except sqlite3.Error as exc:
+            raise VolSurfaceStoreError(f"cannot open {self._path} for reading: {exc}") from exc
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only = 1")
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
+    def _open_for_reading(self) -> sqlite3.Connection | None:
+        """A verified read-only connection, or ``None`` if the store is empty.
+
+        ``None`` means the store provably holds no surface: either there is
+        no database file, or there is one with no tables in it at all. The
+        second case is not only an empty file -- it is exactly what a
+        concurrent reader sees while the very first save is still inside
+        ``_ensure_schema``'s transaction, since the file is created on
+        connect and nothing is committed until that transaction ends (Codex
+        review, PR #195). Reading through the write path used to serialise
+        behind that transaction; a read-only connection sees the database as
+        it was, which is empty, and answering "nothing is stored" is the
+        truth at that instant rather than a refusal a trader would have to
+        interpret.
+
+        A file that *does* have tables is a different thing: it either is a
+        vol-surface store this build can read, or it is refused. Nothing
+        with a table in it is ever mistaken for an empty store.
+        """
+
+        if not self._path.exists():
+            return None
+        connection = self._read_only_connection()
+        try:
+            if not _has_any_table(connection):
+                connection.close()
+                return None
+            self._require_readable_schema(connection)
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
+    def _require_readable_schema(self, connection: sqlite3.Connection) -> None:
+        """Refuse a database this build cannot read -- without repairing it.
+
+        The same gate :meth:`_ensure_schema` applies on the way in, minus
+        every statement that would change something. It has to exist
+        separately because that gate lives inside the write transaction it
+        guards: a read path that simply skipped it would answer from a
+        database written by a *newer* build using this build's meanings,
+        which is a worse failure than the migration this method exists to
+        avoid.
+
+        An unreadable database is one whose version is not exactly this
+        build's, whose version is missing entirely, or which lacks a table a
+        surface cannot be rebuilt without. A *supported older* database --
+        version 3 without Issue #185's additive column or image table -- is
+        readable, and the read stands in for what it lacks rather than adding
+        it (see :data:`_READ_ONLY_COLUMN_DEFAULTS`).
+        """
+
+        # The version is settled first, exactly as on the write path, and for
+        # the same reason: a database that records a version this build does
+        # not read is refused *as that version*, whatever shape its other
+        # tables are in. Checking the tables first would report an old
+        # database as merely malformed and hide the one fact that explains
+        # it.
+        if not _table_exists(connection, "schema_version"):
+            raise VolSurfaceSchemaError(
+                f"{self._path} records no vol-surface schema version at all. Refusing to read "
+                "a database that is not a vol-surface store rather than creating the tables "
+                "it lacks."
+            )
+        row = connection.execute("SELECT version FROM schema_version").fetchone()
+        if row is None:
+            raise VolSurfaceSchemaError(
+                f"{self._path} records no vol-surface schema version. Refusing to read it "
+                f"rather than assume it is version {SCHEMA_VERSION}."
+            )
+        stored = int(row["version"])
+        if stored != SCHEMA_VERSION:
+            raise self._wrong_schema_version_error(stored)
+        missing = [name for name in _REQUIRED_TABLES if not _table_exists(connection, name)]
+        if missing:
+            raise VolSurfaceSchemaError(
+                f"{self._path} claims vol-surface schema version {stored} but is missing the "
+                f"table(s) {', '.join(missing)}. Refusing to read a database whose shape "
+                "contradicts its own version rather than creating what it lacks."
+            )
+
+    def _wrong_schema_version_error(self, stored: int) -> VolSurfaceSchemaError:
+        """The one refusal both the read and the write gate give.
+
+        Shared so the two can never drift into disagreeing about which
+        databases this build will touch.
+        """
+
+        return VolSurfaceSchemaError(
+            f"{self._path} was written with vol-surface schema version {stored}, "
+            f"but this build reads version {SCHEMA_VERSION}. Refusing to read it "
+            "rather than guess what its columns mean."
+        )
+
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         """Create the tables if they are absent, and refuse a version we cannot read.
 
@@ -454,11 +685,7 @@ class VolSurfaceStore:
             if row is not None:
                 stored = int(row["version"])
                 if stored != SCHEMA_VERSION:
-                    raise VolSurfaceSchemaError(
-                        f"{self._path} was written with vol-surface schema version {stored}, "
-                        f"but this build reads version {SCHEMA_VERSION}. Refusing to read it "
-                        "rather than guess what its columns mean."
-                    )
+                    raise self._wrong_schema_version_error(stored)
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
             _add_missing_columns(connection)
@@ -634,10 +861,15 @@ class VolSurfaceStore:
         """Return one stored surface with all of its points, in stored order.
 
         Raises ``KeyError`` for an id this store does not hold -- a missing
-        surface is an error, never an empty one.
+        surface is an error, never an empty one. A store with no database
+        file yet holds no surface, so it raises the same ``KeyError`` rather
+        than bringing a database into existence to answer a question about
+        one that was never saved.
         """
 
-        connection = self._connect()
+        connection = self._open_for_reading()
+        if connection is None:
+            raise KeyError(f"no vol surface is stored with id {surface_id!r}")
         try:
             row = connection.execute(
                 f"SELECT {', '.join(_SURFACE_COLUMNS)} FROM vol_surface WHERE surface_id = ?",
@@ -662,17 +894,32 @@ class VolSurfaceStore:
         """
 
         surface_id = row["surface_id"]
+        # A supported older database (version 3 written before Issue #185)
+        # has neither the ``value_kind`` column nor the image table. Since a
+        # read may not add them, it selects each missing column's own
+        # ``DEFAULT`` in its place -- the value that makes the column
+        # additive, and the one such a row has always meant -- and reads no
+        # images, which is exactly what a single-image capture stored. Both
+        # substitutions rebuild the surface the older build saved,
+        # fingerprint included; neither invents anything, and the check below
+        # still has to agree.
+        point_select, point_parameters = _select_with_stand_ins(
+            connection, "vol_surface_point", _POINT_COLUMNS, self._path
+        )
         point_rows = connection.execute(
-            "SELECT expiry, underlying_tenor, strike_dimension, strike_offset, volatility, "
-            "volatility_sign, value_kind FROM vol_surface_point WHERE surface_id = ? "
-            "ORDER BY point_index",
-            (surface_id,),
+            f"SELECT {point_select} FROM vol_surface_point "
+            "WHERE surface_id = ? ORDER BY point_index",
+            (*point_parameters, surface_id),
         ).fetchall()
-        image_rows = connection.execute(
-            "SELECT source_reference, source_image_sha256, source_image_bytes "
-            "FROM vol_surface_source_image WHERE surface_id = ? ORDER BY image_index",
-            (surface_id,),
-        ).fetchall()
+        image_rows = (
+            connection.execute(
+                "SELECT source_reference, source_image_sha256, source_image_bytes "
+                "FROM vol_surface_source_image WHERE surface_id = ? ORDER BY image_index",
+                (surface_id,),
+            ).fetchall()
+            if _table_exists(connection, "vol_surface_source_image")
+            else ()
+        )
         surface = _surface_from_rows(row, point_rows, image_rows)
         stored_fingerprint = row["content_fingerprint"]
         if surface.content_fingerprint != stored_fingerprint:
@@ -702,7 +949,12 @@ class VolSurfaceStore:
         An unresolved field never matches a value, which is what keeps a
         surface with an unknown currency out of a ``currency="USD"`` answer
         instead of being assumed into it.
+
+        A store with no database file yet holds nothing, and says so without
+        creating one: browsing is not what brings the store into existence,
+        the first confirmed save is.
         """
+
 
         clauses: list[str] = []
         parameters: list[object] = []
@@ -716,7 +968,9 @@ class VolSurfaceStore:
             clauses.append("s.business_date = ?")
             parameters.append(business_date)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        connection = self._connect()
+        connection = self._open_for_reading()
+        if connection is None:
+            return ()
         try:
             rows = connection.execute(
                 "SELECT s.surface_id, s.surface_type, s.capture_id, s.business_date, "
