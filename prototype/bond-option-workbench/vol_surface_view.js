@@ -988,6 +988,13 @@
     return labels.includes(preferred) ? preferred : labels[0];
   }
 
+  // A slice the trader chose survives a change of snapshot when the new
+  // surface stores that same label, and only falls back to the default when
+  // it does not. Deliberate, not an oversight (Codex review, PR #195): the
+  // snapshots offered here are captures of the *same* screen, so holding one
+  // slice still while stepping between them is how two captures get
+  // compared. Resetting to 1Yr/1Mo on every switch would undo that read at
+  // the moment it is wanted.
   function renderSliceSelectors() {
     const { expiries, underlying_tenors: tenors } = payload.grid;
     if (!tenors.includes(sliceTenor)) sliceTenor = defaultedSlice(tenors, DEFAULT_SLICE_TENOR);
@@ -1098,12 +1105,18 @@
       svg.appendChild(gridline);
 
       const label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("class", "vs-y-tick");
       label.setAttribute("x", String(SLICE_MARGIN.left - 8));
       label.setAttribute("y", String(y + 4));
       label.setAttribute("text-anchor", "end");
       label.setAttribute("font-size", "11");
       label.setAttribute("fill", "#99a1b0");
-      label.textContent = String(Math.round(tick * 100) / 100);
+      // A round number the scale invented to divide the axis by, not a vol
+      // anyone confirmed. Marked the way this file already marks the 3D vol
+      // axis's midpoint, so no number on screen can be read as a stored
+      // value unless it is one (Codex review, PR #195). The exact stored
+      // value of every plotted node is on the node itself.
+      label.textContent = `~${Math.round(tick * 100) / 100}`;
       svg.appendChild(label);
     }
 
@@ -1414,6 +1427,9 @@
       tickLabels: Array.from(svg.querySelectorAll("text"))
         .map((text) => text.textContent)
         .filter((text) => TENOR_LABEL.test(text)),
+      yTickLabels: Array.from(svg.querySelectorAll(".vs-y-tick")).map(
+        (text) => text.textContent
+      ),
     };
   };
   window.__shioriTestVolSurfaceLoadSelected = () => loadSelectedSurface();

@@ -1023,6 +1023,95 @@ def test_changing_a_slice_selector_replots_from_the_same_stored_matrix(server_ur
             assert rows[row_index][column_index] == expected
 
 
+def test_no_number_on_a_slice_chart_reads_as_a_stored_value_unless_it_is_one(
+    server_url, page
+) -> None:
+    # Codex review (PR #195): the y axis is divided by round numbers the
+    # scale invents, and they were rendered exactly like confirmed vols. This
+    # file already marks the 3D vol axis's derived midpoint with "~"; the
+    # slice charts must not break that convention.
+    _route_curve_away(page)
+    _route_vol_surface(page)
+    _open_vol_surface(page, server_url)
+    _wait_for_surface(page)
+
+    for which in ("vs-tenor", "vs-expiry"):
+        chart = page.evaluate(
+            "(which) => window.__shioriTestVolSurfaceSliceChart(which)", which
+        )
+        assert chart["yTickLabels"], f"{which} drew no y axis"
+        assert all(label.startswith("~") for label in chart["yTickLabels"]), chart["yTickLabels"]
+
+    # The exact stored value of every plotted node is still on the node.
+    vs_tenor = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert [dot["title"] for dot in vs_tenor["dots"]] == [
+        f"{tenor} = {_displayed(value)} bp"
+        for tenor, value in zip(_TENORS, _ROWS[0], strict=True)
+    ]
+
+
+def test_a_chosen_slice_survives_a_change_of_snapshot(server_url, page) -> None:
+    # Deliberate, and pinned so it stays a decision rather than drifting: the
+    # snapshots offered here are captures of the same screen, so holding one
+    # slice still while stepping between them is how two captures get
+    # compared (Codex review, PR #195, which read the persistence as an
+    # oversight).
+    _route_curve_away(page)
+    _route_vol_surface(page, summaries=(_SUMMARY_A, _SUMMARY_B))
+    _open_vol_surface(page, server_url)
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-empty"))
+    page.select_option("#vol-surface-select", "surface-a")
+    _wait_for_surface(page)
+
+    page.select_option("#vol-surface-slice-tenor", "5Yr")
+    page.select_option("#vol-surface-slice-expiry", "6Mo")
+
+    page.select_option("#vol-surface-select", "surface-b")
+    _wait_for_surface(page)
+
+    assert page.evaluate("() => window.__shioriTestVolSurfaceSlices()") == {
+        "tenor": "5Yr",
+        "expiry": "6Mo",
+    }
+    # And it is surface-b's numbers on that same slice -- every value ten higher.
+    vs_tenor = page.evaluate("() => window.__shioriTestVolSurfaceSliceChart('vs-tenor')")
+    assert [dot["title"] for dot in vs_tenor["dots"]] == [
+        f"{tenor} = {_displayed(value + 10)} bp"
+        for tenor, value in zip(_TENORS, _ROWS[2], strict=True)
+    ]
+
+
+def test_a_slice_the_next_snapshot_does_not_store_falls_back_to_the_default(
+    server_url, page
+) -> None:
+    narrower = {
+        **_SURFACE_B,
+        "grid": {
+            "expiries": _EXPIRIES,
+            "underlying_tenors": ["1Yr", "2Yr"],
+            "rows": [[None if v is None else v + 10 for v in row[:2]] for row in _ROWS],
+        },
+    }
+    _route_curve_away(page)
+    _route_vol_surface(
+        page,
+        summaries=(_SUMMARY_A, _SUMMARY_B),
+        surfaces={"surface-a": _SURFACE_A, "surface-b": narrower},
+    )
+    _open_vol_surface(page, server_url)
+    _wait_until(lambda: not _is_actually_hidden(page, "vol-surface-empty"))
+    page.select_option("#vol-surface-select", "surface-a")
+    _wait_for_surface(page)
+    page.select_option("#vol-surface-slice-tenor", "10Yr")
+
+    page.select_option("#vol-surface-select", "surface-b")
+    _wait_for_surface(page)
+
+    # 10Yr is not stored in the new surface, so the slice returns to the default.
+    assert page.evaluate("() => window.__shioriTestVolSurfaceSlices()")["tenor"] == "1Yr"
+    assert page.eval_on_selector("#vol-surface-slice-tenor", "el => el.value") == "1Yr"
+
+
 def test_clicking_a_node_moves_both_slices_to_it(server_url, page) -> None:
     _route_curve_away(page)
     _route_vol_surface(page)
