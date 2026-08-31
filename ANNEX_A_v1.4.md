@@ -480,6 +480,7 @@ lognormal bond price vol (σ_P)
 - `σ_P`：Black pricing 所需的 annualized **lognormal bond price volatility**。
 - `σ_vcub` 或 `σ_Y^N` **不是 price vol**，不可直接送進 §A.2。
 - 若 ingestion source 以 bp 顯示 normal vol，進 pricing math 前必須明確 normalize 為 absolute decimal yield units（`1 bp = 1e-4`）；禁止依 numeric magnitude 猜 unit。
+- Bloomberg DOCS #2063620 明載 normal volatility quote 以 basis point 表示，且 VCUB 兩個畫面都在畫面上聲明其 vol space（`Normal Vol (OIS)` / `Normal Vol Skew`）。因此**已確認的 VCUB normal-vol capture 於 canonical store 落地時即記錄 `volatility_unit = bp`**，unit 由「已聲明的 vol type」決定，不由數值大小推得。vol type unresolved、或屬 Black / lognormal / shifted-lognormal 者，unit 維持 unresolved（下游 resolver fail closed）。
 
 Bloomberg BVOL/VCUB 的 normal-volatility basis 亦由 Bloomberg negative-rate methodology document 支持；Shiori 優先使用已確認的 `Normal Vol (OIS)` / `Normal Vol Skew` capture。
 
@@ -537,9 +538,49 @@ Canonical store 必須保留 `ABSOLUTE_VOL` 與 `SPREAD_TO_ATM` 原始語義；�
 **Off-grid rule：** Bloomberg 文件確認 OVME 使用由 VCUB 取得 / interpolated 的 normal swaption vol，但本次 source evidence 未完整公開 VCUB 在 expiry × tenor × strike 三維上的精確 interpolation recipe。故：
 
 - exact node lookup：可直接使用；
-- off-grid interpolation：必須是獨立、版本化、可審計的 resolver methodology；
+- off-grid interpolation：必須是獨立、版本化、可審計的 resolver methodology（見 §A.8.3a）；
 - 在完成 Bloomberg live parity 前，不得宣稱 Shiori interpolation 與 Bloomberg 內部算法相同；
 - 不得以鄰近值、flat vol 或任意 fallback 靜默補值。
+
+### A.8.3a In-grid Resolver Contract：`IN_GRID_BILINEAR_V1`
+
+Bloomberg 2026-06-25 methodology document「Bloomberg Volatility Cube」(DOCS #2063620) 已明確：VCUB 可在 normal volatility space 校準與插值；OTM swaption strike 以 **additive moneyness**（相對 ATM）表示；對 off-grid query `(T*, τ*, K*)`，各 bracketing expiry/tenor corner 使用**相同 additive moneyness** `K_ij − F_ij = K* − F*`；四個 corner vol 再以 **expiry/tenor bilinear interpolation** 合成。
+
+據此，Shiori 定義一個版本化 resolver `IN_GRID_BILINEAR_V1`，輸入為**單一 confirmed canonical VCUB snapshot**，輸出**止於 `σ_vcub`**：
+
+```text
+confirmed canonical VCUB snapshot
+  → ATM absolute + OTM spread 重建（§A.8.3）
+  → 四角同一 additive moneyness μ* = K* − F*
+  → corner smile resolution（PWL）
+  → expiry/tenor bilinear interpolation
+  → resolved σ_vcub + diagnostics / provenance
+```
+
+**明確輸入（不得推測）：**
+
+- **volatility unit**：只讀 canonical surface 明確聲明的 unit；`bp` 依 `1bp = 1e-4` 明確 normalize 為 absolute decimal rate vol。已確認的 VCUB normal-vol capture 依 §A.8.1 於落地時即聲明 `bp`，因此可直接解析，無須人工補 unit。未聲明或無法 pin 的 unit 一律 fail closed，禁止由數值大小推斷（§A.8.1）。
+- **expiry / tenor 數值座標**：由呼叫端以顯式 label → coordinate map 提供，且必須覆蓋 surface 上的每一個 label。本 Annex **不**在此定義 calendar date → VCUB year fraction 之 day-count convention；該問題與 `DCF_VCUB` 同屬未解 RED，resolver 不得代為決定。
+- **smile model**：由呼叫端明確聲明，不得由 surface type、欄位數或數值形狀推得。本版本實作 **PWL**：在 additive moneyness 空間對 **normal vol** 線性插值，captured strike node 必須 exact round-trip。**SABR** 在 Bloomberg calibration contract（DOCS #2063620 Appendix D 之 equal-weighted alpha-error objective 與 `β = 0.5`、`shift = 0.03`、`ρ ∈ [-1, 0.999]`、`ν ∈ [0, 1]` 等 versioned defaults）與 calibrated `α / ρ / ν` 未進入 canonical snapshot 前 **fail closed**，不得以 PWL 冒充 SABR。
+- **volatility space**：只接受 canonical surface 明確聲明為 normal vol 的 surface（`vol_type` 屬 `Normal Vol ...` 系列，如 `Normal Vol (OIS)` / `Normal Vol Skew`）。`vol_type` 未解析、或為 lognormal / Black / shifted-lognormal 者一律 fail closed；`surface_type` 只說明來源畫面，不足以證明數值所處的 vol space。
+- **corner forward `F_ij`**：canonical snapshot 不儲存 forward。smile 在 moneyness 空間解析，因此 `σ_vcub` 不需要 forward；`K_ij = F_ij + μ*` 僅在呼叫端明確提供 forward 時報告，未提供時 corner strike 記為未知，不得假設。
+
+**Fail-closed 條件（皆 blocking，不得回傳降級數值）：**
+
+- surface 未聲明 normal volatility space（`vol_type` 未解析，或非 normal vol）；
+- surface 未聲明 volatility unit，或聲明無法 pin 的 unit；
+- query 未聲明 smile model，或聲明本版本未實作的 model；
+- coordinate map 未涵蓋 surface 上的 label，或兩個 label 對應同一座標；
+- query 宣告的 snapshot identity 與傳入 surface 不符（不同 capture / 不同 business date 不得互相插值）；
+- `T*`、`τ*` 或 `μ*` 超出 confirmed surface 覆蓋範圍（`VCUB_EXTRAPOLATION_MODE = FAIL_CLOSED`）；
+- 任一 bracketing node 缺漏或無 resolved value；
+- 所需 smile bracket 落在或跨越 capture **未解析**的 strike coordinate（不得以左右鄰欄插補補洞）；
+- spread-to-ATM 欄位所需之 ATM absolute vol 缺漏（§A.8.3 重建不成立）；
+- 重建後之 absolute normal vol 為負（normal vol 非負；此時應視為 capture 或 spread 語義有誤，不得輸出）。
+
+**Diagnostics / provenance（每一筆 resolved 結果必須可審計）：** canonical snapshot / surface identity、capture 與 confirm 資訊、source unit 與 normalization factor、resolver name/version、smile model/version、`VCUB_EXTRAPOLATION_MODE`、requested `(T*, τ*, μ*)`、四個 bracketing node 與其 ATM/spread 重建細節、各 corner 的 `F_ij`（若有）、`K_ij`（若有）與 corner normal vol、interpolation weights、最終 `σ_vcub`（raw 值標示 source unit、normalized 值標示 `decimal`；兩個 value/unit 配對不得互換，避免已 normalize 的值被再乘一次 `1e-4`）、fallback flag（accepted 結果恆為 false）。
+
+**邊界：** 本 resolver 只產出 normal swaption vol `σ_vcub`。它不是 bond yield vol，也不是 bond price vol；在 `DCF_VCUB` / `DCF_BondVol` convention RED 解除前（§A.8.5），其輸出不得流入 `λ_vcub` 之後的 `σ_Y^N` / `σ_P` / premium 鏈路。本 resolver 之插值行為為 Shiori 自有 versioned contract，在完成 OVME live parity 前仍不得宣稱與 Bloomberg 內部算法相同。
 
 ### A.8.4 Bond-specific Vol Scaling Factor `λ_vcub`
 
@@ -579,6 +620,8 @@ Bloomberg 的精確關係以 total variance 對齊兩邊 day-count convention：
 ```
 
 **RED stop condition：** Bloomberg source evidence 在本版尚未把 `DCF_BondVol` 與 `DCF_VCUB` 的具體 day-count convention 完整 pin 下。當 `BOND_VOL_SOURCE_MODE = VCUB_NORMAL_PROXY` 時，兩個 convention identifiers 與 year-fraction 規則在未被 evidence / live parity 明確確認前，**pricing 必須在推導 `σ_Y^N` 之前 fail closed**。實作不得自行假設二者相同、不得默認 ratio = 1、不得猜測 convention、也不得直接省略 ratio。若 Trader 要繞過此 VCUB blocker，只能顯式切換到經核准且完整 audit 的 `DIRECT_PRICE_VOL` source mode；不得以 override 方式偽造 VCUB convention。
+
+**Date-role semantics 同屬未 pin（Issue #192）：** 上式括號中的 `(t0, TE)` 只是記號，不代表 start / end date role 已被 evidence 確認。start 端（valuation date `t0` 抑或 spot settlement date）與 end 端（option expiry `TE` 抑或 bond forward settlement date `TF`）在本版同樣 unresolved，且必須與 day-count convention **一起** pin：量化上，以當前 pricing date 可達的到期日而言，end date 相差一個日曆日對 `σ_Y^N` 的影響，與 ACT/ACT ISDA 對 ACT/365F 的整體差異同一量級，因此只 pin 其中之一並不能決定 ratio。此量化比較與 candidate 判別可由 `tools/ovme_vcub_dcf_convention_experiment.py`（offline、不進 pricing path）重現。
 
 ### A.8.6 Normal Yield Vol → Lognormal Bond Price Vol
 
@@ -720,7 +763,7 @@ Internal Pricing Report / audit 必須顯示 Vega type、active source mode、bu
 - VCUB bond-option proxy coordinate 依 §A.8.2：`Texp = TF`、`Ttenor = TB - TF`、strike offset = `KY - FY`。
 - OTM/SABR `Display=Spread` 必須先依 §A.8.3 重建 absolute normal vol。
 - **Exact captured node**：直接使用 canonical node value。
-- **Off-grid expiry / tenor / strike**：v1.4 不再把原先的 `linear variance + linear log-moneyness` 宣稱為 Bloomberg-parity default。精確三維 resolver 必須另行版本化並以 OVME live parity 驗證。
+- **Off-grid expiry / tenor / strike**：v1.4 不再把原先的 `linear variance + linear log-moneyness` 宣稱為 Bloomberg-parity default。精確三維 resolver 必須另行版本化並以 OVME live parity 驗證；目前唯一版本化的 in-grid resolver 為 §A.8.3a `IN_GRID_BILINEAR_V1`（covered range 內：additive-moneyness PWL smile + expiry/tenor bilinear，輸出止於 `σ_vcub`）。
 - **超出 captured surface 範圍**：MVP fail closed；不得 flat extrapolate 或 silent fallback，除非日後另立明確 extrapolation model/version。
 
 ---
@@ -771,7 +814,7 @@ d2 = d1 - σY √T
 | `CRR_STEPS` | `HIGH(500)` | `FAST(100)` / `STD(250)` / `HIGH(500)` / `ULTRA(1000)` / `MAX(2000)` | Trader (per pricing) | ✅ |
 | `ENABLE_SHIFTED_BLACK` | `false` | `true` / `false` | Trader (per pricing) | ✅ |
 | `SHIFTED_BLACK_EPSILON` | `3.00%` | 0.00% – 5.00% | Trader (per pricing) | ✅ |
-| `VCUB_RESOLVER_VERSION` | `EXACT_NODE_ONLY` | `EXACT_NODE_ONLY` / future approved resolver versions | Trading Desk Lead | ✅ |
+| `VCUB_RESOLVER_VERSION` | `EXACT_NODE_ONLY` | `EXACT_NODE_ONLY` / `IN_GRID_BILINEAR_V1`（§A.8.3a，輸出止於 `σ_vcub`）/ future approved resolver versions | Trading Desk Lead | ✅ |
 | `VCUB_EXTRAPOLATION_MODE` | `FAIL_CLOSED` | `FAIL_CLOSED` / future approved extrapolation versions | Trading Desk Lead | ✅ |
 | `CURVE_INTERP` | `LINEAR_ZERO` | `LINEAR_ZERO` / `LINEAR_DF` | Trading Desk Lead | ✅ |
 | `AMERICAN_GREEKS_TREE_STEPS` | `FAST(100)` | `FAST(100)` / `STD(250)` | Trader (per pricing) | ✅ |

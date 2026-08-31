@@ -261,8 +261,12 @@ MVP 規則：
 3. `DIRECT_PRICE_VOL`：若有經核准的 official / trader-overridden price vol，可直接作為 `σ_P`；source、unit、override reason 與 version 必須進 audit。
 4. `LOGNORMAL_YIELD_VOL_OVERRIDE`：僅在 Trader 明確 override 時可用；依 Annex A.8.7 先以 Black/Bachelier price equivalence 轉回 normal yield vol，再走 duration conversion。它不是 VCUB 主路徑。
 5. v1.3 的 `PRICE_VOL_CONVERSION_MODE = MODE_1 / MODE_2` 不再是 Bloomberg-parity 主路徑；不得以 `σ_Y(lognormal) × Y × ModDur` 或 convexity MODE_2 冒充 OVME methodology。
-6. VCUB off-grid resolver 在完成 live parity 前，MVP `VCUB_RESOLVER_VERSION = EXACT_NODE_ONLY`；超出已核准 resolver domain 時 fail closed。
-7. 當 `BOND_VOL_SOURCE_MODE = VCUB_NORMAL_PROXY` 時，`DCF_VCUB` 與 `DCF_BondVol` 的 **convention identifiers 與對應 year-fraction 計算規則都必須已 pin 且可審計**；任一 unresolved 時，在推導 `σ_Y^N` 前即 Market Data Blocking，禁止假設 ratio = 1、禁止猜測 convention、禁止省略 total-variance adjustment。
+6. VCUB resolver 在完成 live parity 前，MVP 預設仍為 `VCUB_RESOLVER_VERSION = EXACT_NODE_ONLY`；超出已核准 resolver domain 時 fail closed。另提供已版本化的 in-grid resolver `IN_GRID_BILINEAR_V1`（方法論見 Annex A.8.3a）：僅在 confirmed canonical surface 的 expiry × tenor × strike 覆蓋範圍**之內**解析，且輸出**止於 `σ_vcub`**。
+   - 其 volatility unit 必須由 surface 明確聲明、expiry/tenor 數值座標必須由呼叫端明確提供；兩者皆不得由 label、日期或數值大小推得，未提供即 fail closed。
+   - smile model 由呼叫端明確聲明；本版本僅實作 PWL，SABR 在 Bloomberg calibration contract 與 calibrated parameters 未 pin 前 fail closed，不得以 PWL 冒充。
+   - `VCUB_EXTRAPOLATION_MODE` 維持 `FAIL_CLOSED`，不得 flat extrapolate。
+   - resolver 輸出在 `DCF_VCUB` / `DCF_BondVol` RED 解除前不得流入 `σ_Y^N` / `σ_P` / premium。
+7. 當 `BOND_VOL_SOURCE_MODE = VCUB_NORMAL_PROXY` 時，`DCF_VCUB` 與 `DCF_BondVol` 的 **convention identifiers 與對應 year-fraction 計算規則都必須已 pin 且可審計**；任一 unresolved 時，在推導 `σ_Y^N` 前即 Market Data Blocking，禁止假設 ratio = 1、禁止猜測 convention、禁止省略 total-variance adjustment。此處的 convention 同時包含 day count 與 start / end date roles（start 為 `t0` 抑或 spot settlement date、end 為 `TE` 抑或 `TF`）；兩者必須一起 pin，只 pin day count 不足以解除 blocking（Annex A §A.8.5）。
 8. 不得 silent fallback 到 flat vol、鄰近 vol 或任意插補。唯一可繞過 VCUB unresolved/blocking 的路徑是 Trader 明確選擇且可審計的 approved `DIRECT_PRICE_VOL` override；切換 source mode 不得修改或偽造 unresolved VCUB convention。
 
 ---
@@ -2090,7 +2094,7 @@ Phase 3 支援：
 - SAVED / EXPORTED / CONVERTED_TO_DEAL
 - MODE_A / MODE_B
 - VCUB_NORMAL_PROXY / DIRECT_PRICE_VOL / LOGNORMAL_YIELD_VOL_OVERRIDE
-- EXACT_NODE_ONLY / FAIL_CLOSED
+- EXACT_NODE_ONLY / IN_GRID_BILINEAR_V1 / FAIL_CLOSED
 
 UI translation 不得影響 pricing logic、DB value 或 API payload。
 
