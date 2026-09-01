@@ -72,6 +72,12 @@ and aborting the whole call (there is no partial-series return):
 
 - ``blpapi`` missing, session-start failure, ``//blp/refdata`` open failure,
   request timeout, or a DAPI ``responseError``;
+- a native ``blpapi`` exception raised anywhere in the request lifecycle --
+  Bloomberg dropping the connection after the service opened, so
+  ``sendRequest``/``nextEvent``/a response accessor throws blpapi's own type.
+  It is converted rather than propagated, because callers act on this
+  module's promise: the workbench route answers a Bloomberg-side failure with
+  HTTP 502, and the acceptance CLI records a failed run instead of dying;
 - no ``securityData`` in the response at all;
 - ``securityData`` records naming more than one distinct security (a
   paginated response must be about the one security requested);
@@ -335,6 +341,23 @@ def load_bloomberg_bond_yield_history(
 
             if event.eventType() == blpapi.Event.RESPONSE:
                 done = True
+    except blpapi.exception.Exception as exc:
+        # Everything raised deliberately above is already a BLIBloombergDapiError
+        # (a RuntimeError), so it passes through here untouched. This catches the
+        # native failures nobody raises on purpose -- Bloomberg dropping the
+        # connection after the service opened, so `sendRequest`, `nextEvent` or a
+        # response-element accessor throws blpapi's own exception type.
+        #
+        # Without this the module's promise -- BLIBloombergDapiError for every
+        # Bloomberg-side failure -- was overstated, and two callers acted on that
+        # promise: the workbench route answers a Bloomberg-side failure with HTTP
+        # 502 and would have returned 500, and the acceptance CLI catches this
+        # error type to record a failed run and would have died on a traceback
+        # with neither report written (Codex review, PR #198).
+        raise BLIBloombergDapiError(
+            "Bloomberg DAPI failed during the historical bond Yield request for "
+            f"{security!r}: {type(exc).__name__}: {exc}"
+        ) from exc
     finally:
         session.stop()
 
