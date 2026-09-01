@@ -710,6 +710,17 @@ _LOADER_REFUSALS = {
         ),
         "different securities",
     ),
+    # The same envelope defect with no rows at all: it reads as an empty
+    # series, so a check placed after the `empty` early-out never sees it
+    # (Codex review, PR #198). Every envelope-level condition needs its
+    # rowless shape here, since that is the one an early-out can hide.
+    "two different securities, neither carrying rows": (
+        lambda: _two_records(
+            _security_data([], security="A Corp"),
+            _security_data([], security="B Corp"),
+        ),
+        "different securities",
+    ),
     "row with no date": (
         lambda: _one_record([_row("2026-01-06", "4.0"), _row(None, "4.1")]),
         "no date",
