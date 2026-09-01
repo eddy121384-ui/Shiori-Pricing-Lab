@@ -173,10 +173,26 @@ class _NullValueElement(_Element):
         super().__init__(is_null=True, datatype="FLOAT64")
 
 
+# An element that is present and non-null but cannot be converted to a string,
+# which is what blpapi raises on for a malformed value.
+_UNREADABLE = object()
+
+
+class _UnreadableElement(_Element):
+    pass
+
+
 def _row(observation_date, value=None):
-    sub = {} if observation_date is None else {"date": _Element(text=observation_date)}
+    if observation_date is None:
+        sub = {}
+    elif observation_date is _UNREADABLE:
+        sub = {"date": _UnreadableElement()}
+    else:
+        sub = {"date": _Element(text=observation_date)}
     if value is _NULL:
         sub[_FIELD_A] = _NullValueElement()
+    elif value is _UNREADABLE:
+        sub[_FIELD_A] = _UnreadableElement()
     elif value is not None:
         sub[_FIELD_A] = _Element(text=value, datatype="FLOAT64")
     return _RaisingOnNullRow(sub=sub)
@@ -187,6 +203,8 @@ class _RaisingOnNullRow(_Element):
 
     def getElementAsString(self, name):
         element = self._sub[name]
+        if isinstance(element, _UnreadableElement):
+            raise _FakeBlpapiException("cannot convert this element to a string")
         if element.isNull():
             raise _FakeBlpapiException("cannot convert a null element to a string")
         return element._text
@@ -195,12 +213,15 @@ class _RaisingOnNullRow(_Element):
 def _security_data(
     rows=(), *, security="SYNTHETIC TEST Corp", security_error=None, exceptions=None
 ):
-    sub = {"security": _Element(text=security), "fieldData": _Element(values=list(rows))}
+    security_element = (
+        _UnreadableElement() if security is _UNREADABLE else _Element(text=security)
+    )
+    sub = {"security": security_element, "fieldData": _Element(values=list(rows))}
     if security_error is not None:
         sub["securityError"] = _Element(text=security_error)
     if exceptions is not None:
         sub["fieldExceptions"] = _Element(values=[_Element(text=e) for e in exceptions])
-    return _Element(sub=sub)
+    return _RaisingOnNullRow(sub=sub)
 
 
 def _sender(security_data, recorder=None):
@@ -742,6 +763,18 @@ _LOADER_REFUSALS = {
         ),
         "securityError",
     ),
+    "an unreadable security element": (
+        lambda: _one_record([_row("2026-01-06", "4.0")], security=_UNREADABLE),
+        "could not be read as a string",
+    ),
+    "an unreadable date element": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row(_UNREADABLE, "4.1")]),
+        "could not be read as a string",
+    ),
+    "an unreadable value element": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row("2026-01-07", _UNREADABLE)]),
+        "could not be read as a string",
+    ),
     "row with no date": (
         lambda: _one_record([_row("2026-01-06", "4.0"), _row(None, "4.1")]),
         "no date",
@@ -853,3 +886,66 @@ def test_an_early_return_still_reports_the_whole_envelope(fake_blpapi, first_rec
     assert evidence.security_data_record_count == 2
     assert evidence.distinct_securities == 2
     assert unresolved_reason(evidence) is not None
+
+
+def test_an_unreadable_element_never_aborts_the_probe(fake_blpapi):
+    """It becomes evidence, not an exception (Codex review, PR #198).
+
+    A native blpapi failure escaping `probe_historical_field` would take the
+    other candidates' evidence and the written report down with it -- which
+    defeats the point of a diagnostic that exists to report on every
+    candidate.
+    """
+
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_one_record(
+            [_row("2026-01-06", "4.0"), _row("2026-01-07", _UNREADABLE)]
+        ),
+    )
+
+    assert evidence.unreadable_elements == 1
+    # The readable row beside it is still counted -- this is evidence, not a crash.
+    assert evidence.observations_with_a_value == 1
+    assert sample == (("2026-01-06", "4.0"),)
+    assert "could not be read as a string" in unresolved_reason(evidence)
+
+
+def test_one_candidate_blowing_up_costs_only_its_own_evidence(monkeypatch):
+    """The run-loop backstop: every other candidate is still probed and reported."""
+
+    calls: list[str] = []
+
+    def _explode(*, field, **kwargs):
+        calls.append(field)
+        if field == _FIELD_A:
+            raise RuntimeError("something native went wrong")
+        return (
+            _evidence(field, count=250, valued=250),
+            (),
+        )
+
+    monkeypatch.setattr(module, "probe_historical_field", _explode)
+
+    report, samples = module.run_probe(
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        fields=(_FIELD_A, _FIELD_B),
+        search_terms=(),
+        sample_rows=5,
+    )
+
+    assert calls == [_FIELD_A, _FIELD_B]
+    by_field = {evidence.field: evidence for evidence in report.historical}
+    assert by_field[_FIELD_A].status == "error"
+    assert "something native went wrong" in by_field[_FIELD_A].detail
+    assert by_field[_FIELD_B].observations_with_a_value == 250
+    # And the run stays honest about what it could not establish.
+    assert report.verdict.startswith("INCONCLUSIVE")
+    # A report can still be written, which is the whole point.
+    assert build_report(report)["historical_availability"]
