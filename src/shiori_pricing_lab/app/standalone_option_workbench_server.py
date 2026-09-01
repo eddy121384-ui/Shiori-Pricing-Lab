@@ -592,6 +592,14 @@ DEFAULT_PORT = 8765
 # nav item -- against a route table that 404s every one of those routes, so
 # the view would look available and capture nothing.
 #
+# Bumped to -v25 for Issue #196's Markets Bond Yield History view: the
+# server gained the read-only route POST /api/bloomberg/bond-yield-history,
+# plus that view's own static file. A stale -v24 process serves this
+# commit's page -- which has a Bond Yield History market-view selector, a
+# Yield-field box and a Load button -- against a route table that 404s that
+# route, so every load would fail against a server the launcher had just
+# told the trader was fine to reuse.
+#
 # Bumped to -v24 for Issue #194's Markets Swaption Vol Surface view: the
 # server gained the two read-only routes POST /api/vol-surface/atm/list and
 # POST /api/vol-surface/atm/surface, plus that view's own static file. A
@@ -647,7 +655,20 @@ DEFAULT_PORT = 8765
 # every conversion as MANUAL_UNCONFIRMED -- live data silently displayed as
 # unconfirmed, which is precisely the provenance failure this contract
 # exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v26"
+#
+# Bumped to -v27 for Issue #196's Bloomberg historical bond-Yield foundation,
+# rebased on top of Issue #190's -v26 treasury-futures routes. This branch
+# had independently taken -v25 for its own new route while Issue #190 took
+# -v26 on main, so -v25 named only half of the merged contract and -v26
+# omitted this branch's route entirely; the rebase takes a fresh id rather
+# than picking a side, for the same reason -v26 did above.
+#
+# What -v27 adds over -v26: POST /api/bloomberg/bond-yield-history is one
+# new route the served page's Markets -> Bond Yield History view calls, with
+# bond_yield_history_view.js as new served content. A stale -v26 process
+# would 404 this route and never serve the new static file, so the view
+# would look available and do nothing.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v27"
 
 
 def load_base_case() -> dict:
