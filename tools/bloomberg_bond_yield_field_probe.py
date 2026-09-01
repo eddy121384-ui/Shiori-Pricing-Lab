@@ -206,6 +206,11 @@ class HistoricalFieldEvidence:
     rows_outside_requested_range: int = 0
     security_data_record_count: int = 0
     distinct_securities: int = 0
+    # An element Bloomberg returned that could not be read as a string at all.
+    # The loader converts exactly that into its own fail-closed error via
+    # `_get_element_as_string`, so it refuses the series -- and here it must
+    # never be allowed to kill the run for the other candidates.
+    unreadable_elements: int = 0
     first_observation_date: str | None = None
     last_observation_date: str | None = None
     value_datatype: str | None = None
@@ -333,6 +338,26 @@ def probe_historical_field(
             (),
         )
 
+    unreadable_elements = 0
+
+    def _read_string(element, name: str) -> str | None:
+        """Read ``name`` off ``element`` as a string, or ``None`` if unreadable.
+
+        The loader routes the same access through ``_get_element_as_string``
+        and turns a native ``blpapi`` failure into its fail-closed error. A
+        diagnostic cannot raise here: this probe's whole value is surviving to
+        report on every candidate, and an exception escaping mid-run would
+        take the other candidates' evidence and the written report with it
+        (Codex review, PR #198).
+        """
+
+        nonlocal unreadable_elements
+        try:
+            return element.getElementAsString(name)
+        except blpapi.exception.Exception:
+            unreadable_elements += 1
+            return None
+
     dates: list[str] = []
     rows_with_no_value = 0
     observations_with_a_value = 0
@@ -352,9 +377,13 @@ def probe_historical_field(
     # and a later record naming a different security would go unseen (Codex
     # review, PR #198).
     securities_seen = [
-        record.getElementAsString("security")
-        for record in collected
-        if record.hasElement("security")
+        name
+        for name in (
+            _read_string(record, "security")
+            for record in collected
+            if record.hasElement("security")
+        )
+        if name is not None
     ]
     envelope = {
         "security_data_record_count": len(collected),
@@ -363,7 +392,7 @@ def probe_historical_field(
     }
 
     def _envelope() -> dict:
-        return dict(envelope)
+        return {**envelope, "unreadable_elements": unreadable_elements}
 
     # --- per-record pass -----------------------------------------------------
     for record in collected:
@@ -398,7 +427,9 @@ def probe_historical_field(
             if not row.hasElement("date"):
                 rows_with_no_date += 1
                 continue
-            observation_date = row.getElementAsString("date")
+            observation_date = _read_string(row, "date")
+            if observation_date is None:
+                continue
             # The loader's own strict YYYY-MM-DD rule and its own requested-range
             # bound, imported rather than restated: it refuses the whole series
             # over either, so a row failing them is not evidence this field
@@ -426,7 +457,9 @@ def probe_historical_field(
                     value_datatype = str(element.datatype())
                 except (AttributeError, blpapi.exception.Exception):
                     value_datatype = "<datatype unavailable>"
-            raw_value = row.getElementAsString(field)
+            raw_value = _read_string(row, field)
+            if raw_value is None:
+                continue
             if not raw_value.strip():
                 rows_with_no_value += 1
                 continue
@@ -533,6 +566,15 @@ def unresolved_reason(evidence: HistoricalFieldEvidence) -> str | None:
             "whether or not it carried any rows"
         )
 
+    # An unreadable element can be an envelope one (a malformed `security`), so
+    # it is checked here rather than below the `empty` early-out.
+    if evidence.unreadable_elements and evidence.status != "returned":
+        return (
+            f"returned {evidence.unreadable_elements} element(s) that could not be read "
+            "as a string at all; the loader converts exactly that into its fail-closed "
+            "error and refuses the series"
+        )
+
     # --- row conditions: only an answer that returned rows can show these -----
     if evidence.status != "returned":
         return None
@@ -557,6 +599,12 @@ def unresolved_reason(evidence: HistoricalFieldEvidence) -> str | None:
             f"returned {evidence.rows_outside_requested_range} observation(s) dated "
             "outside the requested window; the loader refuses the whole series rather "
             "than trim them"
+        )
+    if evidence.unreadable_elements:
+        return (
+            f"returned {evidence.unreadable_elements} element(s) that could not be read "
+            "as a string at all; the loader converts exactly that into its fail-closed "
+            "error and refuses the series"
         )
     if evidence.rows_with_an_unusable_value:
         return (
@@ -666,13 +714,31 @@ def run_probe(
     samples: dict[str, tuple[tuple[str, str], ...]] = {}
     if fields and identifier and start and end:
         for field in fields:
-            evidence, sample = probe_historical_field(
-                field=field,
-                identifier=identifier,
-                start=start,
-                end=end,
-                sample_rows=sample_rows,
-            )
+            # A candidate that blows up must cost only its own evidence. This
+            # probe's value is surviving to report on every candidate and to
+            # write its report at all, so nothing one field's response does may
+            # abort the run (Codex review, PR #198). `probe_historical_field`
+            # already converts the reachable failures itself; this is the
+            # backstop for anything native that gets past it.
+            try:
+                evidence, sample = probe_historical_field(
+                    field=field,
+                    identifier=identifier,
+                    start=start,
+                    end=end,
+                    sample_rows=sample_rows,
+                )
+            except Exception as exc:  # noqa: BLE001
+                evidence, sample = (
+                    HistoricalFieldEvidence(
+                        field=field,
+                        status="error",
+                        detail=sanitize_external_text(
+                            f"probing this field raised {type(exc).__name__}: {exc}"
+                        ),
+                    ),
+                    (),
+                )
             historical.append(evidence)
             samples[field] = sample
 
@@ -738,6 +804,7 @@ def build_report(report: YieldFieldProbeReport) -> dict:
                 "observations_with_a_value": evidence.observations_with_a_value,
                 "rows_with_no_value": evidence.rows_with_no_value,
                 "rows_with_an_unusable_value": evidence.rows_with_an_unusable_value,
+                "unreadable_elements": evidence.unreadable_elements,
                 "duplicate_observation_dates": evidence.duplicate_observation_dates,
                 "rows_with_no_date": evidence.rows_with_no_date,
                 "rows_with_a_malformed_date": evidence.rows_with_a_malformed_date,
