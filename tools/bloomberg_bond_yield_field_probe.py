@@ -49,16 +49,23 @@ mechanical verdict line:
   stop and report the ambiguity to Eddy/Sophira rather than choosing the
   closest-looking series. This probe will not choose for you, and neither
   will the loader;
-- any candidate's request never reached Bloomberg -> ``INCONCLUSIVE``. A
-  field that was not asked has not been ruled out, so the ones that did
-  answer are not a result.
+- any candidate is *unresolved* -> ``INCONCLUSIVE``. That covers a request
+  that never reached Bloomberg (the field was never asked) and a field whose
+  answer the canonical loader would refuse outright -- a duplicate
+  observation date, a row with no date, or a value that is not a finite
+  number. The loader aborts the whole series on any of those and keeps no
+  valid subset, so such a candidate has not been shown to work and must not
+  lose by default to one that did (see :func:`unresolved_reason`).
 
-"Usable" here means what the workbench means by it. A row counts only when it
-carries a value the production loader would actually accept: this module
-imports that loader's own ``_parse_finite_float`` rather than restating its
-rule, so a field answering with sentinel text, ``NaN``, or a suffixed number
-can never be reported as a usable series for a workbench that would refuse
-every one of those values.
+"Usable" here means what the workbench means by it, and this module does not
+get to have its own opinion: it imports the loader's own
+``_parse_finite_float`` rather than restating the rule, so a field answering
+with sentinel text, ``NaN``, or a suffixed number can never be reported as a
+usable series for a workbench that would refuse every one of those values.
+
+An ``empty`` or ``field_exception`` answer is not unresolved -- "this bond has
+no history under this field" and "Bloomberg does not recognise this field" are
+real results, and the verdict says so.
 
 Nothing about a field's *economic meaning* -- which Yield definition it is,
 its unit, its quote/source semantics -- is inferred here from a mnemonic or
@@ -90,19 +97,30 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from bloomberg_curve_discovery_probe import (
+# The bootstrap runs before every local tool import below, not after them:
+# `bloomberg_dapi_probe` imports `shiori_pricing_lab` at module level and has
+# no bootstrap of its own, so a bootstrap placed after these imports would
+# never execute in the checkout-without-editable-install case it exists for --
+# the CLI would die on the import rather than reach its own honest
+# missing-blpapi handling (Codex review, PR #198). Mirrors the placement
+# `tools/bloomberg_bond_yield_history_acceptance.py` already uses.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from bloomberg_curve_discovery_probe import (  # noqa: E402
     SearchAttempt,
     attempt_field_search,
     discover_service,
 )
-from bloomberg_dapi_probe import FieldDescription, _send_request, describe_fields
-from bloomberg_input_sourcing_probe import (
+from bloomberg_dapi_probe import (  # noqa: E402
+    FieldDescription,
+    _send_request,
+    describe_fields,
+)
+from bloomberg_input_sourcing_probe import (  # noqa: E402
     sanitize_external_text,
     sanitize_field_documentation_text,
 )
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 # The production loader's own value rule, imported rather than restated: a
 # candidate this probe calls usable must be one the workbench can actually
@@ -176,6 +194,11 @@ class HistoricalFieldEvidence:
     # operator: not "no data on this date" but "this field does not answer in
     # numbers the workbench can load".
     rows_with_an_unusable_value: int = 0
+    # Two more conditions the canonical loader refuses the *whole series* over,
+    # so a candidate showing either cannot be endorsed however many good rows
+    # sit beside them (Codex review, PR #198).
+    duplicate_observation_dates: int = 0
+    rows_with_no_date: int = 0
     first_observation_date: str | None = None
     last_observation_date: str | None = None
     value_datatype: str | None = None
@@ -308,6 +331,7 @@ def probe_historical_field(
     rows_with_no_value = 0
     observations_with_a_value = 0
     rows_with_an_unusable_value = 0
+    rows_with_no_date = 0
     value_datatype: str | None = None
     sample: list[tuple[str, str]] = []
 
@@ -342,9 +366,10 @@ def probe_historical_field(
         field_data = record.getElement("fieldData")
         for index in range(field_data.numValues()):
             row = field_data.getValueAsElement(index)
-            observation_date = (
-                row.getElementAsString("date") if row.hasElement("date") else "<no date element>"
-            )
+            if not row.hasElement("date"):
+                rows_with_no_date += 1
+                continue
+            observation_date = row.getElementAsString("date")
             dates.append(observation_date)
             # `excludeNullElements=True`: Bloomberg's own null element is
             # present under a bare hasElement, and reading it as a string
@@ -377,14 +402,19 @@ def probe_historical_field(
                 sample.append((observation_date, raw_value))
 
     ordered = sorted(dates)
+    # Counted across every securityData record, so a date repeated between two
+    # PARTIAL_RESPONSE messages is caught exactly as the loader catches it.
+    duplicate_observation_dates = len(ordered) - len(set(ordered))
     return (
         HistoricalFieldEvidence(
             field=field,
-            status="returned" if ordered else "empty",
+            status="returned" if (ordered or rows_with_no_date) else "empty",
             observation_count=len(ordered),
             observations_with_a_value=observations_with_a_value,
             rows_with_no_value=rows_with_no_value,
             rows_with_an_unusable_value=rows_with_an_unusable_value,
+            duplicate_observation_dates=duplicate_observation_dates,
+            rows_with_no_date=rows_with_no_date,
             first_observation_date=ordered[0] if ordered else None,
             last_observation_date=ordered[-1] if ordered else None,
             value_datatype=value_datatype,
@@ -394,43 +424,84 @@ def probe_historical_field(
     )
 
 
+def unresolved_reason(evidence: HistoricalFieldEvidence) -> str | None:
+    """Why this candidate cannot take part in a comparison, or ``None``.
+
+    Two different things end up here, and both mean "this run does not settle
+    anything about this field" (Codex review, PR #198):
+
+    - the request never reached Bloomberg, so the field was never asked;
+    - Bloomberg answered, but with a series the canonical loader refuses
+      outright -- a duplicate observation date, a row with no date, or a value
+      that is not a finite number. The loader aborts the *whole* series on any
+      of those; it never keeps the valid subset. So a candidate showing one has
+      not been shown to work, however many good rows sit beside it.
+
+    An ``empty`` or ``field_exception`` answer is *not* unresolved: those are
+    real, informative answers about the field, and the verdict should say so.
+    """
+
+    if evidence.status == "error":
+        return "never reached Bloomberg, so it was never asked"
+    if evidence.status != "returned":
+        return None
+    if evidence.duplicate_observation_dates:
+        return (
+            f"returned {evidence.duplicate_observation_dates} duplicate observation "
+            "date(s); the loader refuses the whole series rather than choose between "
+            "same-dated observations"
+        )
+    if evidence.rows_with_no_date:
+        return (
+            f"returned {evidence.rows_with_no_date} row(s) with no date; the loader "
+            "refuses the whole series"
+        )
+    if evidence.rows_with_an_unusable_value:
+        return (
+            f"returned {evidence.rows_with_an_unusable_value} value(s) the loader "
+            "refuses as non-numeric or non-finite; that aborts the whole series, so "
+            "the valid rows beside them do not make this field loadable"
+        )
+    return None
+
+
 def build_verdict(historical: tuple[HistoricalFieldEvidence, ...]) -> str:
     """One mechanical line about how many candidates the evidence supports.
 
-    Never names a winner beyond "this is the only one that returned Yield
-    values", and never resolves an ambiguity -- Issue #196 stop condition 1 is
-    a stop, not a tie-break.
+    Never names a winner beyond "this is the only one that returned a series
+    the workbench could load", and never resolves an ambiguity -- Issue #196
+    stop condition 1 is a stop, not a tie-break.
 
-    Two things this deliberately refuses to treat as evidence:
-
-    - *A candidate whose request never reached Bloomberg.* A transport failure
-      says nothing about that field, so a run containing one is inconclusive
-      even when another candidate answered richly. Reporting "one candidate
-      returned data" there would quietly promote a mnemonic against an
-      opponent that was never actually asked (Codex review, PR #198).
-    - *Dated rows carrying no value.* A field that answers with rows but no
-      Yield in any of them has supplied no Yield, so it is not a usable
-      series -- ``observations_with_a_value``, never ``observation_count``,
-      decides that.
+    The bar for taking part in the comparison at all is
+    :func:`unresolved_reason`: a candidate the workbench could not load, for
+    any of the reasons it lists, makes the whole run inconclusive rather than
+    losing to the ones that did load. Otherwise a transport blip, one sentinel
+    value, or a repeated date would silently promote a rival mnemonic -- which
+    is the same mistake in three costumes.
     """
 
     if not historical:
         return "NO CANDIDATE PROBED -- pass --field (with --identifier/--start/--end) to test one."
 
-    unprobed = [evidence for evidence in historical if evidence.status == "error"]
-    if len(unprobed) == len(historical):
+    if all(evidence.status == "error" for evidence in historical):
         return (
             "PROBE COULD NOT RUN -- every candidate's request failed before Bloomberg "
             "answered (see the detail above; blpapi missing or no Terminal session is the "
             "usual cause). Nothing here is evidence about any field."
         )
-    if unprobed:
+
+    unresolved = [
+        (evidence, unresolved_reason(evidence))
+        for evidence in historical
+        if unresolved_reason(evidence) is not None
+    ]
+    if unresolved:
         return (
             "INCONCLUSIVE -- "
-            + ", ".join(evidence.field for evidence in unprobed)
-            + " never reached Bloomberg, so this comparison is incomplete. A candidate "
-            "that was not asked has not been ruled out. Re-run once every candidate gets "
-            "an answer; do not read the ones that did answer as a result."
+            + "; ".join(f"{evidence.field} {reason}" for evidence, reason in unresolved)
+            + ". This comparison is incomplete: a candidate that was not asked, or whose "
+            "series the workbench would refuse, has not been ruled out. Fix or re-run "
+            "those before reading the ones that did answer as a result."
         )
 
     usable = [
@@ -565,6 +636,9 @@ def build_report(report: YieldFieldProbeReport) -> dict:
                 "observations_with_a_value": evidence.observations_with_a_value,
                 "rows_with_no_value": evidence.rows_with_no_value,
                 "rows_with_an_unusable_value": evidence.rows_with_an_unusable_value,
+                "duplicate_observation_dates": evidence.duplicate_observation_dates,
+                "rows_with_no_date": evidence.rows_with_no_date,
+                "unresolved_reason": unresolved_reason(evidence),
                 "first_observation_date": evidence.first_observation_date,
                 "last_observation_date": evidence.last_observation_date,
                 "value_datatype": evidence.value_datatype,
@@ -631,9 +705,9 @@ def render_markdown(data: dict) -> str:
     lines += [
         "## 3. Historical availability (one HistoricalDataRequest per candidate)",
         "",
-        "| Field | Status | Rows | Valued obs | Rows w/o value | Unusable values | First | "
-        "Last | Value datatype |",
-        "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        "| Field | Status | Rows | Valued obs | Rows w/o value | Unusable values | "
+        "Duplicate dates | First | Last | Value datatype |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
     ]
     for evidence in data["historical_availability"]:
         lines.append(
@@ -642,6 +716,7 @@ def render_markdown(data: dict) -> str:
             f"{evidence['observations_with_a_value']} | "
             f"{evidence['rows_with_no_value']} | "
             f"{evidence['rows_with_an_unusable_value']} | "
+            f"{evidence['duplicate_observation_dates']} | "
             f"{evidence['first_observation_date'] or '-'} | "
             f"{evidence['last_observation_date'] or '-'} | "
             f"{evidence['value_datatype'] or '-'} |"
@@ -650,6 +725,8 @@ def render_markdown(data: dict) -> str:
     for evidence in data["historical_availability"]:
         if evidence["detail"]:
             lines += [f"- `{evidence['field']}`: {evidence['detail']}"]
+        if evidence["unresolved_reason"]:
+            lines += [f"- `{evidence['field']}` is unresolved: {evidence['unresolved_reason']}"]
     lines.append("")
     return "\n".join(lines)
 
@@ -770,12 +847,15 @@ def main(argv: list[str] | None = None) -> int:
             f"valued_obs={evidence['observations_with_a_value']} "
             f"no_value_rows={evidence['rows_with_no_value']} "
             f"unusable_values={evidence['rows_with_an_unusable_value']} "
+            f"duplicate_dates={evidence['duplicate_observation_dates']} "
             f"first={evidence['first_observation_date']} "
             f"last={evidence['last_observation_date']} "
             f"datatype={evidence['value_datatype']}"
         )
         if evidence["detail"]:
             print(f"  detail: {evidence['detail']}")
+        if evidence["unresolved_reason"]:
+            print(f"  unresolved: {evidence['unresolved_reason']}")
 
     if any(samples.values()):
         print("")
