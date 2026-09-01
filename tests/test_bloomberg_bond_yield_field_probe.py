@@ -1,0 +1,378 @@
+"""Tests for ``tools/bloomberg_bond_yield_field_probe.py`` (Issue #196 §A).
+
+The probe's whole reason to exist is that the Bloomberg Yield field must be
+*confirmed*, never guessed. So the things held down here are: it refuses a
+malformed mnemonic before sending anything, it fires one historical request
+per operator-named candidate and never generates one of its own, it reports
+shape without ever writing a Bloomberg value to a file, and -- the one that
+matters most -- when two candidates both return a series it says AMBIGUOUS
+and stops, rather than picking the closest-looking one.
+
+Every value below is made up. No network access and no real ``blpapi``: the
+historical pass is driven through ``probe_historical_field``'s own
+``send_request`` injection seam.
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "tools"))
+
+import bloomberg_bond_yield_field_probe as module  # noqa: E402
+from bloomberg_bond_yield_field_probe import (  # noqa: E402
+    HistoricalFieldEvidence,
+    YieldFieldProbeReport,
+    _validate_field_mnemonic,
+    build_report,
+    build_verdict,
+    probe_historical_field,
+    render_markdown,
+    write_report,
+)
+
+_FIELD_A = "SYNTHETIC_TEST_YIELD_A"
+_FIELD_B = "SYNTHETIC_TEST_YIELD_B"
+_IDENTIFIER = "/isin/US0000000000"
+
+
+# --- input hygiene ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("malformed", ["px last", "PX-LAST", "px_last", "", "   ", "YLD;DROP"])
+def test_rejects_a_malformed_mnemonic(malformed):
+    with pytest.raises(ValueError, match="--field"):
+        _validate_field_mnemonic(malformed)
+
+
+def test_accepts_a_well_formed_mnemonic():
+    assert _validate_field_mnemonic("  SOME_FIELD_9  ") == "SOME_FIELD_9"
+
+
+# --- the verdict never chooses ------------------------------------------------
+
+
+def _evidence(field, *, status="returned", count=0):
+    return HistoricalFieldEvidence(field=field, status=status, observation_count=count)
+
+
+def test_two_usable_candidates_are_reported_as_ambiguous_never_resolved():
+    verdict = build_verdict((_evidence(_FIELD_A, count=250), _evidence(_FIELD_B, count=250)))
+
+    assert verdict.startswith("AMBIGUOUS")
+    assert _FIELD_A in verdict and _FIELD_B in verdict
+    assert "stop condition 1" in verdict
+
+
+def test_one_usable_candidate_is_reported_without_being_called_confirmed():
+    verdict = build_verdict((_evidence(_FIELD_A, count=250), _evidence(_FIELD_B, status="empty")))
+
+    assert verdict.startswith("ONE CANDIDATE RETURNED DATA")
+    assert _FIELD_A in verdict
+    # A count is evidence of availability, never of meaning.
+    assert "not a meaning" in verdict
+
+
+def test_no_usable_candidate_never_becomes_a_recommendation():
+    verdict = build_verdict((_evidence(_FIELD_A, status="field_exception"),))
+
+    assert verdict.startswith("NO USABLE SERIES")
+    assert "Do not pick one anyway" in verdict
+
+
+def test_no_candidate_probed_is_its_own_answer():
+    assert build_verdict(()).startswith("NO CANDIDATE PROBED")
+
+
+# --- the historical pass ------------------------------------------------------
+
+
+class _FakeBlpapiException(Exception):
+    pass
+
+
+class _FakeBlpapiExceptionNamespace:
+    Exception = _FakeBlpapiException
+
+
+@pytest.fixture()
+def fake_blpapi(monkeypatch):
+    fake = type(sys)("blpapi")
+    fake.exception = _FakeBlpapiExceptionNamespace
+    monkeypatch.setitem(sys.modules, "blpapi", fake)
+    return fake
+
+
+class _Element:
+    def __init__(self, sub=None, values=None, text=None, datatype=None):
+        self._sub = sub or {}
+        self._values = values
+        self._text = text
+        self._datatype = datatype
+
+    def hasElement(self, name):
+        return name in self._sub
+
+    def getElement(self, name):
+        return self._sub[name]
+
+    def getElementAsString(self, name):
+        return self._sub[name]._text
+
+    def numValues(self):
+        return len(self._values or [])
+
+    def getValueAsElement(self, index):
+        return self._values[index]
+
+    def datatype(self):
+        return self._datatype
+
+    def __str__(self):
+        return self._text or "<element>"
+
+
+def _row(observation_date, value=None):
+    sub = {"date": _Element(text=observation_date)}
+    if value is not None:
+        sub[_FIELD_A] = _Element(text=value, datatype="FLOAT64")
+    return _Element(sub=sub)
+
+
+def _security_data(
+    rows=(), *, security="SYNTHETIC TEST Corp", security_error=None, exceptions=None
+):
+    sub = {"security": _Element(text=security), "fieldData": _Element(values=list(rows))}
+    if security_error is not None:
+        sub["securityError"] = _Element(text=security_error)
+    if exceptions is not None:
+        sub["fieldExceptions"] = _Element(values=[_Element(text=e) for e in exceptions])
+    return _Element(sub=sub)
+
+
+def _sender(security_data, recorder=None):
+    def _send(*, service_uri, request_name, configure, collect, context):
+        request = _RecordingRequest()
+        configure(request)
+        if recorder is not None:
+            recorder.append((service_uri, request_name, request))
+        collect(_Element(sub={"securityData": security_data}))
+
+    return _send
+
+
+class _RecordingRequest:
+    def __init__(self):
+        self.securities: list[str] = []
+        self.fields: list[str] = []
+        self.options: dict[str, str] = {}
+
+    def append(self, name, value):
+        getattr(self, name).append(value)
+
+    def set(self, name, value):
+        self.options[name] = value
+
+
+def test_sends_one_historical_request_pinned_like_the_production_loader(fake_blpapi):
+    recorder: list = []
+    probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 5),
+        end=date(2026, 3, 9),
+        sample_rows=3,
+        send_request=_sender(_security_data([_row("2026-01-06", "4.0")]), recorder),
+    )
+
+    (service_uri, request_name, request) = recorder[0]
+    assert service_uri == "//blp/refdata"
+    assert request_name == "HistoricalDataRequest"
+    assert request.securities == [_IDENTIFIER]
+    assert request.fields == [_FIELD_A]
+    assert request.options["startDate"] == "20260105"
+    assert request.options["endDate"] == "20260309"
+    assert request.options["periodicitySelection"] == "DAILY"
+    assert request.options["periodicityAdjustment"] == "ACTUAL"
+    assert request.options["nonTradingDayFillOption"] == "ACTIVE_DAYS_ONLY"
+    assert request.options["nonTradingDayFillMethod"] == "NIL_VALUE"
+
+
+def test_reports_shape_and_keeps_the_value_sample_separate(fake_blpapi):
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=2,
+        send_request=_sender(
+            _security_data(
+                [
+                    _row("2026-01-08", "4.0"),
+                    _row("2026-01-06", "4.12"),
+                    _row("2026-01-07"),
+                    _row("2026-01-09", "4.4"),
+                ]
+            )
+        ),
+    )
+
+    assert evidence.status == "returned"
+    assert evidence.observation_count == 4
+    assert evidence.rows_with_no_value == 1
+    # First/last are the range's own bounds, not the response's arrival order.
+    assert evidence.first_observation_date == "2026-01-06"
+    assert evidence.last_observation_date == "2026-01-09"
+    assert evidence.value_datatype == "FLOAT64"
+    assert evidence.resolved_security == "SYNTHETIC TEST Corp"
+    assert sample == (("2026-01-08", "4.0"), ("2026-01-06", "4.12"))
+
+
+def test_an_empty_series_is_reported_as_empty_not_as_an_error(fake_blpapi):
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=3,
+        send_request=_sender(_security_data([])),
+    )
+
+    assert evidence.status == "empty"
+    assert evidence.observation_count == 0
+    assert sample == ()
+
+
+def test_a_field_exception_is_reported_as_such(fake_blpapi):
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=3,
+        send_request=_sender(_security_data([], exceptions=["BAD_FLD"])),
+    )
+
+    assert evidence.status == "field_exception"
+    assert "BAD_FLD" in evidence.detail
+    assert sample == ()
+
+
+def test_a_security_error_is_reported_as_such(fake_blpapi):
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=3,
+        send_request=_sender(_security_data([], security_error="BAD_SEC")),
+    )
+
+    assert evidence.status == "security_error"
+    assert "BAD_SEC" in evidence.detail
+
+
+def test_a_transport_failure_is_recorded_against_that_field_only(fake_blpapi):
+    def _failing(**kwargs):
+        raise RuntimeError("Bloomberg DAPI session failed to start")
+
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=3,
+        send_request=_failing,
+    )
+
+    assert evidence.status == "error"
+    assert "failed to start" in evidence.detail
+    assert sample == ()
+
+
+# --- the written report never carries a Bloomberg value -----------------------
+
+
+def _report() -> YieldFieldProbeReport:
+    return YieldFieldProbeReport(
+        generated_at="2026-08-31T14:05:00+00:00",
+        identifier=_IDENTIFIER,
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+        search_terms=("yield",),
+        search_attempts=(),
+        search_error=None,
+        descriptions=(),
+        historical=(
+            HistoricalFieldEvidence(
+                field=_FIELD_A,
+                status="returned",
+                observation_count=3,
+                rows_with_no_value=1,
+                first_observation_date="2026-01-06",
+                last_observation_date="2026-01-09",
+                value_datatype="FLOAT64",
+                resolved_security="SYNTHETIC TEST Corp",
+            ),
+        ),
+        verdict="ONE CANDIDATE RETURNED DATA",
+    )
+
+
+def test_the_report_records_shape_and_no_value(tmp_path):
+    data = build_report(_report())
+    markdown_path, json_path = write_report(data, tmp_path)
+
+    written = markdown_path.read_text(encoding="utf-8") + json_path.read_text(encoding="utf-8")
+    assert "4.12" not in written
+    assert "2026-01-06" in written
+    assert "FLOAT64" in written
+    assert "carries no Bloomberg value" in written
+
+
+def test_the_markdown_leads_with_the_verdict():
+    rendered = render_markdown(build_report(_report()))
+
+    assert "**Verdict:** ONE CANDIDATE RETURNED DATA" in rendered
+
+
+def test_the_default_search_terms_are_terms_not_mnemonics():
+    # Nothing in the default search vocabulary may look like a field this repo
+    # is quietly proposing.
+    for term in module.DEFAULT_SEARCH_TERMS:
+        assert term == term.lower()
+        assert "_" not in term
+
+
+def test_a_probe_that_never_reached_bloomberg_is_not_evidence_about_any_field():
+    verdict = build_verdict(
+        (
+            _evidence(_FIELD_A, status="error"),
+            _evidence(_FIELD_B, status="error"),
+        )
+    )
+
+    assert verdict.startswith("PROBE COULD NOT RUN")
+    assert "Nothing here is evidence about any field" in verdict
+
+
+def test_a_missing_blpapi_is_reported_rather_than_raised(monkeypatch):
+    monkeypatch.setitem(sys.modules, "blpapi", None)
+
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=3,
+        send_request=_sender(_security_data([_row("2026-01-06", "4.0")])),
+    )
+
+    assert evidence.status == "error"
+    assert "blpapi is not installed" in evidence.detail
+    assert sample == ()

@@ -30,13 +30,20 @@
 (function () {
   "use strict";
 
-  const panelCurve = document.getElementById("markets-panel-curve");
+  // The market-view selector switches every panel that declares itself with
+  // data-market-view, so a new market (Issue #196's Bond Yield History) is a
+  // tab plus a panel in the markup -- this file never learns what any other
+  // panel contains, and never touches its state.
+  const marketTabs = Array.from(
+    document.querySelectorAll(".markets-view-tab[data-market-view]")
+  );
+  const marketPanels = Array.from(
+    document.querySelectorAll(".markets-panel[data-market-view]")
+  );
   const panelVol = document.getElementById("markets-panel-vol-surface");
-  const tabCurve = document.getElementById("markets-tab-curve");
-  const tabVol = document.getElementById("markets-tab-vol-surface");
   // Not present on this page (or an older markup revision): do nothing at all
   // rather than half-wire a view.
-  if (!panelCurve || !panelVol || !tabCurve || !tabVol) return;
+  if (!marketTabs.length || !marketPanels.length || !panelVol) return;
 
   const els = {
     meta: document.getElementById("vol-surface-meta"),
@@ -191,22 +198,28 @@
 
   // ---- The market-view selector --------------------------------------------
 
-  let activeMarketView = "curve";
+  const DEFAULT_MARKET_VIEW = "curve";
+  let activeMarketView = DEFAULT_MARKET_VIEW;
 
   function selectMarketView(view) {
-    activeMarketView = view === "vol-surface" ? "vol-surface" : "curve";
-    const showVol = activeMarketView === "vol-surface";
-    panelVol.hidden = !showVol;
-    panelCurve.hidden = showVol;
-    tabVol.classList.toggle("is-active", showVol);
-    tabCurve.classList.toggle("is-active", !showVol);
-    tabVol.setAttribute("aria-selected", String(showVol));
-    tabCurve.setAttribute("aria-selected", String(!showVol));
-    if (showVol && !listLoaded && !inFlight) loadSurfaceList();
+    // An unknown name falls back to the curve panel rather than hiding every
+    // panel and leaving the Markets page blank.
+    const known = marketPanels.some((panel) => panel.dataset.marketView === view);
+    activeMarketView = known ? view : DEFAULT_MARKET_VIEW;
+    for (const panel of marketPanels) {
+      panel.hidden = panel.dataset.marketView !== activeMarketView;
+    }
+    for (const tab of marketTabs) {
+      const isActive = tab.dataset.marketView === activeMarketView;
+      tab.classList.toggle("is-active", isActive);
+      tab.setAttribute("aria-selected", String(isActive));
+    }
+    if (activeMarketView === "vol-surface" && !listLoaded && !inFlight) loadSurfaceList();
   }
 
-  tabCurve.addEventListener("click", () => selectMarketView("curve"));
-  tabVol.addEventListener("click", () => selectMarketView("vol-surface"));
+  for (const tab of marketTabs) {
+    tab.addEventListener("click", () => selectMarketView(tab.dataset.marketView));
+  }
 
   // ---- Loading ---------------------------------------------------------------
 
