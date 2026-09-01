@@ -427,6 +427,86 @@ def test_the_chart_draws_a_dot_only_where_a_value_came_back(server_url, page) ->
     ]
 
 
+def test_the_line_joins_across_dates_bloomberg_omitted(server_url, page) -> None:
+    """A weekend is not an unresolved observation (Codex review, PR #198).
+
+    With ACTIVE_DAYS_ONLY Bloomberg omits every weekend and holiday, so
+    breaking the run on non-consecutive dates would break at every weekend --
+    and telling "market closed" from "no history here" needs the security's
+    own trading calendar, which this view does not have and must not invent.
+    The dots stay the data; the axis is scaled by real dates so the omitted
+    stretch reads as a wider span; the table states which dates came back.
+    """
+
+    _route_other_markets_away(page)
+    _route_history(
+        page,
+        payload={
+            **_PAYLOAD,
+            "observation_count": 3,
+            "first_observation_date": "2026-01-08",
+            "last_observation_date": "2026-01-13",
+            "observations": [
+                {"date": "2026-01-08", "yield_value": 4.0, "raw_value": "4.0"},
+                # Jan 9 is a Friday and Jan 12 the following Monday: the
+                # weekend between them is absent from the response.
+                {"date": "2026-01-09", "yield_value": 4.12, "raw_value": "4.12"},
+                {"date": "2026-01-12", "yield_value": 4.25, "raw_value": "4.25"},
+            ],
+        },
+    )
+    _open_yield_history(page, server_url)
+    _fill_query(page)
+    _load(page)
+    _wait_for_series(page)
+
+    polylines = page.eval_on_selector_all(
+        "#byh-chart-svg-wrap polyline.byh-line", "els => els.map(el => el.getAttribute('points'))"
+    )
+    assert len(polylines) == 1
+    assert len(polylines[0].split(" ")) == 3
+    # No point was manufactured for either omitted date, and no row exists for
+    # them either -- the gap is real, it is simply not a break in the line.
+    assert page.eval_on_selector_all("#byh-chart-svg-wrap circle.byh-dot", "els => els.length") == 3
+    assert [row[0] for row in _table_rows(page)] == ["2026-01-08", "2026-01-09", "2026-01-12"]
+
+
+def test_the_gap_is_visible_as_distance_rather_than_as_an_invented_point(
+    server_url, page
+) -> None:
+    """The x axis is scaled by real dates, so an omitted stretch is wider."""
+
+    _route_other_markets_away(page)
+    _route_history(
+        page,
+        payload={
+            **_PAYLOAD,
+            "observation_count": 3,
+            "first_observation_date": "2026-01-08",
+            "last_observation_date": "2026-01-28",
+            "observations": [
+                {"date": "2026-01-08", "yield_value": 4.0, "raw_value": "4.0"},
+                {"date": "2026-01-09", "yield_value": 4.12, "raw_value": "4.12"},
+                # Nineteen days later: a stretch this bond has no history over.
+                {"date": "2026-01-28", "yield_value": 4.25, "raw_value": "4.25"},
+            ],
+        },
+    )
+    _open_yield_history(page, server_url)
+    _fill_query(page)
+    _load(page)
+    _wait_for_series(page)
+
+    xs = page.eval_on_selector_all(
+        "#byh-chart-svg-wrap circle.byh-dot", "els => els.map(el => Number(el.getAttribute('cx')))"
+    )
+    one_day = xs[1] - xs[0]
+    nineteen_days = xs[2] - xs[1]
+    # Positioned by elapsed time, not by row index: the empty stretch is
+    # visibly nineteen times the one-day step, not the same width as it.
+    assert nineteen_days > one_day * 15
+
+
 def test_the_line_never_spans_a_valueless_row(server_url, page) -> None:
     _route_other_markets_away(page)
     _route_history(page)

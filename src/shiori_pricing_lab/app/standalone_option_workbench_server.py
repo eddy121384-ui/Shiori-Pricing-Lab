@@ -570,6 +570,14 @@ DEFAULT_PORT = 8765
 # nav item -- against a route table that 404s every one of those routes, so
 # the view would look available and capture nothing.
 #
+# Bumped to -v25 for Issue #196's Markets Bond Yield History view: the
+# server gained the read-only route POST /api/bloomberg/bond-yield-history,
+# plus that view's own static file. A stale -v24 process serves this
+# commit's page -- which has a Bond Yield History market-view selector, a
+# Yield-field box and a Load button -- against a route table that 404s that
+# route, so every load would fail against a server the launcher had just
+# told the trader was fine to reuse.
+#
 # Bumped to -v24 for Issue #194's Markets Swaption Vol Surface view: the
 # server gained the two read-only routes POST /api/vol-surface/atm/list and
 # POST /api/vol-surface/atm/surface, plus that view's own static file. A
@@ -603,7 +611,7 @@ DEFAULT_PORT = 8765
 # page last put in that field -- including one derived against a spot quote
 # the refresh has since replaced -- which is precisely the stale-Forward
 # failure this contract exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v24"
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v25"
 
 
 def load_base_case() -> dict:

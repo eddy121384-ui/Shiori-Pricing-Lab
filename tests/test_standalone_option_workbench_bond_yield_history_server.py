@@ -316,3 +316,33 @@ def test_a_loader_value_error_is_a_client_error(server_url, monkeypatch) -> None
 
     assert status == 400
     assert "start_date" in body["error"]
+
+
+# --- the launcher must not reuse a server that predates this route ------------
+
+
+def test_the_page_and_its_new_module_are_served_from_disk(server_url) -> None:
+    with urllib.request.urlopen(f"{server_url}/bond_yield_history_view.js") as response:
+        assert response.status == 200
+        body = response.read().decode("utf-8")
+    assert _ROUTE in body
+
+
+def test_the_api_contract_marker_moved_with_the_new_route() -> None:
+    """A new route must bump the contract, or a stale process gets reused.
+
+    ``scripts/launch_workbench.py`` reuses an already-running server on port
+    8765 when ``GET /api/health`` reports the contract it expects. A server
+    started from a revision predating this route serves this commit's static
+    files from disk -- Bond Yield History tab and all -- from an in-memory
+    route table that 404s every load (Codex review, PR #198). So the marker
+    must have moved past the revision that last set it, and the launcher's
+    copy must agree with the server's.
+    """
+
+    project_root = server_module.PROTOTYPE_DIR.parent.parent
+    launcher = (project_root / "scripts" / "launch_workbench.py").read_text(encoding="utf-8")
+    assert f'"{server_module.API_CONTRACT_ID}"' in launcher
+    # The revision this branch started from; reusing its marker would reuse
+    # its route table.
+    assert not server_module.API_CONTRACT_ID.endswith("-v24")

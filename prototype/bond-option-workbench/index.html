@@ -932,10 +932,15 @@
               <div class="markets-chart-svg-wrap" id="byh-chart-svg-wrap"></div>
             </div>
             <div class="vol-surface-axis-note">
-              One point per returned observation, positioned by its own observation date. A date
-              Bloomberg did not answer for is a gap the line never bridges, and a returned row with
-              no value is drawn as no point at all &mdash; never as zero and never as the previous day's
-              number.
+              One dot per returned observation, positioned by its own observation date. Only the dots
+              are data. The line between them is a reading aid: it joins consecutive returned
+              observations and therefore does cross dates Bloomberg returned nothing for &mdash; a
+              weekend, a holiday, or a stretch this bond simply has no history over. Because the axis
+              is scaled by real dates, such a stretch shows as a wider empty span rather than as an
+              extra point; the table below is the authoritative record of exactly which dates came
+              back. A row Bloomberg <em>did</em> return but with no value is different: it is drawn as
+              no dot at all and the line breaks at it, never as zero and never as the previous
+              observation's number.
             </div>
           </div>
         </section>

@@ -12,9 +12,9 @@
 //     mnemonic is typed by the trader from workstation evidence; with the box
 //     empty this view sends no request at all;
 //   * fill, interpolate, forward-fill, back-fill, smooth, or resample. A date
-//     Bloomberg did not answer for is absent, and a returned row with no value
-//     is drawn as no point and rendered as an em dash -- never zero, never a
-//     neighbour's number;
+//     Bloomberg did not answer for is absent -- it gets no row and no dot --
+//     and a returned row with no value is drawn as no dot and rendered as an
+//     em dash, never zero and never a neighbour's number;
 //   * compute a volatility statistic. There is no standard deviation, no
 //     annualization, and no Historical Vol anywhere in this file. The optional
 //     daily-change column is a display derivative only (see dailyChanges);
@@ -443,8 +443,26 @@
       svg.appendChild(label);
     }
 
-    // One polyline per unbroken run of valued observations. A returned row
-    // with no value ends the run it interrupts, so no segment spans a hole.
+    // One polyline per unbroken run of valued observations. A returned row with
+    // no value ends the run it interrupts, so no segment spans a hole.
+    //
+    // A run is NOT broken merely because two observations sit on non-adjacent
+    // calendar dates, and that is deliberate (Codex review, PR #198). With
+    // ACTIVE_DAYS_ONLY, Bloomberg omits every weekend and holiday, so breaking
+    // on non-consecutive dates would break at every weekend and render a year
+    // of daily yields as fifty-odd disconnected five-point stubs. Worse, the
+    // rule needed to tell "market was closed" from "this bond has no history
+    // here" is the security's own trading calendar, which this view does not
+    // have and must not invent -- guessing one is exactly what Issue #196
+    // forbids.
+    //
+    // The honest line is drawn instead: the dots are the data, the segments
+    // are a reading aid between them, the x axis is scaled by real dates so a
+    // long empty stretch reads as a long empty stretch, and the table states
+    // exactly which dates came back. What the line genuinely must not cross is
+    // a date Bloomberg *did* answer for and supplied no value on -- an
+    // unresolved observation, the direct analogue of the vol surface's
+    // unresolved node -- and it does not.
     let run = [];
     const flushRun = () => {
       if (run.length > 1) {
