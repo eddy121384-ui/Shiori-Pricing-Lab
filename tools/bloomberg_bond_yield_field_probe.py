@@ -333,7 +333,6 @@ def probe_historical_field(
             (),
         )
 
-    securities_seen: list[str] = []
     dates: list[str] = []
     rows_with_no_value = 0
     observations_with_a_value = 0
@@ -344,18 +343,30 @@ def probe_historical_field(
     value_datatype: str | None = None
     sample: list[tuple[str, str]] = []
 
+    # --- envelope pass: every record, before any per-record verdict ----------
+    # The canonical loader settles "is this whole answer about the one security
+    # we asked for?" before it reads a single row, and so must this. Collecting
+    # security names inside the per-record loop below would mean an early
+    # return -- on a securityError or a fieldException in the *first* record --
+    # reported envelope evidence gathered from only the records visited so far,
+    # and a later record naming a different security would go unseen (Codex
+    # review, PR #198).
+    securities_seen = [
+        record.getElementAsString("security")
+        for record in collected
+        if record.hasElement("security")
+    ]
+    envelope = {
+        "security_data_record_count": len(collected),
+        "distinct_securities": len(set(securities_seen)),
+        "resolved_security": securities_seen[0] if securities_seen else None,
+    }
+
     def _envelope() -> dict:
-        """The envelope evidence every early return must carry too."""
+        return dict(envelope)
 
-        return {
-            "security_data_record_count": len(collected),
-            "distinct_securities": len(set(securities_seen)),
-            "resolved_security": securities_seen[0] if securities_seen else None,
-        }
-
+    # --- per-record pass -----------------------------------------------------
     for record in collected:
-        if record.hasElement("security"):
-            securities_seen.append(record.getElementAsString("security"))
         if record.hasElement("securityError"):
             return (
                 HistoricalFieldEvidence(

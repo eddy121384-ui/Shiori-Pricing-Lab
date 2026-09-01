@@ -721,6 +721,27 @@ _LOADER_REFUSALS = {
         ),
         "different securities",
     ),
+    # An early return on the first record must still see the envelope the
+    # later records make up. These are the shapes where a per-record verdict
+    # is reached before the whole envelope has been read (Codex review,
+    # PR #198).
+    "field exception first, a different security after": (
+        lambda: _two_records(
+            _security_data([], security="A Corp", exceptions=["BAD_FLD"]),
+            _security_data([_row("2026-01-06", "4.0")], security="B Corp"),
+        ),
+        "different securities",
+    ),
+    # This one is already unresolved by its securityError, which is checked
+    # first; it is here so the envelope evidence beside it is still exercised
+    # (asserted separately below).
+    "security error first, a different security after": (
+        lambda: _two_records(
+            _security_data([], security="A Corp", security_error="BAD_SEC"),
+            _security_data([_row("2026-01-06", "4.0")], security="B Corp"),
+        ),
+        "securityError",
+    ),
     "row with no date": (
         lambda: _one_record([_row("2026-01-06", "4.0"), _row(None, "4.1")]),
         "no date",
@@ -788,3 +809,47 @@ def test_a_well_formed_answer_is_not_caught_by_any_of_those(fake_blpapi):
 
     assert unresolved_reason(evidence) is None
     assert build_verdict((evidence,)).startswith("ONE CANDIDATE RETURNED DATA")
+
+
+@pytest.mark.parametrize(
+    "first_record",
+    [
+        _security_data([], security="A Corp", exceptions=["BAD_FLD"]),
+        _security_data([], security="A Corp", security_error="BAD_SEC"),
+    ],
+    ids=["field exception", "security error"],
+)
+def test_an_early_return_still_reports_the_whole_envelope(fake_blpapi, first_record):
+    """Envelope evidence is gathered from every record, not the ones read so far.
+
+    A per-record verdict reached on the first record used to carry envelope
+    counts collected only up to that point, so a later record naming a
+    different security was invisible (Codex review, PR #198). The loader
+    settles the envelope question before reading any row; so does this now.
+    """
+
+    def _send(*, service_uri, request_name, configure, collect, context):
+        configure(_RecordingRequest())
+        collect(_Element(sub={"securityData": first_record}))
+        collect(
+            _Element(
+                sub={
+                    "securityData": _security_data(
+                        [_row("2026-01-06", "4.0")], security="B Corp"
+                    )
+                }
+            )
+        )
+
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_send,
+    )
+
+    assert evidence.security_data_record_count == 2
+    assert evidence.distinct_securities == 2
+    assert unresolved_reason(evidence) is not None
