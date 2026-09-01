@@ -33,6 +33,7 @@ from bloomberg_bond_yield_field_probe import (  # noqa: E402
     build_verdict,
     probe_historical_field,
     render_markdown,
+    unresolved_reason,
     write_report,
 )
 
@@ -161,7 +162,7 @@ class _NullValueElement(_Element):
 
 
 def _row(observation_date, value=None):
-    sub = {"date": _Element(text=observation_date)}
+    sub = {} if observation_date is None else {"date": _Element(text=observation_date)}
     if value is _NULL:
         sub[_FIELD_A] = _NullValueElement()
     elif value is not None:
@@ -538,7 +539,11 @@ def test_a_field_answering_only_in_unloadable_values_is_not_a_usable_series(fake
 
     assert evidence.observation_count == 2
     assert evidence.observations_with_a_value == 0
-    assert build_verdict((evidence,)).startswith("NO USABLE SERIES")
+    # Not "no usable series" -- that would read as "this field has no history".
+    # It answered; the workbench just cannot load what it answered with.
+    verdict = build_verdict((evidence,))
+    assert verdict.startswith("INCONCLUSIVE")
+    assert "non-numeric or non-finite" in verdict
 
 
 def test_the_probe_applies_the_canonical_loaders_own_value_rule():
@@ -547,3 +552,129 @@ def test_the_probe_applies_the_canonical_loaders_own_value_rule():
     from shiori_pricing_lab.data.bloomberg_bond_quote import _parse_finite_float
 
     assert module._parse_finite_float is _parse_finite_float
+
+
+# --- a series the loader would refuse is never an endorsement -----------------
+
+
+def test_a_duplicate_observation_date_is_counted(fake_blpapi):
+    """The loader refuses the whole series over one; the probe must see it."""
+
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_sender(
+            _security_data([_row("2026-01-06", "4.0"), _row("2026-01-06", "4.5")])
+        ),
+    )
+
+    assert evidence.duplicate_observation_dates == 1
+    assert unresolved_reason(evidence) is not None
+    assert "duplicate observation" in unresolved_reason(evidence)
+
+
+def test_a_duplicate_date_across_two_records_is_counted(fake_blpapi):
+    """Caught across records, exactly as the loader catches it across messages."""
+
+    def _send(*, service_uri, request_name, configure, collect, context):
+        configure(_RecordingRequest())
+        collect(_Element(sub={"securityData": _security_data([_row("2026-01-06", "4.0")])}))
+        collect(_Element(sub={"securityData": _security_data([_row("2026-01-06", "4.5")])}))
+
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_send,
+    )
+
+    assert evidence.duplicate_observation_dates == 1
+
+
+def test_a_row_with_no_date_is_counted_not_placeheld(fake_blpapi):
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_sender(
+            _security_data([_row("2026-01-06", "4.0"), _row(None, "4.5")])
+        ),
+    )
+
+    assert evidence.rows_with_no_date == 1
+    assert evidence.observation_count == 1
+    assert evidence.first_observation_date == "2026-01-06"
+    assert "no date" in unresolved_reason(evidence)
+
+
+def test_one_unusable_value_beside_good_ones_still_blocks_an_endorsement():
+    """The loader aborts the whole series on it -- it keeps no valid subset.
+
+    So `observations_with_a_value > 0` is not enough to endorse a candidate
+    (Codex review, PR #198): 250 good rows and one sentinel is a field the
+    workbench cannot load over this range.
+    """
+
+    good = _evidence(_FIELD_A, count=250, valued=250)
+    mixed = HistoricalFieldEvidence(
+        field=_FIELD_B,
+        status="returned",
+        observation_count=250,
+        observations_with_a_value=249,
+        rows_with_an_unusable_value=1,
+    )
+
+    verdict = build_verdict((good, mixed))
+
+    assert verdict.startswith("INCONCLUSIVE")
+    assert _FIELD_B in verdict
+    assert "ONE CANDIDATE" not in verdict
+
+
+def test_a_duplicate_date_blocks_an_endorsement_too():
+    good = _evidence(_FIELD_A, count=250, valued=250)
+    duplicated = HistoricalFieldEvidence(
+        field=_FIELD_B,
+        status="returned",
+        observation_count=250,
+        observations_with_a_value=250,
+        duplicate_observation_dates=1,
+    )
+
+    verdict = build_verdict((good, duplicated))
+
+    assert verdict.startswith("INCONCLUSIVE")
+    assert "duplicate observation" in verdict
+
+
+def test_an_empty_or_excepted_candidate_is_a_real_answer_not_an_unresolved_one():
+    """"This field has no history" and "this field does not exist" are results."""
+
+    assert unresolved_reason(_evidence(_FIELD_B, status="empty")) is None
+    assert unresolved_reason(_evidence(_FIELD_B, status="field_exception")) is None
+
+    verdict = build_verdict((_evidence(_FIELD_A, count=250, valued=250),
+                             _evidence(_FIELD_B, status="empty")))
+    assert verdict.startswith("ONE CANDIDATE RETURNED DATA")
+
+
+def test_a_clean_candidate_is_not_made_unresolved_by_a_plain_hole():
+    """A row Bloomberg returned with no value is a gap, not a refusal."""
+
+    clean = HistoricalFieldEvidence(
+        field=_FIELD_A,
+        status="returned",
+        observation_count=250,
+        observations_with_a_value=249,
+        rows_with_no_value=1,
+    )
+
+    assert unresolved_reason(clean) is None
+    assert build_verdict((clean,)).startswith("ONE CANDIDATE RETURNED DATA")
