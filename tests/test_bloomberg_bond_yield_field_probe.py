@@ -493,3 +493,57 @@ def test_a_bloomberg_null_row_is_counted_as_a_hole_not_a_crash(fake_blpapi):
     assert evidence.observations_with_a_value == 2
     assert evidence.rows_with_no_value == 1
     assert sample == (("2026-01-06", "4.0"), ("2026-01-08", "4.4"))
+
+
+@pytest.mark.parametrize("unusable", ["nan", "NaN", "inf", "-inf", "N.A.", "4.0X", "#N/A N/A"])
+def test_a_value_the_loader_would_refuse_is_not_a_usable_observation(fake_blpapi, unusable):
+    """The probe must predict the workbench, not flatter a candidate.
+
+    A non-blank but non-numeric or non-finite value is refused by the
+    canonical loader's `_parse_finite_float`; counting it here would let
+    `build_verdict` recommend -- or call ambiguous -- a field the workbench
+    cannot load at all (Codex review, PR #198).
+    """
+
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_sender(
+            _security_data([_row("2026-01-06", "4.0"), _row("2026-01-07", unusable)])
+        ),
+    )
+
+    assert evidence.observation_count == 2
+    assert evidence.observations_with_a_value == 1
+    assert evidence.rows_with_an_unusable_value == 1
+    # Counted apart from a genuine hole: they mean different things.
+    assert evidence.rows_with_no_value == 0
+    assert sample == (("2026-01-06", "4.0"),)
+
+
+def test_a_field_answering_only_in_unloadable_values_is_not_a_usable_series(fake_blpapi):
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_sender(
+            _security_data([_row("2026-01-06", "N.A."), _row("2026-01-07", "N.A.")])
+        ),
+    )
+
+    assert evidence.observation_count == 2
+    assert evidence.observations_with_a_value == 0
+    assert build_verdict((evidence,)).startswith("NO USABLE SERIES")
+
+
+def test_the_probe_applies_the_canonical_loaders_own_value_rule():
+    """Imported, not restated -- so the two cannot drift apart."""
+
+    from shiori_pricing_lab.data.bloomberg_bond_quote import _parse_finite_float
+
+    assert module._parse_finite_float is _parse_finite_float
