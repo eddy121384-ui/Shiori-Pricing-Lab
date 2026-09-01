@@ -142,6 +142,11 @@ class HistoricalFieldEvidence:
     field: str
     status: str  # "returned" | "empty" | "field_exception" | "security_error" | "error"
     observation_count: int = 0
+    # Counted separately, never derived: a field that answers with dated rows
+    # but no Yield value in any of them has told you nothing about itself, and
+    # the verdict must not read those rows as a usable series (Codex review,
+    # PR #198).
+    observations_with_a_value: int = 0
     rows_with_no_value: int = 0
     first_observation_date: str | None = None
     last_observation_date: str | None = None
@@ -273,6 +278,7 @@ def probe_historical_field(
     resolved_security: str | None = None
     dates: list[str] = []
     rows_with_no_value = 0
+    observations_with_a_value = 0
     value_datatype: str | None = None
     sample: list[tuple[str, str]] = []
 
@@ -311,7 +317,12 @@ def probe_historical_field(
                 row.getElementAsString("date") if row.hasElement("date") else "<no date element>"
             )
             dates.append(observation_date)
-            if not row.hasElement(field):
+            # `excludeNullElements=True`: Bloomberg's own null element is
+            # present under a bare hasElement, and reading it as a string
+            # raises -- which here would abort the whole probe and lose every
+            # other candidate's evidence with it. A returned null is a row with
+            # no value, same as an absent one (Codex review, PR #198).
+            if not row.hasElement(field, True):
                 rows_with_no_value += 1
                 continue
             element = row.getElement(field)
@@ -324,6 +335,7 @@ def probe_historical_field(
             if not raw_value.strip():
                 rows_with_no_value += 1
                 continue
+            observations_with_a_value += 1
             if len(sample) < sample_rows:
                 sample.append((observation_date, raw_value))
 
@@ -333,6 +345,7 @@ def probe_historical_field(
             field=field,
             status="returned" if ordered else "empty",
             observation_count=len(ordered),
+            observations_with_a_value=observations_with_a_value,
             rows_with_no_value=rows_with_no_value,
             first_observation_date=ordered[0] if ordered else None,
             last_observation_date=ordered[-1] if ordered else None,
@@ -346,39 +359,65 @@ def probe_historical_field(
 def build_verdict(historical: tuple[HistoricalFieldEvidence, ...]) -> str:
     """One mechanical line about how many candidates the evidence supports.
 
-    Never names a winner beyond "this is the only one that returned data",
-    and never resolves an ambiguity -- Issue #196 stop condition 1 is a stop,
-    not a tie-break.
+    Never names a winner beyond "this is the only one that returned Yield
+    values", and never resolves an ambiguity -- Issue #196 stop condition 1 is
+    a stop, not a tie-break.
+
+    Two things this deliberately refuses to treat as evidence:
+
+    - *A candidate whose request never reached Bloomberg.* A transport failure
+      says nothing about that field, so a run containing one is inconclusive
+      even when another candidate answered richly. Reporting "one candidate
+      returned data" there would quietly promote a mnemonic against an
+      opponent that was never actually asked (Codex review, PR #198).
+    - *Dated rows carrying no value.* A field that answers with rows but no
+      Yield in any of them has supplied no Yield, so it is not a usable
+      series -- ``observations_with_a_value``, never ``observation_count``,
+      decides that.
     """
 
-    usable = [
-        evidence
-        for evidence in historical
-        if evidence.status == "returned" and evidence.observation_count > 0
-    ]
     if not historical:
         return "NO CANDIDATE PROBED -- pass --field (with --identifier/--start/--end) to test one."
-    if all(evidence.status == "error" for evidence in historical):
+
+    unprobed = [evidence for evidence in historical if evidence.status == "error"]
+    if len(unprobed) == len(historical):
         return (
             "PROBE COULD NOT RUN -- every candidate's request failed before Bloomberg "
             "answered (see the detail above; blpapi missing or no Terminal session is the "
             "usual cause). Nothing here is evidence about any field."
         )
+    if unprobed:
+        return (
+            "INCONCLUSIVE -- "
+            + ", ".join(evidence.field for evidence in unprobed)
+            + " never reached Bloomberg, so this comparison is incomplete. A candidate "
+            "that was not asked has not been ruled out. Re-run once every candidate gets "
+            "an answer; do not read the ones that did answer as a result."
+        )
+
+    usable = [
+        evidence
+        for evidence in historical
+        if evidence.status == "returned" and evidence.observations_with_a_value > 0
+    ]
     if not usable:
         return (
-            "NO USABLE SERIES -- none of the probed fields returned a historical "
-            "observation for this bond over this range. Do not pick one anyway."
+            "NO USABLE SERIES -- none of the probed fields returned a Yield value for "
+            "this bond over this range. Do not pick one anyway."
         )
     if len(usable) == 1:
         return (
             f"ONE CANDIDATE RETURNED DATA: {usable[0].field} "
-            f"({usable[0].observation_count} observations). Confirm its economic meaning "
-            "and unit from Bloomberg's own documentation above and from the Terminal "
-            "before using it -- an observation count is not a meaning."
+            f"({usable[0].observations_with_a_value} observations carrying a value). "
+            "Confirm its economic meaning and unit from Bloomberg's own documentation "
+            "above and from the Terminal before using it -- an observation count is not "
+            "a meaning."
         )
     return (
         "AMBIGUOUS -- "
-        + ", ".join(f"{item.field} ({item.observation_count} obs)" for item in usable)
+        + ", ".join(
+            f"{item.field} ({item.observations_with_a_value} valued obs)" for item in usable
+        )
         + " all returned a historical series. Issue #196 stop condition 1 applies: stop "
         "and report the ambiguity to Eddy/Sophira. This probe does not choose, and the "
         "loader has no default to fall back on."
@@ -485,6 +524,7 @@ def build_report(report: YieldFieldProbeReport) -> dict:
                 "field": evidence.field,
                 "status": evidence.status,
                 "observation_count": evidence.observation_count,
+                "observations_with_a_value": evidence.observations_with_a_value,
                 "rows_with_no_value": evidence.rows_with_no_value,
                 "first_observation_date": evidence.first_observation_date,
                 "last_observation_date": evidence.last_observation_date,
@@ -552,13 +592,15 @@ def render_markdown(data: dict) -> str:
     lines += [
         "## 3. Historical availability (one HistoricalDataRequest per candidate)",
         "",
-        "| Field | Status | Obs | Rows w/o value | First | Last | Value datatype |",
-        "| --- | --- | ---: | ---: | --- | --- | --- |",
+        "| Field | Status | Rows | Valued obs | Rows w/o value | First | Last | Value datatype |",
+        "| --- | --- | ---: | ---: | ---: | --- | --- | --- |",
     ]
     for evidence in data["historical_availability"]:
         lines.append(
             f"| `{evidence['field']}` | {evidence['status']} | "
-            f"{evidence['observation_count']} | {evidence['rows_with_no_value']} | "
+            f"{evidence['observation_count']} | "
+            f"{evidence['observations_with_a_value']} | "
+            f"{evidence['rows_with_no_value']} | "
             f"{evidence['first_observation_date'] or '-'} | "
             f"{evidence['last_observation_date'] or '-'} | "
             f"{evidence['value_datatype'] or '-'} |"
@@ -683,7 +725,8 @@ def main(argv: list[str] | None = None) -> int:
     for evidence in data["historical_availability"]:
         print(
             f"{evidence['field']}: {evidence['status']} "
-            f"obs={evidence['observation_count']} "
+            f"rows={evidence['observation_count']} "
+            f"valued_obs={evidence['observations_with_a_value']} "
             f"no_value_rows={evidence['rows_with_no_value']} "
             f"first={evidence['first_observation_date']} "
             f"last={evidence['last_observation_date']} "

@@ -187,8 +187,37 @@ def test_a_bloomberg_failure_is_recorded_not_raised(monkeypatch):
     data = build_report(report)
 
     assert data["status"] == "error"
-    assert "BAD_FLD" in data["error"]
+    assert data["error_kind"] == "BLIBloombergDapiError"
     assert data["observation_count"] == 0
+    # The operator still gets the full message -- on the console, not on disk.
+    assert "BAD_FLD" in report.error
+
+
+def test_a_refused_value_never_reaches_a_report_through_the_error_message(monkeypatch, tmp_path):
+    """`_parse_finite_float` names the value it refused (Codex review, PR #198).
+
+    Storing that message would put a live Bloomberg value on disk, straight
+    through the guarantee this tool makes about its own report files.
+    """
+
+    _stub_loader(
+        monkeypatch,
+        raises=BLIBloombergDapiError(
+            "Bloomberg DAPI field SOME_FIELD historical returned a non-numeric "
+            "value: '4.1234567X'"
+        ),
+    )
+
+    report = _run(monkeypatch)
+    data = build_report(report)
+    markdown_path, json_path = write_report(data, tmp_path)
+
+    written = markdown_path.read_text(encoding="utf-8") + json_path.read_text(encoding="utf-8")
+    assert "4.1234567X" not in written
+    assert "4.1234567" not in written
+    assert "BLIBloombergDapiError" in written
+    # And the operator can still see exactly what was refused, on the console.
+    assert "4.1234567X" in report.error
 
 
 def test_no_bloomberg_value_is_ever_written_to_a_file(monkeypatch, tmp_path):

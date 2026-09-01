@@ -54,6 +54,13 @@ stays a gap. A row Bloomberg returned with no value at all is preserved as
 an explicit ``yield_value=None`` observation on its own date -- a visible
 hole, never a zero and never a neighbour's number.
 
+That last case is read with ``hasElement(field, True)``, not a bare
+``hasElement``. Bloomberg's own null element is *present* under the bare
+call, and reading it as a string raises -- so the bare call would abort the
+whole series on precisely the row this loader exists to keep. Excluding null
+elements makes a returned null indistinguishable from an absent one, which
+is what it means: no value on that date.
+
 **An empty series is a valid answer.** A bond with no observations in the
 requested window returns ``observations=()`` with full provenance -- never a
 synthetic zero series, never a widened date range, never a substituted
@@ -449,8 +456,14 @@ def _observations_from_records(
                     f"requested range {start.isoformat()}..{end.isoformat()}"
                 )
 
+            # `hasElement(field)` on its own is true for an element Bloomberg
+            # returned as *null* -- which is exactly what NIL_VALUE produces on
+            # a day it holds no observation -- and reading a null element as a
+            # string raises, which would fail the whole series on the very case
+            # this loader exists to preserve. `excludeNullElements=True` makes a
+            # returned null read as the hole it is (Codex review, PR #198).
             raw_value: str | None = None
-            if row.hasElement(field):
+            if row.hasElement(field, True):
                 raw_value = _get_element_as_string(blpapi, row, field, security)
                 if not raw_value.strip():
                     raw_value = None
