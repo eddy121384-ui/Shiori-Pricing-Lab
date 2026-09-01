@@ -95,6 +95,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -248,6 +249,29 @@ def _validate_field_mnemonic(field: str) -> str:
     return candidate
 
 
+def _validate_field_mnemonics(fields: Sequence[str]) -> tuple[str, ...]:
+    """Validate every ``--field`` and refuse a repeated one.
+
+    A mnemonic named twice would be probed twice and then counted twice, so a
+    single working field could be reported ``AMBIGUOUS`` *against itself* --
+    falsely raising Issue #196's stop condition over an operator's slip
+    (Codex review, PR #198). Refused rather than silently deduplicated, which
+    is how this repository already treats a repeated acquisition key (see
+    ``load_bloomberg_usd_sofr_option_discount_curve``'s duplicate tenor).
+    """
+
+    validated: list[str] = []
+    for field in fields:
+        candidate = _validate_field_mnemonic(field)
+        if candidate in validated:
+            raise ValueError(
+                f"--field {candidate} was given more than once; name each candidate "
+                "mnemonic exactly once"
+            )
+        validated.append(candidate)
+    return tuple(validated)
+
+
 def _sanitized_description(description: FieldDescription) -> FieldDescription:
     """Sanitize Bloomberg-authored text, mirroring the curve documentation probe."""
 
@@ -268,10 +292,14 @@ def search_yield_field_catalogue(
     against a bond, and no hit is promoted into a historical request.
     """
 
+    # Broad on purpose, like every other pass here: a native blpapi failure in
+    # the catalogue search must cost the search and nothing else. This probe's
+    # value is surviving to report -- an exception escaping any pass would take
+    # the later passes and both report files with it (Codex review, PR #198).
     try:
         apiflds = discover_service(_APIFLDS_SERVICE)
-    except (RuntimeError, ImportError) as exc:
-        return (), sanitize_external_text(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return (), sanitize_external_text(f"{type(exc).__name__}: {exc}")
     if not apiflds.opened:
         return (), sanitize_external_text(apiflds.open_error or "//blp/apiflds did not open")
     return attempt_field_search(apiflds, search_terms), None
@@ -702,10 +730,16 @@ def run_probe(
             descriptions = tuple(
                 _sanitized_description(description) for description in describe_fields(list(fields))
             )
-        except (RuntimeError, ImportError) as exc:
+        # Same reason: a native blpapi failure reading a fieldInfo or overrides
+        # element must become per-field evidence, not the end of the run. This
+        # pass runs *before* the historical one, so an escape here costs every
+        # candidate's availability evidence and both reports.
+        except Exception as exc:  # noqa: BLE001
             descriptions = tuple(
                 FieldDescription(
-                    field=field, status="field_error", detail=sanitize_external_text(str(exc))
+                    field=field,
+                    status="field_error",
+                    detail=sanitize_external_text(f"{type(exc).__name__}: {exc}"),
                 )
                 for field in fields
             )
@@ -979,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
     try:
-        fields = tuple(_validate_field_mnemonic(field) for field in args.field)
+        fields = _validate_field_mnemonics(args.field)
         start = _parse_iso_date_argument(args.start, "start") if args.start else None
         end = _parse_iso_date_argument(args.end, "end") if args.end else None
     except ValueError as exc:

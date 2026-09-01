@@ -949,3 +949,93 @@ def test_one_candidate_blowing_up_costs_only_its_own_evidence(monkeypatch):
     assert report.verdict.startswith("INCONCLUSIVE")
     # A report can still be written, which is the whole point.
     assert build_report(report)["historical_availability"]
+
+
+# --- an operator slip must not manufacture a stop condition -------------------
+
+
+def test_a_repeated_field_is_refused_rather_than_probed_twice():
+    """Probed twice, it would be AMBIGUOUS against itself (Codex review, PR #198)."""
+
+    with pytest.raises(ValueError, match="more than once"):
+        module._validate_field_mnemonics([_FIELD_A, _FIELD_B, _FIELD_A])
+
+
+def test_a_repeated_field_is_caught_after_normalisation():
+    with pytest.raises(ValueError, match="more than once"):
+        module._validate_field_mnemonics([_FIELD_A, f"  {_FIELD_A}  "])
+
+
+def test_distinct_fields_keep_the_order_they_were_named_in():
+    assert module._validate_field_mnemonics([_FIELD_B, _FIELD_A]) == (_FIELD_B, _FIELD_A)
+
+
+def test_the_cli_refuses_a_repeated_field_before_probing_anything(capsys):
+    exit_code = module.main(
+        [
+            "--identifier",
+            _IDENTIFIER,
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-31",
+            "--field",
+            _FIELD_A,
+            "--field",
+            _FIELD_A,
+        ]
+    )
+
+    assert exit_code == 2
+    assert "more than once" in capsys.readouterr().err
+
+
+# --- no pass may take the run down with it ------------------------------------
+
+
+def test_a_native_failure_in_the_documentation_pass_becomes_per_field_evidence(monkeypatch):
+    """It runs before the historical pass, so an escape costs everything after it."""
+
+    class _NativeFailure(Exception):
+        pass
+
+    def _explode(fields):
+        raise _NativeFailure("unreadable fieldInfo element")
+
+    monkeypatch.setattr(module, "describe_fields", _explode)
+    monkeypatch.setattr(module, "search_yield_field_catalogue", lambda terms: ((), None))
+    monkeypatch.setattr(
+        module,
+        "probe_historical_field",
+        lambda **kwargs: (_evidence(kwargs["field"], count=250, valued=250), ()),
+    )
+
+    report, _ = module.run_probe(
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        fields=(_FIELD_A,),
+        search_terms=(),
+        sample_rows=5,
+    )
+
+    assert [d.status for d in report.descriptions] == ["field_error"]
+    assert "unreadable fieldInfo element" in report.descriptions[0].detail
+    # The pass after it still ran, and a report can still be built.
+    assert report.historical[0].observations_with_a_value == 250
+    assert build_report(report)["historical_availability"]
+
+
+def test_a_native_failure_in_the_catalogue_search_costs_only_the_search(monkeypatch):
+    class _NativeFailure(Exception):
+        pass
+
+    def _explode(uri):
+        raise _NativeFailure("apiflds introspection blew up")
+
+    monkeypatch.setattr(module, "discover_service", _explode)
+
+    attempts, error = module.search_yield_field_catalogue(("yield",))
+
+    assert attempts == ()
+    assert "apiflds introspection blew up" in error
