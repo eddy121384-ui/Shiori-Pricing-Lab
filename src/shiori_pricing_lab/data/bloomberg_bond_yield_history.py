@@ -282,102 +282,114 @@ def load_bloomberg_bond_yield_history(
             "Yield series"
         ) from exc
 
-    session_options = blpapi.SessionOptions()
-    session_options.setServerHost(_DAPI_HOST)
-    session_options.setServerPort(_DAPI_PORT)
-    session = blpapi.Session(session_options)
-
-    security_data_records: list = []
-
+    # One conversion boundary around every line that touches blpapi -- the
+    # session lifecycle AND the response validation after it. The invariant is
+    # "every Bloomberg-side failure raises BLIBloombergDapiError", so the
+    # boundary has to be the whole region that can produce one; guarding only
+    # the block that was last reported leaves the next unguarded access to be
+    # found later (Codex review rounds 11-12, PR #198). `_resolved_security`
+    # and `_observations_from_records` call hasElement/getElement/numValues/
+    # getValueAsElement on Bloomberg's own elements, all of which can throw
+    # natively, and they run after `session.stop()`.
     try:
-        if not session.start():
-            raise BLIBloombergDapiError(
-                f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
-                "-- confirm a Bloomberg Terminal is running and logged in locally"
-            )
-        if not session.openService(_REFDATA_SERVICE):
-            raise BLIBloombergDapiError(f"Bloomberg DAPI failed to open service {_REFDATA_SERVICE}")
+        session_options = blpapi.SessionOptions()
+        session_options.setServerHost(_DAPI_HOST)
+        session_options.setServerPort(_DAPI_PORT)
+        session = blpapi.Session(session_options)
 
-        service = session.getService(_REFDATA_SERVICE)
-        request = service.createRequest(_HISTORICAL_REQUEST_NAME)
-        request.append("securities", security)
-        request.append("fields", field)
-        request.set("startDate", start.strftime(_BLOOMBERG_REQUEST_DATE_FORMAT))
-        request.set("endDate", end.strftime(_BLOOMBERG_REQUEST_DATE_FORMAT))
-        for option_name, option_value in _HISTORICAL_REQUEST_OPTIONS:
-            request.set(option_name, option_value)
+        security_data_records: list = []
 
-        session.sendRequest(request)
-
-        deadline = _monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
-        done = False
-        while not done:
-            remaining_seconds = deadline - _monotonic()
-            if remaining_seconds <= 0:
+        try:
+            if not session.start():
                 raise BLIBloombergDapiError(
-                    "Bloomberg DAPI request timed out waiting for a historical bond "
-                    f"Yield response for {security!r}"
+                    f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
+                    "-- confirm a Bloomberg Terminal is running and logged in locally"
                 )
-            remaining_ms = max(1, int(remaining_seconds * 1000))
-            event = session.nextEvent(remaining_ms)
-
-            if event.eventType() == blpapi.Event.TIMEOUT:
+            if not session.openService(_REFDATA_SERVICE):
                 raise BLIBloombergDapiError(
-                    "Bloomberg DAPI request timed out waiting for a historical bond "
-                    f"Yield response for {security!r}"
+                    f"Bloomberg DAPI failed to open service {_REFDATA_SERVICE}"
                 )
-            if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
-                continue
 
-            for msg in event:
-                if msg.hasElement("responseError"):
+            service = session.getService(_REFDATA_SERVICE)
+            request = service.createRequest(_HISTORICAL_REQUEST_NAME)
+            request.append("securities", security)
+            request.append("fields", field)
+            request.set("startDate", start.strftime(_BLOOMBERG_REQUEST_DATE_FORMAT))
+            request.set("endDate", end.strftime(_BLOOMBERG_REQUEST_DATE_FORMAT))
+            for option_name, option_value in _HISTORICAL_REQUEST_OPTIONS:
+                request.set(option_name, option_value)
+
+            session.sendRequest(request)
+
+            deadline = _monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
+            done = False
+            while not done:
+                remaining_seconds = deadline - _monotonic()
+                if remaining_seconds <= 0:
                     raise BLIBloombergDapiError(
-                        f"Bloomberg DAPI responseError for the historical bond Yield "
-                        f"request for {security!r}: {msg.getElement('responseError')}"
+                        "Bloomberg DAPI request timed out waiting for a historical bond "
+                        f"Yield response for {security!r}"
                     )
-                if not msg.hasElement("securityData"):
-                    continue
-                security_data_records.append(msg.getElement("securityData"))
+                remaining_ms = max(1, int(remaining_seconds * 1000))
+                event = session.nextEvent(remaining_ms)
 
-            if event.eventType() == blpapi.Event.RESPONSE:
-                done = True
+                if event.eventType() == blpapi.Event.TIMEOUT:
+                    raise BLIBloombergDapiError(
+                        "Bloomberg DAPI request timed out waiting for a historical bond "
+                        f"Yield response for {security!r}"
+                    )
+                if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
+                    continue
+
+                for msg in event:
+                    if msg.hasElement("responseError"):
+                        raise BLIBloombergDapiError(
+                            f"Bloomberg DAPI responseError for the historical bond Yield "
+                            f"request for {security!r}: {msg.getElement('responseError')}"
+                        )
+                    if not msg.hasElement("securityData"):
+                        continue
+                    security_data_records.append(msg.getElement("securityData"))
+
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    done = True
+        finally:
+            session.stop()
+
+        if not security_data_records:
+            raise BLIBloombergDapiError(
+                f"Bloomberg DAPI returned no securityData for the historical bond Yield "
+                f"request for {security!r}"
+            )
+
+        # The envelope question -- "is this whole answer about the one security
+        # we asked for?" -- is settled before any row in it is read.
+        resolved_security = _resolved_security(blpapi, security_data_records, security)
+        observations = _observations_from_records(
+            blpapi,
+            security_data_records,
+            security=security,
+            field=field,
+            start=start,
+            end=end,
+        )
     except blpapi.exception.Exception as exc:
         # Everything raised deliberately above is already a BLIBloombergDapiError
         # (a RuntimeError), so it passes through here untouched. This catches the
         # native failures nobody raises on purpose -- Bloomberg dropping the
-        # connection after the service opened, so `sendRequest`, `nextEvent` or a
-        # response-element accessor throws blpapi's own exception type.
+        # connection after the service opened, or a response element whose
+        # structural accessor throws while the answer is being validated.
         #
         # Without this the module's promise -- BLIBloombergDapiError for every
-        # Bloomberg-side failure -- was overstated, and two callers acted on that
+        # Bloomberg-side failure -- was overstated, and two callers act on that
         # promise: the workbench route answers a Bloomberg-side failure with HTTP
         # 502 and would have returned 500, and the acceptance CLI catches this
         # error type to record a failed run and would have died on a traceback
-        # with neither report written (Codex review, PR #198).
+        # with neither report written.
         raise BLIBloombergDapiError(
             "Bloomberg DAPI failed during the historical bond Yield request for "
             f"{security!r}: {type(exc).__name__}: {exc}"
         ) from exc
-    finally:
-        session.stop()
-
-    if not security_data_records:
-        raise BLIBloombergDapiError(
-            f"Bloomberg DAPI returned no securityData for the historical bond Yield "
-            f"request for {security!r}"
-        )
-
-    # The envelope question -- "is this whole answer about the one security we
-    # asked for?" -- is settled before any row in it is read.
-    resolved_security = _resolved_security(blpapi, security_data_records, security)
-    observations = _observations_from_records(
-        blpapi,
-        security_data_records,
-        security=security,
-        field=field,
-        start=start,
-        end=end,
-    )
 
     return BloombergBondYieldHistory(
         requested_identifier=security,

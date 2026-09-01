@@ -61,12 +61,19 @@ class _FakeElement:
         string_value=None,
         raise_on_value=None,
         is_null=False,
+        raise_on_accessor=None,
     ):
         self._sub = sub_elements or {}
         self._values = values
         self._string_value = string_value
         self._raise_on_value = raise_on_value
         self._is_null = is_null
+        # Which structural accessor throws blpapi's own exception, if any.
+        self._raise_on_accessor = raise_on_accessor
+
+    def _maybe_raise(self, accessor):
+        if self._raise_on_accessor == accessor:
+            raise _FakeBlpapiException(f"{accessor} threw natively")
 
     def isNull(self):
         return self._is_null
@@ -78,11 +85,13 @@ class _FakeElement:
         when asked -- which is exactly the distinction the loader depends on.
         """
 
+        self._maybe_raise("hasElement")
         if name not in self._sub:
             return False
         return not (exclude_null_elements and self._sub[name].isNull())
 
     def getElement(self, name):
+        self._maybe_raise("getElement")
         return self._sub[name]
 
     def getElementAsString(self, name):
@@ -94,9 +103,11 @@ class _FakeElement:
         return self._string_value
 
     def numValues(self):
+        self._maybe_raise("numValues")
         return len(self._values or [])
 
     def getValueAsElement(self, index):
+        self._maybe_raise("getValueAsElement")
         return self._values[index]
 
     def __str__(self):
@@ -889,4 +900,56 @@ def test_a_deliberate_failure_is_not_rewrapped(monkeypatch):
     _install_fake_blpapi(monkeypatch, events=_response(_security_data(security_error="BAD_SEC")))
 
     with pytest.raises(BLIBloombergDapiError, match="securityError"):
+        _load()
+
+
+# --- the conversion boundary covers validation, not just the session ----------
+# Round 11 converted native failures in the session lifecycle; round 12 found
+# that `_resolved_security` and `_observations_from_records` run after
+# `session.stop()` and were still outside it (PR #198). The invariant is "every
+# Bloomberg-side failure raises BLIBloombergDapiError", so this table is over
+# the structural accessors those helpers call on Bloomberg's own elements,
+# rather than over whichever line was last reported.
+
+# Each accessor is armed on the element the loader actually calls it on:
+# hasElement/getElement on the securityData envelope, numValues/
+# getValueAsElement on the fieldData array inside it.
+_VALIDATION_ACCESSORS = ("hasElement", "getElement", "numValues", "getValueAsElement")
+
+
+def _record_raising_on(accessor):
+    record = _security_data(rows=[_row("2026-01-06", "4.0")])
+    if accessor in ("numValues", "getValueAsElement"):
+        record._sub["fieldData"]._raise_on_accessor = accessor
+    else:
+        record._raise_on_accessor = accessor
+    return record
+
+
+@pytest.mark.parametrize("accessor", _VALIDATION_ACCESSORS)
+def test_a_native_failure_while_validating_the_response_is_converted(monkeypatch, accessor):
+    _install_fake_blpapi(monkeypatch, events=_response(_record_raising_on(accessor)))
+
+    with pytest.raises(BLIBloombergDapiError, match="failed during the historical bond Yield"):
+        _load()
+
+
+@pytest.mark.parametrize("accessor", _VALIDATION_ACCESSORS)
+def test_a_native_validation_failure_still_stops_the_session(monkeypatch, accessor):
+    holder = _install_fake_blpapi(monkeypatch, events=_response(_record_raising_on(accessor)))
+
+    with pytest.raises(BLIBloombergDapiError):
+        _load()
+
+    assert holder["session"].stopped is True
+
+
+def test_a_native_failure_inside_a_row_is_converted(monkeypatch):
+    """The deepest accessor: a row element inside fieldData, not the envelope."""
+
+    row = _row("2026-01-06", "4.0")
+    row._raise_on_accessor = "hasElement"
+    _install_fake_blpapi(monkeypatch, events=_rows_response([row]))
+
+    with pytest.raises(BLIBloombergDapiError, match="failed during the historical bond Yield"):
         _load()
