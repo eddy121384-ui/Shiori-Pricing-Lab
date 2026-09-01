@@ -1039,3 +1039,60 @@ def test_a_native_failure_in_the_catalogue_search_costs_only_the_search(monkeypa
 
     assert attempts == ()
     assert "apiflds introspection blew up" in error
+
+
+# --- no collaborator may abort the run ----------------------------------------
+# Rounds 8, 9 and 10 were each one more place a native exception could escape
+# and take the whole diagnostic with it (PR #198). The invariant is per *pass*,
+# so this table is over every collaborator `run_probe` calls rather than over
+# the lines that happened to be named. If a new pass is added, it belongs here.
+
+
+class _NativeBlpapiFailure(Exception):
+    """Stands in for anything blpapi raises that is not RuntimeError/ImportError."""
+
+
+_RUN_PROBE_COLLABORATORS = (
+    "discover_service",
+    "attempt_field_search",
+    "describe_fields",
+    "probe_historical_field",
+)
+
+
+@pytest.mark.parametrize("collaborator", _RUN_PROBE_COLLABORATORS)
+def test_no_collaborator_failure_can_abort_the_run(monkeypatch, collaborator):
+    def _explode(*args, **kwargs):
+        raise _NativeBlpapiFailure(f"{collaborator} blew up natively")
+
+    # Everything else behaves; only the one under test raises.
+    monkeypatch.setattr(module, "discover_service", lambda uri: _OpenedService())
+    monkeypatch.setattr(module, "attempt_field_search", lambda evidence, terms: ())
+    monkeypatch.setattr(module, "describe_fields", lambda fields: [])
+    monkeypatch.setattr(
+        module,
+        "probe_historical_field",
+        lambda **kwargs: (_evidence(kwargs["field"], count=250, valued=250), ()),
+    )
+    monkeypatch.setattr(module, collaborator, _explode)
+
+    report, _ = module.run_probe(
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        fields=(_FIELD_A,),
+        search_terms=("yield",),
+        sample_rows=5,
+    )
+
+    # The run finished, the verdict is stated, and both reports can be written.
+    assert report.verdict
+    data = build_report(report)
+    assert data["verdict"]
+    assert render_markdown(data)
+
+
+class _OpenedService:
+    opened = True
+    open_error = None
+    operations = ()
