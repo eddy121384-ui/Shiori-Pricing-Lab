@@ -51,11 +51,13 @@ mechanical verdict line:
   will the loader;
 - any candidate is *unresolved* -> ``INCONCLUSIVE``. That covers a request
   that never reached Bloomberg (the field was never asked) and a field whose
-  answer the canonical loader would refuse outright -- a duplicate
-  observation date, a row with no date, or a value that is not a finite
-  number. The loader aborts the whole series on any of those and keeps no
-  valid subset, so such a candidate has not been shown to work and must not
-  lose by default to one that did (see :func:`unresolved_reason`).
+  answer the canonical loader would refuse outright. The loader aborts the
+  whole series on any of its fail-closed conditions and keeps no valid
+  subset, so such a candidate has not been shown to work and must not lose by
+  default to one that did. :func:`unresolved_reason` carries that list
+  condition for condition, and a parametrised test exercises every row of it
+  end-to-end -- this probe is only honest while it refuses exactly what the
+  workbench refuses.
 
 "Usable" here means what the workbench means by it, and this module does not
 get to have its own opinion: it imports the loader's own
@@ -126,6 +128,7 @@ from bloomberg_input_sourcing_probe import (  # noqa: E402
 # candidate this probe calls usable must be one the workbench can actually
 # load, and the only way to guarantee that is for both to apply the same
 # function (Codex review, PR #198).
+from shiori_pricing_lab.data._validation import _parse_iso_date  # noqa: E402
 from shiori_pricing_lab.data.bloomberg_bond_quote import (  # noqa: E402
     BLIBloombergDapiError,
     _parse_finite_float,
@@ -199,6 +202,10 @@ class HistoricalFieldEvidence:
     # sit beside them (Codex review, PR #198).
     duplicate_observation_dates: int = 0
     rows_with_no_date: int = 0
+    rows_with_a_malformed_date: int = 0
+    rows_outside_requested_range: int = 0
+    security_data_record_count: int = 0
+    distinct_securities: int = 0
     first_observation_date: str | None = None
     last_observation_date: str | None = None
     value_datatype: str | None = None
@@ -326,25 +333,36 @@ def probe_historical_field(
             (),
         )
 
-    resolved_security: str | None = None
+    securities_seen: list[str] = []
     dates: list[str] = []
     rows_with_no_value = 0
     observations_with_a_value = 0
     rows_with_an_unusable_value = 0
     rows_with_no_date = 0
+    rows_with_a_malformed_date = 0
+    rows_outside_requested_range = 0
     value_datatype: str | None = None
     sample: list[tuple[str, str]] = []
 
+    def _envelope() -> dict:
+        """The envelope evidence every early return must carry too."""
+
+        return {
+            "security_data_record_count": len(collected),
+            "distinct_securities": len(set(securities_seen)),
+            "resolved_security": securities_seen[0] if securities_seen else None,
+        }
+
     for record in collected:
         if record.hasElement("security"):
-            resolved_security = record.getElementAsString("security")
+            securities_seen.append(record.getElementAsString("security"))
         if record.hasElement("securityError"):
             return (
                 HistoricalFieldEvidence(
                     field=field,
                     status="security_error",
-                    resolved_security=resolved_security,
                     detail=sanitize_external_text(str(record.getElement("securityError"))),
+                    **_envelope(),
                 ),
                 (),
             )
@@ -356,8 +374,8 @@ def probe_historical_field(
                 HistoricalFieldEvidence(
                     field=field,
                     status="field_exception",
-                    resolved_security=resolved_security,
                     detail=sanitize_external_text(str(exceptions.getValueAsElement(0))),
+                    **_envelope(),
                 ),
                 (),
             )
@@ -370,6 +388,18 @@ def probe_historical_field(
                 rows_with_no_date += 1
                 continue
             observation_date = row.getElementAsString("date")
+            # The loader's own strict YYYY-MM-DD rule and its own requested-range
+            # bound, imported rather than restated: it refuses the whole series
+            # over either, so a row failing them is not evidence this field
+            # loads (Codex review, PR #198).
+            try:
+                parsed_date = _parse_iso_date(observation_date, "observation date")
+            except ValueError:
+                rows_with_a_malformed_date += 1
+                continue
+            if parsed_date < start or parsed_date > end:
+                rows_outside_requested_range += 1
+                continue
             dates.append(observation_date)
             # `excludeNullElements=True`: Bloomberg's own null element is
             # present under a bare hasElement, and reading it as a string
@@ -405,20 +435,23 @@ def probe_historical_field(
     # Counted across every securityData record, so a date repeated between two
     # PARTIAL_RESPONSE messages is caught exactly as the loader catches it.
     duplicate_observation_dates = len(ordered) - len(set(ordered))
+    refused_rows = rows_with_no_date + rows_with_a_malformed_date + rows_outside_requested_range
     return (
         HistoricalFieldEvidence(
             field=field,
-            status="returned" if (ordered or rows_with_no_date) else "empty",
+            status="returned" if (ordered or refused_rows) else "empty",
             observation_count=len(ordered),
             observations_with_a_value=observations_with_a_value,
             rows_with_no_value=rows_with_no_value,
             rows_with_an_unusable_value=rows_with_an_unusable_value,
             duplicate_observation_dates=duplicate_observation_dates,
             rows_with_no_date=rows_with_no_date,
+            rows_with_a_malformed_date=rows_with_a_malformed_date,
+            rows_outside_requested_range=rows_outside_requested_range,
             first_observation_date=ordered[0] if ordered else None,
             last_observation_date=ordered[-1] if ordered else None,
             value_datatype=value_datatype,
-            resolved_security=resolved_security,
+            **_envelope(),
         ),
         tuple(sample),
     )
@@ -427,24 +460,65 @@ def probe_historical_field(
 def unresolved_reason(evidence: HistoricalFieldEvidence) -> str | None:
     """Why this candidate cannot take part in a comparison, or ``None``.
 
-    Two different things end up here, and both mean "this run does not settle
-    anything about this field" (Codex review, PR #198):
+    This function is the probe's mirror of the canonical loader's own
+    fail-closed list (``data/bloomberg_bond_yield_history.py``). The probe
+    exists to predict what the workbench will do with a field, so **every**
+    condition that makes the loader refuse a whole series has to make this
+    probe refuse to treat that field as a working candidate. Otherwise a
+    candidate the workbench cannot load loses by default to one that can, and
+    a rival mnemonic gets promoted on a comparison that never happened.
 
-    - the request never reached Bloomberg, so the field was never asked;
-    - Bloomberg answered, but with a series the canonical loader refuses
-      outright -- a duplicate observation date, a row with no date, or a value
-      that is not a finite number. The loader aborts the *whole* series on any
-      of those; it never keeps the valid subset. So a candidate showing one has
-      not been shown to work, however many good rows sit beside it.
+    The mapping, condition for condition (Codex review rounds 2-5, PR #198):
 
-    An ``empty`` or ``field_exception`` answer is *not* unresolved: those are
-    real, informative answers about the field, and the verdict should say so.
+    ===============================================  ==========================
+    loader refuses                                   probe reports
+    ===============================================  ==========================
+    blpapi/session/service/timeout/responseError     ``status="error"``
+    no ``securityData`` at all                       ``security_data_record_count == 0``
+    records naming more than one security            ``distinct_securities > 1``
+    ``securityError``                                ``status="security_error"``
+    row with no ``date``                             ``rows_with_no_date``
+    ``date`` that is not strict ``YYYY-MM-DD``       ``rows_with_a_malformed_date``
+    ``date`` outside the requested window            ``rows_outside_requested_range``
+    duplicate observation date                       ``duplicate_observation_dates``
+    non-numeric / non-finite value                   ``rows_with_an_unusable_value``
+    ===============================================  ==========================
+
+    Two loader refusals are deliberately *not* unresolved here, because they
+    are real answers about the mnemonic rather than a failure to get one:
+
+    - a ``fieldException`` -- "Bloomberg does not recognise this field" names
+      the field as the problem, which is exactly what the operator ran the
+      probe to learn. (A ``securityError`` names the *security*, which every
+      candidate shares, so it says nothing about this mnemonic and is
+      unresolved.)
+    - an empty series -- "this bond has no history under this field" is an
+      answer, and the loader returns it happily.
+
+    A plain hole (a row Bloomberg returned with no value) is likewise not a
+    refusal: the loader loads that series and preserves the hole.
     """
 
     if evidence.status == "error":
         return "never reached Bloomberg, so it was never asked"
+    if evidence.status == "security_error":
+        return (
+            "returned a securityError, which says nothing about this mnemonic -- the "
+            "security is shared by every candidate -- and which the loader aborts on"
+        )
+    # Checked ahead of the `empty` early-out: "no securityData at all" and "a
+    # securityData record holding no rows" both look empty from outside, but
+    # the loader raises on the first and returns an empty series for the
+    # second (Codex review, PR #198).
+    if evidence.security_data_record_count == 0:
+        return "returned no securityData at all; the loader refuses that response"
     if evidence.status != "returned":
         return None
+    if evidence.distinct_securities > 1:
+        return (
+            f"answered for {evidence.distinct_securities} different securities; the "
+            "loader refuses an envelope that is not about the one security requested"
+        )
     if evidence.duplicate_observation_dates:
         return (
             f"returned {evidence.duplicate_observation_dates} duplicate observation "
@@ -455,6 +529,17 @@ def unresolved_reason(evidence: HistoricalFieldEvidence) -> str | None:
         return (
             f"returned {evidence.rows_with_no_date} row(s) with no date; the loader "
             "refuses the whole series"
+        )
+    if evidence.rows_with_a_malformed_date:
+        return (
+            f"returned {evidence.rows_with_a_malformed_date} row(s) whose date is not a "
+            "strict YYYY-MM-DD calendar date; the loader refuses the whole series"
+        )
+    if evidence.rows_outside_requested_range:
+        return (
+            f"returned {evidence.rows_outside_requested_range} observation(s) dated "
+            "outside the requested window; the loader refuses the whole series rather "
+            "than trim them"
         )
     if evidence.rows_with_an_unusable_value:
         return (
@@ -638,6 +723,10 @@ def build_report(report: YieldFieldProbeReport) -> dict:
                 "rows_with_an_unusable_value": evidence.rows_with_an_unusable_value,
                 "duplicate_observation_dates": evidence.duplicate_observation_dates,
                 "rows_with_no_date": evidence.rows_with_no_date,
+                "rows_with_a_malformed_date": evidence.rows_with_a_malformed_date,
+                "rows_outside_requested_range": evidence.rows_outside_requested_range,
+                "security_data_record_count": evidence.security_data_record_count,
+                "distinct_securities": evidence.distinct_securities,
                 "unresolved_reason": unresolved_reason(evidence),
                 "first_observation_date": evidence.first_observation_date,
                 "last_observation_date": evidence.last_observation_date,

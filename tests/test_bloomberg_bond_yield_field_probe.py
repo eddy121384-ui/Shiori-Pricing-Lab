@@ -58,13 +58,25 @@ def test_accepts_a_well_formed_mnemonic():
 # --- the verdict never chooses ------------------------------------------------
 
 
-def _evidence(field, *, status="returned", count=0, valued=None):
-    return HistoricalFieldEvidence(
-        field=field,
-        status=status,
-        observation_count=count,
-        observations_with_a_value=count if valued is None else valued,
-    )
+def _evidence(field, *, status="returned", count=0, valued=None, **overrides):
+    """One candidate's evidence, defaulting to a well-formed single-security answer.
+
+    `security_data_record_count`/`distinct_securities` matter: a response with
+    no securityData, or one naming several securities, is refused by the
+    loader and so is unresolved here. A hand-built fixture has to say it is a
+    normal one-security answer, exactly as `probe_historical_field` reports.
+    """
+
+    fields = {
+        "field": field,
+        "status": status,
+        "observation_count": count,
+        "observations_with_a_value": count if valued is None else valued,
+        "security_data_record_count": 1,
+        "distinct_securities": 1,
+    }
+    fields.update(overrides)
+    return HistoricalFieldEvidence(**fields)
 
 
 def test_two_usable_candidates_are_reported_as_ambiguous_never_resolved():
@@ -623,13 +635,7 @@ def test_one_unusable_value_beside_good_ones_still_blocks_an_endorsement():
     """
 
     good = _evidence(_FIELD_A, count=250, valued=250)
-    mixed = HistoricalFieldEvidence(
-        field=_FIELD_B,
-        status="returned",
-        observation_count=250,
-        observations_with_a_value=249,
-        rows_with_an_unusable_value=1,
-    )
+    mixed = _evidence(_FIELD_B, count=250, valued=249, rows_with_an_unusable_value=1)
 
     verdict = build_verdict((good, mixed))
 
@@ -640,13 +646,7 @@ def test_one_unusable_value_beside_good_ones_still_blocks_an_endorsement():
 
 def test_a_duplicate_date_blocks_an_endorsement_too():
     good = _evidence(_FIELD_A, count=250, valued=250)
-    duplicated = HistoricalFieldEvidence(
-        field=_FIELD_B,
-        status="returned",
-        observation_count=250,
-        observations_with_a_value=250,
-        duplicate_observation_dates=1,
-    )
+    duplicated = _evidence(_FIELD_B, count=250, duplicate_observation_dates=1)
 
     verdict = build_verdict((good, duplicated))
 
@@ -668,13 +668,112 @@ def test_an_empty_or_excepted_candidate_is_a_real_answer_not_an_unresolved_one()
 def test_a_clean_candidate_is_not_made_unresolved_by_a_plain_hole():
     """A row Bloomberg returned with no value is a gap, not a refusal."""
 
-    clean = HistoricalFieldEvidence(
-        field=_FIELD_A,
-        status="returned",
-        observation_count=250,
-        observations_with_a_value=249,
-        rows_with_no_value=1,
-    )
+    clean = _evidence(_FIELD_A, count=250, valued=249, rows_with_no_value=1)
 
     assert unresolved_reason(clean) is None
     assert build_verdict((clean,)).startswith("ONE CANDIDATE RETURNED DATA")
+
+
+# --- the probe refuses everything the loader refuses ---------------------------
+# Five review rounds arrived one refusal condition at a time (PR #198). This
+# table is the whole of the canonical loader's own fail-closed list, exercised
+# end-to-end through `probe_historical_field`, so a condition the loader
+# refuses can never again reach `build_verdict` as a working candidate.
+
+
+def _one_record(rows, **kwargs):
+    return _sender(_security_data(rows, **kwargs))
+
+
+def _two_records(first, second):
+    def _send(*, service_uri, request_name, configure, collect, context):
+        configure(_RecordingRequest())
+        collect(_Element(sub={"securityData": first}))
+        collect(_Element(sub={"securityData": second}))
+
+    return _send
+
+
+_LOADER_REFUSALS = {
+    "no securityData at all": (
+        lambda **kw: None,
+        "no securityData",
+    ),
+    "securityError": (
+        lambda: _one_record([], security_error="BAD_SEC"),
+        "securityError",
+    ),
+    "two different securities": (
+        lambda: _two_records(
+            _security_data([_row("2026-01-06", "4.0")], security="A Corp"),
+            _security_data([_row("2026-01-07", "4.1")], security="B Corp"),
+        ),
+        "different securities",
+    ),
+    "row with no date": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row(None, "4.1")]),
+        "no date",
+    ),
+    "malformed date": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row("06/01/2026", "4.1")]),
+        "strict YYYY-MM-DD",
+    ),
+    "date outside the requested window": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row("2026-03-09", "4.1")]),
+        "outside the requested window",
+    ),
+    "duplicate observation date": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row("2026-01-06", "4.1")]),
+        "duplicate observation",
+    ),
+    "non-finite value": (
+        lambda: _one_record([_row("2026-01-06", "4.0"), _row("2026-01-07", "nan")]),
+        "non-numeric or non-finite",
+    ),
+}
+
+
+@pytest.mark.parametrize("condition", sorted(_LOADER_REFUSALS))
+def test_every_loader_refusal_makes_the_candidate_unresolved(fake_blpapi, condition):
+    make_sender, expected_phrase = _LOADER_REFUSALS[condition]
+    sender = make_sender()
+    if sender is None:  # "no securityData at all": the message carries none
+
+        def sender(*, service_uri, request_name, configure, collect, context):
+            configure(_RecordingRequest())
+            collect(_Element(sub={}))
+
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=sender,
+    )
+
+    reason = unresolved_reason(evidence)
+    assert reason is not None, f"{condition} was not treated as unresolved"
+    assert expected_phrase in reason
+    # And it can never be endorsed, nor make a rival win by default.
+    assert build_verdict((evidence,)).startswith("INCONCLUSIVE")
+    rival = _evidence(_FIELD_B, count=250, valued=250)
+    assert build_verdict((evidence, rival)).startswith("INCONCLUSIVE")
+
+
+def test_a_well_formed_answer_is_not_caught_by_any_of_those(fake_blpapi):
+    """The counterpart: the table above must not refuse a loadable series."""
+
+    evidence, _ = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_one_record(
+            [_row("2026-01-06", "4.0"), _row("2026-01-07", _NULL), _row("2026-01-08", "4.4")]
+        ),
+    )
+
+    assert unresolved_reason(evidence) is None
+    assert build_verdict((evidence,)).startswith("ONE CANDIDATE RETURNED DATA")
