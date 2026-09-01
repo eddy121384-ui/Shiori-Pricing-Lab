@@ -352,6 +352,9 @@ from shiori_pricing_lab.data.bloomberg_bond_quote import (
     load_bloomberg_bond_identity_and_quote,
     parse_bond_identifier,
 )
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    load_bloomberg_bond_yield_history,
+)
 from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
     DEFAULT_USD_SOFR_TENORS,
     USD_SOFR_CURVE_ID,
@@ -418,6 +421,10 @@ _STATIC_FILES = {
     ),
     "/vol_surface_view.js": (
         "vol_surface_view.js",
+        "application/javascript; charset=utf-8",
+    ),
+    "/bond_yield_history_view.js": (
+        "bond_yield_history_view.js",
         "application/javascript; charset=utf-8",
     ),
 }
@@ -2344,6 +2351,77 @@ def fetch_usd_sofr_option_discount_curve() -> dict:
     }
 
 
+_BOND_YIELD_HISTORY_REQUIRED_KEYS = ("bond_identifier", "yield_field", "start_date", "end_date")
+
+
+def fetch_bloomberg_bond_yield_history(body: dict) -> dict:
+    """Load one bond's raw Bloomberg historical Yield series for the Markets view.
+
+    Reuses the existing bond-identity path -- :func:`parse_bond_identifier`
+    turns the trader's ISIN/CUSIP into the symbology-qualified request string,
+    exactly as :func:`lookup_bloomberg_bond` already does, so a yellow-key
+    ticker is never guessed here either -- and then calls the one canonical
+    loader :func:`load_bloomberg_bond_yield_history` exactly once.
+
+    ``yield_field`` is required in the request body and has no default
+    anywhere in this bridge: the mnemonic comes from the trader, who takes it
+    from workstation evidence (Issue #196 §A). This route never picks a field,
+    never substitutes one, and never falls back to another when a field
+    returns nothing.
+
+    Every observation is passed through exactly as the loader returned it,
+    including its raw Bloomberg value string and an explicit ``null`` for a
+    returned row that carried no value. Nothing is filled, interpolated,
+    rounded, resampled, or converted, and no Yield Change, standard
+    deviation, annualization, or volatility is computed here or anywhere
+    downstream of here in this issue.
+
+    Raises ``ValueError`` for a malformed request body or identifier, and
+    ``BLIBloombergDapiError`` for any Bloomberg-side failure -- never caught
+    or remapped here.
+    """
+
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    missing = [key for key in _BOND_YIELD_HISTORY_REQUIRED_KEYS if key not in body]
+    if missing:
+        raise ValueError(f"request body is missing {', '.join(missing)}")
+
+    _, bloomberg_identifier = parse_bond_identifier(body["bond_identifier"])
+    history = load_bloomberg_bond_yield_history(
+        identifier=bloomberg_identifier,
+        yield_field=body["yield_field"],
+        start_date=body["start_date"],
+        end_date=body["end_date"],
+    )
+    return {
+        "requested_identifier": history.requested_identifier,
+        "security": history.security,
+        "yield_field": history.yield_field,
+        "field_meaning": history.field_meaning,
+        "field_unit": history.field_unit,
+        "requested_start_date": history.requested_start_date.isoformat(),
+        "requested_end_date": history.requested_end_date.isoformat(),
+        "source_system": history.source_system,
+        "acquired_at": history.acquired_at,
+        "observation_count": len(history.observations),
+        "first_observation_date": (
+            history.observations[0].observation_date.isoformat() if history.observations else None
+        ),
+        "last_observation_date": (
+            history.observations[-1].observation_date.isoformat() if history.observations else None
+        ),
+        "observations": [
+            {
+                "date": observation.observation_date.isoformat(),
+                "yield_value": observation.yield_value,
+                "raw_value": observation.raw_value,
+            }
+            for observation in history.observations
+        ],
+    }
+
+
 _ADVANCED_PROFILE_REQUIRED_KEYS = (
     "convention_profile",
     "isin",
@@ -3033,6 +3111,33 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, payload)
 
+    def _handle_api_bloomberg_bond_yield_history(self, raw_body: bytes) -> None:
+        """Load one bond's raw historical Yield series. Reads Bloomberg; writes nothing.
+
+        A malformed body, identifier, field mnemonic or date range is HTTP
+        400 carrying the refusal verbatim. A Bloomberg-side failure -- an
+        unknown mnemonic, a duplicate observation date, a non-finite value --
+        is HTTP 502, never a repaired or partial series.
+        """
+
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        try:
+            payload = fetch_bloomberg_bond_yield_history(body)
+        except BLIBloombergDapiError as exc:
+            self._write_json(502, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._write_json(400, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._write_json(200, payload)
+
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
         try:
             body = json.loads(raw_body)
@@ -3215,6 +3320,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/bond/advanced-profile": _handle_api_bond_advanced_profile,
         "/api/bond/convention-profile/candidates": _handle_api_bond_profile_candidates,
         "/api/bloomberg/option-discount-curve": _handle_api_bloomberg_option_discount_curve,
+        "/api/bloomberg/bond-yield-history": _handle_api_bloomberg_bond_yield_history,
         "/api/vcub/atm/parse": _handle_api_vcub_atm_parse,
         "/api/vcub/atm/confirm": _handle_api_vcub_atm_confirm,
         "/api/vcub/atm/reject": _handle_api_vcub_atm_reject,

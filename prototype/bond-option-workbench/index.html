@@ -657,17 +657,19 @@
     <!-- ===================== MARKETS VIEW (Issue #167) ===================== -->
     <div class="main markets-view" id="view-markets" hidden>
 
-      <!-- Market-view selector (Issue #194): which market the Markets page is
-           showing. The Option Discount Curve panel below is unchanged; the
-           Swaption Vol Surface panel after it is the new read-only view. -->
+      <!-- Market-view selector (Issue #194, third tab added by Issue #196):
+           which market the Markets page is showing. Each tab carries the
+           panel it shows in data-market-view, so the selector switches any
+           number of panels without knowing what any of them contain. -->
       <section class="card markets-view-switch">
         <div class="markets-view-tabs" role="tablist" aria-label="Market view">
-          <button type="button" class="markets-view-tab is-active" id="markets-tab-curve" role="tab" aria-selected="true">Option Discount Curve</button>
-          <button type="button" class="markets-view-tab" id="markets-tab-vol-surface" role="tab" aria-selected="false">Swaption Vol Surface</button>
+          <button type="button" class="markets-view-tab is-active" id="markets-tab-curve" data-market-view="curve" role="tab" aria-selected="true">Option Discount Curve</button>
+          <button type="button" class="markets-view-tab" id="markets-tab-vol-surface" data-market-view="vol-surface" role="tab" aria-selected="false">Swaption Vol Surface</button>
+          <button type="button" class="markets-view-tab" id="markets-tab-yield-history" data-market-view="yield-history" role="tab" aria-selected="false">Bond Yield History</button>
         </div>
       </section>
 
-      <div class="markets-panel" id="markets-panel-curve">
+      <div class="markets-panel" id="markets-panel-curve" data-market-view="curve">
 
       <section class="card markets-header-card">
         <div class="markets-header-top">
@@ -739,7 +741,7 @@
            stored nodes as an interactive 3D surface. Nothing here captures,
            confirms, prices, or fetches Bloomberg, and the surface mesh is
            drawn locally with no charting library and no CDN. -->
-      <div class="markets-panel" id="markets-panel-vol-surface" hidden>
+      <div class="markets-panel" id="markets-panel-vol-surface" data-market-view="vol-surface" hidden>
 
         <section class="card markets-header-card">
           <div class="markets-header-top">
@@ -852,6 +854,120 @@
 
       </div>
       <!-- /#markets-panel-vol-surface -->
+
+      <!-- ===== Bond Yield History panel (Issue #196) =====
+           Read-only. Loads one bond's own raw Bloomberg historical Yield
+           series over an explicit date range and shows exactly those dated
+           observations, numerically and graphically. Nothing here prices,
+           stores, captures, or computes a volatility statistic; the Yield
+           field is typed by the trader from workstation evidence and has no
+           default anywhere. The chart is inline SVG with no charting
+           library and no CDN. -->
+      <div class="markets-panel" id="markets-panel-yield-history" data-market-view="yield-history" hidden>
+
+        <section class="card markets-header-card">
+          <div class="markets-header-top">
+            <div class="markets-title-block">
+              <div class="markets-title">Bond Yield History</div>
+              <div class="markets-meta">Raw Bloomberg observations only &mdash; no fill, no interpolation, no volatility statistic.</div>
+            </div>
+          </div>
+          <div class="byh-query">
+            <div class="byh-field">
+              <label class="byh-label" for="byh-identifier">Bond identifier (ISIN / CUSIP)</label>
+              <input class="control" id="byh-identifier" type="text" autocomplete="off" spellcheck="false" placeholder="12-char ISIN or 9-char CUSIP" />
+            </div>
+            <div class="byh-field">
+              <label class="byh-label" for="byh-yield-field">Bloomberg Yield field</label>
+              <input class="control" id="byh-yield-field" type="text" autocomplete="off" spellcheck="false" placeholder="confirmed mnemonic" />
+            </div>
+            <div class="byh-field byh-field-narrow">
+              <label class="byh-label" for="byh-start">Start date</label>
+              <input class="control" id="byh-start" type="date" />
+            </div>
+            <div class="byh-field byh-field-narrow">
+              <label class="byh-label" for="byh-end">End date</label>
+              <input class="control" id="byh-end" type="date" />
+            </div>
+            <span class="btn primary" id="byh-load-btn">Load</span>
+          </div>
+          <div class="byh-field-note">
+            The Yield field is not guessed and has no default: enter the mnemonic confirmed on the
+            Bloomberg workstation (<span class="mono">tools/bloomberg_bond_yield_field_probe.py</span>).
+          </div>
+          <div class="vol-surface-provenance" id="byh-provenance" hidden>
+            <div class="vsp-item"><span class="vsp-k">Requested</span><span class="vsp-v mono" id="byh-requested-identifier">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Bloomberg security</span><span class="vsp-v mono" id="byh-security">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Field</span><span class="vsp-v mono" id="byh-field-mnemonic">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Field meaning</span><span class="vsp-v" id="byh-field-meaning">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Unit</span><span class="vsp-v" id="byh-field-unit">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Source</span><span class="vsp-v" id="byh-source">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Requested range</span><span class="vsp-v" id="byh-requested-range">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Observations</span><span class="vsp-v" id="byh-observation-count">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">First observation</span><span class="vsp-v" id="byh-first-observation">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Last observation</span><span class="vsp-v" id="byh-last-observation">&mdash;</span></div>
+            <div class="vsp-item"><span class="vsp-k">Acquired at</span><span class="vsp-v" id="byh-acquired-at">&mdash;</span></div>
+          </div>
+        </section>
+
+        <section class="card markets-status" id="byh-loading" hidden>Loading the Bloomberg Yield history&hellip;</section>
+        <section class="card markets-status" id="byh-idle">
+          Enter a bond identifier, the confirmed Bloomberg Yield field and a date range, then press Load.
+        </section>
+        <section class="card markets-status" id="byh-empty" hidden>
+          Bloomberg returned no observations for this bond over this range. That is the answer, not a gap to fill &mdash; nothing has been substituted.
+        </section>
+        <section class="card markets-status markets-status-error" id="byh-error" hidden>
+          <div class="markets-error-title">Unable to load this Yield history</div>
+          <div class="markets-error-detail" id="byh-error-detail">&mdash;</div>
+        </section>
+
+        <section class="card markets-chart-card" id="byh-chart-card" hidden>
+          <div class="card-head">
+            <div class="card-title">Yield history</div>
+          </div>
+          <div class="card-body">
+            <div class="markets-chart-wrap">
+              <div class="markets-chart-ylabel" id="byh-chart-ylabel">Yield</div>
+              <div class="markets-chart-svg-wrap" id="byh-chart-svg-wrap"></div>
+            </div>
+            <div class="vol-surface-axis-note">
+              One point per returned observation, positioned by its own observation date. A date
+              Bloomberg did not answer for is a gap the line never bridges, and a returned row with
+              no value is drawn as no point at all &mdash; never as zero and never as the previous day's
+              number.
+            </div>
+          </div>
+        </section>
+
+        <section class="card markets-table-card" id="byh-table-card" hidden>
+          <div class="card-head">
+            <div class="card-title">Observations</div>
+            <div class="card-head-right">
+              <label class="byh-toggle"><input type="checkbox" id="byh-show-change" /> Show daily Yield change</label>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="markets-table-wrap">
+              <table class="markets-table" id="byh-table">
+                <thead>
+                  <tr><th>Date</th><th class="num">Yield</th><th class="num byh-change-col" hidden>&Delta; vs previous observation</th></tr>
+                </thead>
+                <tbody id="byh-table-body"></tbody>
+              </table>
+            </div>
+            <div class="byh-change-note" id="byh-change-note" hidden>
+              Display derivative only: each row's <span class="mono">Yield<sub>t</sub> &minus; Yield<sub>t&minus;1</sub></span>
+              against the <em>previous returned observation</em>, which is not necessarily the previous
+              calendar day. It is computed in this page for reading only, is never stored, and is not a
+              volatility statistic &mdash; no standard deviation and no annualization is calculated anywhere
+              in this view.
+            </div>
+          </div>
+        </section>
+
+      </div>
+      <!-- /#markets-panel-yield-history -->
 
     </div>
 
@@ -1052,5 +1168,6 @@
 <script src="vcub_capture.js"></script>
 <script src="vcub_otm_capture.js"></script>
 <script src="vol_surface_view.js"></script>
+<script src="bond_yield_history_view.js"></script>
 </body>
 </html>
