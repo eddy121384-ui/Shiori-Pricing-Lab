@@ -215,11 +215,22 @@ class _FakeService:
 
 
 class _FakeSession:
-    def __init__(self, options, *, start_result, open_service_result, events):
+    def __init__(
+        self,
+        options,
+        *,
+        start_result,
+        open_service_result,
+        events,
+        raise_on_send=None,
+        raise_on_next_event=None,
+    ):
         self.options = options
         self._start_result = start_result
         self._open_service_result = open_service_result
         self._events = list(events)
+        self._raise_on_send = raise_on_send
+        self._raise_on_next_event = raise_on_next_event
         self.stopped = False
         self.last_request = None
 
@@ -233,9 +244,12 @@ class _FakeSession:
         return _FakeService(self)
 
     def sendRequest(self, request):
-        pass
+        if self._raise_on_send is not None:
+            raise self._raise_on_send
 
     def nextEvent(self, timeout_ms):
+        if self._raise_on_next_event is not None:
+            raise self._raise_on_next_event
         if not self._events:
             raise AssertionError("fake session ran out of queued events")
         return self._events.pop(0)
@@ -255,7 +269,15 @@ class _FakeSessionOptions:
 _FIXED_ACQUISITION = datetime(2026, 8, 31, 14, 5, 0, tzinfo=UTC)
 
 
-def _install_fake_blpapi(monkeypatch, *, start_result=True, open_service_result=True, events=()):
+def _install_fake_blpapi(
+    monkeypatch,
+    *,
+    start_result=True,
+    open_service_result=True,
+    events=(),
+    raise_on_send=None,
+    raise_on_next_event=None,
+):
     holder: dict = {}
 
     def _session_factory(options):
@@ -264,6 +286,8 @@ def _install_fake_blpapi(monkeypatch, *, start_result=True, open_service_result=
             start_result=start_result,
             open_service_result=open_service_result,
             events=list(events),
+            raise_on_send=raise_on_send,
+            raise_on_next_event=raise_on_next_event,
         )
         holder["session"] = session
         return session
@@ -808,3 +832,61 @@ def test_the_loader_computes_no_statistic():
     body = source.split('"""', 2)[2]  # skip the module docstring, which names them to forbid them
     for forbidden in ("stdev", "std_dev", "stdlib.statistics", "annualiz", "sqrt", "variance"):
         assert forbidden not in body
+
+
+# --- a native blpapi failure is converted, never propagated -------------------
+# Two callers act on this module's promise that every Bloomberg-side failure is
+# a BLIBloombergDapiError: the workbench route answers one with HTTP 502, and
+# the acceptance CLI catches it to record a failed run rather than dying
+# (Codex review, PR #198).
+
+
+def test_a_native_failure_sending_the_request_becomes_the_loaders_own_error(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        raise_on_send=_FakeBlpapiException("connection lost after the service opened"),
+    )
+
+    with pytest.raises(BLIBloombergDapiError, match="failed during the historical bond Yield"):
+        _load()
+
+
+def test_a_native_failure_waiting_for_events_becomes_the_loaders_own_error(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        raise_on_next_event=_FakeBlpapiException("session terminated"),
+    )
+
+    with pytest.raises(BLIBloombergDapiError, match="failed during the historical bond Yield"):
+        _load()
+
+
+def test_the_session_is_still_stopped_after_a_native_failure(monkeypatch):
+    holder = _install_fake_blpapi(
+        monkeypatch, raise_on_send=_FakeBlpapiException("connection lost")
+    )
+
+    with pytest.raises(BLIBloombergDapiError):
+        _load()
+
+    assert holder["session"].stopped is True
+
+
+def test_the_native_cause_is_preserved_for_diagnosis(monkeypatch):
+    cause = _FakeBlpapiException("connection lost after the service opened")
+    _install_fake_blpapi(monkeypatch, raise_on_send=cause)
+
+    with pytest.raises(BLIBloombergDapiError) as raised:
+        _load()
+
+    assert raised.value.__cause__ is cause
+    assert "connection lost after the service opened" in str(raised.value)
+
+
+def test_a_deliberate_failure_is_not_rewrapped(monkeypatch):
+    """The explicit raises above are already the public type and pass through."""
+
+    _install_fake_blpapi(monkeypatch, events=_response(_security_data(security_error="BAD_SEC")))
+
+    with pytest.raises(BLIBloombergDapiError, match="securityError"):
+        _load()
