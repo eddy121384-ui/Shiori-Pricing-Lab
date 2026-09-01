@@ -292,17 +292,20 @@ def search_yield_field_catalogue(
     against a bond, and no hit is promoted into a historical request.
     """
 
-    # Broad on purpose, like every other pass here: a native blpapi failure in
-    # the catalogue search must cost the search and nothing else. This probe's
-    # value is surviving to report -- an exception escaping any pass would take
-    # the later passes and both report files with it (Codex review, PR #198).
+    # The guard covers this function's WHOLE body, not one call inside it.
+    # Introspection and the search requests are both native blpapi work, and
+    # `attempt_field_search` catches only RuntimeError/ImportError per attempt,
+    # so anything else it raises while configuring, sending or collecting would
+    # escape. Guarding one call and leaving its neighbour outside is how this
+    # kept coming back (Codex review rounds 8-10, PR #198): the invariant is
+    # per *pass*, so the try has to be too.
     try:
         apiflds = discover_service(_APIFLDS_SERVICE)
+        if not apiflds.opened:
+            return (), sanitize_external_text(apiflds.open_error or "//blp/apiflds did not open")
+        return attempt_field_search(apiflds, search_terms), None
     except Exception as exc:  # noqa: BLE001
         return (), sanitize_external_text(f"{type(exc).__name__}: {exc}")
-    if not apiflds.opened:
-        return (), sanitize_external_text(apiflds.open_error or "//blp/apiflds did not open")
-    return attempt_field_search(apiflds, search_terms), None
 
 
 def probe_historical_field(
