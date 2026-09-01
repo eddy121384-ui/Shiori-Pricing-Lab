@@ -506,19 +506,25 @@ def unresolved_reason(evidence: HistoricalFieldEvidence) -> str | None:
             "returned a securityError, which says nothing about this mnemonic -- the "
             "security is shared by every candidate -- and which the loader aborts on"
         )
-    # Checked ahead of the `empty` early-out: "no securityData at all" and "a
-    # securityData record holding no rows" both look empty from outside, but
-    # the loader raises on the first and returns an empty series for the
-    # second (Codex review, PR #198).
+    # --- envelope conditions: true of the response as a whole -----------------
+    # These run ahead of the `empty` early-out below, because they hold whether
+    # or not any row came back. "No securityData at all" and "a securityData
+    # record holding no rows" look alike from outside, but the loader raises on
+    # the first and returns an empty series for the second; and a response
+    # naming two securities is refused by `_resolved_security` regardless of
+    # whether either record carried rows (Codex review, PR #198).
     if evidence.security_data_record_count == 0:
         return "returned no securityData at all; the loader refuses that response"
-    if evidence.status != "returned":
-        return None
     if evidence.distinct_securities > 1:
         return (
             f"answered for {evidence.distinct_securities} different securities; the "
-            "loader refuses an envelope that is not about the one security requested"
+            "loader refuses an envelope that is not about the one security requested, "
+            "whether or not it carried any rows"
         )
+
+    # --- row conditions: only an answer that returned rows can show these -----
+    if evidence.status != "returned":
+        return None
     if evidence.duplicate_observation_dates:
         return (
             f"returned {evidence.duplicate_observation_dates} duplicate observation "
