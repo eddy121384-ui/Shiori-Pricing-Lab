@@ -48,7 +48,17 @@ mechanical verdict line:
 - two or more did -> ``AMBIGUOUS``. Issue #196's stop condition 1 applies:
   stop and report the ambiguity to Eddy/Sophira rather than choosing the
   closest-looking series. This probe will not choose for you, and neither
-  will the loader.
+  will the loader;
+- any candidate's request never reached Bloomberg -> ``INCONCLUSIVE``. A
+  field that was not asked has not been ruled out, so the ones that did
+  answer are not a result.
+
+"Usable" here means what the workbench means by it. A row counts only when it
+carries a value the production loader would actually accept: this module
+imports that loader's own ``_parse_finite_float`` rather than restating its
+rule, so a field answering with sentinel text, ``NaN``, or a suffixed number
+can never be reported as a usable series for a workbench that would refuse
+every one of those values.
 
 Nothing about a field's *economic meaning* -- which Yield definition it is,
 its unit, its quote/source semantics -- is inferred here from a mnemonic or
@@ -89,6 +99,18 @@ from bloomberg_dapi_probe import FieldDescription, _send_request, describe_field
 from bloomberg_input_sourcing_probe import (
     sanitize_external_text,
     sanitize_field_documentation_text,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+# The production loader's own value rule, imported rather than restated: a
+# candidate this probe calls usable must be one the workbench can actually
+# load, and the only way to guarantee that is for both to apply the same
+# function (Codex review, PR #198).
+from shiori_pricing_lab.data.bloomberg_bond_quote import (  # noqa: E402
+    BLIBloombergDapiError,
+    _parse_finite_float,
 )
 
 _APIFLDS_SERVICE = "//blp/apiflds"
@@ -148,6 +170,12 @@ class HistoricalFieldEvidence:
     # PR #198).
     observations_with_a_value: int = 0
     rows_with_no_value: int = 0
+    # Bloomberg returned something here, and the production loader would refuse
+    # it -- sentinel text, NaN, a number with a suffix. Counted apart from
+    # `rows_with_no_value` because it means something different to the
+    # operator: not "no data on this date" but "this field does not answer in
+    # numbers the workbench can load".
+    rows_with_an_unusable_value: int = 0
     first_observation_date: str | None = None
     last_observation_date: str | None = None
     value_datatype: str | None = None
@@ -279,6 +307,7 @@ def probe_historical_field(
     dates: list[str] = []
     rows_with_no_value = 0
     observations_with_a_value = 0
+    rows_with_an_unusable_value = 0
     value_datatype: str | None = None
     sample: list[tuple[str, str]] = []
 
@@ -335,6 +364,14 @@ def probe_historical_field(
             if not raw_value.strip():
                 rows_with_no_value += 1
                 continue
+            # A value the canonical loader would refuse is not evidence that
+            # this field carries a usable Yield series, however many rows came
+            # back with one.
+            try:
+                _parse_finite_float(raw_value, field)
+            except BLIBloombergDapiError:
+                rows_with_an_unusable_value += 1
+                continue
             observations_with_a_value += 1
             if len(sample) < sample_rows:
                 sample.append((observation_date, raw_value))
@@ -347,6 +384,7 @@ def probe_historical_field(
             observation_count=len(ordered),
             observations_with_a_value=observations_with_a_value,
             rows_with_no_value=rows_with_no_value,
+            rows_with_an_unusable_value=rows_with_an_unusable_value,
             first_observation_date=ordered[0] if ordered else None,
             last_observation_date=ordered[-1] if ordered else None,
             value_datatype=value_datatype,
@@ -526,6 +564,7 @@ def build_report(report: YieldFieldProbeReport) -> dict:
                 "observation_count": evidence.observation_count,
                 "observations_with_a_value": evidence.observations_with_a_value,
                 "rows_with_no_value": evidence.rows_with_no_value,
+                "rows_with_an_unusable_value": evidence.rows_with_an_unusable_value,
                 "first_observation_date": evidence.first_observation_date,
                 "last_observation_date": evidence.last_observation_date,
                 "value_datatype": evidence.value_datatype,
@@ -592,8 +631,9 @@ def render_markdown(data: dict) -> str:
     lines += [
         "## 3. Historical availability (one HistoricalDataRequest per candidate)",
         "",
-        "| Field | Status | Rows | Valued obs | Rows w/o value | First | Last | Value datatype |",
-        "| --- | --- | ---: | ---: | ---: | --- | --- | --- |",
+        "| Field | Status | Rows | Valued obs | Rows w/o value | Unusable values | First | "
+        "Last | Value datatype |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
     ]
     for evidence in data["historical_availability"]:
         lines.append(
@@ -601,6 +641,7 @@ def render_markdown(data: dict) -> str:
             f"{evidence['observation_count']} | "
             f"{evidence['observations_with_a_value']} | "
             f"{evidence['rows_with_no_value']} | "
+            f"{evidence['rows_with_an_unusable_value']} | "
             f"{evidence['first_observation_date'] or '-'} | "
             f"{evidence['last_observation_date'] or '-'} | "
             f"{evidence['value_datatype'] or '-'} |"
@@ -728,6 +769,7 @@ def main(argv: list[str] | None = None) -> int:
             f"rows={evidence['observation_count']} "
             f"valued_obs={evidence['observations_with_a_value']} "
             f"no_value_rows={evidence['rows_with_no_value']} "
+            f"unusable_values={evidence['rows_with_an_unusable_value']} "
             f"first={evidence['first_observation_date']} "
             f"last={evidence['last_observation_date']} "
             f"datatype={evidence['value_datatype']}"
