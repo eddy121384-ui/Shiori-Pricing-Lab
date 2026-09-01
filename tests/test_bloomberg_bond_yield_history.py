@@ -54,14 +54,33 @@ class _FakeBlpapiExceptionNamespace:
 
 
 class _FakeElement:
-    def __init__(self, sub_elements=None, values=None, string_value=None, raise_on_value=None):
+    def __init__(
+        self,
+        sub_elements=None,
+        values=None,
+        string_value=None,
+        raise_on_value=None,
+        is_null=False,
+    ):
         self._sub = sub_elements or {}
         self._values = values
         self._string_value = string_value
         self._raise_on_value = raise_on_value
+        self._is_null = is_null
 
-    def hasElement(self, name):
-        return name in self._sub
+    def isNull(self):
+        return self._is_null
+
+    def hasElement(self, name, exclude_null_elements=False):
+        """Mirrors ``blpapi.Element.hasElement``'s own two-argument signature.
+
+        A *null* element is present under the default call and excluded only
+        when asked -- which is exactly the distinction the loader depends on.
+        """
+
+        if name not in self._sub:
+            return False
+        return not (exclude_null_elements and self._sub[name].isNull())
 
     def getElement(self, name):
         return self._sub[name]
@@ -84,7 +103,17 @@ class _FakeElement:
         return self._string_value or "<element>"
 
 
+# Bloomberg's own null element: present, reported null, and raising when read
+# as a string -- which is how NIL_VALUE arrives on a day with no observation.
+_NULL = object()
+
+
 def _leaf(value) -> _FakeElement:
+    if value is _NULL:
+        return _FakeElement(
+            is_null=True,
+            raise_on_value=_FakeBlpapiException("cannot convert a null element to a string"),
+        )
     if isinstance(value, BaseException):
         return _FakeElement(raise_on_value=value)
     return _FakeElement(string_value=value)
@@ -477,6 +506,48 @@ def test_missing_dates_remain_missing(monkeypatch):
         date(2026, 1, 9),
     ]
     assert len(history.observations) == 2
+
+
+def test_a_bloomberg_null_value_is_a_visible_hole_not_a_failed_series(monkeypatch):
+    """The NIL_VALUE case: present, null, and unreadable as a string.
+
+    A bare ``hasElement`` reports such an element as present, so reading it
+    would raise and abort the whole series -- on precisely the row this loader
+    exists to preserve (Codex review, PR #198).
+    """
+
+    _install_fake_blpapi(
+        monkeypatch,
+        events=_rows_response(
+            [
+                _row("2026-01-06", "4.0"),
+                _row("2026-01-07", _NULL),
+                _row("2026-01-08", "4.4"),
+            ]
+        ),
+    )
+
+    history = _load()
+
+    assert [o.observation_date for o in history.observations] == [
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+    ]
+    assert [o.yield_value for o in history.observations] == [4.0, None, 4.4]
+    assert [o.raw_value for o in history.observations] == ["4.0", None, "4.4"]
+
+
+def test_a_series_that_is_entirely_bloomberg_nulls_is_all_holes(monkeypatch):
+    _install_fake_blpapi(
+        monkeypatch,
+        events=_rows_response([_row("2026-01-06", _NULL), _row("2026-01-07", _NULL)]),
+    )
+
+    history = _load()
+
+    assert len(history.observations) == 2
+    assert all(o.yield_value is None and o.raw_value is None for o in history.observations)
 
 
 @pytest.mark.parametrize("blank", ["", "   "])

@@ -57,8 +57,13 @@ def test_accepts_a_well_formed_mnemonic():
 # --- the verdict never chooses ------------------------------------------------
 
 
-def _evidence(field, *, status="returned", count=0):
-    return HistoricalFieldEvidence(field=field, status=status, observation_count=count)
+def _evidence(field, *, status="returned", count=0, valued=None):
+    return HistoricalFieldEvidence(
+        field=field,
+        status=status,
+        observation_count=count,
+        observations_with_a_value=count if valued is None else valued,
+    )
 
 
 def test_two_usable_candidates_are_reported_as_ambiguous_never_resolved():
@@ -109,14 +114,22 @@ def fake_blpapi(monkeypatch):
 
 
 class _Element:
-    def __init__(self, sub=None, values=None, text=None, datatype=None):
+    def __init__(self, sub=None, values=None, text=None, datatype=None, is_null=False):
         self._sub = sub or {}
         self._values = values
         self._text = text
         self._datatype = datatype
+        self._is_null = is_null
 
-    def hasElement(self, name):
-        return name in self._sub
+    def isNull(self):
+        return self._is_null
+
+    def hasElement(self, name, exclude_null_elements=False):
+        """Mirrors ``blpapi.Element.hasElement``'s own two-argument signature."""
+
+        if name not in self._sub:
+            return False
+        return not (exclude_null_elements and self._sub[name].isNull())
 
     def getElement(self, name):
         return self._sub[name]
@@ -137,11 +150,33 @@ class _Element:
         return self._text or "<element>"
 
 
+# Bloomberg's own null element: present, reported null, and raising when read
+# as a string -- which is how NIL_VALUE arrives on a day with no observation.
+_NULL = object()
+
+
+class _NullValueElement(_Element):
+    def __init__(self):
+        super().__init__(is_null=True, datatype="FLOAT64")
+
+
 def _row(observation_date, value=None):
     sub = {"date": _Element(text=observation_date)}
-    if value is not None:
+    if value is _NULL:
+        sub[_FIELD_A] = _NullValueElement()
+    elif value is not None:
         sub[_FIELD_A] = _Element(text=value, datatype="FLOAT64")
-    return _Element(sub=sub)
+    return _RaisingOnNullRow(sub=sub)
+
+
+class _RaisingOnNullRow(_Element):
+    """A row whose string read of a null element raises, exactly as blpapi's does."""
+
+    def getElementAsString(self, name):
+        element = self._sub[name]
+        if element.isNull():
+            raise _FakeBlpapiException("cannot convert a null element to a string")
+        return element._text
 
 
 def _security_data(
@@ -224,6 +259,7 @@ def test_reports_shape_and_keeps_the_value_sample_separate(fake_blpapi):
 
     assert evidence.status == "returned"
     assert evidence.observation_count == 4
+    assert evidence.observations_with_a_value == 3
     assert evidence.rows_with_no_value == 1
     # First/last are the range's own bounds, not the response's arrival order.
     assert evidence.first_observation_date == "2026-01-06"
@@ -376,3 +412,84 @@ def test_a_missing_blpapi_is_reported_rather_than_raised(monkeypatch):
     assert evidence.status == "error"
     assert "blpapi is not installed" in evidence.detail
     assert sample == ()
+
+
+def test_a_candidate_that_never_reached_bloomberg_stops_the_verdict(monkeypatch):
+    """A field that was never asked has not been ruled out (Codex review, PR #198).
+
+    Without this, a transient session failure on one candidate would let the
+    other one be reported as "the one that returned data" -- promoting a
+    mnemonic against an opponent Bloomberg never answered for.
+    """
+
+    verdict = build_verdict(
+        (_evidence(_FIELD_A, count=250), _evidence(_FIELD_B, status="error"))
+    )
+
+    assert verdict.startswith("INCONCLUSIVE")
+    assert _FIELD_B in verdict
+    assert "has not been ruled out" in verdict
+    assert "ONE CANDIDATE" not in verdict
+
+
+def test_an_unprobed_candidate_stops_an_ambiguous_verdict_too(monkeypatch):
+    verdict = build_verdict(
+        (
+            _evidence(_FIELD_A, count=250),
+            _evidence(_FIELD_B, count=250),
+            _evidence("SYNTHETIC_TEST_YIELD_C", status="error"),
+        )
+    )
+
+    assert verdict.startswith("INCONCLUSIVE")
+    assert "AMBIGUOUS" not in verdict
+
+
+def test_rows_carrying_no_value_are_not_a_usable_series():
+    """A field that answers with dated rows but no Yield has supplied no Yield."""
+
+    verdict = build_verdict((_evidence(_FIELD_A, count=250, valued=0),))
+
+    assert verdict.startswith("NO USABLE SERIES")
+    assert "Do not pick one anyway" in verdict
+
+
+def test_a_valueless_candidate_never_makes_a_comparison_ambiguous():
+    verdict = build_verdict(
+        (_evidence(_FIELD_A, count=250, valued=250), _evidence(_FIELD_B, count=250, valued=0))
+    )
+
+    assert verdict.startswith("ONE CANDIDATE RETURNED DATA")
+    assert _FIELD_A in verdict
+    assert "250 observations carrying a value" in verdict
+
+
+def test_a_bloomberg_null_row_is_counted_as_a_hole_not_a_crash(fake_blpapi):
+    """A bare hasElement reports a null element present, and reading it raises.
+
+    In the probe that would abort the whole run and lose every other
+    candidate's evidence with it (Codex review, PR #198).
+    """
+
+    evidence, sample = probe_historical_field(
+        field=_FIELD_A,
+        identifier=_IDENTIFIER,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 31),
+        sample_rows=5,
+        send_request=_sender(
+            _security_data(
+                [
+                    _row("2026-01-06", "4.0"),
+                    _row("2026-01-07", _NULL),
+                    _row("2026-01-08", "4.4"),
+                ]
+            )
+        ),
+    )
+
+    assert evidence.status == "returned"
+    assert evidence.observation_count == 3
+    assert evidence.observations_with_a_value == 2
+    assert evidence.rows_with_no_value == 1
+    assert sample == (("2026-01-06", "4.0"), ("2026-01-08", "4.4"))

@@ -23,6 +23,11 @@ so you can check a handful of dates against the Terminal or Excel by eye;
 that sample is deliberately not written to disk, so running this inside a
 repository checkout cannot leave proprietary Bloomberg values behind.
 
+That rule covers failures too. A loader message can quote the value it
+refused -- ``_parse_finite_float`` names the non-numeric or non-finite value
+it rejected -- so the report records only the *class* of the failure, and
+the message itself goes to the console alone (Codex review, PR #198).
+
 Nothing here prices, stores, or wires anything: no VCUB store, no vol
 resolver, no PRICE_VOL/YIELD_VOL, no Forward, no Discounting. It reads one
 series and reports it.
@@ -83,7 +88,12 @@ class AcceptanceReport:
     end_date: str
     status: str  # "loaded" | "error"
     history: BloombergBondYieldHistory | None
+    # `error` is the loader's own message, printed to the console only. It can
+    # quote the offending Bloomberg value verbatim -- `_parse_finite_float`
+    # names the value it refused -- so only `error_kind`, the exception class
+    # name, is ever written to a report file (Codex review, PR #198).
     error: str | None
+    error_kind: str | None
 
 
 def _parse_iso_date_argument(value: str, name: str) -> date:
@@ -127,6 +137,7 @@ def run_acceptance(
             status="error",
             history=None,
             error=f"{type(exc).__name__}: {exc}",
+            error_kind=type(exc).__name__,
         )
 
     return AcceptanceReport(
@@ -140,6 +151,7 @@ def run_acceptance(
         status="loaded",
         history=history,
         error=None,
+        error_kind=None,
     )
 
 
@@ -154,7 +166,17 @@ def build_report(report: AcceptanceReport) -> dict:
         "issue": 196,
         "generated_at": report.generated_at,
         "status": report.status,
-        "error": report.error,
+        # The class of failure, never the loader's message: a refused value is
+        # named in that message, and this record must not put it on disk.
+        "error_kind": report.error_kind,
+        "error_detail_note": (
+            None
+            if report.error_kind is None
+            else (
+                "The full loader message was printed to the console only -- it can quote "
+                "the Bloomberg value it refused, which this record does not persist."
+            )
+        ),
         "requested_identifier": report.requested_identifier,
         "identifier_kind": report.identifier_kind,
         "bloomberg_identifier": report.bloomberg_identifier,
@@ -176,8 +198,9 @@ def build_report(report: AcceptanceReport) -> dict:
         "source_system": history.source_system if history else None,
         "acquired_at": history.acquired_at if history else None,
         "values_note": (
-            "This record deliberately carries no Bloomberg value. Only counts, dates "
-            "and provenance are recorded."
+            "This record deliberately carries no Bloomberg value. Only counts, dates, "
+            "provenance and the class of any failure are recorded -- never a loader "
+            "message, which can quote the value it refused."
         ),
     }
 
@@ -189,8 +212,11 @@ def render_markdown(data: dict) -> str:
         f"- Generated at: {data['generated_at']}",
         f"- Status: {data['status']}",
     ]
-    if data["error"]:
-        lines += [f"- Error: {data['error']}"]
+    if data["error_kind"]:
+        lines += [
+            f"- Error: {data['error_kind']}",
+            f"- {data['error_detail_note']}",
+        ]
     lines += [
         f"- Requested identifier: {data['requested_identifier']} "
         f"({data['identifier_kind']}) -> {data['bloomberg_identifier']}",
@@ -319,8 +345,10 @@ def main(argv: list[str] | None = None) -> int:
     markdown_path, json_path = write_report(data, output_dir)
 
     print(f"Status: {data['status']}")
-    if data["error"]:
-        print(f"error: {data['error']}", file=sys.stderr)
+    # The full message goes to the console, where the operator needs it, and
+    # nowhere else -- the written reports carry only its class.
+    if report.error:
+        print(f"error: {report.error}", file=sys.stderr)
     print(f"Resolved security: {data['resolved_security']}")
     print(
         f"Observations: {data['observation_count']} "
