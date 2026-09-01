@@ -48,3 +48,11 @@ Thumbs.db
 
 # Local Bloomberg probe evidence (tools/bloomberg_input_sourcing_probe.py)
 /shiori_probe_output/
+
+# Local Bloomberg historical bond-Yield evidence (Issue #196):
+# tools/bloomberg_bond_yield_field_probe.py and
+# tools/bloomberg_bond_yield_history_acceptance.py write their reports here.
+# The reports carry no Bloomberg values by construction, but the directories
+# are runtime workstation evidence and are never committed.
+/shiori_bond_yield_field_probe_output/
+/shiori_bond_yield_history_acceptance_output/

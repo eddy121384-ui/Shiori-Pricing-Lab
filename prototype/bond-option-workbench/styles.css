@@ -927,3 +927,23 @@ select.control:focus { border-color: var(--blue); }
 /* An intersection the capture left unresolved. Stored as "unread", shown as
    unread -- never zero, never interpolated from its neighbours. */
 .vol-surface-table td.unresolved { color: var(--muted-2); }
+
+/* ===== Markets -> Bond Yield History (Issue #196) ===================== */
+
+.byh-query {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+  margin-top: 12px;
+}
+.byh-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 200px; min-width: 0; }
+.byh-field-narrow { flex: 0 0 160px; }
+.byh-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted);
+}
+/* The Yield field is typed from workstation evidence, never defaulted -- this
+   note stays visible whether or not a series has been loaded. */
+.byh-field-note { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.byh-toggle { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.byh-change-note { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.byh-chart-empty { font-size: 12.5px; color: var(--muted-2); padding: 18px 0; }
+.markets-chart-svg-wrap .byh-dot { fill: var(--chart-line); }
