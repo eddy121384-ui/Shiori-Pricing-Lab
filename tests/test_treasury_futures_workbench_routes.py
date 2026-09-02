@@ -25,8 +25,8 @@ from collections.abc import Iterator
 
 import pytest
 from test_treasury_futures_ctd import (
+    ACTIVE_ZN,
     DELIVERY_ZN,
-    GENERIC_ZN,
     _install_fake_blpapi,
     _two_stage_responder,
 )
@@ -138,14 +138,14 @@ def test_the_automatic_ctd_route_returns_a_confirmed_live_record(
     _install_fake_blpapi(monkeypatch, _two_stage_responder())
     status, payload = _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
     assert status == 200
-    assert payload["contract_symbol"] == "TYU6"
-    assert payload["ctd_identifier"] == "US91282CQT17"
-    assert payload["conversion_factor"] == 0.9069
-    assert payload["last_delivery_date"] == "2026-09-30"
+    assert payload["contract_symbol"] == "TYZ6"
+    assert payload["ctd_identifier"] == "US91282CRJ26"
+    assert payload["conversion_factor"] == 0.9202
+    assert payload["last_delivery_date"] == "2026-12-31"
     assert payload["source"] == "BLOOMBERG_DAPI"
     assert payload["is_confirmed_source"] is True
     # Display extras ride along, never as the identifier.
-    assert payload["ctd_cusip"] == "91282CQT1"
+    assert payload["ctd_cusip"] == "91282CRJ2"
 
 
 def test_a_bloomberg_sourced_conversion_fetches_the_ctd_server_side(
@@ -161,8 +161,8 @@ def test_a_bloomberg_sourced_conversion_fetches_the_ctd_server_side(
     # Confirmed because the server just fetched it, not because a client said so.
     assert payload["ctd"]["is_confirmed_source"] is True
     assert payload["ctd"]["source"] == "BLOOMBERG_DAPI"
-    assert payload["ctd"]["ctd_identifier"] == "US91282CQT17"
-    assert [security for security, _ in harness["requests"]] == [GENERIC_ZN, DELIVERY_ZN]
+    assert payload["ctd"]["ctd_identifier"] == "US91282CRJ26"
+    assert [security for security, _ in harness["requests"]] == [ACTIVE_ZN, DELIVERY_ZN]
 
 
 def test_a_client_can_never_assert_a_confirmed_source_on_a_conversion(
@@ -202,8 +202,8 @@ def test_a_bloomberg_sourced_conversion_never_reads_a_ctd_from_the_request(
     )
     assert status == 200
     # The request's own CTD is ignored entirely.
-    assert payload["ctd"]["conversion_factor"] == 0.9069
-    assert payload["ctd"]["ctd_identifier"] == "US91282CQT17"
+    assert payload["ctd"]["conversion_factor"] == 0.9202
+    assert payload["ctd"]["ctd_identifier"] == "US91282CRJ26"
 
 
 def test_a_bloomberg_sourced_conversion_needs_a_contract_code(server_url: str) -> None:
@@ -257,7 +257,7 @@ def test_a_bloomberg_response_missing_a_required_field_is_reported_not_patched(
     server_url: str, monkeypatch
 ) -> None:
     _install_fake_blpapi(
-        monkeypatch, _two_stage_responder(stage_two_fields={"FUT_CTD_ISIN": "US91282CQT17"})
+        monkeypatch, _two_stage_responder(stage_two_fields={"FUT_CTD_ISIN": "US91282CRJ26"})
     )
     status, payload = _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
     assert status == 502
@@ -270,7 +270,7 @@ def test_the_route_asks_bloomberg_for_the_contract_the_caller_named(
 ) -> None:
     harness = _install_fake_blpapi(monkeypatch, _two_stage_responder())
     _post(f"{server_url}/api/treasury-futures/ctd", {"contract_code": "ZN"})
-    assert [security for security, _ in harness["requests"]] == [GENERIC_ZN, DELIVERY_ZN]
+    assert [security for security, _ in harness["requests"]] == [ACTIVE_ZN, DELIVERY_ZN]
 
 
 def test_the_automatic_ctd_route_rejects_an_unsupported_contract(server_url: str) -> None:

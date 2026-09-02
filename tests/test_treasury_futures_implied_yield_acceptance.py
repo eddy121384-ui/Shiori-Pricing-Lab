@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 from test_treasury_futures_ctd import (
+    ACTIVE_ZN,
     DELIVERY_ZN,
-    GENERIC_ZN,
     _install_fake_blpapi,
     _two_stage_responder,
 )
@@ -72,14 +72,14 @@ def test_every_ctd_input_the_benchmark_needs_is_printed(monkeypatch, capsys) -> 
     module.main(["--price", "ZN=112-165"])
     output = capsys.readouterr().out
     for fragment in (
-        "TYU6",                # contract symbol
-        "US91282CQT17",        # CTD ISIN
-        "91282CQT1",           # CTD CUSIP
-        "T 4.25 05/31/33",     # CTD description
-        "4.25",                # coupon
-        "2033-05-31",          # maturity
-        "0.9069",              # conversion factor
-        "2026-09-30",          # last delivery / settlement
+        "TYZ6",                # contract symbol
+        "US91282CRJ26",        # CTD ISIN
+        "91282CRJ2",           # CTD CUSIP
+        "T 4.5 08/31/33",      # CTD description
+        "4.5",                 # coupon
+        "2033-08-31",          # maturity
+        "0.9202",              # conversion factor
+        "2026-12-31",          # last delivery / settlement
         "BLOOMBERG_DAPI",      # source
     ):
         assert fragment in output, fragment
@@ -106,7 +106,7 @@ def test_the_internal_round_trips_are_reported_and_pass(monkeypatch, capsys) -> 
 def test_it_uses_the_confirmed_two_stage_lookup(monkeypatch, capsys) -> None:
     harness = _install_fake_blpapi(monkeypatch, _two_stage_responder())
     module.main(["--price", "ZN=112-165"])
-    assert [security for security, _ in harness["requests"]] == [GENERIC_ZN, DELIVERY_ZN]
+    assert [security for security, _ in harness["requests"]] == [ACTIVE_ZN, DELIVERY_ZN]
 
 
 def test_an_off_tick_price_is_reported_as_off_tick_not_silently_rounded(
@@ -163,7 +163,7 @@ def test_a_contract_that_fails_still_lets_the_others_report(monkeypatch, capsys)
     one -- the exit code carries the failure, the output carries the rest."""
 
     def _respond(security):
-        if security in (GENERIC_ZN, DELIVERY_ZN):
+        if security in (ACTIVE_ZN, DELIVERY_ZN):
             return _two_stage_responder()(security)
         raise RuntimeError(f"no fake response for {security!r}")
 

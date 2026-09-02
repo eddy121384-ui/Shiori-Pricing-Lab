@@ -12,9 +12,10 @@ resolved -- so the default candidate list below is empty, exactly as
 
 Confirmed and wired into ``data/treasury_futures_ctd.BLOOMBERG_CTD_FIELD_MAP``:
 
-- ``FUT_CUR_GEN_TICKER`` -> ``contract_symbol``, resolving the generic front
-  contract to the actual delivery month (``TU1 Comdty`` -> ``TUU6``,
-  ``FV1`` -> ``FVU6``, ``TY1`` -> ``TYU6``, ``US1`` -> ``USU6``).
+- ``PARSEKYABLE_DES`` -> ``contract_symbol``, resolving the desk-active
+  contract alias to the actual delivery month (``TUA Comdty`` -> ``TUZ6``,
+  ``FVA`` -> ``FVZ6``, ``TYA`` -> ``TYZ6``, ``USA`` -> ``USZ6``), carrying the
+  yellow key the stage-two request already prices on.
 - ``FUT_CTD_ISIN`` -> ``ctd_identifier`` (the canonical identifier).
 - ``FUT_CTD_CPN`` -> ``ctd_coupon_percent``.
 - ``FUT_CTD_MTY`` -> ``ctd_maturity_date``.
@@ -69,7 +70,7 @@ from shiori_pricing_lab.data.treasury_futures_ctd import (
     BLOOMBERG_CTD_DISPLAY_FIELD_MAP,
     BLOOMBERG_CTD_FIELD_MAP,
     REQUIRED_BLOOMBERG_CTD_FIELDS,
-    bloomberg_generic_front_contract,
+    bloomberg_active_contract,
     unresolved_bloomberg_ctd_fields,
 )
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
@@ -85,14 +86,14 @@ _CANDIDATE_CTD_FIELDS: dict[str, str] = {}
 
 
 def default_security(contract_code: str) -> str:
-    """Bloomberg generic front-contract ticker for one supported contract code.
+    """Bloomberg desk-active contract alias for one supported contract code.
 
-    Defers to `data/treasury_futures_ctd`'s own confirmed root table rather
-    than keeping a second copy: the roots are production data now, and two
+    Defers to `data/treasury_futures_ctd`'s own confirmed alias table rather
+    than keeping a second copy: the aliases are production data now, and two
     copies could disagree about which contract this probe is reporting on.
     """
 
-    return bloomberg_generic_front_contract(contract_code)
+    return bloomberg_active_contract(contract_code)
 
 
 def _print_field_dictionary(fields: list[str]) -> None:

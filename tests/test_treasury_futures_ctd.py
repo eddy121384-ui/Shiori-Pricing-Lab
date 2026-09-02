@@ -38,8 +38,8 @@ from shiori_pricing_lab.data.treasury_futures_ctd import (
     TreasuryFuturesCTDBloombergError,
     TreasuryFuturesCTDError,
     TreasuryFuturesCTDSource,
+    bloomberg_active_contract,
     bloomberg_delivery_month_security,
-    bloomberg_generic_front_contract,
     load_bloomberg_ctd_metadata,
     treasury_futures_ctd_from_manual_entry,
     unresolved_bloomberg_ctd_fields,
@@ -47,49 +47,49 @@ from shiori_pricing_lab.data.treasury_futures_ctd import (
 
 VALID_ENTRY = {
     "contract_code": "ZN",
-    "contract_symbol": "TYU6",
-    "ctd_identifier": "US91282CQT17",
-    "ctd_coupon_percent": 4.25,
-    "ctd_maturity_date": "2033-05-31",
-    "conversion_factor": 0.9069,
-    "last_delivery_date": "2026-09-30",
-    "as_of": "2026-08-25T14:00:00Z",
+    "contract_symbol": "TYZ6",
+    "ctd_identifier": "US91282CRJ26",
+    "ctd_coupon_percent": 4.5,
+    "ctd_maturity_date": "2033-08-31",
+    "conversion_factor": 0.9202,
+    "last_delivery_date": "2026-12-31",
+    "as_of": "2026-09-01T14:00:00Z",
 }
 
 # The shape Eddy's live ZN run returned, as raw Bloomberg strings.
 LIVE_ZN_STAGE_TWO = {
-    "FUT_CTD_ISIN": "US91282CQT17",
-    "FUT_CTD_CUSIP": "91282CQT1",
-    "FUT_CTD_TICKER": "T 4.25 05/31/33",
-    "FUT_CTD_CPN": "4.250000",
-    "FUT_CTD_MTY": "2033-05-31",
-    "FUT_CNVS_FACTOR": "0.906900",
-    "FUT_DLV_DT_LAST": "2026-09-30",
+    "FUT_CTD_ISIN": "US91282CRJ26",
+    "FUT_CTD_CUSIP": "91282CRJ2",
+    "FUT_CTD_TICKER": "T 4.5 08/31/33",
+    "FUT_CTD_CPN": "4.500000",
+    "FUT_CTD_MTY": "2033-08-31",
+    "FUT_CNVS_FACTOR": "0.920200",
+    "FUT_DLV_DT_LAST": "2026-12-31",
 }
-GENERIC_ZN = "TY1 Comdty"
-DELIVERY_ZN = "TYU6 Comdty"
+ACTIVE_ZN = "TYA Comdty"
+DELIVERY_ZN = "TYZ6 Comdty"
 
 # All four contracts as Eddy's live run returned them, keyed by contract code.
 # Pinned as literals: these are real confirmed records, and the
 # remaining-maturity guard must never reject one of them.
 LIVE_STAGE_TWO: dict[str, dict[str, str]] = {
     "ZT": {
-        "FUT_CTD_ISIN": "US91282CHK09",
-        "FUT_CTD_CUSIP": "91282CHK0",
-        "FUT_CTD_TICKER": "T 4 06/30/28",
-        "FUT_CTD_CPN": "4.000000",
-        "FUT_CTD_MTY": "2028-06-30",
-        "FUT_CNVS_FACTOR": "0.967200",
-        "FUT_DLV_DT_LAST": "2026-10-05",
+        "FUT_CTD_ISIN": "US91282CJA09",
+        "FUT_CTD_CUSIP": "91282CJA0",
+        "FUT_CTD_TICKER": "T 4.625 09/30/28",
+        "FUT_CTD_CPN": "4.625000",
+        "FUT_CTD_MTY": "2028-09-30",
+        "FUT_CNVS_FACTOR": "0.977400",
+        "FUT_DLV_DT_LAST": "2027-01-06",
     },
     "ZF": {
-        "FUT_CTD_ISIN": "US91282CPN55",
-        "FUT_CTD_CUSIP": "91282CPN5",
-        "FUT_CTD_TICKER": "T 3.5 11/30/30",
+        "FUT_CTD_ISIN": "US91282CQD64",
+        "FUT_CTD_CUSIP": "91282CQD6",
+        "FUT_CTD_TICKER": "T 3.5 02/28/31",
         "FUT_CTD_CPN": "3.500000",
-        "FUT_CTD_MTY": "2030-11-30",
+        "FUT_CTD_MTY": "2031-02-28",
         "FUT_CNVS_FACTOR": "0.909000",
-        "FUT_DLV_DT_LAST": "2026-10-05",
+        "FUT_DLV_DT_LAST": "2027-01-06",
     },
     "ZN": dict(LIVE_ZN_STAGE_TWO),
     "ZB": {
@@ -98,11 +98,11 @@ LIVE_STAGE_TWO: dict[str, dict[str, str]] = {
         "FUT_CTD_TICKER": "T 5 05/15/45",
         "FUT_CTD_CPN": "5.000000",
         "FUT_CTD_MTY": "2045-05-15",
-        "FUT_CNVS_FACTOR": "0.889200",
-        "FUT_DLV_DT_LAST": "2026-09-30",
+        "FUT_CNVS_FACTOR": "0.889900",
+        "FUT_DLV_DT_LAST": "2026-12-31",
     },
 }
-LIVE_DELIVERY_SYMBOL = {"ZT": "TUU6", "ZF": "FVU6", "ZN": "TYU6", "ZB": "USU6"}
+LIVE_DELIVERY_SYMBOL = {"ZT": "TUZ6", "ZF": "FVZ6", "ZN": "TYZ6", "ZB": "USZ6"}
 
 
 # ---------------------------------------------------------------------------
@@ -274,16 +274,16 @@ def _install_fake_blpapi(monkeypatch, responder, *, start_result=True, open_serv
 
 
 def _two_stage_responder(
-    *, generic_fields=None, stage_two_fields=None, generic=GENERIC_ZN, delivery=DELIVERY_ZN
+    *, active_fields=None, stage_two_fields=None, active=ACTIVE_ZN, delivery=DELIVERY_ZN
 ):
-    generic_fields = (
-        {"FUT_CUR_GEN_TICKER": "TYU6"} if generic_fields is None else generic_fields
+    active_fields = (
+        {"PARSEKYABLE_DES": "TYZ6 Comdty"} if active_fields is None else active_fields
     )
     stage_two_fields = dict(LIVE_ZN_STAGE_TWO) if stage_two_fields is None else stage_two_fields
 
     def _respond(security):
-        if security == generic:
-            return _response_event([_security_data(security, generic_fields)])
+        if security == active:
+            return _response_event([_security_data(security, active_fields)])
         if security == delivery:
             return _response_event([_security_data(security, stage_two_fields)])
         raise AssertionError(f"unexpected security requested: {security!r}")
@@ -305,13 +305,13 @@ def test_the_confirmed_mnemonics_are_exactly_the_ones_eddy_verified() -> None:
     # active contracts. Re-pointing one is a market-data change, not a
     # refactor, and must fail here first.
     assert BLOOMBERG_CTD_FIELD_MAP == {
-        "contract_symbol": "FUT_CUR_GEN_TICKER",
-        "ctd_identifier": "FUT_CTD_ISIN",
-        "ctd_coupon_percent": "FUT_CTD_CPN",
-        "ctd_maturity_date": "FUT_CTD_MTY",
-        "conversion_factor": "FUT_CNVS_FACTOR",
-        "last_delivery_date": "FUT_DLV_DT_LAST",
-    }
+            "contract_symbol": "PARSEKYABLE_DES",
+            "ctd_identifier": "FUT_CTD_ISIN",
+            "ctd_coupon_percent": "FUT_CTD_CPN",
+            "ctd_maturity_date": "FUT_CTD_MTY",
+            "conversion_factor": "FUT_CNVS_FACTOR",
+            "last_delivery_date": "FUT_DLV_DT_LAST",
+        }
 
 
 def test_cusip_and_ticker_are_display_only_never_the_identifier() -> None:
@@ -325,30 +325,48 @@ def test_cusip_and_ticker_are_display_only_never_the_identifier() -> None:
     assert not set(BLOOMBERG_CTD_DISPLAY_FIELD_MAP) & set(REQUIRED_BLOOMBERG_CTD_FIELDS)
 
 
-def test_the_confirmed_ticker_roots_cover_the_four_mvp_contracts() -> None:
-    assert BLOOMBERG_FUTURES_TICKER_ROOTS == {"ZT": "TU", "ZF": "FV", "ZN": "TY", "ZB": "US"}
+def test_the_confirmed_active_aliases_cover_the_four_mvp_contracts() -> None:
+    assert module.BLOOMBERG_FUTURES_ACTIVE_ALIASES == {
+        "ZT": "TUA",
+        "ZF": "FVA",
+        "ZN": "TYA",
+        "ZB": "USA",
+    }
+    # The delivery-month roots are unchanged: the active alias (TYA) is not the
+    # delivery symbol the resolved month starts with (TYZ6 -> TY).
+    assert BLOOMBERG_FUTURES_TICKER_ROOTS == {
+        "ZT": "TU",
+        "ZF": "FV",
+        "ZN": "TY",
+        "ZB": "US",
+    }
 
 
 @pytest.mark.parametrize(
     "contract_code, expected",
-    [("ZT", "TU1 Comdty"), ("ZF", "FV1 Comdty"), ("ZN", "TY1 Comdty"), ("ZB", "US1 Comdty")],
+    [
+        ("ZT", "TUA Comdty"),
+        ("ZF", "FVA Comdty"),
+        ("ZN", "TYA Comdty"),
+        ("ZB", "USA Comdty"),
+    ],
 )
-def test_stage_one_asks_the_generic_front_contract(contract_code, expected) -> None:
-    assert bloomberg_generic_front_contract(contract_code) == expected
+def test_stage_one_asks_the_desk_active_contract_alias(contract_code, expected) -> None:
+    assert bloomberg_active_contract(contract_code) == expected
 
 
-def test_an_unsupported_contract_has_no_generic_ticker() -> None:
+def test_an_unsupported_contract_has_no_active_alias() -> None:
     with pytest.raises(TreasuryFuturesCTDError):
-        bloomberg_generic_front_contract("ZQ")
+        bloomberg_active_contract("ZQ")
 
 
 @pytest.mark.parametrize(
     "symbol, expected",
     [
-        ("TUU6", "TUU6 Comdty"),
-        ("FVU6", "FVU6 Comdty"),
-        ("TYU6 Comdty", "TYU6 Comdty"),  # already qualified, never doubled
-        ("  USU6  ", "USU6 Comdty"),
+        ("TYZ6", "TYZ6 Comdty"),
+        ("FVZ6", "FVZ6 Comdty"),
+        ("TYZ6 Comdty", "TYZ6 Comdty"),  # already qualified, never doubled
+        ("  USZ6  ", "USZ6 Comdty"),
     ],
 )
 def test_stage_two_qualifies_the_delivery_month_without_doubling(symbol, expected) -> None:
@@ -356,6 +374,118 @@ def test_stage_two_qualifies_the_delivery_month_without_doubling(symbol, expecte
 
 
 # ---------------------------------------------------------------------------
+# Active-contract resolution regression (PR #191: the September 2026 roll)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "contract_code, alias, resolved",
+    [
+        ("ZT", "TUA", "TUZ6"),
+        ("ZF", "FVA", "FVZ6"),
+        ("ZN", "TYA", "TYZ6"),
+        ("ZB", "USA", "USZ6"),
+    ],
+)
+def test_the_active_alias_resolves_to_the_december_contract(
+    monkeypatch, contract_code, alias, resolved
+) -> None:
+    """The four desk-active aliases are the only authority for the active contract.
+
+    UAT during the September 2026 roll showed the generic continuation #1
+    (``TY1``) still answered ``FUT_CUR_GEN_TICKER`` with the old September
+    delivery month (``TYU6``) while ``TYA`` already resolved to December
+    (``TYZ6``). Each active alias must resolve to its own December contract.
+    """
+
+    fields = dict(LIVE_STAGE_TWO[contract_code])
+    _install_fake_blpapi(
+        monkeypatch,
+        _two_stage_responder(
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
+            stage_two_fields=fields,
+            active=f"{alias} Comdty",
+            delivery=f"{resolved} Comdty",
+        ),
+    )
+    ctd = load_bloomberg_ctd_metadata(contract_code)
+    assert ctd.contract_symbol == resolved
+    assert ctd.contract_code == contract_code
+
+
+def test_stage_one_resolves_the_active_alias_not_the_generic_front_contract(
+    monkeypatch,
+) -> None:
+    """During roll the desk-active alias must win over generic continuation #1.
+
+    UAT showed ``TY1`` still answered ``FUT_CUR_GEN_TICKER`` with the old
+    September delivery month (``TYU6``) while ``TYA`` already resolved to
+    December (``TYZ6``). The resolver must ask the active alias, so the
+    resolved symbol is the December contract, not the stale September one.
+    """
+
+    harness = _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    ctd = load_bloomberg_ctd_metadata("ZN")
+    # Stage one must request the active alias ``TYA Comdty`` -- never ``TY1``.
+    assert harness["requests"][0][0] == "TYA Comdty"
+    # And it resolves to the December delivery month, not the stale September one.
+    assert ctd.contract_symbol == "TYZ6"
+    assert ctd.contract_symbol != "TYU6"
+
+
+@pytest.mark.parametrize(
+    "active_fields",
+    [
+        {},                                          # missing entirely
+        {"PARSEKYABLE_DES": ""},                     # blank
+        {"PARSEKYABLE_DES": "GARBAGE Comdty"},       # wrong root
+        {"PARSEKYABLE_DES": "TYZ Comdty"},           # no year digits
+        {"PARSEKYABLE_DES": "FVZ6 Comdty"},          # a different contract's delivery month
+    ],
+)
+def test_a_missing_malformed_or_wrong_root_active_alias_fails_closed(
+    monkeypatch, active_fields
+) -> None:
+    """A bad active-alias response fails closed -- there is no fallback.
+
+    The old generic continuation #1 must never be consulted as a fallback: a
+    fallback to generic #1 could silently select the old delivery contract
+    during roll, which is exactly the production bug being fixed.
+    """
+
+    _install_fake_blpapi(
+        monkeypatch, _two_stage_responder(active_fields=active_fields)
+    )
+    with pytest.raises(TreasuryFuturesCTDBloombergError):
+        load_bloomberg_ctd_metadata("ZN")
+
+
+def test_there_is_no_generic_continuation_fallback_anywhere_in_the_module() -> None:
+    """The generic continuation #1 mnemonic and suffix must be gone.
+
+    ``FUT_CUR_GEN_TICKER`` and the ``1`` suffix were the exact authority that
+    went stale during roll. Their removal is asserted so a future edit cannot
+    silently reintroduce the old resolver as a fallback.
+    """
+
+    assert "FUT_CUR_GEN_TICKER" not in BLOOMBERG_CTD_FIELD_MAP.values()
+    assert not hasattr(module, "BLOOMBERG_GENERIC_CONTRACT_FIELD")
+    assert not hasattr(module, "BLOOMBERG_GENERIC_FRONT_CONTRACT_SUFFIX")
+
+
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF"])
+def test_the_december_ctds_cross_year_last_delivery_passes(monkeypatch, contract_code) -> None:
+    """ZT/ZF December contracts last deliver in January of the following year.
+
+    The confirmed December CTDs last deliver ``2027-01-06``, a month after the
+    December delivery month, and must pass the cross-year last-delivery and
+    remaining-maturity guards without the delivery year being mis-resolved.
+    """
+
+    ctd = _load_with(monkeypatch, contract_code)
+    assert ctd.last_delivery_date == date(2027, 1, 6)
+    assert ctd.ctd_identifier == LIVE_STAGE_TWO[contract_code]["FUT_CTD_ISIN"]
+
 # The live two-stage lookup
 # ---------------------------------------------------------------------------
 
@@ -365,32 +495,32 @@ def test_a_successful_two_stage_load_returns_a_confirmed_record(monkeypatch) -> 
     ctd = load_bloomberg_ctd_metadata("ZN")
 
     assert ctd.contract_code == "ZN"
-    assert ctd.contract_symbol == "TYU6"
-    assert ctd.ctd_identifier == "US91282CQT17"
-    assert ctd.ctd_coupon_percent == 4.25
-    assert ctd.ctd_maturity_date == date(2033, 5, 31)
-    assert ctd.conversion_factor == 0.9069
-    assert ctd.last_delivery_date == date(2026, 9, 30)
+    assert ctd.contract_symbol == "TYZ6"
+    assert ctd.ctd_identifier == "US91282CRJ26"
+    assert ctd.ctd_coupon_percent == 4.5
+    assert ctd.ctd_maturity_date == date(2033, 8, 31)
+    assert ctd.conversion_factor == 0.9202
+    assert ctd.last_delivery_date == date(2026, 12, 31)
     assert ctd.source is TreasuryFuturesCTDSource.BLOOMBERG_DAPI
     assert ctd.is_confirmed_source is True
     # Display extras carried, never used as the identifier.
-    assert ctd.ctd_cusip == "91282CQT1"
-    assert ctd.ctd_description == "T 4.25 05/31/33"
+    assert ctd.ctd_cusip == "91282CRJ2"
+    assert ctd.ctd_description == "T 4.5 08/31/33"
 
 
 def test_the_two_stages_ask_the_right_securities_for_the_right_fields(monkeypatch) -> None:
     harness = _install_fake_blpapi(monkeypatch, _two_stage_responder())
     load_bloomberg_ctd_metadata("ZN")
 
-    assert [security for security, _ in harness["requests"]] == [GENERIC_ZN, DELIVERY_ZN]
-    generic_fields = harness["requests"][0][1]
+    assert [security for security, _ in harness["requests"]] == [ACTIVE_ZN, DELIVERY_ZN]
+    active_fields = harness["requests"][0][1]
     delivery_fields = harness["requests"][1][1]
     # Stage one asks for exactly the resolver field -- nothing else.
-    assert generic_fields == ["FUT_CUR_GEN_TICKER"]
+    assert active_fields == ["PARSEKYABLE_DES"]
     # Stage two asks for every required CTD field plus the display extras,
     # and never re-asks for the resolver.
     assert set(delivery_fields) == set(LIVE_ZN_STAGE_TWO)
-    assert "FUT_CUR_GEN_TICKER" not in delivery_fields
+    assert "PARSEKYABLE_DES" not in delivery_fields
     # No field is requested twice in one call.
     assert len(delivery_fields) == len(set(delivery_fields))
 
@@ -434,12 +564,12 @@ def test_blpapi_not_installed_is_reported_as_a_workstation_prerequisite(monkeypa
     assert "blpapi is not installed" in str(exc.value)
 
 
-@pytest.mark.parametrize("generic_fields", [{}, {"FUT_CUR_GEN_TICKER": ""}])
-def test_a_missing_delivery_month_fails_closed(monkeypatch, generic_fields) -> None:
-    _install_fake_blpapi(monkeypatch, _two_stage_responder(generic_fields=generic_fields))
+@pytest.mark.parametrize("active_fields", [{}, {"PARSEKYABLE_DES": ""}])
+def test_a_missing_delivery_month_fails_closed(monkeypatch, active_fields) -> None:
+    _install_fake_blpapi(monkeypatch, _two_stage_responder(active_fields=active_fields))
     with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
         load_bloomberg_ctd_metadata("ZN")
-    assert "FUT_CUR_GEN_TICKER" in str(exc.value)
+    assert "PARSEKYABLE_DES" in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -517,7 +647,7 @@ def test_an_identifier_that_is_not_a_valid_us_isin_is_refused(
 
 @pytest.mark.parametrize(
     "live_isin",
-    ["US91282CHK09", "US91282CPN55", "US91282CQT17", "US912810UL07"],
+    ["US91282CJA09", "US91282CQD64", "US91282CRJ26", "US912810UL07"],
 )
 def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_isin) -> None:
     """The guard against getting the ISO 6166 parity backwards.
@@ -537,13 +667,13 @@ def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_
 @pytest.mark.parametrize(
     "resolved",
     [
-        "USU6",     # a different contract's delivery month entirely
-        "FVU6",
+        "USZ6",     # a different contract's delivery month entirely
+        "FVZ6",
         "GARBAGE",
         "TY6",      # no delivery-month letter
-        "TYU",      # no year digits
+        "TYZ",      # no year digits
         "TY",       # bare root
-        "TYUX",     # non-numeric year
+        "TYZX",     # non-numeric year
         # Codex review, PR #191: standard futures months these contracts do
         # not list. The full twelve-month alphabet admitted these.
         "TYF7",     # January
@@ -554,13 +684,13 @@ def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_
         # An unbounded run of year digits is a malformed answer, not a wider
         # contract. Left unbounded it makes the delivery year unresolvable and
         # the load raises a bare ValueError instead of failing closed.
-        "TYU202699",
+        "TYZ202699",
     ],
 )
 def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, resolved) -> None:
     """Codex review, PR #191 (P1).
 
-    Stage one asks `TY1 Comdty` which delivery month it is. Any other answer
+    Stage one asks `TYA Comdty` which delivery month it is. Any other answer
     would send stage two to a different contract, whose perfectly valid CTD
     would come back labelled ZN -- so pricing would apply ZN's quote
     convention to another contract's CTD metadata.
@@ -569,7 +699,7 @@ def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, res
     _install_fake_blpapi(
         monkeypatch,
         _two_stage_responder(
-            generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
             delivery=f"{resolved} Comdty",
         ),
     )
@@ -582,25 +712,19 @@ def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, res
     "contract_code, resolved, maturity, last_delivery",
     [
         # The four Eddy's live run returned, with their own real CTDs.
-        ("ZT", "TUU6", "2028-06-30", "2026-10-05"),
-        ("ZF", "FVU6", "2030-11-30", "2026-10-05"),
-        ("ZN", "TYU6", "2033-05-31", "2026-09-30"),
-        ("ZB", "USU6", "2045-05-15", "2026-09-30"),
+        ("ZT", "TUZ6", "2028-09-30", "2027-01-06"),
+        ("ZF", "FVZ6", "2031-02-28", "2027-01-06"),
+        ("ZN", "TYZ6", "2033-08-31", "2026-12-31"),
+        ("ZB", "USZ6", "2045-05-15", "2026-12-31"),
         # The rest of the quarterly cycle these contracts list, so the guard
         # cannot be narrowed to the one month the live run happened to be in.
         # Each maturity is hand-computed to sit inside that month's window.
         ("ZN", "TYH7", "2034-05-15", "2027-03-31"),  # ref 2027-03-01
         ("ZN", "TYM7", "2034-05-15", "2027-06-30"),  # ref 2027-06-01
-        ("ZN", "TYZ6", "2034-05-15", "2026-12-31"),  # ref 2026-12-01
         ("ZB", "USH7", "2045-05-15", "2027-03-31"),  # ref 2027-03-01
-        # A Z contract whose last delivery day falls in *January of the next
-        # year*: the delivery month is still 2026-12, so the year digit must be
-        # resolved against the nearest matching year, not read off the last
-        # delivery date's year.
-        ("ZT", "TUZ6", "2028-10-31", "2027-01-05"),  # ref 2026-12-01
         # Bloomberg's two-digit year convention, so the digit-count cap that
         # keeps the year resolvable cannot be tightened to one digit only.
-        ("ZN", "TYU26", "2033-05-31", "2026-09-30"),  # ref 2026-09-01
+        ("ZN", "TYZ26", "2033-08-31", "2026-12-31"),  # ref 2026-12-01
     ],
 )
 def test_each_contracts_own_delivery_month_is_accepted(
@@ -614,9 +738,9 @@ def test_each_contracts_own_delivery_month_is_accepted(
     _install_fake_blpapi(
         monkeypatch,
         _two_stage_responder(
-            generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
             stage_two_fields=fields,
-            generic=bloomberg_generic_front_contract(contract_code),
+            active=bloomberg_active_contract(contract_code),
             delivery=f"{resolved} Comdty",
         ),
     )
@@ -637,9 +761,9 @@ def _load_with(monkeypatch, contract_code, *, symbol=None, stage_two=None):
     _install_fake_blpapi(
         monkeypatch,
         _two_stage_responder(
-            generic_fields={"FUT_CUR_GEN_TICKER": resolved},
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
             stage_two_fields=dict(stage_two or LIVE_STAGE_TWO[contract_code]),
-            generic=bloomberg_generic_front_contract(contract_code),
+            active=bloomberg_active_contract(contract_code),
             delivery=f"{resolved} Comdty",
         ),
     )
@@ -664,22 +788,22 @@ def test_every_confirmed_live_ctd_passes_the_remaining_maturity_guard(
 
 @pytest.mark.parametrize(
     "contract_code, last_delivery_month",
-    [("ZT", 10), ("ZF", 10)],
+    [("ZT", 1), ("ZF", 1)],
 )
 def test_the_window_is_measured_from_the_delivery_month_not_the_last_delivery_day(
     monkeypatch, contract_code, last_delivery_month
 ) -> None:
     """The heart of Eddy's methodology decision (Issue #190).
 
-    ZT and ZF deliver in September but their last delivery day falls in
-    October. Measuring the window from `FUT_DLV_DT_LAST` therefore shifts it a
-    month later and rejects both of these real CTDs. Measured from the first
-    day of the delivery month the symbol names, both load.
+    ZT and ZF deliver in December but their last delivery day falls in the
+    following January. Measuring the window from `FUT_DLV_DT_LAST` therefore
+    shifts it a month later and rejects both of these real CTDs. Measured
+    from the first day of the delivery month the symbol names, both load.
     """
 
     live = LIVE_STAGE_TWO[contract_code]
     assert date.fromisoformat(live["FUT_DLV_DT_LAST"]).month == last_delivery_month
-    assert LIVE_DELIVERY_SYMBOL[contract_code][2] == "U"  # September delivery
+    assert LIVE_DELIVERY_SYMBOL[contract_code][2] == "Z"  # December delivery
 
     ctd = _load_with(monkeypatch, contract_code)
     assert ctd.ctd_identifier == live["FUT_CTD_ISIN"]
@@ -688,7 +812,7 @@ def test_the_window_is_measured_from_the_delivery_month_not_the_last_delivery_da
 def test_the_codex_counterexample_fails_closed(monkeypatch) -> None:
     """Codex review, PR #191 (P1).
 
-    A ZN/`TYU6` request answered with the confirmed ZB CTD: checksum-valid
+    A ZN/`TYZ6` request answered with the confirmed ZB CTD: checksum-valid
     identifier, sane numbers, delivery before maturity. Every other guard
     passes it, and it would have been stamped as a confirmed ZN record and
     priced on ZN's 1/64 tick.
@@ -699,7 +823,7 @@ def test_the_codex_counterexample_fails_closed(monkeypatch) -> None:
     message = str(exc.value)
     assert "2045-05-15" in message
     assert "ZN's remaining-maturity window" in message
-    assert "2026-09-01" in message  # first day of the TYU6 delivery month
+    assert "2026-12-01" in message  # first day of the TYZ6 delivery month
 
 
 @pytest.mark.parametrize("requested", ["ZT", "ZF", "ZN", "ZB"])
@@ -730,15 +854,15 @@ def test_cross_substituted_live_ctds_fail_closed(monkeypatch, requested, donor) 
 @pytest.mark.parametrize(
     "last_delivery",
     [
-        # Codex review, PR #191 (P2). `TYU6` delivers in September 2026, so a
+        # Codex review, PR #191 (P2). `TYZ6` delivers in December 2026, so a
         # last delivery day years away contradicts the symbol. Resolving the
         # decade by nearest match alone silently guessed one:
-        "2031-09-30",  # exactly between 2026 and 2036 -- was resolved to 2036
-        "2030-09-30",  # not a tie at all -- was resolved to 2026
-        "2021-09-30",
+        "2031-12-31",  # exactly between 2026 and 2036 -- was resolved to 2036
+        "2030-12-31",  # not a tie at all -- was resolved to 2026
+        "2021-12-31",
         # Still before the CTD's maturity, so the delivery-before-maturity
         # check cannot be what refuses it -- this is the decade check firing.
-        "2029-09-30",
+        "2029-12-31",
     ],
 )
 def test_a_last_delivery_day_that_contradicts_the_delivery_month_fails_closed(
@@ -766,24 +890,24 @@ def test_a_last_delivery_day_that_contradicts_the_delivery_month_fails_closed(
         # month is an incoherent response -- and `last_delivery_date` is the
         # settlement date the yield is computed on, so accepting one a month
         # late silently moves the answer.
-        ("ZN", "2026-08-31", False),  # the day before the delivery month opens
-        ("ZN", "2026-09-01", True),  # the first day of the delivery month
-        ("ZN", "2026-09-30", True),  # the last day of the delivery month
-        ("ZN", "2026-10-01", False),  # into the following month -- not ZN's
-        ("ZB", "2026-09-30", True),
-        ("ZB", "2026-10-01", False),
+        ("ZN", "2026-11-30", False),  # the day before the delivery month opens
+        ("ZN", "2026-12-01", True),  # the first day of the delivery month
+        ("ZN", "2026-12-31", True),  # the last day of the delivery month
+        ("ZN", "2027-01-01", False),  # into the following month -- not ZN's
+        ("ZB", "2026-12-31", True),
+        ("ZB", "2027-01-01", False),
         # ZT and ZF last deliver a few business days after the delivery
         # month's last business day, so their date is always in the *following*
         # month -- never in the delivery month itself.
-        ("ZT", "2026-08-31", False),
-        ("ZT", "2026-09-01", False),  # the delivery month is not ZT's
-        ("ZT", "2026-09-30", False),
-        ("ZT", "2026-10-01", True),
-        ("ZT", "2026-10-05", True),  # the confirmed live value
-        ("ZT", "2026-11-01", False),  # two whole months out
-        ("ZF", "2026-09-01", False),
-        ("ZF", "2026-10-05", True),
-        ("ZF", "2026-11-01", False),
+        ("ZT", "2026-11-30", False),
+        ("ZT", "2026-12-01", False),  # the delivery month is not ZT's
+        ("ZT", "2026-12-31", False),
+        ("ZT", "2027-01-01", True),
+        ("ZT", "2027-01-06", True),  # the confirmed live value
+        ("ZT", "2027-02-01", False),  # two whole months out
+        ("ZF", "2026-12-01", False),
+        ("ZF", "2027-01-06", True),
+        ("ZF", "2027-02-01", False),
     ],
 )
 def test_the_accepted_last_delivery_span_is_contract_specific(
@@ -812,9 +936,9 @@ def test_every_live_description_is_kept_because_it_agrees(monkeypatch, contract_
 @pytest.mark.parametrize(
     "description",
     [
-        "T 4.5 05/31/33",  # coupon disagrees with FUT_CTD_CPN
-        "T 4.25 05/31/34",  # year disagrees with FUT_CTD_MTY
-        "T 4.25 06/30/33",  # month and day disagree
+        "T 4.625 08/31/33",  # coupon disagrees with FUT_CTD_CPN
+        "T 4.5 08/31/34",  # year disagrees with FUT_CTD_MTY
+        "T 4.5 09/30/33",  # month and day disagree
         "T 5 05/15/45",  # the confirmed ZB description against ZN's fields
         "#N/A N/A",  # a sentinel, not a description
         "GARBAGE",
@@ -839,9 +963,9 @@ def test_a_description_that_contradicts_the_priced_fields_is_dropped(
     fields = dict(LIVE_STAGE_TWO["ZN"], FUT_CTD_TICKER=description)
     ctd = _load_with(monkeypatch, "ZN", stage_two=fields)
     assert ctd.ctd_description is None
-    assert ctd.ctd_identifier == "US91282CQT17"  # the priced record is unaffected
-    assert ctd.ctd_coupon_percent == 4.25
-    assert ctd.ctd_maturity_date == date(2033, 5, 31)
+    assert ctd.ctd_identifier == "US91282CRJ26"  # the priced record is unaffected
+    assert ctd.ctd_coupon_percent == 4.5
+    assert ctd.ctd_maturity_date == date(2033, 8, 31)
 
 
 @pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
@@ -859,9 +983,9 @@ def test_the_live_cusip_and_isin_name_the_same_bond(contract_code) -> None:
 @pytest.mark.parametrize(
     "cusip",
     [
-        "91282CQT2",  # one character off -- a different security
+        "91282CRJ3",  # one character off -- a different security
         "912810UL0",  # the confirmed ZB CUSIP against ZN's ISIN
-        "91282CQT",  # truncated
+        "91282CRJ",  # truncated
         "#N/A N/A",
     ],
 )
@@ -888,7 +1012,7 @@ def test_a_missing_cusip_is_still_fine_only_a_contradictory_one_is_refused(
 
     fields = dict(LIVE_STAGE_TWO["ZN"], FUT_CTD_CUSIP=cusip)
     ctd = _load_with(monkeypatch, "ZN", stage_two=fields)
-    assert ctd.ctd_identifier == "US91282CQT17"
+    assert ctd.ctd_identifier == "US91282CRJ26"
 
 
 def test_a_wrong_day_in_the_right_month_is_still_accepted(monkeypatch) -> None:
@@ -904,9 +1028,9 @@ def test_a_wrong_day_in_the_right_month_is_still_accepted(monkeypatch) -> None:
     flip to asserting a refusal.
     """
 
-    fields = dict(LIVE_STAGE_TWO["ZT"], FUT_DLV_DT_LAST="2026-10-31")
+    fields = dict(LIVE_STAGE_TWO["ZT"], FUT_DLV_DT_LAST="2027-01-31")
     ctd = _load_with(monkeypatch, "ZT", stage_two=fields)
-    assert ctd.last_delivery_date == date(2026, 10, 31)  # not the real 2026-10-05
+    assert ctd.last_delivery_date == date(2027, 1, 31)  # not the real 2027-01-06
 
 
 def test_every_confirmed_live_last_delivery_day_sits_inside_its_contracts_span() -> None:
@@ -920,19 +1044,19 @@ def test_every_confirmed_live_last_delivery_day_sits_inside_its_contracts_span()
     for contract_code, symbol in LIVE_DELIVERY_SYMBOL.items():
         last_delivery = date.fromisoformat(LIVE_STAGE_TWO[contract_code]["FUT_DLV_DT_LAST"])
         reference = module._delivery_month_first_day(symbol, contract_code, last_delivery)
-        assert reference == date(2026, 9, 1)
-        expected_month = 9 if contract_code in {"ZN", "ZB"} else 10
+        assert reference == date(2026, 12, 1)
+        expected_month = 12 if contract_code in {"ZN", "ZB"} else 1
         assert last_delivery.month == expected_month
 
 
 @pytest.mark.parametrize(
     "contract_code, maturity, accepted",
     [
-        # ZN/TYU6, reference 2026-09-01, window [2033-03-01, 2036-09-01].
-        ("ZN", "2033-02-28", False),  # one day below the lower bound
-        ("ZN", "2033-03-01", True),  # exactly the lower bound, inclusive
-        ("ZN", "2036-09-01", True),  # exactly the upper bound, inclusive
-        ("ZN", "2036-09-02", False),  # one day above the upper bound
+        # ZN/TYZ6, reference 2026-12-01, window [2033-06-01, 2036-12-01].
+        ("ZN", "2033-05-31", False),  # one day below the lower bound
+        ("ZN", "2033-06-01", True),  # exactly the lower bound, inclusive
+        ("ZN", "2036-12-01", True),  # exactly the upper bound, inclusive
+        ("ZN", "2036-12-02", False),  # one day above the upper bound
     ],
 )
 def test_zn_window_boundaries_measured_from_the_first_of_the_delivery_month(
@@ -949,11 +1073,11 @@ def test_zn_window_boundaries_measured_from_the_first_of_the_delivery_month(
 @pytest.mark.parametrize(
     "maturity, accepted",
     [
-        # ZB/USU6, reference 2026-09-01, window [2041-09-01, 2051-09-01).
-        ("2041-08-31", False),  # one day below the lower bound
-        ("2041-09-01", True),  # exactly the lower bound, inclusive
-        ("2051-08-31", True),  # last day inside the exclusive upper bound
-        ("2051-09-01", False),  # exactly 25 years -- excluded
+        # ZB/USZ6, reference 2026-12-01, window [2041-12-01, 2051-12-01).
+        ("2041-11-30", False),  # one day below the lower bound
+        ("2041-12-01", True),  # exactly the lower bound, inclusive
+        ("2051-11-30", True),  # last day inside the exclusive upper bound
+        ("2051-12-01", False),  # exactly 25 years -- excluded
     ],
 )
 def test_zb_upper_bound_is_exclusive_at_twenty_five_years(
@@ -977,7 +1101,7 @@ def test_a_display_only_field_is_optional_and_never_blocks_the_load(monkeypatch)
     ctd = load_bloomberg_ctd_metadata("ZN")
     assert ctd.ctd_cusip is None
     assert ctd.ctd_description is None
-    assert ctd.ctd_identifier == "US91282CQT17"  # the answer is unaffected
+    assert ctd.ctd_identifier == "US91282CRJ26"  # the answer is unaffected
 
 
 @pytest.mark.parametrize("field", ["FUT_CTD_CPN", "FUT_CNVS_FACTOR"])
@@ -1010,7 +1134,7 @@ def test_a_date_in_any_other_format_fails_closed_rather_than_being_guessed(
         ({"FUT_CNVS_FACTOR": "0"}, "non-positive conversion factor"),
         ({"FUT_CNVS_FACTOR": "-0.9"}, "non-positive conversion factor"),
         ({"FUT_CTD_CPN": "-1.0"}, "negative coupon"),
-        ({"FUT_DLV_DT_LAST": "2033-05-31"}, "on or after"),
+        ({"FUT_DLV_DT_LAST": "2033-08-31"}, "on or after"),
         ({"FUT_DLV_DT_LAST": "2040-01-31"}, "on or after"),
     ],
 )
@@ -1063,7 +1187,7 @@ def test_a_security_error_fails_closed(monkeypatch) -> None:
 @pytest.mark.parametrize("record_count", [0, 2])
 def test_anything_other_than_exactly_one_record_fails_closed(monkeypatch, record_count) -> None:
     def _respond(security):
-        record = _security_data(security, {"FUT_CUR_GEN_TICKER": "TYU6"})
+        record = _security_data(security, {"PARSEKYABLE_DES": "TYZ6 Comdty"})
         return _response_event([record] * record_count)
 
     _install_fake_blpapi(monkeypatch, _respond)
@@ -1076,7 +1200,7 @@ def test_a_record_for_a_different_security_fails_closed(monkeypatch) -> None:
     def _respond(security):
         # Bloomberg answers about a security nobody asked for.
         return _response_event(
-            [_security_data("SOMETHING ELSE", {"FUT_CUR_GEN_TICKER": "TYU6"})]
+            [_security_data("SOMETHING ELSE", {"PARSEKYABLE_DES": "TYZ6 Comdty"})]
         )
 
     _install_fake_blpapi(monkeypatch, _respond)
@@ -1088,7 +1212,7 @@ def test_a_record_for_a_different_security_fails_closed(monkeypatch) -> None:
 def test_a_record_missing_its_own_identifier_fails_closed(monkeypatch) -> None:
     def _respond(security):
         return _response_event(
-            [_security_data(security, {"FUT_CUR_GEN_TICKER": "TYU6"}, omit_security=True)]
+            [_security_data(security, {"PARSEKYABLE_DES": "TYZ6 Comdty"}, omit_security=True)]
         )
 
     _install_fake_blpapi(monkeypatch, _respond)
@@ -1128,10 +1252,10 @@ def test_the_live_path_never_falls_back_to_manual_or_cached_data(monkeypatch) ->
 def test_a_complete_manual_entry_is_accepted_and_typed() -> None:
     ctd = treasury_futures_ctd_from_manual_entry(dict(VALID_ENTRY))
     assert ctd.contract_code == "ZN"
-    assert ctd.ctd_coupon_percent == 4.25
-    assert ctd.ctd_maturity_date == date(2033, 5, 31)
-    assert ctd.conversion_factor == 0.9069
-    assert ctd.last_delivery_date == date(2026, 9, 30)
+    assert ctd.ctd_coupon_percent == 4.5
+    assert ctd.ctd_maturity_date == date(2033, 8, 31)
+    assert ctd.conversion_factor == 0.9202
+    assert ctd.last_delivery_date == date(2026, 12, 31)
 
 
 def test_manual_entry_is_always_reported_as_an_unconfirmed_source() -> None:
@@ -1153,10 +1277,10 @@ def test_manual_entry_may_carry_the_display_extras_but_does_not_require_them() -
     bare = treasury_futures_ctd_from_manual_entry(dict(VALID_ENTRY))
     assert bare.ctd_cusip is None and bare.ctd_description is None
     filled = treasury_futures_ctd_from_manual_entry(
-        dict(VALID_ENTRY, ctd_cusip="91282CQT1", ctd_description="T 4.25 05/31/33")
+        dict(VALID_ENTRY, ctd_cusip="91282CRJ2", ctd_description="T 4.5 08/31/33")
     )
-    assert filled.ctd_cusip == "91282CQT1"
-    assert filled.ctd_description == "T 4.25 05/31/33"
+    assert filled.ctd_cusip == "91282CRJ2"
+    assert filled.ctd_description == "T 4.5 08/31/33"
 
 
 def test_the_display_payload_carries_the_full_ctd_small_print() -> None:
@@ -1213,7 +1337,7 @@ def test_a_structurally_invalid_field_is_rejected(overrides) -> None:
 
 
 def test_a_delivery_date_at_or_after_the_ctd_maturity_is_rejected() -> None:
-    for bad in ("2033-05-31", "2035-01-31"):
+    for bad in ("2033-08-31", "2035-01-31"):
         with pytest.raises(TreasuryFuturesCTDError):
             treasury_futures_ctd_from_manual_entry(dict(VALID_ENTRY, last_delivery_date=bad))
 

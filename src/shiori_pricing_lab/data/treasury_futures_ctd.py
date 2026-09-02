@@ -6,12 +6,21 @@ cheapest to deliver into one futures contract, and where that record came
 from. No pricing, no yield, no schedule, no quote parsing lives here.
 
 **Automatic Bloomberg sourcing, in two stages.** Bloomberg does not publish
-CTD metadata against the generic front-contract ticker's own delivery month
+CTD metadata against the desk-active contract ticker's own delivery month
 directly, so one lookup is two requests:
 
-1. ``<root>1 Comdty`` -> ``FUT_CUR_GEN_TICKER`` resolves the generic front
-   contract to the actual delivery month (``TU1 Comdty`` -> ``TUU6``).
+1. ``<root>A Comdty`` -> ``PARSEKYABLE_DES`` resolves the desk-active
+   contract to the actual delivery month (``TUA Comdty`` -> ``TUZ6``).
 2. ``<actual> Comdty`` -> the CTD fields for that specific contract.
+
+The active-contract ticker is the desk-active alias (``TUA``, ``FVA``,
+``TYA``, ``USA``), **not** the generic continuation #1 (``TU1``, ``FV1``,
+``TY1``, ``US1``). During the September 2026 roll the generic front contract
+still answered ``FUT_CUR_GEN_TICKER`` with the old September delivery month
+(``TY1`` -> ``TYU6``) while the desk-active contract had already moved to
+December (``TYA`` -> ``TYZ6``). Selecting the old delivery month is exactly
+the production bug being fixed, so there is deliberately **no fallback** to
+generic continuation #1: a failed/missing active-alias response fails closed.
 
 Both stages fail closed. A missing, blank, malformed or unparseable value on
 any required field aborts the whole load with the field named -- there is no
@@ -26,16 +35,16 @@ as ``bloomberg_bond_quote``'s own field maps record theirs -- they are
 them back as data.
 
 ===== ============== ============= ============ ========== ======== ==============
-Code  Generic ticker Contract      CTD ISIN     Coupon %   CF       Last delivery
+Code  Active alias   Contract      CTD ISIN     Coupon %   CF       Last delivery
 ===== ============== ============= ============ ========== ======== ==============
-ZT    TU1 Comdty     TUU6          US91282CHK09 4.00       0.967200 2026-10-05
-ZF    FV1 Comdty     FVU6          US91282CPN55 3.50       0.909000 2026-10-05
-ZN    TY1 Comdty     TYU6          US91282CQT17 4.25       0.906900 2026-09-30
-ZB    US1 Comdty     USU6          US912810UL07 5.00       0.889200 2026-09-30
+ZT    TUA Comdty     TUZ6          US91282CJA09 4.625      0.977400 2027-01-06
+ZF    FVA Comdty     FVZ6          US91282CQD64 3.500      0.909000 2027-01-06
+ZN    TYA Comdty     TYZ6          US91282CRJ26 4.500      0.920200 2026-12-31
+ZB    USA Comdty     USZ6          US912810UL07 5.000      0.889900 2026-12-31
 ===== ============== ============= ============ ========== ======== ==============
 
-CTD maturities returned alongside: 2028-06-30 (ZT), 2030-11-30 (ZF),
-2033-05-31 (ZN), 2045-05-15 (ZB). Two of the four are month-end maturities,
+CTD maturities returned alongside: 2028-09-30 (ZT), 2031-02-28 (ZF),
+2033-08-31 (ZN), 2045-05-15 (ZB). Two of the four are month-end maturities,
 which is exactly the coupon-grid case ``pricing/treasury_futures_implied_yield``
 anchors for.
 
@@ -156,10 +165,10 @@ REQUIRED_BLOOMBERG_CTD_FIELDS = (
 
 #: Confirmed logical field -> Bloomberg mnemonic. See the module docstring
 #: for the live evidence behind every entry. ``contract_symbol`` is resolved
-#: in stage one, against the generic front-contract ticker; the rest are
+#: in stage one, against the desk-active contract alias; the rest are
 #: stage two, against the actual delivery month that stage one returns.
 BLOOMBERG_CTD_FIELD_MAP: dict[str, str] = {
-    "contract_symbol": "FUT_CUR_GEN_TICKER",
+    "contract_symbol": "PARSEKYABLE_DES",
     "ctd_identifier": "FUT_CTD_ISIN",
     "ctd_coupon_percent": "FUT_CTD_CPN",
     "ctd_maturity_date": "FUT_CTD_MTY",
@@ -174,19 +183,34 @@ BLOOMBERG_CTD_DISPLAY_FIELD_MAP: dict[str, str] = {
     "ctd_description": "FUT_CTD_TICKER",
 }
 
-#: The mnemonic that resolves a generic front contract to its delivery month.
-BLOOMBERG_GENERIC_CONTRACT_FIELD = BLOOMBERG_CTD_FIELD_MAP["contract_symbol"]
+#: The mnemonic that resolves the desk-active contract alias to its delivery
+#: month.
+BLOOMBERG_ACTIVE_CONTRACT_FIELD = BLOOMBERG_CTD_FIELD_MAP["contract_symbol"]
 
-#: Shiori contract code -> Bloomberg ticker root, and the yellow key both
-#: stages use. Confirmed against all four roots (see the module docstring).
+#: Shiori contract code -> Bloomberg delivery-month root, used to validate and
+#: slice the delivery symbol that stage one resolves (``TYZ6`` -> root ``TY``
+#: + month ``Z`` + year ``6``). These are the actual futures roots, unchanged
+#: from the quarterly delivery symbols; they are *not* the active aliases.
 BLOOMBERG_FUTURES_TICKER_ROOTS: dict[str, str] = {
     "ZT": "TU",
     "ZF": "FV",
     "ZN": "TY",
     "ZB": "US",
 }
+
+#: Shiori contract code -> Bloomberg desk-active alias. These are the active
+#: aliases (``TUA``, ``FVA``, ``TYA``, ``USA``), not the generic continuation
+#: #1 tickers (``TU1``, ``FV1``, ``TY1``, ``US1``). During roll the generic
+#: front contract lags the desk-active contract, so resolving the active alias
+#: via ``PARSEKYABLE_DES`` is the only correct authority for "the active
+#: contract" (Issue #190 / PR #191).
+BLOOMBERG_FUTURES_ACTIVE_ALIASES: dict[str, str] = {
+    "ZT": "TUA",
+    "ZF": "FVA",
+    "ZN": "TYA",
+    "ZB": "USA",
+}
 BLOOMBERG_FUTURES_YELLOW_KEY = "Comdty"
-BLOOMBERG_GENERIC_FRONT_CONTRACT_SUFFIX = "1"
 
 
 class TreasuryFuturesCTDError(ValueError):
@@ -269,34 +293,37 @@ def unresolved_bloomberg_ctd_fields() -> tuple[str, ...]:
     )
 
 
-def bloomberg_generic_front_contract(contract_code: str) -> str:
-    """The stage-one Bloomberg security for ``contract_code`` (``"TU1 Comdty"``)."""
+def bloomberg_active_contract(contract_code: str) -> str:
+    """The stage-one Bloomberg security for ``contract_code`` (``"TYA Comdty"``).
+
+    This is the desk-active contract alias, not the generic continuation #1.
+    During roll the generic front contract stays on the old delivery month
+    while the desk-active contract has already moved; resolving the alias is
+    therefore the only correct authority for the current active contract.
+    """
 
     normalized = str(contract_code).strip().upper()
-    root = BLOOMBERG_FUTURES_TICKER_ROOTS.get(normalized)
-    if root is None:
+    alias = BLOOMBERG_FUTURES_ACTIVE_ALIASES.get(normalized)
+    if alias is None:
         raise TreasuryFuturesCTDError(
-            f"no Bloomberg ticker root is confirmed for contract {contract_code!r} -- "
-            f"confirmed: {', '.join(sorted(BLOOMBERG_FUTURES_TICKER_ROOTS))}"
+            f"no Bloomberg active-contract alias is confirmed for contract {contract_code!r} -- "
+            f"confirmed: {', '.join(sorted(BLOOMBERG_FUTURES_ACTIVE_ALIASES))}"
         )
-    return (
-        f"{root}{BLOOMBERG_GENERIC_FRONT_CONTRACT_SUFFIX} {BLOOMBERG_FUTURES_YELLOW_KEY}"
-    )
+    return f"{alias} {BLOOMBERG_FUTURES_YELLOW_KEY}"
 
 
 def bloomberg_delivery_month_security(contract_symbol: str) -> str:
-    """The stage-two Bloomberg security for a delivery month (``"TUU6 Comdty"``).
+    """The stage-two Bloomberg security for a delivery month (``"TYZ6 Comdty"``).
 
-    ``FUT_CUR_GEN_TICKER`` returns the bare ticker (``"TUU6"``); DAPI needs a
-    yellow key, and it is the same one the generic ticker already carries.
-    A symbol that already ends in that yellow key is passed through rather
-    than doubled.
+    ``PARSEKYABLE_DES`` already returns the yellow key (``"TYZ6 Comdty"``), and
+    DAPI needs one. A symbol that already ends in that yellow key is passed
+    through rather than doubled.
     """
 
     symbol = str(contract_symbol).strip()
     if not symbol:
         raise TreasuryFuturesCTDBloombergError(
-            f"Bloomberg DAPI returned a blank {BLOOMBERG_GENERIC_CONTRACT_FIELD}"
+            f"Bloomberg DAPI returned a blank {BLOOMBERG_ACTIVE_CONTRACT_FIELD}"
         )
     if symbol.upper().endswith(BLOOMBERG_FUTURES_YELLOW_KEY.upper()):
         return symbol
@@ -589,24 +616,31 @@ def _require_isin(raw_value: str, field: str, security: str) -> str:
 def _require_delivery_ticker(contract_symbol: str, contract_code: str, security: str) -> str:
     """Require the resolved delivery month to belong to the contract asked for.
 
-    Stage one asks ``TY1 Comdty`` which delivery month it currently is. If it
-    answered anything else -- a different root, a malformed symbol -- stage two
-    would fetch that *other* contract's perfectly valid CTD and this module
-    would return it labelled with the requested ``contract_code``, so pricing
-    would apply one contract's quote convention to another's CTD metadata
-    (Codex review, PR #191). The root is the check that matters; the delivery
-    month must be one these contracts actually list -- the quarterly
-    ``HMUZ`` cycle, not the full twelve-month futures alphabet, which admitted
-    symbols such as ``TYF7``.
+    Stage one asks ``TYA Comdty`` which delivery month it currently is, and
+    ``PARSEKYABLE_DES`` answers with the actual contract carrying its yellow
+    key (``TYZ6 Comdty``). That suffix is stripped before validation -- it is
+    the same yellow key the stage-two security already carries, not part of
+    the delivery symbol, and it must not be weakened into the representation.
+    If stage one answered anything else -- a different root, a malformed
+    symbol -- stage two would fetch that *other* contract's perfectly valid
+    CTD and this module would return it labelled with the requested
+    ``contract_code``, so pricing would apply one contract's quote convention
+    to another's CTD metadata (Codex review, PR #191). The root is the check
+    that matters; the delivery month must be one these contracts actually
+    list -- the quarterly ``HMUZ`` cycle, not the full twelve-month futures
+    alphabet, which admitted symbols such as ``TYF7``.
     """
 
-    symbol = contract_symbol.strip().upper()
+    raw = contract_symbol.strip().upper()
+    if raw.endswith(BLOOMBERG_FUTURES_YELLOW_KEY.upper()):
+        raw = raw[: -len(BLOOMBERG_FUTURES_YELLOW_KEY)].strip()
+    symbol = raw
     expected_root = BLOOMBERG_FUTURES_TICKER_ROOTS[contract_code]
     remainder = symbol[len(expected_root) :]
     if (
         not symbol.startswith(expected_root)
         # One or two year digits -- the two conventions Bloomberg uses
-        # (``TYU6``, ``TYU26``). Unbounded digits are not a wider contract, they
+        # (``TYZ6``, ``TYZ26``). Unbounded digits are not a wider contract, they
         # are a malformed answer, and they make the delivery year unresolvable:
         # the derived year would land outside `datetime.date`'s range and raise
         # a bare ValueError instead of failing closed as a named error.
@@ -616,9 +650,9 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
     ):
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI resolved {security!r} to {contract_symbol!r}, which is not a "
-            f"{contract_code} delivery month (expected the {expected_root} root followed by "
-            f"one of the quarterly delivery months {TREASURY_FUTURES_DELIVERY_MONTH_CODES} "
-            "and year digits)"
+            f"{contract_code} delivery month (expected the {expected_root} active alias "
+            f"resolving to one of the quarterly delivery months "
+            f"{TREASURY_FUTURES_DELIVERY_MONTH_CODES} and year digits)"
         )
     return symbol
 
@@ -869,10 +903,12 @@ def _parse_bloomberg_date(raw_value: str, field: str, security: str) -> date:
 def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
     """Load current CTD metadata for ``contract_code`` from Bloomberg DAPI.
 
-    Two requests (see the module docstring): the generic front contract
+    Two requests (see the module docstring): the desk-active contract alias
     resolves the delivery month, then that delivery month answers the CTD
     fields. Fails closed on anything missing, blank or unparseable, and never
-    falls back to manual, cached or synthetic data.
+    falls back to manual, cached or synthetic data -- in particular there is
+    no fallback to the generic continuation #1, whose front contract lags the
+    desk-active contract during roll.
     """
 
     unresolved = unresolved_bloomberg_ctd_fields()
@@ -886,7 +922,7 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
         )
 
     normalized_code = str(contract_code).strip().upper()
-    generic_security = bloomberg_generic_front_contract(normalized_code)
+    active_security = bloomberg_active_contract(normalized_code)
 
     try:
         import blpapi  # noqa: F401
@@ -896,16 +932,16 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
             f"workstation with Bloomberg's official blpapi package installed ({exc})"
         ) from exc
 
-    # Stage one: which delivery month is the generic front contract today?
-    generic_answered = _reference_data_fields(
-        generic_security, [BLOOMBERG_GENERIC_CONTRACT_FIELD]
+    # Stage one: which delivery month is the desk-active contract today?
+    active_answered = _reference_data_fields(
+        active_security, [BLOOMBERG_ACTIVE_CONTRACT_FIELD]
     )
     contract_symbol = _require_delivery_ticker(
         _require_answered(
-            generic_answered, BLOOMBERG_GENERIC_CONTRACT_FIELD, generic_security
+            active_answered, BLOOMBERG_ACTIVE_CONTRACT_FIELD, active_security
         ),
         normalized_code,
-        generic_security,
+        active_security,
     )
     delivery_security = bloomberg_delivery_month_security(contract_symbol)
 

@@ -106,11 +106,11 @@ def test_running_the_probe_confirms_nothing_on_its_own(fake_dapi) -> None:
     assert BLOOMBERG_CTD_FIELD_MAP == before
 
 
-def test_the_default_security_is_the_generic_front_contract_per_code() -> None:
-    assert module.default_security("ZT") == "TU1 Comdty"
-    assert module.default_security("ZF") == "FV1 Comdty"
-    assert module.default_security("ZN") == "TY1 Comdty"
-    assert module.default_security("ZB") == "US1 Comdty"
+def test_the_default_security_is_the_active_alias_per_code() -> None:
+    assert module.default_security("ZT") == "TUA Comdty"
+    assert module.default_security("ZF") == "FVA Comdty"
+    assert module.default_security("ZN") == "TYA Comdty"
+    assert module.default_security("ZB") == "USA Comdty"
 
 
 def test_an_unsupported_contract_code_is_refused_not_guessed() -> None:
@@ -121,7 +121,7 @@ def test_an_unsupported_contract_code_is_refused_not_guessed() -> None:
 def test_all_four_mvp_contracts_are_probed_when_fields_are_given(fake_dapi) -> None:
     assert module.main(["--fields", "SOME_NEW_CANDIDATE"]) == 0
     probed = [security for security, _ in fake_dapi["probe"]]
-    assert probed == ["TU1 Comdty", "FV1 Comdty", "TY1 Comdty", "US1 Comdty"]
+    assert probed == ["TUA Comdty", "FVA Comdty", "TYA Comdty", "USA Comdty"]
 
 
 def test_an_explicit_security_is_sent_verbatim(fake_dapi) -> None:
@@ -137,7 +137,7 @@ def test_explicit_fields_override_the_candidate_list(fake_dapi) -> None:
 def test_the_probed_security_and_every_field_outcome_are_printed(fake_dapi, capsys) -> None:
     module.main(["--contract", "ZN", "--fields", "CAND_A,CAND_B,CAND_C"])
     output = capsys.readouterr().out
-    assert "TY1 Comdty" in output
+    assert "TYA Comdty" in output
     # A returned value, an absent field and a field exception all appear --
     # one bad field never aborts the run.
     assert "returned" in output
