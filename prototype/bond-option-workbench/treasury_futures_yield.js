@@ -321,9 +321,9 @@
       // They are equal only when on-tick.
       const offTick = result.on_tick
         ? ""
-        : ` — off-tick (target yield implies ${result.futures_price}, nearest ${result.exchange_quote})`;
+        : ` — off-tick (implied ${result.futures_price}, nearest ${result.exchange_quote})`;
       els.futuresPriceNote.textContent =
-        `target yield implies ${result.futures_price} → CTD clean ` +
+        `implied ${result.futures_price.toFixed(6)} → CTD clean ` +
         `${result.converted_clean_price.toFixed(6)}, min tick ${result.minimum_tick_label}, ` +
         `settled ${result.settlement_date}${offTick}`;
     }
