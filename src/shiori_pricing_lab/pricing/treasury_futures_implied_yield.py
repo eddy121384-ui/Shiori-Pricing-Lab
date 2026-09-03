@@ -187,6 +187,7 @@ class TreasuryFuturesPriceFromYield:
     exchange_price: float
     exchange_quote: str
     minimum_tick: float
+    on_tick: bool
 
     def as_payload(self) -> dict[str, object]:
         contract = get_contract(self.ctd.contract_code)
@@ -203,6 +204,7 @@ class TreasuryFuturesPriceFromYield:
             "exchange_price": self.exchange_price,
             "exchange_quote": self.exchange_quote,
             "minimum_tick": self.minimum_tick,
+            "on_tick": self.on_tick,
             "minimum_tick_label": contract.minimum_tick_label,
             "methodology": _methodology_payload(),
             "ctd": self.ctd.as_display_payload(),
@@ -507,12 +509,20 @@ def futures_price_from_target_yield(
         )
 
     settlement_date = _settlement_date(ctd)
-    clean_price = clean_price_from_yield(
-        float(target_yield_percent),
-        settlement_date,
-        ctd.ctd_maturity_date,
-        ctd.ctd_coupon_percent,
-    )
+    try:
+        clean_price = clean_price_from_yield(
+            float(target_yield_percent),
+            settlement_date,
+            ctd.ctd_maturity_date,
+            ctd.ctd_coupon_percent,
+        )
+    except (OverflowError, ValueError) as exc:
+        # Extreme but finite yields (e.g. 1e100) can cause numerical overflow
+        # in the pricing math. Translate to TreasuryFuturesYieldError so the
+        # existing per-direction fail-visible behavior is preserved.
+        raise TreasuryFuturesYieldError(
+            f"target yield {target_yield_percent}% causes numerical overflow in pricing: {exc}"
+        ) from exc
     if clean_price <= 0:
         raise TreasuryFuturesYieldError(
             f"target yield {target_yield_percent}% implies a non-positive CTD clean price"
@@ -522,6 +532,8 @@ def futures_price_from_target_yield(
     )
     price = futures_price_from_clean_price(clean_price, ctd.conversion_factor)
     contract = get_contract(ctd.contract_code)
+    exchange_price = round_to_tick(contract.code, price)
+    on_tick = exchange_price == price
     return TreasuryFuturesPriceFromYield(
         ctd=ctd,
         target_yield_percent=float(target_yield_percent),
@@ -530,7 +542,8 @@ def futures_price_from_target_yield(
         dirty_price=clean_price + accrued,
         converted_clean_price=clean_price,
         futures_price=price,
-        exchange_price=round_to_tick(contract.code, price),
+        exchange_price=exchange_price,
         exchange_quote=format_futures_quote(contract.code, price),
         minimum_tick=contract.minimum_tick,
+        on_tick=on_tick,
     )

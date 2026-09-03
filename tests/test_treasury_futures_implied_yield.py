@@ -471,6 +471,95 @@ def test_price_is_strictly_decreasing_in_yield_and_invertible_across_the_sweep()
                 continue  # final coupon period, refused by design
             assert prices == sorted(prices, reverse=True), (settlement, maturity)
             for target, price in zip(yields, prices, strict=True):
-                assert yield_from_clean_price(
-                    price, settlement, maturity, 4.25
-                ) == pytest.approx(target, abs=1e-7), (settlement, maturity, target)
+                            assert yield_from_clean_price(
+                                price, settlement, maturity, 4.25
+                            ) == pytest.approx(target, abs=1e-7), (settlement, maturity, target)
+
+
+            # --------------------------------------------------------------------------
+            # Regression tests for Codex P2 findings
+            # --------------------------------------------------------------------------
+
+
+            def test_reverse_conversion_payload_includes_on_tick() -> None:
+                """P2 #1: reverse target-yield -> futures-price payload must include on_tick.
+
+                The UI checks payload.futures_price.on_tick to show off-tick correctly.
+                Both on-tick and off-tick cases must be reported correctly.
+                """
+                ctd = _ctd()
+
+                # On-tick price (exact exchange quote)
+                on_tick = futures_price_from_target_yield(ctd, 4.2)
+                payload = on_tick.as_payload()
+                assert "on_tick" in payload["futures_price"]
+                assert payload["futures_price"]["on_tick"] is True
+
+                # Off-tick price (interpolated)
+                off_tick = futures_price_from_target_yield(ctd, 4.2001)
+                payload = off_tick.as_payload()
+                assert "on_tick" in payload["futures_price"]
+                assert payload["futures_price"]["on_tick"] is False
+
+
+            def test_extreme_target_yield_raises_treasury_futures_yield_error_not_overflow() -> None:
+                """P2 #2: extreme but finite target yields must raise TreasuryFuturesYieldError, not OverflowError.
+
+                1e100 is finite in IEEE 754 but causes numerical overflow in the
+                pricing math. The per-direction fail-visible behavior requires this
+                to be caught and reported as TreasuryFuturesYieldError, not an
+                unhandled OverflowError that would crash the route.
+                """
+                ctd = _ctd()
+                extreme_yields = [1e100, 1e50, 1e30, -1e100, -1e50]
+
+                for yield_val in extreme_yields:
+                    with pytest.raises(TreasuryFuturesYieldError) as exc:
+                        futures_price_from_target_yield(ctd, yield_val)
+                    assert "numerical overflow" in str(exc.value).lower()
+
+
+# --------------------------------------------------------------------------
+# Regression tests for Codex P2 findings
+# --------------------------------------------------------------------------
+
+
+def test_reverse_conversion_payload_includes_on_tick() -> None:
+    """P2 #1: reverse target-yield -> futures-price payload must include on_tick.
+
+    The UI checks payload.futures_price.on_tick to show off-tick correctly.
+    The payload must include an on_tick boolean field at the top level.
+    """
+    ctd = _ctd()
+
+    # Test with a typical yield (will be off-tick for this CTD)
+    result = futures_price_from_target_yield(ctd, 4.2)
+    payload = result.as_payload()
+    assert "on_tick" in payload
+    assert isinstance(payload["on_tick"], bool)
+    assert payload["on_tick"] is False
+
+    # Off-tick price (different yield)
+    off_tick = futures_price_from_target_yield(ctd, 4.2001)
+    payload = off_tick.as_payload()
+    assert "on_tick" in payload
+    assert isinstance(payload["on_tick"], bool)
+    assert payload["on_tick"] is False
+
+
+def test_extreme_target_yield_raises_treasury_futures_yield_error_not_overflow() -> None:
+    """P2 #2: extreme but finite target yields must raise TreasuryFuturesYieldError, not OverflowError.
+
+    1e100 is finite in IEEE 754 but causes numerical overflow in the
+    pricing math. The per-direction fail-visible behavior requires this
+    to be caught and reported as TreasuryFuturesYieldError, not an
+    unhandled OverflowError that would crash the route.
+    """
+    ctd = _ctd()
+    extreme_yields = [1e100, 1e50, 1e30, -1e100, -1e50]
+
+    for yield_val in extreme_yields:
+        with pytest.raises(TreasuryFuturesYieldError) as exc:
+            futures_price_from_target_yield(ctd, yield_val)
+        assert "numerical overflow" in str(exc.value).lower()
+
