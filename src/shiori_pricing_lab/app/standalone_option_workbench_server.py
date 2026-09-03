@@ -365,6 +365,13 @@ from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
 from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import VCUBOTMCapture
+from shiori_pricing_lab.data.treasury_futures_ctd import (
+    TreasuryFuturesCTDBloombergError,
+    TreasuryFuturesCTDError,
+    TreasuryFuturesCTDFieldsUnconfirmedError,
+    load_bloomberg_ctd_metadata,
+    treasury_futures_ctd_from_manual_entry,
+)
 from shiori_pricing_lab.data.vcub_vol_surface_adapter import (
     canonical_surface_from_confirmed_capture,
     canonical_surface_from_confirmed_otm_capture,
@@ -399,6 +406,17 @@ from shiori_pricing_lab.pricing.bli_treasury_price_format import (
 from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
     UST_COUPON_PAYMENT_ROLL_CONVENTION,
 )
+from shiori_pricing_lab.pricing.treasury_futures_contract import (
+    SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES,
+    TreasuryFuturesContractError,
+    TreasuryFuturesQuoteError,
+    get_contract,
+)
+from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+    TreasuryFuturesYieldError,
+    futures_price_from_target_yield,
+    implied_yield_from_futures_price,
+)
 from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide, coerce_enum
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -414,6 +432,10 @@ _STATIC_FILES = {
     "/vcub_capture.js": ("vcub_capture.js", "application/javascript; charset=utf-8"),
     "/vcub_otm_capture.js": (
         "vcub_otm_capture.js",
+        "application/javascript; charset=utf-8",
+    ),
+    "/treasury_futures_yield.js": (
+        "treasury_futures_yield.js",
         "application/javascript; charset=utf-8",
     ),
     "/vol_surface_view.js": (
@@ -596,7 +618,29 @@ DEFAULT_PORT = 8765
 # page last put in that field -- including one derived against a spot quote
 # the refresh has since replaced -- which is precisely the stale-Forward
 # failure this contract exists to prevent.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v24"
+# Bumped to -v26 for Issue #190's Treasury futures <-> CTD implied-yield desk
+# utility, merged on top of Issue #194's -v24 vol-surface routes.
+#
+# This branch had used -v24 and then -v25 for the two Issue #190 steps while
+# Issue #194 independently took -v24 on main, so -v24 briefly named two
+# different contracts and -v25 named only half of the merged one. Neither
+# describes what this process now serves, so the merge takes a fresh id
+# rather than picking a side: a version that means two things is worse than
+# no version at all.
+#
+# What -v26 adds over -v24: GET /api/treasury-futures/contracts and POST
+# /api/treasury-futures/ctd + /api/treasury-futures/convert are three new
+# routes the served page's Futures Yield view calls, with
+# treasury_futures_yield.js as new served content; the CTD route performs a
+# real two-stage live Bloomberg lookup and returns ctd_cusip/ctd_description;
+# and the convert route takes 'ctd_source' + 'contract_code' so a
+# BLOOMBERG-sourced conversion is fetched server-side. A stale -v24 process
+# would 404 all three and never serve the new static file; a stale -v25 one
+# would 404 the vol-surface routes instead. Ignoring 'ctd_source' rebuilds
+# every conversion as MANUAL_UNCONFIRMED -- live data silently displayed as
+# unconfirmed, which is precisely the provenance failure this contract
+# exists to prevent.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v26"
 
 
 def load_base_case() -> dict:
@@ -2813,6 +2857,172 @@ def export_current_run_as_markdown(display: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Treasury futures <-> CTD implied yield desk utility (Issue #190)
+#
+# Three thin bridge functions. Every number they return comes from
+# ``pricing/treasury_futures_implied_yield`` and
+# ``pricing/treasury_futures_contract`` -- this layer parses a JSON body,
+# calls the canonical path once, and serializes the result. It contains no
+# bond mathematics, no quote parsing, and no tick arithmetic of its own,
+# which is exactly what stops the browser panel and Python from drifting
+# apart (Issue #190: "UI must consume one canonical calculation path").
+# ---------------------------------------------------------------------------
+
+
+def treasury_futures_contract_catalogue() -> dict:
+    """The supported contracts and their quote conventions, for the panel's selector.
+
+    The browser never hard-codes a tick size or a sub-32nd alphabet: it renders
+    what this returns, so the page and the calculation always agree on what
+    ZT/ZF/ZN/ZB actually trade in.
+    """
+
+    return {
+        "contracts": [
+            {
+                "code": contract.code,
+                "name": contract.name,
+                "minimum_tick": contract.minimum_tick,
+                "minimum_tick_label": contract.minimum_tick_label,
+                "ticks_per_32nd": contract.ticks_per_32nd,
+                "sub_32nd_digits": sorted(contract.sub_32nd_digits),
+                "accepts_half_32nd_suffix": contract.accepts_half_32nd_suffix,
+            }
+            for contract in (
+                get_contract(code) for code in SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES
+            )
+        ]
+    }
+
+
+def load_treasury_futures_ctd(body: dict) -> dict:
+    """Load the current CTD for one contract from Bloomberg DAPI.
+
+    Two requests behind this (see ``data/treasury_futures_ctd``): the
+    desk-active alias (``TUA``/``FVA``/``TYA``/``USA``) resolves the actual
+    delivery contract via ``PARSEKYABLE_DES``, then that delivery contract
+    answers the CTD fields. There is no fallback to generic continuation #1
+    -- during a roll the generic front contract lags the desk-active one, so
+    falling back to it would silently price the wrong delivery month. Fails
+    closed on anything missing or unparseable, and never falls back to
+    manual, cached or synthetic data -- so a caller either gets a confirmed
+    live record or an error naming what Bloomberg did not give.
+    """
+
+    if not isinstance(body, dict) or not body.get("contract_code"):
+        raise ValueError("request body must be a JSON object with 'contract_code'")
+    get_contract(str(body["contract_code"]))
+    return load_bloomberg_ctd_metadata(str(body["contract_code"])).as_display_payload()
+
+
+#: How the CTD for a conversion is sourced. ``BLOOMBERG`` re-fetches it
+#: server-side; ``MANUAL`` reads the operator-supplied fields in the request.
+TREASURY_FUTURES_CTD_SOURCE_MODES = ("BLOOMBERG", "MANUAL")
+
+
+def _resolve_conversion_ctd(body: dict):
+    """Resolve the CTD a conversion runs against, by declared source mode.
+
+    **A confirmed provenance is never taken from the request.** The panel puts
+    a loaded CTD into editable fields, so whatever comes back is operator
+    input whatever its origin -- and a client that could assert
+    ``BLOOMBERG_DAPI`` on a payload could make an edited or invented CTD
+    display as confirmed live market data. So ``BLOOMBERG`` mode sends only
+    the contract code and the server fetches the CTD itself; the numbers never
+    round-trip through the browser. ``MANUAL`` mode reads the supplied fields
+    and stamps them ``MANUAL_UNCONFIRMED``, exactly as before.
+
+    Mode defaults to ``MANUAL`` when absent, so a request carrying only a
+    ``ctd`` object behaves as it always has.
+    """
+
+    source_mode = str(body.get("ctd_source") or "MANUAL").strip().upper()
+    if source_mode not in TREASURY_FUTURES_CTD_SOURCE_MODES:
+        raise ValueError(
+            f"'ctd_source' must be one of {', '.join(TREASURY_FUTURES_CTD_SOURCE_MODES)}, "
+            f"got {body.get('ctd_source')!r}"
+        )
+    if source_mode == "MANUAL":
+        return treasury_futures_ctd_from_manual_entry(body.get("ctd"))
+
+    contract_code = body.get("contract_code")
+    if not contract_code:
+        raise ValueError(
+            "a BLOOMBERG-sourced conversion needs 'contract_code' -- the CTD is fetched "
+            "server-side and is never read from the request"
+        )
+    get_contract(str(contract_code))
+    return load_bloomberg_ctd_metadata(str(contract_code))
+
+
+def convert_treasury_futures(body: dict) -> dict:
+    """Run either or both converter directions against one CTD record.
+
+    ``futures_price`` and ``target_yield_percent`` are independent and both
+    optional; at least one is required. Each direction's failure is reported
+    on its own key so a bad target yield never hides a good implied yield --
+    the trader keeps whichever answer is actually computable.
+
+    The CTD comes from :func:`_resolve_conversion_ctd`, which decides between
+    a server-side live fetch and operator-supplied fields.
+    """
+
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    futures_price = body.get("futures_price")
+    target_yield = body.get("target_yield_percent")
+    if futures_price in (None, "") and target_yield in (None, ""):
+        raise ValueError(
+            "request body must carry 'futures_price', 'target_yield_percent', or both"
+        )
+
+    ctd = _resolve_conversion_ctd(body)
+
+    payload: dict = {"ctd": ctd.as_display_payload(), "implied_yield": None, "futures_price": None}
+    if futures_price not in (None, ""):
+        try:
+            payload["implied_yield"] = implied_yield_from_futures_price(
+                ctd, futures_price
+            ).as_payload()
+        except (TreasuryFuturesQuoteError, TreasuryFuturesYieldError) as exc:
+            payload["implied_yield_error"] = str(exc)
+    if target_yield not in (None, ""):
+        try:
+            payload["futures_price"] = futures_price_from_target_yield(
+                ctd, _parse_target_yield_percent(target_yield)
+            ).as_payload()
+        except (TreasuryFuturesQuoteError, TreasuryFuturesYieldError) as exc:
+            payload["futures_price_error"] = str(exc)
+    return payload
+
+
+def _parse_target_yield_percent(raw: object) -> float:
+    """Read a trader-entered target yield in percent, or say why it is not one.
+
+    The browser sends whatever was typed, verbatim: a JSON number produced by
+    the page's own coercion would turn a typo into ``null`` and silently mean
+    "no target yield at all" instead of an error the trader can see.
+    """
+
+    if isinstance(raw, bool):
+        raise TreasuryFuturesYieldError(f"target yield must be a number in percent, got {raw!r}")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    # One optional trailing '%', not a run of them: `rstrip("%")` turned `4%%`
+    # into `4` and priced the typo as 4.0%, which is an unreadable input
+    # answered with an apparently valid futures price (Codex review, PR #191).
+    text = str(raw).strip()
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise TreasuryFuturesYieldError(
+            f"target yield must be a number in percent, got {raw!r}"
+        ) from exc
+
+
 class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
     server_version = "ShioriStandaloneWorkbenchBridge/0.1"
 
@@ -2849,6 +3059,9 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
                 self._write_json(200, price_base_case())
             except Exception as exc:  # noqa: BLE001
                 self._write_json(500, {"error": str(exc)})
+            return
+        if self.path == "/api/treasury-futures/contracts":
+            self._write_json(200, treasury_futures_contract_catalogue())
             return
         self._write_json(404, {"error": f"no such route: {self.path}"})
 
@@ -3160,6 +3373,50 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return None
         return body
 
+    def _handle_api_treasury_futures_ctd(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        try:
+            payload = load_treasury_futures_ctd(body)
+        except (
+            TreasuryFuturesCTDBloombergError,
+            TreasuryFuturesCTDFieldsUnconfirmedError,
+        ) as exc:
+            # Not a bridge fault: Bloomberg is unreachable, unentitled, or did
+            # not return a usable CTD. The panel renders this text verbatim so
+            # the trader sees exactly what failed rather than a bare 502, and
+            # keeps the manual fields usable.
+            self._write_json(502, {"error": str(exc), "automatic_source_available": False})
+            return
+        except (TreasuryFuturesContractError, ValueError) as exc:
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
+    def _handle_api_treasury_futures_convert(self, raw_body: bytes) -> None:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        try:
+            payload = convert_treasury_futures(body)
+        except (
+            TreasuryFuturesCTDBloombergError,
+            TreasuryFuturesCTDFieldsUnconfirmedError,
+        ) as exc:
+            # A BLOOMBERG-sourced conversion whose live fetch failed: the same
+            # answer the CTD route gives, for the same reason.
+            self._write_json(502, {"error": str(exc), "automatic_source_available": False})
+            return
+        except (TreasuryFuturesCTDError, TreasuryFuturesContractError, ValueError) as exc:
+            self._write_json(400, {"error": str(exc)})
+            return
+        self._write_json(200, payload)
+
     def _handle_api_vol_surface_atm_list(self, raw_body: bytes) -> None:
         """List the confirmed ATM surfaces. Reads the store; writes nothing.
 
@@ -3221,6 +3478,8 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/vcub/otm/parse": _handle_api_vcub_otm_parse,
         "/api/vcub/otm/confirm": _handle_api_vcub_otm_confirm,
         "/api/vcub/otm/reject": _handle_api_vcub_otm_reject,
+        "/api/treasury-futures/ctd": _handle_api_treasury_futures_ctd,
+        "/api/treasury-futures/convert": _handle_api_treasury_futures_convert,
         "/api/vol-surface/atm/list": _handle_api_vol_surface_atm_list,
         "/api/vol-surface/atm/surface": _handle_api_vol_surface_atm_surface,
         "/api/export/json": _handle_api_export_json,

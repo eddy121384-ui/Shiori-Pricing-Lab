@@ -64,6 +64,10 @@
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="12" height="10" rx="1"/><rect x="9" y="10" width="12" height="10" rx="1"/></svg>
         OTM / SABR
       </div>
+      <div class="nav-item" id="nav-futures-yield">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10"/><path d="M11 4l3 3-3 3"/><path d="M20 17H10"/><path d="M13 14l-3 3 3 3"/></svg>
+        Futures Yield
+      </div>
       <div class="nav-item">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M12 3a9 9 0 0 1 9 9h-9z" opacity="0.5"/></svg>
         Analytics
@@ -1024,6 +1028,109 @@
       </section>
 
     </div>
+
+    <!-- ============ TREASURY FUTURES YIELD VIEW (Issue #190) ============ -->
+    <div class="main futures-yield-view" id="view-futures-yield" hidden>
+
+      <section class="card">
+        <div class="card-head">
+          <div class="card-title">Treasury Futures &harr; CTD Implied Yield</div>
+          <div class="card-head-right"><span class="fy-source-pill" id="fy-source-pill">No CTD loaded</span></div>
+        </div>
+        <div class="card-body">
+          <div class="fy-subtitle">CME Treasury Analytics methodology: the CTD&rsquo;s yield to maturity, settled on the contract&rsquo;s last delivery day, from <span class="mono">futures price &times; conversion factor</span>. Semiannual, U.S. Treasury Actual/Actual, par 100. No net-basis, repo or carry adjustment.</div>
+        </div>
+      </section>
+
+      <section class="card markets-status markets-status-error" id="fy-error" hidden>
+        <div class="markets-error-title">Unable to convert</div>
+        <div class="markets-error-detail" id="fy-error-detail">&mdash;</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div class="card-title">Contract &amp; CTD</div>
+          <span class="card-summary" id="fy-ctd-summary">&mdash;</span>
+        </div>
+        <div class="card-body">
+          <div class="form-row"><label for="fy-contract-select">Tenor / Contract</label>
+            <select class="control" id="fy-contract-select"></select>
+          </div>
+          <span class="btn outline" id="fy-load-bloomberg-btn">Load current CTD from Bloomberg</span>
+          <div class="markets-status markets-status-warning fy-inline-note" id="fy-automatic-note" hidden>&mdash;</div>
+
+          <div class="fy-manual-grid">
+            <div class="form-row"><label for="fy-contract-symbol">Contract symbol</label>
+              <input class="control" id="fy-contract-symbol" type="text" placeholder="e.g. TYZ6">
+            </div>
+            <div class="form-row"><label for="fy-ctd-identifier">CTD (ISIN / CUSIP)</label>
+              <input class="control" id="fy-ctd-identifier" type="text" placeholder="CTD security identifier">
+            </div>
+            <div class="form-row"><label for="fy-ctd-coupon">CTD coupon (%)</label>
+              <input class="control" id="fy-ctd-coupon" type="text" inputmode="decimal" placeholder="e.g. 4.25">
+            </div>
+            <div class="form-row"><label for="fy-ctd-maturity">CTD maturity</label>
+              <input class="control" id="fy-ctd-maturity" type="date">
+            </div>
+            <div class="form-row"><label for="fy-conversion-factor">Conversion factor</label>
+              <input class="control" id="fy-conversion-factor" type="text" inputmode="decimal" placeholder="e.g. 0.8012">
+            </div>
+            <div class="form-row"><label for="fy-last-delivery">Last delivery date</label>
+              <input class="control" id="fy-last-delivery" type="date">
+            </div>
+            <div class="form-row"><label for="fy-as-of">CTD as of</label>
+              <input class="control" id="fy-as-of" type="text" placeholder="2026-08-25T14:00:00Z">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div class="card-title">Convert</div>
+          <span class="card-summary" id="fy-tick-summary">&mdash;</span>
+        </div>
+        <div class="card-body">
+          <div class="fy-convert-row">
+            <div class="form-row"><label for="fy-futures-price">Futures Price</label>
+              <input class="control" id="fy-futures-price" type="text" placeholder="112-165 or 112.515625">
+            </div>
+            <div class="fy-answer">
+              <span class="fy-answer-label">&rarr; Implied Yield</span>
+              <span class="fy-answer-value" id="fy-implied-yield">&mdash;</span>
+            </div>
+            <div class="fy-answer-note" id="fy-implied-yield-note">&mdash;</div>
+          </div>
+
+          <div class="fy-convert-row">
+            <div class="form-row"><label for="fy-target-yield">Target Yield (%)</label>
+              <input class="control" id="fy-target-yield" type="text" inputmode="decimal" placeholder="4.20">
+            </div>
+            <div class="fy-answer">
+              <span class="fy-answer-label">&rarr; Futures Price</span>
+              <span class="fy-answer-value" id="fy-futures-price-out">&mdash;</span>
+            </div>
+            <div class="fy-answer-note" id="fy-futures-price-note">&mdash;</div>
+          </div>
+
+          <div class="fy-actions">
+            <span class="btn primary" id="fy-convert-btn">Convert</span>
+          </div>
+
+          <dl class="fy-detail-strip" id="fy-detail-strip">
+            <div><dt>CTD</dt><dd id="fy-detail-ctd">&mdash;</dd></div>
+            <div><dt>Coupon</dt><dd id="fy-detail-coupon">&mdash;</dd></div>
+            <div><dt>Maturity</dt><dd id="fy-detail-maturity">&mdash;</dd></div>
+            <div><dt>Conversion factor</dt><dd id="fy-detail-cf">&mdash;</dd></div>
+            <div><dt>Last delivery</dt><dd id="fy-detail-delivery">&mdash;</dd></div>
+            <div><dt>Tick size</dt><dd id="fy-detail-tick">&mdash;</dd></div>
+            <div><dt>Source</dt><dd id="fy-detail-source">&mdash;</dd></div>
+            <div><dt>As of</dt><dd id="fy-detail-as-of">&mdash;</dd></div>
+          </dl>
+        </div>
+      </section>
+
+    </div>
   </div>
 
   <!-- ===================== FOOTER ===================== -->
@@ -1051,6 +1158,7 @@
 <script src="script.js"></script>
 <script src="vcub_capture.js"></script>
 <script src="vcub_otm_capture.js"></script>
+<script src="treasury_futures_yield.js"></script>
 <script src="vol_surface_view.js"></script>
 </body>
 </html>

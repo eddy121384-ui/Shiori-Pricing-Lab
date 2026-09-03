@@ -1,0 +1,1115 @@
+"""Current cheapest-to-deliver metadata for a Treasury futures contract (Issue #190).
+
+Scope: the *sourcing* half of the desk's futures <-> CTD implied-yield
+converter -- the validated record of which cash Treasury is currently
+cheapest to deliver into one futures contract, and where that record came
+from. No pricing, no yield, no schedule, no quote parsing lives here.
+
+**Automatic Bloomberg sourcing, in two stages.** Bloomberg does not publish
+CTD metadata against the desk-active contract ticker's own delivery month
+directly, so one lookup is two requests:
+
+1. ``<root>A Comdty`` -> ``PARSEKYABLE_DES`` resolves the desk-active
+   contract to the actual delivery month (``TUA Comdty`` -> ``TUZ6``).
+2. ``<actual> Comdty`` -> the CTD fields for that specific contract.
+
+The active-contract ticker is the desk-active alias (``TUA``, ``FVA``,
+``TYA``, ``USA``), **not** the generic continuation #1 (``TU1``, ``FV1``,
+``TY1``, ``US1``). During the September 2026 roll the generic front contract
+still answered ``FUT_CUR_GEN_TICKER`` with the old September delivery month
+(``TY1`` -> ``TYU6``) while the desk-active contract had already moved to
+December (``TYA`` -> ``TYZ6``). Selecting the old delivery month is exactly
+the production bug being fixed, so there is deliberately **no fallback** to
+generic continuation #1: a failed/missing active-alias response fails closed.
+
+Both stages fail closed. A missing, blank, malformed or unparseable value on
+any required field aborts the whole load with the field named -- there is no
+partial record, no fallback to manual entry, and no contract cache anywhere
+in this repository.
+
+**Confirmed field evidence (Eddy's Bloomberg workstation, Issue #190).**
+Every mnemonic below returned a value on all four current active contracts.
+The live values are recorded here as the evidence for the mapping, exactly
+as ``bloomberg_bond_quote``'s own field maps record theirs -- they are
+*evidence of the mnemonic*, never a cache: nothing in this module ever reads
+them back as data.
+
+===== ============== ============= ============ ========== ======== ==============
+Code  Active alias   Contract      CTD ISIN     Coupon %   CF       Last delivery
+===== ============== ============= ============ ========== ======== ==============
+ZT    TUA Comdty     TUZ6          US91282CJA09 4.625      0.977400 2027-01-06
+ZF    FVA Comdty     FVZ6          US91282CQD64 3.500      0.909000 2027-01-06
+ZN    TYA Comdty     TYZ6          US91282CRJ26 4.500      0.920200 2026-12-31
+ZB    USA Comdty     USZ6          US912810UL07 5.000      0.889900 2026-12-31
+===== ============== ============= ============ ========== ======== ==============
+
+CTD maturities returned alongside: 2028-09-30 (ZT), 2031-02-28 (ZF),
+2033-08-31 (ZN), 2045-05-15 (ZB). Two of the four are month-end maturities,
+which is exactly the coupon-grid case ``pricing/treasury_futures_implied_yield``
+anchors for.
+
+**``FUT_CTD_ISIN`` is the canonical CTD identifier.** ``FUT_CTD_CUSIP`` and
+``FUT_CTD_TICKER`` are confirmed to return values too and are carried as
+*display* metadata only -- never as the identifier a calculation keys on,
+and never coerced into one. This mirrors ``bloomberg_bond_quote``'s
+separation of typed fields from display-only ones.
+
+**Superseded candidates.** The probe's original list carried several
+candidates per destination so that one workstation run could be conclusive.
+It was: for the contract symbol, ``FUT_ACT_DEF_GEN_TICKER`` (``PARSEKYABLE_DES``
+is confirmed and wired -- see above); for the identifier, ``CTD_ISIN`` and
+``CTD_CUSIP``; for the coupon, ``CTD_CPN``; for the maturity, ``CTD_MTY`` and
+``FUT_CTD_MATURITY``; for the conversion factor, ``CTD_CONVERSION_FACTOR``
+and ``FUT_CTD_CNVS_FACTOR``; for the last delivery date, ``LAST_DELIVERY_DT``
+and ``FUT_LAST_DLV_DT``. A confirmed mnemonic was found for every required
+field, so none of the rest is wired. They are recorded as **superseded, not as
+confirmed rejections** -- the run reported no per-field ``BAD_FLD`` evidence
+for them individually, so this module does not claim any of them is invalid.
+Re-adding one still requires its own confirmation.
+
+**Remaining-maturity plausibility / cross-contract guard.** Every guard above
+checks the record against *itself*, so a coherent CTD belonging to a
+*different* Treasury contract passed them all and was stamped as confirmed
+(Codex review, PR #191). ``_require_remaining_maturity_plausible`` closes that
+by requiring the CTD's remaining maturity to fall inside the contract's
+published window, measured from the **first calendar day of the delivery month
+named by the resolved symbol** -- ``TUZ6`` -> December 2026 -> ``2026-12-01``.
+
+The measurement basis is the whole game here, and it is Eddy's methodology
+decision (Issue #190). ``FUT_DLV_DT_LAST`` is *not* the reference: for ZT and
+ZF the last delivery day falls in the month *after* the delivery month, so
+using it as the reference is a month late every time. Measured from the first
+of the delivery month instead, the four contracts confirmed live and current
+(the December active-alias run at the top of this docstring) all clear their
+lower bound comfortably:
+
+=====  ==========  ============  ==========================  =========
+Code   Reference   CTD maturity  Window                      Result
+=====  ==========  ============  ==========================  =========
+ZT     2026-12-01  2028-09-30    [2028-09-01, 2028-12-01]    in window
+ZF     2026-12-01  2031-02-28    [2031-02-01, 2032-03-01]    in window
+ZN     2026-12-01  2033-08-31    [2033-06-01, 2036-12-01]    in window
+ZB     2026-12-01  2045-05-15    [2041-12-01, 2051-12-01)    in window
+=====  ==========  ============  ==========================  =========
+
+(This table is recomputed from the module's own ``_delivery_month_first_day``
+and ``_add_months_to_first_day`` against the confirmed December records
+above -- it is not a fresh Bloomberg observation. The window bounds
+themselves, and the original case for measuring from the first of the
+delivery month rather than ``FUT_DLV_DT_LAST``, were established against the
+September evidence that preceded the active-alias fix; this table exists so
+the guard's own evidence stays in step with the mapping it now guards.)
+
+Every cross-substitution of one confirmed CTD into another contract's request
+fails closed, including Codex's counterexample (ZN answered with the ZB
+CTD).
+
+**This is a plausibility guard, not proof of CME deliverability.** ZT and ZF
+eligibility also has an *original term to maturity* leg, which needs an issue
+date or original term that the CTD data contract does not carry and no
+confirmed mnemonic supplies. Inventing either would be fabricating reference
+data (AGENTS.md rule 6), so that leg is deliberately absent: a bond can
+satisfy this guard and still not be genuinely deliverable. What it rules out
+is another contract's CTD arriving labelled as this one's.
+
+**Manual entry remains a first-class debug/fallback path, and is always
+visibly unconfirmed.** A record built that way carries
+``TreasuryFuturesCTDSource.MANUAL_UNCONFIRMED`` and its own operator-supplied
+``as_of``, and every consumer renders that status next to the answer.
+
+**Clock.** Manual entry never reads a clock -- ``as_of`` is caller-supplied.
+The automatic path stamps the acquisition instant, using the same
+``datetime.now(UTC)`` ISO-seconds-with-``Z`` form ``data/vol_surface_store``
+and ``data/bloomberg_vcub_ocr`` already use. That is when Shiori received the
+data, not a market as-of, and it is labelled as such wherever it is shown.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from enum import StrEnum
+
+from shiori_pricing_lab.data._validation import (
+    _parse_iso_date,
+    _require_finite_number,
+    _require_non_blank,
+)
+
+_DAPI_HOST = "localhost"
+_DAPI_PORT = 8194
+_REFDATA_SERVICE = "//blp/refdata"
+_REQUEST_TIMEOUT_MS = 10_000
+_SECURITY_IDENTIFIER_FIELD = "security"
+
+# Testable seam for the whole-request deadline: a plain module-level alias,
+# monkeypatchable in tests without touching the real `time` module --
+# the same seam `bloomberg_bond_quote` already uses.
+_monotonic = time.monotonic
+
+
+class TreasuryFuturesCTDSource(StrEnum):
+    """Where one CTD record came from, and whether it is confirmed."""
+
+    BLOOMBERG_DAPI = "BLOOMBERG_DAPI"
+    MANUAL_UNCONFIRMED = "MANUAL_UNCONFIRMED"
+
+
+#: Sources whose data is confirmed to be current automatic market data. A
+#: record whose source is not in here must be shown as unconfirmed wherever
+#: its numbers are shown (Issue #190).
+CONFIRMED_TREASURY_FUTURES_CTD_SOURCES = frozenset({TreasuryFuturesCTDSource.BLOOMBERG_DAPI})
+
+#: The six CTD facts the converter cannot compute without.
+REQUIRED_BLOOMBERG_CTD_FIELDS = (
+    "contract_symbol",
+    "ctd_identifier",
+    "ctd_coupon_percent",
+    "ctd_maturity_date",
+    "conversion_factor",
+    "last_delivery_date",
+)
+
+#: Confirmed logical field -> Bloomberg mnemonic. See the module docstring
+#: for the live evidence behind every entry. ``contract_symbol`` is resolved
+#: in stage one, against the desk-active contract alias; the rest are
+#: stage two, against the actual delivery month that stage one returns.
+BLOOMBERG_CTD_FIELD_MAP: dict[str, str] = {
+    "contract_symbol": "PARSEKYABLE_DES",
+    "ctd_identifier": "FUT_CTD_ISIN",
+    "ctd_coupon_percent": "FUT_CTD_CPN",
+    "ctd_maturity_date": "FUT_CTD_MTY",
+    "conversion_factor": "FUT_CNVS_FACTOR",
+    "last_delivery_date": "FUT_DLV_DT_LAST",
+}
+
+#: Confirmed to return a value, carried for display only -- never the
+#: identifier a calculation keys on, never coerced into a typed field.
+BLOOMBERG_CTD_DISPLAY_FIELD_MAP: dict[str, str] = {
+    "ctd_cusip": "FUT_CTD_CUSIP",
+    "ctd_description": "FUT_CTD_TICKER",
+}
+
+#: The mnemonic that resolves the desk-active contract alias to its delivery
+#: month.
+BLOOMBERG_ACTIVE_CONTRACT_FIELD = BLOOMBERG_CTD_FIELD_MAP["contract_symbol"]
+
+#: Shiori contract code -> Bloomberg delivery-month root, used to validate and
+#: slice the delivery symbol that stage one resolves (``TYZ6`` -> root ``TY``
+#: + month ``Z`` + year ``6``). These are the actual futures roots, unchanged
+#: from the quarterly delivery symbols; they are *not* the active aliases.
+BLOOMBERG_FUTURES_TICKER_ROOTS: dict[str, str] = {
+    "ZT": "TU",
+    "ZF": "FV",
+    "ZN": "TY",
+    "ZB": "US",
+}
+
+#: Shiori contract code -> Bloomberg desk-active alias. These are the active
+#: aliases (``TUA``, ``FVA``, ``TYA``, ``USA``), not the generic continuation
+#: #1 tickers (``TU1``, ``FV1``, ``TY1``, ``US1``). During roll the generic
+#: front contract lags the desk-active contract, so resolving the active alias
+#: via ``PARSEKYABLE_DES`` is the only correct authority for "the active
+#: contract" (Issue #190 / PR #191).
+BLOOMBERG_FUTURES_ACTIVE_ALIASES: dict[str, str] = {
+    "ZT": "TUA",
+    "ZF": "FVA",
+    "ZN": "TYA",
+    "ZB": "USA",
+}
+BLOOMBERG_FUTURES_YELLOW_KEY = "Comdty"
+
+
+class TreasuryFuturesCTDError(ValueError):
+    """A CTD metadata record is missing a required field or is internally invalid."""
+
+
+class TreasuryFuturesCTDFieldsUnconfirmedError(RuntimeError):
+    """Automatic Bloomberg CTD sourcing was asked for before its fields were confirmed."""
+
+
+class TreasuryFuturesCTDBloombergError(RuntimeError):
+    """Bloomberg DAPI did not return one usable CTD record.
+
+    Covers ``blpapi`` not installed, session/service failure, a request
+    timeout, a ``responseError``, a record-count or security-identity
+    mismatch, a ``securityError``, a missing or blank required field, and a
+    required value that cannot be parsed. Deliberately one exception type --
+    these are all the same caller remediation ("Bloomberg did not give us a
+    usable CTD"), not distinct conditions a caller would handle differently.
+    """
+
+
+@dataclass(frozen=True)
+class TreasuryFuturesCTD:
+    """The current CTD for one futures contract, as the converter needs it.
+
+    ``ctd_identifier`` is the CTD's ISIN -- the canonical identifier.
+    ``ctd_cusip`` and ``ctd_description`` are display-only extras the
+    automatic path fills in and the manual path may leave unset; nothing
+    keyed on them ever reaches a calculation.
+    """
+
+    contract_code: str
+    contract_symbol: str
+    ctd_identifier: str
+    ctd_coupon_percent: float
+    ctd_maturity_date: date
+    conversion_factor: float
+    last_delivery_date: date
+    source: TreasuryFuturesCTDSource
+    as_of: str
+    ctd_cusip: str | None = None
+    ctd_description: str | None = None
+
+    @property
+    def is_confirmed_source(self) -> bool:
+        """Whether these numbers came from a confirmed automatic market-data path."""
+
+        return self.source in CONFIRMED_TREASURY_FUTURES_CTD_SOURCES
+
+    def as_display_payload(self) -> dict[str, object]:
+        """The small print the desk panel shows under every answer."""
+
+        return {
+            "contract_code": self.contract_code,
+            "contract_symbol": self.contract_symbol,
+            "ctd_identifier": self.ctd_identifier,
+            "ctd_cusip": self.ctd_cusip,
+            "ctd_description": self.ctd_description,
+            "ctd_coupon_percent": self.ctd_coupon_percent,
+            "ctd_maturity_date": self.ctd_maturity_date.isoformat(),
+            "conversion_factor": self.conversion_factor,
+            "last_delivery_date": self.last_delivery_date.isoformat(),
+            "source": str(self.source),
+            "as_of": self.as_of,
+            "is_confirmed_source": self.is_confirmed_source,
+        }
+
+
+def unresolved_bloomberg_ctd_fields() -> tuple[str, ...]:
+    """Required CTD fields that still have no confirmed Bloomberg mnemonic.
+
+    Empty since Issue #190's field discovery. Kept as the single place any
+    consumer asks whether the automatic path is available, so adding a new
+    required field automatically re-closes that path until it is confirmed.
+    """
+
+    return tuple(
+        field for field in REQUIRED_BLOOMBERG_CTD_FIELDS if field not in BLOOMBERG_CTD_FIELD_MAP
+    )
+
+
+def bloomberg_active_contract(contract_code: str) -> str:
+    """The stage-one Bloomberg security for ``contract_code`` (``"TYA Comdty"``).
+
+    This is the desk-active contract alias, not the generic continuation #1.
+    During roll the generic front contract stays on the old delivery month
+    while the desk-active contract has already moved; resolving the alias is
+    therefore the only correct authority for the current active contract.
+    """
+
+    normalized = str(contract_code).strip().upper()
+    alias = BLOOMBERG_FUTURES_ACTIVE_ALIASES.get(normalized)
+    if alias is None:
+        raise TreasuryFuturesCTDError(
+            f"no Bloomberg active-contract alias is confirmed for contract {contract_code!r} -- "
+            f"confirmed: {', '.join(sorted(BLOOMBERG_FUTURES_ACTIVE_ALIASES))}"
+        )
+    return f"{alias} {BLOOMBERG_FUTURES_YELLOW_KEY}"
+
+
+def bloomberg_delivery_month_security(contract_symbol: str) -> str:
+    """The stage-two Bloomberg security for a delivery month (``"TYZ6 Comdty"``).
+
+    ``PARSEKYABLE_DES`` already returns the yellow key (``"TYZ6 Comdty"``), and
+    DAPI needs one. A symbol that already ends in that yellow key is passed
+    through rather than doubled.
+    """
+
+    symbol = str(contract_symbol).strip()
+    if not symbol:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned a blank {BLOOMBERG_ACTIVE_CONTRACT_FIELD}"
+        )
+    if symbol.upper().endswith(BLOOMBERG_FUTURES_YELLOW_KEY.upper()):
+        return symbol
+    return f"{symbol} {BLOOMBERG_FUTURES_YELLOW_KEY}"
+
+
+def _acquisition_now() -> str:
+    """When Shiori received the data -- never a market as-of.
+
+    Same form as ``data/vol_surface_store`` and ``data/bloomberg_vcub_ocr``
+    already use, rather than a third timestamp convention.
+    """
+
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _reference_data_fields(security: str, fields: list[str]) -> dict[str, str]:
+    """Send one ``ReferenceDataRequest`` and return the raw strings it answered.
+
+    Returns only the fields Bloomberg actually populated -- an absent or
+    field-exceptioned field is simply missing from the result, and it is the
+    caller that decides whether that field was required. Every envelope-level
+    problem (session, service, timeout, ``responseError``, record count,
+    identity mismatch, ``securityError``) raises.
+
+    Deliberately local to this module rather than shared with
+    ``bloomberg_bond_quote``: that module's own note says its two loaders are
+    separate self-contained implementations so neither puts the other's
+    production behavior and test coverage at risk, and the same reasoning
+    applies here. Within *this* module both stages share this one helper, so
+    there is still only one request implementation for the CTD path.
+    """
+
+    import blpapi
+
+    monotonic = _monotonic
+
+    session_options = blpapi.SessionOptions()
+    session_options.setServerHost(_DAPI_HOST)
+    session_options.setServerPort(_DAPI_PORT)
+    session = blpapi.Session(session_options)
+
+    security_data_records: list = []
+    try:
+        if not session.start():
+            raise TreasuryFuturesCTDBloombergError(
+                f"Bloomberg DAPI session failed to start against {_DAPI_HOST}:{_DAPI_PORT} "
+                "-- confirm a Bloomberg Terminal is running and logged in locally"
+            )
+        if not session.openService(_REFDATA_SERVICE):
+            raise TreasuryFuturesCTDBloombergError(
+                f"Bloomberg DAPI failed to open service {_REFDATA_SERVICE}"
+            )
+
+        service = session.getService(_REFDATA_SERVICE)
+        request = service.createRequest("ReferenceDataRequest")
+        request.append("securities", security)
+        for field in dict.fromkeys(fields):
+            request.append("fields", field)
+        session.sendRequest(request)
+
+        deadline = monotonic() + _REQUEST_TIMEOUT_MS / 1000.0
+        done = False
+        while not done:
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                raise TreasuryFuturesCTDBloombergError(
+                    f"Bloomberg DAPI request timed out waiting for a response for {security!r}"
+                )
+            event = session.nextEvent(max(1, int(remaining_seconds * 1000)))
+
+            if event.eventType() == blpapi.Event.TIMEOUT:
+                raise TreasuryFuturesCTDBloombergError(
+                    f"Bloomberg DAPI request timed out waiting for a response for {security!r}"
+                )
+            if event.eventType() not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
+                continue
+
+            for message in event:
+                if message.hasElement("responseError"):
+                    raise TreasuryFuturesCTDBloombergError(
+                        f"Bloomberg DAPI responseError for {security!r}: "
+                        f"{message.getElement('responseError')}"
+                    )
+                security_data_array = message.getElement("securityData")
+                for index in range(security_data_array.numValues()):
+                    security_data_records.append(security_data_array.getValueAsElement(index))
+
+            if event.eventType() == blpapi.Event.RESPONSE:
+                done = True
+    finally:
+        session.stop()
+
+    if len(security_data_records) != 1:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned {len(security_data_records)} securityData records for "
+            f"{security!r}, expected exactly one"
+        )
+    security_data = security_data_records[0]
+
+    if not security_data.hasElement(_SECURITY_IDENTIFIER_FIELD):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI securityData record for {security!r} is missing its own "
+            "security identifier"
+        )
+    returned_security = security_data.getElementAsString(_SECURITY_IDENTIFIER_FIELD)
+    if returned_security != security:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI securityData record identifier {returned_security!r} does not "
+            f"match requested identifier {security!r}"
+        )
+    if security_data.hasElement("securityError"):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI securityError for {security!r}: "
+            f"{security_data.getElement('securityError')}"
+        )
+
+    field_data = security_data.getElement("fieldData")
+    answered: dict[str, str] = {}
+    for field in dict.fromkeys(fields):
+        if not field_data.hasElement(field):
+            continue
+        try:
+            raw_value = field_data.getElementAsString(field)
+        except blpapi.exception.Exception as exc:
+            raise TreasuryFuturesCTDBloombergError(
+                f"Bloomberg DAPI returned a malformed value for {field} on {security!r}: {exc}"
+            ) from exc
+        if raw_value:
+            answered[field] = raw_value
+    return answered
+
+
+def _require_answered(answered: dict[str, str], field: str, security: str) -> str:
+    """Return a required field's value, stripped, or raise.
+
+    Whitespace is as missing as an absent element (Codex review, PR #191). A
+    field that is *present but semantically empty* is the more dangerous of
+    the two: it survives a truthiness check and reaches the record as an
+    empty string on an otherwise confirmed-source result.
+    """
+
+    raw_value = answered.get(field)
+    if raw_value is None or not raw_value.strip():
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI response for {security!r} is missing {field}"
+        )
+    return raw_value.strip()
+
+
+#: The delivery months the four supported CBOT Treasury futures actually
+#: list: the quarterly March/June/September/December cycle (Codex review, PR
+#: #191). Deliberately narrower than the standard twelve-month futures
+#: alphabet, which admitted symbols such as ``TYF7`` that are not ZN delivery
+#: contracts at all.
+#:
+#: This is a *guard against a malformed stage-one response*, not an
+#: authoritative statement of the listing cycle -- all four confirmed samples
+#: are ``U`` (September), so the quarterly restriction rests on the contracts'
+#: published cycle rather than on four observations. If Bloomberg ever
+#: legitimately answers with a serial month, this fails closed naming that
+#: month, which is a visible error to act on rather than a silent wrong
+#: answer.
+TREASURY_FUTURES_DELIVERY_MONTH_CODES = "HMUZ"
+
+#: The calendar month each quarterly delivery code names. Keyed by the same
+#: codes as ``TREASURY_FUTURES_DELIVERY_MONTH_CODES``.
+_DELIVERY_MONTH_NUMBERS: dict[str, int] = {"H": 3, "M": 6, "U": 9, "Z": 12}
+
+#: Remaining-maturity plausibility windows, as ``(lower_months, upper_months,
+#: upper_inclusive)`` measured from the **first calendar day of the named
+#: delivery month** (Eddy's methodology decision, Issue #190).
+#:
+#: These encode the published remaining-maturity leg of each contract's
+#: deliverable grade, and nothing else. ZT and ZF additionally carry an
+#: *original term to maturity* leg that this module cannot evaluate: the CTD
+#: data contract has no issue date or original term, and no Bloomberg mnemonic
+#: for one is confirmed. Inventing either would be fabricating reference data
+#: under AGENTS.md rule 6, so the original-term leg is deliberately absent and
+#: this guard is **not** proof of full CME deliverability -- see
+#: ``_require_remaining_maturity_plausible``.
+TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[str, tuple[int, int, bool]] = {
+    # Not less than 1 year 9 months, not more than 2 years.
+    "ZT": (21, 24, True),
+    # Not less than 4 years 2 months, not more than 5 years 3 months.
+    "ZF": (50, 63, True),
+    # 6 years 6 months through 10 years.
+    "ZN": (78, 120, True),
+    # At least 15 years and strictly less than 25 years.
+    "ZB": (180, 300, False),
+}
+
+#: Which month the reported last delivery day must fall in, as
+#: ``(start, end)`` months counted from the first day of the delivery month and
+#: half-open. Contract-specific because the contracts genuinely differ (Codex
+#: review, PR #191):
+#:
+#: * ZN and ZB last deliver on the **last business day of the delivery month**,
+#:   so their last delivery day is in that month -- ``(0, 1)``;
+#: * ZT and ZF last deliver a few business days *after* the last trading day,
+#:   which is itself the last business day of the delivery month. Any business
+#:   day after the month's last one necessarily falls in the next month, so
+#:   their last delivery day is never in the delivery month -- ``(1, 2)``. Both
+#:   confirmed samples are 2026-10-05 for a September contract.
+#:
+#: This matters beyond provenance: ``last_delivery_date`` *is* the settlement
+#: date the implied yield is computed on, so accepting the wrong one moves the
+#: answer. See ``_delivery_month_first_day`` for what this deliberately does
+#: **not** check.
+TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN: dict[str, tuple[int, int]] = {
+    "ZT": (1, 2),
+    "ZF": (1, 2),
+    "ZN": (0, 1),
+    "ZB": (0, 1),
+}
+
+_ISIN_LENGTH = 12
+
+#: Every U.S. Treasury carries a ``US``-prefixed ISIN, and the CTD of a U.S.
+#: Treasury futures contract is by definition a U.S. Treasury. All four
+#: confirmed CTDs are ``US...``.
+_US_ISIN_COUNTRY_PREFIX = "US"
+
+
+def _isin_check_digit_is_valid(identifier: str) -> bool:
+    """ISO 6166 check digit: expand letters to two-digit values, then Luhn.
+
+    Doubling starts at the second digit **from the right** -- the check digit
+    itself is never doubled. (Getting that parity backwards makes every real
+    ISIN look invalid, which is how this implementation was verified: against
+    the four CTD ISINs Eddy's live run returned, all of which must pass.)
+    """
+
+    digits = "".join(str(int(character, 36)) for character in identifier)
+    total = 0
+    double = False
+    for character in reversed(digits):
+        value = int(character)
+        if double:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+        double = not double
+    return total % 10 == 0
+
+
+def _require_isin(raw_value: str, field: str, security: str) -> str:
+    """Require a genuine U.S. ISIN, not merely an ISIN-shaped string.
+
+    Bloomberg can answer a field with a sentinel (``#N/A N/A``) or a
+    placeholder that is neither absent nor blank, and a 12-alphanumeric shape
+    check alone still admits a transposed or mistyped identifier whose check
+    digit is wrong (Codex review, PR #191). Any of those would reach the
+    record as the CTD's identity on an ``is_confirmed_source: true`` result.
+    Three checks, in order of how much they narrow:
+
+    1. 12 alphanumeric characters -- the shape
+       ``bloomberg_bond_quote.parse_bond_identifier`` already requires;
+    2. the ``US`` country prefix -- the CTD of a U.S. Treasury futures
+       contract is a U.S. Treasury;
+    3. the ISO 6166 check digit.
+
+    Deliberately stricter than the trader-entry parser, which checks only the
+    shape. A trader's typo is visible to them and correctable on the spot; a
+    silently wrong identifier arriving from a live feed is stamped confirmed
+    and shown as market data.
+    """
+
+    identifier = raw_value.strip().upper()
+    if len(identifier) != _ISIN_LENGTH or not identifier.isalnum():
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} did not return a 12-character "
+            f"alphanumeric ISIN: {raw_value!r}"
+        )
+    if not identifier.startswith(_US_ISIN_COUNTRY_PREFIX):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned a non-U.S. ISIN "
+            f"{identifier!r} -- the CTD of a U.S. Treasury futures contract must be a "
+            "U.S. Treasury"
+        )
+    if not _isin_check_digit_is_valid(identifier):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned {identifier!r}, whose "
+            "ISO 6166 check digit is invalid"
+        )
+    return identifier
+
+
+def _require_delivery_ticker(contract_symbol: str, contract_code: str, security: str) -> str:
+    """Require the resolved delivery month to belong to the contract asked for.
+
+    Stage one asks ``TYA Comdty`` which delivery month it currently is, and
+    ``PARSEKYABLE_DES`` answers with the actual contract carrying its yellow
+    key (``TYZ6 Comdty``). That suffix is stripped before validation -- it is
+    the same yellow key the stage-two security already carries, not part of
+    the delivery symbol, and it must not be weakened into the representation.
+    If stage one answered anything else -- a different root, a malformed
+    symbol -- stage two would fetch that *other* contract's perfectly valid
+    CTD and this module would return it labelled with the requested
+    ``contract_code``, so pricing would apply one contract's quote convention
+    to another's CTD metadata (Codex review, PR #191). The root is the check
+    that matters; the delivery month must be one these contracts actually
+    list -- the quarterly ``HMUZ`` cycle, not the full twelve-month futures
+    alphabet, which admitted symbols such as ``TYF7``.
+    """
+
+    raw = contract_symbol.strip().upper()
+    if raw.endswith(BLOOMBERG_FUTURES_YELLOW_KEY.upper()):
+        raw = raw[: -len(BLOOMBERG_FUTURES_YELLOW_KEY)].strip()
+    symbol = raw
+    expected_root = BLOOMBERG_FUTURES_TICKER_ROOTS[contract_code]
+    remainder = symbol[len(expected_root) :]
+    if (
+        not symbol.startswith(expected_root)
+        # One or two year digits -- the two conventions Bloomberg uses
+        # (``TYZ6``, ``TYZ26``). Unbounded digits are not a wider contract, they
+        # are a malformed answer, and they make the delivery year unresolvable:
+        # the derived year would land outside `datetime.date`'s range and raise
+        # a bare ValueError instead of failing closed as a named error.
+        or len(remainder) not in (2, 3)
+        or remainder[0] not in TREASURY_FUTURES_DELIVERY_MONTH_CODES
+        or not remainder[1:].isdigit()
+    ):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI resolved {security!r} to {contract_symbol!r}, which is not a "
+            f"{contract_code} delivery month (expected the {expected_root} delivery root "
+            f"resolving to one of the quarterly delivery months "
+            f"{TREASURY_FUTURES_DELIVERY_MONTH_CODES} and year digits)"
+        )
+    return symbol
+
+
+def _delivery_month_first_day(
+    contract_symbol: str, contract_code: str, last_delivery_date: date, security: str = ""
+) -> date:
+    """First calendar day of the delivery month the resolved symbol names.
+
+    The month comes from the symbol's delivery code (``TUU6`` -> ``U`` ->
+    September). The symbol carries only the *last digit(s)* of the year, so the
+    decade is taken from the matching year nearest ``last_delivery_date`` and
+    then **verified against it**, over the month
+    ``TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN`` allows that contract: the
+    delivery month for ZN and ZB, the following month for ZT and ZF.
+
+    **This validates the month, not the day, and that leaves real exposure.**
+    ``last_delivery_date`` is the settlement date the yield is priced on, so a
+    response naming the right month but the wrong day still prices wrongly: on
+    the confirmed ZT sample at ``103-000``, 2026-10-31 instead of its real
+    2026-10-05 moves the implied yield +0.96 bp, past Issue #190's 0.5 bp
+    parity budget (Codex review, PR #191). Checking the *day* means knowing
+    which days are business days, and this repository has no holiday calendar
+    -- only a ``BusinessDayConvention`` enum. Authoring one here would be
+    inventing market data (AGENTS.md rule 6) and inferring a bound, which is
+    the same move that made the first deliverable-window attempt reject two of
+    the four real CTDs. So it is escalated to Eddy rather than guessed, and the
+    residual is recorded here rather than left invisible.
+
+    Verifying rather than trusting the nearest match matters, because nearest
+    alone silently guesses (Codex review, PR #191). ``TYU6`` reported with a
+    2031 last delivery is exactly between 2026 and 2036 and was resolved to
+    2036; reported with a 2030 one it was resolved to 2026. Both pairs are
+    self-contradictory and must fail closed rather than pick a decade. The
+    candidates are a full modulus apart and the accepted span is at most two
+    months, so at most one candidate can satisfy the check and the result stays
+    deterministic.
+
+    ``last_delivery_date`` is used **only** to place and confirm the decade. It
+    is never the reference date for the maturity window: for ZT and ZF the last
+    delivery day falls in the month *after* the delivery month, which shifts
+    every measurement by a month and, against the four confirmed live CTDs,
+    rejected two of them.
+    """
+
+    remainder = contract_symbol[len(BLOOMBERG_FUTURES_TICKER_ROOTS[contract_code]) :]
+    month = _DELIVERY_MONTH_NUMBERS[remainder[0]]
+    digits = remainder[1:]
+    modulus = 10 ** len(digits)
+    anchor = last_delivery_date.year
+    year = anchor + ((int(digits) - anchor) % modulus)
+    if year - anchor > modulus // 2:
+        year -= modulus
+
+    reference = date(year, month, 1)
+    start_months, end_months = TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN[contract_code]
+    span_start = _add_months_to_first_day(reference, start_months)
+    span_end = _add_months_to_first_day(reference, end_months)
+    if not span_start <= last_delivery_date < span_end:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned last delivery {last_delivery_date.isoformat()} for "
+            f"{security or contract_symbol!r}, which does not belong to the "
+            f"{contract_symbol} delivery month: {contract_code} last delivers between "
+            f"{span_start.isoformat()} and {span_end.isoformat()}, so the delivery year is "
+            "unresolvable and the settlement date it would price on is unusable"
+        )
+    return reference
+
+
+def _add_months_to_first_day(reference: date, months: int) -> date:
+    """Advance a first-of-month date by whole months.
+
+    ``reference`` is always the first of a month, so this never needs the
+    day-of-month clamping the coupon grid does -- the first of a month exists in
+    every month.
+    """
+
+    total = reference.year * 12 + (reference.month - 1) + months
+    year, month_index = divmod(total, 12)
+    return date(year, month_index + 1, 1)
+
+
+def _require_remaining_maturity_plausible(
+    contract_code: str,
+    contract_symbol: str,
+    ctd_maturity_date: date,
+    last_delivery_date: date,
+    security: str,
+) -> None:
+    """Remaining-maturity plausibility / cross-contract guard.
+
+    Every other guard checks the CTD record against *itself*: the identifier is
+    checksum-valid, the numbers are sane, delivery precedes maturity. None of
+    them ties the CTD to the contract it is supposed to be deliverable into, so
+    a coherent CTD belonging to a *different* Treasury contract passed them all
+    and was stamped as confirmed -- pricing would then apply one contract's
+    quote convention to another's CTD (Codex review, PR #191).
+
+    This closes that gap by the narrowest check that does: the CTD's remaining
+    maturity, measured from the first calendar day of the delivery month the
+    resolved symbol names, must fall in that contract's published
+    remaining-maturity window.
+
+    **This is a plausibility / cross-contract guard, not proof of CME
+    deliverability.** It deliberately omits the original-term leg of ZT and ZF
+    eligibility, which needs an issue date or original term the CTD data
+    contract does not carry. A bond can therefore satisfy this guard and still
+    not be genuinely deliverable; what it rules out is another contract's CTD
+    arriving labelled as this one's.
+    """
+
+    lower_months, upper_months, upper_inclusive = (
+        TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS[contract_code]
+    )
+    reference = _delivery_month_first_day(
+        contract_symbol, contract_code, last_delivery_date, security
+    )
+    earliest = _add_months_to_first_day(reference, lower_months)
+    latest = _add_months_to_first_day(reference, upper_months)
+
+    too_short = ctd_maturity_date < earliest
+    too_long = ctd_maturity_date > latest if upper_inclusive else ctd_maturity_date >= latest
+    if too_short or too_long:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned a CTD maturing {ctd_maturity_date.isoformat()} for "
+            f"{security!r}, which is outside {contract_code}'s remaining-maturity window "
+            f"[{earliest.isoformat()}, {latest.isoformat()}"
+            f"{']' if upper_inclusive else ')'} measured from {reference.isoformat()}, the "
+            f"first day of the {contract_symbol} delivery month"
+        )
+
+
+def _require_cusip_agrees_with_isin(
+    ctd_identifier: str, ctd_cusip: str | None, security: str
+) -> None:
+    """Require the display CUSIP, when present, to name the same bond as the ISIN.
+
+    A U.S. ISIN is ``US`` + the nine-character CUSIP + a check digit, so the
+    two identifiers are not independent: characters 3-11 of the ISIN *are* the
+    CUSIP. If Bloomberg answers with a checksum-valid ISIN and a CUSIP
+    belonging to a different Treasury, the record names two bonds at once and
+    was still stamped confirmed (Codex review, PR #191). The acceptance script
+    prints both, so a parity run could be set up against whichever the reader
+    happened to key in -- and the coupon, maturity and conversion factor that
+    produced the yield might belong to the other one.
+
+    This is an arithmetic identity of the identifiers, not an inferred market
+    convention, so it cannot reject a coherent response: all four confirmed
+    live CTDs satisfy it exactly. The CUSIP stays optional -- a *missing* one
+    is fine, only a *contradictory* one is refused.
+    """
+
+    if ctd_cusip is None:
+        return
+    cusip = ctd_cusip.strip().upper()
+    if not cusip:
+        return
+    embedded = ctd_identifier[2:11]
+    if cusip != embedded:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned CTD identifiers naming different securities for "
+            f"{security!r}: {BLOOMBERG_CTD_FIELD_MAP['ctd_identifier']} {ctd_identifier} "
+            f"embeds CUSIP {embedded}, but "
+            f"{BLOOMBERG_CTD_DISPLAY_FIELD_MAP['ctd_cusip']} returned {cusip}"
+        )
+
+
+#: ``FUT_CTD_TICKER`` as all four confirmed contracts return it: ``T``, the
+#: coupon, and the maturity as ``mm/dd/yy`` (``T 4.25 05/31/33``).
+_CTD_DESCRIPTION_PATTERN = re.compile(
+    r"^T\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]{2})/([0-9]{2})/([0-9]{2})$"
+)
+
+
+def _coherent_ctd_description(
+    raw_description: str | None, coupon_percent: float, maturity: date
+) -> str | None:
+    """Keep the display description only if it names the bond that was priced.
+
+    ``FUT_CTD_TICKER`` encodes a coupon and a maturity of its own, and pricing
+    uses the structured fields instead -- so a contradictory description is a
+    second bond shown beside the first. It is rendered in the workbench summary
+    and printed by the acceptance script under "use these exact values on the
+    benchmark side", where a reader could key it into the benchmark instead of
+    the ISIN (Codex review, PR #191).
+
+    Dropped rather than refused. The field is display-only and already
+    optional, so losing it costs nothing, while failing the load on it would
+    stake availability on my reading of a vendor display format -- and an
+    unrecognised-but-valid format would then be an outage. The structured
+    fields remain authoritative either way.
+
+    The two-digit year is compared against ``maturity.year % 100`` rather than
+    expanded, so no century rule is inferred: this only ever *confirms*
+    agreement with a maturity already parsed from ``FUT_CTD_MTY``.
+    """
+
+    if raw_description is None:
+        return None
+    description = raw_description.strip()
+    if not description:
+        return None
+
+    match = _CTD_DESCRIPTION_PATTERN.match(description)
+    if match is None:
+        return None
+    if abs(float(match.group(1)) - coupon_percent) > 1e-9:
+        return None
+    month, day, year_digits = (int(match.group(index)) for index in (2, 3, 4))
+    if (month, day, year_digits) != (maturity.month, maturity.day, maturity.year % 100):
+        return None
+    return description
+
+
+def _parse_bloomberg_float(raw_value: str, field: str, security: str) -> float:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned a non-numeric "
+            f"value: {raw_value!r}"
+        ) from exc
+    if value != value or value in (float("inf"), float("-inf")):
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned a non-finite "
+            f"value: {raw_value!r}"
+        )
+    return value
+
+
+def _parse_bloomberg_date(raw_value: str, field: str, security: str) -> date:
+    """Parse a Bloomberg date string strictly as ``YYYY-MM-DD``.
+
+    No alternative format is attempted. A date this module cannot read is a
+    date it must not guess at -- a misread maturity or delivery date moves
+    every number the converter produces.
+    """
+
+    try:
+        return _parse_iso_date(raw_value, field)
+    except ValueError as exc:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {field} on {security!r} returned a value that is not a "
+            f"YYYY-MM-DD date: {raw_value!r}"
+        ) from exc
+
+
+def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
+    """Load current CTD metadata for ``contract_code`` from Bloomberg DAPI.
+
+    Two requests (see the module docstring): the desk-active contract alias
+    resolves the delivery month, then that delivery month answers the CTD
+    fields. Fails closed on anything missing, blank or unparseable, and never
+    falls back to manual, cached or synthetic data -- in particular there is
+    no fallback to the generic continuation #1, whose front contract lags the
+    desk-active contract during roll.
+    """
+
+    unresolved = unresolved_bloomberg_ctd_fields()
+    if unresolved:
+        raise TreasuryFuturesCTDFieldsUnconfirmedError(
+            "automatic Bloomberg CTD sourcing is not available: no confirmed Bloomberg "
+            f"field mnemonic for {', '.join(unresolved)}. Run "
+            "tools/bloomberg_treasury_futures_ctd_probe.py on a Bloomberg-networked "
+            "workstation to confirm the candidate mnemonics, then wire the confirmed "
+            "ones into data/treasury_futures_ctd.BLOOMBERG_CTD_FIELD_MAP."
+        )
+
+    normalized_code = str(contract_code).strip().upper()
+    active_security = bloomberg_active_contract(normalized_code)
+
+    try:
+        import blpapi  # noqa: F401
+    except ImportError as exc:
+        raise TreasuryFuturesCTDBloombergError(
+            "blpapi is not installed -- automatic CTD sourcing needs a Bloomberg-networked "
+            f"workstation with Bloomberg's official blpapi package installed ({exc})"
+        ) from exc
+
+    # Stage one: which delivery month is the desk-active contract today?
+    active_answered = _reference_data_fields(
+        active_security, [BLOOMBERG_ACTIVE_CONTRACT_FIELD]
+    )
+    contract_symbol = _require_delivery_ticker(
+        _require_answered(
+            active_answered, BLOOMBERG_ACTIVE_CONTRACT_FIELD, active_security
+        ),
+        normalized_code,
+        active_security,
+    )
+    delivery_security = bloomberg_delivery_month_security(contract_symbol)
+
+    # Stage two: that delivery month's CTD.
+    stage_two_fields = [
+        BLOOMBERG_CTD_FIELD_MAP[field]
+        for field in REQUIRED_BLOOMBERG_CTD_FIELDS
+        if field != "contract_symbol"
+    ] + list(BLOOMBERG_CTD_DISPLAY_FIELD_MAP.values())
+    ctd_answered = _reference_data_fields(delivery_security, stage_two_fields)
+
+    def _required(logical_field: str) -> str:
+        return _require_answered(
+            ctd_answered, BLOOMBERG_CTD_FIELD_MAP[logical_field], delivery_security
+        )
+
+    coupon_field = BLOOMBERG_CTD_FIELD_MAP["ctd_coupon_percent"]
+    factor_field = BLOOMBERG_CTD_FIELD_MAP["conversion_factor"]
+    maturity_field = BLOOMBERG_CTD_FIELD_MAP["ctd_maturity_date"]
+    delivery_field = BLOOMBERG_CTD_FIELD_MAP["last_delivery_date"]
+
+    ctd_identifier = _require_isin(
+        _required("ctd_identifier"),
+        BLOOMBERG_CTD_FIELD_MAP["ctd_identifier"],
+        delivery_security,
+    )
+    coupon_percent = _parse_bloomberg_float(
+        _required("ctd_coupon_percent"), coupon_field, delivery_security
+    )
+    conversion_factor = _parse_bloomberg_float(
+        _required("conversion_factor"), factor_field, delivery_security
+    )
+    ctd_maturity_date = _parse_bloomberg_date(
+        _required("ctd_maturity_date"), maturity_field, delivery_security
+    )
+    last_delivery_date = _parse_bloomberg_date(
+        _required("last_delivery_date"), delivery_field, delivery_security
+    )
+
+    # The same domain rules the manual path enforces. A live response is not
+    # exempt from them: a negative coupon, a non-positive conversion factor or
+    # a delivery date at/after maturity is unusable whoever supplied it.
+    if coupon_percent < 0:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {coupon_field} on {delivery_security!r} returned a "
+            f"negative coupon: {coupon_percent}"
+        )
+    if conversion_factor <= 0:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI field {factor_field} on {delivery_security!r} returned a "
+            f"non-positive conversion factor: {conversion_factor}"
+        )
+    if last_delivery_date >= ctd_maturity_date:
+        raise TreasuryFuturesCTDBloombergError(
+            f"Bloomberg DAPI returned last delivery {last_delivery_date.isoformat()} on or "
+            f"after the CTD's maturity {ctd_maturity_date.isoformat()} for "
+            f"{delivery_security!r}"
+        )
+
+    _require_cusip_agrees_with_isin(
+        ctd_identifier,
+        ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_cusip"]),
+        delivery_security,
+    )
+
+    # Ties the CTD to the contract it was fetched for. Live path only: a manual
+    # record is always visibly MANUAL_UNCONFIRMED and never claims to be
+    # market data, which is the provenance this guard protects.
+    _require_remaining_maturity_plausible(
+        normalized_code,
+        contract_symbol,
+        ctd_maturity_date,
+        last_delivery_date,
+        delivery_security,
+    )
+
+    return TreasuryFuturesCTD(
+        contract_code=normalized_code,
+        contract_symbol=contract_symbol,
+        ctd_identifier=ctd_identifier,
+        ctd_coupon_percent=coupon_percent,
+        ctd_maturity_date=ctd_maturity_date,
+        conversion_factor=conversion_factor,
+        last_delivery_date=last_delivery_date,
+        source=TreasuryFuturesCTDSource.BLOOMBERG_DAPI,
+        as_of=_acquisition_now(),
+        ctd_cusip=ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_cusip"]),
+        ctd_description=_coherent_ctd_description(
+            ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_description"]),
+            coupon_percent,
+            ctd_maturity_date,
+        ),
+    )
+
+
+def treasury_futures_ctd_from_manual_entry(payload: dict[str, object]) -> TreasuryFuturesCTD:
+    """Build a validated, explicitly-unconfirmed CTD record from operator input.
+
+    Every field in :data:`REQUIRED_BLOOMBERG_CTD_FIELDS` plus ``contract_code``
+    and ``as_of`` is required: an answer built on a missing conversion factor,
+    maturity or delivery date would be wrong rather than approximate, so this
+    fails closed instead of defaulting anything. The display-only extras
+    (``ctd_cusip``, ``ctd_description``) are optional.
+    """
+
+    if not isinstance(payload, dict):
+        raise TreasuryFuturesCTDError("CTD metadata must be a JSON object")
+
+    missing = [
+        field
+        for field in (*REQUIRED_BLOOMBERG_CTD_FIELDS, "contract_code", "as_of")
+        if payload.get(field) is None
+    ]
+    if missing:
+        raise TreasuryFuturesCTDError(f"CTD metadata is missing required field(s): {missing}")
+
+    try:
+        for field in ("contract_code", "contract_symbol", "ctd_identifier", "as_of"):
+            _require_non_blank(payload[field], field)
+        _require_finite_number(payload["ctd_coupon_percent"], "ctd_coupon_percent")
+        _require_finite_number(payload["conversion_factor"], "conversion_factor")
+        ctd_maturity_date = _parse_iso_date(payload["ctd_maturity_date"], "ctd_maturity_date")
+        last_delivery_date = _parse_iso_date(payload["last_delivery_date"], "last_delivery_date")
+    except ValueError as exc:
+        raise TreasuryFuturesCTDError(str(exc)) from exc
+
+    coupon_percent = float(payload["ctd_coupon_percent"])  # type: ignore[arg-type]
+    conversion_factor = float(payload["conversion_factor"])  # type: ignore[arg-type]
+    if coupon_percent < 0:
+        raise TreasuryFuturesCTDError(
+            f"ctd_coupon_percent must not be negative, got {coupon_percent}"
+        )
+    if conversion_factor <= 0:
+        raise TreasuryFuturesCTDError(
+            f"conversion_factor must be positive, got {conversion_factor}"
+        )
+    if last_delivery_date >= ctd_maturity_date:
+        raise TreasuryFuturesCTDError(
+            f"last_delivery_date {last_delivery_date.isoformat()} must be before the CTD's "
+            f"maturity {ctd_maturity_date.isoformat()}"
+        )
+
+    def _optional_text(field: str) -> str | None:
+        value = payload.get(field)
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    return TreasuryFuturesCTD(
+        contract_code=str(payload["contract_code"]).strip().upper(),
+        contract_symbol=str(payload["contract_symbol"]).strip(),
+        ctd_identifier=str(payload["ctd_identifier"]).strip().upper(),
+        ctd_coupon_percent=coupon_percent,
+        ctd_maturity_date=ctd_maturity_date,
+        conversion_factor=conversion_factor,
+        last_delivery_date=last_delivery_date,
+        source=TreasuryFuturesCTDSource.MANUAL_UNCONFIRMED,
+        as_of=str(payload["as_of"]).strip(),
+        ctd_cusip=_optional_text("ctd_cusip"),
+        ctd_description=_optional_text("ctd_description"),
+    )
