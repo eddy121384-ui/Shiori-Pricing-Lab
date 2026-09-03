@@ -247,7 +247,12 @@ def round_to_tick(contract_code: str, price: float) -> float:
 
     contract = get_contract(contract_code)
     price = _require_positive_finite_price(price)
-    return math.floor(price * contract.ticks_per_point + 0.5) / contract.ticks_per_point
+    try:
+        return math.floor(price * contract.ticks_per_point + 0.5) / contract.ticks_per_point
+    except OverflowError as exc:
+        raise TreasuryFuturesQuoteError(
+            f"futures price {price} causes numerical overflow in tick rounding"
+        ) from exc
 
 
 def parse_futures_quote(contract_code: str, raw: str | int | float) -> TreasuryFuturesQuote:
@@ -347,16 +352,23 @@ def format_futures_quote(contract_code: str, price: float) -> str:
 
 def _build_quote(contract: TreasuryFuturesContract, decimal_price: float) -> TreasuryFuturesQuote:
     exchange_price = round_to_tick(contract.code, decimal_price)
+    # Use a very small tolerance for floating-point roundoff when checking if
+    # the price is on a valid tick. The contract's minimum tick is the
+    # economic threshold; here we only account for IEEE 754 roundoff error.
+    tick = contract.minimum_tick
+    on_tick = abs(exchange_price - decimal_price) <= tick * 1e-8
     return TreasuryFuturesQuote(
         contract_code=contract.code,
         decimal_price=decimal_price,
         exchange_price=exchange_price,
         exchange_quote=format_futures_quote(contract.code, decimal_price),
         # An exact tick multiple survives the round-trip bit for bit; anything
-        # the trader typed off-tick does not. No tolerance is applied here on
-        # purpose -- a price one ULP off a tick is still not a tradeable price,
-        # and saying so costs the caller nothing but a flag.
-        on_tick=exchange_price == decimal_price,
+        # the trader typed off-tick does not. A tiny tolerance is applied
+        # here to account for floating-point roundoff, so a mathematically
+        # on-tick price with normal float noise is correctly reported as
+        # on_tick=True. The contract tick itself remains the economic
+        # threshold for what is tradeable.
+        on_tick=on_tick,
         minimum_tick=contract.minimum_tick,
     )
 

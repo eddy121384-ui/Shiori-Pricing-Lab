@@ -516,8 +516,8 @@ def futures_price_from_target_yield(
             ctd.ctd_maturity_date,
             ctd.ctd_coupon_percent,
         )
-    except (OverflowError, ValueError) as exc:
-        # Extreme but finite yields (e.g. 1e100) can cause numerical overflow
+    except OverflowError as exc:
+        # Extreme but finite yields (e.g. 1e308) can cause numerical overflow
         # in the pricing math. Translate to TreasuryFuturesYieldError so the
         # existing per-direction fail-visible behavior is preserved.
         raise TreasuryFuturesYieldError(
@@ -533,7 +533,8 @@ def futures_price_from_target_yield(
     price = futures_price_from_clean_price(clean_price, ctd.conversion_factor)
     contract = get_contract(ctd.contract_code)
     exchange_price = round_to_tick(contract.code, price)
-    on_tick = exchange_price == price
+    # Use the same tolerance as _build_quote for consistency.
+    on_tick = abs(exchange_price - price) <= contract.minimum_tick * 1e-8
     return TreasuryFuturesPriceFromYield(
         ctd=ctd,
         target_yield_percent=float(target_yield_percent),
