@@ -30,11 +30,12 @@ The live values behind each are recorded in ``data/treasury_futures_ctd``'s
 own module docstring, as evidence of the mnemonic rather than as data.
 
 **Superseded candidates.** The original list carried several candidates per
-destination so one run could be conclusive: ``FUT_ACT_DEF_GEN_TICKER``,
-``PARSEKYABLE_DES``, ``CTD_ISIN``, ``CTD_CUSIP``, ``CTD_CPN``, ``CTD_MTY``,
-``FUT_CTD_MATURITY``, ``CTD_CONVERSION_FACTOR``, ``FUT_CTD_CNVS_FACTOR``,
-``LAST_DELIVERY_DT``, ``FUT_LAST_DLV_DT``. A confirmed mnemonic was found for
-every required field, so none is wired. They are recorded as **superseded,
+destination so one run could be conclusive: ``FUT_ACT_DEF_GEN_TICKER``
+(``PARSEKYABLE_DES`` is confirmed and wired -- see above), ``CTD_ISIN``,
+``CTD_CUSIP``, ``CTD_CPN``, ``CTD_MTY``, ``FUT_CTD_MATURITY``,
+``CTD_CONVERSION_FACTOR``, ``FUT_CTD_CNVS_FACTOR``, ``LAST_DELIVERY_DT``,
+``FUT_LAST_DLV_DT``. A confirmed mnemonic was found for every required
+field, so none of the rest is wired. They are recorded as **superseded,
 not as confirmed rejections** -- no per-field ``BAD_FLD`` evidence was
 reported for them individually, so nothing here claims any of them is
 invalid. Re-adding one still needs its own confirmation.
@@ -157,7 +158,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=",".join(SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES),
         help=(
             "Comma-separated Shiori contract codes to probe using their Bloomberg "
-            "generic front-contract ticker (default: all supported)"
+            "desk-active alias (e.g. TYA for ZN; default: all supported)"
         ),
     )
     parser.add_argument(
@@ -165,7 +166,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Probe this Bloomberg security string verbatim (e.g. \"TYZ6 Comdty\") "
-            "instead of the generic front contract. Overrides --contract."
+            "instead of the desk-active alias. Overrides --contract."
         ),
     )
     parser.add_argument(

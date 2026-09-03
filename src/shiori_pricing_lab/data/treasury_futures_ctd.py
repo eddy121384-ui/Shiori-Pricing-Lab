@@ -56,9 +56,9 @@ separation of typed fields from display-only ones.
 
 **Superseded candidates.** The probe's original list carried several
 candidates per destination so that one workstation run could be conclusive.
-It was: for the contract symbol, ``FUT_ACT_DEF_GEN_TICKER`` and
-``PARSEKYABLE_DES``; for the identifier, ``CTD_ISIN`` and ``CTD_CUSIP``; for
-the coupon, ``CTD_CPN``; for the maturity, ``CTD_MTY`` and
+It was: for the contract symbol, ``FUT_ACT_DEF_GEN_TICKER`` (``PARSEKYABLE_DES``
+is confirmed and wired -- see above); for the identifier, ``CTD_ISIN`` and
+``CTD_CUSIP``; for the coupon, ``CTD_CPN``; for the maturity, ``CTD_MTY`` and
 ``FUT_CTD_MATURITY``; for the conversion factor, ``CTD_CONVERSION_FACTOR``
 and ``FUT_CTD_CNVS_FACTOR``; for the last delivery date, ``LAST_DELIVERY_DT``
 and ``FUT_LAST_DLV_DT``. A confirmed mnemonic was found for every required
@@ -650,7 +650,7 @@ def _require_delivery_ticker(contract_symbol: str, contract_code: str, security:
     ):
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI resolved {security!r} to {contract_symbol!r}, which is not a "
-            f"{contract_code} delivery month (expected the {expected_root} active alias "
+            f"{contract_code} delivery month (expected the {expected_root} delivery root "
             f"resolving to one of the quarterly delivery months "
             f"{TREASURY_FUTURES_DELIVERY_MONTH_CODES} and year digits)"
         )
