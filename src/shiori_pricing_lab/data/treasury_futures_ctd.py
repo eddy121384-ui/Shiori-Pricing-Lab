@@ -62,7 +62,7 @@ is confirmed and wired -- see above); for the identifier, ``CTD_ISIN`` and
 ``FUT_CTD_MATURITY``; for the conversion factor, ``CTD_CONVERSION_FACTOR``
 and ``FUT_CTD_CNVS_FACTOR``; for the last delivery date, ``LAST_DELIVERY_DT``
 and ``FUT_LAST_DLV_DT``. A confirmed mnemonic was found for every required
-field, so none of these is wired. They are recorded as **superseded, not as
+field, so none of the rest is wired. They are recorded as **superseded, not as
 confirmed rejections** -- the run reported no per-field ``BAD_FLD`` evidence
 for them individually, so this module does not claim any of them is invalid.
 Re-adding one still requires its own confirmation.
@@ -73,27 +73,36 @@ checks the record against *itself*, so a coherent CTD belonging to a
 (Codex review, PR #191). ``_require_remaining_maturity_plausible`` closes that
 by requiring the CTD's remaining maturity to fall inside the contract's
 published window, measured from the **first calendar day of the delivery month
-named by the resolved symbol** -- ``TUU6`` -> September 2026 -> ``2026-09-01``.
+named by the resolved symbol** -- ``TUZ6`` -> December 2026 -> ``2026-12-01``.
 
 The measurement basis is the whole game here, and it is Eddy's methodology
 decision (Issue #190). ``FUT_DLV_DT_LAST`` is *not* the reference: for ZT and
-ZF the last delivery day falls in the month *after* the delivery month, and
-that one month rejects two of the four confirmed live CTDs. Measured from the
-first of the delivery month instead, all four clear their lower bound with
-about a month to spare:
+ZF the last delivery day falls in the month *after* the delivery month, so
+using it as the reference is a month late every time. Measured from the first
+of the delivery month instead, the four contracts confirmed live and current
+(the December active-alias run at the top of this docstring) all clear their
+lower bound comfortably:
 
 =====  ==========  ============  ==========================  =========
 Code   Reference   CTD maturity  Window                      Result
 =====  ==========  ============  ==========================  =========
-ZT     2026-09-01  2028-06-30    [2028-06-01, 2028-09-01]    in window
-ZF     2026-09-01  2030-11-30    [2030-11-01, 2031-12-01]    in window
-ZN     2026-09-01  2033-05-31    [2033-03-01, 2036-09-01]    in window
-ZB     2026-09-01  2045-05-15    [2041-09-01, 2051-09-01)    in window
+ZT     2026-12-01  2028-09-30    [2028-09-01, 2028-12-01]    in window
+ZF     2026-12-01  2031-02-28    [2031-02-01, 2032-03-01]    in window
+ZN     2026-12-01  2033-08-31    [2033-06-01, 2036-12-01]    in window
+ZB     2026-12-01  2045-05-15    [2041-12-01, 2051-12-01)    in window
 =====  ==========  ============  ==========================  =========
 
+(This table is recomputed from the module's own ``_delivery_month_first_day``
+and ``_add_months_to_first_day`` against the confirmed December records
+above -- it is not a fresh Bloomberg observation. The window bounds
+themselves, and the original case for measuring from the first of the
+delivery month rather than ``FUT_DLV_DT_LAST``, were established against the
+September evidence that preceded the active-alias fix; this table exists so
+the guard's own evidence stays in step with the mapping it now guards.)
+
 Every cross-substitution of one confirmed CTD into another contract's request
-fails closed, including Codex's counterexample (ZN/``TYU6`` answered with the
-ZB CTD).
+fails closed, including Codex's counterexample (ZN answered with the ZB
+CTD).
 
 **This is a plausibility guard, not proof of CME deliverability.** ZT and ZF
 eligibility also has an *original term to maturity* leg, which needs an issue

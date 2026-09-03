@@ -2899,12 +2899,15 @@ def treasury_futures_contract_catalogue() -> dict:
 def load_treasury_futures_ctd(body: dict) -> dict:
     """Load the current CTD for one contract from Bloomberg DAPI.
 
-    Two requests behind this (see ``data/treasury_futures_ctd``): the generic
-    front contract resolves the delivery month, then that delivery month
-    answers the CTD fields. Fails closed on anything missing or unparseable,
-    and never falls back to manual, cached or synthetic data -- so a caller
-    either gets a confirmed live record or an error naming what Bloomberg did
-    not give.
+    Two requests behind this (see ``data/treasury_futures_ctd``): the
+    desk-active alias (``TUA``/``FVA``/``TYA``/``USA``) resolves the actual
+    delivery contract via ``PARSEKYABLE_DES``, then that delivery contract
+    answers the CTD fields. There is no fallback to generic continuation #1
+    -- during a roll the generic front contract lags the desk-active one, so
+    falling back to it would silently price the wrong delivery month. Fails
+    closed on anything missing or unparseable, and never falls back to
+    manual, cached or synthetic data -- so a caller either gets a confirmed
+    live record or an error naming what Bloomberg did not give.
     """
 
     if not isinstance(body, dict) or not body.get("contract_code"):
