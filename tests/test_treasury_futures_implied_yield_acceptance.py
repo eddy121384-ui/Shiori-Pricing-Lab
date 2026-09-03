@@ -136,7 +136,11 @@ def test_the_benchmark_is_told_the_price_the_yield_was_actually_computed_from(
 
     instruction = next(line for line in output.splitlines() if "and read its Yield" in line)
     assert "112.5137" in instruction
-    assert "112-165" not in instruction  # the rounded quote is not the priced input
+    # The exchange quote is now included but clearly labeled as "nearest exchange quote"
+    assert "nearest exchange quote" in instruction
+    assert "'112-165'" in instruction
+    # They must not be displayed as an equality (e.g., "112-165 = 112.5137" is forbidden)
+    assert "112-165 = 112.5137" not in instruction
     # And the mismatch is called out rather than left for the reader to notice.
     assert "not an exchange-tradable level" in output
 
@@ -150,6 +154,32 @@ def test_an_on_tick_price_needs_no_off_tick_warning(monkeypatch, capsys) -> None
     assert "not an exchange-tradable level" not in output
     instruction = next(line for line in output.splitlines() if "and read its Yield" in line)
     assert "112.515625" in instruction
+
+
+def test_off_tick_display_shows_entered_decimal_and_exchange_quote_separately(
+    monkeypatch, capsys
+) -> None:
+    """P2 #1: off-tick display must show entered decimal and exchange quote as distinct values.
+
+    The acceptance script's printed instruction must show the exact entered decimal
+    as the priced input, and the exchange quote separately as the nearest tradable
+    quote, without implying equality between them.
+    """
+
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    module.main(["--price", "ZN=112.5137"])
+    output = capsys.readouterr().out
+
+    instruction = next(line for line in output.splitlines() if "and read its Yield" in line)
+    # The priced input is the entered decimal
+    assert "112.5137" in instruction
+    # The rounded exchange quote is shown separately
+    assert "112-165" in instruction
+    # They must not be displayed as an equality (e.g., "112-165 = 112.5137" is forbidden)
+    assert "112-165 = 112.5137" not in instruction
+    # Off-tick must be explicitly called out
+    assert "off-tick" in output.lower()
+    assert "nearest" in output.lower()
 
 
 def test_a_failed_live_load_is_reported_and_exits_non_zero(capsys) -> None:

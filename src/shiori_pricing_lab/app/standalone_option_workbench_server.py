@@ -2970,14 +2970,14 @@ def convert_treasury_futures(body: dict) -> dict:
 
     if not isinstance(body, dict):
         raise ValueError("request body must be a JSON object")
-    ctd = _resolve_conversion_ctd(body)
-
     futures_price = body.get("futures_price")
     target_yield = body.get("target_yield_percent")
     if futures_price in (None, "") and target_yield in (None, ""):
         raise ValueError(
             "request body must carry 'futures_price', 'target_yield_percent', or both"
         )
+
+    ctd = _resolve_conversion_ctd(body)
 
     payload: dict = {"ctd": ctd.as_display_payload(), "implied_yield": None, "futures_price": None}
     if futures_price not in (None, ""):

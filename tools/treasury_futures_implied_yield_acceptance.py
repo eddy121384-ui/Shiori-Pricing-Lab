@@ -174,10 +174,13 @@ def _report_contract(contract_code: str, futures_price: str) -> int:
     # set to decimal_price. Naming exchange_quote here would have compared two
     # yields from different inputs whenever the entered price is off-tick,
     # breaking this script's own identical-input rule (Codex review, PR #191).
-    print(f"    futures price {forward.quote.decimal_price!r}, and read its Yield.")
-    if not forward.quote.on_tick:
+    if forward.quote.on_tick:
+        print(f"    futures price {forward.quote.decimal_price!r}, and read its Yield.")
+    else:
+        print(f"    futures price {forward.quote.decimal_price!r} (entered),"
+              f"nearest exchange quote {forward.quote.exchange_quote!r}, and read its Yield.")
         print(f"    NOTE: {forward.quote.decimal_price!r} is off-tick for {contract_code} "
-              f"(minimum tick {forward.quote.minimum_tick}).")
+          f"(minimum tick {forward.quote.minimum_tick}).")
         print(f"    It is not an exchange-tradable level, and it is NOT "
               f"{forward.quote.exchange_quote}.")
         print("    Use the decimal above on both sides, or re-run on an on-tick price.")

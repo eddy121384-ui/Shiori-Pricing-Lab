@@ -289,35 +289,44 @@
   }
 
   function renderImpliedYield(payload) {
-    if (!payload.implied_yield) {
-      els.impliedYield.textContent = NBSP_DASH;
-      els.impliedYieldNote.textContent = payload.implied_yield_error || NBSP_DASH;
-      return;
+      if (!payload.implied_yield) {
+        els.impliedYield.textContent = NBSP_DASH;
+        els.impliedYieldNote.textContent = payload.implied_yield_error || NBSP_DASH;
+        return;
+      }
+      const result = payload.implied_yield;
+      els.impliedYield.textContent = `${result.implied_yield_percent.toFixed(4)}%`;
+      // The priced decimal is the exact value the calculation used.
+      // The exchange quote is the nearest tradable price for this contract.
+      // They are equal only when on-tick.
+      const offTick = result.on_tick
+        ? ""
+        : ` — off-tick (entered ${result.futures_price}, nearest ${result.exchange_quote})`;
+      els.impliedYieldNote.textContent =
+        `entered ${result.futures_price} → CTD clean ` +
+        `${result.converted_clean_price.toFixed(6)}, accrued ` +
+        `${result.accrued_interest.toFixed(6)}, settled ${result.settlement_date}${offTick}`;
     }
-    const result = payload.implied_yield;
-    els.impliedYield.textContent = `${result.implied_yield_percent.toFixed(4)}%`;
-    const offTick = result.on_tick
-      ? ""
-      : ` — off-tick, nearest exchange price ${result.exchange_quote}`;
-    els.impliedYieldNote.textContent =
-      `${result.exchange_quote} = ${result.futures_price} → CTD clean ` +
-      `${result.converted_clean_price.toFixed(6)}, accrued ` +
-      `${result.accrued_interest.toFixed(6)}, settled ${result.settlement_date}${offTick}`;
-  }
 
   function renderFuturesPrice(payload) {
-    if (!payload.futures_price) {
-      els.futuresPriceOut.textContent = NBSP_DASH;
-      els.futuresPriceNote.textContent = payload.futures_price_error || NBSP_DASH;
-      return;
+      if (!payload.futures_price) {
+        els.futuresPriceOut.textContent = NBSP_DASH;
+        els.futuresPriceNote.textContent = payload.futures_price_error || NBSP_DASH;
+        return;
+      }
+      const result = payload.futures_price;
+      els.futuresPriceOut.textContent = result.exchange_quote;
+      // The priced decimal is the exact value the calculation used.
+      // The exchange quote is the nearest tradable price for this contract.
+      // They are equal only when on-tick.
+      const offTick = result.on_tick
+        ? ""
+        : ` — off-tick (target yield implies ${result.futures_price}, nearest ${result.exchange_quote})`;
+      els.futuresPriceNote.textContent =
+        `target yield implies ${result.futures_price} → CTD clean ` +
+        `${result.converted_clean_price.toFixed(6)}, min tick ${result.minimum_tick_label}, ` +
+        `settled ${result.settlement_date}${offTick}`;
     }
-    const result = payload.futures_price;
-    els.futuresPriceOut.textContent = result.exchange_quote;
-    els.futuresPriceNote.textContent =
-      `raw ${result.futures_price.toFixed(6)} — CTD clean ` +
-      `${result.converted_clean_price.toFixed(6)}, min tick ${result.minimum_tick_label}, ` +
-      `settled ${result.settlement_date}`;
-  }
 
   function clearAnswers() {
     // A stale answer next to an error banner is the one genuinely dangerous

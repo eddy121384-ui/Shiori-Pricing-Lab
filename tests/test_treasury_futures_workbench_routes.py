@@ -311,6 +311,28 @@ def test_neither_direction_is_a_request_error(server_url: str) -> None:
     assert "futures_price" in payload["error"]
 
 
+
+
+def test_bloomberg_sourced_conversion_rejected_before_fetch_when_no_direction(
+  # noqa: E501
+    server_url: str,
+) -> None:
+    """The route must validate that at least one of futures_price or target_yield_percent
+    is supplied BEFORE calling _resolve_conversion_ctd (which would fetch the CTD
+    from Bloomberg when ctd_source=BLOOMBERG). This test exercises the route
+    against a server with no fake blpapi (so a real fetch would fail if attempted)
+    and asserts the 400 comes from the direction check, not from a failed Bloomberg call.
+    """
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd_source": "BLOOMBERG", "contract_code": "ZN"},
+    )
+    assert status == 400
+    assert "futures_price" in payload["error"] or "target_yield_percent" in payload["error"]
+    # The error must be the validation error, not a Bloomberg connection error
+    assert "blpapi is not installed" not in payload.get("error", "")
+    assert "blpapi is not installed" not in str(payload)
+
 def test_a_bad_target_yield_never_hides_a_good_implied_yield(server_url: str) -> None:
     # Each direction reports its own failure, so the trader keeps whichever
     # answer is actually computable.
