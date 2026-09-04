@@ -94,10 +94,10 @@ def test_a_valid_exchange_quote_parses_to_its_decimal_price(code, raw, expected)
 @pytest.mark.parametrize(
     "code, price, expected",
     [
-        ("ZT", 102 + 16.625 / 32, "102-166"),
+        ("ZT", 102 + 16.625 / 32, "102-16 5/8"),
         ("ZT", 102.5, "102-16"),
-        ("ZF", 108 + 15.75 / 32, "108-157"),
-        ("ZN", 112 + 16.5 / 32, "112-165"),
+        ("ZF", 108 + 15.75 / 32, "108-15 3/4"),
+        ("ZN", 112 + 16.5 / 32, "112-16 1/2"),
         ("ZN", 112.5, "112-16"),
         ("ZB", 118.5, "118-16"),
         ("ZB", 119.0, "119-00"),
@@ -105,6 +105,92 @@ def test_a_valid_exchange_quote_parses_to_its_decimal_price(code, raw, expected)
 )
 def test_a_decimal_price_formats_back_to_its_exchange_quote(code, price, expected) -> None:
     assert format_futures_quote(code, price) == expected
+
+
+# Bloomberg-style notation parsing tests
+@pytest.mark.parametrize(
+    "code, raw, expected",
+    [
+        # ZT -- eighths of a 32nd (Bloomberg style)
+        ("ZT", "102-16 1/8", 102 + 16.125 / 32),
+        ("ZT", "102-16 1/4", 102 + 16.25 / 32),
+        ("ZT", "102-16 3/8", 102 + 16.375 / 32),
+        ("ZT", "102-16 1/2", 102 + 16.5 / 32),
+        ("ZT", "102-16 5/8", 102 + 16.625 / 32),
+        ("ZT", "102-16 3/4", 102 + 16.75 / 32),
+        ("ZT", "102-16 7/8", 102 + 16.875 / 32),
+        # ZT -- Unicode fractions
+        ("ZT", "102-16 ⅛", 102 + 16.125 / 32),
+        ("ZT", "102-16 ¼", 102 + 16.25 / 32),
+        ("ZT", "102-16 ⅜", 102 + 16.375 / 32),
+        ("ZT", "102-16 ½", 102 + 16.5 / 32),
+        ("ZT", "102-16 ⅝", 102 + 16.625 / 32),
+        ("ZT", "102-16 ¾", 102 + 16.75 / 32),
+        ("ZT", "102-16 ⅞", 102 + 16.875 / 32),
+        # ZF -- quarters of a 32nd
+        ("ZF", "108-15 1/4", 108 + 15.25 / 32),
+        ("ZF", "108-15 1/2", 108 + 15.5 / 32),
+        ("ZF", "108-15 3/4", 108 + 15.75 / 32),
+        ("ZF", "108-15 ¼", 108 + 15.25 / 32),
+        ("ZF", "108-15 ½", 108 + 15.5 / 32),
+        ("ZF", "108-15 ¾", 108 + 15.75 / 32),
+        # ZN -- halves of a 32nd
+        ("ZN", "112-16 1/2", 112 + 16.5 / 32),
+        ("ZN", "112-16 ½", 112 + 16.5 / 32),
+        # ZB -- whole 32nds only (no fractions)
+        ("ZB", "118-16", 118 + 16 / 32),
+    ],
+)
+def test_bloomberg_style_quote_parses_to_correct_decimal(code, raw, expected) -> None:
+    assert parse_futures_quote(code, raw).decimal_price == pytest.approx(expected)
+
+
+# Test that internal shorthand and Bloomberg notation produce the same decimal prices
+@pytest.mark.parametrize(
+    "code, shorthand, bloomberg, expected",
+    [
+        ("ZT", "102-161", "102-16 1/8", 102 + 16.125 / 32),
+        ("ZT", "102-162", "102-16 1/4", 102 + 16.25 / 32),
+        ("ZT", "102-163", "102-16 3/8", 102 + 16.375 / 32),
+        ("ZT", "102-165", "102-16 1/2", 102 + 16.5 / 32),
+        ("ZT", "102-166", "102-16 5/8", 102 + 16.625 / 32),
+        ("ZT", "102-167", "102-16 3/4", 102 + 16.75 / 32),
+        ("ZT", "102-168", "102-16 7/8", 102 + 16.875 / 32),
+        ("ZT", "102-16+", "102-16 1/2", 102 + 16.5 / 32),
+        ("ZF", "108-152", "108-15 1/4", 108 + 15.25 / 32),
+        ("ZF", "108-155", "108-15 1/2", 108 + 15.5 / 32),
+        ("ZF", "108-157", "108-15 3/4", 108 + 15.75 / 32),
+        ("ZF", "108-15+", "108-15 1/2", 108 + 15.5 / 32),
+        ("ZN", "112-165", "112-16 1/2", 112 + 16.5 / 32),
+        ("ZN", "112-16+", "112-16 1/2", 112 + 16.5 / 32),
+    ],
+)
+def test_shorthand_and_bloomberg_notation_are_equivalent(
+    code, shorthand, bloomberg, expected
+) -> None:
+    shorthand_result = parse_futures_quote(code, shorthand)
+    bloomberg_result = parse_futures_quote(code, bloomberg)
+    assert shorthand_result.decimal_price == pytest.approx(expected)
+    assert bloomberg_result.decimal_price == pytest.approx(expected)
+    # Both should format to the same Bloomberg-style output
+    lhs = format_futures_quote(code, shorthand_result.decimal_price)
+    rhs = format_futures_quote(code, bloomberg_result.decimal_price)
+    assert lhs == rhs
+
+
+# Test invalid Bloomberg fractions are rejected
+@pytest.mark.parametrize(
+    "code, raw",
+    [
+        ("ZT", "102-16 1/3"),  # 1/3 not a valid eighth fraction
+        ("ZB", "118-16 1/2"),  # ZB doesn't have fractions
+        ("ZN", "112-16 1/4"),  # ZN doesn't have quarters
+        ("ZF", "108-15 1/8"),  # ZF doesn't have eighths
+    ],
+)
+def test_invalid_bloomberg_fraction_is_rejected(code, raw) -> None:
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote(code, raw)
 
 
 @pytest.mark.parametrize("code", SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES)
@@ -164,7 +250,7 @@ def test_an_off_tick_decimal_is_kept_exactly_and_flagged_not_rounded_away() -> N
     assert quote.decimal_price == 112.5137
     assert quote.on_tick is False
     assert quote.exchange_price == pytest.approx(112.515625)
-    assert quote.exchange_quote == "112-165"
+    assert quote.exchange_quote == "112-16 1/2"
 
 
 def test_an_on_tick_decimal_is_reported_as_on_tick() -> None:
