@@ -138,9 +138,9 @@ def test_the_benchmark_is_told_the_price_the_yield_was_actually_computed_from(
     assert "112.5137" in instruction
     # The exchange quote is now included but clearly labeled as "nearest exchange quote"
     assert "nearest exchange quote" in instruction
-    assert "'112-165'" in instruction
-    # They must not be displayed as an equality (e.g., "112-165 = 112.5137" is forbidden)
-    assert "112-165 = 112.5137" not in instruction
+    assert "112-16 1/2" in instruction
+    # They must not be displayed as an equality (e.g., "112-16 1/2 = 112.5137" is forbidden)
+    assert "112-16 1/2 = 112.5137" not in instruction
     # And the mismatch is called out rather than left for the reader to notice.
     assert "not an exchange-tradable level" in output
 
@@ -174,16 +174,19 @@ def test_off_tick_display_shows_entered_decimal_and_exchange_quote_separately(
     # The priced input is the entered decimal
     assert "112.5137" in instruction
     # The rounded exchange quote is shown separately
-    assert "112-165" in instruction
-    # They must not be displayed as an equality (e.g., "112-165 = 112.5137" is forbidden)
-    assert "112-165 = 112.5137" not in instruction
+    assert "112-16 1/2" in instruction
+    # They must not be displayed as an equality (e.g., "112-16 1/2 = 112.5137" is forbidden)
+    assert "112-16 1/2 = 112.5137" not in instruction
     # Off-tick must be explicitly called out
     assert "off-tick" in output.lower()
     assert "nearest" in output.lower()
 
 
-def test_a_failed_live_load_is_reported_and_exits_non_zero(capsys) -> None:
+def test_a_failed_live_load_is_reported_and_exits_non_zero(monkeypatch, capsys) -> None:
     # No fake installed: the live fetch cannot succeed here.
+    # Setting blpapi = None in sys.modules makes `import blpapi` raise ImportError,
+    # which is what the CTD module expects to catch.
+    monkeypatch.setitem(sys.modules, "blpapi", None)
     assert module.main(["--price", "ZN=112-165"]) == 1
     assert "CTD LOAD FAILED" in capsys.readouterr().out
 
