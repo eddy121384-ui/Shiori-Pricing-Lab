@@ -584,6 +584,49 @@ def test_a_server_refusal_is_shown_verbatim(server_url, page) -> None:
     assert _is_actually_hidden(page, "hyv-result")
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        {},  # truthy, so the renderer used to draw a normal block of dashes
+        {"source_system": "HISTORICAL_YIELD_VOL_MO"},
+        {**_FULL_PAYLOAD["volatility_source"], "volatility": None},
+        {**_FULL_PAYLOAD["volatility_source"], "volatility": "0.06"},
+        {**_FULL_PAYLOAD["volatility_source"], "volatility_unit": ""},
+        [],  # an array is an object to typeof, and is not one
+    ],
+)
+def test_a_half_understood_volatility_source_is_refused(server_url, page, source) -> None:
+    # A published risk source drawn from a payload the page does not
+    # understand is worse than no source at all (Codex review, PR #200).
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, "volatility_source": source})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_no_source_and_no_reason_is_also_refused(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": None,
+            "volatility_source_unavailable_reason": None,
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "no reason for its absence" in page.inner_text("#hyv-error-detail")
+
+
 def test_a_malformed_answer_is_refused_rather_than_displayed(server_url, page) -> None:
     _route_other_markets_away(page)
     _route_vol(page, payload={"window_status": "FULL_WINDOW"})

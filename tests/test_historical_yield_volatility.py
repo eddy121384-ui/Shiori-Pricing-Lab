@@ -314,6 +314,26 @@ def test_an_integer_observation_beyond_the_float_range_fails_closed():
     assert "not a usable Yield value" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "dates",
+    [
+        [_START, None, _START + timedelta(days=2), _START + timedelta(days=3)],
+        ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"],
+        [_START, datetime(2026, 1, 2), _START + timedelta(days=2), _START + timedelta(days=3)],
+    ],
+)
+def test_observation_dates_are_typed_before_they_are_ordered(dates):
+    # `<=` on a mixed date/None sequence raises TypeError, and an all-string
+    # sequence orders lexicographically, passes, and produces a result whose
+    # .isoformat() blows up in the route later (Codex review, PR #200).
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([4.00, 4.10, 3.80, 4.30], dates=dates), requested_observation_count=4
+        )
+
+    assert "calendar date" in str(excinfo.value)
+
+
 def test_observations_out_of_chronological_order_fail_closed():
     dates = [
         _START,
@@ -662,6 +682,50 @@ def test_a_result_carrying_a_malformed_volatility_fails_through_our_error(bad):
     assert "not a finite number" in str(excinfo.value)
     # And never the flat-window explanation, which none of these are.
     assert "identical" not in str(excinfo.value)
+
+
+def test_a_result_carrying_a_blocker_is_never_published():
+    # The dataclass says every blocker is fatal. Until this guard, a directly
+    # constructed result with a blocker AND a finite figure published as an
+    # ACTIVE risk source -- exposing a number the result itself says must not
+    # be used (Codex review, PR #200).
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    result = dataclasses.replace(base, blockers=("this result must not be used",))
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "must not be used" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"observation_count": -1}, "non-negative int"),
+        ({"yield_change_count": 999}, "do not describe one calculation"),
+        ({"requested_observation_count": True}, "non-negative int"),
+        ({"observation_count": 9, "yield_change_count": 8}, "more than were asked for"),
+        ({"series_observation_count": 1}, "from a series of"),
+        ({"requested_observation_count": 180}, "which is INSUFFICIENT_HISTORY"),
+        ({"window_status": "FULL_WINDOW"}, "must be a HistoricalYieldVolStatus"),
+        ({"annualized_yield_vol": None}, "no blocker explaining why"),
+    ],
+)
+def test_a_result_whose_counts_contradict_themselves_is_never_published(overrides, expected):
+    """Counts are copied verbatim into the audit, so an unchecked one is
+    fabricated calculation provenance travelling under this module's name."""
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    result = dataclasses.replace(base, **overrides)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert expected in str(excinfo.value)
 
 
 def test_publishing_something_other_than_a_result_fails_closed():

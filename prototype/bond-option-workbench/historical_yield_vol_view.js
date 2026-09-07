@@ -230,6 +230,39 @@
         return `malformed response: "${key}" is neither a string nor null`;
       }
     }
+    // The nested source is inspected, not merely tested for truthiness
+    // (Codex review, PR #200). `volatility_source: {}` is truthy, so the
+    // renderer treated it as a published source and drew a normal block full
+    // of dashes and `undefined` -- a half-understood risk result presented as
+    // a whole one, which is the opposite of what this validator promises.
+    const source = candidate.volatility_source;
+    if (source !== null && source !== undefined) {
+      if (typeof source !== "object" || Array.isArray(source)) {
+        return 'malformed response: "volatility_source" is neither an object nor null';
+      }
+      for (const key of [
+        "source_system",
+        "volatility_basis",
+        "status",
+        "volatility_text",
+        "volatility_unit",
+        "source_unit",
+      ]) {
+        if (typeof source[key] !== "string" || !source[key]) {
+          return `malformed response: volatility_source."${key}" is missing`;
+        }
+      }
+      if (typeof source.volatility !== "number" || !Number.isFinite(source.volatility)) {
+        return 'malformed response: volatility_source."volatility" is not a finite number';
+      }
+      if (typeof source.normalization_factor !== "number") {
+        return 'malformed response: volatility_source."normalization_factor" is not a number';
+      }
+    } else if (typeof candidate.volatility_source_unavailable_reason !== "string") {
+      // No source and no reason is not an answer either: the card would show
+      // an em dash where the refusal belongs.
+      return 'malformed response: no "volatility_source" and no reason for its absence';
+    }
     return null;
   }
 
