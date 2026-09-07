@@ -761,11 +761,11 @@ def test_a_result_carrying_a_blocker_is_never_published():
         ({"observation_count": -1}, "non-negative int"),
         ({"yield_change_count": 999}, "do not describe one calculation"),
         ({"requested_observation_count": True}, "non-negative int"),
-        ({"observation_count": 9, "yield_change_count": 8}, "more than were asked for"),
-        ({"series_observation_count": 1}, "from a series of"),
+        ({"observation_count": 9, "yield_change_count": 8}, "yields exactly 4"),
+        ({"series_observation_count": 1}, "yields exactly 1"),
         ({"requested_observation_count": 180}, "which is INSUFFICIENT_HISTORY"),
         ({"window_status": "FULL_WINDOW"}, "must be a HistoricalYieldVolStatus"),
-        ({"annualized_yield_vol": None}, "no blocker explaining why"),
+        ({"annualized_yield_vol": None}, "exist together or not at all"),
     ],
 )
 def test_a_result_whose_counts_contradict_themselves_is_never_published(overrides, expected):
@@ -812,7 +812,7 @@ def test_a_result_claiming_another_methodology_is_never_published(overrides, exp
 @pytest.mark.parametrize(
     ("daily", "expected"),
     [
-        (None, "not a finite number"),
+        (None, "exist together or not at all"),
         ("x", "not a finite number"),
         (float("inf"), "not a finite number"),
         (float("nan"), "not a finite number"),
@@ -899,6 +899,56 @@ def test_observation_date_provenance_is_checked_against_the_counts(overrides, ex
     )
 
     assert expected in str(result_shape_problem(dataclasses.replace(base, **overrides)))
+
+
+def test_the_selected_window_count_is_exactly_what_the_calculator_would_use():
+    # series=200, requested=180, used=4 satisfied both inequalities I had
+    # written while describing a window this module never produces: the tail
+    # slice always takes exactly min(series, requested) (Codex review, #200).
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    result = dataclasses.replace(
+        base,
+        series_observation_count=200,
+        requested_observation_count=180,
+        window_status=HistoricalYieldVolStatus.INSUFFICIENT_HISTORY,
+    )
+
+    assert "yields exactly 180" in str(result_shape_problem(result))
+    with pytest.raises(HistoricalYieldVolUnavailableError):
+        historical_yield_vol_volatility_input(result)
+
+
+def test_the_calculator_always_uses_the_minimum_of_series_and_requested():
+    """The invariant the rule above encodes, checked against the calculator."""
+
+    for series_length, requested in ((90, 180), (200, 180), (4, 4), (0, 180)):
+        result = calculate_historical_yield_volatility(
+            _history([4.0 + (index % 5) * 0.02 for index in range(series_length)]),
+            requested_observation_count=requested,
+        )
+        assert result.observation_count == min(series_length, requested)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"annualized_yield_vol": None},
+        {"daily_yield_vol": None},
+    ],
+)
+def test_a_half_populated_result_is_refused_before_serialization(overrides):
+    # The route serializes EVERY result, so a half-populated one answered
+    # HTTP 200 showing a daily risk figure with no fatal blocker beside it.
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    problem = result_shape_problem(dataclasses.replace(base, **overrides))
+
+    assert problem is not None
+    assert "exist together or not at all" in problem
 
 
 def test_the_shared_shape_check_is_what_both_consumers_use():

@@ -678,16 +678,17 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
             f"Changes, but this result for {result.security!r} claims "
             f"{result.yield_change_count} -- its counts do not describe one calculation"
         )
-    if result.observation_count > result.requested_observation_count:
-        return (
-            f"this result for {result.security!r} used {result.observation_count} of a "
-            f"requested {result.requested_observation_count} Yield observations, which is "
-            "more than were asked for"
-        )
-    if result.observation_count > result.series_observation_count:
+    # Equality, not two inequalities (Codex review, PR #200). The calculator
+    # takes `observations[-requested:]`, so it always uses exactly
+    # min(series, requested) -- and a result reporting series=200,
+    # requested=180, used=4 satisfied both inequalities while describing a
+    # window this module would never produce.
+    expected_used = min(result.series_observation_count, result.requested_observation_count)
+    if result.observation_count != expected_used:
         return (
             f"this result for {result.security!r} used {result.observation_count} Yield "
-            f"observations from a series of {result.series_observation_count}"
+            f"observations, but a series of {result.series_observation_count} against a "
+            f"requested {result.requested_observation_count} yields exactly {expected_used}"
         )
 
     expected_status = (
@@ -724,6 +725,30 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
     # number came from", so they are checked against the counts rather than
     # taken on trust: an empty, duplicated, out-of-range or simply different
     # tuple published false calculation provenance (Codex review, PR #200).
+    # Both figures are present exactly when there is no blocker. This is the
+    # invariant the dataclass documents, and it belongs here rather than only
+    # in the publication path: the route serializes EVERY result, so a half-
+    # populated one answered HTTP 200 showing a daily risk figure with no
+    # fatal blocker beside it (Codex review, PR #200).
+    figures_present = result.daily_yield_vol is not None and result.annualized_yield_vol is not None
+    figures_absent = result.daily_yield_vol is None and result.annualized_yield_vol is None
+    if not (figures_present or figures_absent):
+        return (
+            f"this result for {result.security!r} carries a daily standard deviation of "
+            f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
+            f"{result.annualized_yield_vol!r} -- the two figures exist together or not at all"
+        )
+    if figures_present == bool(result.blockers):
+        return (
+            f"this result for {result.security!r} "
+            + (
+                "carries both figures alongside a fatal blocker"
+                if result.blockers
+                else "carries no figures and no blocker explaining why"
+            )
+            + f" ({'; '.join(str(blocker) for blocker in result.blockers) or 'no blockers'})"
+        )
+
     if not isinstance(result.observation_dates, tuple):
         return (
             f"observation_dates must be a tuple for {result.security!r}, got "
