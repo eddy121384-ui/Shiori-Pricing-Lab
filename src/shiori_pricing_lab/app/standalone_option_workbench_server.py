@@ -2554,9 +2554,20 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
     is currently displaying. A trader who loads a history and then calculates
     a vol therefore spends two Bloomberg round trips, deliberately: an
     observation this process did not fetch and validate itself is not
-    evidence, and a result whose provenance -- security, field, range,
-    acquisition timestamp -- comes from its own acquisition is reproducible
-    from this payload alone rather than from a page's state.
+    evidence, and the result's provenance -- security, field, range, dates
+    used, acquisition timestamp -- then describes its own acquisition rather
+    than a page's state.
+
+    What that provenance does and does not support, precisely (Codex review,
+    PR #200). It carries everything Issue #197 §3 asks for: enough to
+    *re-issue* the identical request and to *re-run* the identical convention
+    over its answer. It does **not** carry the Yield values or the Yield
+    Changes the statistic was taken over, so the arithmetic cannot be
+    replayed from this payload by itself -- and once Bloomberg's answer for
+    that range changes, re-issuing the request no longer reproduces these
+    figures either. A consumer needing the values has the #196 route for the
+    same query, and the ``acquired_at`` here is what says whether the two
+    are the same acquisition.
 
     ``requested_observation_count`` is optional and defaults to Middle
     Office's confirmed 180-observation 6M-style window. It is never derived

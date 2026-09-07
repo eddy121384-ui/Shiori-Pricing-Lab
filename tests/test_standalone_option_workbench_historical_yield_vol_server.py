@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -437,21 +438,70 @@ def test_the_view_script_is_served(server_url) -> None:
     assert "api/bloomberg/historical-yield-vol" in body
 
 
-def test_the_card_never_claims_to_reuse_the_displayed_series(server_url) -> None:
-    """The served copy must match what the route actually does.
+def _normalized(markup: str) -> str:
+    return " ".join(markup.split())
 
-    The route performs its own Bloomberg acquisition rather than consuming
-    the observations the #196 view is displaying, so two panels can disagree
-    if Bloomberg's answer changed between the two requests. Copy that told a
-    trader the vol was computed "from the same series above" misrepresented
-    the result's provenance (Codex review, PR #200) -- three of that review's
-    findings were fixed strings asserting something the code contradicts, so
-    this one is pinned rather than left to prose review.
+
+def _served_block(page: str, pattern: str) -> str:
+    """Return one served block's inner markup with whitespace normalized."""
+
+    found = re.search(pattern, page, re.S)
+    assert found is not None, f"the served page has no block matching {pattern!r}"
+    return _normalized(found.group(1))
+
+
+# The exact provenance copy the Historical Yield Vol card serves. Pinned whole,
+# not by keyword: three of Codex's findings on PR #200 were served strings
+# asserting something the code contradicts, and a substring check cannot catch a
+# contradiction ADDED beside the sentences it looks for. Any edit to either block
+# fails this test on purpose -- these two paragraphs are what tell a trader where
+# the number came from, so changing them is a deliberate act with a review
+# attached, not a wording tweak.
+_EXPECTED_CARD_INTRO = """
+    A Middle Office-style historical volatility of <em>this bond's own</em> Yield, calculated
+    server-side: daily Yield <em>Change</em>, sample standard deviation, annualized by
+    &radic;252. It does <strong>not</strong> read the series displayed above &mdash; it sends
+    the same query to Bloomberg again and calculates from that answer, so its observations are
+    its own and its <span class="mono">Acquired at</span> below is the one that governs. If
+    Bloomberg&rsquo;s answer changed between the two requests, the two panels are two
+    acquisitions, not one. This is also <strong>not</strong> Bloomberg implied vol and not a
+    VCUB number, and it is not wired into pricing &mdash; it is a Yield Vol, and no approved
+    Yield-Vol&nbsp;&rarr;&nbsp;Price-Vol conversion exists in this build.
+"""
+
+_EXPECTED_CARD_NOTE = """
+    Sends the bond identifier, Yield field and date range entered above as a fresh Bloomberg
+    request, then uses the most recent <span class="mono">N</span> observations <em>that</em>
+    request returned. 180 is Middle Office's confirmed 6M-style window; it is not derived from
+    an expiry or a tenor, so change it only against evidence. The unit is never inferred from
+    how large the numbers look. It is optional for the calculation &mdash; without it the
+    volatility is still calculated and shown in the field&rsquo;s own unit &mdash; but
+    publishing to the normalized volatility source needs a declared <span
+    class="mono">DECIMAL</span>, <span class="mono">PERCENT</span> or <span
+    class="mono">BASIS_POINTS</span>, because that contract carries a decimal annual volatility
+    and nothing else may enter it unscaled.
+"""
+
+
+def test_the_cards_provenance_copy_is_exactly_what_was_reviewed(server_url) -> None:
+    """The served copy must match what the route actually does, in full.
+
+    The route performs its own Bloomberg acquisition rather than consuming the
+    observations the #196 view is displaying, so the two panels can disagree if
+    Bloomberg's answer changed between the two requests. Copy that told a trader
+    the vol was computed "from the same series above" misrepresented the result's
+    provenance (Codex review, PR #200).
+
+    Both blocks are compared whole rather than probed for phrases, so a
+    contradictory sentence added *beside* the honest ones fails here too -- which
+    a substring check would have let through (Codex review, PR #200, again).
     """
 
     with urllib.request.urlopen(f"{server_url}/index.html") as response:
         page = response.read().decode("utf-8")
 
-    assert "from the same Bloomberg series above" not in page
-    assert "does <strong>not</strong> read the series displayed above" in page
-    assert "sends" in page and "fresh Bloomberg" in page
+    assert _served_block(page, r'<div class="hyv-intro">(.*?)</div>') == _normalized(
+        _EXPECTED_CARD_INTRO
+    )
+    notes = re.findall(r'<div class="byh-field-note">(.*?)</div>', page, re.S)
+    assert _normalized(notes[1]) == _normalized(_EXPECTED_CARD_NOTE)

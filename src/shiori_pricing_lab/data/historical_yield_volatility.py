@@ -200,9 +200,16 @@ class HistoricalYieldVolResult:
       number, and every entry says why. :attr:`is_usable` is the same test.
     - ``warnings`` is **not fatal**. An ``INSUFFICIENT_HISTORY`` window that
       still supports the standard-deviation convention carries a number
-      *and* a warning: the number is publishable, but it is not a
-      full-window result and must never be presented as one. A consumer that
-      drops it has lost the only honest answer available for that bond.
+      *and* a warning: the window being short is not itself a bar to
+      publication, but the number is not a full-window result and must never
+      be presented as one. A consumer that drops it has lost the only honest
+      answer available for that bond.
+
+      "Not a bar to publication" is not a promise that it *will* publish
+      (Codex review, PR #200): :func:`historical_yield_vol_volatility_input`
+      applies its own conditions on top -- a declared and supported unit, and
+      a positive standard deviation -- and a short window failing either of
+      those is refused exactly as a full window would be.
 
     A short window with too few Yield Changes carries both: the warning that
     says the window is short, and the blocker that says it is too short to
