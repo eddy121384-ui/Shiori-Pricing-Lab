@@ -435,3 +435,23 @@ def test_the_view_script_is_served(server_url) -> None:
         body = response.read().decode("utf-8")
 
     assert "api/bloomberg/historical-yield-vol" in body
+
+
+def test_the_card_never_claims_to_reuse_the_displayed_series(server_url) -> None:
+    """The served copy must match what the route actually does.
+
+    The route performs its own Bloomberg acquisition rather than consuming
+    the observations the #196 view is displaying, so two panels can disagree
+    if Bloomberg's answer changed between the two requests. Copy that told a
+    trader the vol was computed "from the same series above" misrepresented
+    the result's provenance (Codex review, PR #200) -- three of that review's
+    findings were fixed strings asserting something the code contradicts, so
+    this one is pinned rather than left to prose review.
+    """
+
+    with urllib.request.urlopen(f"{server_url}/index.html") as response:
+        page = response.read().decode("utf-8")
+
+    assert "from the same Bloomberg series above" not in page
+    assert "does <strong>not</strong> read the series displayed above" in page
+    assert "sends" in page and "fresh Bloomberg" in page

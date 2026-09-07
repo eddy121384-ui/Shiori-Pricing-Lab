@@ -985,10 +985,14 @@
           <div class="card-body">
             <div class="hyv-intro">
               A Middle Office-style historical volatility of <em>this bond's own</em> Yield, calculated
-              server-side from the same Bloomberg series above: daily Yield <em>Change</em>, sample
-              standard deviation, annualized by &radic;252. This is <strong>not</strong> Bloomberg implied
-              vol and not a VCUB number, and it is not wired into pricing &mdash; it is a Yield Vol, and
-              no approved Yield-Vol&nbsp;&rarr;&nbsp;Price-Vol conversion exists in this build.
+              server-side: daily Yield <em>Change</em>, sample standard deviation, annualized by
+              &radic;252. It does <strong>not</strong> read the series displayed above &mdash; it sends
+              the same query to Bloomberg again and calculates from that answer, so its observations are
+              its own and its <span class="mono">Acquired at</span> below is the one that governs. If
+              Bloomberg&rsquo;s answer changed between the two requests, the two panels are two
+              acquisitions, not one. This is also <strong>not</strong> Bloomberg implied vol and not a
+              VCUB number, and it is not wired into pricing &mdash; it is a Yield Vol, and no approved
+              Yield-Vol&nbsp;&rarr;&nbsp;Price-Vol conversion exists in this build.
             </div>
             <div class="byh-query">
               <div class="byh-field byh-field-narrow">
@@ -1002,8 +1006,9 @@
               <span class="btn primary" id="hyv-calculate-btn">Calculate Historical Vol</span>
             </div>
             <div class="byh-field-note">
-              Uses the bond identifier, Yield field and date range entered above, and the most recent
-              <span class="mono">N</span> observations Bloomberg returned. 180 is Middle Office's confirmed
+              Sends the bond identifier, Yield field and date range entered above as a fresh Bloomberg
+              request, then uses the most recent <span class="mono">N</span> observations
+              <em>that</em> request returned. 180 is Middle Office's confirmed
               6M-style window; it is not derived from an expiry or a tenor, so change it only against
               evidence. The unit is never inferred from how large the numbers look. It is optional
               for the calculation &mdash; without it the volatility is still calculated and shown in
