@@ -413,6 +413,35 @@ def test_a_statistic_that_cannot_be_represented_is_400_not_500(
     assert expected in payload["error"]
 
 
+def test_a_malformed_result_is_400_before_serialization(server_url, monkeypatch) -> None:
+    """A result the publication helper refuses must not then crash the route.
+
+    This route reads `window_status.value` and calls `.isoformat()` on dates
+    for EVERY response, so a malformed result answered HTTP 500 even after
+    publication had correctly refused it -- the refusal was caught, and the
+    same bad field dereferenced two lines later (Codex review, PR #200).
+    """
+
+    _stub_loader(monkeypatch)
+    # Built through the server module's OWN reference to the calculator, not a
+    # fresh import: under full-suite ordering the two can be different module
+    # objects, and the calculator's isinstance check then rejects a history
+    # built against the other one.
+    good = server_module.calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    monkeypatch.setattr(
+        server_module,
+        "calculate_historical_yield_volatility",
+        lambda *args, **kwargs: replace(good, window_status="FULL_WINDOW"),
+    )
+
+    status, payload = _post_json(f"{server_url}{_ROUTE}", _body(requested_observation_count=4))
+
+    assert status == 400
+    assert "must be a HistoricalYieldVolStatus" in payload["error"]
+
+
 def test_a_bloomberg_side_failure_is_502(server_url, monkeypatch) -> None:
     _stub_loader(monkeypatch, raises=BLIBloombergDapiError("synthetic DAPI failure"))
 

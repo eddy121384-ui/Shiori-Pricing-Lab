@@ -632,38 +632,106 @@ def decimal_annual_normalization_factor(field_unit: object) -> float:
     return _DECIMAL_ANNUAL_NORMALIZATION_FACTORS[candidate]
 
 
-def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
-    """Refuse a result whose own fields contradict each other or its contract.
+def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
+    """Return why ``result``'s own fields contradict each other, or ``None``.
 
-    A ``HistoricalYieldVolResult`` reaching publication is normally one this
-    module just built, and it was published on that basis. It need not be:
-    the dataclass is public, ``dataclasses.replace`` is one call, and a future
-    producer is a different author. Every check here is something this
-    module's own calculator guarantees and a hand-built result does not
-    (Codex review, PR #200).
+    The checks every consumer needs, whatever it intends to do with the
+    result: the status is the enum, the counts are non-negative integers that
+    agree with each other and with the status, and the dates are dates. A
+    result failing any of these cannot be serialized honestly, let alone
+    published.
 
-    - **Any blocker is fatal.** The dataclass says so, and until this check
-      existed a result carrying "must not be used" alongside a finite figure
-      published as an ``ACTIVE`` risk source anyway.
-    - **The status is the enum**, not a string that looks like one -- reading
-      ``.value`` off a bare ``str`` raised ``AttributeError`` past this
-      helper's documented error type.
-    - **The counts are non-negative integers that agree with each other and
-      with the status.** They are copied verbatim into
-      ``override_or_fallback_audit``, so an unchecked count is fabricated
-      calculation provenance travelling under this module's name --
-      ``observation_count=-1`` with ``yield_change_count=999`` published an
-      audit claiming exactly that.
+    Returns a message rather than raising, because its two callers owe their
+    own error types (Codex review, PR #200):
+    :func:`historical_yield_vol_volatility_input` promises
+    ``HistoricalYieldVolUnavailableError`` and the workbench route needs
+    ``HistoricalYieldVolInputError`` for its HTTP 400. Sharing a raiser would
+    have one of them breaking the contract the other keeps -- which is the
+    failure this whole review has been about.
+
+    A ``HistoricalYieldVolResult`` reaching a consumer is normally one this
+    module just built. It need not be: the dataclass is public,
+    ``dataclasses.replace`` is one call, and a future producer is a different
+    author.
     """
 
-    # The status is typed first so every message below can name it safely --
-    # reading `.value` off a bare string is one of the escapes this guard
-    # exists to close.
     if not isinstance(result.window_status, HistoricalYieldVolStatus):
-        raise HistoricalYieldVolUnavailableError(
+        return (
             f"window_status must be a HistoricalYieldVolStatus for {result.security!r}, got "
             f"{result.window_status!r} ({type(result.window_status).__name__})"
         )
+
+    counts = {
+        "series_observation_count": result.series_observation_count,
+        "requested_observation_count": result.requested_observation_count,
+        "observation_count": result.observation_count,
+        "yield_change_count": result.yield_change_count,
+    }
+    for name, value in counts.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return f"{name} must be a non-negative int for {result.security!r}, got {value!r}"
+
+    expected_changes = max(result.observation_count - 1, 0)
+    if result.yield_change_count != expected_changes:
+        return (
+            f"{result.observation_count} Yield observations make {expected_changes} Yield "
+            f"Changes, but this result for {result.security!r} claims "
+            f"{result.yield_change_count} -- its counts do not describe one calculation"
+        )
+    if result.observation_count > result.requested_observation_count:
+        return (
+            f"this result for {result.security!r} used {result.observation_count} of a "
+            f"requested {result.requested_observation_count} Yield observations, which is "
+            "more than were asked for"
+        )
+    if result.observation_count > result.series_observation_count:
+        return (
+            f"this result for {result.security!r} used {result.observation_count} Yield "
+            f"observations from a series of {result.series_observation_count}"
+        )
+
+    expected_status = (
+        HistoricalYieldVolStatus.NO_HISTORY
+        if result.observation_count == 0
+        else HistoricalYieldVolStatus.FULL_WINDOW
+        if result.observation_count == result.requested_observation_count
+        else HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+    )
+    if result.window_status is not expected_status:
+        return (
+            f"this result for {result.security!r} reports {result.window_status.value} for "
+            f"{result.observation_count} of {result.requested_observation_count} Yield "
+            f"observations, which is {expected_status.value}"
+        )
+
+    for name, value in (
+        ("first_observation_date", result.first_observation_date),
+        ("last_observation_date", result.last_observation_date),
+        ("requested_start_date", result.requested_start_date),
+        ("requested_end_date", result.requested_end_date),
+    ):
+        if value is None and name.startswith(("first", "last")):
+            continue
+        if not isinstance(value, date) or isinstance(value, datetime):
+            return (
+                f"{name} must be a calendar date for {result.security!r}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    return None
+
+
+def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
+    """Refuse a result that must not become a normalized volatility source.
+
+    Everything :func:`result_shape_problem` covers, plus the rules that are
+    about publication specifically: no blocker, both figures present and
+    consistent, and the approved methodology under the canonical label.
+    """
+
+    problem = result_shape_problem(result)
+    if problem is not None:
+        raise HistoricalYieldVolUnavailableError(problem)
+
     if result.blockers:
         raise HistoricalYieldVolUnavailableError(
             f"no Historical Yield Vol is available for {result.security!r} "
@@ -677,41 +745,22 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
             "publish and no reason to give"
         )
 
-    counts = {
-        "series_observation_count": result.series_observation_count,
-        "requested_observation_count": result.requested_observation_count,
-        "observation_count": result.observation_count,
-        "yield_change_count": result.yield_change_count,
-    }
-    for name, value in counts.items():
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise HistoricalYieldVolUnavailableError(
-                f"{name} must be a non-negative int for {result.security!r}, got {value!r}"
-            )
-
-    expected_changes = max(result.observation_count - 1, 0)
-    if result.yield_change_count != expected_changes:
+    # A figure has to have come from enough changes to be one. Without this a
+    # NO_HISTORY result carrying a positive number published an ACTIVE source
+    # whose audit said it was "calculated from 0 of the requested 0 Yield
+    # observations (0 Yield Changes)" (Codex review, PR #200).
+    if result.yield_change_count < _MINIMUM_CHANGES_FOR_STDEV:
         raise HistoricalYieldVolUnavailableError(
-            f"{result.observation_count} Yield observations make {expected_changes} Yield "
-            f"Changes, but this result for {result.security!r} claims "
-            f"{result.yield_change_count} -- its counts do not describe one calculation"
-        )
-    if result.observation_count > result.requested_observation_count:
-        raise HistoricalYieldVolUnavailableError(
-            f"this result for {result.security!r} used {result.observation_count} of a "
-            f"requested {result.requested_observation_count} Yield observations, which is "
-            "more than were asked for"
-        )
-    if result.observation_count > result.series_observation_count:
-        raise HistoricalYieldVolUnavailableError(
-            f"this result for {result.security!r} used {result.observation_count} Yield "
-            f"observations from a series of {result.series_observation_count}"
+            f"this result for {result.security!r} carries a Historical Yield Vol computed "
+            f"from {result.yield_change_count} Yield Change(s), below the "
+            f"{_MINIMUM_CHANGES_FOR_STDEV} the {STANDARD_DEVIATION_CONVENTION} convention "
+            "needs -- no window this short produces a standard deviation"
         )
 
     # The canonical source label names one methodology. A result claiming a
     # different convention or annualization publishes an audit asserting an
     # unapproved method under this module's name, whatever its number was
-    # actually computed with (Codex review, PR #200).
+    # actually computed with.
     if result.standard_deviation_convention != STANDARD_DEVIATION_CONVENTION:
         raise HistoricalYieldVolUnavailableError(
             f"{HISTORICAL_YIELD_VOL_MO_SOURCE} is the "
@@ -731,11 +780,9 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
         )
 
     # The figure is validated before anything computes with it or compares
-    # against it (Codex review, PR #200). A string or complex raised TypeError
-    # out of the normalization, inf reached BLIVolatilityInput and raised its
-    # raw ValueError, and NaN was reported as a flat window it never was --
-    # and checking it here rather than after the daily comparison keeps the
-    # message about the figure that is actually malformed.
+    # against it. A string or complex raised TypeError out of the
+    # normalization, inf reached BLIVolatilityInput and raised its raw
+    # ValueError, and NaN was reported as a flat window it never was.
     try:
         _require_finite_number(result.annualized_yield_vol, "annualized_yield_vol")
     except (ValueError, OverflowError, TypeError) as exc:
@@ -745,10 +792,7 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
             f"published as {HISTORICAL_YIELD_VOL_MO_SOURCE}: {exc}"
         ) from exc
 
-    # Both figures exist together and follow the stated annualization. The
-    # gate used to be one-sided, so a result with a missing, non-finite or
-    # simply wrong daily sigma published beside a valid annualized one, and
-    # the card drew a dash or a bogus daily headline next to a live source.
+    # Both figures exist together and follow the stated annualization.
     try:
         _require_finite_number(result.daily_yield_vol, "daily_yield_vol")
     except (ValueError, OverflowError, TypeError) as exc:
@@ -763,8 +807,7 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
         )
     # isclose rather than equality: the calculator's own results match exactly,
     # but a legitimate result rebuilt elsewhere may differ in the last ulp, and
-    # this guard must not refuse an honest number for that (see the note in
-    # this module's review history about rules stricter than the calculator).
+    # this guard must not refuse an honest number for that.
     if not math.isclose(
         result.annualized_yield_vol,
         result.daily_yield_vol * ANNUALIZATION_FACTOR,
@@ -776,20 +819,6 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
             f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
             f"{result.annualized_yield_vol!r}, which is not that daily figure times "
             f"sqrt({ANNUALIZATION_TRADING_DAYS})"
-        )
-
-    expected_status = (
-        HistoricalYieldVolStatus.NO_HISTORY
-        if result.observation_count == 0
-        else HistoricalYieldVolStatus.FULL_WINDOW
-        if result.observation_count == result.requested_observation_count
-        else HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
-    )
-    if result.window_status is not expected_status:
-        raise HistoricalYieldVolUnavailableError(
-            f"this result for {result.security!r} reports {result.window_status.value} for "
-            f"{result.observation_count} of {result.requested_observation_count} Yield "
-            f"observations, which is {expected_status.value}"
         )
 
 

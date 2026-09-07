@@ -392,10 +392,12 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
     PUBLISHED_VOLATILITY_UNIT,
+    HistoricalYieldVolInputError,
     HistoricalYieldVolUnavailableError,
     calculate_historical_yield_volatility,
     decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
+    result_shape_problem,
     validate_requested_observation_count,
 )
 from shiori_pricing_lab.data.treasury_futures_ctd import (
@@ -2633,6 +2635,17 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
     result = calculate_historical_yield_volatility(
         history, requested_observation_count=requested_observation_count
     )
+
+    # Checked before anything is serialized, including for results publication
+    # refuses (Codex review, PR #200). This route reads `window_status.value`
+    # and calls `.isoformat()` on dates for EVERY response, so a malformed
+    # result answered HTTP 500 even after the publication helper had correctly
+    # refused it -- the refusal was caught, and then the same bad field was
+    # dereferenced two lines later. Publishability is a separate question this
+    # route does not ask; being serializable is one it cannot avoid.
+    shape_problem = result_shape_problem(result)
+    if shape_problem is not None:
+        raise HistoricalYieldVolInputError(shape_problem)
 
     # The normalized volatility source is built by the one canonical helper,
     # never assembled here. A result it refuses is reported as refused, with

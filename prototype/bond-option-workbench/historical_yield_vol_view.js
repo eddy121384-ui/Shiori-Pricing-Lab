@@ -214,7 +214,20 @@
   // screen under a Middle Office heading has to be one this server calculated.
   function validatePayload(candidate) {
     if (!candidate || typeof candidate !== "object") return "malformed response: not an object";
-    for (const key of ["window_status", "standard_deviation_convention", "methodology"]) {
+    // Every string this page presents as audited provenance is checked, not
+    // just the three that shape the layout (Codex review, PR #200). render()
+    // coerces whatever it is given, so an object or a number arrived on
+    // screen looking like a source system or an acquisition timestamp.
+    for (const key of [
+      "window_status",
+      "standard_deviation_convention",
+      "methodology",
+      "source_system",
+      "acquired_at",
+      "calculated_at",
+      "security",
+      "yield_field",
+    ]) {
       if (typeof candidate[key] !== "string" || !candidate[key]) {
         return `malformed response: "${key}" is missing`;
       }
@@ -247,6 +260,11 @@
         "volatility_text",
         "volatility_unit",
         "source_unit",
+        // Always populated by the publication helper, and the only place a
+        // published number's calculation provenance appears on this card --
+        // omitted, the renderer silently dropped it; as an object it appended
+        // "[object Object]" (Codex review, PR #200).
+        "override_or_fallback_audit",
       ]) {
         if (typeof source[key] !== "string" || !source[key]) {
           return `malformed response: volatility_source."${key}" is missing`;

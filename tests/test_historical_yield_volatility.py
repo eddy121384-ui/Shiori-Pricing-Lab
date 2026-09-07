@@ -41,6 +41,7 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     calculate_historical_yield_volatility,
     decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
+    result_shape_problem,
 )
 
 _START = date(2026, 1, 1)
@@ -831,6 +832,55 @@ def test_the_daily_figure_is_validated_alongside_the_annualized_one(daily, expec
         historical_yield_vol_volatility_input(dataclasses.replace(base, daily_yield_vol=daily))
 
     assert expected in str(excinfo.value)
+
+
+def test_a_no_history_result_carrying_a_figure_is_never_published():
+    # observation_count=0 with a positive figure derived the same NO_HISTORY
+    # status and passed, publishing an ACTIVE source whose audit read
+    # "calculated from 0 of the requested 0 Yield observations (0 Yield
+    # Changes)" (Codex review, PR #200).
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    result = dataclasses.replace(
+        base,
+        observation_count=0,
+        yield_change_count=0,
+        series_observation_count=0,
+        requested_observation_count=0,
+        window_status=HistoricalYieldVolStatus.NO_HISTORY,
+    )
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "0 Yield Change(s)" in str(excinfo.value)
+
+
+def test_the_shared_shape_check_is_what_both_consumers_use():
+    """One shape checker, two error types.
+
+    The route needs HistoricalYieldVolInputError for its HTTP 400 and the
+    publication helper promises HistoricalYieldVolUnavailableError. Sharing a
+    raiser would have one of them breaking the contract the other keeps, so
+    the shared function returns a message and each caller raises its own type
+    (Codex review, PR #200).
+    """
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert result_shape_problem(base) is None
+    assert "must be a HistoricalYieldVolStatus" in str(
+        result_shape_problem(dataclasses.replace(base, window_status="FULL_WINDOW"))
+    )
+    # A NO_HISTORY result is malformed to nobody: it serializes fine and is
+    # simply not publishable, which is the distinction the split exists for.
+    empty = calculate_historical_yield_volatility(_history([]))
+    assert result_shape_problem(empty) is None
+    with pytest.raises(HistoricalYieldVolUnavailableError):
+        historical_yield_vol_volatility_input(empty)
 
 
 def test_publishing_something_other_than_a_result_fails_closed():
