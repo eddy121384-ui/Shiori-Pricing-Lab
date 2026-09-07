@@ -2543,6 +2543,14 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
     bridge computes no Yield Change, no standard deviation and no
     annualization of its own; it serializes what the calculator returned.
 
+    The series is re-loaded here rather than taken from whatever the browser
+    is currently displaying. A trader who loads a history and then calculates
+    a vol therefore spends two Bloomberg round trips, deliberately: an
+    observation this process did not fetch and validate itself is not
+    evidence, and a result whose provenance -- security, field, range,
+    acquisition timestamp -- comes from its own acquisition is reproducible
+    from this payload alone rather than from a page's state.
+
     ``requested_observation_count`` is optional and defaults to Middle
     Office's confirmed 180-observation 6M-style window. It is never derived
     from an expiry, a tenor, or the date range -- Issue #197 forbids
