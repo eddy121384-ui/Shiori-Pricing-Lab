@@ -19,6 +19,7 @@ import math
 import statistics
 import sys
 from datetime import UTC, date, datetime, timedelta
+from fractions import Fraction
 
 import pytest
 
@@ -388,6 +389,65 @@ def test_integers_a_float_does_represent_exactly_are_still_accepted():
         _history([2**53, 2**53, 2**53]), requested_observation_count=3
     )
     assert exact.daily_yield_vol == 0.0
+
+
+def test_integer_changes_that_lose_precision_on_subtraction_fail_closed():
+    """Exact per-value conversion is not enough to keep the statistic honest.
+
+    Every value in [1, 2**100, 2**101] is exactly representable, so the
+    per-observation guard passes all three. The exact changes are
+    [2**100 - 1, 2**100] and their ddof=1 sigma is sqrt(1/2); float
+    subtraction returns 2**100 for both and the calculator answered a flat
+    zero volatility -- a wrong number with no overflow and no exception
+    (Codex review, PR #200).
+    """
+
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([1, 2**100, 2**101]), requested_observation_count=3
+        )
+
+    message = str(excinfo.value)
+    assert "cannot be differenced" in message
+    assert "1267650600228229401496703205375" in message
+
+
+def test_large_integers_whose_changes_are_exact_still_calculate():
+    # The rule is about losing the change, not about magnitude. These three
+    # convert exactly and differ by exactly 2, which is representable, so the
+    # honest answer is the flat zero the data really shows.
+    result = calculate_historical_yield_volatility(
+        _history([2**53, 2**53 + 2, 2**53 + 4]), requested_observation_count=3
+    )
+
+    assert result.daily_yield_vol == 0.0
+    assert result.annualized_yield_vol == 0.0
+    assert result.blockers == ()
+
+
+def test_float_pairs_are_not_held_to_the_exact_difference_rule():
+    """A float observation is its float value, so IEEE754 subtraction is the method.
+
+    A negative-yield series crossing zero produces differences that are not
+    the exact difference of the two floats on a small fraction of ordinary
+    pairs. Refusing those would reject honest Bund/JGB history, so the rule
+    deliberately stops at pairs with an integer endpoint.
+    """
+
+    values = [
+        0.0008575465478184933,
+        -0.002862526213472576,
+        0.002428522257291637,
+        0.006576038572850303,
+    ]
+    assert Fraction(values[1] - values[0]) != Fraction(values[1]) - Fraction(values[0])
+
+    result = calculate_historical_yield_volatility(
+        _history(values), requested_observation_count=4
+    )
+
+    assert result.daily_yield_vol is not None
+    assert result.blockers == ()
 
 
 def test_observations_outside_the_declared_range_fail_closed():
@@ -818,9 +878,9 @@ def test_a_result_whose_counts_contradict_themselves_is_never_published(override
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({"standard_deviation_convention": "POPULATION_STDEV_P"}, "cannot be published"),
-        ({"annualization_trading_days": 365}, "annualizes by sqrt(252)"),
-        ({"annualization_factor": 19.1}, "annualizes by sqrt(252)"),
+        ({"standard_deviation_convention": "POPULATION_STDEV_P"}, "this calculator produces"),
+        ({"annualization_trading_days": 365}, "this calculator uses sqrt(252)"),
+        ({"annualization_factor": 19.1}, "this calculator uses sqrt(252)"),
     ],
 )
 def test_a_result_claiming_another_methodology_is_never_published(overrides, expected):
@@ -1126,6 +1186,26 @@ def test_publication_never_raises_anything_but_its_own_error_on_a_real_result():
         ({"warnings": None}, "warnings must be a tuple"),
         ({"blockers": ("",)}, "non-blank string"),
         ({"warnings": (7,)}, "non-blank string"),
+        # Two finite figures that cannot both be true. Publication refused
+        # this, the route caught that refusal and still answered HTTP 200
+        # with both headline numbers (Codex review, PR #200).
+        ({"daily_yield_vol": 99.0}, "which is not that daily figure times"),
+        (
+            {"daily_yield_vol": -0.01, "annualized_yield_vol": -0.01 * ANNUALIZATION_FACTOR},
+            "never negative",
+        ),
+        # A methodology the canonical calculator cannot produce, serialized
+        # under the hard-coded canonical label.
+        ({"standard_deviation_convention": "POPULATION_STDEV_P"}, "this calculator produces"),
+        ({"annualization_trading_days": 365}, "annualization by sqrt"),
+        # A full window does not carry the short-window qualification.
+        ({"warnings": ("Applied VCUB substitute",)}, "only INSUFFICIENT_HISTORY carries one"),
+        # _write_json calls json.dumps outside the handler's exception
+        # boundary, so an unserializable provenance value terminated the
+        # response instead of returning the promised HTTP 400.
+        ({"calculated_at": object()}, "calculated_at must be a non-blank string"),
+        ({"acquired_at": ""}, "acquired_at must be a non-blank string"),
+        ({"field_unit": 7}, "field_unit must be a non-blank string or None"),
     ],
 )
 def test_the_shared_guard_refuses_what_the_calculator_could_not_produce(overrides, expected):
@@ -1161,6 +1241,22 @@ def test_figures_are_required_exactly_when_the_change_count_supports_them():
 
     assert problem is not None
     assert "1 Yield Change(s)" in problem
+
+
+def test_an_insufficient_history_result_must_keep_its_warning():
+    # The other direction of the same rule: stripping the warning turns a
+    # short window into something a consumer reads as an ordinary result,
+    # and the route displays it as calculation output (Codex review, #200).
+    short = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=180
+    )
+    assert short.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+    assert result_shape_problem(short) is None
+
+    problem = result_shape_problem(dataclasses.replace(short, warnings=()))
+
+    assert problem is not None
+    assert "always carries one" in problem
 
 
 def test_the_shared_shape_check_is_what_both_consumers_use():

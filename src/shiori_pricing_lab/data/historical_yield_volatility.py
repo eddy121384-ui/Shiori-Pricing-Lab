@@ -105,6 +105,10 @@ the window is never taken on trust.
   loader guarantees this; the guard exists so a hand-built or future series
   cannot quietly reorder the changes);
 - a non-finite Yield value anywhere in the selected window;
+- an integer Yield value no float represents exactly, or an integer pair
+  whose Yield Change loses precision on subtraction. Both are conversions
+  that succeed while changing the number the statistic is taken over, which
+  is the one failure this module cannot detect after the fact;
 - a row inside the selected window that Bloomberg returned with **no value**.
   This one is a refusal on purpose. Dropping the row would compute a change
   across the hole -- a two-day move recorded as a one-day move -- and keeping
@@ -133,9 +137,11 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
+from fractions import Fraction
 
 from shiori_pricing_lab.data._validation import _require_finite_number
 from shiori_pricing_lab.data.bli_snapshot import (
@@ -143,7 +149,10 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIVolatilityBasis,
     BLIVolatilityInput,
 )
-from shiori_pricing_lab.data.bloomberg_bond_yield_history import BloombergBondYieldHistory
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    BloombergBondYieldHistory,
+    BondYieldObservation,
+)
 
 # The canonical normalized volatility-source label for this calculation.
 # Deliberately distinct from Bloomberg VCUB / market-implied vol, from a
@@ -340,6 +349,51 @@ def _require_finite_step(
                 "window overflow the arithmetic, so no Historical Yield Vol is reported "
                 "for it"
             )
+
+
+def _require_exact_integer_changes(
+    window: Sequence[BondYieldObservation],
+    values: list[float],
+    changes: list[float],
+    history: BloombergBondYieldHistory,
+) -> None:
+    """Refuse an integer pair whose Yield Change loses precision on subtraction.
+
+    Checking each integer observation converts exactly is not enough (Codex
+    review, PR #200). ``[1, 2**100, 2**101]`` converts exactly value by value
+    -- every one of the three is representable -- yet the exact changes are
+    ``[2**100 - 1, 2**100]`` while float subtraction returns ``2**100`` for
+    both. The sample standard deviation of the exact changes is ``sqrt(1/2)``;
+    of the rounded ones, zero. No overflow, no exception: this module
+    answering with a number the data does not support.
+
+    The rule applies only to a pair with an integer endpoint, and deliberately
+    not to a pair of floats. A float observation *is* its float value, and
+    subtracting two of them is the ordinary IEEE754 operation the Middle
+    Office spreadsheet performs on the same numbers -- rounding there is the
+    method, not a corruption of the input. An integer is different: it carries
+    a value this module converts, and the conversion must not change the
+    statistic. Applying the exact-difference rule to float pairs as well would
+    refuse honest data, not protect it: a negative-yield series crossing zero
+    produces inexact differences on roughly 0.3% of ordinary pairs.
+    """
+
+    for index, change in enumerate(changes):
+        previous_value = window[index].yield_value
+        current_value = window[index + 1].yield_value
+        if not isinstance(previous_value, int) and not isinstance(current_value, int):
+            continue
+        exact = Fraction(values[index + 1]) - Fraction(values[index])
+        if exact == Fraction(change):
+            continue
+        raise HistoricalYieldVolInputError(
+            f"the Yield Change between {window[index].observation_date} and "
+            f"{window[index + 1].observation_date} for {history.security!r} is "
+            f"{exact} exactly, and subtracting the two observations as floats gives "
+            f"{change!r} -- the integer Yield values in this window cannot be "
+            "differenced without changing the standard deviation they produce, so no "
+            "Historical Yield Vol is reported for it"
+        )
 
 
 def _require_consistent_observation_dates(history: BloombergBondYieldHistory) -> None:
@@ -542,6 +596,7 @@ def calculate_historical_yield_volatility(
     # volatility with no blocker at all, and the route turned the other case
     # into an HTTP 500. Every intermediate is checked instead, so an
     # unrepresentable magnitude fails closed on this module's own error type.
+    _require_exact_integer_changes(window, values, changes, history)
     _require_finite_step(changes, history)
 
     if len(changes) >= _MINIMUM_CHANGES_FOR_STDEV:
@@ -845,6 +900,91 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
             )
         previous = used
 
+    # A warning is the calculator's qualification of a short window, so it
+    # belongs to exactly that status. A FULL_WINDOW result carrying
+    # ("Applied VCUB substitute",) and an INSUFFICIENT_HISTORY result carrying
+    # none are both shapes this module cannot produce, and the route displays
+    # either as calculation output (Codex review, PR #200).
+    warnings_expected = result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+    if bool(result.warnings) != warnings_expected:
+        return (
+            f"this result for {result.security!r} reports {result.window_status.value} with "
+            + (
+                f"{len(result.warnings)} warning(s), and only INSUFFICIENT_HISTORY carries one"
+                if result.warnings
+                else "no warning, and INSUFFICIENT_HISTORY always carries one"
+            )
+        )
+
+    # The methodology the route serializes under the hard-coded canonical
+    # label. Enforced here and not only at publication, because the route
+    # returns the raw figures under that label whether or not the normalized
+    # source was published.
+    if result.standard_deviation_convention != STANDARD_DEVIATION_CONVENTION:
+        return (
+            f"this result for {result.security!r} claims the "
+            f"{result.standard_deviation_convention!r} convention; this calculator produces "
+            f"{STANDARD_DEVIATION_CONVENTION}"
+        )
+    if (
+        result.annualization_trading_days != ANNUALIZATION_TRADING_DAYS
+        or result.annualization_factor != ANNUALIZATION_FACTOR
+    ):
+        return (
+            f"this result for {result.security!r} claims annualization by sqrt("
+            f"{result.annualization_trading_days!r}) = {result.annualization_factor!r}; this "
+            f"calculator uses sqrt({ANNUALIZATION_TRADING_DAYS})"
+        )
+
+    # Consistency, not merely finiteness: daily=99.0 beside the real
+    # annualized figure is two finite numbers that cannot both be true, and
+    # the route serialized both as headline figures.
+    if figures_present:
+        if result.daily_yield_vol < 0:
+            return (
+                f"the daily standard deviation for {result.security!r} is "
+                f"{result.daily_yield_vol!r}, and a standard deviation is never negative"
+            )
+        if not math.isclose(
+            result.annualized_yield_vol,
+            result.daily_yield_vol * ANNUALIZATION_FACTOR,
+            rel_tol=1e-12,
+            abs_tol=0.0,
+        ):
+            return (
+                f"this result for {result.security!r} reports a daily standard deviation of "
+                f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
+                f"{result.annualized_yield_vol!r}, which is not that daily figure times "
+                f"sqrt({ANNUALIZATION_TRADING_DAYS})"
+            )
+
+    # Everything the route puts in its JSON payload has to survive json.dumps.
+    # `_write_json` serializes outside the handler's exception boundary, so an
+    # unserializable value there terminates the response rather than answering
+    # the promised HTTP 400 (Codex review, PR #200).
+    for name, value in (
+        ("requested_identifier", result.requested_identifier),
+        ("security", result.security),
+        ("yield_field", result.yield_field),
+        ("source_system", result.source_system),
+        ("acquired_at", result.acquired_at),
+        ("calculated_at", result.calculated_at),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            return (
+                f"{name} must be a non-blank string for {result.security!r}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    for name, value in (
+        ("field_meaning", result.field_meaning),
+        ("field_unit", result.field_unit),
+    ):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            return (
+                f"{name} must be a non-blank string or None for {result.security!r}, got "
+                f"{value!r} ({type(value).__name__})"
+            )
+
     expected_first = result.observation_dates[0] if result.observation_dates else None
     expected_last = result.observation_dates[-1] if result.observation_dates else None
     if result.first_observation_date != expected_first:
@@ -897,69 +1037,14 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
             "needs -- no window this short produces a standard deviation"
         )
 
-    # The canonical source label names one methodology. A result claiming a
-    # different convention or annualization publishes an audit asserting an
-    # unapproved method under this module's name, whatever its number was
-    # actually computed with.
-    if result.standard_deviation_convention != STANDARD_DEVIATION_CONVENTION:
-        raise HistoricalYieldVolUnavailableError(
-            f"{HISTORICAL_YIELD_VOL_MO_SOURCE} is the "
-            f"{STANDARD_DEVIATION_CONVENTION} convention; this result for "
-            f"{result.security!r} claims {result.standard_deviation_convention!r} and "
-            "cannot be published under that label"
-        )
-    if (
-        result.annualization_trading_days != ANNUALIZATION_TRADING_DAYS
-        or result.annualization_factor != ANNUALIZATION_FACTOR
-    ):
-        raise HistoricalYieldVolUnavailableError(
-            f"{HISTORICAL_YIELD_VOL_MO_SOURCE} annualizes by sqrt("
-            f"{ANNUALIZATION_TRADING_DAYS}); this result for {result.security!r} claims "
-            f"sqrt({result.annualization_trading_days!r}) = "
-            f"{result.annualization_factor!r}"
-        )
-
-    # The figure is validated before anything computes with it or compares
-    # against it. A string or complex raised TypeError out of the
-    # normalization, inf reached BLIVolatilityInput and raised its raw
-    # ValueError, and NaN was reported as a flat window it never was.
-    try:
-        _require_finite_number(result.annualized_yield_vol, "annualized_yield_vol")
-    except (ValueError, OverflowError, TypeError) as exc:
-        raise HistoricalYieldVolUnavailableError(
-            f"the Historical Yield Vol carried by this result for {result.security!r} is "
-            f"not a finite number ({result.annualized_yield_vol!r}), so it cannot be "
-            f"published as {HISTORICAL_YIELD_VOL_MO_SOURCE}: {exc}"
-        ) from exc
-
-    # Both figures exist together and follow the stated annualization.
-    try:
-        _require_finite_number(result.daily_yield_vol, "daily_yield_vol")
-    except (ValueError, OverflowError, TypeError) as exc:
-        raise HistoricalYieldVolUnavailableError(
-            f"the daily standard deviation carried by this result for {result.security!r} "
-            f"is not a finite number ({result.daily_yield_vol!r}): {exc}"
-        ) from exc
-    if result.daily_yield_vol < 0:
-        raise HistoricalYieldVolUnavailableError(
-            f"the daily standard deviation for {result.security!r} is "
-            f"{result.daily_yield_vol!r}, and a standard deviation is never negative"
-        )
-    # isclose rather than equality: the calculator's own results match exactly,
-    # but a legitimate result rebuilt elsewhere may differ in the last ulp, and
-    # this guard must not refuse an honest number for that.
-    if not math.isclose(
-        result.annualized_yield_vol,
-        result.daily_yield_vol * ANNUALIZATION_FACTOR,
-        rel_tol=1e-12,
-        abs_tol=0.0,
-    ):
-        raise HistoricalYieldVolUnavailableError(
-            f"this result for {result.security!r} reports a daily standard deviation of "
-            f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
-            f"{result.annualized_yield_vol!r}, which is not that daily figure times "
-            f"sqrt({ANNUALIZATION_TRADING_DAYS})"
-        )
+    # Both figures' finiteness, their annualization relationship and the
+    # methodology constants are enforced by result_shape_problem above, which
+    # every caller of this function runs first. They are properties of any
+    # serializable result, not only of a publishable one, so this function
+    # keeps no second copy: two rules for one invariant, with only one of them
+    # reachable, is the defect and not the safeguard (Codex review, PR #200).
+    # Everything this function checks itself is publication-only: whether this
+    # particular result may be published under this particular label.
 
 
 def historical_yield_vol_volatility_input(
