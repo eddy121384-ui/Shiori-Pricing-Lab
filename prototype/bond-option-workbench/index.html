@@ -969,8 +969,10 @@
               Display derivative only: each row's <span class="mono">Yield<sub>t</sub> &minus; Yield<sub>t&minus;1</sub></span>
               against the <em>previous returned observation</em>, which is not necessarily the previous
               calendar day. It is computed in this page for reading only, is never stored, and is not a
-              volatility statistic &mdash; no standard deviation and no annualization is calculated anywhere
-              in this view.
+              volatility statistic: nothing on this page computes a standard deviation or an
+              annualization from it. The Historical Yield Vol card below <em>does</em> show both, but
+              they are calculated server-side by the canonical calculator from its own Bloomberg
+              request &mdash; not from this column and not from this page.
             </div>
           </div>
         </section>

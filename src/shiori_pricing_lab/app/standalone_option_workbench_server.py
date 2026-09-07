@@ -2479,8 +2479,13 @@ def fetch_bloomberg_bond_yield_history(body: dict) -> dict:
     including its raw Bloomberg value string and an explicit ``null`` for a
     returned row that carried no value. Nothing is filled, interpolated,
     rounded, resampled, or converted, and no Yield Change, standard
-    deviation, annualization, or volatility is computed here or anywhere
-    downstream of here in this issue.
+    deviation, annualization, or volatility is computed here.
+
+    Issue #197 later added a statistic, and it is deliberately not here: it
+    lives behind its own route, :func:`fetch_historical_yield_volatility`,
+    which makes its own acquisition through the same #196 loader. This route
+    still answers exactly what Bloomberg returned and nothing more, and no
+    consumer of this payload computes a volatility from it.
 
     Raises ``ValueError`` for a malformed request body or identifier, and
     ``BLIBloombergDapiError`` for any Bloomberg-side failure -- never caught
