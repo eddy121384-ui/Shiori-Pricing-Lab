@@ -596,6 +596,61 @@ def test_a_malformed_answer_is_refused_rather_than_displayed(server_url, page) -
     assert _is_actually_hidden(page, "hyv-result")
 
 
+# --- state does not survive between calculations -------------------------------
+
+
+def test_a_second_calculation_leaves_nothing_of_the_first_on_screen(server_url, page) -> None:
+    """A blocked window followed by a clean one must not keep the blocked state.
+
+    The card's boxes and its warnings heading are set from the payload every
+    render; this drives the transition a trader actually makes rather than
+    trusting that.
+    """
+
+    _route_other_markets_away(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+
+    # First: short AND blocked -- both boxes up, no number, neutral heading.
+    page.unroute(_ROUTE)
+    _route_vol(page, payload=_BLOCKED_SHORT_PAYLOAD)
+    _calculate(page)
+    _wait_for_result(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-blockers"))
+    assert "usable" not in page.inner_text("#hyv-warnings-title").lower()
+
+    # Then: a clean full window over the top of it.
+    page.unroute(_ROUTE)
+    _route_vol(page)
+    _calculate(page)
+    _wait_until(lambda: _is_actually_hidden(page, "hyv-blockers"))
+
+    assert _is_actually_hidden(page, "hyv-warnings")
+    assert page.inner_text("#hyv-status").strip() == "FULL_WINDOW"
+    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+    assert "HISTORICAL_YIELD_VOL_MO" in page.inner_text("#hyv-source-detail")
+
+
+def test_a_failure_after_a_result_hides_the_stale_result(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+
+    _route_vol(page)
+    _calculate(page)
+    _wait_for_result(page)
+    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+
+    page.unroute(_ROUTE)
+    _route_vol(page, error="synthetic refusal")
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    # The previous run's numbers must not still be readable underneath.
+    assert _is_actually_hidden(page, "hyv-result")
+    assert page.evaluate("() => window.__shioriTestHistoricalYieldVolPayload()") is None
+
+
 # --- no side effects on the #196 view or on pricing ---------------------------
 
 

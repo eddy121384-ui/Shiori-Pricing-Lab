@@ -556,6 +556,37 @@ def test_a_degenerate_zero_vol_window_is_not_published_as_a_volatility():
     assert "degenerate" in str(excinfo.value)
 
 
+def test_a_vol_that_underflows_its_own_unit_conversion_says_so():
+    # 0.0 / 5e-324 / 0.0 in PERCENT: the changes are NOT identical and the
+    # calculated vol is strictly positive, but x 1e-2 underflows it to zero.
+    # The refusal must name that cause, not blame a flat window it never saw
+    # (found while probing the boundary Codex's non-finite finding pointed at).
+    result = calculate_historical_yield_volatility(
+        _history([0.0, 5e-324, 0.0, 5e-324], field_unit="PERCENT"),
+        requested_observation_count=4,
+    )
+
+    assert result.annualized_yield_vol > 0
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "underflowed to zero" in str(excinfo.value)
+    assert "identical" not in str(excinfo.value)
+
+
+def test_a_genuinely_flat_window_still_names_the_flat_window():
+    result = calculate_historical_yield_volatility(
+        _history([4.0, 5.0, 6.0, 7.0], field_unit="PERCENT"), requested_observation_count=4
+    )
+
+    assert result.annualized_yield_vol == 0.0
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "identical" in str(excinfo.value)
+    assert "underflowed" not in str(excinfo.value)
+
+
 def test_publishing_something_other_than_a_result_fails_closed():
     with pytest.raises(HistoricalYieldVolUnavailableError):
         historical_yield_vol_volatility_input({"annualized_yield_vol": 1.0})

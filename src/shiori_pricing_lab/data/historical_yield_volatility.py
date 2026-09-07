@@ -597,11 +597,29 @@ def historical_yield_vol_volatility_input(
     normalized = result.annualized_yield_vol * factor
 
     if not normalized > 0:
+        # Two different causes end up here and they must not be confused: the
+        # window really was flat, or a strictly positive vol underflowed to
+        # zero on the way into the published unit (0.0 / 5e-324 / 0.0 in
+        # PERCENT does exactly that). Blaming identical changes for the second
+        # would be a refusal message asserting something untrue, which is the
+        # same defect as any other overclaim in this module.
+        if not result.annualized_yield_vol > 0:
+            cause = (
+                "every Yield Change in the window was identical, so this degenerate window "
+                "is reported as what it is rather than published as a volatility"
+            )
+        else:
+            cause = (
+                f"its Historical Yield Vol of {result.annualized_yield_vol!r} "
+                f"{result.field_unit} is too small to represent in "
+                f"{PUBLISHED_VOLATILITY_UNIT} and underflowed to zero under the "
+                f"{factor!r} normalization -- a volatility that cannot survive its own "
+                "unit conversion is refused rather than published as zero"
+            )
         raise HistoricalYieldVolUnavailableError(
             f"the Historical Yield Vol of the selected {result.observation_count}-observation "
-            f"window for {result.security!r} is {normalized!r}, which is not positive -- "
-            "every Yield Change in the window was identical, so this degenerate window is "
-            "reported as what it is rather than published as a volatility"
+            f"window for {result.security!r} is {normalized!r} {PUBLISHED_VOLATILITY_UNIT}, "
+            f"which is not positive -- {cause}"
         )
 
     audit = (
