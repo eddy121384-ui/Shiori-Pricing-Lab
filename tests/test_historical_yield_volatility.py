@@ -951,6 +951,95 @@ def test_a_half_populated_result_is_refused_before_serialization(overrides):
     assert "exist together or not at all" in problem
 
 
+def test_the_fixture_builder_produces_series_the_196_loader_could_return():
+    """Twice a new rule caught a fixture asserting an impossible series.
+
+    Those fixtures are what every guard in this file was validated against, so
+    the builder's own output is checked against #196's documented invariants:
+    dates strictly ascending, no duplicates, every observation inside the
+    declared range, values finite or explicitly absent. A fixture that could
+    not come off the wire proves nothing about production (Codex review,
+    PR #200).
+    """
+
+    for values in ([], [4.0], [4.0, 4.1], [4.0 + i * 0.01 for i in range(180)], [4.0, None, 4.2]):
+        history = _history(values)
+
+        assert history.requested_start_date <= history.requested_end_date
+        previous = None
+        for observation in history.observations:
+            assert type(observation.observation_date) is date
+            if previous is not None:
+                assert observation.observation_date > previous, "dates must strictly ascend"
+            assert history.requested_start_date <= observation.observation_date
+            assert observation.observation_date <= history.requested_end_date
+            if observation.yield_value is not None:
+                assert math.isfinite(observation.yield_value)
+            previous = observation.observation_date
+
+
+# --- Are the guards stricter than the calculator? ---------------------------
+
+
+def _real_results():
+    """Results the calculator actually produces, across the shapes it supports."""
+
+    for series_length in (0, 1, 2, 3, 4, 5, 90, 180, 200):
+        for requested in (3, 4, 180):
+            for pattern in ("varied", "flat-ish", "tiny", "large"):
+                if pattern == "varied":
+                    values = [4.0 + (index % 7) * 0.01 for index in range(series_length)]
+                elif pattern == "flat-ish":
+                    values = [4.0 + index * 0.5 for index in range(series_length)]
+                elif pattern == "tiny":
+                    values = [1e-8 * (index % 3) for index in range(series_length)]
+                else:
+                    values = [1e6 + (index % 5) * 13.0 for index in range(series_length)]
+                yield calculate_historical_yield_volatility(
+                    _history(values), requested_observation_count=requested
+                )
+
+
+def test_every_result_the_calculator_produces_passes_the_shared_shape_check():
+    """The guard must never refuse a result this module itself built.
+
+    Every rule in `result_shape_problem` is my reading of what the calculator
+    guarantees, and every other test in this file starts from tampered
+    calculator output -- so an over-strict rule would refuse a legitimate
+    result and none of them would notice (Codex review, PR #200: I encoded an
+    equality as two inequalities and the gap went unseen in both directions).
+    This drives the calculator across the shapes it supports and asserts the
+    guard accepts all of them.
+    """
+
+    checked = 0
+    for result in _real_results():
+        problem = result_shape_problem(result)
+        assert problem is None, f"the guard refused a real result: {problem}"
+        checked += 1
+    assert checked > 50
+
+
+def test_publication_never_raises_anything_but_its_own_error_on_a_real_result():
+    """Whatever the calculator produces, publication publishes or explains.
+
+    The single-error-type promise, checked against real output rather than
+    against the shapes I imagined -- it has been broken six times, every time
+    by a value this module produced elsewhere and did not validate.
+    """
+
+    published = refused = 0
+    for result in _real_results():
+        try:
+            historical_yield_vol_volatility_input(result)
+            published += 1
+        except HistoricalYieldVolUnavailableError:
+            refused += 1
+    # Both outcomes must actually occur, or this test is asserting nothing.
+    assert published > 0
+    assert refused > 0
+
+
 def test_the_shared_shape_check_is_what_both_consumers_use():
     """One shape checker, two error types.
 

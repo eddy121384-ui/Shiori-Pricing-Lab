@@ -555,6 +555,28 @@ def test_the_api_contract_id_names_this_route(server_url) -> None:
     assert health["api_contract"].endswith("-v28")
 
 
+def test_this_files_fixture_builder_also_produces_a_possible_series() -> None:
+    """The same check the calculator tests apply to their own builder.
+
+    This file hand-builds BloombergBondYieldHistory too, and a fixture the
+    #196 loader could never return proves nothing about the route (Codex
+    review, PR #200 -- two of my fixtures asserted impossible series).
+    """
+
+    for values in ([], [4.0], [4.00, 4.10, 3.80, 4.30], [4.0 + i * 0.01 for i in range(200)]):
+        history = _history(values)
+
+        assert history.requested_start_date <= history.requested_end_date
+        previous = None
+        for observation in history.observations:
+            assert type(observation.observation_date) is date
+            if previous is not None:
+                assert observation.observation_date > previous
+            assert history.requested_start_date <= observation.observation_date
+            assert observation.observation_date <= history.requested_end_date
+            previous = observation.observation_date
+
+
 def test_the_view_script_is_served(server_url) -> None:
     with urllib.request.urlopen(f"{server_url}/historical_yield_vol_view.js") as response:
         body = response.read().decode("utf-8")
