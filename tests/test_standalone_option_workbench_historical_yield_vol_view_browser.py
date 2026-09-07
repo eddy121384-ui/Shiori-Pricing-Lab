@@ -627,6 +627,54 @@ def test_no_source_and_no_reason_is_also_refused(server_url, page) -> None:
     assert "no reason for its absence" in page.inner_text("#hyv-error-detail")
 
 
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_a_blank_source_unavailability_reason_is_refused(server_url, page, reason) -> None:
+    # typeof "" === "string", so a type check alone accepted it and text()
+    # rendered it as an em dash: an unpublished risk figure presented with no
+    # explanation of why publication was refused (Codex review, PR #200).
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": None,
+            "volatility_source_unavailable_reason": reason,
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "no reason for its absence" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_string_inside_the_published_source_is_refused(server_url, page, blank) -> None:
+    # Same rule, same file, the other branch: a whitespace-only audit line
+    # renders as whitespace on the card rather than as the calculation
+    # provenance the block exists to carry.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": {
+                **_FULL_PAYLOAD["volatility_source"],
+                "override_or_fallback_audit": blank,
+            },
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "override_or_fallback_audit" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
 def test_a_malformed_answer_is_refused_rather_than_displayed(server_url, page) -> None:
     _route_other_markets_away(page)
     _route_vol(page, payload={"window_status": "FULL_WINDOW"})

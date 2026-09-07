@@ -101,6 +101,14 @@
     return value === null || value === undefined || value === "" ? EM_DASH : String(value);
   }
 
+  // A string that renders as nothing is not an answer. text() turns "" into
+  // an em dash, and a whitespace-only string into whitespace, so a validator
+  // that checks only `typeof value === "string"` lets a blank field reach the
+  // card as a dash where a real sentence belongs (Codex review, PR #200).
+  function isNonBlankString(value) {
+    return typeof value === "string" && value.trim() !== "";
+  }
+
   async function postJson(route, body) {
     requestedRoutes.push(route);
     const response = await fetch(route, {
@@ -266,7 +274,7 @@
         // "[object Object]" (Codex review, PR #200).
         "override_or_fallback_audit",
       ]) {
-        if (typeof source[key] !== "string" || !source[key]) {
+        if (!isNonBlankString(source[key])) {
           return `malformed response: volatility_source."${key}" is missing`;
         }
       }
@@ -276,9 +284,11 @@
       if (typeof source.normalization_factor !== "number") {
         return 'malformed response: volatility_source."normalization_factor" is not a number';
       }
-    } else if (typeof candidate.volatility_source_unavailable_reason !== "string") {
+    } else if (!isNonBlankString(candidate.volatility_source_unavailable_reason)) {
       // No source and no reason is not an answer either: the card would show
-      // an em dash where the refusal belongs.
+      // an em dash where the refusal belongs. A blank or whitespace-only
+      // reason renders as exactly that dash, so it is refused for the same
+      // reason a missing one is (Codex review, PR #200).
       return 'malformed response: no "volatility_source" and no reason for its absence';
     }
     return null;
