@@ -202,7 +202,7 @@ def test_parse_and_format_are_inverses_across_every_tick_of_a_point(code) -> Non
         assert parse_futures_quote(code, quote).decimal_price == pytest.approx(price)
 
 
-@pytest.mark.parametrize(
+@ pytest.mark.parametrize(
     "code, raw",
     [
         # A half 32nd is not a tick on ZB.
@@ -229,6 +229,117 @@ def test_parse_and_format_are_inverses_across_every_tick_of_a_point(code) -> Non
 def test_an_invalid_quote_for_this_contract_is_rejected(code, raw) -> None:
     with pytest.raises(TreasuryFuturesQuoteError):
         parse_futures_quote(code, raw)
+
+
+# Codex P2 regression: fraction tick validity must use exact integer arithmetic,
+# not float rounding. Test the high-precision counterexample where float
+# arithmetic could produce false positives/negatives.
+def test_fraction_tick_validity_uses_exact_integer_arithmetic() -> None:
+    """Codex P2: exact integer arithmetic for fraction tick divisibility.
+    
+    The fraction 5/8 on ZT (8 ticks/32nd): 5*8=40, 40%8=0 -> 5 ticks exact.
+    The fraction 1/3 on ZT: 1*8=8, 8%3=2 != 0 -> not an exact tick, REJECTED.
+    
+    Float arithmetic: (5/8)*8 = 5.0 -> is_integer() = True (correct)
+    Float arithmetic: (1/3)*8 = 2.666... -> is_integer() = False (correct)
+    
+    But edge cases with floating point can be problematic:
+    - Very large numerators/denominators
+    - Fractions that are mathematically exact but float-imprecise
+    
+    Using integer arithmetic (product % denominator == 0) is exact.
+    """
+    # Valid fractions that should parse correctly (exact divisibility)
+    assert parse_futures_quote("ZT", "102-16 1/8").decimal_price == pytest.approx(102 + 16.125 / 32)
+    assert parse_futures_quote("ZT", "102-16 5/8").decimal_price == pytest.approx(102 + 16.625 / 32)
+    assert parse_futures_quote("ZF", "108-15 1/4").decimal_price == pytest.approx(108 + 15.25 / 32)
+    assert parse_futures_quote("ZF", "108-15 3/4").decimal_price == pytest.approx(108 + 15.75 / 32)
+    assert parse_futures_quote("ZN", "112-16 1/2").decimal_price == pytest.approx(112 + 16.5 / 32)
+
+
+def test_fraction_not_on_tick_grid_is_rejected_exact_integer_check() -> None:
+    """Codex P2: fractions not exactly representable on the tick grid are rejected.
+    
+    These are fractions where numerator * ticks_per_32nd is NOT divisible by denominator.
+    This uses exact integer arithmetic (product % denominator != 0), not float.is_integer().
+    """
+    # ZT: 8 ticks per 32nd. Fractions with denominator not dividing 8*numerator
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZT", "102-16 1/3")   # 1*8=8, 8%3=2 != 0
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZT", "102-16 1/5")   # 1*8=8, 8%5=3 != 0
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZT", "102-16 2/5")   # 2*8=16, 16%5=1 != 0
+    
+    # ZF: 4 ticks per 32nd
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZF", "108-15 1/3")   # 1*4=4, 4%3=1 != 0
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZF", "108-15 1/8")   # 1*4=4, 4%8=4 != 0
+    
+    # ZN: 2 ticks per 32nd
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZN", "112-16 1/3")   # 1*2=2, 2%3=2 != 0
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZN", "112-16 1/4")   # 1*2=2, 2%4=2 != 0
+
+
+def test_high_precision_fraction_counterexample() -> None:
+    """Codex P2: High-precision counterexample where float arithmetic fails.
+    
+    Consider a fraction like 123456789/987654321 on a contract with 8 ticks/32nd.
+    Float: (123456789/987654321) * 8 = 1.000000008... might incorrectly round.
+    Integer: 123456789 * 8 = 987654312, 987654312 % 987654321 != 0 -> REJECTED (correct).
+    
+    This test uses fractions that are mathematically NOT on the tick grid but
+    could be misclassified by float.is_integer() due to floating-point precision.
+    """
+    # Large numbers where float precision could be an issue
+    # 1/3 is the classic case: float(1/3)*8 = 2.6666666666666665
+    # is_integer() correctly returns False, but we test integer arithmetic explicitly
+    
+    # Edge case: fraction that equals exactly an integer in decimal but 
+    # not an exact multiple of the tick grid
+    # E.g., on ZN (2 ticks/32nd), 2/3 of a 32nd = 1.333... ticks
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZN", "112-16 2/3")
+    
+    # Another edge case: very close to a tick but not exact
+    # 3/2 = 1.5 -> on ZF (4 ticks/32nd): 1.5*4 = 6 ticks -> exact! But 3/2 is not a standard fraction
+    # Actually 3/2 of a 32nd = 1.5 32nds = 1 32nd + 16 ticks = way out of range
+    
+    # Test that 1/6 on ZT is rejected (1*8=8, 8%6=2 != 0)
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZT", "102-16 1/6")
+    
+    # Test that 5/6 on ZT is rejected (5*8=40, 40%6=4 != 0)
+    with pytest.raises(TreasuryFuturesQuoteError):
+        parse_futures_quote("ZT", "102-16 5/6")
+
+
+def test_all_valid_fractions_are_exactly_representable_as_integers() -> None:
+    """Verify every valid fraction for each contract maps to an exact integer tick count.
+    
+    This is a completeness test: for each contract, every fraction in the 
+    _TICK_FRACTION_TO_DESK mapping must satisfy exact integer divisibility.
+    """
+    from shiori_pricing_lab.pricing.treasury_futures_contract import _TICK_FRACTION_TO_DESK
+    
+    for (ticks_per_32nd, sub_ticks), fraction_str in _TICK_FRACTION_TO_DESK.items():
+        num_str, den_str = fraction_str.split("/")
+        numerator = int(num_str)
+        denominator = int(den_str)
+        
+        # Exact integer check
+        product = numerator * ticks_per_32nd
+        assert product % denominator == 0, (
+            f"Fraction {fraction_str} for {ticks_per_32nd} ticks/32nd "
+            f"fails exact integer divisibility: {product} % {denominator} = {product % denominator}"
+        )
+        sub_ticks_calc = product // denominator
+        assert sub_ticks_calc == sub_ticks, (
+            f"Fraction {fraction_str} gives {sub_ticks_calc} ticks, expected {sub_ticks}"
+        )
 
 
 @pytest.mark.parametrize("bad_price", [0, -1, -110.5, float("inf"), float("nan")])

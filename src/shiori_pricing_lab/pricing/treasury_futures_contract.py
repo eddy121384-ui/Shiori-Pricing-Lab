@@ -54,15 +54,11 @@ Futures use the leading-decimal-digit rule above, so ``99-032`` means a
 different price on a futures contract than it does on a cash bond. The two
 notations are never interchanged, and neither module calls the other.
 
-**Off-tick input.** A *fractional* quote is an exchange quote by
-construction, so one that is not on the selected contract's tick (``118-16+``
-on ZB, which has no half-32nd) is rejected as a typo. A *decimal* price is
-accepted exactly as entered, on-tick or not: the desk's whole point is
-asking "if 10Y futures were at X, where is the yield?", and X is often a
-hypothetical level rather than a tradeable one. Every parse result carries
-both the exact decimal the trader entered and the nearest valid exchange
-price/quote, so a caller can show what would actually trade without ever
-silently rounding the number the calculation used.
+**Desk/fractional notation.** The fractional form ``<handle>-<32nds> <numerator>/<denominator>``
+(e.g., ``110-16 5/8``) is the standard desk notation for Treasury futures,
+not a vendor-specific format. The parser accepts this form as well as
+Unicode fractions (``¼`` ``½`` ``¾`` ``⅛`` ``⅜`` ``⅝`` ``⅞``) and the
+internal shorthand digit notation (``110-165``).
 """
 
 from __future__ import annotations
@@ -78,9 +74,9 @@ TREASURY_FUTURES_32NDS_PER_POINT = 32
 # writes the exchange's own sub-digit form.
 TREASURY_FUTURES_HALF_32ND_SUFFIX = "+"
 
-# Mapping from tick fraction to Bloomberg-style fraction string.
+# Mapping from tick fraction to desk/fractional notation string.
 # Key: (ticks_per_32nd, sub_ticks) -> fraction string
-_TICK_FRACTION_TO_BLOOMBERG = {
+_TICK_FRACTION_TO_DESK = {
     # ZT: 8 ticks per 32nd (eighths)
     (8, 1): "1/8",
     (8, 2): "1/4",
@@ -118,8 +114,8 @@ _FRACTIONAL_QUOTE_PATTERN = re.compile(
     rf"(?P<sub>\d|{re.escape(TREASURY_FUTURES_HALF_32ND_SUFFIX)})?$"
 )
 
-# Extended pattern for Bloomberg-style notation: "102-18 5/8" or "102-18 1/2" or "102-18 ⅝"
-_BLOOMBERG_QUOTE_PATTERN = re.compile(
+# Extended pattern for desk/fractional notation: "102-18 5/8" or "102-18 1/2" or "102-18 ⅝"
+_DESK_FRACTIONAL_QUOTE_PATTERN = re.compile(
     rf"^(?P<handle>\d+)[{_QUOTE_SEPARATORS}](?P<thirty_seconds>\d{{2}})"
     rf"\s+(?P<fraction>\d+/\d+|[{_UNICODE_FRACTION_CHARS}])$"
 )
@@ -336,16 +332,16 @@ def _parse_fractional_quote(contract: TreasuryFuturesContract, text: str) -> flo
     if match is not None:
         return _parse_internal_shorthand_quote(contract, match)
 
-    # Try Bloomberg-style pattern (e.g., "102-18 5/8", "102-18 1/2")
-    match = _BLOOMBERG_QUOTE_PATTERN.match(text)
+    # Try desk/fractional pattern (e.g., "102-18 5/8", "102-18 1/2")
+    match = _DESK_FRACTIONAL_QUOTE_PATTERN.match(text)
     if match is not None:
-        return _parse_bloomberg_quote(contract, match)
+        return _parse_desk_fractional_quote(contract, match)
 
     # If neither pattern matches, provide a helpful error
     raise TreasuryFuturesQuoteError(
         f"{text!r} is not a valid {contract.code} quote -- expected a handle, a "
         "separator, exactly two 32nds digits, and an optional sub-32nd digit "
-        "(e.g. '110-16', '110-165', '110-16+') or Bloomberg-style fraction "
+        "(e.g. '110-16', '110-165', '110-16+') or desk/fractional fraction "
         "(e.g. '110-16 1/2', '110-16 5/8')"
     )
 
@@ -387,8 +383,8 @@ def _parse_internal_shorthand_quote(contract: TreasuryFuturesContract, match: re
     return _require_positive_finite_price(ticks / contract.ticks_per_point)
 
 
-def _parse_bloomberg_quote(contract: TreasuryFuturesContract, match: re.Match) -> float:
-    """Parse Bloomberg-style notation (e.g., '102-18 5/8', '102-18 1/2')."""
+def _parse_desk_fractional_quote(contract: TreasuryFuturesContract, match: re.Match) -> float:
+    """Parse desk/fractional notation (e.g., '102-18 5/8', '102-18 1/2')."""
     handle = int(match.group("handle"))
     thirty_seconds = int(match.group("thirty_seconds"))
     fraction_str = match.group("fraction")
@@ -412,37 +408,28 @@ def _parse_bloomberg_quote(contract: TreasuryFuturesContract, match: re.Match) -
                 f"must be in form 'numerator/denominator', got {fraction_str!r}"
             ) from None
 
-    # Convert fraction to ticks for this contract
-    # For ZT: 1/8 = 1 tick, 1/4 = 2 ticks, 3/8 = 3 ticks, etc.
-    # For ZF: 1/4 = 1 tick, 1/2 = 2 ticks, 3/4 = 3 ticks
-    # For ZN: 1/2 = 1 tick
-    # The fraction represents numerator/denominator of a 32nd
-    # So 1/8 of a 32nd = 1/8 * (1/32) = 1/256 point
-    # For ZT (8 ticks/32nd): 1 tick = 1/8 of a 32nd
-    # So fraction * 32nd = (numerator/denominator) * (1/32) point
-    # In ticks: (numerator/denominator) * ticks_per_32nd
+    # Convert fraction to ticks for this contract using exact integer arithmetic.
+    # The fraction represents numerator/denominator of a 32nd.
+    # sub_ticks = (numerator / denominator) * ticks_per_32nd
+    # For this to be an exact tick: (numerator * ticks_per_32nd) must be divisible by denominator.
     if denominator <= 0:
         raise TreasuryFuturesQuoteError(
             f"{match.group(0)!r} is not a valid {contract.code} quote -- "
             f"fraction denominator must be positive, got {denominator}"
         )
 
-    # Calculate sub_ticks from fraction
-    # The fraction represents a portion of a 32nd
-    # For a contract with ticks_per_32nd ticks per 32nd:
-    # sub_ticks = fraction * ticks_per_32nd = (numerator/denominator) * ticks_per_32nd
-    sub_ticks_fraction = (numerator * contract.ticks_per_32nd) / denominator
-    
-    # Check if the fraction maps to an exact tick
-    if not sub_ticks_fraction.is_integer():
+    # Exact integer arithmetic: check divisibility before converting
+    # numerator * ticks_per_32nd must be exactly divisible by denominator
+    product = numerator * contract.ticks_per_32nd
+    if product % denominator != 0:
         raise TreasuryFuturesQuoteError(
             f"{match.group(0)!r} is not a valid {contract.code} quote -- "
             f"fraction {fraction_str} does not correspond to a valid tick for {contract.code} "
             f"(contract trades in {contract.ticks_per_32nd} ticks per 32nd)"
         )
 
-    sub_ticks = int(sub_ticks_fraction)
-    
+    sub_ticks = product // denominator
+
     if sub_ticks < 0 or sub_ticks >= contract.ticks_per_32nd:
         raise TreasuryFuturesQuoteError(
             f"{match.group(0)!r} is not a valid {contract.code} quote -- "
@@ -466,7 +453,7 @@ def _parse_bloomberg_quote(contract: TreasuryFuturesContract, match: re.Match) -
 
 
 def format_futures_quote(contract_code: str, price: float) -> str:
-    """Render ``price`` as ``contract_code``'s exchange quote in Bloomberg/desk notation.
+    """Render ``price`` as ``contract_code``'s exchange quote in desk/fractional notation.
 
     Uses fractional notation (e.g., "102-18 5/8") for contracts that trade
     in sub-32nd increments. For whole-32nd contracts (ZB), uses "102-16".
@@ -483,10 +470,10 @@ def format_futures_quote(contract_code: str, price: float) -> str:
     if sub_ticks == 0:
         return f"{handle}-{thirty_seconds:02d}"
 
-    # Map sub_ticks to Bloomberg-style fraction
+    # Map sub_ticks to desk/fractional notation
     key = (contract.ticks_per_32nd, sub_ticks)
-    if key in _TICK_FRACTION_TO_BLOOMBERG:
-        fraction = _TICK_FRACTION_TO_BLOOMBERG[key]
+    if key in _TICK_FRACTION_TO_DESK:
+        fraction = _TICK_FRACTION_TO_DESK[key]
         return f"{handle}-{thirty_seconds:02d} {fraction}"
 
     # Fallback to digit notation (should not happen for valid ticks)
