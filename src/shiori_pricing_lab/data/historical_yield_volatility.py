@@ -9,12 +9,20 @@ repository -- and turns it into an auditable Historical Yield Vol:
 ``180 Yield observations -> 179 daily Yield Changes -> STDEV.S (ddof=1)
 -> x sqrt(252)``
 
-Every number needed to reproduce that result travels with it: which security
-Bloomberg resolved, which Yield mnemonic was asked for, the requested date
-range, the requested and the *actual* observation counts, the exact dates
-used, the number of changes, the standard-deviation convention, the
-annualization factor, the daily and the annualized figure, the unit, both
-timestamps, and any blocker.
+Audit and request provenance travels with every result -- everything Issue
+#197 §3 asks for: which security Bloomberg resolved, which Yield mnemonic was
+asked for, the requested date range, the requested and the *actual*
+observation counts, the exact dates used, the number of changes, the
+standard-deviation convention, the annualization factor, the daily and the
+annualized figure, the unit, both timestamps, and any warning or blocker.
+
+That is enough to *re-issue* the identical request and *re-run* the identical
+convention over its answer. It is deliberately **not** enough to replay the
+arithmetic: the Yield values and the Yield Changes themselves are not carried
+(Codex review, PR #200), and once Bloomberg's answer for that range changes,
+re-issuing does not reproduce these figures either. A consumer needing the
+values reads them from the #196 loader for the same query, and ``acquired_at``
+is what says whether the two are the same acquisition.
 
 **The convention is PROVISIONAL, not methodology-final (Issue #197).** Middle
 Office has confirmed the underlying's own Yield, daily Yield *Change*, a
@@ -35,10 +43,20 @@ be read as evidence that the provisional half is settled.
 - It fills nothing. A date Bloomberg did not answer for is simply not in the
   series, and this module neither notices its absence nor manufactures it: no
   interpolation, forward-fill, back-fill, smoothing, winsorization,
-  resampling, or synthetic observation exists here. Consequently a "daily"
-  Yield Change is the change between two *consecutive returned observations*,
-  which under Bloomberg's ``ACTIVE_DAYS_ONLY`` is the natural trading-day
-  step and is exactly what a 180-trading-day Middle Office window means.
+  resampling, or synthetic observation exists here. Consequently a Yield
+  Change is the change between two *consecutive returned observations*, and
+  the window is *observation*-based throughout -- never day-based.
+
+  That distinction matters at the parity gate (Codex review, PR #200).
+  ``ACTIVE_DAYS_ONLY`` stops Bloomberg filling a non-trading day in, but it
+  does not promise that every active day came back, and this module performs
+  no completeness check and has no trading calendar to perform one with. So
+  a change spanning an omitted active day is a multi-day move counted once,
+  and 180 returned observations can span more than 180 trading days. Where
+  Bloomberg returned every active day the two readings coincide, which is the
+  ordinary case -- but Middle Office's "180 trading days" and this module's
+  "180 returned observations" are not the same statement, and a parity
+  mismatch should check the returned dates before it blames the convention.
 - **The calculated result** converts no units. The standard deviation of a
   difference carries the unit of the values differenced, so the vol this
   module reports is in the Yield field's own unit -- ``field_unit``, carried
@@ -297,6 +315,29 @@ def validate_requested_observation_count(value: object) -> int:
     return value
 
 
+def _require_finite_step(
+    values: list[float], history: BloombergBondYieldHistory, *, what: str = "Yield Change"
+) -> None:
+    """Refuse an intermediate the arithmetic could not represent.
+
+    Separate from the input check on purpose: the observations can each be
+    perfectly finite and their difference, or the annualization of their
+    standard deviation, still overflow. A non-finite intermediate is not a
+    small numerical wobble -- it means the magnitudes involved are outside
+    what this statistic can express, so it fails closed rather than reporting
+    ``inf`` as a volatility.
+    """
+
+    for value in values:
+        if not math.isfinite(value):
+            raise HistoricalYieldVolInputError(
+                f"the {what} for {history.security!r} on {history.yield_field} is "
+                f"{value!r}, which is not a finite number -- the Yield magnitudes in this "
+                "window overflow the arithmetic, so no Historical Yield Vol is reported "
+                "for it"
+            )
+
+
 def _require_strictly_ascending(history: BloombergBondYieldHistory) -> None:
     previous: date | None = None
     for observation in history.observations:
@@ -390,8 +431,10 @@ def calculate_historical_yield_volatility(
         )
     elif len(window) < requested:
         status = HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
-        # A warning, not a blocker: this window's number is publishable, and
-        # what must never happen is it being read as a full-window result.
+        # A warning, not a blocker: being short does not by itself stop this
+        # window's number reaching the publication helper's remaining checks
+        # (a declared, supported unit; a positive sigma), and what must never
+        # happen is it being read as a full-window result.
         warnings.append(
             f"INSUFFICIENT_HISTORY: {len(window)} of the requested {requested} Yield "
             "observations exist. This is not a full-window Historical Yield Vol, and no "
@@ -407,13 +450,25 @@ def calculate_historical_yield_volatility(
             "reported for this window"
         )
 
+    # Finite observations are not enough to make the arithmetic finite (Codex
+    # review, PR #200). Subtracting two representable Yields can overflow --
+    # 1e308 - -1e308 is inf -- and so can annualizing a large daily sigma, and
+    # `statistics.stdev` raises AttributeError rather than a ValueError when
+    # handed an inf. Left unguarded, this module returned inf as a usable
+    # volatility with no blocker at all, and the route turned the other case
+    # into an HTTP 500. Every intermediate is checked instead, so an
+    # unrepresentable magnitude fails closed on this module's own error type.
+    _require_finite_step(changes, history)
+
     if len(changes) >= _MINIMUM_CHANGES_FOR_STDEV:
         # Sample standard deviation, ddof=1 -- Excel's STDEV.S. The stdlib
         # accumulates the sum of squares in exact rational arithmetic, so the
         # answer is the correctly-rounded value of the ddof=1 formula over
         # these changes rather than an accumulation-order artifact.
         daily: float | None = statistics.stdev(changes)
+        _require_finite_step([daily], history, what="daily standard deviation")
         annualized: float | None = daily * ANNUALIZATION_FACTOR
+        _require_finite_step([annualized], history, what="annualized Historical Yield Vol")
     else:
         daily = None
         annualized = None

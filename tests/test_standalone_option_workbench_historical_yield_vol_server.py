@@ -365,6 +365,29 @@ def test_an_unusable_observation_contract_is_refused(server_url, monkeypatch, ba
     assert calls == []
 
 
+def test_an_overflowing_window_is_400_not_500(server_url, monkeypatch) -> None:
+    # Before the fix this pair raised AttributeError out of statistics.stdev
+    # and the route answered HTTP 500 -- an unhandled crash where the honest
+    # answer is a refusal the trader can read (Codex review, PR #200).
+    _stub_loader(monkeypatch, history=_history([1e308, -1e308, 1e308]))
+
+    status, payload = _post_json(f"{server_url}{_ROUTE}", _body(requested_observation_count=3))
+
+    assert status == 400
+    assert "not a finite number" in payload["error"]
+
+
+def test_an_overflowing_annualization_is_refused_not_returned(server_url, monkeypatch) -> None:
+    # And this one returned `"annualized_yield_vol": Infinity` with no blocker
+    # -- invalid JSON for a strict parser, and a usable-looking risk figure.
+    _stub_loader(monkeypatch, history=_history([0.0, 1e308, 0.0]))
+
+    status, payload = _post_json(f"{server_url}{_ROUTE}", _body(requested_observation_count=3))
+
+    assert status == 400
+    assert "annualized Historical Yield Vol" in payload["error"]
+
+
 def test_a_bloomberg_side_failure_is_502(server_url, monkeypatch) -> None:
     _stub_loader(monkeypatch, raises=BLIBloombergDapiError("synthetic DAPI failure"))
 

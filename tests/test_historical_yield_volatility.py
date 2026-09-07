@@ -227,6 +227,43 @@ def test_a_non_finite_yield_value_fails_closed(bad):
     assert "finite" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        # The subtraction itself overflows: statistics.stdev is then handed an
+        # inf and raises AttributeError, which the route turned into HTTP 500.
+        ([1e308, -1e308, 1e308], "Yield Change"),
+        # Every change is finite, the daily sigma is finite, and annualizing it
+        # is not -- this one returned inf as a usable volatility with no
+        # blocker at all until Codex caught it (PR #200).
+        ([0.0, 1e308, 0.0], "annualized Historical Yield Vol"),
+        ([0.0, 1e307, 0.0], "annualized Historical Yield Vol"),
+    ],
+)
+def test_finite_observations_whose_arithmetic_overflows_fail_closed(values, expected):
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history(values), requested_observation_count=len(values)
+        )
+
+    assert expected in str(excinfo.value)
+    assert "not a finite number" in str(excinfo.value)
+
+
+def test_an_overflowing_window_never_reports_an_infinite_volatility():
+    # The property behind the three cases above: no result this module returns
+    # ever carries a non-finite figure, however extreme the observations are.
+    for values in ([1e308, -1e308, 1e308], [0.0, 1e308, 0.0], [1e200, -1e200, 1e200, -1e200]):
+        try:
+            result = calculate_historical_yield_volatility(
+                _history(values), requested_observation_count=len(values)
+            )
+        except HistoricalYieldVolInputError:
+            continue
+        assert result.daily_yield_vol is None or math.isfinite(result.daily_yield_vol)
+        assert result.annualized_yield_vol is None or math.isfinite(result.annualized_yield_vol)
+
+
 def test_observations_out_of_chronological_order_fail_closed():
     dates = [
         _START,
