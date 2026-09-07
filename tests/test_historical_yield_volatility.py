@@ -14,6 +14,7 @@ rather than in a parity run months later.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import statistics
 import sys
@@ -634,6 +635,33 @@ def test_a_genuinely_flat_window_still_names_the_flat_window():
 
     assert "identical" in str(excinfo.value)
     assert "underflowed" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["0.06", complex(1, 1), float("inf"), float("-inf"), float("nan"), True, []],
+)
+def test_a_result_carrying_a_malformed_volatility_fails_through_our_error(bad):
+    """The publication helper validates the figure it is handed.
+
+    A directly constructed or future result can carry anything there. Before
+    this guard a string or complex raised TypeError out of the normalization,
+    inf reached BLIVolatilityInput and raised its raw ValueError, and NaN was
+    reported as a flat window it never was -- four different ways for a helper
+    documenting one error type to deliver another (Codex review, PR #200).
+    """
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    result = dataclasses.replace(base, annualized_yield_vol=bad)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "not a finite number" in str(excinfo.value)
+    # And never the flat-window explanation, which none of these are.
+    assert "identical" not in str(excinfo.value)
 
 
 def test_publishing_something_other_than_a_result_fails_closed():

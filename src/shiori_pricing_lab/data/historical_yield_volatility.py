@@ -638,6 +638,23 @@ def historical_yield_vol_volatility_input(
     # and its warning is carried into the audit string below rather than
     # being dropped at the boundary.
 
+    # The result's own figure is validated before it is used, not trusted
+    # because this module usually produced it (Codex review, PR #200). A
+    # directly constructed or future result can carry a string, a complex, an
+    # inf or a NaN there: the first two raised TypeError out of the
+    # multiplication below, inf reached BLIVolatilityInput and raised its raw
+    # ValueError, and NaN fell through to the not-positive branch and was
+    # reported as a flat window it never was. All four are the same failure --
+    # this helper promising one error type and delivering another.
+    try:
+        _require_finite_number(result.annualized_yield_vol, "annualized_yield_vol")
+    except (ValueError, OverflowError, TypeError) as exc:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol carried by this result for {result.security!r} is "
+            f"not a finite number ({result.annualized_yield_vol!r}), so it cannot be "
+            f"published as {HISTORICAL_YIELD_VOL_MO_SOURCE}: {exc}"
+        ) from exc
+
     factor = decimal_annual_normalization_factor(result.field_unit)
     normalized = result.annualized_yield_vol * factor
 
