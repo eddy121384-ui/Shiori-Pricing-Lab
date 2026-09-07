@@ -197,6 +197,31 @@ _NO_HISTORY_PAYLOAD = {
     "'SYNTHETIC TEST Corp' (NO_HISTORY)",
 }
 
+# Short AND too short: one warning, one blocker, and no number at all. The
+# warning heading must not claim this result is usable.
+_BLOCKED_SHORT_PAYLOAD = {
+    **_SHORT_PAYLOAD,
+    "series_observation_count": 2,
+    "observation_count": 2,
+    "yield_change_count": 1,
+    "daily_yield_vol": None,
+    "daily_yield_vol_text": None,
+    "annualized_yield_vol": None,
+    "annualized_yield_vol_text": None,
+    "warnings": [
+        "INSUFFICIENT_HISTORY: 2 of the requested 180 Yield observations exist. This is not "
+        "a full-window Historical Yield Vol, and no flat extension, benchmark, index or VCUB "
+        "substitute has been applied"
+    ],
+    "blockers": [
+        "1 Yield Change(s) is below the 2 the SAMPLE_STDEV_S_DDOF_1 convention needs -- no "
+        "standard deviation is reported for this window"
+    ],
+    "volatility_source": None,
+    "volatility_source_unavailable_reason": "no Historical Yield Vol is available for "
+    "'SYNTHETIC TEST Corp' (INSUFFICIENT_HISTORY)",
+}
+
 _NO_UNIT_PAYLOAD = {
     **_FULL_PAYLOAD,
     "field_unit": None,
@@ -485,6 +510,9 @@ def test_a_short_window_never_looks_like_a_full_one(server_url, page) -> None:
     assert _is_actually_hidden(page, "hyv-blockers")
     assert "90 of the requested 180" in page.inner_text("#hyv-warning-list")
     assert "90 of 90" in page.inner_text("#hyv-actual-count")
+    # Nothing is blocking, so the heading may say the number is usable.
+    # (The heading is text-transform: uppercase, hence the case fold.)
+    assert "usable" in page.inner_text("#hyv-warnings-title").lower()
     assert "INSUFFICIENT_HISTORY" in page.inner_text("#hyv-source-detail")
 
 
@@ -503,6 +531,24 @@ def test_zero_history_shows_no_number_and_no_substitute(server_url, page) -> Non
     assert _is_actually_hidden(page, "hyv-warnings")
     assert "no approved proxy" in page.inner_text("#hyv-blocker-list")
     assert "no Historical Yield Vol is available" in page.inner_text("#hyv-source-detail")
+
+
+def test_a_short_and_blocked_window_is_never_called_usable(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload=_BLOCKED_SHORT_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    # Both boxes are up, there is no number, and the warning heading must not
+    # claim usability the result does not have.
+    assert not _is_actually_hidden(page, "hyv-warnings")
+    assert not _is_actually_hidden(page, "hyv-blockers")
+    assert page.inner_text("#hyv-annualized").strip() == "—"
+    heading = page.inner_text("#hyv-warnings-title").lower()
+    assert "usable" not in heading
+    assert "not a full-window result" in heading
 
 
 # --- refusals -----------------------------------------------------------------

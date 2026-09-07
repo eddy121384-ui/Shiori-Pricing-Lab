@@ -63,6 +63,7 @@
     blockers: document.getElementById("hyv-blockers"),
     blockerList: document.getElementById("hyv-blocker-list"),
     warnings: document.getElementById("hyv-warnings"),
+    warningsTitle: document.getElementById("hyv-warnings-title"),
     warningList: document.getElementById("hyv-warning-list"),
 
     methodologyValue: document.getElementById("hyv-methodology-value"),
@@ -249,6 +250,14 @@
     };
     fill(els.blockerList, els.blockers, payload.blockers);
     fill(els.warningList, els.warnings, payload.warnings);
+    // The warning heading must never claim usability the result does not
+    // have. A window can be BOTH short and too short -- one warning, one
+    // blocker, no number -- and a fixed "usable, but qualified" heading told
+    // the trader the opposite (Codex review, PR #200). Usability is stated
+    // only when nothing is blocking.
+    els.warningsTitle.textContent = payload.blockers.length
+      ? "Not a full-window result"
+      : "Not a full-window result — usable, but qualified";
 
     els.methodologyValue.textContent = text(payload.methodology);
     els.security.textContent = text(payload.security);
