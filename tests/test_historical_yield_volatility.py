@@ -847,7 +847,10 @@ def test_a_no_history_result_carrying_a_figure_is_never_published():
         observation_count=0,
         yield_change_count=0,
         series_observation_count=0,
-        requested_observation_count=0,
+        # A real NO_HISTORY result still carries the window that was ASKED
+        # for -- the calculator refuses any requested count below 3, so 0 here
+        # was a third fixture describing a result this module cannot produce.
+        requested_observation_count=MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
         window_status=HistoricalYieldVolStatus.NO_HISTORY,
         # Kept internally consistent so this test isolates the condition it
         # names: leaving the four dates behind now trips the date/count check
@@ -1038,6 +1041,71 @@ def test_publication_never_raises_anything_but_its_own_error_on_a_real_result():
     # Both outcomes must actually occur, or this test is asserting nothing.
     assert published > 0
     assert refused > 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        # The calculator refuses any requested count below 3 before it
+        # calculates anything, so provenance claiming one is impossible.
+        (
+            {
+                "requested_observation_count": 2,
+                "series_observation_count": 2,
+                "observation_count": 2,
+                "yield_change_count": 1,
+            },
+            "below the 3 this calculator accepts",
+        ),
+        # Figures follow the change count, not merely blocker-emptiness.
+        ({"yield_change_count": 3, "observation_count": 4}, None),
+        # Both figures non-None but unusable: the route serializes these for
+        # every response, so "x"/"y" reached HTTP 200 as repr strings.
+        (
+            {"daily_yield_vol": "x", "annualized_yield_vol": "y"},
+            "is not a finite number",
+        ),
+        # bool(None) is False, so blockers=None looked blocker-free and then
+        # made the route raise TypeError at list(...).
+        ({"blockers": None}, "blockers must be a tuple"),
+        ({"warnings": None}, "warnings must be a tuple"),
+        ({"blockers": ("",)}, "non-blank string"),
+        ({"warnings": (7,)}, "non-blank string"),
+    ],
+)
+def test_the_shared_guard_refuses_what_the_calculator_could_not_produce(overrides, expected):
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    problem = result_shape_problem(dataclasses.replace(base, **overrides))
+
+    if expected is None:
+        assert problem is None
+    else:
+        assert problem is not None and expected in problem
+
+
+def test_figures_are_required_exactly_when_the_change_count_supports_them():
+    # Two observations make one change, which has no ddof=1 standard
+    # deviation -- a figure there is one the calculator could not produce.
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    short = dataclasses.replace(
+        base,
+        series_observation_count=2,
+        observation_count=2,
+        yield_change_count=1,
+        window_status=HistoricalYieldVolStatus.INSUFFICIENT_HISTORY,
+        observation_dates=base.observation_dates[:2],
+        last_observation_date=base.observation_dates[1],
+    )
+
+    problem = result_shape_problem(short)
+
+    assert problem is not None
+    assert "1 Yield Change(s)" in problem
 
 
 def test_the_shared_shape_check_is_what_both_consumers_use():

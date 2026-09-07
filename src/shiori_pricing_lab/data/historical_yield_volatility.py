@@ -661,6 +661,20 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
             f"{result.window_status!r} ({type(result.window_status).__name__})"
         )
 
+    # Typed before their truthiness is read (Codex review, PR #200).
+    # bool(None) is False, so a result with blockers=None looked blocker-free,
+    # published, and then made the route raise TypeError at list(...) for an
+    # HTTP 500. warnings was not inspected at all and failed the same way.
+    for name, collection in (("blockers", result.blockers), ("warnings", result.warnings)):
+        if not isinstance(collection, tuple):
+            return (
+                f"{name} must be a tuple for {result.security!r}, got "
+                f"{type(collection).__name__}"
+            )
+        for entry in collection:
+            if not isinstance(entry, str) or not entry.strip():
+                return f"every {name} entry for {result.security!r} must be a non-blank string"
+
     counts = {
         "series_observation_count": result.series_observation_count,
         "requested_observation_count": result.requested_observation_count,
@@ -670,6 +684,16 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
     for name, value in counts.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return f"{name} must be a non-negative int for {result.security!r}, got {value!r}"
+
+    # The calculator refuses any requested count below this before it
+    # calculates anything, so a result claiming one describes provenance for a
+    # calculation this module cannot produce.
+    if result.requested_observation_count < _MINIMUM_OBSERVATIONS_FOR_STDEV:
+        return (
+            f"this result for {result.security!r} reports a requested window of "
+            f"{result.requested_observation_count} Yield observations, below the "
+            f"{_MINIMUM_OBSERVATIONS_FOR_STDEV} this calculator accepts"
+        )
 
     expected_changes = max(result.observation_count - 1, 0)
     if result.yield_change_count != expected_changes:
@@ -748,6 +772,30 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
             )
             + f" ({'; '.join(str(blocker) for blocker in result.blockers) or 'no blockers'})"
         )
+    # Availability follows the change count, not merely the absence of a
+    # blocker: two observations make one change, which has no ddof=1 standard
+    # deviation, so a figure there is one the calculator could not have
+    # produced (Codex review, PR #200).
+    if figures_present != (result.yield_change_count >= _MINIMUM_CHANGES_FOR_STDEV):
+        return (
+            f"this result for {result.security!r} "
+            + ("carries figures from " if figures_present else "carries no figures from ")
+            + f"{result.yield_change_count} Yield Change(s), and the "
+            f"{STANDARD_DEVIATION_CONVENTION} convention produces one exactly when there "
+            f"are at least {_MINIMUM_CHANGES_FOR_STDEV}"
+        )
+    # Present means usable-as-a-number, here as well as at publication: the
+    # route serializes these two for every response, so "x"/"y" reached an
+    # HTTP 200 as repr strings beside an unavailability reason.
+    if figures_present:
+        for name, value in (
+            ("daily_yield_vol", result.daily_yield_vol),
+            ("annualized_yield_vol", result.annualized_yield_vol),
+        ):
+            try:
+                _require_finite_number(value, name)
+            except (ValueError, OverflowError, TypeError) as exc:
+                return f"{name} for {result.security!r} is not a finite number: {exc}"
 
     if not isinstance(result.observation_dates, tuple):
         return (
