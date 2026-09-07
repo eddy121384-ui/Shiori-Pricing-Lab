@@ -5,7 +5,9 @@ observations (Issue #196).
 Desktop API for one bond's own historical Yield series over one explicit date
 range, and returns exactly the dated observations Bloomberg answered with,
 plus the provenance needed to audit them later. It is the raw market-data
-foundation the future Historical Volatility work will read from.
+foundation the Historical Volatility work reads from -- Issue #197's
+``data/historical_yield_volatility.py`` consumes this module's
+``BloombergBondYieldHistory`` and is its only statistical consumer.
 
 **What this module is deliberately not.** It computes no Yield Change, no
 standard deviation, no annualization, and no volatility of any kind. It does

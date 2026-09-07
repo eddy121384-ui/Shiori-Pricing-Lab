@@ -388,6 +388,21 @@ def test_a_non_integer_observation_count_sends_no_request_at_all(server_url, pag
     assert calls == []
 
 
+def test_a_count_javascript_cannot_represent_exactly_sends_no_request(server_url, page) -> None:
+    # 2^53 + 1 survives the whole-number regex but not Number(): it would
+    # arrive as ...992 and the server would audit a window the trader never
+    # asked for, while this card claims the count is sent verbatim.
+    _route_other_markets_away(page)
+    calls = _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page, count="9007199254740993")
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert calls == []
+    assert "without rounding" in page.inner_text("#hyv-error-detail")
+
+
 def test_the_card_calls_only_its_own_route(server_url, page) -> None:
     _route_other_markets_away(page)
     _route_vol(page)

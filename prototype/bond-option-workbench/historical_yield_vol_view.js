@@ -159,6 +159,17 @@
     if (!/^\d+$/.test(rawCount)) {
       return { error: "Enter the number of Yield observations as a whole number (180 = Middle Office's 6M window)." };
     }
+    // A count past 2^53-1 does not survive Number(): 9007199254740993 arrives
+    // as ...992, and the server would then calculate and audit a window the
+    // trader never asked for while this card claims the count is sent
+    // verbatim (Codex review, PR #200). Refused rather than silently rounded.
+    if (!Number.isSafeInteger(Number(rawCount))) {
+      return {
+        error:
+          "That observation count is too large to send exactly. Enter a whole number this " +
+          "page can represent without rounding it.",
+      };
+    }
     const body = {
       bond_identifier: identifier,
       yield_field: yieldField,
