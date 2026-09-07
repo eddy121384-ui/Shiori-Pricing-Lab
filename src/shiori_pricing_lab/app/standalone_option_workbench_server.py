@@ -2674,7 +2674,10 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
             None if result.annualized_yield_vol is None else repr(result.annualized_yield_vol)
         ),
         "window_status": result.window_status.value,
+        # Two lists, not one: a blocker means there is no number, a warning
+        # means there is one that must not be read as a full window.
         "blockers": list(result.blockers),
+        "warnings": list(result.warnings),
         "volatility_source": volatility_source,
         "volatility_source_unavailable_reason": volatility_source_unavailable_reason,
     }

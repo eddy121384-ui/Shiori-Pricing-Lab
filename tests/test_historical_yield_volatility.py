@@ -89,6 +89,8 @@ def test_one_hundred_eighty_observations_produce_exactly_one_hundred_seventy_nin
     assert result.yield_change_count == 179
     assert result.window_status is HistoricalYieldVolStatus.FULL_WINDOW
     assert result.blockers == ()
+    assert result.warnings == ()
+    assert result.is_usable is True
 
 
 def test_daily_changes_are_exactly_current_minus_previous():
@@ -265,8 +267,13 @@ def test_short_history_is_labelled_insufficient_with_both_counts():
     assert result.observation_count == 90
     assert result.yield_change_count == 89
     assert result.annualized_yield_vol is not None
-    assert any("INSUFFICIENT_HISTORY" in blocker for blocker in result.blockers)
-    assert any("90 of the requested 180" in blocker for blocker in result.blockers)
+    # A short window that still supports the convention is a WARNING, never a
+    # blocker: a consumer that discarded it would have thrown away the only
+    # honest answer available for this bond (Codex review, PR #200).
+    assert result.blockers == ()
+    assert result.is_usable is True
+    assert any("INSUFFICIENT_HISTORY" in warning for warning in result.warnings)
+    assert any("90 of the requested 180" in warning for warning in result.warnings)
 
 
 def test_short_history_is_never_flat_extended_to_the_requested_window():
@@ -292,6 +299,7 @@ def test_zero_history_is_blocking_and_offers_no_proxy():
     assert result.is_usable is False
     assert result.blockers
     assert "no approved proxy" in result.blockers[0]
+    assert result.warnings == ()
 
 
 def test_history_too_short_for_a_sample_standard_deviation_reports_no_number():
@@ -303,7 +311,37 @@ def test_history_too_short_for_a_sample_standard_deviation_reports_no_number():
     assert result.yield_change_count == 1
     assert result.daily_yield_vol is None
     assert result.annualized_yield_vol is None
-    assert len(result.blockers) == 2
+    # Both, and each in its own bucket: the window is short (warning) AND too
+    # short to produce a standard deviation at all (blocker).
+    assert len(result.warnings) == 1
+    assert len(result.blockers) == 1
+    assert result.is_usable is False
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],                                                       # NO_HISTORY
+        [4.00, 4.10],                                             # too few changes
+        [4.0 + (index % 5) * 0.02 for index in range(90)],         # short but usable
+        [4.0 + (index % 7) * 0.01 for index in range(180)],        # full window
+    ],
+)
+def test_blockers_are_fatal_and_warnings_are_not(values):
+    """The invariant the dataclass documents, checked on every shape."""
+
+    result = calculate_historical_yield_volatility(_history(values))
+
+    if result.blockers:
+        assert result.daily_yield_vol is None
+        assert result.annualized_yield_vol is None
+        assert result.is_usable is False
+    else:
+        assert result.daily_yield_vol is not None
+        assert result.annualized_yield_vol is not None
+        assert result.is_usable is True
+    # A warning never implies the absence of a number on its own.
+    assert result.is_usable == (not result.blockers)
 
 
 # --- Provenance -------------------------------------------------------------

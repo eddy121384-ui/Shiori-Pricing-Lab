@@ -62,6 +62,8 @@
 
     blockers: document.getElementById("hyv-blockers"),
     blockerList: document.getElementById("hyv-blocker-list"),
+    warnings: document.getElementById("hyv-warnings"),
+    warningList: document.getElementById("hyv-warning-list"),
 
     methodologyValue: document.getElementById("hyv-methodology-value"),
     security: document.getElementById("hyv-security"),
@@ -208,7 +210,9 @@
     for (const key of ["requested_observation_count", "observation_count", "yield_change_count"]) {
       if (!Number.isInteger(candidate[key])) return `malformed response: "${key}" is not an integer`;
     }
-    if (!Array.isArray(candidate.blockers)) return 'malformed response: "blockers" must be an array';
+    for (const key of ["blockers", "warnings"]) {
+      if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
+    }
     for (const key of ["daily_yield_vol_text", "annualized_yield_vol_text"]) {
       if (candidate[key] !== null && typeof candidate[key] !== "string") {
         return `malformed response: "${key}" is neither a string nor null`;
@@ -231,13 +235,20 @@
     els.status.className =
       payload.window_status === "FULL_WINDOW" ? "hyv-status-pill is-full" : "hyv-status-pill is-short";
 
-    els.blockerList.textContent = "";
-    for (const blocker of payload.blockers) {
-      const item = document.createElement("li");
-      item.textContent = String(blocker);
-      els.blockerList.appendChild(item);
-    }
-    els.blockers.hidden = payload.blockers.length === 0;
+    // Blocking and merely-qualified are rendered in separate boxes. Folding
+    // them into one list is how a short window that DOES have a usable number
+    // ends up read as a window that has none.
+    const fill = (list, box, entries) => {
+      list.textContent = "";
+      for (const entry of entries) {
+        const item = document.createElement("li");
+        item.textContent = String(entry);
+        list.appendChild(item);
+      }
+      box.hidden = entries.length === 0;
+    };
+    fill(els.blockerList, els.blockers, payload.blockers);
+    fill(els.warningList, els.warnings, payload.warnings);
 
     els.methodologyValue.textContent = text(payload.methodology);
     els.security.textContent = text(payload.security);

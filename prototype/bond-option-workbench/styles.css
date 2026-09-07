@@ -1033,14 +1033,22 @@ select.control:focus { border-color: var(--blue); }
 /* A short or blocked window never reads like a completed one. */
 .hyv-status-pill.is-full { background: rgba(34, 165, 101, .12); color: var(--green); }
 .hyv-status-pill.is-short { background: rgba(224, 123, 60, .14); color: var(--orange); }
-.hyv-blockers {
+/* Fatal and non-fatal are told apart on sight, never by reading the text:
+   a blocker means there is no number, a warning means there is one that must
+   not be read as a full window. */
+.hyv-blockers, .hyv-warnings {
   margin-top: 14px; padding: 12px 14px; border-radius: 8px;
-  background: rgba(224, 123, 60, .08); border: 1px solid rgba(224, 123, 60, .25);
 }
-.hyv-blockers-title {
+.hyv-blockers {
+  background: rgba(224, 123, 60, .12); border: 1px solid rgba(224, 123, 60, .4);
+}
+.hyv-warnings { background: #fffaf0; border: 1px solid #f4dfa8; }
+.hyv-blockers-title, .hyv-warnings-title {
   font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
-  color: var(--orange); margin-bottom: 6px;
+  margin-bottom: 6px;
 }
+.hyv-blockers-title { color: var(--orange); }
+.hyv-warnings-title { color: #8a641a; }
 .hyv-source-block {
   margin-top: 14px; padding: 12px 14px; border-radius: 8px;
   background: var(--field-bg); border: 1px solid var(--field-border);

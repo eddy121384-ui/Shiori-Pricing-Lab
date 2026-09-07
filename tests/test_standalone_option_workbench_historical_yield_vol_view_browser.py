@@ -137,6 +137,7 @@ _FULL_PAYLOAD = {
     "annualized_yield_vol_text": _ANNUALIZED_TEXT,
     "window_status": "FULL_WINDOW",
     "blockers": [],
+    "warnings": [],
     "volatility_source": {
         "source_system": "HISTORICAL_YIELD_VOL_MO",
         "volatility_basis": "YIELD_VOL",
@@ -159,7 +160,8 @@ _SHORT_PAYLOAD = {
     "observation_count": 90,
     "yield_change_count": 89,
     "window_status": "INSUFFICIENT_HISTORY",
-    "blockers": [
+    "blockers": [],
+    "warnings": [
         "INSUFFICIENT_HISTORY: 90 of the requested 180 Yield observations exist. This is "
         "not a full-window Historical Yield Vol, and no flat extension, benchmark, index "
         "or VCUB substitute has been applied"
@@ -184,6 +186,7 @@ _NO_HISTORY_PAYLOAD = {
     "annualized_yield_vol": None,
     "annualized_yield_vol_text": None,
     "window_status": "NO_HISTORY",
+    "warnings": [],
     "blockers": [
         "Bloomberg returned no Yield observations for 'SYNTHETIC TEST Corp' over "
         "2026-01-01..2026-09-01 -- there is no approved proxy for an instrument with no "
@@ -438,6 +441,7 @@ def test_a_full_window_shows_the_normalized_source_and_no_blockers(server_url, p
 
     assert page.inner_text("#hyv-status").strip() == "FULL_WINDOW"
     assert _is_actually_hidden(page, "hyv-blockers")
+    assert _is_actually_hidden(page, "hyv-warnings")
     detail = page.inner_text("#hyv-source-detail")
     assert "HISTORICAL_YIELD_VOL_MO" in detail
     assert "YIELD_VOL" in detail
@@ -475,8 +479,11 @@ def test_a_short_window_never_looks_like_a_full_one(server_url, page) -> None:
     _wait_for_result(page)
 
     assert page.inner_text("#hyv-status").strip() == "INSUFFICIENT_HISTORY"
-    assert not _is_actually_hidden(page, "hyv-blockers")
-    assert "90 of the requested 180" in page.inner_text("#hyv-blocker-list")
+    # A usable-but-qualified window shows in the warnings box, and the
+    # blocking box stays away: the trader can tell "short" from "nothing".
+    assert not _is_actually_hidden(page, "hyv-warnings")
+    assert _is_actually_hidden(page, "hyv-blockers")
+    assert "90 of the requested 180" in page.inner_text("#hyv-warning-list")
     assert "90 of 90" in page.inner_text("#hyv-actual-count")
     assert "INSUFFICIENT_HISTORY" in page.inner_text("#hyv-source-detail")
 
@@ -492,6 +499,8 @@ def test_zero_history_shows_no_number_and_no_substitute(server_url, page) -> Non
     assert page.inner_text("#hyv-status").strip() == "NO_HISTORY"
     assert page.inner_text("#hyv-annualized").strip() == "—"
     assert page.inner_text("#hyv-daily").strip() == "—"
+    assert not _is_actually_hidden(page, "hyv-blockers")
+    assert _is_actually_hidden(page, "hyv-warnings")
     assert "no approved proxy" in page.inner_text("#hyv-blocker-list")
     assert "no Historical Yield Vol is available" in page.inner_text("#hyv-source-detail")
 

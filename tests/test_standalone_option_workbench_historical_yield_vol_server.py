@@ -226,6 +226,7 @@ def test_the_payload_carries_the_full_audit_trail(server_url, monkeypatch) -> No
     assert payload["standard_deviation_convention"] == "SAMPLE_STDEV_S_DDOF_1"
     assert payload["annualization_trading_days"] == 252
     assert payload["annualization_factor"] == pytest.approx(math.sqrt(252))
+    assert payload["warnings"] == []
     assert payload["daily_yield_vol"] == pytest.approx(0.4, abs=1e-12)
     assert payload["annualized_yield_vol"] == pytest.approx(0.4 * math.sqrt(252), abs=1e-12)
     assert payload["blockers"] == []
@@ -299,7 +300,9 @@ def test_short_history_is_insufficient_with_both_counts(server_url, monkeypatch)
     assert payload["window_status"] == "INSUFFICIENT_HISTORY"
     assert payload["requested_observation_count"] == 180
     assert payload["observation_count"] == 90
-    assert any("INSUFFICIENT_HISTORY" in blocker for blocker in payload["blockers"])
+    # A short but usable window warns; it does not block.
+    assert payload["blockers"] == []
+    assert any("INSUFFICIENT_HISTORY" in warning for warning in payload["warnings"])
     # Publishable, but never silently: the audit states both counts, and the
     # published value is still normalized to the contract's own unit.
     source = payload["volatility_source"]
@@ -334,6 +337,7 @@ def test_zero_history_is_a_blocking_answer_not_a_proxy(server_url, monkeypatch) 
     assert payload["daily_yield_vol_text"] is None
     assert payload["volatility_source"] is None
     assert "no approved proxy" in payload["blockers"][0]
+    assert payload["warnings"] == []
 
 
 # --- fail closed --------------------------------------------------------------

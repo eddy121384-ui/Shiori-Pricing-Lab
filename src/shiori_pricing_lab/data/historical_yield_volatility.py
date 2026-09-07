@@ -94,7 +94,9 @@ the window is never taken on trust.
 (some history, but fewer observations than requested), ``NO_HISTORY`` (none at
 all, blocking). An ``INSUFFICIENT_HISTORY`` result still carries whatever the
 available observations support, but it can never be mistaken for a full
-window: the status, both counts, and a blocker line travel with it. The "use
+window: the status, both counts, and a warning line travel with it. Fatal
+``blockers`` and non-fatal ``warnings`` are separate fields precisely so a
+consumer cannot read "this window is short" as "there is no number here". The "use
 the longest available vol flat for the missing horizon" behaviour Middle
 Office once mentioned is **not** implemented -- doing so needs an expiry ->
 lookback mapping this repository does not have and Issue #197 forbids
@@ -189,8 +191,22 @@ class HistoricalYieldVolResult:
     unit (#196 never infers one), which a consumer must display as unknown
     rather than assume.
 
-    ``daily_yield_vol``/``annualized_yield_vol`` are ``None`` exactly when
-    ``blockers`` is non-empty: a result with no number always says why.
+    ``blockers`` and ``warnings`` are deliberately two fields, because the
+    two have opposite consequences and conflating them is how a consumer
+    ends up discarding a result it was meant to use (Codex review, PR #200):
+
+    - ``blockers`` is **fatal**. ``daily_yield_vol``/``annualized_yield_vol``
+      are ``None`` exactly when ``blockers`` is non-empty -- there is no
+      number, and every entry says why. :attr:`is_usable` is the same test.
+    - ``warnings`` is **not fatal**. An ``INSUFFICIENT_HISTORY`` window that
+      still supports the standard-deviation convention carries a number
+      *and* a warning: the number is publishable, but it is not a
+      full-window result and must never be presented as one. A consumer that
+      drops it has lost the only honest answer available for that bond.
+
+    A short window with too few Yield Changes carries both: the warning that
+    says the window is short, and the blocker that says it is too short to
+    produce a standard deviation at all.
     """
 
     # -- Provenance carried verbatim from the #196 acquisition --------------
@@ -223,11 +239,17 @@ class HistoricalYieldVolResult:
     annualized_yield_vol: float | None
     window_status: HistoricalYieldVolStatus
     blockers: tuple[str, ...]
+    warnings: tuple[str, ...]
     calculated_at: str
 
     @property
     def is_usable(self) -> bool:
-        """Whether this result carries a Historical Yield Vol at all."""
+        """Whether this result carries a Historical Yield Vol at all.
+
+        Equivalent to ``not self.blockers``. A ``True`` here says only that a
+        number exists -- ``window_status`` and ``warnings`` still decide how
+        it may be presented.
+        """
 
         return self.annualized_yield_vol is not None
 
@@ -347,7 +369,10 @@ def calculate_historical_yield_volatility(
         current - previous for previous, current in zip(values, values[1:], strict=False)
     ]
 
+    # Fatal (no number) and non-fatal (a number, but a qualified one) are
+    # kept apart on purpose -- see HistoricalYieldVolResult's docstring.
     blockers: list[str] = []
+    warnings: list[str] = []
     if not window:
         status = HistoricalYieldVolStatus.NO_HISTORY
         blockers.append(
@@ -358,7 +383,9 @@ def calculate_historical_yield_volatility(
         )
     elif len(window) < requested:
         status = HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
-        blockers.append(
+        # A warning, not a blocker: this window's number is publishable, and
+        # what must never happen is it being read as a full-window result.
+        warnings.append(
             f"INSUFFICIENT_HISTORY: {len(window)} of the requested {requested} Yield "
             "observations exist. This is not a full-window Historical Yield Vol, and no "
             "flat extension, benchmark, index or VCUB substitute has been applied"
@@ -408,6 +435,7 @@ def calculate_historical_yield_volatility(
         annualized_yield_vol=annualized,
         window_status=status,
         blockers=tuple(blockers),
+        warnings=tuple(warnings),
         calculated_at=_calculation_now().isoformat(timespec="seconds"),
     )
 
@@ -499,6 +527,9 @@ def historical_yield_vol_volatility_input(
             f"no Historical Yield Vol is available for {result.security!r} "
             f"({result.window_status.value}): {'; '.join(result.blockers)}"
         )
+    # An INSUFFICIENT_HISTORY result reaching here is publishable by design,
+    # and its warning is carried into the audit string below rather than
+    # being dropped at the boundary.
 
     factor = decimal_annual_normalization_factor(result.field_unit)
     normalized = result.annualized_yield_vol * factor
