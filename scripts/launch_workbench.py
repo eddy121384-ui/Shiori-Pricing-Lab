@@ -106,31 +106,52 @@ def check_python_version(version_info=None) -> None:
         )
 
 
-def select_interpreter_command(which=shutil.which) -> list[str]:
-    """Return the argv prefix for a Python 3 interpreter: ``python`` or ``py -3``.
+def select_interpreter_command(which=shutil.which, run=subprocess.run) -> list[str]:
+    """Return the argv prefix for a Python 3 interpreter.
 
-    Mirrors, as a unit-testable function, the exact two-step fallback
-    ``start_shiori.bat`` performs before any Python code can run at all --
-    batch is the only thing that can execute before an interpreter is known
-    to exist, so the ``.bat`` file encodes this same order directly. This
-    function exists purely so that order, and the "neither is present"
-    failure, has deterministic test coverage even though the literal
-    batch-file bytes cannot be executed by pytest -- :func:`run` below does
-    **not** call this (it uses ``sys.executable``, the interpreter already
-    proven to satisfy :func:`check_python_version`, for every subprocess it
-    starts, rather than re-deriving a selection that could disagree with
-    it). The real entry point is proven separately by the Windows CI smoke
-    job (see ``.github/workflows``).
+    Lookup order:
+    1. %USERPROFILE%\\.venvs\\shiori-bloomberg\\Scripts\\python.exe (if exists and >= 3.11)
+    2. `python` (if exists and >= 3.11)
+    3. `py -3` (if exists and >= 3.11)
+
+    Mirrors, as a unit-testable function, the exact fallback order
+    `start_shiori.bat` performs before any Python code can run at all.
     """
+    actual_probe = "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
 
+    # 1. Standard Shiori Bloomberg venv
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        bloomberg_py = Path(user_profile) / ".venvs" / "shiori-bloomberg" / "Scripts" / "python.exe"
+        if bloomberg_py.exists():
+            try:
+                result = run([str(bloomberg_py), "-c", actual_probe], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return [str(bloomberg_py)]
+            except OSError:
+                pass
+
+    # 2. 'python' on PATH
     if which("python") is not None:
-        return ["python"]
+        try:
+            result = run(["python", "-c", actual_probe], capture_output=True, text=True)
+            if result.returncode == 0:
+                return ["python"]
+        except OSError:
+            pass
+
+    # 3. 'py -3' fallback
     if which("py") is not None:
-        return ["py", "-3"]
+        try:
+            result = run(["py", "-3", "-c", actual_probe], capture_output=True, text=True)
+            if result.returncode == 0:
+                return ["py", "-3"]
+        except OSError:
+            pass
+
     raise LauncherError(
-        "Python 3.11+ was not found on PATH (checked for both 'python' and "
-        "'py'). Install it from https://www.python.org/downloads/ and try "
-        "again."
+        "Python 3.11+ was not found (checked shiori-bloomberg venv, 'python', and 'py'). "
+        "Install it from https://www.python.org/downloads/ and try again."
     )
 
 
