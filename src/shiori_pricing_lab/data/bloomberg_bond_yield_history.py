@@ -13,8 +13,11 @@ foundation the Historical Volatility work reads from -- Issue #197's
 standard deviation, no annualization, and no volatility of any kind. It does
 not touch pricing, the VCUB store or resolver, PRICE_VOL/YIELD_VOL, Forward,
 or Discounting, and it never selects a benchmark or proxy series when the
-bond's own history is thin or absent. Issue #196 stops at the observations;
-the statistical methodology is a later, separately approved issue.
+bond's own history is thin or absent. Issue #196 stops at the observations.
+The statistic lives in the separate module named above, under its own issue
+and its own approval -- which, at the time of writing, it has not yet
+received: #197's convention is provisional pending a Middle Office parity
+run, and nothing in this module depends on how that lands.
 
 **The Yield field is never guessed here.** ``yield_field`` is a required,
 caller-supplied Bloomberg mnemonic with no default anywhere in this module,
