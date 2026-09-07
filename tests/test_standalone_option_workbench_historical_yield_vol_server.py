@@ -422,6 +422,53 @@ def test_a_bloomberg_side_failure_is_502(server_url, monkeypatch) -> None:
     assert payload["error"] == "synthetic DAPI failure"
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("start_date", 20260101, "start_date must be a non-blank string"),
+        ("start_date", "01/01/2026", "YYYY-MM-DD"),
+        ("start_date", ["2026-01-01"], "start_date must be a non-blank string"),
+        ("start_date", None, "start_date must be a non-blank string"),
+        ("yield_field", 42, "yield_field must be a non-blank string"),
+        ("yield_field", "px_last", "uppercase"),
+        ("field_unit", 7, "field_unit must be a non-blank string"),
+        ("field_meaning", ["x"], "field_meaning must be a non-blank string"),
+    ],
+)
+def test_the_route_delegates_input_validation_and_still_answers_400(
+    server_url, field, value, expected
+) -> None:
+    """Malformed request fields reach the #196 loader and come back as 400.
+
+    This route deliberately does not re-validate the date range, the mnemonic
+    or the provenance strings: the #196 loader owns those rules and enforces
+    them before it sends anything to Bloomberg. That is delegation to a
+    validator, not the "trust it because of where it came from" assumption
+    behind four separate error-contract breaches in this slice (Codex review,
+    PR #200) -- but the difference only holds while the loader really does
+    refuse first, so it is pinned here rather than assumed.
+
+    No stand-in loader: this drives the production one, which validates
+    caller input before importing blpapi.
+    """
+
+    body = _body(requested_observation_count=180)
+    body[field] = value
+    status, payload = _post_json(f"{server_url}{_ROUTE}", body)
+
+    assert status == 400
+    assert expected in payload["error"]
+
+
+def test_an_inverted_date_range_is_400_before_any_bloomberg_request(server_url) -> None:
+    status, payload = _post_json(
+        f"{server_url}{_ROUTE}", _body(start_date="2026-06-01", end_date="2026-01-01")
+    )
+
+    assert status == 400
+    assert "must not be after" in payload["error"]
+
+
 def test_a_malformed_body_is_400(server_url, monkeypatch) -> None:
     _stub_loader(monkeypatch)
 
