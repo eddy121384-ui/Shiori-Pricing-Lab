@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -386,6 +387,30 @@ def test_an_overflowing_annualization_is_refused_not_returned(server_url, monkey
 
     assert status == 400
     assert "annualized Historical Yield Vol" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        # statistics.stdev raises OverflowError converting its exact result
+        # back to a float -- not ValueError, so this used to be an HTTP 500.
+        ([0.0, sys.float_info.max, 0.0], "cannot be represented as a finite number"),
+        # A strictly positive sigma that rounds to zero: a false zero risk
+        # figure if returned, so the route refuses instead.
+        ([0.0, 5e-324, 5e-324, 5e-324, 5e-324], "underflows to zero"),
+    ],
+)
+def test_a_statistic_that_cannot_be_represented_is_400_not_500(
+    server_url, monkeypatch, values, expected
+) -> None:
+    _stub_loader(monkeypatch, history=_history(values))
+
+    status, payload = _post_json(
+        f"{server_url}{_ROUTE}", _body(requested_observation_count=len(values))
+    )
+
+    assert status == 400
+    assert expected in payload["error"]
 
 
 def test_a_bloomberg_side_failure_is_502(server_url, monkeypatch) -> None:

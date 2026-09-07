@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import sys
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -262,6 +263,54 @@ def test_an_overflowing_window_never_reports_an_infinite_volatility():
             continue
         assert result.daily_yield_vol is None or math.isfinite(result.daily_yield_vol)
         assert result.annualized_yield_vol is None or math.isfinite(result.annualized_yield_vol)
+
+
+def test_a_standard_deviation_that_underflows_to_zero_fails_closed():
+    # Changes [5e-324, 0.0, 0.0, 0.0] are NOT all equal, so the exact ddof=1
+    # standard deviation is strictly positive -- and it rounds to 0.0 coming
+    # back to a float. Reporting that as a usable zero volatility would be a
+    # false risk figure dressed as a flat window (Codex review, PR #200).
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([0.0, 5e-324, 5e-324, 5e-324, 5e-324]), requested_observation_count=5
+        )
+
+    assert "underflows to zero" in str(excinfo.value)
+
+
+def test_a_genuinely_flat_window_is_still_a_legitimate_zero():
+    # The other side of that guard: equal changes really do have sigma zero,
+    # and that is a result, not a refusal.
+    result = calculate_historical_yield_volatility(
+        _history([4.0, 5.0, 6.0, 7.0]), requested_observation_count=4
+    )
+
+    assert result.daily_yield_vol == 0.0
+    assert result.blockers == ()
+
+
+def test_a_standard_deviation_that_overflows_raises_this_modules_error():
+    # statistics.stdev accumulates exactly but converts back to a float at the
+    # end, and that conversion can overflow on changes this module has already
+    # checked finite -- raising OverflowError, not ValueError, so it escaped
+    # as an HTTP 500 under a docstring promising one error type.
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([0.0, sys.float_info.max, 0.0]), requested_observation_count=3
+        )
+
+    assert "cannot be represented as a finite number" in str(excinfo.value)
+
+
+def test_an_integer_observation_beyond_the_float_range_fails_closed():
+    # math.isfinite and float() both raise OverflowError -- not ValueError --
+    # on an int this large, from a hand-built or future producer.
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([10**400, 1, 2, 3]), requested_observation_count=4
+        )
+
+    assert "not a usable Yield value" in str(excinfo.value)
 
 
 def test_observations_out_of_chronological_order_fail_closed():

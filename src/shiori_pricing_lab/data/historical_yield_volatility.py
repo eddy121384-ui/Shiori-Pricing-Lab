@@ -400,12 +400,22 @@ def calculate_historical_yield_volatility(
             _require_finite_number(
                 observation.yield_value, f"{history.yield_field} on {observation.observation_date}"
             )
-        except ValueError as exc:
+            values.append(float(observation.yield_value))  # type: ignore[arg-type]
+        except (ValueError, OverflowError) as exc:
             # Converted, not propagated: this module promises one error type
             # for every fail-closed condition, and the workbench route maps
             # that type to an HTTP 400 carrying the refusal verbatim.
-            raise HistoricalYieldVolInputError(str(exc)) from exc
-        values.append(float(observation.yield_value))  # type: ignore[arg-type]
+            #
+            # OverflowError belongs here as much as ValueError (Codex review,
+            # PR #200). An int observation beyond the float range -- 10**400
+            # from a hand-built or future producer -- overflows inside
+            # math.isfinite, and float() overflows on the same value. Neither
+            # is a ValueError, so both used to escape this module as an
+            # HTTP 500 while its docstring promised one error type.
+            raise HistoricalYieldVolInputError(
+                f"{history.yield_field} on {observation.observation_date} is not a usable "
+                f"Yield value for {history.security!r}: {exc}"
+            ) from exc
 
     # Y_t - Y_{t-1} between consecutive returned observations, in the field's
     # own unit. Ordinary float subtraction on purpose: it is the same
@@ -465,8 +475,39 @@ def calculate_historical_yield_volatility(
         # accumulates the sum of squares in exact rational arithmetic, so the
         # answer is the correctly-rounded value of the ddof=1 formula over
         # these changes rather than an accumulation-order artifact.
-        daily: float | None = statistics.stdev(changes)
+        #
+        # That exactness is why the call is wrapped (Codex review, PR #200).
+        # I had reasoned the Fraction accumulation made an internal overflow
+        # impossible and said so; it is wrong. The accumulation is exact, but
+        # converting the exact result *back* to a float can still overflow --
+        # stdev([float_info.max, -float_info.max]) raises OverflowError, from
+        # changes this module has already checked finite. The guard below
+        # never ran, and the route answered HTTP 500 under a docstring
+        # promising one error type.
+        try:
+            daily: float | None = statistics.stdev(changes)
+        except (OverflowError, ArithmeticError) as exc:
+            raise HistoricalYieldVolInputError(
+                f"the {STANDARD_DEVIATION_CONVENTION} standard deviation of the "
+                f"{len(changes)} Yield Changes for {history.security!r} cannot be "
+                f"represented as a finite number: {type(exc).__name__}: {exc}"
+            ) from exc
         _require_finite_step([daily], history, what="daily standard deviation")
+
+        # A zero sigma is only honest when the changes really were all equal.
+        # Subnormal changes -- [5e-324, 0.0, 0.0, 0.0] -- have a strictly
+        # positive exact standard deviation that rounds to 0.0 on the way back
+        # to a float, and reporting that as a usable zero volatility with no
+        # blocker is a false risk figure, not a flat window (Codex review,
+        # PR #200).
+        if daily == 0.0 and len(set(changes)) > 1:
+            raise HistoricalYieldVolInputError(
+                f"the {STANDARD_DEVIATION_CONVENTION} standard deviation of the "
+                f"{len(changes)} Yield Changes for {history.security!r} is strictly "
+                "positive but underflows to zero as a float -- the changes are too small "
+                "to express a volatility, and a zero is not reported in their place"
+            )
+
         annualized: float | None = daily * ANNUALIZATION_FACTOR
         _require_finite_step([annualized], history, what="annualized Historical Yield Vol")
     else:
