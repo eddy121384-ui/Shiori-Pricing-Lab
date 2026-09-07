@@ -358,6 +358,38 @@ def test_observation_dates_are_typed_before_they_are_ordered(dates):
     assert "calendar date" in str(excinfo.value)
 
 
+def test_an_integer_no_float_represents_exactly_fails_closed():
+    """The one finding so far that was a wrong number, not a refusal.
+
+    [2**53, 2**53+1, 2**53+2] has identical integer changes and an exact
+    sigma of zero. float() succeeds on every one of them and quietly maps the
+    middle value onto the first, so the changes become [0.0, 2.0] and the
+    calculator answered sqrt(2) -- a number the data does not support, with no
+    error anywhere (Codex review, PR #200).
+    """
+
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([2**53, 2**53 + 1, 2**53 + 2]), requested_observation_count=3
+        )
+
+    assert "no float represents exactly" in str(excinfo.value)
+
+
+def test_integers_a_float_does_represent_exactly_are_still_accepted():
+    # The rule must not refuse ordinary integer observations, which are
+    # exactly representable and which the previous round's tests rely on.
+    result = calculate_historical_yield_volatility(
+        _history([4, 5, 4, 5]), requested_observation_count=4
+    )
+    assert result.daily_yield_vol is not None
+
+    exact = calculate_historical_yield_volatility(
+        _history([2**53, 2**53, 2**53]), requested_observation_count=3
+    )
+    assert exact.daily_yield_vol == 0.0
+
+
 def test_observations_outside_the_declared_range_fail_closed():
     # The result copies the declared range verbatim and the route serializes
     # it as this calculation's provenance, so a window built from observations
@@ -989,18 +1021,34 @@ def _real_results():
 
     for series_length in (0, 1, 2, 3, 4, 5, 90, 180, 200):
         for requested in (3, 4, 180):
-            for pattern in ("varied", "flat-ish", "tiny", "large"):
+            for pattern in ("varied", "flat-ish", "subnormal", "subnormal-flat", "large"):
                 if pattern == "varied":
                     values = [4.0 + (index % 7) * 0.01 for index in range(series_length)]
                 elif pattern == "flat-ish":
                     values = [4.0 + index * 0.5 for index in range(series_length)]
-                elif pattern == "tiny":
-                    values = [1e-8 * (index % 3) for index in range(series_length)]
+                elif pattern == "subnormal":
+                    # Genuinely below sys.float_info.min (2.2e-308), which
+                    # 1e-8 is not -- the sweep claimed subnormal coverage it
+                    # did not have (Codex review, PR #200).
+                    values = [1e-308 * (index % 3) for index in range(series_length)]
+                elif pattern == "subnormal-flat":
+                    values = [1e-310 * (1 + index) for index in range(series_length)]
                 else:
                     values = [1e6 + (index % 5) * 13.0 for index in range(series_length)]
-                yield calculate_historical_yield_volatility(
-                    _history(values), requested_observation_count=requested
-                )
+                nonzero = [abs(value) for value in values if value]
+                if pattern.startswith("subnormal") and nonzero:
+                    assert min(nonzero) < sys.float_info.min, (
+                        "the subnormal patterns must actually be subnormal"
+                    )
+                try:
+                    yield calculate_historical_yield_volatility(
+                        _history(values), requested_observation_count=requested
+                    )
+                except HistoricalYieldVolInputError:
+                    # A refusal is correct behaviour for some of these shapes
+                    # (a sigma that underflows to zero, for one). The sweep is
+                    # about what the guard does with results that DO come back.
+                    continue
 
 
 def test_every_result_the_calculator_produces_passes_the_shared_shape_check():
@@ -1021,6 +1069,13 @@ def test_every_result_the_calculator_produces_passes_the_shared_shape_check():
         assert problem is None, f"the guard refused a real result: {problem}"
         checked += 1
     assert checked > 50
+    # And the sweep must actually have produced subnormal-magnitude results,
+    # or its claim to cover that boundary is the same kind of overstatement
+    # this whole review has been about.
+    assert any(
+        r.daily_yield_vol is not None and 0 < r.daily_yield_vol < sys.float_info.min
+        for r in _real_results()
+    )
 
 
 def test_publication_never_raises_anything_but_its_own_error_on_a_real_result():

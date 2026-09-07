@@ -456,7 +456,7 @@ def calculate_historical_yield_volatility(
             _require_finite_number(
                 observation.yield_value, f"{history.yield_field} on {observation.observation_date}"
             )
-            values.append(float(observation.yield_value))  # type: ignore[arg-type]
+            converted = float(observation.yield_value)  # type: ignore[arg-type]
         except (ValueError, OverflowError) as exc:
             # Converted, not propagated: this module promises one error type
             # for every fail-closed condition, and the workbench route maps
@@ -472,6 +472,24 @@ def calculate_historical_yield_volatility(
                 f"{history.yield_field} on {observation.observation_date} is not a usable "
                 f"Yield value for {history.security!r}: {exc}"
             ) from exc
+
+        # Raised outside the conversion guard so its message is not wrapped in
+        # that guard's. An int beyond 2**53 converts to a float that is not
+        # equal to it, and float() SUCCEEDS while doing so, so no overflow
+        # handling ever sees it (Codex review, PR #200).
+        # [2**53, 2**53+1, 2**53+2] has identical integer changes and an exact
+        # sigma of zero; converted it becomes changes of [0.0, 2.0] and a daily
+        # sigma of sqrt(2). Not a refusal and not a crash -- this module
+        # answering with a number the data does not support, which is the one
+        # outcome it exists to prevent.
+        if isinstance(observation.yield_value, int) and converted != observation.yield_value:
+            raise HistoricalYieldVolInputError(
+                f"{history.yield_field} on {observation.observation_date} is "
+                f"{observation.yield_value!r} for {history.security!r}, which no float "
+                "represents exactly -- converting it would silently change the observation "
+                "this calculation is taken over"
+            )
+        values.append(converted)
 
     # Y_t - Y_{t-1} between consecutive returned observations, in the field's
     # own unit. Ordinary float subtraction on purpose: it is the same
