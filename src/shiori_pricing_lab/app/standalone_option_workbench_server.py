@@ -391,8 +391,10 @@ from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import VCUBOTMCapture
 from shiori_pricing_lab.data.historical_yield_volatility import (
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+    PUBLISHED_VOLATILITY_UNIT,
     HistoricalYieldVolUnavailableError,
     calculate_historical_yield_volatility,
+    decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
     validate_requested_observation_count,
 )
@@ -2559,9 +2561,17 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
 
     ``field_meaning``/``field_unit`` are optional provenance strings passed
     through to the #196 loader verbatim. Neither is inferred here. Without a
-    confirmed unit the calculation still runs and is still displayed, but it
-    cannot be published as a normalized volatility source -- see
-    ``volatility_source_unavailable_reason``.
+    confirmed unit -- or with one outside the supported normalization
+    vocabulary -- the calculation still runs and is still displayed in the
+    field's own unit, but it cannot be published as a normalized volatility
+    source: see ``volatility_source_unavailable_reason``.
+
+    Note the two different units in this payload, deliberately.
+    ``daily_yield_vol``/``annualized_yield_vol`` are in the Yield field's own
+    unit, which is what a Middle Office parity run compares against.
+    ``volatility_source.volatility`` is the same number normalized to
+    ``DECIMAL_ANNUAL``, the unit ``BLIVolatilityInput`` states, alongside the
+    source unit and the exact factor applied.
 
     ``daily_yield_vol_text``/``annualized_yield_vol_text`` carry Python's own
     repr of the two floats so the browser can print exactly the digits this
@@ -2605,6 +2615,11 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
     # The normalized volatility source is built by the one canonical helper,
     # never assembled here. A result it refuses is reported as refused, with
     # that helper's own reason -- there is no second, looser publication path.
+    #
+    # The published number is in DECIMAL_ANNUAL, which is not the unit the
+    # calculated result above is in, so the payload states both the source
+    # unit and the exact factor between them (Annex A §A.8.1): a normalized
+    # value and a raw one must never be mistaken for each other.
     volatility_source: dict | None = None
     volatility_source_unavailable_reason: str | None = None
     try:
@@ -2616,6 +2631,10 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
             "source_system": published.source_system,
             "volatility_basis": published.volatility_basis.value,
             "volatility": published.volatility,
+            "volatility_text": repr(published.volatility),
+            "volatility_unit": PUBLISHED_VOLATILITY_UNIT,
+            "source_unit": result.field_unit,
+            "normalization_factor": decimal_annual_normalization_factor(result.field_unit),
             "status": published.status.value,
             "override_or_fallback_audit": published.override_or_fallback_audit,
         }

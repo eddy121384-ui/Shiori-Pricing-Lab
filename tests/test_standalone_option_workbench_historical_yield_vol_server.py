@@ -260,8 +260,15 @@ def test_a_full_window_with_a_unit_publishes_the_historical_yield_vol_mo_source(
     assert source["source_system"] == "HISTORICAL_YIELD_VOL_MO"
     assert source["volatility_basis"] == "YIELD_VOL"
     assert source["status"] == "ACTIVE"
-    assert source["volatility"] == payload["annualized_yield_vol"]
-    assert source["override_or_fallback_audit"] is None
+    # Normalized to the unit BLIVolatilityInput states, never the raw
+    # percentage-point figure the headline shows.
+    assert source["volatility_unit"] == "DECIMAL_ANNUAL"
+    assert source["source_unit"] == "PERCENT"
+    assert source["normalization_factor"] == 1e-2
+    assert source["volatility"] == pytest.approx(payload["annualized_yield_vol"] / 100, rel=1e-12)
+    assert float(source["volatility_text"]) == source["volatility"]
+    assert "PERCENT" in source["override_or_fallback_audit"]
+    assert "DECIMAL_ANNUAL" in source["override_or_fallback_audit"]
     assert payload["volatility_source_unavailable_reason"] is None
 
 
@@ -272,8 +279,9 @@ def test_an_unconfirmed_unit_reports_why_no_source_was_published(server_url, mon
 
     assert status == 200
     assert payload["volatility_source"] is None
-    assert "unit" in payload["volatility_source_unavailable_reason"]
-    # The calculation itself still stands and is still shown.
+    assert "unit was not established" in payload["volatility_source_unavailable_reason"]
+    # The calculation itself still stands and is still shown, in the field's
+    # own unit -- only the normalized publication is withheld.
     assert payload["annualized_yield_vol"] is not None
 
 
@@ -292,8 +300,25 @@ def test_short_history_is_insufficient_with_both_counts(server_url, monkeypatch)
     assert payload["requested_observation_count"] == 180
     assert payload["observation_count"] == 90
     assert any("INSUFFICIENT_HISTORY" in blocker for blocker in payload["blockers"])
-    # Publishable, but never silently: the audit states both counts.
-    assert "90 of the requested 180" in payload["volatility_source"]["override_or_fallback_audit"]
+    # Publishable, but never silently: the audit states both counts, and the
+    # published value is still normalized to the contract's own unit.
+    source = payload["volatility_source"]
+    assert "90 of the requested 180" in source["override_or_fallback_audit"]
+    assert source["volatility"] == pytest.approx(payload["annualized_yield_vol"] / 100, rel=1e-12)
+
+
+def test_a_unit_outside_the_vocabulary_refuses_publication_but_not_calculation(
+    server_url, monkeypatch
+) -> None:
+    _stub_loader(monkeypatch)
+
+    status, payload = _post_json(f"{server_url}{_ROUTE}", _body(field_unit="PERCENTAGE POINTS"))
+
+    assert status == 200
+    assert payload["annualized_yield_vol"] is not None
+    assert payload["field_unit"] == "PERCENTAGE POINTS"
+    assert payload["volatility_source"] is None
+    assert "no approved normalization" in payload["volatility_source_unavailable_reason"]
 
 
 def test_zero_history_is_a_blocking_answer_not_a_proxy(server_url, monkeypatch) -> None:

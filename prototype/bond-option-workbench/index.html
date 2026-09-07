@@ -997,7 +997,7 @@
               </div>
               <div class="byh-field">
                 <label class="byh-label" for="hyv-field-unit">Yield field unit (as confirmed)</label>
-                <input class="control" id="hyv-field-unit" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. PERCENT &mdash; optional" />
+                <input class="control" id="hyv-field-unit" type="text" autocomplete="off" spellcheck="false" placeholder="DECIMAL / PERCENT / BASIS_POINTS" />
               </div>
               <span class="btn primary" id="hyv-calculate-btn">Calculate Historical Vol</span>
             </div>
@@ -1005,9 +1005,12 @@
               Uses the bond identifier, Yield field and date range entered above, and the most recent
               <span class="mono">N</span> observations Bloomberg returned. 180 is Middle Office's confirmed
               6M-style window; it is not derived from an expiry or a tenor, so change it only against
-              evidence. The unit is optional provenance and is never inferred &mdash; without it the
-              volatility is still calculated and shown, but it cannot be published as a normalized
-              volatility source.
+              evidence. The unit is never inferred from how large the numbers look. It is optional
+              for the calculation &mdash; without it the volatility is still calculated and shown in
+              the field&rsquo;s own unit &mdash; but publishing to the normalized volatility source
+              needs a declared <span class="mono">DECIMAL</span>, <span class="mono">PERCENT</span> or
+              <span class="mono">BASIS_POINTS</span>, because that contract carries a decimal annual
+              volatility and nothing else may enter it unscaled.
             </div>
 
             <section class="markets-status" id="hyv-loading" hidden>Calculating the Historical Yield Vol&hellip;</section>
@@ -1061,7 +1064,7 @@
               </div>
 
               <div class="hyv-source-block" id="hyv-source-block">
-                <div class="hyv-source-title">Normalized volatility source</div>
+                <div class="hyv-source-title">Normalized volatility source &mdash; decimal annual</div>
                 <div class="hyv-source-detail" id="hyv-source-detail">&mdash;</div>
               </div>
 

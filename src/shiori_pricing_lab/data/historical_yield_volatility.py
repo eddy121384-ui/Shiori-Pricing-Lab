@@ -39,12 +39,24 @@ be read as evidence that the provisional half is settled.
   Yield Change is the change between two *consecutive returned observations*,
   which under Bloomberg's ``ACTIVE_DAYS_ONLY`` is the natural trading-day
   step and is exactly what a 180-trading-day Middle Office window means.
-- It converts no units. The standard deviation of a difference carries the
-  unit of the values differenced, so the vol this module reports is in the
-  Yield field's own unit -- ``field_unit``, carried verbatim from #196 and
-  ``None`` when the request did not establish it. There is no percent/decimal/
-  bp conversion helper here because performing one would require knowing a
-  unit that #196 deliberately refuses to infer.
+- **The calculated result** converts no units. The standard deviation of a
+  difference carries the unit of the values differenced, so the vol this
+  module reports is in the Yield field's own unit -- ``field_unit``, carried
+  verbatim from #196 and ``None`` when the request did not establish it.
+  That is the number a Middle Office parity run compares against, so it is
+  never rescaled behind the reader's back.
+
+  **Publication to the normalized volatility layer** is where a unit is
+  normalized, and only there, because that layer's contract states a unit:
+  ``BLIVolatilityInput`` carries a *decimal annual* volatility
+  (docs/30 §1). Annex A §A.8.1 fixes the discipline this module follows --
+  read only an explicitly declared unit, normalize it by an explicit factor
+  (``1 bp = 1e-4``), never infer a unit from a value's magnitude, and fail
+  closed on a unit that is undeclared or cannot be pinned. So
+  :func:`decimal_annual_normalization_factor` accepts exactly
+  ``DECIMAL``/``PERCENT``/``BASIS_POINTS`` and refuses everything else,
+  including ``None``, and every published input records the source unit and
+  the factor applied.
 - It prices nothing. The output is a **Yield Vol**. This repository has no
   approved Yield-Vol -> Price-Vol conversion -- ``pricing/
   bli_mvp_required_input_guard.py`` refuses ``YIELD_VOL`` outright, in both
@@ -124,6 +136,26 @@ ANNUALIZATION_FACTOR = math.sqrt(ANNUALIZATION_TRADING_DAYS)
 # PROVISIONAL (Issue #197): sample standard deviation, Excel's STDEV.S.
 # Named in every result so the Middle Office parity gate can disprove it.
 STANDARD_DEVIATION_CONVENTION = "SAMPLE_STDEV_S_DDOF_1"
+
+# The unit BLIVolatilityInput's own contract states (docs/30 §1), and
+# therefore the unit anything published into it must already be in.
+PUBLISHED_VOLATILITY_UNIT = "DECIMAL_ANNUAL"
+
+# The only Yield-field units this module will normalize, and the exact factor
+# each takes. Annex A §A.8.1: read a *declared* unit, normalize by an explicit
+# factor (1 bp = 1e-4), never infer one from a value's magnitude, fail closed
+# on anything undeclared. There is no fuzzy matching and no alias list here --
+# a unit outside this vocabulary is refused with the vocabulary named, which
+# is what tells a trader what to confirm on the workstation.
+_DECIMAL_ANNUAL_NORMALIZATION_FACTORS: dict[str, float] = {
+    "DECIMAL": 1.0,
+    "PERCENT": 1e-2,
+    "BASIS_POINTS": 1e-4,
+}
+
+SUPPORTED_PUBLICATION_YIELD_UNITS: tuple[str, ...] = tuple(
+    sorted(_DECIMAL_ANNUAL_NORMALIZATION_FACTORS)
+)
 
 # ddof=1 needs two changes, and two changes need three observations.
 _MINIMUM_OBSERVATIONS_FOR_STDEV = 3
@@ -380,6 +412,39 @@ def calculate_historical_yield_volatility(
     )
 
 
+def decimal_annual_normalization_factor(field_unit: object) -> float:
+    """Return the factor that takes ``field_unit`` to ``DECIMAL_ANNUAL``.
+
+    Annex A §A.8.1's rule, applied to this module's own output: the unit must
+    have been *declared*, it is normalized by an explicit factor, and a unit
+    that is absent or outside the supported vocabulary fails closed rather
+    than being guessed from how large the number looks.
+
+    Raises :class:`HistoricalYieldVolUnavailableError` for ``None``, for a
+    non-string, and for any string outside
+    :data:`SUPPORTED_PUBLICATION_YIELD_UNITS`. Surrounding whitespace and
+    case are normalized before matching -- that is lexical tidying of the
+    trader's own typing, never an interpretation of what a unit means.
+    """
+
+    if not isinstance(field_unit, str) or not field_unit.strip():
+        raise HistoricalYieldVolUnavailableError(
+            "the Yield field's unit was not established by this request, so its Historical "
+            f"Yield Vol cannot be normalized to {PUBLISHED_VOLATILITY_UNIT} -- confirm the "
+            "unit on the workstation and supply one of "
+            f"{', '.join(SUPPORTED_PUBLICATION_YIELD_UNITS)}"
+        )
+    candidate = field_unit.strip().upper()
+    if candidate not in _DECIMAL_ANNUAL_NORMALIZATION_FACTORS:
+        raise HistoricalYieldVolUnavailableError(
+            f"Yield field unit {field_unit!r} has no approved normalization to "
+            f"{PUBLISHED_VOLATILITY_UNIT} -- this module normalizes only "
+            f"{', '.join(SUPPORTED_PUBLICATION_YIELD_UNITS)} and refuses to infer a unit "
+            "from a value's magnitude (Annex A §A.8.1)"
+        )
+    return _DECIMAL_ANNUAL_NORMALIZATION_FACTORS[candidate]
+
+
 def historical_yield_vol_volatility_input(
     result: HistoricalYieldVolResult,
 ) -> BLIVolatilityInput:
@@ -394,26 +459,35 @@ def historical_yield_vol_volatility_input(
     refuses outright: this source is therefore visible and auditable without
     being able to reach Black-76 through any existing path.
 
+    **The value is normalized to ``DECIMAL_ANNUAL`` on the way in**, because
+    that is the unit ``BLIVolatilityInput`` states (docs/30 §1) and the
+    contract carries no unit field of its own to say otherwise. A ``PERCENT``
+    Yield field whose Historical Vol is ``6.35`` publishes as ``0.0635``; a
+    ``BASIS_POINTS`` field normalizes by ``1e-4``. The factor comes from
+    :func:`decimal_annual_normalization_factor`, so an undeclared or
+    unsupported unit refuses publication instead of putting a
+    hundred-times-too-large number into a risk contract. The calculated
+    result itself is left in the field's own unit -- that is the number the
+    Middle Office parity run compares against.
+
     Nothing is overwritten or replaced here. A VCUB capture, a manual
     override and this historical statistic are three separately labelled
     inputs; producing one never consumes another.
 
+    ``override_or_fallback_audit`` is always populated, never ``None``. A
+    Historical Yield Vol is a computed statistic, not the "directly observed
+    value" a blank audit would claim, and Annex A §A.8.1 requires the source
+    unit and the normalization factor to travel with every resolved result --
+    so a consumer holding only this input can still see the window status,
+    both observation counts, the convention, and exactly how the number was
+    rescaled.
+
     Raises :class:`HistoricalYieldVolUnavailableError` when the result cannot
-    honestly enter that layer:
-
-    - it carries no volatility (``NO_HISTORY``, or too few changes);
-    - its ``field_unit`` is unknown. ``BLIVolatilityInput`` has no unit
-      field, so an unlabelled number there is indistinguishable from a
-      decimal, a percent and a basis-point figure. #196 refuses to infer a
-      unit, and this gate refuses to assume one on its behalf;
-    - the window's standard deviation is exactly zero. ``BLIVolatilityInput``
-      requires a positive volatility, and a degenerate window is reported as
-      what it is rather than published as a tradeable-looking number.
-
-    An ``INSUFFICIENT_HISTORY`` result is publishable, but never silently:
-    its ``override_or_fallback_audit`` states both counts, so a consumer that
-    reads only the normalized layer still cannot mistake it for a full
-    180-observation window.
+    honestly enter that layer: it carries no volatility (``NO_HISTORY``, or
+    too few changes); its unit is undeclared or outside the supported
+    vocabulary; or the window's standard deviation is not positive, which
+    ``BLIVolatilityInput`` refuses and which this module reports as the
+    degenerate window it is rather than publishing.
     """
 
     if not isinstance(result, HistoricalYieldVolResult):
@@ -425,32 +499,29 @@ def historical_yield_vol_volatility_input(
             f"no Historical Yield Vol is available for {result.security!r} "
             f"({result.window_status.value}): {'; '.join(result.blockers)}"
         )
-    if result.field_unit is None:
-        raise HistoricalYieldVolUnavailableError(
-            f"the unit of {result.yield_field} was not established by this request, so its "
-            f"Historical Yield Vol cannot be published as {HISTORICAL_YIELD_VOL_MO_SOURCE} "
-            "-- confirm the field's unit on the workstation and supply it"
-        )
-    if not result.annualized_yield_vol > 0:
+
+    factor = decimal_annual_normalization_factor(result.field_unit)
+    normalized = result.annualized_yield_vol * factor
+
+    if not normalized > 0:
         raise HistoricalYieldVolUnavailableError(
             f"the Historical Yield Vol of the selected {result.observation_count}-observation "
-            f"window for {result.security!r} is {result.annualized_yield_vol!r}, which is not "
-            "positive -- every Yield Change in the window was identical, so this degenerate "
-            "window is reported as what it is rather than published as a volatility"
+            f"window for {result.security!r} is {normalized!r}, which is not positive -- "
+            "every Yield Change in the window was identical, so this degenerate window is "
+            "reported as what it is rather than published as a volatility"
         )
 
-    audit: str | None = None
-    if result.window_status is not HistoricalYieldVolStatus.FULL_WINDOW:
-        audit = (
-            f"{result.window_status.value}: calculated from {result.observation_count} of the "
-            f"requested {result.requested_observation_count} Yield observations "
-            f"({result.yield_change_count} Yield Changes), "
-            f"{result.standard_deviation_convention} x sqrt({result.annualization_trading_days}). "
-            "No flat extension, benchmark, index or VCUB substitute applied."
-        )
+    audit = (
+        f"{HISTORICAL_YIELD_VOL_MO_SOURCE} {result.window_status.value}: calculated from "
+        f"{result.observation_count} of the requested {result.requested_observation_count} "
+        f"Yield observations ({result.yield_change_count} Yield Changes), "
+        f"{result.standard_deviation_convention} x sqrt({result.annualization_trading_days}); "
+        f"source unit {result.field_unit} normalized to {PUBLISHED_VOLATILITY_UNIT} by factor "
+        f"{factor!r}. No flat extension, benchmark, index or VCUB substitute applied."
+    )
 
     return BLIVolatilityInput(
-        volatility=result.annualized_yield_vol,
+        volatility=normalized,
         volatility_basis=BLIVolatilityBasis.YIELD_VOL,
         source_system=HISTORICAL_YIELD_VOL_MO_SOURCE,
         status=BLIMarketDataStatus.ACTIVE,

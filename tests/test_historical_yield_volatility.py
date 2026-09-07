@@ -31,11 +31,13 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     ANNUALIZATION_TRADING_DAYS,
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+    PUBLISHED_VOLATILITY_UNIT,
     STANDARD_DEVIATION_CONVENTION,
     HistoricalYieldVolInputError,
     HistoricalYieldVolStatus,
     HistoricalYieldVolUnavailableError,
     calculate_historical_yield_volatility,
+    decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
 )
 
@@ -346,8 +348,80 @@ def test_a_full_window_publishes_as_the_historical_yield_vol_mo_source():
     assert published.source_system == HISTORICAL_YIELD_VOL_MO_SOURCE == "HISTORICAL_YIELD_VOL_MO"
     assert published.volatility_basis is BLIVolatilityBasis.YIELD_VOL
     assert published.status is BLIMarketDataStatus.ACTIVE
-    assert published.volatility == result.annualized_yield_vol
-    assert published.override_or_fallback_audit is None
+    # A PERCENT field's vol enters the decimal-annual contract as a decimal.
+    assert published.volatility == pytest.approx(result.annualized_yield_vol / 100, rel=1e-12)
+
+
+# --- Publication is normalized to DECIMAL_ANNUAL (docs/30 §1, Annex A §A.8.1) --
+
+
+@pytest.mark.parametrize(
+    ("unit", "factor"),
+    [("DECIMAL", 1.0), ("PERCENT", 1e-2), ("BASIS_POINTS", 1e-4), ("  percent  ", 1e-2)],
+)
+def test_a_declared_unit_normalizes_by_its_own_explicit_factor(unit, factor):
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], field_unit=unit), requested_observation_count=4
+    )
+    published = historical_yield_vol_volatility_input(result)
+
+    assert decimal_annual_normalization_factor(unit) == factor
+    assert published.volatility == pytest.approx(result.annualized_yield_vol * factor, rel=1e-12)
+    # The calculated result itself is never rescaled -- that is the number the
+    # Middle Office parity run compares against.
+    assert result.annualized_yield_vol == pytest.approx(0.4 * math.sqrt(252), abs=1e-12)
+
+
+def test_the_published_value_is_never_the_raw_percent_figure():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], field_unit="PERCENT"), requested_observation_count=4
+    )
+    published = historical_yield_vol_volatility_input(result)
+
+    # 6.35-ish percentage points must not enter a decimal-annual risk
+    # contract as 6.35 -- that is a hundred-times-too-large volatility.
+    assert result.annualized_yield_vol > 6
+    assert published.volatility < 0.1
+
+
+def test_a_unit_outside_the_supported_vocabulary_refuses_publication():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], field_unit="PERCENTAGE POINTS"),
+        requested_observation_count=4,
+    )
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "no approved normalization" in str(excinfo.value)
+    # The refusal names what would be accepted, so a trader knows what to
+    # confirm rather than guessing.
+    for supported in ("DECIMAL", "PERCENT", "BASIS_POINTS"):
+        assert supported in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", [None, "", "   ", 100, 1e-2])
+def test_an_undeclared_unit_never_falls_back_to_a_factor(bad):
+    with pytest.raises(HistoricalYieldVolUnavailableError):
+        decimal_annual_normalization_factor(bad)
+
+
+def test_the_publication_unit_is_the_one_the_contract_states():
+    assert PUBLISHED_VOLATILITY_UNIT == "DECIMAL_ANNUAL"
+
+
+def test_the_audit_records_the_source_unit_and_the_factor_applied():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], field_unit="BASIS_POINTS"),
+        requested_observation_count=4,
+    )
+    audit = historical_yield_vol_volatility_input(result).override_or_fallback_audit
+
+    assert audit is not None
+    assert "BASIS_POINTS" in audit
+    assert "DECIMAL_ANNUAL" in audit
+    assert "0.0001" in audit
+    assert "FULL_WINDOW" in audit
 
 
 def test_the_source_is_distinguishable_from_vcub_manual_and_price_vol():
@@ -388,7 +462,7 @@ def test_an_unconfirmed_unit_cannot_be_published_as_a_volatility_source():
     with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
         historical_yield_vol_volatility_input(result)
 
-    assert "unit" in str(excinfo.value)
+    assert "unit was not established" in str(excinfo.value)
 
 
 def test_a_degenerate_zero_vol_window_is_not_published_as_a_volatility():
@@ -396,7 +470,7 @@ def test_a_degenerate_zero_vol_window_is_not_published_as_a_volatility():
     # sample standard deviation is exactly zero -- a real number, but not a
     # volatility anything should be allowed to consume.
     result = calculate_historical_yield_volatility(
-        _history([4.0, 5.0, 6.0, 7.0]), requested_observation_count=4
+        _history([4.0, 5.0, 6.0, 7.0], field_unit="PERCENT"), requested_observation_count=4
     )
 
     assert result.daily_yield_vol == 0.0

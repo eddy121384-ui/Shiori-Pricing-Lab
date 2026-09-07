@@ -16,7 +16,12 @@
 //     floats -- so what a trader reads is digit-for-digit what was computed;
 //   * guess a Yield field, a unit, a window length, or an expiry -> lookback
 //     mapping. The count box starts at Middle Office's confirmed 180 and is
-//     sent verbatim; the unit is optional provenance and is never inferred;
+//     sent verbatim; the unit is typed from workstation evidence and is never
+//     inferred, and the normalization it drives happens on the server;
+//   * rescale anything. The headline figures are in the Yield field's own
+//     unit and the normalized volatility source is in DECIMAL_ANNUAL; both
+//     arrive already computed, each carrying its own unit label, and this
+//     page never converts one into the other;
 //   * substitute anything. A blocked window (no history, too little history)
 //     is displayed as blocked. No benchmark, index, VCUB, VOLATILITY_90D or
 //     flat synthetic vol is ever reached for, and a short window is never
@@ -254,11 +259,17 @@
 
     const source = payload.volatility_source;
     if (source) {
+      // The published number is NOT the figure in the headline above: it is
+      // that figure normalized to the unit BLIVolatilityInput states. Both
+      // are shown, each labelled with its own unit and the factor between
+      // them, so a normalized value and a raw one can never be swapped.
       const audit = source.override_or_fallback_audit
         ? ` — ${source.override_or_fallback_audit}`
         : "";
       els.sourceDetail.textContent =
-        `${source.source_system} · ${source.volatility_basis} · ${source.status}${audit}`;
+        `${source.source_system} · ${source.volatility_basis} · ${source.status} · ` +
+        `${text(source.volatility_text)} ${text(source.volatility_unit)} ` +
+        `(${text(source.source_unit)} × ${text(source.normalization_factor)})${audit}`;
       els.sourceBlock.className = "hyv-source-block";
     } else {
       els.sourceDetail.textContent = text(payload.volatility_source_unavailable_reason);

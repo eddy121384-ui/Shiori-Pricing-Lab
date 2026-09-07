@@ -64,6 +64,10 @@ _FIELD = "SYNTHETIC_TEST_YIELD_FIELD"
 # re-formatted instead of printing the server's own string would be caught.
 _DAILY_TEXT = "0.4000000000000001"
 _ANNUALIZED_TEXT = "6.349803146555018"
+# The same figure normalized to the unit BLIVolatilityInput states. It is a
+# different number from the headline on purpose: the page must show both, each
+# under its own unit, and must never derive one from the other.
+_NORMALIZED_TEXT = "0.06349803146555018"
 
 
 def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> None:
@@ -136,9 +140,15 @@ _FULL_PAYLOAD = {
     "volatility_source": {
         "source_system": "HISTORICAL_YIELD_VOL_MO",
         "volatility_basis": "YIELD_VOL",
-        "volatility": float(_ANNUALIZED_TEXT),
+        "volatility": float(_NORMALIZED_TEXT),
+        "volatility_text": _NORMALIZED_TEXT,
+        "volatility_unit": "DECIMAL_ANNUAL",
+        "source_unit": "PERCENT",
+        "normalization_factor": 0.01,
         "status": "ACTIVE",
-        "override_or_fallback_audit": None,
+        "override_or_fallback_audit": "HISTORICAL_YIELD_VOL_MO FULL_WINDOW: calculated from "
+        "180 of the requested 180 Yield observations (179 Yield Changes); source unit PERCENT "
+        "normalized to DECIMAL_ANNUAL by factor 0.01.",
     },
     "volatility_source_unavailable_reason": None,
 }
@@ -188,9 +198,9 @@ _NO_UNIT_PAYLOAD = {
     **_FULL_PAYLOAD,
     "field_unit": None,
     "volatility_source": None,
-    "volatility_source_unavailable_reason": "the unit of SYNTHETIC_TEST_YIELD_FIELD was not "
-    "established by this request, so its Historical Yield Vol cannot be published as "
-    "HISTORICAL_YIELD_VOL_MO",
+    "volatility_source_unavailable_reason": "the Yield field's unit was not established by "
+    "this request, so its Historical Yield Vol cannot be normalized to DECIMAL_ANNUAL -- "
+    "confirm the unit on the workstation and supply one of BASIS_POINTS, DECIMAL, PERCENT",
 }
 
 
@@ -431,6 +441,13 @@ def test_a_full_window_shows_the_normalized_source_and_no_blockers(server_url, p
     detail = page.inner_text("#hyv-source-detail")
     assert "HISTORICAL_YIELD_VOL_MO" in detail
     assert "YIELD_VOL" in detail
+    # The normalized value, its unit, the source unit and the exact factor are
+    # all on screen, and the raw headline figure is not what was published.
+    assert _NORMALIZED_TEXT in detail
+    assert "DECIMAL_ANNUAL" in detail
+    assert "PERCENT" in detail
+    assert "0.01" in detail
+    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
 
 
 def test_an_unconfirmed_unit_says_so_rather_than_naming_one(server_url, page) -> None:
@@ -443,7 +460,7 @@ def test_an_unconfirmed_unit_says_so_rather_than_naming_one(server_url, page) ->
 
     assert "not confirmed" in page.inner_text("#hyv-unit")
     assert "not confirmed" in page.inner_text("#hyv-annualized-unit")
-    assert "cannot be published" in page.inner_text("#hyv-source-detail")
+    assert "cannot be normalized" in page.inner_text("#hyv-source-detail")
 
 
 # --- short and absent history -------------------------------------------------
