@@ -125,7 +125,11 @@ def select_interpreter_command(which=shutil.which, run=subprocess.run) -> list[s
         bloomberg_py = Path(user_profile) / ".venvs" / "shiori-bloomberg" / "Scripts" / "python.exe"
         if bloomberg_py.exists():
             try:
-                result = run([str(bloomberg_py), "-c", actual_probe], capture_output=True, text=True)
+                result = run(
+                    [str(bloomberg_py), "-c", actual_probe],
+                    capture_output=True,
+                    text=True,
+                )
                 if result.returncode == 0:
                     return [str(bloomberg_py)]
             except OSError:
