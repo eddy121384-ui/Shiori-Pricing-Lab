@@ -74,20 +74,27 @@ def test_check_python_version_raises_for_python_2():
 # --- Interpreter selection (mirrors start_shiori.bat's own fallback order) ----
 
 
-def test_select_interpreter_prefers_python_when_present():
+def _probe_ok(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+
+def test_select_interpreter_prefers_python_when_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "no-user"))
     which = {"python": "/usr/bin/python", "py": None}.get
-    assert lw.select_interpreter_command(which=which) == ["python"]
+    assert lw.select_interpreter_command(which=which, run=_probe_ok) == ["python"]
 
 
-def test_select_interpreter_falls_back_to_py_when_python_absent():
+def test_select_interpreter_falls_back_to_py_when_python_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "no-user"))
     which = {"python": None, "py": "C:\\Windows\\py.exe"}.get
-    assert lw.select_interpreter_command(which=which) == ["py", "-3"]
+    assert lw.select_interpreter_command(which=which, run=_probe_ok) == ["py", "-3"]
 
 
-def test_select_interpreter_raises_when_both_absent():
+def test_select_interpreter_raises_when_both_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "no-user"))
     which = {"python": None, "py": None}.get
-    with pytest.raises(lw.LauncherError, match="not found on PATH"):
-        lw.select_interpreter_command(which=which)
+    with pytest.raises(lw.LauncherError, match="not found"):
+        lw.select_interpreter_command(which=which, run=_probe_ok)
 
 
 # --- venv creation --------------------------------------------------------------
