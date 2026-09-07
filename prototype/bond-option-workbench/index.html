@@ -975,6 +975,108 @@
           </div>
         </section>
 
+
+        <!-- ===== Historical Yield Vol (Issue #197) ===== -->
+        <section class="card hyv-card">
+          <div class="card-head">
+            <div class="card-title">Historical Yield Vol &mdash; Middle Office</div>
+            <div class="card-head-right"><span class="hyv-methodology mono" id="hyv-methodology">HISTORICAL_YIELD_VOL_MO</span></div>
+          </div>
+          <div class="card-body">
+            <div class="hyv-intro">
+              A Middle Office-style historical volatility of <em>this bond's own</em> Yield, calculated
+              server-side from the same Bloomberg series above: daily Yield <em>Change</em>, sample
+              standard deviation, annualized by &radic;252. This is <strong>not</strong> Bloomberg implied
+              vol and not a VCUB number, and it is not wired into pricing &mdash; it is a Yield Vol, and
+              no approved Yield-Vol&nbsp;&rarr;&nbsp;Price-Vol conversion exists in this build.
+            </div>
+            <div class="byh-query">
+              <div class="byh-field byh-field-narrow">
+                <label class="byh-label" for="hyv-observation-count">Yield observations</label>
+                <input class="control" id="hyv-observation-count" type="number" min="3" step="1" value="180" />
+              </div>
+              <div class="byh-field">
+                <label class="byh-label" for="hyv-field-unit">Yield field unit (as confirmed)</label>
+                <input class="control" id="hyv-field-unit" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. PERCENT &mdash; optional" />
+              </div>
+              <span class="btn primary" id="hyv-calculate-btn">Calculate Historical Vol</span>
+            </div>
+            <div class="byh-field-note">
+              Uses the bond identifier, Yield field and date range entered above, and the most recent
+              <span class="mono">N</span> observations Bloomberg returned. 180 is Middle Office's confirmed
+              6M-style window; it is not derived from an expiry or a tenor, so change it only against
+              evidence. The unit is optional provenance and is never inferred &mdash; without it the
+              volatility is still calculated and shown, but it cannot be published as a normalized
+              volatility source.
+            </div>
+
+            <section class="markets-status" id="hyv-loading" hidden>Calculating the Historical Yield Vol&hellip;</section>
+            <section class="markets-status" id="hyv-idle">
+              Load a Yield history above, then press Calculate Historical Vol.
+            </section>
+            <section class="markets-status markets-status-error" id="hyv-error" hidden>
+              <div class="markets-error-title">Unable to calculate a Historical Yield Vol</div>
+              <div class="markets-error-detail" id="hyv-error-detail">&mdash;</div>
+            </section>
+
+            <div class="hyv-result" id="hyv-result" hidden>
+              <div class="hyv-headline">
+                <div class="hyv-headline-block">
+                  <div class="hyv-headline-label">Annualized Historical Yield Vol</div>
+                  <div class="hyv-headline-value mono" id="hyv-annualized">&mdash;</div>
+                  <div class="hyv-headline-unit" id="hyv-annualized-unit">&mdash;</div>
+                </div>
+                <div class="hyv-headline-block">
+                  <div class="hyv-headline-label">Daily standard deviation</div>
+                  <div class="hyv-headline-value mono" id="hyv-daily">&mdash;</div>
+                  <div class="hyv-headline-unit" id="hyv-daily-unit">&mdash;</div>
+                </div>
+                <div class="hyv-headline-block">
+                  <div class="hyv-headline-label">Window status</div>
+                  <div class="hyv-status-pill" id="hyv-status">&mdash;</div>
+                </div>
+              </div>
+
+              <div class="hyv-blockers" id="hyv-blockers" hidden>
+                <div class="hyv-blockers-title">Not a full-window result</div>
+                <ul class="capture-issue-list" id="hyv-blocker-list"></ul>
+              </div>
+
+              <div class="vol-surface-provenance" id="hyv-provenance">
+                <div class="vsp-item"><span class="vsp-k">Methodology</span><span class="vsp-v mono" id="hyv-methodology-value">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Bloomberg security</span><span class="vsp-v mono" id="hyv-security">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Field</span><span class="vsp-v mono" id="hyv-field">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Unit</span><span class="vsp-v" id="hyv-unit">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Source</span><span class="vsp-v" id="hyv-source">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Requested range</span><span class="vsp-v" id="hyv-requested-range">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Observations requested</span><span class="vsp-v" id="hyv-requested-count">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Observations used</span><span class="vsp-v" id="hyv-actual-count">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Yield Changes</span><span class="vsp-v" id="hyv-change-count">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">First observation used</span><span class="vsp-v" id="hyv-first-observation">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Last observation used</span><span class="vsp-v" id="hyv-last-observation">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Std-dev convention</span><span class="vsp-v mono" id="hyv-stdev-convention">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Annualization</span><span class="vsp-v mono" id="hyv-annualization">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Acquired at</span><span class="vsp-v" id="hyv-acquired-at">&mdash;</span></div>
+                <div class="vsp-item"><span class="vsp-k">Calculated at</span><span class="vsp-v" id="hyv-calculated-at">&mdash;</span></div>
+              </div>
+
+              <div class="hyv-source-block" id="hyv-source-block">
+                <div class="hyv-source-title">Normalized volatility source</div>
+                <div class="hyv-source-detail" id="hyv-source-detail">&mdash;</div>
+              </div>
+
+              <div class="byh-change-note">
+                Every number above is calculated by the server's one canonical Historical Yield Vol
+                calculator and printed here exactly as it was returned. This page performs no standard
+                deviation, no annualization and no rounding of its own. The
+                <span class="mono">179 changes + STDEV.S</span> half of this convention is
+                <strong>provisional</strong> and awaits a Middle Office parity check; the underlying's own
+                Yield, the daily Yield Change, the 180-observation window and &radic;252 are confirmed.
+              </div>
+            </div>
+          </div>
+        </section>
+
       </div>
       <!-- /#markets-panel-yield-history -->
 
@@ -1282,5 +1384,6 @@
 <script src="treasury_futures_yield.js"></script>
 <script src="vol_surface_view.js"></script>
 <script src="bond_yield_history_view.js"></script>
+<script src="historical_yield_vol_view.js"></script>
 </body>
 </html>

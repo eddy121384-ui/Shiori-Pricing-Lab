@@ -1,0 +1,429 @@
+"""Deterministic tests for the Middle Office Historical Yield Vol calculator
+(Issue #197).
+
+Every observation below is invented. No Bloomberg value, no real Yield
+series, and no real field mnemonic appears in this file -- the production
+loader has no default field precisely because the real one is workstation
+evidence, not repository content.
+
+The numeric fixtures are hand-computable on purpose: the small window's
+Yield Changes are exact one-digit decimals whose sample standard deviation
+can be written down in closed form, so a change to the arithmetic fails here
+rather than in a parity run months later.
+"""
+
+from __future__ import annotations
+
+import math
+import statistics
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
+
+import shiori_pricing_lab.data.historical_yield_volatility as module
+from shiori_pricing_lab.data.bli_snapshot import BLIMarketDataStatus, BLIVolatilityBasis
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    BloombergBondYieldHistory,
+    BondYieldObservation,
+)
+from shiori_pricing_lab.data.historical_yield_volatility import (
+    ANNUALIZATION_FACTOR,
+    ANNUALIZATION_TRADING_DAYS,
+    HISTORICAL_YIELD_VOL_MO_SOURCE,
+    MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+    STANDARD_DEVIATION_CONVENTION,
+    HistoricalYieldVolInputError,
+    HistoricalYieldVolStatus,
+    HistoricalYieldVolUnavailableError,
+    calculate_historical_yield_volatility,
+    historical_yield_vol_volatility_input,
+)
+
+_START = date(2026, 1, 1)
+
+
+def _history(
+    values: list[float | None],
+    *,
+    field_unit: str | None = "PERCENT",
+    dates: list[date] | None = None,
+    security: str = "/isin/US0000000000",
+) -> BloombergBondYieldHistory:
+    """One synthetic #196 series: consecutive dates unless ``dates`` says otherwise."""
+
+    if dates is None:
+        dates = [_START + timedelta(days=index) for index in range(len(values))]
+    observations = tuple(
+        BondYieldObservation(
+            observation_date=observation_date,
+            yield_value=value,
+            raw_value=None if value is None else repr(value),
+        )
+        for observation_date, value in zip(dates, values, strict=True)
+    )
+    return BloombergBondYieldHistory(
+        requested_identifier=security,
+        security=security,
+        yield_field="SYNTHETIC_TEST_YIELD_FIELD",
+        field_meaning="synthetic test field",
+        field_unit=field_unit,
+        requested_start_date=_START,
+        requested_end_date=_START + timedelta(days=max(len(values), 1) * 2),
+        observations=observations,
+        source_system="BLOOMBERG_DAPI",
+        acquired_at="2026-09-07T09:00:00+08:00",
+    )
+
+
+# --- The provisional convention, pinned ------------------------------------
+
+
+def test_one_hundred_eighty_observations_produce_exactly_one_hundred_seventy_nine_changes():
+    values = [4.0 + (index % 7) * 0.01 for index in range(MIDDLE_OFFICE_6M_OBSERVATION_COUNT)]
+    result = calculate_historical_yield_volatility(_history(values))
+
+    assert result.observation_count == 180
+    assert result.requested_observation_count == 180
+    assert result.yield_change_count == 179
+    assert result.window_status is HistoricalYieldVolStatus.FULL_WINDOW
+    assert result.blockers == ()
+
+
+def test_daily_changes_are_exactly_current_minus_previous():
+    # Four observations -> three changes of +0.10, -0.30, +0.50 (in the
+    # field's own unit). Sample standard deviation, ddof=1, of those three:
+    #   mean = 0.10, deviations = 0.00, -0.40, +0.40
+    #   variance = (0 + 0.16 + 0.16) / 2 = 0.16 -> sigma_daily = 0.40
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert result.yield_change_count == 3
+    assert result.daily_yield_vol == pytest.approx(0.4, abs=1e-12)
+    assert result.annualized_yield_vol == pytest.approx(0.4 * math.sqrt(252), abs=1e-12)
+
+
+def test_sample_standard_deviation_ddof_one_is_used_not_population():
+    values = [4.0, 4.1, 3.8, 4.3, 4.05]
+    result = calculate_historical_yield_volatility(
+        _history(values), requested_observation_count=len(values)
+    )
+    changes = [b - a for a, b in zip(values, values[1:], strict=False)]
+
+    assert result.daily_yield_vol == pytest.approx(statistics.stdev(changes), rel=1e-12)
+    assert result.daily_yield_vol != pytest.approx(statistics.pstdev(changes), rel=1e-9)
+    assert result.standard_deviation_convention == STANDARD_DEVIATION_CONVENTION
+
+
+def test_annualization_is_exactly_daily_times_sqrt_252():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert result.annualization_trading_days == ANNUALIZATION_TRADING_DAYS == 252
+    assert result.annualization_factor == ANNUALIZATION_FACTOR == math.sqrt(252)
+    assert result.annualized_yield_vol == result.daily_yield_vol * math.sqrt(252)
+
+
+def test_the_window_is_the_most_recent_observations_not_the_earliest():
+    # Ten observations, a four-observation window: the last four are used and
+    # the earlier six never enter a change.
+    values = [9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 4.00, 4.10, 3.80, 4.30]
+    result = calculate_historical_yield_volatility(
+        _history(values), requested_observation_count=4
+    )
+
+    assert result.series_observation_count == 10
+    assert result.observation_count == 4
+    assert result.first_observation_date == _START + timedelta(days=6)
+    assert result.last_observation_date == _START + timedelta(days=9)
+    assert result.daily_yield_vol == pytest.approx(0.4, abs=1e-12)
+
+
+# --- Units ------------------------------------------------------------------
+
+
+def test_the_volatility_carries_the_yield_field_unit_verbatim_and_unconverted():
+    values = [4.00, 4.10, 3.80, 4.30]
+    percent = calculate_historical_yield_volatility(
+        _history(values, field_unit="PERCENT"), requested_observation_count=4
+    )
+    basis_points = calculate_historical_yield_volatility(
+        _history(values, field_unit="BASIS_POINTS"), requested_observation_count=4
+    )
+
+    assert percent.field_unit == "PERCENT"
+    assert basis_points.field_unit == "BASIS_POINTS"
+    # Same numbers in, same number out: the unit label is provenance, never a
+    # scaling instruction.
+    assert percent.annualized_yield_vol == basis_points.annualized_yield_vol
+
+
+def test_an_unconfirmed_unit_stays_unconfirmed():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], field_unit=None), requested_observation_count=4
+    )
+
+    assert result.field_unit is None
+    assert result.annualized_yield_vol is not None
+
+
+# --- Missing dates are not filled ------------------------------------------
+
+
+def test_missing_calendar_dates_are_not_filled_in():
+    # A ten-day calendar span holding four observations: the changes are
+    # between consecutive *returned observations*, and no row is manufactured
+    # for the dates in between.
+    dates = [
+        _START,
+        _START + timedelta(days=4),
+        _START + timedelta(days=5),
+        _START + timedelta(days=9),
+    ]
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], dates=dates), requested_observation_count=4
+    )
+
+    assert result.observation_count == 4
+    assert result.yield_change_count == 3
+    assert result.observation_dates == tuple(dates)
+    assert result.daily_yield_vol == pytest.approx(0.4, abs=1e-12)
+
+
+# --- Fail closed ------------------------------------------------------------
+
+
+def test_a_row_with_no_value_inside_the_window_fails_closed():
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([4.00, None, 3.80, 4.30]), requested_observation_count=4
+        )
+
+    assert "no Yield value" in str(excinfo.value)
+    assert (_START + timedelta(days=1)).isoformat() in str(excinfo.value)
+
+
+def test_a_row_with_no_value_outside_the_window_is_irrelevant():
+    result = calculate_historical_yield_volatility(
+        _history([None, 4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert result.observation_count == 4
+    assert result.daily_yield_vol == pytest.approx(0.4, abs=1e-12)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_yield_value_fails_closed(bad):
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([4.00, bad, 3.80, 4.30]), requested_observation_count=4
+        )
+
+    assert "finite" in str(excinfo.value)
+
+
+def test_observations_out_of_chronological_order_fail_closed():
+    dates = [
+        _START,
+        _START + timedelta(days=3),
+        _START + timedelta(days=1),
+        _START + timedelta(days=4),
+    ]
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history([4.00, 4.10, 3.80, 4.30], dates=dates), requested_observation_count=4
+        )
+
+    assert "strictly ascending" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", [0, 1, 2, -180, "180", 180.0, True, None])
+def test_an_unusable_requested_observation_count_fails_closed(bad):
+    with pytest.raises(HistoricalYieldVolInputError):
+        calculate_historical_yield_volatility(
+            _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=bad
+        )
+
+
+def test_something_other_than_a_196_history_fails_closed():
+    with pytest.raises(HistoricalYieldVolInputError):
+        calculate_historical_yield_volatility({"observations": []})
+
+
+# --- Insufficient and zero history -----------------------------------------
+
+
+def test_short_history_is_labelled_insufficient_with_both_counts():
+    values = [4.0 + (index % 5) * 0.02 for index in range(90)]
+    result = calculate_historical_yield_volatility(_history(values))
+
+    assert result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+    assert result.requested_observation_count == 180
+    assert result.observation_count == 90
+    assert result.yield_change_count == 89
+    assert result.annualized_yield_vol is not None
+    assert any("INSUFFICIENT_HISTORY" in blocker for blocker in result.blockers)
+    assert any("90 of the requested 180" in blocker for blocker in result.blockers)
+
+
+def test_short_history_is_never_flat_extended_to_the_requested_window():
+    ninety = calculate_historical_yield_volatility(
+        _history([4.0 + (index % 5) * 0.02 for index in range(90)])
+    )
+
+    assert ninety.observation_count == 90
+    assert len(ninety.observation_dates) == 90
+    # No date, no observation and no change was manufactured to reach 180, and
+    # the result never reports the requested count as though it had been met.
+    assert ninety.observation_count != ninety.requested_observation_count
+
+
+def test_zero_history_is_blocking_and_offers_no_proxy():
+    result = calculate_historical_yield_volatility(_history([]))
+
+    assert result.window_status is HistoricalYieldVolStatus.NO_HISTORY
+    assert result.observation_count == 0
+    assert result.yield_change_count == 0
+    assert result.daily_yield_vol is None
+    assert result.annualized_yield_vol is None
+    assert result.is_usable is False
+    assert result.blockers
+    assert "no approved proxy" in result.blockers[0]
+
+
+def test_history_too_short_for_a_sample_standard_deviation_reports_no_number():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10]), requested_observation_count=180
+    )
+
+    assert result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+    assert result.yield_change_count == 1
+    assert result.daily_yield_vol is None
+    assert result.annualized_yield_vol is None
+    assert len(result.blockers) == 2
+
+
+# --- Provenance -------------------------------------------------------------
+
+
+def test_provenance_travels_with_the_result():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert result.requested_identifier == "/isin/US0000000000"
+    assert result.security == "/isin/US0000000000"
+    assert result.yield_field == "SYNTHETIC_TEST_YIELD_FIELD"
+    assert result.field_meaning == "synthetic test field"
+    assert result.source_system == "BLOOMBERG_DAPI"
+    assert result.acquired_at == "2026-09-07T09:00:00+08:00"
+    assert result.requested_start_date == _START
+    assert result.calculated_at
+
+
+def test_the_statistic_does_not_depend_on_the_calculation_clock(monkeypatch):
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    monkeypatch.setattr(module, "_calculation_now", lambda: datetime(2020, 1, 1, tzinfo=UTC))
+    early = calculate_historical_yield_volatility(history, requested_observation_count=4)
+    monkeypatch.setattr(module, "_calculation_now", lambda: datetime(2099, 12, 31, tzinfo=UTC))
+    late = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    assert early.calculated_at != late.calculated_at
+    assert early.observation_dates == late.observation_dates
+    assert early.annualized_yield_vol == late.annualized_yield_vol
+
+
+# --- The normalized volatility source --------------------------------------
+
+
+def test_a_full_window_publishes_as_the_historical_yield_vol_mo_source():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    published = historical_yield_vol_volatility_input(result)
+
+    assert published.source_system == HISTORICAL_YIELD_VOL_MO_SOURCE == "HISTORICAL_YIELD_VOL_MO"
+    assert published.volatility_basis is BLIVolatilityBasis.YIELD_VOL
+    assert published.status is BLIMarketDataStatus.ACTIVE
+    assert published.volatility == result.annualized_yield_vol
+    assert published.override_or_fallback_audit is None
+
+
+def test_the_source_is_distinguishable_from_vcub_manual_and_price_vol():
+    published = historical_yield_vol_volatility_input(
+        calculate_historical_yield_volatility(
+            _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+        )
+    )
+
+    assert published.source_system not in {"BLOOMBERG_DAPI", "MANUAL_TRADER_ENTRY", "VCUB"}
+    assert published.volatility_basis is not BLIVolatilityBasis.PRICE_VOL
+    assert published.volatility_basis is not BLIVolatilityBasis.EQUIVALENT_PRICE_VOL
+
+
+def test_an_insufficient_window_publishes_only_with_an_explicit_audit():
+    result = calculate_historical_yield_volatility(
+        _history([4.0 + (index % 5) * 0.02 for index in range(90)])
+    )
+    published = historical_yield_vol_volatility_input(result)
+
+    assert published.override_or_fallback_audit is not None
+    assert "INSUFFICIENT_HISTORY" in published.override_or_fallback_audit
+    assert "90 of the requested 180" in published.override_or_fallback_audit
+
+
+def test_zero_history_cannot_be_published_as_a_volatility_source():
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(calculate_historical_yield_volatility(_history([])))
+
+    assert "NO_HISTORY" in str(excinfo.value)
+
+
+def test_an_unconfirmed_unit_cannot_be_published_as_a_volatility_source():
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], field_unit=None), requested_observation_count=4
+    )
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "unit" in str(excinfo.value)
+
+
+def test_a_degenerate_zero_vol_window_is_not_published_as_a_volatility():
+    # Four yields a whole unit apart: every Yield Change is exactly 1.0, so the
+    # sample standard deviation is exactly zero -- a real number, but not a
+    # volatility anything should be allowed to consume.
+    result = calculate_historical_yield_volatility(
+        _history([4.0, 5.0, 6.0, 7.0]), requested_observation_count=4
+    )
+
+    assert result.daily_yield_vol == 0.0
+    assert result.annualized_yield_vol == 0.0
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(result)
+
+    assert "degenerate" in str(excinfo.value)
+
+
+def test_publishing_something_other_than_a_result_fails_closed():
+    with pytest.raises(HistoricalYieldVolUnavailableError):
+        historical_yield_vol_volatility_input({"annualized_yield_vol": 1.0})
+
+
+# --- No pricing / VCUB / Forward side effects -------------------------------
+
+
+def test_the_yield_vol_basis_is_still_refused_by_the_pricing_input_guard():
+    # The boundary this issue must not cross: nothing here makes YIELD_VOL
+    # priceable. The guard's supported set is unchanged, so a
+    # HISTORICAL_YIELD_VOL_MO input cannot reach Black-76 through it.
+    from shiori_pricing_lab.pricing.bli_mvp_required_input_guard import (
+        _SUPPORTED_VOLATILITY_BASES,
+    )
+
+    assert BLIVolatilityBasis.YIELD_VOL not in _SUPPORTED_VOLATILITY_BASES
+    assert _SUPPORTED_VOLATILITY_BASES == frozenset(
+        {BLIVolatilityBasis.PRICE_VOL, BLIVolatilityBasis.EQUIVALENT_PRICE_VOL}
+    )

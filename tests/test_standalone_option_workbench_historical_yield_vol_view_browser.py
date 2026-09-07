@@ -1,0 +1,527 @@
+"""Browser-driven tests for the Historical Yield Vol card (Issue #197).
+
+Exercises ``historical_yield_vol_view.js`` -- the Middle Office Historical
+Yield Vol card inside Markets -> Bond Yield History -- against one real
+``ThreadingHTTPServer`` and one real headless Chromium page. The one
+read-only route is intercepted at the browser network layer with
+``page.route``, the pattern the sibling Markets browser files already use, so
+the fixtures are deterministic and no Bloomberg session is involved.
+
+Every value below is made up. No Bloomberg value, no real Yield series and no
+real field mnemonic appears here.
+
+The invariant this file exists to hold down: **the page displays the server's
+calculation and computes nothing.** The fixture's figures are deliberately
+not the standard deviation of anything -- if the page ever grew its own
+statistic, the numbers on screen would stop matching the payload and these
+tests would fail.
+
+**CI must not silently skip these tests** -- same reasoning and mechanism as
+the sibling browser-test files: locally, missing Playwright is a skip; in CI
+(``CI=true``) it is a hard collection-time error.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import threading
+import time
+from collections.abc import Iterator
+
+import pytest
+
+from shiori_pricing_lab.app.standalone_option_workbench_server import create_server
+
+_PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
+_RUNNING_IN_CI = os.environ.get("CI") == "true"
+
+if _RUNNING_IN_CI and not _PLAYWRIGHT_AVAILABLE:
+    raise RuntimeError(
+        "Playwright is not installed in CI. The browser regression tests in "
+        "this file are merge-protection, not optional -- CI must install "
+        "'playwright' and run 'playwright install chromium' rather than let "
+        "this file silently skip."
+    )
+
+pytestmark = pytest.mark.skipif(
+    not _PLAYWRIGHT_AVAILABLE,
+    reason="playwright not installed locally (local-only skip; CI hard-fails instead)",
+)
+
+if _PLAYWRIGHT_AVAILABLE:
+    from playwright.sync_api import sync_playwright
+
+_CHROMIUM_EXECUTABLE_PATH = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+
+_ROUTE = "**/api/bloomberg/historical-yield-vol"
+_HISTORY_ROUTE = "**/api/bloomberg/bond-yield-history"
+_ISIN = "US0000000000"
+_FIELD = "SYNTHETIC_TEST_YIELD_FIELD"
+
+# Digits a toFixed/round renderer would silently rewrite, so a page that
+# re-formatted instead of printing the server's own string would be caught.
+_DAILY_TEXT = "0.4000000000000001"
+_ANNUALIZED_TEXT = "6.349803146555018"
+
+
+def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.02) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
+def _is_actually_hidden(page, element_id: str) -> bool:
+    return page.eval_on_selector(f"#{element_id}", "el => getComputedStyle(el).display") == "none"
+
+
+@pytest.fixture()
+def server_url() -> Iterator[str]:
+    server = create_server(host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[0], server.server_address[1]
+    try:
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture()
+def page():
+    with sync_playwright() as p:
+        launch_kwargs = {}
+        if _CHROMIUM_EXECUTABLE_PATH:
+            launch_kwargs["executable_path"] = _CHROMIUM_EXECUTABLE_PATH
+        browser = p.chromium.launch(**launch_kwargs)
+        pg = browser.new_page(viewport={"width": 1672, "height": 941})
+        yield pg
+        browser.close()
+
+
+_FULL_PAYLOAD = {
+    "methodology": "HISTORICAL_YIELD_VOL_MO",
+    "requested_identifier": f"/isin/{_ISIN}",
+    "security": "SYNTHETIC TEST Corp",
+    "yield_field": _FIELD,
+    "field_meaning": None,
+    "field_unit": "PERCENT",
+    "source_system": "BLOOMBERG_DAPI",
+    "acquired_at": "2026-08-31T14:05:00+00:00",
+    "calculated_at": "2026-08-31T14:05:02+00:00",
+    "requested_start_date": "2026-01-01",
+    "requested_end_date": "2026-09-01",
+    "series_observation_count": 200,
+    "requested_observation_count": 180,
+    "observation_count": 180,
+    "observation_dates": ["2026-01-08", "2026-09-01"],
+    "first_observation_date": "2026-01-08",
+    "last_observation_date": "2026-09-01",
+    "yield_change_count": 179,
+    "standard_deviation_convention": "SAMPLE_STDEV_S_DDOF_1",
+    "annualization_trading_days": 252,
+    "annualization_factor": 15.874507866387544,
+    "daily_yield_vol": float(_DAILY_TEXT),
+    "daily_yield_vol_text": _DAILY_TEXT,
+    "annualized_yield_vol": float(_ANNUALIZED_TEXT),
+    "annualized_yield_vol_text": _ANNUALIZED_TEXT,
+    "window_status": "FULL_WINDOW",
+    "blockers": [],
+    "volatility_source": {
+        "source_system": "HISTORICAL_YIELD_VOL_MO",
+        "volatility_basis": "YIELD_VOL",
+        "volatility": float(_ANNUALIZED_TEXT),
+        "status": "ACTIVE",
+        "override_or_fallback_audit": None,
+    },
+    "volatility_source_unavailable_reason": None,
+}
+
+_SHORT_PAYLOAD = {
+    **_FULL_PAYLOAD,
+    "series_observation_count": 90,
+    "observation_count": 90,
+    "yield_change_count": 89,
+    "window_status": "INSUFFICIENT_HISTORY",
+    "blockers": [
+        "INSUFFICIENT_HISTORY: 90 of the requested 180 Yield observations exist. This is "
+        "not a full-window Historical Yield Vol, and no flat extension, benchmark, index "
+        "or VCUB substitute has been applied"
+    ],
+    "volatility_source": {
+        **_FULL_PAYLOAD["volatility_source"],
+        "override_or_fallback_audit": "INSUFFICIENT_HISTORY: calculated from 90 of the "
+        "requested 180 Yield observations (89 Yield Changes).",
+    },
+}
+
+_NO_HISTORY_PAYLOAD = {
+    **_FULL_PAYLOAD,
+    "series_observation_count": 0,
+    "observation_count": 0,
+    "observation_dates": [],
+    "first_observation_date": None,
+    "last_observation_date": None,
+    "yield_change_count": 0,
+    "daily_yield_vol": None,
+    "daily_yield_vol_text": None,
+    "annualized_yield_vol": None,
+    "annualized_yield_vol_text": None,
+    "window_status": "NO_HISTORY",
+    "blockers": [
+        "Bloomberg returned no Yield observations for 'SYNTHETIC TEST Corp' over "
+        "2026-01-01..2026-09-01 -- there is no approved proxy for an instrument with no "
+        "history, so no Historical Yield Vol is available"
+    ],
+    "volatility_source": None,
+    "volatility_source_unavailable_reason": "no Historical Yield Vol is available for "
+    "'SYNTHETIC TEST Corp' (NO_HISTORY)",
+}
+
+_NO_UNIT_PAYLOAD = {
+    **_FULL_PAYLOAD,
+    "field_unit": None,
+    "volatility_source": None,
+    "volatility_source_unavailable_reason": "the unit of SYNTHETIC_TEST_YIELD_FIELD was not "
+    "established by this request, so its Historical Yield Vol cannot be published as "
+    "HISTORICAL_YIELD_VOL_MO",
+}
+
+
+def _route_vol(page, *, payload=None, error: str | None = None, status: int = 400):
+    calls: list[dict] = []
+
+    def _handle(route):
+        calls.append(json.loads(route.request.post_data))
+        if error is not None:
+            route.fulfill(
+                status=status,
+                content_type="application/json",
+                body=json.dumps({"error": error}),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload if payload is not None else _FULL_PAYLOAD),
+        )
+
+    page.route(_ROUTE, _handle)
+    return calls
+
+
+def _route_other_markets_away(page):
+    """Keep the sibling Markets views' own fetches off live Bloomberg."""
+
+    page.route(
+        "**/api/bloomberg/option-discount-curve",
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "no Bloomberg in this test"}),
+        ),
+    )
+    page.route(
+        "**/api/vol-surface/atm/list",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"surfaces": [], "database": "test.sqlite3"}),
+        ),
+    )
+    page.route(
+        _HISTORY_ROUTE,
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body=json.dumps({"error": "no Bloomberg in this test"}),
+        ),
+    )
+
+
+def _open_card(page, server_url: str) -> None:
+    page.goto(f"{server_url}/")
+    page.click("#nav-markets")
+    _wait_until(lambda: not _is_actually_hidden(page, "view-markets"))
+    page.click("#markets-tab-yield-history")
+    _wait_until(lambda: not _is_actually_hidden(page, "markets-panel-yield-history"))
+
+
+def _fill_query(page, *, identifier=_ISIN, field=_FIELD, count="180", unit="PERCENT"):
+    page.fill("#byh-identifier", identifier)
+    page.fill("#byh-yield-field", field)
+    page.fill("#byh-start", "2026-01-01")
+    page.fill("#byh-end", "2026-09-01")
+    page.fill("#hyv-observation-count", count)
+    page.fill("#hyv-field-unit", unit)
+
+
+def _calculate(page) -> None:
+    page.click("#hyv-calculate-btn")
+
+
+def _wait_for_result(page) -> None:
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-result"))
+
+
+# --- the card is there, and starts idle ---------------------------------------
+
+
+def test_the_card_lives_in_the_bond_yield_history_view_and_starts_idle(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+
+    assert not _is_actually_hidden(page, "hyv-idle")
+    assert _is_actually_hidden(page, "hyv-result")
+    assert page.inner_text("#hyv-methodology").strip() == "HISTORICAL_YIELD_VOL_MO"
+    # Opening the tab sends nothing on its own.
+    assert page.evaluate("() => window.__shioriTestHistoricalYieldVolRequestedRoutes()") == []
+
+
+def test_the_window_defaults_to_middle_offices_confirmed_180(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+
+    assert page.input_value("#hyv-observation-count") == "180"
+
+
+# --- what the page sends ------------------------------------------------------
+
+
+def test_the_query_above_is_reused_and_the_count_is_sent_verbatim(server_url, page) -> None:
+    _route_other_markets_away(page)
+    calls = _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page, count="180")
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert calls == [
+        {
+            "bond_identifier": _ISIN,
+            "yield_field": _FIELD,
+            "start_date": "2026-01-01",
+            "end_date": "2026-09-01",
+            "requested_observation_count": 180,
+            "field_unit": "PERCENT",
+        }
+    ]
+
+
+def test_an_empty_unit_box_sends_no_unit_at_all(server_url, page) -> None:
+    _route_other_markets_away(page)
+    calls = _route_vol(page, payload=_NO_UNIT_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page, unit="")
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert "field_unit" not in calls[0]
+
+
+def test_no_yield_field_sends_no_request_at_all(server_url, page) -> None:
+    _route_other_markets_away(page)
+    calls = _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page, field="")
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert calls == []
+    assert "will not guess one" in page.inner_text("#hyv-error-detail")
+
+
+def test_a_non_integer_observation_count_sends_no_request_at_all(server_url, page) -> None:
+    _route_other_markets_away(page)
+    calls = _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page, count="180.5")
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert calls == []
+
+
+def test_the_card_calls_only_its_own_route(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    routes = page.evaluate("() => window.__shioriTestHistoricalYieldVolRequestedRoutes()")
+    assert routes == ["/api/bloomberg/historical-yield-vol"]
+
+
+# --- what the page displays ---------------------------------------------------
+
+
+def test_the_displayed_figures_are_the_servers_exact_digits(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    # Digit-for-digit the payload's own strings: no rounding, no toFixed, no
+    # re-formatting through a JavaScript number.
+    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+    assert page.inner_text("#hyv-daily").strip() == _DAILY_TEXT
+
+
+def test_there_is_no_browser_side_volatility_statistic(server_url, page) -> None:
+    _route_other_markets_away(page)
+    # A payload whose figures are deliberately unrelated to any statistic of
+    # the observations: a page computing its own would disagree with them.
+    _route_vol(page, payload={**_FULL_PAYLOAD, "annualized_yield_vol_text": "1234.5"})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-annualized").strip() == "1234.5"
+    payload = page.evaluate("() => window.__shioriTestHistoricalYieldVolPayload()")
+    assert payload["annualized_yield_vol_text"] == "1234.5"
+
+
+def test_the_full_provenance_is_on_screen(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-methodology-value").strip() == "HISTORICAL_YIELD_VOL_MO"
+    assert page.inner_text("#hyv-security").strip() == "SYNTHETIC TEST Corp"
+    assert page.inner_text("#hyv-field").strip() == _FIELD
+    assert page.inner_text("#hyv-unit").strip() == "PERCENT"
+    assert page.inner_text("#hyv-source").strip() == "BLOOMBERG_DAPI"
+    assert page.inner_text("#hyv-requested-count").strip() == "180"
+    assert "180 of 200" in page.inner_text("#hyv-actual-count")
+    assert page.inner_text("#hyv-change-count").strip() == "179"
+    assert page.inner_text("#hyv-first-observation").strip() == "2026-01-08"
+    assert page.inner_text("#hyv-last-observation").strip() == "2026-09-01"
+    assert page.inner_text("#hyv-stdev-convention").strip() == "SAMPLE_STDEV_S_DDOF_1"
+    assert "252" in page.inner_text("#hyv-annualization")
+    assert page.inner_text("#hyv-acquired-at").strip() == "2026-08-31T14:05:00+00:00"
+    assert page.inner_text("#hyv-calculated-at").strip() == "2026-08-31T14:05:02+00:00"
+
+
+def test_a_full_window_shows_the_normalized_source_and_no_blockers(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-status").strip() == "FULL_WINDOW"
+    assert _is_actually_hidden(page, "hyv-blockers")
+    detail = page.inner_text("#hyv-source-detail")
+    assert "HISTORICAL_YIELD_VOL_MO" in detail
+    assert "YIELD_VOL" in detail
+
+
+def test_an_unconfirmed_unit_says_so_rather_than_naming_one(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload=_NO_UNIT_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page, unit="")
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert "not confirmed" in page.inner_text("#hyv-unit")
+    assert "not confirmed" in page.inner_text("#hyv-annualized-unit")
+    assert "cannot be published" in page.inner_text("#hyv-source-detail")
+
+
+# --- short and absent history -------------------------------------------------
+
+
+def test_a_short_window_never_looks_like_a_full_one(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload=_SHORT_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-status").strip() == "INSUFFICIENT_HISTORY"
+    assert not _is_actually_hidden(page, "hyv-blockers")
+    assert "90 of the requested 180" in page.inner_text("#hyv-blocker-list")
+    assert "90 of 90" in page.inner_text("#hyv-actual-count")
+    assert "INSUFFICIENT_HISTORY" in page.inner_text("#hyv-source-detail")
+
+
+def test_zero_history_shows_no_number_and_no_substitute(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload=_NO_HISTORY_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-status").strip() == "NO_HISTORY"
+    assert page.inner_text("#hyv-annualized").strip() == "—"
+    assert page.inner_text("#hyv-daily").strip() == "—"
+    assert "no approved proxy" in page.inner_text("#hyv-blocker-list")
+    assert "no Historical Yield Vol is available" in page.inner_text("#hyv-source-detail")
+
+
+# --- refusals -----------------------------------------------------------------
+
+
+def test_a_server_refusal_is_shown_verbatim(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        error="Bloomberg returned 1 row(s) with no Yield value inside the selected window",
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "no Yield value" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_a_malformed_answer_is_refused_rather_than_displayed(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={"window_status": "FULL_WINDOW"})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+# --- no side effects on the #196 view or on pricing ---------------------------
+
+
+def test_calculating_does_not_disturb_the_196_history_view(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    # The #196 view was never loaded, and this card did not load it: its own
+    # idle state still stands and its payload is still empty.
+    assert not _is_actually_hidden(page, "byh-idle")
+    assert page.evaluate("() => window.__shioriTestYieldHistoryPayload()") is None
+    assert page.evaluate("() => window.__shioriTestYieldHistoryRequestedRoutes()") == []

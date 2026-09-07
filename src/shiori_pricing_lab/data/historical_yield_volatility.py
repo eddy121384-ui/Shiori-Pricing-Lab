@@ -1,0 +1,458 @@
+"""``calculate_historical_yield_volatility``: Middle Office-style Historical
+Yield Volatility from one bond's own Bloomberg Yield history (Issue #197).
+
+**What this module is.** One canonical, deterministic calculator that reads a
+:class:`~shiori_pricing_lab.data.bloomberg_bond_yield_history.BloombergBondYieldHistory`
+-- the merged Issue #196 contract, the only historical bond-Yield path in this
+repository -- and turns it into an auditable Historical Yield Vol:
+
+``180 Yield observations -> 179 daily Yield Changes -> STDEV.S (ddof=1)
+-> x sqrt(252)``
+
+Every number needed to reproduce that result travels with it: which security
+Bloomberg resolved, which Yield mnemonic was asked for, the requested date
+range, the requested and the *actual* observation counts, the exact dates
+used, the number of changes, the standard-deviation convention, the
+annualization factor, the daily and the annualized figure, the unit, both
+timestamps, and any blocker.
+
+**The convention is PROVISIONAL, not methodology-final (Issue #197).** Middle
+Office has confirmed the underlying's own Yield, daily Yield *Change*, a
+180-observation 6M-style window, sqrt(252) annualization, and that an
+instrument with no history has no approved proxy. It has *not* yet confirmed
+179-vs-180 changes or STDEV.S-vs-STDEV.P. This module implements the issue's
+explicitly provisional choice -- 179 changes, ddof=1 -- and names it in the
+result (``standard_deviation_convention``) precisely so a parity run against
+one Middle Office reference case can disprove it cheaply. Nothing here should
+be read as evidence that the provisional half is settled.
+
+**What this module deliberately is not.**
+
+- It acquires nothing. It never opens a Bloomberg session, never widens a
+  date range, and never re-requests a field. It is handed a series that the
+  #196 loader already validated, and it is the only consumer-side statistic
+  in this slice.
+- It fills nothing. A date Bloomberg did not answer for is simply not in the
+  series, and this module neither notices its absence nor manufactures it: no
+  interpolation, forward-fill, back-fill, smoothing, winsorization,
+  resampling, or synthetic observation exists here. Consequently a "daily"
+  Yield Change is the change between two *consecutive returned observations*,
+  which under Bloomberg's ``ACTIVE_DAYS_ONLY`` is the natural trading-day
+  step and is exactly what a 180-trading-day Middle Office window means.
+- It converts no units. The standard deviation of a difference carries the
+  unit of the values differenced, so the vol this module reports is in the
+  Yield field's own unit -- ``field_unit``, carried verbatim from #196 and
+  ``None`` when the request did not establish it. There is no percent/decimal/
+  bp conversion helper here because performing one would require knowing a
+  unit that #196 deliberately refuses to infer.
+- It prices nothing. The output is a **Yield Vol**. This repository has no
+  approved Yield-Vol -> Price-Vol conversion -- ``pricing/
+  bli_mvp_required_input_guard.py`` refuses ``YIELD_VOL`` outright, in both
+  the bundle and the standalone path, saying so in as many words -- so this
+  result stops at the normalized volatility layer and enters no pricing
+  chain. Inventing that conversion is a separate, separately approved issue.
+- It chooses no proxy. Zero observations is an answer (``NO_HISTORY``), not a
+  cue to reach for a benchmark, an index, VCUB, ``VOLATILITY_90D``, or a flat
+  synthetic number.
+
+**Window selection.** The window is the *tail* of the returned series: the
+most recent ``requested_observation_count`` observations. A trader who asks
+Bloomberg for a wider date range than the window still gets exactly the most
+recent N observations, and the first/last dates actually used are reported so
+the window is never taken on trust.
+
+**Fail-closed conditions**, every one raising
+:class:`HistoricalYieldVolInputError` before any statistic exists:
+
+- a ``requested_observation_count`` that is not an ``int`` >= 3 (two
+  observations make one change, and one change has no ddof=1 standard
+  deviation -- this is arithmetic, not a methodology choice);
+- a series whose observation dates are not strictly ascending (the #196
+  loader guarantees this; the guard exists so a hand-built or future series
+  cannot quietly reorder the changes);
+- a non-finite Yield value anywhere in the selected window;
+- a row inside the selected window that Bloomberg returned with **no value**.
+  This one is a refusal on purpose. Dropping the row would compute a change
+  across the hole -- a two-day move recorded as a one-day move -- and keeping
+  it would require a number nobody observed. Both are inventions, and which
+  one Middle Office would sanction is not established, so the calculation
+  stops and names the dates instead.
+
+**Statuses.** ``FULL_WINDOW`` (actual == requested), ``INSUFFICIENT_HISTORY``
+(some history, but fewer observations than requested), ``NO_HISTORY`` (none at
+all, blocking). An ``INSUFFICIENT_HISTORY`` result still carries whatever the
+available observations support, but it can never be mistaken for a full
+window: the status, both counts, and a blocker line travel with it. The "use
+the longest available vol flat for the missing horizon" behaviour Middle
+Office once mentioned is **not** implemented -- doing so needs an expiry ->
+lookback mapping this repository does not have and Issue #197 forbids
+inventing.
+
+**No clock inside the statistic.** ``calculated_at`` is provenance, read once
+after the arithmetic is complete; no window boundary, count, or value depends
+on today's date.
+"""
+
+from __future__ import annotations
+
+import math
+import statistics
+from dataclasses import dataclass
+from datetime import date, datetime
+from enum import StrEnum
+
+from shiori_pricing_lab.data._validation import _require_finite_number
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLIMarketDataStatus,
+    BLIVolatilityBasis,
+    BLIVolatilityInput,
+)
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import BloombergBondYieldHistory
+
+# The canonical normalized volatility-source label for this calculation.
+# Deliberately distinct from Bloomberg VCUB / market-implied vol, from a
+# manual override, and from PRICE_VOL / EQUIVALENT_PRICE_VOL: this is a
+# Middle Office-style historical statistic on the bond's own Yield, and a
+# consumer must be able to tell it apart from all of them at a glance.
+HISTORICAL_YIELD_VOL_MO_SOURCE = "HISTORICAL_YIELD_VOL_MO"
+
+# Middle Office's confirmed 6M-style window and annualization.
+MIDDLE_OFFICE_6M_OBSERVATION_COUNT = 180
+ANNUALIZATION_TRADING_DAYS = 252
+ANNUALIZATION_FACTOR = math.sqrt(ANNUALIZATION_TRADING_DAYS)
+
+# PROVISIONAL (Issue #197): sample standard deviation, Excel's STDEV.S.
+# Named in every result so the Middle Office parity gate can disprove it.
+STANDARD_DEVIATION_CONVENTION = "SAMPLE_STDEV_S_DDOF_1"
+
+# ddof=1 needs two changes, and two changes need three observations.
+_MINIMUM_OBSERVATIONS_FOR_STDEV = 3
+_MINIMUM_CHANGES_FOR_STDEV = 2
+
+
+class HistoricalYieldVolInputError(ValueError):
+    """The supplied series or contract cannot produce an honest statistic."""
+
+
+class HistoricalYieldVolUnavailableError(ValueError):
+    """This result cannot be published as a normalized volatility source."""
+
+
+class HistoricalYieldVolStatus(StrEnum):
+    """How much of the requested observation window actually existed."""
+
+    FULL_WINDOW = "FULL_WINDOW"
+    INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+    NO_HISTORY = "NO_HISTORY"
+
+
+@dataclass(frozen=True)
+class HistoricalYieldVolResult:
+    """One Historical Yield Vol calculation, with everything needed to redo it.
+
+    ``field_unit`` is the unit of ``daily_yield_vol`` and
+    ``annualized_yield_vol`` as well as of the Yield observations: a standard
+    deviation of differences carries the unit of what was differenced, and
+    nothing here rescales. ``None`` means the request did not establish a
+    unit (#196 never infers one), which a consumer must display as unknown
+    rather than assume.
+
+    ``daily_yield_vol``/``annualized_yield_vol`` are ``None`` exactly when
+    ``blockers`` is non-empty: a result with no number always says why.
+    """
+
+    # -- Provenance carried verbatim from the #196 acquisition --------------
+    requested_identifier: str
+    security: str
+    yield_field: str
+    field_meaning: str | None
+    field_unit: str | None
+    source_system: str
+    acquired_at: str
+    requested_start_date: date
+    requested_end_date: date
+
+    # -- The window this calculation actually used -------------------------
+    series_observation_count: int
+    requested_observation_count: int
+    observation_count: int
+    observation_dates: tuple[date, ...]
+    first_observation_date: date | None
+    last_observation_date: date | None
+    yield_change_count: int
+
+    # -- The convention, stated rather than assumed ------------------------
+    standard_deviation_convention: str
+    annualization_trading_days: int
+    annualization_factor: float
+
+    # -- The result --------------------------------------------------------
+    daily_yield_vol: float | None
+    annualized_yield_vol: float | None
+    window_status: HistoricalYieldVolStatus
+    blockers: tuple[str, ...]
+    calculated_at: str
+
+    @property
+    def is_usable(self) -> bool:
+        """Whether this result carries a Historical Yield Vol at all."""
+
+        return self.annualized_yield_vol is not None
+
+
+def _calculation_now() -> datetime:
+    """One offset-aware calculation timestamp, read from the platform clock.
+
+    Called only once the arithmetic is finished, so nothing in the statistic
+    can depend on it. Module-level for the same reason ``bloomberg_bond_
+    yield_history._acquisition_now`` is: tests monkeypatch it and no real
+    clock is read in CI.
+    """
+
+    return datetime.now().astimezone()
+
+
+def validate_requested_observation_count(value: object) -> int:
+    """Return ``value`` as a usable observation contract, or refuse it.
+
+    Public so a caller can refuse a bad contract *before* spending a
+    Bloomberg round trip on a request whose result it would then throw away
+    -- the same "caller-input problems raise before anything is sent"
+    convention the #196 loader already follows. The calculator calls it too,
+    so the check cannot drift between the two.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HistoricalYieldVolInputError(
+            f"requested_observation_count must be an int, got {value!r}"
+        )
+    if value < _MINIMUM_OBSERVATIONS_FOR_STDEV:
+        raise HistoricalYieldVolInputError(
+            "requested_observation_count must be at least "
+            f"{_MINIMUM_OBSERVATIONS_FOR_STDEV} -- {value} observations yield "
+            f"{max(value - 1, 0)} Yield Change(s), and the {STANDARD_DEVIATION_CONVENTION} "
+            f"convention needs at least {_MINIMUM_CHANGES_FOR_STDEV}"
+        )
+    return value
+
+
+def _require_strictly_ascending(history: BloombergBondYieldHistory) -> None:
+    previous: date | None = None
+    for observation in history.observations:
+        if previous is not None and observation.observation_date <= previous:
+            raise HistoricalYieldVolInputError(
+                "historical Yield observations must be strictly ascending by date before "
+                f"a Yield Change is taken -- {observation.observation_date.isoformat()} "
+                f"follows {previous.isoformat()} for {history.security!r}"
+            )
+        previous = observation.observation_date
+
+
+def calculate_historical_yield_volatility(
+    history: BloombergBondYieldHistory,
+    *,
+    requested_observation_count: int = MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+) -> HistoricalYieldVolResult:
+    """Return the Historical Yield Vol of ``history``'s most recent window.
+
+    ``history`` is the underlying bond's **own** Yield series, exactly as the
+    Issue #196 loader returned it. ``requested_observation_count`` is the
+    explicit observation contract; it defaults to Middle Office's confirmed
+    180-observation 6M-style window and is never derived from an expiry, a
+    tenor, or a date range.
+
+    Raises :class:`HistoricalYieldVolInputError` for every fail-closed
+    condition in the module docstring. Returns a result with
+    ``annualized_yield_vol=None`` and a non-empty ``blockers`` for the two
+    honest "no number" cases -- no history at all, and history too short to
+    support the standard-deviation convention.
+    """
+
+    if not isinstance(history, BloombergBondYieldHistory):
+        raise HistoricalYieldVolInputError(
+            "history must be a BloombergBondYieldHistory produced by the Issue #196 "
+            f"loader, got {type(history).__name__}"
+        )
+    requested = validate_requested_observation_count(requested_observation_count)
+    _require_strictly_ascending(history)
+
+    window = history.observations[-requested:]
+    dates = tuple(observation.observation_date for observation in window)
+
+    unvalued = [
+        observation.observation_date.isoformat()
+        for observation in window
+        if observation.yield_value is None
+    ]
+    if unvalued:
+        raise HistoricalYieldVolInputError(
+            f"Bloomberg returned {len(unvalued)} row(s) with no Yield value inside the "
+            f"selected {len(window)}-observation window for {history.security!r} "
+            f"({', '.join(unvalued)}) -- a Yield Change is neither taken across such a "
+            "row nor invented for it, so this window produces no Historical Yield Vol"
+        )
+
+    values: list[float] = []
+    for observation in window:
+        try:
+            _require_finite_number(
+                observation.yield_value, f"{history.yield_field} on {observation.observation_date}"
+            )
+        except ValueError as exc:
+            # Converted, not propagated: this module promises one error type
+            # for every fail-closed condition, and the workbench route maps
+            # that type to an HTTP 400 carrying the refusal verbatim.
+            raise HistoricalYieldVolInputError(str(exc)) from exc
+        values.append(float(observation.yield_value))  # type: ignore[arg-type]
+
+    # Y_t - Y_{t-1} between consecutive returned observations, in the field's
+    # own unit. Ordinary float subtraction on purpose: it is the same
+    # arithmetic the Middle Office spreadsheet performs on the same values.
+    # `strict=False` is deliberate, not an oversight: pairing a series with
+    # its own tail is the one place unequal lengths are the point -- N values
+    # make exactly N-1 changes, which is the 180 -> 179 contract itself.
+    changes = [
+        current - previous for previous, current in zip(values, values[1:], strict=False)
+    ]
+
+    blockers: list[str] = []
+    if not window:
+        status = HistoricalYieldVolStatus.NO_HISTORY
+        blockers.append(
+            f"Bloomberg returned no Yield observations for {history.security!r} over "
+            f"{history.requested_start_date.isoformat()}.."
+            f"{history.requested_end_date.isoformat()} -- there is no approved proxy for an "
+            "instrument with no history, so no Historical Yield Vol is available"
+        )
+    elif len(window) < requested:
+        status = HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+        blockers.append(
+            f"INSUFFICIENT_HISTORY: {len(window)} of the requested {requested} Yield "
+            "observations exist. This is not a full-window Historical Yield Vol, and no "
+            "flat extension, benchmark, index or VCUB substitute has been applied"
+        )
+    else:
+        status = HistoricalYieldVolStatus.FULL_WINDOW
+
+    if window and len(changes) < _MINIMUM_CHANGES_FOR_STDEV:
+        blockers.append(
+            f"{len(changes)} Yield Change(s) is below the {_MINIMUM_CHANGES_FOR_STDEV} the "
+            f"{STANDARD_DEVIATION_CONVENTION} convention needs -- no standard deviation is "
+            "reported for this window"
+        )
+
+    if len(changes) >= _MINIMUM_CHANGES_FOR_STDEV:
+        # Sample standard deviation, ddof=1 -- Excel's STDEV.S. The stdlib
+        # accumulates the sum of squares in exact rational arithmetic, so the
+        # answer is the correctly-rounded value of the ddof=1 formula over
+        # these changes rather than an accumulation-order artifact.
+        daily: float | None = statistics.stdev(changes)
+        annualized: float | None = daily * ANNUALIZATION_FACTOR
+    else:
+        daily = None
+        annualized = None
+
+    return HistoricalYieldVolResult(
+        requested_identifier=history.requested_identifier,
+        security=history.security,
+        yield_field=history.yield_field,
+        field_meaning=history.field_meaning,
+        field_unit=history.field_unit,
+        source_system=history.source_system,
+        acquired_at=history.acquired_at,
+        requested_start_date=history.requested_start_date,
+        requested_end_date=history.requested_end_date,
+        series_observation_count=len(history.observations),
+        requested_observation_count=requested,
+        observation_count=len(window),
+        observation_dates=dates,
+        first_observation_date=dates[0] if dates else None,
+        last_observation_date=dates[-1] if dates else None,
+        yield_change_count=len(changes),
+        standard_deviation_convention=STANDARD_DEVIATION_CONVENTION,
+        annualization_trading_days=ANNUALIZATION_TRADING_DAYS,
+        annualization_factor=ANNUALIZATION_FACTOR,
+        daily_yield_vol=daily,
+        annualized_yield_vol=annualized,
+        window_status=status,
+        blockers=tuple(blockers),
+        calculated_at=_calculation_now().isoformat(timespec="seconds"),
+    )
+
+
+def historical_yield_vol_volatility_input(
+    result: HistoricalYieldVolResult,
+) -> BLIVolatilityInput:
+    """Publish ``result`` as Shiori's normalized ``HISTORICAL_YIELD_VOL_MO`` source.
+
+    The already-reviewed ``BLIVolatilityInput`` is the one normalized
+    volatility contract in this repository, so this function constructs one
+    rather than adding a second schema beside it -- the same
+    "one model, a canonical source label for its existing ``source_system``"
+    shape ``pricing/bli_effective_forward.py`` established for the Forward.
+    The basis is ``YIELD_VOL``, which the MVP/standalone required-input guard
+    refuses outright: this source is therefore visible and auditable without
+    being able to reach Black-76 through any existing path.
+
+    Nothing is overwritten or replaced here. A VCUB capture, a manual
+    override and this historical statistic are three separately labelled
+    inputs; producing one never consumes another.
+
+    Raises :class:`HistoricalYieldVolUnavailableError` when the result cannot
+    honestly enter that layer:
+
+    - it carries no volatility (``NO_HISTORY``, or too few changes);
+    - its ``field_unit`` is unknown. ``BLIVolatilityInput`` has no unit
+      field, so an unlabelled number there is indistinguishable from a
+      decimal, a percent and a basis-point figure. #196 refuses to infer a
+      unit, and this gate refuses to assume one on its behalf;
+    - the window's standard deviation is exactly zero. ``BLIVolatilityInput``
+      requires a positive volatility, and a degenerate window is reported as
+      what it is rather than published as a tradeable-looking number.
+
+    An ``INSUFFICIENT_HISTORY`` result is publishable, but never silently:
+    its ``override_or_fallback_audit`` states both counts, so a consumer that
+    reads only the normalized layer still cannot mistake it for a full
+    180-observation window.
+    """
+
+    if not isinstance(result, HistoricalYieldVolResult):
+        raise HistoricalYieldVolUnavailableError(
+            f"result must be a HistoricalYieldVolResult, got {type(result).__name__}"
+        )
+    if result.annualized_yield_vol is None:
+        raise HistoricalYieldVolUnavailableError(
+            f"no Historical Yield Vol is available for {result.security!r} "
+            f"({result.window_status.value}): {'; '.join(result.blockers)}"
+        )
+    if result.field_unit is None:
+        raise HistoricalYieldVolUnavailableError(
+            f"the unit of {result.yield_field} was not established by this request, so its "
+            f"Historical Yield Vol cannot be published as {HISTORICAL_YIELD_VOL_MO_SOURCE} "
+            "-- confirm the field's unit on the workstation and supply it"
+        )
+    if not result.annualized_yield_vol > 0:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol of the selected {result.observation_count}-observation "
+            f"window for {result.security!r} is {result.annualized_yield_vol!r}, which is not "
+            "positive -- every Yield Change in the window was identical, so this degenerate "
+            "window is reported as what it is rather than published as a volatility"
+        )
+
+    audit: str | None = None
+    if result.window_status is not HistoricalYieldVolStatus.FULL_WINDOW:
+        audit = (
+            f"{result.window_status.value}: calculated from {result.observation_count} of the "
+            f"requested {result.requested_observation_count} Yield observations "
+            f"({result.yield_change_count} Yield Changes), "
+            f"{result.standard_deviation_convention} x sqrt({result.annualization_trading_days}). "
+            "No flat extension, benchmark, index or VCUB substitute applied."
+        )
+
+    return BLIVolatilityInput(
+        volatility=result.annualized_yield_vol,
+        volatility_basis=BLIVolatilityBasis.YIELD_VOL,
+        source_system=HISTORICAL_YIELD_VOL_MO_SOURCE,
+        status=BLIMarketDataStatus.ACTIVE,
+        override_or_fallback_audit=audit,
+    )
