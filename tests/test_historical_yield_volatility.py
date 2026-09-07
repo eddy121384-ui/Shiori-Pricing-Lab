@@ -46,12 +46,29 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
 _START = date(2026, 1, 1)
 
 
+def _default_end_date(dates: list | None, values: list) -> date:
+    """The latest real date in the fixture, or a span wide enough for the default.
+
+    Deliberately tolerant of the deliberately-malformed date lists a few tests
+    pass: those exist to be refused by the calculator's own date typing, and
+    the fixture must not raise first and hide which guard fired.
+    """
+
+    if dates:
+        real = [d for d in dates if type(d) is date]
+        if real:
+            return max(real)
+    return _START + timedelta(days=max(len(values), 1) * 2)
+
+
 def _history(
     values: list[float | None],
     *,
     field_unit: str | None = "PERCENT",
     dates: list[date] | None = None,
     security: str = "/isin/US0000000000",
+    requested_start_date: date | None = None,
+    requested_end_date: date | None = None,
 ) -> BloombergBondYieldHistory:
     """One synthetic #196 series: consecutive dates unless ``dates`` says otherwise."""
 
@@ -71,8 +88,14 @@ def _history(
         yield_field="SYNTHETIC_TEST_YIELD_FIELD",
         field_meaning="synthetic test field",
         field_unit=field_unit,
-        requested_start_date=_START,
-        requested_end_date=_START + timedelta(days=max(len(values), 1) * 2),
+        # Derived from the dates actually used, so a fixture is always
+        # internally consistent: a real #196 series can never carry an
+        # observation outside the range it reports, because the loader
+        # refuses one, and the calculator now refuses one too.
+        requested_start_date=_START if requested_start_date is None else requested_start_date,
+        requested_end_date=(
+            _default_end_date(dates, values) if requested_end_date is None else requested_end_date
+        ),
         observations=observations,
         source_system="BLOOMBERG_DAPI",
         acquired_at="2026-09-07T09:00:00+08:00",
@@ -332,6 +355,37 @@ def test_observation_dates_are_typed_before_they_are_ordered(dates):
         )
 
     assert "calendar date" in str(excinfo.value)
+
+
+def test_observations_outside_the_declared_range_fail_closed():
+    # The result copies the declared range verbatim and the route serializes
+    # it as this calculation's provenance, so a window built from observations
+    # outside it would publish false request provenance (Codex review, #200).
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history(
+                [4.00, 4.10, 3.80, 4.30],
+                requested_start_date=_START + timedelta(days=1),
+                requested_end_date=_START + timedelta(days=2),
+            ),
+            requested_observation_count=4,
+        )
+
+    assert "outside the declared range" in str(excinfo.value)
+
+
+def test_an_inverted_declared_range_fails_closed():
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(
+            _history(
+                [4.00, 4.10, 3.80, 4.30],
+                requested_start_date=_START + timedelta(days=90),
+                requested_end_date=_START,
+            ),
+            requested_observation_count=4,
+        )
+
+    assert "after it ends" in str(excinfo.value)
 
 
 def test_observations_out_of_chronological_order_fail_closed():
@@ -724,6 +778,57 @@ def test_a_result_whose_counts_contradict_themselves_is_never_published(override
 
     with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
         historical_yield_vol_volatility_input(result)
+
+    assert expected in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"standard_deviation_convention": "POPULATION_STDEV_P"}, "cannot be published"),
+        ({"annualization_trading_days": 365}, "annualizes by sqrt(252)"),
+        ({"annualization_factor": 19.1}, "annualizes by sqrt(252)"),
+    ],
+)
+def test_a_result_claiming_another_methodology_is_never_published(overrides, expected):
+    """The canonical source label names one methodology.
+
+    A result claiming POPULATION/365 published an audit asserting exactly that
+    under HISTORICAL_YIELD_VOL_MO, whatever its number was computed with
+    (Codex review, PR #200).
+    """
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(dataclasses.replace(base, **overrides))
+
+    assert expected in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("daily", "expected"),
+    [
+        (None, "not a finite number"),
+        ("x", "not a finite number"),
+        (float("inf"), "not a finite number"),
+        (float("nan"), "not a finite number"),
+        (-0.4, "never negative"),
+        (99.0, "times sqrt(252)"),
+    ],
+)
+def test_the_daily_figure_is_validated_alongside_the_annualized_one(daily, expected):
+    # The gate was one-sided: a missing, non-finite or simply wrong daily
+    # sigma published beside a valid annualized one, and the card drew a dash
+    # or a bogus daily headline next to a live source.
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        historical_yield_vol_volatility_input(dataclasses.replace(base, daily_yield_vol=daily))
 
     assert expected in str(excinfo.value)
 

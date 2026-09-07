@@ -342,7 +342,34 @@ def _require_finite_step(
             )
 
 
-def _require_strictly_ascending(history: BloombergBondYieldHistory) -> None:
+def _require_consistent_observation_dates(history: BloombergBondYieldHistory) -> None:
+    """Every observation is a calendar date, ascending, and inside the range.
+
+    The range half matters because the result copies
+    ``requested_start_date``/``requested_end_date`` verbatim and the route
+    serializes them as this calculation's provenance. A window built from
+    observations outside the range it reports is published as an ``ACTIVE``
+    risk source carrying false request provenance (Codex review, PR #200).
+    The #196 loader already refuses an out-of-range observation for the same
+    reason; this repeats the rule for producers that are not it.
+    """
+
+    for name, value in (
+        ("requested_start_date", history.requested_start_date),
+        ("requested_end_date", history.requested_end_date),
+    ):
+        if not isinstance(value, date) or isinstance(value, datetime):
+            raise HistoricalYieldVolInputError(
+                f"{name} must be a calendar date for {history.security!r}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    if history.requested_start_date > history.requested_end_date:
+        raise HistoricalYieldVolInputError(
+            f"the declared range for {history.security!r} starts "
+            f"{history.requested_start_date.isoformat()}, after it ends "
+            f"{history.requested_end_date.isoformat()}"
+        )
+
     previous: date | None = None
     for observation in history.observations:
         # Typed before compared (Codex review, PR #200). `<=` on a mixed
@@ -364,6 +391,17 @@ def _require_strictly_ascending(history: BloombergBondYieldHistory) -> None:
                 "historical Yield observations must be strictly ascending by date before "
                 f"a Yield Change is taken -- {observation.observation_date.isoformat()} "
                 f"follows {previous.isoformat()} for {history.security!r}"
+            )
+        if (
+            observation.observation_date < history.requested_start_date
+            or observation.observation_date > history.requested_end_date
+        ):
+            raise HistoricalYieldVolInputError(
+                f"observation {observation.observation_date.isoformat()} for "
+                f"{history.security!r} falls outside the declared range "
+                f"{history.requested_start_date.isoformat()}.."
+                f"{history.requested_end_date.isoformat()} -- a window cannot report a "
+                "request range its own observations do not sit in"
             )
         previous = observation.observation_date
 
@@ -394,7 +432,7 @@ def calculate_historical_yield_volatility(
             f"loader, got {type(history).__name__}"
         )
     requested = validate_requested_observation_count(requested_observation_count)
-    _require_strictly_ascending(history)
+    _require_consistent_observation_dates(history)
 
     window = history.observations[-requested:]
     dates = tuple(observation.observation_date for observation in window)
@@ -670,6 +708,76 @@ def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
             f"observations from a series of {result.series_observation_count}"
         )
 
+    # The canonical source label names one methodology. A result claiming a
+    # different convention or annualization publishes an audit asserting an
+    # unapproved method under this module's name, whatever its number was
+    # actually computed with (Codex review, PR #200).
+    if result.standard_deviation_convention != STANDARD_DEVIATION_CONVENTION:
+        raise HistoricalYieldVolUnavailableError(
+            f"{HISTORICAL_YIELD_VOL_MO_SOURCE} is the "
+            f"{STANDARD_DEVIATION_CONVENTION} convention; this result for "
+            f"{result.security!r} claims {result.standard_deviation_convention!r} and "
+            "cannot be published under that label"
+        )
+    if (
+        result.annualization_trading_days != ANNUALIZATION_TRADING_DAYS
+        or result.annualization_factor != ANNUALIZATION_FACTOR
+    ):
+        raise HistoricalYieldVolUnavailableError(
+            f"{HISTORICAL_YIELD_VOL_MO_SOURCE} annualizes by sqrt("
+            f"{ANNUALIZATION_TRADING_DAYS}); this result for {result.security!r} claims "
+            f"sqrt({result.annualization_trading_days!r}) = "
+            f"{result.annualization_factor!r}"
+        )
+
+    # The figure is validated before anything computes with it or compares
+    # against it (Codex review, PR #200). A string or complex raised TypeError
+    # out of the normalization, inf reached BLIVolatilityInput and raised its
+    # raw ValueError, and NaN was reported as a flat window it never was --
+    # and checking it here rather than after the daily comparison keeps the
+    # message about the figure that is actually malformed.
+    try:
+        _require_finite_number(result.annualized_yield_vol, "annualized_yield_vol")
+    except (ValueError, OverflowError, TypeError) as exc:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol carried by this result for {result.security!r} is "
+            f"not a finite number ({result.annualized_yield_vol!r}), so it cannot be "
+            f"published as {HISTORICAL_YIELD_VOL_MO_SOURCE}: {exc}"
+        ) from exc
+
+    # Both figures exist together and follow the stated annualization. The
+    # gate used to be one-sided, so a result with a missing, non-finite or
+    # simply wrong daily sigma published beside a valid annualized one, and
+    # the card drew a dash or a bogus daily headline next to a live source.
+    try:
+        _require_finite_number(result.daily_yield_vol, "daily_yield_vol")
+    except (ValueError, OverflowError, TypeError) as exc:
+        raise HistoricalYieldVolUnavailableError(
+            f"the daily standard deviation carried by this result for {result.security!r} "
+            f"is not a finite number ({result.daily_yield_vol!r}): {exc}"
+        ) from exc
+    if result.daily_yield_vol < 0:
+        raise HistoricalYieldVolUnavailableError(
+            f"the daily standard deviation for {result.security!r} is "
+            f"{result.daily_yield_vol!r}, and a standard deviation is never negative"
+        )
+    # isclose rather than equality: the calculator's own results match exactly,
+    # but a legitimate result rebuilt elsewhere may differ in the last ulp, and
+    # this guard must not refuse an honest number for that (see the note in
+    # this module's review history about rules stricter than the calculator).
+    if not math.isclose(
+        result.annualized_yield_vol,
+        result.daily_yield_vol * ANNUALIZATION_FACTOR,
+        rel_tol=1e-12,
+        abs_tol=0.0,
+    ):
+        raise HistoricalYieldVolUnavailableError(
+            f"this result for {result.security!r} reports a daily standard deviation of "
+            f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
+            f"{result.annualized_yield_vol!r}, which is not that daily figure times "
+            f"sqrt({ANNUALIZATION_TRADING_DAYS})"
+        )
+
     expected_status = (
         HistoricalYieldVolStatus.NO_HISTORY
         if result.observation_count == 0
@@ -738,23 +846,6 @@ def historical_yield_vol_volatility_input(
     # An INSUFFICIENT_HISTORY result reaching here is publishable by design,
     # and its warning is carried into the audit string below rather than
     # being dropped at the boundary.
-
-    # The result's own figure is validated before it is used, not trusted
-    # because this module usually produced it (Codex review, PR #200). A
-    # directly constructed or future result can carry a string, a complex, an
-    # inf or a NaN there: the first two raised TypeError out of the
-    # multiplication below, inf reached BLIVolatilityInput and raised its raw
-    # ValueError, and NaN fell through to the not-positive branch and was
-    # reported as a flat window it never was. All four are the same failure --
-    # this helper promising one error type and delivering another.
-    try:
-        _require_finite_number(result.annualized_yield_vol, "annualized_yield_vol")
-    except (ValueError, OverflowError, TypeError) as exc:
-        raise HistoricalYieldVolUnavailableError(
-            f"the Historical Yield Vol carried by this result for {result.security!r} is "
-            f"not a finite number ({result.annualized_yield_vol!r}), so it cannot be "
-            f"published as {HISTORICAL_YIELD_VOL_MO_SOURCE}: {exc}"
-        ) from exc
 
     factor = decimal_annual_normalization_factor(result.field_unit)
     normalized = result.annualized_yield_vol * factor
