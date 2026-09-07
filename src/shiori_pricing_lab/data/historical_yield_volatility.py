@@ -21,8 +21,12 @@ convention over its answer. It is deliberately **not** enough to replay the
 arithmetic: the Yield values and the Yield Changes themselves are not carried
 (Codex review, PR #200), and once Bloomberg's answer for that range changes,
 re-issuing does not reproduce these figures either. A consumer needing the
-values reads them from the #196 loader for the same query, and ``acquired_at``
-is what says whether the two are the same acquisition.
+values reads them from the #196 loader for the same query.
+
+``acquired_at`` is temporal provenance, not an acquisition identifier: the
+#196 loader stamps it to whole seconds, so two requests answered inside the
+same second carry the same string. Two *different* timestamps prove two
+acquisitions; two equal ones prove nothing (Codex review, PR #200).
 
 **The convention is PROVISIONAL, not methodology-final (Issue #197).** Middle
 Office has confirmed the underlying's own Yield, daily Yield *Change*, a

@@ -2566,8 +2566,14 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
     replayed from this payload by itself -- and once Bloomberg's answer for
     that range changes, re-issuing the request no longer reproduces these
     figures either. A consumer needing the values has the #196 route for the
-    same query, and the ``acquired_at`` here is what says whether the two
-    are the same acquisition.
+    same query.
+
+    ``acquired_at`` is temporal provenance, not an acquisition identifier
+    (Codex review, PR #200): the #196 loader stamps it to whole seconds, so
+    two requests answered inside the same second carry the same string. Two
+    *different* timestamps prove two acquisitions; two equal ones prove
+    nothing, and nothing here should be read as licence to pair one
+    response's values with another response's statistic.
 
     ``requested_observation_count`` is optional and defaults to Middle
     Office's confirmed 180-observation 6M-style window. It is never derived
