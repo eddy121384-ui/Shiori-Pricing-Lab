@@ -849,12 +849,56 @@ def test_a_no_history_result_carrying_a_figure_is_never_published():
         series_observation_count=0,
         requested_observation_count=0,
         window_status=HistoricalYieldVolStatus.NO_HISTORY,
+        # Kept internally consistent so this test isolates the condition it
+        # names: leaving the four dates behind now trips the date/count check
+        # first, which is a different (also correct) refusal.
+        observation_dates=(),
+        first_observation_date=None,
+        last_observation_date=None,
     )
 
     with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
         historical_yield_vol_volatility_input(result)
 
     assert "0 Yield Change(s)" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"observation_dates": ()}, "lists 0 dates"),
+        ({"observation_dates": [_START]}, "must be a tuple"),
+        (
+            {"observation_dates": (_START, _START, _START + timedelta(days=2), _START)},
+            "strictly ascending",
+        ),
+        ({"first_observation_date": _START + timedelta(days=1)}, "not the first date used"),
+        ({"last_observation_date": _START}, "not the last date used"),
+        (
+            {
+                "observation_dates": (
+                    _START - timedelta(days=5),
+                    _START,
+                    _START + timedelta(days=1),
+                    _START + timedelta(days=2),
+                )
+            },
+            "outside the declared range",
+        ),
+    ],
+)
+def test_observation_date_provenance_is_checked_against_the_counts(overrides, expected):
+    """The dates are what the route displays as "where this number came from".
+
+    An empty, duplicated, out-of-range or simply different tuple published
+    false calculation provenance under a live source (Codex review, PR #200).
+    """
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert expected in str(result_shape_problem(dataclasses.replace(base, **overrides)))
 
 
 def test_the_shared_shape_check_is_what_both_consumers_use():

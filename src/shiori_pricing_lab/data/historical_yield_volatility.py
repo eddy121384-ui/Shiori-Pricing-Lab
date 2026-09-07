@@ -705,18 +705,67 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
         )
 
     for name, value in (
-        ("first_observation_date", result.first_observation_date),
-        ("last_observation_date", result.last_observation_date),
         ("requested_start_date", result.requested_start_date),
         ("requested_end_date", result.requested_end_date),
     ):
-        if value is None and name.startswith(("first", "last")):
-            continue
         if not isinstance(value, date) or isinstance(value, datetime):
             return (
                 f"{name} must be a calendar date for {result.security!r}, got {value!r} "
                 f"({type(value).__name__})"
             )
+    if result.requested_start_date > result.requested_end_date:
+        return (
+            f"the declared range for {result.security!r} starts "
+            f"{result.requested_start_date.isoformat()}, after it ends "
+            f"{result.requested_end_date.isoformat()}"
+        )
+
+    # The dates are provenance the route displays as "which observations this
+    # number came from", so they are checked against the counts rather than
+    # taken on trust: an empty, duplicated, out-of-range or simply different
+    # tuple published false calculation provenance (Codex review, PR #200).
+    if not isinstance(result.observation_dates, tuple):
+        return (
+            f"observation_dates must be a tuple for {result.security!r}, got "
+            f"{type(result.observation_dates).__name__}"
+        )
+    if len(result.observation_dates) != result.observation_count:
+        return (
+            f"this result for {result.security!r} reports {result.observation_count} "
+            f"observations but lists {len(result.observation_dates)} dates"
+        )
+    previous: date | None = None
+    for used in result.observation_dates:
+        if not isinstance(used, date) or isinstance(used, datetime):
+            return (
+                f"every date in observation_dates must be a calendar date for "
+                f"{result.security!r}, got {used!r} ({type(used).__name__})"
+            )
+        if previous is not None and used <= previous:
+            return (
+                f"observation_dates for {result.security!r} must be strictly ascending -- "
+                f"{used.isoformat()} follows {previous.isoformat()}"
+            )
+        if used < result.requested_start_date or used > result.requested_end_date:
+            return (
+                f"observation date {used.isoformat()} for {result.security!r} falls outside "
+                f"the declared range {result.requested_start_date.isoformat()}.."
+                f"{result.requested_end_date.isoformat()}"
+            )
+        previous = used
+
+    expected_first = result.observation_dates[0] if result.observation_dates else None
+    expected_last = result.observation_dates[-1] if result.observation_dates else None
+    if result.first_observation_date != expected_first:
+        return (
+            f"first_observation_date for {result.security!r} is "
+            f"{result.first_observation_date!r}, not the first date used ({expected_first!r})"
+        )
+    if result.last_observation_date != expected_last:
+        return (
+            f"last_observation_date for {result.security!r} is "
+            f"{result.last_observation_date!r}, not the last date used ({expected_last!r})"
+        )
     return None
 
 
