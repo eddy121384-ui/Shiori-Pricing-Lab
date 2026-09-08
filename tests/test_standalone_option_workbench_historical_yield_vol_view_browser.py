@@ -496,6 +496,44 @@ def test_a_headline_text_that_is_not_its_own_number_is_refused(
     assert _is_actually_hidden(page, "hyv-result")
 
 
+@pytest.mark.parametrize(
+    "volatility_overrides",
+    [
+        # The third displayed figure, missed when the rule was written for the
+        # two top-level ones (Codex review, PR #200).
+        {"volatility_text": "not calculated"},
+        {"volatility_text": "   "},
+        # Text for a different number: this string is the published figure on
+        # screen, so a disagreement is a wrong normalized volatility shown as
+        # an ACTIVE risk source.
+        {"volatility_text": "0.99"},
+        {"volatility": 0.99},
+        {"volatility": None},
+    ],
+)
+def test_the_published_figures_text_must_be_its_own_number(
+    server_url, page, volatility_overrides
+) -> None:
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": {
+                **_FULL_PAYLOAD["volatility_source"],
+                **volatility_overrides,
+            },
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:

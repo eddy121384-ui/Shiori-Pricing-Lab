@@ -109,6 +109,29 @@
     return typeof value === "string" && value.trim() !== "";
   }
 
+  // Every figure this card prints comes from a string, and the string is what
+  // reaches the screen -- so it has to be the number it claims to be. One
+  // function for all three of them, because writing this rule once per figure
+  // is exactly how the third one was left out: the top-level pair was fixed
+  // and `volatility_source.volatility_text` kept rendering whatever it said
+  // (Codex review, PR #200).
+  //
+  // Numeric equality rather than string equality: Python's repr and
+  // JavaScript's String() spell the same float differently (1e-05 against
+  // 0.00001), and it is the value that must match, not the spelling.
+  function figureTextProblem(textKey, rendered, numberKey, value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return `malformed response: "${numberKey}" is not a finite number`;
+    }
+    if (!isNonBlankString(rendered)) {
+      return `malformed response: "${textKey}" is not a non-blank string`;
+    }
+    if (Number(rendered) !== value) {
+      return `malformed response: "${textKey}" does not read back as "${numberKey}"`;
+    }
+    return null;
+  }
+
   async function postJson(route, body) {
     requestedRoutes.push(route);
     const response = await fetch(route, {
@@ -267,15 +290,8 @@
         }
         continue;
       }
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        return `malformed response: "${numberKey}" is not a finite number`;
-      }
-      if (!isNonBlankString(rendered)) {
-        return `malformed response: "${textKey}" is not a non-blank string`;
-      }
-      if (Number(rendered) !== value) {
-        return `malformed response: "${textKey}" does not read back as "${numberKey}"`;
-      }
+      const problem = figureTextProblem(textKey, rendered, numberKey, value);
+      if (problem !== null) return problem;
     }
     // The nested source is inspected, not merely tested for truthiness
     // (Codex review, PR #200). `volatility_source: {}` is truthy, so the
@@ -291,7 +307,8 @@
         "source_system",
         "volatility_basis",
         "status",
-        "volatility_text",
+        // "volatility_text" is deliberately not here: it is checked below
+        // against the number it is the text of, which subsumes non-blank.
         "volatility_unit",
         "source_unit",
         // Always populated by the publication helper, and the only place a
@@ -304,9 +321,13 @@
           return `malformed response: volatility_source."${key}" is missing`;
         }
       }
-      if (typeof source.volatility !== "number" || !Number.isFinite(source.volatility)) {
-        return 'malformed response: volatility_source."volatility" is not a finite number';
-      }
+      const publishedProblem = figureTextProblem(
+        'volatility_source."volatility_text"',
+        source.volatility_text,
+        'volatility_source."volatility"',
+        source.volatility,
+      );
+      if (publishedProblem !== null) return publishedProblem;
       if (typeof source.normalization_factor !== "number") {
         return 'malformed response: volatility_source."normalization_factor" is not a number';
       }
