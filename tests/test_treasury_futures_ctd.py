@@ -69,7 +69,7 @@ LIVE_ZN_STAGE_TWO = {
 ACTIVE_ZN = "TYA Comdty"
 DELIVERY_ZN = "TYZ6 Comdty"
 
-# All four contracts as Eddy's live run returned them, keyed by contract code.
+# All six contracts as Eddy's live runs returned them, keyed by contract code.
 # Pinned as literals: these are real confirmed records, and the
 # remaining-maturity guard must never reject one of them.
 LIVE_STAGE_TWO: dict[str, dict[str, str]] = {
@@ -101,8 +101,34 @@ LIVE_STAGE_TWO: dict[str, dict[str, str]] = {
         "FUT_CNVS_FACTOR": "0.889900",
         "FUT_DLV_DT_LAST": "2026-12-31",
     },
+    # Issue #202 evidence (Eddy's Bloomberg workstation, 2026-09-07).
+    "UXY": {
+        "FUT_CTD_ISIN": "US91282CQQ77",
+        "FUT_CTD_CUSIP": "91282CQQ7",
+        "FUT_CTD_TICKER": "T 4.375 05/15/36",
+        "FUT_CTD_CPN": "4.375000",
+        "FUT_CTD_MTY": "2036-05-15",
+        "FUT_CNVS_FACTOR": "0.885800",
+        "FUT_DLV_DT_LAST": "2026-12-31",
+    },
+    "WN": {
+        "FUT_CTD_ISIN": "US912810TL26",
+        "FUT_CTD_CUSIP": "912810TL2",
+        "FUT_CTD_TICKER": "T 4 11/15/52",
+        "FUT_CTD_CPN": "4.000000",
+        "FUT_CTD_MTY": "2052-11-15",
+        "FUT_CNVS_FACTOR": "0.739300",
+        "FUT_DLV_DT_LAST": "2026-12-31",
+    },
 }
-LIVE_DELIVERY_SYMBOL = {"ZT": "TUZ6", "ZF": "FVZ6", "ZN": "TYZ6", "ZB": "USZ6"}
+LIVE_DELIVERY_SYMBOL = {
+    "ZT": "TUZ6",
+    "ZF": "FVZ6",
+    "ZN": "TYZ6",
+    "ZB": "USZ6",
+    "UXY": "UXYZ6",
+    "WN": "WNZ6",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +327,7 @@ def test_every_required_field_has_a_confirmed_mnemonic() -> None:
 
 
 def test_the_confirmed_mnemonics_are_exactly_the_ones_eddy_verified() -> None:
-    # Pinned as literals: these are the mnemonics confirmed against all four
+    # Pinned as literals: these are the mnemonics confirmed against all six
     # active contracts. Re-pointing one is a market-data change, not a
     # refactor, and must fail here first.
     assert BLOOMBERG_CTD_FIELD_MAP == {
@@ -325,12 +351,14 @@ def test_cusip_and_ticker_are_display_only_never_the_identifier() -> None:
     assert not set(BLOOMBERG_CTD_DISPLAY_FIELD_MAP) & set(REQUIRED_BLOOMBERG_CTD_FIELDS)
 
 
-def test_the_confirmed_active_aliases_cover_the_four_mvp_contracts() -> None:
+def test_the_confirmed_active_aliases_cover_the_supported_contracts() -> None:
     assert module.BLOOMBERG_FUTURES_ACTIVE_ALIASES == {
         "ZT": "TUA",
         "ZF": "FVA",
         "ZN": "TYA",
         "ZB": "USA",
+        "UXY": "UXYA",
+        "WN": "WNA",
     }
     # The delivery-month roots are unchanged: the active alias (TYA) is not the
     # delivery symbol the resolved month starts with (TYZ6 -> TY).
@@ -339,6 +367,8 @@ def test_the_confirmed_active_aliases_cover_the_four_mvp_contracts() -> None:
         "ZF": "FV",
         "ZN": "TY",
         "ZB": "US",
+        "UXY": "UXY",
+        "WN": "WN",
     }
 
 
@@ -349,6 +379,8 @@ def test_the_confirmed_active_aliases_cover_the_four_mvp_contracts() -> None:
         ("ZF", "FVA Comdty"),
         ("ZN", "TYA Comdty"),
         ("ZB", "USA Comdty"),
+        ("UXY", "UXYA Comdty"),
+        ("WN", "WNA Comdty"),
     ],
 )
 def test_stage_one_asks_the_desk_active_contract_alias(contract_code, expected) -> None:
@@ -385,12 +417,14 @@ def test_stage_two_qualifies_the_delivery_month_without_doubling(symbol, expecte
         ("ZF", "FVA", "FVZ6"),
         ("ZN", "TYA", "TYZ6"),
         ("ZB", "USA", "USZ6"),
+        ("UXY", "UXYA", "UXYZ6"),
+        ("WN", "WNA", "WNZ6"),
     ],
 )
 def test_the_active_alias_resolves_to_the_december_contract(
     monkeypatch, contract_code, alias, resolved
 ) -> None:
-    """The four desk-active aliases are the only authority for the active contract.
+    """The desk-active aliases are the only authority for the active contract.
 
     UAT during the September 2026 roll showed the generic continuation #1
     (``TY1``) still answered ``FUT_CUR_GEN_TICKER`` with the old September
@@ -647,14 +681,21 @@ def test_an_identifier_that_is_not_a_valid_us_isin_is_refused(
 
 @pytest.mark.parametrize(
     "live_isin",
-    ["US91282CJA09", "US91282CQD64", "US91282CRJ26", "US912810UL07"],
+    [
+        "US91282CJA09",
+        "US91282CQD64",
+        "US91282CRJ26",
+        "US912810UL07",
+        "US91282CQQ77",
+        "US912810TL26",
+    ],
 )
 def test_every_isin_the_live_run_returned_passes_the_checksum(monkeypatch, live_isin) -> None:
     """The guard against getting the ISO 6166 parity backwards.
 
     Doubling from the wrong digit makes *every* real ISIN look invalid, which
-    would fail every live load closed. These are the four CTD ISINs Eddy's
-    workstation run actually returned; all four must pass.
+    would fail every live load closed. These are the CTD ISINs Eddy's
+    workstation runs actually returned; all six must pass.
     """
 
     # The CUSIP must travel with its own ISIN: they are not independent
@@ -711,11 +752,17 @@ def test_a_delivery_month_that_is_not_this_contracts_is_refused(monkeypatch, res
 @pytest.mark.parametrize(
     "contract_code, resolved, maturity, last_delivery",
     [
-        # The four Eddy's live run returned, with their own real CTDs.
+        # The six Eddy's live runs returned, with their own real CTDs.
         ("ZT", "TUZ6", "2028-09-30", "2027-01-06"),
         ("ZF", "FVZ6", "2031-02-28", "2027-01-06"),
         ("ZN", "TYZ6", "2033-08-31", "2026-12-31"),
         ("ZB", "USZ6", "2045-05-15", "2026-12-31"),
+        ("UXY", "UXYZ6", "2036-05-15", "2026-12-31"),
+        ("WN", "WNZ6", "2052-11-15", "2026-12-31"),
+        # Non-December delivery months for the new contracts, so the guard
+        # cannot be narrowed to the one month the live run happened to be in.
+        ("UXY", "UXYH7", "2036-08-15", "2027-03-31"),  # ref 2027-03-01
+        ("WN", "WNH7", "2052-11-15", "2027-03-31"),  # ref 2027-03-01
         # The rest of the quarterly cycle these contracts list, so the guard
         # cannot be narrowed to the one month the live run happened to be in.
         # Each maturity is hand-computed to sit inside that month's window.
@@ -770,14 +817,14 @@ def _load_with(monkeypatch, contract_code, *, symbol=None, stage_two=None):
     return load_bloomberg_ctd_metadata(contract_code)
 
 
-@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB", "UXY", "WN"])
 def test_every_confirmed_live_ctd_passes_the_remaining_maturity_guard(
     monkeypatch, contract_code
 ) -> None:
-    """Eddy's four confirmed live CTDs must all load.
+    """Eddy's confirmed live CTDs must all load.
 
     The guard exists to reject another contract's CTD, and a guard that
-    rejects real data is an outage, not a safeguard. These four are the
+    rejects real data is an outage, not a safeguard. These six are the
     evidence that the window bounds and the measurement basis are right.
     """
 
@@ -826,14 +873,24 @@ def test_the_codex_counterexample_fails_closed(monkeypatch) -> None:
     assert "2026-12-01" in message  # first day of the TYZ6 delivery month
 
 
-@pytest.mark.parametrize("requested", ["ZT", "ZF", "ZN", "ZB"])
-@pytest.mark.parametrize("donor", ["ZT", "ZF", "ZN", "ZB"])
+#: Off-diagonal pairings the plausibility guard genuinely cannot tell
+#: apart: UXY's 9y5m-10y window sits inside ZN's 6y6m-10y window, so a ZN
+#: request answered with UXY's coherent CTD passes. Documented here rather
+#: than hidden -- the guard is cross-contract plausibility (Issue #202), not
+#: deliverability proof.
+_KNOWN_WINDOW_OVERLAP = {("ZN", "UXY")}
+
+
+@pytest.mark.parametrize("requested", ["ZT", "ZF", "ZN", "ZB", "UXY", "WN"])
+@pytest.mark.parametrize("donor", ["ZT", "ZF", "ZN", "ZB", "UXY", "WN"])
 def test_cross_substituted_live_ctds_fail_closed(monkeypatch, requested, donor) -> None:
-    """Every off-diagonal pairing of the four real CTDs must be refused.
+    """Every off-diagonal pairing of the real CTDs must be refused.
 
     Each of these is a coherent, checksum-valid, internally consistent record
     -- just the wrong contract's. The diagonal must still load, so the guard
-    cannot pass this by rejecting everything.
+    cannot pass this by rejecting everything. The one documented exception is
+    a ZN request answered with UXY's CTD, whose window genuinely overlaps
+    ZN's (see ``_KNOWN_WINDOW_OVERLAP``).
     """
 
     donor_fields = dict(
@@ -842,7 +899,7 @@ def test_cross_substituted_live_ctds_fail_closed(monkeypatch, requested, donor) 
         # that differs is the maturity being tested.
         FUT_DLV_DT_LAST=LIVE_STAGE_TWO[requested]["FUT_DLV_DT_LAST"],
     )
-    if requested == donor:
+    if requested == donor or (requested, donor) in _KNOWN_WINDOW_OVERLAP:
         assert _load_with(monkeypatch, requested, stage_two=donor_fields) is not None
         return
 
@@ -908,6 +965,17 @@ def test_a_last_delivery_day_that_contradicts_the_delivery_month_fails_closed(
         ("ZF", "2026-12-01", False),
         ("ZF", "2027-01-06", True),
         ("ZF", "2027-02-01", False),
+        # UXY and WN last deliver on the last business day of the delivery
+        # month (confirmed 2026-12-31 for December delivery) -- the ZN/ZB
+        # pattern, never the ZT/ZF following-month pattern.
+        ("UXY", "2026-11-30", False),
+        ("UXY", "2026-12-01", True),
+        ("UXY", "2026-12-31", True),  # the confirmed live value
+        ("UXY", "2027-01-01", False),
+        ("WN", "2026-11-30", False),
+        ("WN", "2026-12-01", True),
+        ("WN", "2026-12-31", True),  # the confirmed live value
+        ("WN", "2027-01-01", False),
     ],
 )
 def test_the_accepted_last_delivery_span_is_contract_specific(
@@ -921,12 +989,12 @@ def test_the_accepted_last_delivery_span_is_contract_specific(
             _load_with(monkeypatch, contract_code, stage_two=fields)
 
 
-@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB", "UXY", "WN"])
 def test_every_live_description_is_kept_because_it_agrees(monkeypatch, contract_code) -> None:
-    """The four confirmed descriptions must survive the coherence check.
+    """The confirmed descriptions must survive the coherence check.
 
     A guard that silently dropped real display metadata would be its own small
-    regression, so all four are pinned.
+    regression, so all six are pinned.
     """
 
     ctd = _load_with(monkeypatch, contract_code)
@@ -968,11 +1036,11 @@ def test_a_description_that_contradicts_the_priced_fields_is_dropped(
     assert ctd.ctd_maturity_date == date(2033, 8, 31)
 
 
-@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB"])
+@pytest.mark.parametrize("contract_code", ["ZT", "ZF", "ZN", "ZB", "UXY", "WN"])
 def test_the_live_cusip_and_isin_name_the_same_bond(contract_code) -> None:
     """A U.S. ISIN is ``US`` + CUSIP + check digit, so the two must agree.
 
-    Pinned across all four confirmed live CTDs: this is an identity of the
+    Pinned across all six confirmed live CTDs: this is an identity of the
     identifiers, so the guard below cannot reject a coherent response.
     """
 
@@ -1036,16 +1104,16 @@ def test_a_wrong_day_in_the_right_month_is_still_accepted(monkeypatch) -> None:
 def test_every_confirmed_live_last_delivery_day_sits_inside_its_contracts_span() -> None:
     """The spans must not be narrower than the real contracts.
 
-    ZN and ZB last deliver inside the delivery month; ZT and ZF a few business
-    days into the next one. Pinned so the spans cannot be tightened onto real
-    data.
+    ZN, ZB, UXY and WN last deliver inside the delivery month; ZT and ZF a
+    few business days into the next one. Pinned so the spans cannot be
+    tightened onto real data.
     """
 
     for contract_code, symbol in LIVE_DELIVERY_SYMBOL.items():
         last_delivery = date.fromisoformat(LIVE_STAGE_TWO[contract_code]["FUT_DLV_DT_LAST"])
         reference = module._delivery_month_first_day(symbol, contract_code, last_delivery)
         assert reference == date(2026, 12, 1)
-        expected_month = 12 if contract_code in {"ZN", "ZB"} else 1
+        expected_month = 12 if contract_code in {"ZN", "ZB", "UXY", "WN"} else 1
         assert last_delivery.month == expected_month
 
 

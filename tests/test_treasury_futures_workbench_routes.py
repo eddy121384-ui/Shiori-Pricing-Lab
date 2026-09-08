@@ -99,7 +99,7 @@ def _convert(server_url: str, **overrides) -> tuple[int, dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_contract_catalogue_lists_the_four_mvp_contracts(server_url: str) -> None:
+def test_the_contract_catalogue_lists_the_supported_contracts(server_url: str) -> None:
     status, payload = _get(f"{server_url}/api/treasury-futures/contracts")
     assert status == 200
     assert [contract["code"] for contract in payload["contracts"]] == list(
@@ -116,6 +116,8 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
     digits = {c["code"]: c["sub_32nd_digits"] for c in payload["contracts"]}
     assert digits["ZB"] == ["0"]
     assert digits["ZN"] == ["0", "5"]
+    assert digits["UXY"] == ["0", "5"]
+    assert digits["WN"] == ["0"]
     # The tick's human label is the server's too, so the page never computes
     # a reciprocal to say what the tick is.
     labels = {c["code"]: c["minimum_tick_label"] for c in payload["contracts"]}
@@ -124,6 +126,8 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
         "ZF": "1/128 point",
         "ZN": "1/64 point",
         "ZB": "1/32 point",
+        "UXY": "1/64 point",
+        "WN": "1/32 point",
     }
 
 

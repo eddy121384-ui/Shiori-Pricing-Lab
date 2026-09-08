@@ -61,9 +61,11 @@ def _ctd(**overrides):
     return treasury_futures_ctd_from_manual_entry(entry)
 
 
-# Four arbitrary but structurally representative CTD shapes, one per MVP
-# contract: a month-end 2-year maturity for ZT (the case a day-of-month
-# schedule gets wrong), mid-month 15ths for the rest.
+# Arbitrary but structurally representative CTD shapes, one per contract: a
+# month-end 2-year maturity for ZT (the case a day-of-month schedule gets
+# wrong), mid-month 15ths for the rest. UXY/WN fixtures are arbitrary inputs
+# in the same style -- not market data -- so the shared round-trip tests
+# cover the new grids without claiming any live parity.
 CTD_BY_CONTRACT = {
     "ZT": dict(
         contract_code="ZT",
@@ -86,6 +88,20 @@ CTD_BY_CONTRACT = {
         ctd_coupon_percent=3.0,
         ctd_maturity_date="2049-08-15",
         conversion_factor=0.6421,
+    ),
+    "UXY": dict(
+        contract_code="UXY",
+        contract_symbol="UXYZ6",
+        ctd_coupon_percent=4.125,
+        ctd_maturity_date="2036-08-15",
+        conversion_factor=0.8791,
+    ),
+    "WN": dict(
+        contract_code="WN",
+        contract_symbol="WNZ6",
+        ctd_coupon_percent=3.875,
+        ctd_maturity_date="2053-02-15",
+        conversion_factor=0.7312,
     ),
 }
 
