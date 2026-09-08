@@ -91,6 +91,10 @@
 
   const ROUTE = "/api/bloomberg/historical-yield-vol";
   const EM_DASH = "—";
+  // The server's `_DECIMAL_ANNUAL_NORMALIZATION_FACTORS`, which is Annex A
+  // A.8.1's closed vocabulary. Held here only to check what the card claims
+  // was applied -- no value on screen is normalized by this page.
+  const DECIMAL_ANNUAL_FACTORS = { DECIMAL: 1, PERCENT: 0.01, BASIS_POINTS: 0.0001 };
   const UNIT_UNCONFIRMED = "Unit not confirmed by this request";
 
   let payload = null;
@@ -328,8 +332,27 @@
         source.volatility,
       );
       if (publishedProblem !== null) return publishedProblem;
-      if (typeof source.normalization_factor !== "number") {
-        return 'malformed response: volatility_source."normalization_factor" is not a number';
+      // The card prints "source unit x factor" as the exact normalization
+      // applied to an ACTIVE risk source, so an arbitrary finite number there
+      // is false provenance, not a cosmetic slip -- `PERCENT` beside `-1` was
+      // displayed as fact (Codex review, PR #200). The vocabulary is closed
+      // and fixed by Annex A A.8.1 (1 bp = 1e-4); this is a label checked
+      // against a reviewed constant, not a calculation repeated in the
+      // browser, and nothing here recomputes the published number.
+      const expectedFactor = DECIMAL_ANNUAL_FACTORS[source.source_unit];
+      if (expectedFactor === undefined) {
+        return (
+          'malformed response: volatility_source."source_unit" is ' +
+          `"${source.source_unit}", which is not one of ` +
+          `${Object.keys(DECIMAL_ANNUAL_FACTORS).join(", ")}`
+        );
+      }
+      if (source.normalization_factor !== expectedFactor) {
+        return (
+          'malformed response: volatility_source."normalization_factor" is ' +
+          `${source.normalization_factor} for source unit "${source.source_unit}", ` +
+          `which normalizes by ${expectedFactor}`
+        );
       }
     } else if (!isNonBlankString(candidate.volatility_source_unavailable_reason)) {
       // No source and no reason is not an answer either: the card would show
@@ -337,6 +360,28 @@
       // reason renders as exactly that dash, so it is refused for the same
       // reason a missing one is (Codex review, PR #200).
       return 'malformed response: no "volatility_source" and no reason for its absence';
+    }
+
+    // Each figure agreeing with its own number is not enough: absence agrees
+    // with absence, so a payload with no blockers, an ACTIVE normalized source
+    // and BOTH headline pairs null passed every rule above and drew two dashes
+    // beside a published risk figure (Codex review, PR #200). Availability is
+    // a property of the whole answer, not of one field, and it is the same
+    // invariant the calculator's `is_usable` carries: a fatal blocker means
+    // there is no number, and no blocker means there is one.
+    const figuresPresent = candidate.annualized_yield_vol !== null
+      && candidate.annualized_yield_vol !== undefined;
+    if (candidate.blockers.length === 0 && !figuresPresent) {
+      return 'malformed response: no "blockers", yet no Historical Yield Vol to show';
+    }
+    if (candidate.blockers.length > 0 && figuresPresent) {
+      return 'malformed response: a fatal blocker beside a Historical Yield Vol';
+    }
+    // The reverse does NOT hold and must not be asserted: a figure exists with
+    // no published source whenever the Yield field's unit was never confirmed,
+    // which is an honest answer this card is built to show.
+    if (!figuresPresent && candidate.volatility_source) {
+      return 'malformed response: a published volatility source with no figure behind it';
     }
     return null;
   }

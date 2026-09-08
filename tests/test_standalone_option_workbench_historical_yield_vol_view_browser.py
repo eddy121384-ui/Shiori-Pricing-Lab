@@ -534,6 +534,114 @@ def test_the_published_figures_text_must_be_its_own_number(
     assert _is_actually_hidden(page, "hyv-result")
 
 
+@pytest.mark.parametrize(
+    "source_overrides",
+    [
+        # The factor the card prints as the exact normalization applied. An
+        # arbitrary number here is false provenance on an ACTIVE risk source.
+        {"normalization_factor": -1},
+        {"normalization_factor": 0.1},
+        {"normalization_factor": 1},
+        {"source_unit": "PERCENTAGE_POINTS"},
+        # DECIMAL normalizes by 1, not by PERCENT's 0.01.
+        {"source_unit": "DECIMAL"},
+    ],
+)
+def test_a_normalization_factor_its_unit_does_not_fix_is_refused(
+    server_url, page, source_overrides
+) -> None:
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": {**_FULL_PAYLOAD["volatility_source"], **source_overrides},
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    ("unit", "factor"),
+    [("DECIMAL", 1), ("PERCENT", 0.01), ("BASIS_POINTS", 0.0001)],
+)
+def test_every_supported_unit_and_its_own_factor_still_renders(
+    server_url, page, unit, factor
+) -> None:
+    # The rule must accept the whole approved vocabulary, not just the unit
+    # the fixture happens to use.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": {
+                **_FULL_PAYLOAD["volatility_source"],
+                "source_unit": unit,
+                "normalization_factor": factor,
+            },
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert unit in page.inner_text("#hyv-source-detail")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # No blocker, an ACTIVE source, and no figures: two dashes beside a
+        # published risk number (Codex review, PR #200).
+        {
+            "daily_yield_vol": None,
+            "daily_yield_vol_text": None,
+            "annualized_yield_vol": None,
+            "annualized_yield_vol_text": None,
+        },
+        # A fatal blocker beside a figure: the calculator's own `is_usable`
+        # invariant says these two cannot both be true.
+        {"blockers": ["this result must not be used"]},
+    ],
+)
+def test_figure_availability_must_agree_with_blockers_and_source(
+    server_url, page, overrides
+) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_a_figure_with_no_published_source_is_still_an_honest_answer(
+    server_url, page
+) -> None:
+    # The availability rule must not be symmetric. An unconfirmed Yield unit
+    # blocks publication without blocking the calculation, and that result is
+    # exactly what this card exists to show.
+    _route_other_markets_away(page)
+    _route_vol(page, payload=_NO_UNIT_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:
