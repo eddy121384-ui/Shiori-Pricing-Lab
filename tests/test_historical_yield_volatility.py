@@ -1294,6 +1294,28 @@ def test_a_fatal_blocker_forces_is_usable_false():
     assert blocked.is_usable == (not blocked.blockers)
 
 
+@pytest.mark.parametrize("missing", ["daily_yield_vol", "annualized_yield_vol"])
+def test_half_a_result_is_not_usable(missing):
+    """The two figures exist together or not at all -- including here.
+
+    `result_shape_problem` rejects the half-populated shape, but a caller
+    reading `is_usable` is not going through it, which is the whole reason
+    the property exists. A result whose daily sigma had gone missing under a
+    populated annualized figure still answered True (Codex review, #200).
+    """
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    assert base.is_usable is True
+
+    half = dataclasses.replace(base, **{missing: None})
+
+    assert half.is_usable is False
+    # And the guard says the same thing, so the two never disagree.
+    assert result_shape_problem(half) is not None
+
+
 @pytest.mark.parametrize("label", ["REUTERS", "BLOOMBERG_VCUB", "bloomberg_dapi"])
 def test_history_from_another_source_system_is_refused(label):
     """The one acquisition path this statistic is built on.
