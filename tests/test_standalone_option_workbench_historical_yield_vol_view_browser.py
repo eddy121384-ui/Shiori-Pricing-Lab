@@ -1223,10 +1223,22 @@ def test_the_card_accepts_what_the_real_route_actually_serializes(
 
 
 @pytest.mark.parametrize(
-    "key",
-    ["source_system", "security", "yield_field", "acquired_at", "calculated_at"],
+    ("key", "expected_detail"),
+    [
+        ("security", '"security" is missing'),
+        ("yield_field", '"yield_field" is missing'),
+        # These three are caught earlier now, by the two rules that came
+        # after: a source label that is not Bloomberg's own, and a stamp that
+        # places no moment. Different sentence, same refusal -- what this test
+        # pins is that whitespace never reaches the audit line.
+        ("source_system", "this card shows only BLOOMBERG_DAPI"),
+        ("acquired_at", "UTC offset"),
+        ("calculated_at", "UTC offset"),
+    ],
 )
-def test_whitespace_only_provenance_is_refused(server_url, page, key) -> None:
+def test_whitespace_only_provenance_is_refused(
+    server_url, page, key, expected_detail
+) -> None:
     # Truthy and renders as nothing: the card showed visually blank audit
     # provenance beside the risk figure. `isNonBlankString` was already used
     # for the nested source's strings and the unavailability reason; this
@@ -1238,7 +1250,7 @@ def test_whitespace_only_provenance_is_refused(server_url, page, key) -> None:
     _calculate(page)
     _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
 
-    assert f'"{key}" is missing' in page.inner_text("#hyv-error-detail")
+    assert expected_detail in page.inner_text("#hyv-error-detail")
     assert _is_actually_hidden(page, "hyv-result")
 
 
@@ -1364,6 +1376,64 @@ def test_a_reworded_warning_tail_still_renders(server_url, page) -> None:
     _wait_for_result(page)
 
     assert "equally honest wording" in page.inner_text("#hyv-warning-list")
+
+
+@pytest.mark.parametrize("label", ["REUTERS", "BLOOMBERG_VCUB", "bloomberg_dapi", ""])
+def test_the_card_shows_only_bloomberg_acquired_history(server_url, page, label) -> None:
+    # `REUTERS` was rendered as provenance under a heading that says
+    # Bloomberg. The server guard gained this rule one commit ago; the card
+    # is the other consumer and did not (Codex review, PR #200).
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, "source_system": label})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "this card shows only BLOOMBERG_DAPI" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "not-a-time",
+        "",
+        # Well-formed and still refused: a local reading names no moment.
+        "2026-08-31T14:05:00",
+        "2026-08-31",
+        "31/08/2026 14:05:00+00:00",
+    ],
+)
+@pytest.mark.parametrize("key", ["acquired_at", "calculated_at"])
+def test_a_displayed_timestamp_must_place_a_moment(server_url, page, key, stamp) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, key: stamp})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "UTC offset" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["2026-08-31T14:05:00+00:00", "2026-08-31T14:05:00Z", "2026-09-08T17:21:10+08:00"],
+)
+def test_the_stamps_the_acquisition_path_produces_are_accepted(server_url, page, stamp) -> None:
+    # The rule must not refuse what the loader actually emits:
+    # `datetime.now().astimezone().isoformat(timespec="seconds")`, in whatever
+    # offset the workstation happens to be in.
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, "acquired_at": stamp})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-acquired-at").strip() == stamp
 
 
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(

@@ -100,6 +100,9 @@
   const MINIMUM_REQUESTED_OBSERVATIONS = 3;
   // Two changes is what a ddof=1 standard deviation needs.
   const MINIMUM_CHANGES_FOR_STDEV = 2;
+  // `bloomberg_bond_yield_history.SOURCE_SYSTEM`: the one acquisition path
+  // this statistic is built on.
+  const BLOOMBERG_SOURCE_SYSTEM = "BLOOMBERG_DAPI";
   // The one annualization this calculation uses, printed as "x sqrt(252)".
   const ANNUALIZATION_TRADING_DAYS = 252;
   // The one methodology this route emits, under the one convention it uses.
@@ -107,6 +110,18 @@
     methodology: "HISTORICAL_YIELD_VOL_MO",
     standard_deviation_convention: "SAMPLE_STDEV_S_DDOF_1",
   };
+
+  // The shape both the #196 loader and the calculator stamp:
+  // `datetime.now().astimezone().isoformat(timespec="seconds")`. The offset is
+  // required, not optional -- a local reading names no placeable moment, and
+  // `acquired_at` exists precisely to tell two acquisitions apart.
+  function isOffsetAwareTimestamp(value) {
+    if (typeof value !== "string") return false;
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(value)) {
+      return false;
+    }
+    return Number.isFinite(Date.parse(value));
+  }
 
   // A strict ISO calendar date, the way the route serializes one. Parsed and
   // then compared back, so "2026-02-31" is refused rather than rolled over.
@@ -327,11 +342,31 @@
     if (candidate.field_unit !== null && !isNonBlankString(candidate.field_unit)) {
       return 'malformed response: "field_unit" is neither a non-blank string nor null';
     }
+    // The acquisition path this statistic is built on, checked exactly the way
+    // the server guard checks it. `REUTERS` was rendered as provenance under a
+    // heading that says Bloomberg (Codex review, PR #200). Exact and
+    // case-sensitive: unlike the Yield unit this label never passes through a
+    // trader's typing, so there is nothing to tidy.
+    if (candidate.source_system !== BLOOMBERG_SOURCE_SYSTEM) {
+      return (
+        `malformed response: "source_system" is ${JSON.stringify(candidate.source_system)}; ` +
+        `this card shows only ${BLOOMBERG_SOURCE_SYSTEM}`
+      );
+    }
+    // Both timestamps are evidence of *when* -- when Bloomberg was read, and
+    // when this number was calculated -- and "not-a-time" was displayed as
+    // exactly that. An offset is what makes the moment placeable; a
+    // well-formed local reading is refused for the same reason.
+    for (const key of ["acquired_at", "calculated_at"]) {
+      if (!isOffsetAwareTimestamp(candidate[key])) {
+        return (
+          `malformed response: "${key}" is ${JSON.stringify(candidate[key])}; it must be an ` +
+          "ISO-8601 timestamp with a UTC offset"
+        );
+      }
+    }
     for (const key of [
       "window_status",
-      "source_system",
-      "acquired_at",
-      "calculated_at",
       "security",
       "yield_field",
     ]) {
