@@ -575,12 +575,16 @@ def test_every_supported_unit_and_its_own_factor_still_renders(
     server_url, page, unit, factor
 ) -> None:
     # The rule must accept the whole approved vocabulary, not just the unit
-    # the fixture happens to use.
+    # the fixture happens to use. `field_unit` moves with it: the server
+    # publishes `source_unit` as a copy of it, so overriding only the nested
+    # one asserts a shape the server cannot produce -- which is what this
+    # test did until the headline/source unit rule caught it.
     _route_other_markets_away(page)
     _route_vol(
         page,
         payload={
             **_FULL_PAYLOAD,
+            "field_unit": unit,
             "volatility_source": {
                 **_FULL_PAYLOAD["volatility_source"],
                 "source_unit": unit,
@@ -640,6 +644,116 @@ def test_a_figure_with_no_published_source_is_still_an_honest_answer(
     _wait_for_result(page)
 
     assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+
+
+@pytest.mark.parametrize("unit", ["percent", " Percent ", "basis_points", "decimal"])
+def test_a_unit_spelled_the_way_a_trader_typed_it_still_renders(server_url, page, unit) -> None:
+    """A false refusal I introduced, not a payload defect (Codex review, #200).
+
+    `decimal_annual_normalization_factor` trims and upper-cases before it
+    matches, and the server publishes `source_unit` as the trader typed it --
+    so "percent" is a real HTTP 200 whose factor really is 0.01. The previous
+    commit's raw map lookup rejected that honest answer and showed nothing.
+    """
+
+    factor = {"percent": 0.01, " percent ": 0.01, "basis_points": 0.0001, "decimal": 1}[
+        unit.strip().lower()
+    ]
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "field_unit": unit,
+            "volatility_source": {
+                **_FULL_PAYLOAD["volatility_source"],
+                "source_unit": unit,
+                "normalization_factor": factor,
+            },
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert unit in page.inner_text("#hyv-source-detail")
+
+
+def test_a_headline_unit_its_source_disagrees_with_is_refused(server_url, page) -> None:
+    # The server publishes source_unit as a copy of field_unit, so the card
+    # labelling the raw figure PERCENT while its normalized source claims
+    # DECIMAL is impossible -- and each half was internally valid.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "field_unit": "PERCENT",
+            "volatility_source": {
+                **_FULL_PAYLOAD["volatility_source"],
+                "source_unit": "DECIMAL",
+                "normalization_factor": 1,
+            },
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # One figure without the other: a real annualized risk number beside a
+        # dash for the daily sigma it was annualized from.
+        {"daily_yield_vol": None, "daily_yield_vol_text": None},
+        {"annualized_yield_vol": None, "annualized_yield_vol_text": None},
+    ],
+)
+def test_the_two_headline_figures_must_exist_together(server_url, page, overrides) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # 180 observations and no changes, printed as this figure's provenance.
+        {"yield_change_count": 0},
+        {"yield_change_count": 180},
+        # The window is the smaller of what was asked for and what came back.
+        {"observation_count": 200},
+        {"series_observation_count": 100},
+        {"series_observation_count": "200"},
+    ],
+)
+def test_the_provenance_counts_must_be_the_calculators_own_arithmetic(
+    server_url, page, overrides
+) -> None:
+    # These three numbers are the provenance printed under the figure, and
+    # they are not independent: the window is min(series, requested) and N
+    # observations make N-1 changes (Codex review, PR #200).
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
 
 
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(

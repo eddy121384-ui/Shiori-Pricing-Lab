@@ -95,6 +95,16 @@
   // A.8.1's closed vocabulary. Held here only to check what the card claims
   // was applied -- no value on screen is normalized by this page.
   const DECIMAL_ANNUAL_FACTORS = { DECIMAL: 1, PERCENT: 0.01, BASIS_POINTS: 0.0001 };
+
+  // `decimal_annual_normalization_factor` trims and upper-cases before it
+  // matches, and the server publishes `source_unit` as the trader typed it --
+  // so "percent" is a legitimate HTTP 200 whose factor really is 0.01. A raw
+  // lookup here refused that honest answer (Codex review, PR #200). This is
+  // lexical tidying of someone's typing, never an interpretation of what a
+  // unit means: an unknown spelling still fails closed.
+  function canonicalUnit(value) {
+    return typeof value === "string" ? value.trim().toUpperCase() : value;
+  }
   const UNIT_UNCONFIRMED = "Unit not confirmed by this request";
 
   let payload = null;
@@ -267,8 +277,37 @@
         return `malformed response: "${key}" is missing`;
       }
     }
-    for (const key of ["requested_observation_count", "observation_count", "yield_change_count"]) {
+    for (const key of [
+      "series_observation_count",
+      "requested_observation_count",
+      "observation_count",
+      "yield_change_count",
+    ]) {
       if (!Number.isInteger(candidate[key])) return `malformed response: "${key}" is not an integer`;
+    }
+    // The counts are this card's provenance for the figure above them, and
+    // they are not three independent numbers: the window is the smaller of
+    // what was asked for and what came back, and N observations make N-1
+    // changes. Typed but unrelated, they read as "calculated from 180
+    // observations (0 Yield Changes)" under a real number (Codex review,
+    // PR #200).
+    const expectedObservations = Math.min(
+      candidate.series_observation_count,
+      candidate.requested_observation_count,
+    );
+    if (candidate.observation_count !== expectedObservations) {
+      return (
+        `malformed response: "observation_count" is ${candidate.observation_count}, and a ` +
+        `window of ${candidate.requested_observation_count} over ` +
+        `${candidate.series_observation_count} returned observations is ${expectedObservations}`
+      );
+    }
+    const expectedChanges = Math.max(candidate.observation_count - 1, 0);
+    if (candidate.yield_change_count !== expectedChanges) {
+      return (
+        `malformed response: "yield_change_count" is ${candidate.yield_change_count}, and ` +
+        `${candidate.observation_count} observations make ${expectedChanges}`
+      );
     }
     for (const key of ["blockers", "warnings"]) {
       if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
@@ -339,7 +378,8 @@
       // and fixed by Annex A A.8.1 (1 bp = 1e-4); this is a label checked
       // against a reviewed constant, not a calculation repeated in the
       // browser, and nothing here recomputes the published number.
-      const expectedFactor = DECIMAL_ANNUAL_FACTORS[source.source_unit];
+      const sourceUnit = canonicalUnit(source.source_unit);
+      const expectedFactor = DECIMAL_ANNUAL_FACTORS[sourceUnit];
       if (expectedFactor === undefined) {
         return (
           'malformed response: volatility_source."source_unit" is ' +
@@ -352,6 +392,17 @@
           'malformed response: volatility_source."normalization_factor" is ' +
           `${source.normalization_factor} for source unit "${source.source_unit}", ` +
           `which normalizes by ${expectedFactor}`
+        );
+      }
+      // The server publishes `source_unit` as a copy of the same `field_unit`
+      // the headline is labelled with, so the two disagreeing is impossible --
+      // and the card would otherwise label the raw figure PERCENT while
+      // claiming its normalized source came from DECIMAL, with an internally
+      // valid factor under it (Codex review, PR #200).
+      if (canonicalUnit(candidate.field_unit) !== sourceUnit) {
+        return (
+          `malformed response: the headline is labelled "${candidate.field_unit}" while its ` +
+          `normalized source claims "${source.source_unit}"`
         );
       }
     } else if (!isNonBlankString(candidate.volatility_source_unavailable_reason)) {
@@ -369,8 +420,14 @@
     // a property of the whole answer, not of one field, and it is the same
     // invariant the calculator's `is_usable` carries: a fatal blocker means
     // there is no number, and no blocker means there is one.
-    const figuresPresent = candidate.annualized_yield_vol !== null
-      && candidate.annualized_yield_vol !== undefined;
+    // Both figures, not just the annualized one: the daily sigma alone being
+    // null passed every per-field rule and drew a real risk figure beside a
+    // dash, a shape the calculator cannot produce (Codex review, PR #200).
+    const present = (value) => value !== null && value !== undefined;
+    if (present(candidate.annualized_yield_vol) !== present(candidate.daily_yield_vol)) {
+      return 'malformed response: one Historical Yield Vol figure is present and the other is not';
+    }
+    const figuresPresent = present(candidate.annualized_yield_vol);
     if (candidate.blockers.length === 0 && !figuresPresent) {
       return 'malformed response: no "blockers", yet no Historical Yield Vol to show';
     }
