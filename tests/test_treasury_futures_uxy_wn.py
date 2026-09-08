@@ -143,9 +143,9 @@ def test_explicit_symbol_root_validation(contract_code, symbol, ok) -> None:
             _require_delivery_ticker(symbol, contract_code, "test")
 
 
-def test_window_config_is_9y5m_to_10y_for_uxy_and_25y_up_for_wn() -> None:
+def test_window_config_is_9y5m_to_10y_for_uxy_and_open_ended_25y_up_for_wn() -> None:
     assert TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS["UXY"] == (113, 120, True)
-    assert TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS["WN"][0] == 300
+    assert TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS["WN"] == (300, None, True)
 
 
 @pytest.mark.parametrize(
@@ -156,11 +156,11 @@ def test_window_config_is_9y5m_to_10y_for_uxy_and_25y_up_for_wn() -> None:
         ("UXY", "UXYZ6", date(2036, 4, 30), False),
         ("UXY", "UXYZ6", date(2036, 12, 1), True),
         ("UXY", "UXYZ6", date(2036, 12, 2), False),
-        # WN window from 2026-12-01: [2051-12-01, 2056-12-01].
+        # WN window from 2026-12-01: [2051-12-01, no upper bound).
         ("WN", "WNZ6", date(2051, 12, 1), True),
         ("WN", "WNZ6", date(2051, 11, 30), False),
         ("WN", "WNZ6", date(2056, 12, 1), True),
-        ("WN", "WNZ6", date(2056, 12, 2), False),
+        ("WN", "WNZ6", date(2076, 12, 1), True),
     ],
 )
 def test_window_boundaries_are_exact(code, symbol, maturity, passes) -> None:

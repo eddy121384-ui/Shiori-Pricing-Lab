@@ -95,7 +95,7 @@ ZF     2026-12-01  2031-02-28    [2031-02-01, 2032-03-01]    in window
 ZN     2026-12-01  2033-08-31    [2033-06-01, 2036-12-01]    in window
 ZB     2026-12-01  2045-05-15    [2041-12-01, 2051-12-01)    in window
 UXY    2026-12-01  2036-05-15    [2036-05-01, 2036-12-01]    in window
-WN     2026-12-01  2052-11-15    [2051-12-01, 2056-12-01]    in window
+WN     2026-12-01  2052-11-15    [2051-12-01, no upper bound) in window
 =====  ==========  ============  ==========================  =========
 
 (This table is recomputed from the module's own ``_delivery_month_first_day``
@@ -514,7 +514,9 @@ _DELIVERY_MONTH_NUMBERS: dict[str, int] = {"H": 3, "M": 6, "U": 9, "Z": 12}
 
 #: Remaining-maturity plausibility windows, as ``(lower_months, upper_months,
 #: upper_inclusive)`` measured from the **first calendar day of the named
-#: delivery month** (Eddy's methodology decision, Issue #190).
+#: delivery month** (Eddy's methodology decision, Issue #190). An upper leg
+#: of ``None`` is an open-ended floor-only window: ``upper_inclusive`` is
+#: then meaningless and ignored.
 #:
 #: These encode the published remaining-maturity leg of each contract's
 #: deliverable grade, and nothing else. ZT, ZF and UXY additionally carry an
@@ -524,7 +526,9 @@ _DELIVERY_MONTH_NUMBERS: dict[str, int] = {"H": 3, "M": 6, "U": 9, "Z": 12}
 #: under AGENTS.md rule 6, so the original-term leg is deliberately absent and
 #: this guard is **not** proof of full CME deliverability -- see
 #: ``_require_remaining_maturity_plausible``.
-TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[str, tuple[int, int, bool]] = {
+TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[
+    str, tuple[int, int | None, bool]
+] = {
     # Not less than 1 year 9 months, not more than 2 years.
     "ZT": (21, 24, True),
     # Not less than 4 years 2 months, not more than 5 years 3 months.
@@ -535,13 +539,9 @@ TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[str, tuple[int, int, boo
     "ZB": (180, 300, False),
     # 9 years 5 months through 10 years (Issue #202).
     "UXY": (113, 120, True),
-    # At least 25 years (Issue #202). The 30-year upper leg is not a CME
-    # rule -- CME requires only the 25-year floor. It is a physical
-    # plausibility cap: no U.S. Treasury is issued with an original term
-    # above 30 years, so a remaining maturity past 30 years cannot belong
-    # to any Treasury. Like the ZT/ZF original-term leg, full CME
-    # deliverability is still not enforced here.
-    "WN": (300, 360, True),
+    # At least 25 years, with no upper bound (Issue #202 requires only the
+    # floor). ``upper_inclusive`` is meaningless while the upper leg is None.
+    "WN": (300, None, True),
 }
 
 #: Which month the reported last delivery day must fall in, as
@@ -801,16 +801,26 @@ def _require_remaining_maturity_plausible(
         contract_symbol, contract_code, last_delivery_date, security
     )
     earliest = _add_months_to_first_day(reference, lower_months)
-    latest = _add_months_to_first_day(reference, upper_months)
 
     too_short = ctd_maturity_date < earliest
-    too_long = ctd_maturity_date > latest if upper_inclusive else ctd_maturity_date >= latest
+    too_long = False
+    window_label = f"[{earliest.isoformat()}, no upper bound)"
+    if upper_months is not None:
+        latest = _add_months_to_first_day(reference, upper_months)
+        too_long = (
+            ctd_maturity_date > latest
+            if upper_inclusive
+            else ctd_maturity_date >= latest
+        )
+        window_label = (
+            f"[{earliest.isoformat()}, {latest.isoformat()}"
+            f"{']' if upper_inclusive else ')'}"
+        )
     if too_short or too_long:
         raise TreasuryFuturesCTDBloombergError(
             f"Bloomberg DAPI returned a CTD maturing {ctd_maturity_date.isoformat()} for "
             f"{security!r}, which is outside {contract_code}'s remaining-maturity window "
-            f"[{earliest.isoformat()}, {latest.isoformat()}"
-            f"{']' if upper_inclusive else ')'} measured from {reference.isoformat()}, the "
+            f"{window_label} measured from {reference.isoformat()}, the "
             f"first day of the {contract_symbol} delivery month"
         )
 
