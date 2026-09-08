@@ -29,10 +29,19 @@ import os
 import threading
 import time
 from collections.abc import Iterator
+from datetime import date, timedelta
 
 import pytest
 
+import shiori_pricing_lab.app.standalone_option_workbench_server as server_module
 from shiori_pricing_lab.app.standalone_option_workbench_server import create_server
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    BloombergBondYieldHistory,
+    BondYieldObservation,
+)
+from shiori_pricing_lab.data.historical_yield_volatility import (
+    calculate_historical_yield_volatility,
+)
 
 _PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
 _RUNNING_IN_CI = os.environ.get("CI") == "true"
@@ -109,6 +118,15 @@ def page():
         browser.close()
 
 
+# 180 ascending dates whose endpoints are the ones the card displays. Built
+# rather than abbreviated: the fixture used to count 180 observations and list
+# two dates, a shape `result_shape_problem` refuses and the server can never
+# emit, and every test in this file treated it as canonical (Codex review,
+# PR #200).
+_OBSERVATION_DATES = [
+    (date(2026, 1, 8) + timedelta(days=offset)).isoformat() for offset in range(179)
+] + ["2026-09-01"]
+
 _FULL_PAYLOAD = {
     "methodology": "HISTORICAL_YIELD_VOL_MO",
     "requested_identifier": f"/isin/{_ISIN}",
@@ -124,7 +142,7 @@ _FULL_PAYLOAD = {
     "series_observation_count": 200,
     "requested_observation_count": 180,
     "observation_count": 180,
-    "observation_dates": ["2026-01-08", "2026-09-01"],
+    "observation_dates": _OBSERVATION_DATES,
     "first_observation_date": "2026-01-08",
     "last_observation_date": "2026-09-01",
     "yield_change_count": 179,
@@ -1056,6 +1074,66 @@ def test_negative_counts_are_refused(server_url, page, overrides) -> None:
 
     assert "malformed response" in page.inner_text("#hyv-error-detail")
     assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_the_card_accepts_what_the_real_route_actually_serializes(
+    server_url, page, monkeypatch
+) -> None:
+    """The one test that does not hand-build the payload (Codex review, #200).
+
+    Every other test in this file fulfils the request with a fixture I wrote,
+    so none of them proves `validatePayload` accepts what the calculator and
+    the route actually emit -- and the fixture had already drifted from that
+    shape without any test noticing. Here only the #196 Bloomberg loader is
+    stubbed; the request reaches the real `ThreadingHTTPServer` route, which
+    runs the real calculator and the real serializer, and the card has to
+    render the answer it gets.
+
+    This is the check that closes the loop the malformed-payload cases cannot:
+    those prove the card refuses what the server would never send, and this
+    proves it accepts what the server does send.
+    """
+
+    start = date(2026, 1, 1)
+    values = [4.0 + (index % 7) * 0.01 for index in range(180)]
+    observations = tuple(
+        BondYieldObservation(
+            observation_date=start + timedelta(days=index),
+            yield_value=value,
+            raw_value=repr(value),
+        )
+        for index, value in enumerate(values)
+    )
+    history = BloombergBondYieldHistory(
+        requested_identifier=f"/isin/{_ISIN}",
+        security="SYNTHETIC TEST Corp",
+        yield_field=_FIELD,
+        field_meaning="Yield to maturity",
+        field_unit="PERCENT",
+        requested_start_date=start,
+        requested_end_date=date(2026, 9, 1),
+        observations=observations,
+        source_system="BLOOMBERG_DAPI",
+        acquired_at="2026-09-01T14:05:00+00:00",
+    )
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_bond_yield_history", lambda **kwargs: history
+    )
+    expected = calculate_historical_yield_volatility(history, requested_observation_count=180)
+
+    _route_other_markets_away(page)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    # Digit for digit against the figures the real calculator produced.
+    assert page.inner_text("#hyv-annualized").strip() == repr(expected.annualized_yield_vol)
+    assert page.inner_text("#hyv-daily").strip() == repr(expected.daily_yield_vol)
+    assert page.inner_text("#hyv-status").strip() == "FULL_WINDOW"
+    assert page.inner_text("#hyv-actual-count").strip().startswith("180")
+    assert page.inner_text("#hyv-change-count").strip() == "179"
+    assert _is_actually_hidden(page, "hyv-error")
 
 
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
