@@ -436,7 +436,14 @@ def test_there_is_no_browser_side_volatility_statistic(server_url, page) -> None
     _route_other_markets_away(page)
     # A payload whose figures are deliberately unrelated to any statistic of
     # the observations: a page computing its own would disagree with them.
-    _route_vol(page, payload={**_FULL_PAYLOAD, "annualized_yield_vol_text": "1234.5"})
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "annualized_yield_vol": 1234.5,
+            "annualized_yield_vol_text": "1234.5",
+        },
+    )
     _open_card(page, server_url)
     _fill_query(page)
     _calculate(page)
@@ -445,6 +452,71 @@ def test_there_is_no_browser_side_volatility_statistic(server_url, page) -> None
     assert page.inner_text("#hyv-annualized").strip() == "1234.5"
     payload = page.evaluate("() => window.__shioriTestHistoricalYieldVolPayload()")
     assert payload["annualized_yield_vol_text"] == "1234.5"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # The finding as reported: a string that is not a number at all,
+        # printed verbatim as the risk headline (Codex review, PR #200).
+        {"annualized_yield_vol_text": "not calculated"},
+        {"annualized_yield_vol_text": ""},
+        {"annualized_yield_vol_text": "   "},
+        # A number that is not the number: the text is what reaches the
+        # screen, so a text/value disagreement is a wrong figure on screen.
+        {"annualized_yield_vol_text": "0.123"},
+        {"daily_yield_vol_text": "0.123"},
+        # Text where the calculator produced no figure, and the reverse.
+        {"annualized_yield_vol": None, "annualized_yield_vol_text": "0.5"},
+        {"daily_yield_vol": None, "daily_yield_vol_text": "0.5"},
+        {"annualized_yield_vol_text": None},
+        # A non-finite numeric counterpart cannot back a headline either.
+        {"annualized_yield_vol": "0.5"},
+    ],
+)
+def test_a_headline_text_that_is_not_its_own_number_is_refused(
+    server_url, page, overrides
+) -> None:
+    """The two figures are printed verbatim, so the string IS the risk number.
+
+    Checking only `typeof === "string"` let `annualized_yield_vol_text:
+    "not calculated"` through, and render() put it on screen under the Middle
+    Office heading. Each text field must now be present exactly when its
+    numeric counterpart is, and read back as exactly that number.
+    """
+
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_a_repr_javascript_would_spell_differently_is_still_accepted(
+    server_url, page
+) -> None:
+    # The rule compares values, not spellings. Python's repr of this float is
+    # "1e-05" and JavaScript's String() of it is "0.00001"; a string-equality
+    # rule would refuse an entirely honest payload and print nothing.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "annualized_yield_vol": 1e-05,
+            "annualized_yield_vol_text": "1e-05",
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-annualized").strip() == "1e-05"
 
 
 def test_the_full_provenance_is_on_screen(server_url, page) -> None:

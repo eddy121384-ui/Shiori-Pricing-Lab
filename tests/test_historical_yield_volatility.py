@@ -1259,6 +1259,26 @@ def test_an_insufficient_history_result_must_keep_its_warning():
     assert "always carries one" in problem
 
 
+def test_a_fatal_blocker_forces_is_usable_false():
+    """The property is public and is read without the publication guard.
+
+    The calculator never emits a blocker beside a figure, but `is_usable` is
+    an accessor on a plain dataclass and its docstring calls itself equivalent
+    to `not self.blockers`. A directly constructed result carrying both
+    answered True — the opposite of what the blocker says (Codex review, #200).
+    """
+
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    assert base.is_usable is True
+
+    blocked = dataclasses.replace(base, blockers=("this result must not be used",))
+
+    assert blocked.is_usable is False
+    assert blocked.is_usable == (not blocked.blockers)
+
+
 def test_the_shared_shape_check_is_what_both_consumers_use():
     """One shape checker, two error types.
 

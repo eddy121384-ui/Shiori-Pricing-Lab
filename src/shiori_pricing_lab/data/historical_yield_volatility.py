@@ -287,9 +287,18 @@ class HistoricalYieldVolResult:
         Equivalent to ``not self.blockers``. A ``True`` here says only that a
         number exists -- ``window_status`` and ``warnings`` still decide how
         it may be presented.
+
+        Both halves are tested, not just the figure (Codex review, PR #200).
+        The calculator never emits a blocker beside a figure, but this is a
+        public accessor on a plain dataclass: a directly constructed or future
+        result carrying ``blockers=("this result must not be used",)`` beside
+        a number answered ``True`` here, which is the opposite of what the
+        blocker says and of what this docstring promises. A caller reading
+        this property is not going through the publication guard -- that is
+        the whole reason the property exists -- so the rule has to hold here.
         """
 
-        return self.annualized_yield_vol is not None
+        return not self.blockers and self.annualized_yield_vol is not None
 
 
 def _calculation_now() -> datetime:

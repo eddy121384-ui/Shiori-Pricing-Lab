@@ -246,9 +246,35 @@
     for (const key of ["blockers", "warnings"]) {
       if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
     }
-    for (const key of ["daily_yield_vol_text", "annualized_yield_vol_text"]) {
-      if (candidate[key] !== null && typeof candidate[key] !== "string") {
-        return `malformed response: "${key}" is neither a string nor null`;
+    // The two headline figures are printed from these strings verbatim, so a
+    // string that is not a number is a fabricated risk figure on screen under
+    // a Middle Office heading -- `annualized_yield_vol_text: "not calculated"`
+    // was displayed as the result (Codex review, PR #200). Each text field is
+    // checked against the numeric field it is the repr of: present exactly
+    // when that one is, and reading back as exactly that number. Numeric
+    // equality rather than string equality on purpose -- Python's repr and
+    // JavaScript's String() disagree on the same float (1e-05 vs 0.00001),
+    // and it is the value that must match, not the spelling.
+    for (const [textKey, numberKey] of [
+      ["daily_yield_vol_text", "daily_yield_vol"],
+      ["annualized_yield_vol_text", "annualized_yield_vol"],
+    ]) {
+      const value = candidate[numberKey];
+      const rendered = candidate[textKey];
+      if (value === null || value === undefined) {
+        if (rendered !== null && rendered !== undefined) {
+          return `malformed response: "${textKey}" carries text where "${numberKey}" is absent`;
+        }
+        continue;
+      }
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        return `malformed response: "${numberKey}" is not a finite number`;
+      }
+      if (!isNonBlankString(rendered)) {
+        return `malformed response: "${textKey}" is not a non-blank string`;
+      }
+      if (Number(rendered) !== value) {
+        return `malformed response: "${textKey}" does not read back as "${numberKey}"`;
       }
     }
     // The nested source is inspected, not merely tested for truthiness
