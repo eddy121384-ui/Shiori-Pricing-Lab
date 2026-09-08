@@ -1301,41 +1301,12 @@ def test_a_count_javascript_cannot_represent_exactly_is_refused(server_url, page
 @pytest.mark.parametrize(
     "warnings",
     [
-        ["Applied VCUB substitute"],
-        # Right prefix, wrong subject: still not this window's qualification.
-        ["INSUFFICIENT_HISTORY: Applied VCUB substitute"],
-        # Right words, wrong counts.
-        [
-            "INSUFFICIENT_HISTORY: 12 of the requested 34 Yield observations exist. This is "
-            "not a full-window Historical Yield Vol"
-        ],
-        # 90 is a suffix of 190: an unbounded substring search found the
-        # window's own count inside a larger, contradictory one (Codex
-        # review, PR #200).
-        [
-            "INSUFFICIENT_HISTORY: 190 of the requested 180 Yield observations exist. This "
-            "is not a full-window Historical Yield Vol"
-        ],
-        # The requested count as a suffix of a larger number, likewise.
-        [
-            "INSUFFICIENT_HISTORY: 90 of the requested 1180 Yield observations exist. This "
-            "is not a full-window Historical Yield Vol"
-        ],
         # Two warnings is not "a warning".
         [_SHORT_PAYLOAD["warnings"][0], _SHORT_PAYLOAD["warnings"][0]],
+        [],
     ],
 )
-def test_the_short_window_warning_must_qualify_this_window(server_url, page, warnings) -> None:
-    """The card checks the machine-derivable parts, not the sentence.
-
-    `result_shape_problem` requires the exact warning; the card requires the
-    status it qualifies and the two counts it is about, and leaves the
-    explanatory tail to the server. A second copy of that prose in JavaScript
-    is the drift this review has spent eleven rounds paying for -- but
-    presence alone let "Applied VCUB substitute" reach the screen beside an
-    audit line saying no substitute was applied (Codex review, PR #200).
-    """
-
+def test_a_short_window_carries_exactly_one_warning(server_url, page, warnings) -> None:
     _route_other_markets_away(page)
     _route_vol(page, payload={**_SHORT_PAYLOAD, "warnings": warnings})
     _open_card(page, server_url)
@@ -1343,13 +1314,39 @@ def test_the_short_window_warning_must_qualify_this_window(server_url, page, war
     _calculate(page)
     _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
 
-    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert "carries exactly" in page.inner_text("#hyv-error-detail")
     assert _is_actually_hidden(page, "hyv-result")
 
 
+def test_the_card_does_not_check_what_the_warning_says(server_url, page) -> None:
+    """A stated gap, pinned so nobody mistakes it for coverage.
+
+    Three content rules were written here and all three were wrong -- an
+    unbounded substring, then a count prefix plus a whole-token search, each
+    accepting a warning that contradicted the counts beside it. The only
+    version that is not a character search is the whole sentence, which puts
+    a second copy of the server's prose in JavaScript.
+
+    So the card enforces the structural rules and `result_shape_problem`
+    enforces the exact sentence server-side. A machine-readable warning code
+    in the payload is with Eddy as a contract change; until then this test
+    records what is NOT covered rather than letting a half-rule imply it is
+    (Codex review, PR #200).
+    """
+
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_SHORT_PAYLOAD, "warnings": ["Applied VCUB substitute"]})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert "Applied VCUB substitute" in page.inner_text("#hyv-warning-list")
+
+
 def test_a_reworded_warning_tail_still_renders(server_url, page) -> None:
-    # The deliberate limit of the rule, pinned so it cannot quietly tighten:
-    # the card must not break because the server rephrased the explanation.
+    # The reason the content rule is not there: the card must not break
+    # because the server rephrased an explanation that was never wrong.
     _route_other_markets_away(page)
     _route_vol(
         page,

@@ -503,37 +503,27 @@
         `that status carries exactly ${expectedWarnings}`
       );
     }
-    // And it has to be *that* qualification. `result_shape_problem` requires
-    // the exact sentence; the card checks the machine-derivable parts of it --
-    // the status it qualifies, and the two counts it is about -- and leaves
-    // the explanatory tail to the server (Codex review, PR #200).
+    // The card does NOT check what the warning says, and that is a decision
+    // rather than an oversight (Codex review, PR #200).
     //
-    // Deliberately not the whole sentence: a second copy of that prose in
-    // JavaScript is the drift this review has spent eleven rounds paying for,
-    // and a reworded tail would then break the card while the answer stayed
-    // correct. Checking only these two parts still refuses "Applied VCUB
-    // substitute", which is the payload that mattered -- it claimed a
-    // substitute beside an audit line saying none was applied.
-    if (expectedWarnings === 1) {
-      const qualification = candidate.warnings[0];
-      // A fixed prefix for the window's own count, and a whole-token match
-      // for the requested one. An unbounded substring was wrong: searching
-      // for "90 of the requested 180" finds it inside "190 of the requested
-      // 180", so a warning contradicting the count beside it passed (Codex
-      // review, PR #200). The counts are validated safe integers, so they are
-      // digits and safe to place in a pattern.
-      const prefix = `${expectedStatus}: ${candidate.observation_count} `;
-      const namesRequested = new RegExp(
-        `\\b${candidate.requested_observation_count}\\b`,
-      ).test(qualification);
-      if (!qualification.startsWith(prefix) || !namesRequested) {
-        return (
-          `malformed response: the short-window warning is ${JSON.stringify(qualification)}; ` +
-          `it must begin ${JSON.stringify(prefix)} and name ` +
-          `${candidate.requested_observation_count}`
-        );
-      }
-    }
+    // Three content rules were written here and all three were wrong. An
+    // unbounded substring found "90 of the requested 180" inside "190 of the
+    // requested 180". A fixed count prefix plus a whole-token search accepted
+    // "90 of the requested 1180 ... The previous target was 180." Each looked
+    // like a check on whether the warning describes this window, and was
+    // really a search for characters. The only version that is not is the
+    // whole sentence -- a second copy of the server's prose in JavaScript,
+    // which is the drift this file has spent thirteen review rounds paying
+    // for, and which would break the card whenever the server rewords an
+    // explanation that was never wrong.
+    //
+    // So the structural rules above stay -- exactly one warning for
+    // INSUFFICIENT_HISTORY, none otherwise, every entry a non-blank string --
+    // and the content gap is carried openly: `result_shape_problem` enforces
+    // the exact sentence server-side, and a machine-readable warning code in
+    // the payload is with Eddy as a contract change. A rule that looks like
+    // validation and is not is worse than a stated gap.
+
     // The two headline figures are printed from these strings verbatim, so a
     // string that is not a number is a fabricated risk figure on screen under
     // a Middle Office heading -- `annualized_yield_vol_text: "not calculated"`
