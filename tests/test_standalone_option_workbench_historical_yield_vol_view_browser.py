@@ -1298,6 +1298,65 @@ def test_a_count_javascript_cannot_represent_exactly_is_refused(server_url, page
     assert _is_actually_hidden(page, "hyv-result")
 
 
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        ["Applied VCUB substitute"],
+        # Right prefix, wrong subject: still not this window's qualification.
+        ["INSUFFICIENT_HISTORY: Applied VCUB substitute"],
+        # Right words, wrong counts.
+        [
+            "INSUFFICIENT_HISTORY: 12 of the requested 34 Yield observations exist. This is "
+            "not a full-window Historical Yield Vol"
+        ],
+        # Two warnings is not "a warning".
+        [_SHORT_PAYLOAD["warnings"][0], _SHORT_PAYLOAD["warnings"][0]],
+    ],
+)
+def test_the_short_window_warning_must_qualify_this_window(server_url, page, warnings) -> None:
+    """The card checks the machine-derivable parts, not the sentence.
+
+    `result_shape_problem` requires the exact warning; the card requires the
+    status it qualifies and the two counts it is about, and leaves the
+    explanatory tail to the server. A second copy of that prose in JavaScript
+    is the drift this review has spent eleven rounds paying for -- but
+    presence alone let "Applied VCUB substitute" reach the screen beside an
+    audit line saying no substitute was applied (Codex review, PR #200).
+    """
+
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_SHORT_PAYLOAD, "warnings": warnings})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_a_reworded_warning_tail_still_renders(server_url, page) -> None:
+    # The deliberate limit of the rule, pinned so it cannot quietly tighten:
+    # the card must not break because the server rephrased the explanation.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_SHORT_PAYLOAD,
+            "warnings": [
+                "INSUFFICIENT_HISTORY: 90 of the requested 180 Yield observations exist. "
+                "Some entirely different but equally honest wording."
+            ],
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert "equally honest wording" in page.inner_text("#hyv-warning-list")
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:

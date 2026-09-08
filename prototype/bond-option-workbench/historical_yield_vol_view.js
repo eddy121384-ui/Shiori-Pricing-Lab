@@ -344,6 +344,16 @@
         return `malformed response: "${key}" is missing`;
       }
     }
+    for (const key of ["blockers", "warnings"]) {
+      if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
+      // These entries ARE the refusal and the qualification a trader reads.
+      // An object rendered as "[object Object]" and a blank string as an
+      // empty bullet, in the one place the card explains itself (Codex
+      // review, PR #200). Checked before any length is treated as meaningful.
+      if (!candidate[key].every(isNonBlankString)) {
+        return `malformed response: every "${key}" entry must be a non-blank string`;
+      }
+    }
     // The observation dates behind the figure, and the two endpoints the card
     // prints as "first/last observation used". Never checked against each
     // other or against the count, so a null endpoint drew a dash and an
@@ -484,23 +494,36 @@
       );
     }
     // The warning is that qualification, so it belongs to exactly that status
-    // -- the same rule the server's own result guard carries.
-    const warningExpected = expectedStatus === "INSUFFICIENT_HISTORY";
-    if (candidate.warnings.length > 0 !== warningExpected) {
+    // -- the same rule the server's own result guard carries, and exactly one
+    // of them: two warnings is not "a warning" either.
+    const expectedWarnings = expectedStatus === "INSUFFICIENT_HISTORY" ? 1 : 0;
+    if (candidate.warnings.length !== expectedWarnings) {
       return (
-        `malformed response: ${expectedStatus} with ` +
-        (candidate.warnings.length > 0 ? `${candidate.warnings.length} warning(s)` : "no warning") +
-        ", and only INSUFFICIENT_HISTORY carries one"
+        `malformed response: ${expectedStatus} with ${candidate.warnings.length} warning(s); ` +
+        `that status carries exactly ${expectedWarnings}`
       );
     }
-    for (const key of ["blockers", "warnings"]) {
-      if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
-      // These entries ARE the refusal and the qualification a trader reads.
-      // An object rendered as "[object Object]" and a blank string as an
-      // empty bullet, in the one place the card explains itself (Codex
-      // review, PR #200). Checked before any length is treated as meaningful.
-      if (!candidate[key].every(isNonBlankString)) {
-        return `malformed response: every "${key}" entry must be a non-blank string`;
+    // And it has to be *that* qualification. `result_shape_problem` requires
+    // the exact sentence; the card checks the machine-derivable parts of it --
+    // the status it qualifies, and the two counts it is about -- and leaves
+    // the explanatory tail to the server (Codex review, PR #200).
+    //
+    // Deliberately not the whole sentence: a second copy of that prose in
+    // JavaScript is the drift this review has spent eleven rounds paying for,
+    // and a reworded tail would then break the card while the answer stayed
+    // correct. Checking only these two parts still refuses "Applied VCUB
+    // substitute", which is the payload that mattered -- it claimed a
+    // substitute beside an audit line saying none was applied.
+    if (expectedWarnings === 1) {
+      const qualification = candidate.warnings[0];
+      const counts =
+        `${candidate.observation_count} of the requested ` +
+        `${candidate.requested_observation_count}`;
+      if (!qualification.startsWith(`${expectedStatus}:`) || !qualification.includes(counts)) {
+        return (
+          `malformed response: the short-window warning is ${JSON.stringify(qualification)}; ` +
+          `it must qualify ${expectedStatus} and name ${counts} observations`
+        );
       }
     }
     // The two headline figures are printed from these strings verbatim, so a
