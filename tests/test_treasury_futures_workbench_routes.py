@@ -118,6 +118,9 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
     assert digits["ZN"] == ["0", "5"]
     assert digits["UXY"] == ["0", "5"]
     assert digits["WN"] == ["0"]
+    # Decimal contracts have no 32nds alphabet at all (Issue #204).
+    assert digits["FGBS"] == []
+    assert digits["FGBL"] == []
     # The tick's human label is the server's too, so the page never computes
     # a reciprocal to say what the tick is.
     labels = {c["code"]: c["minimum_tick_label"] for c in payload["contracts"]}
@@ -128,7 +131,45 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
         "ZB": "1/32 point",
         "UXY": "1/64 point",
         "WN": "1/32 point",
+        "FGBS": "0.005 point",
+        "FGBM": "0.01 point",
+        "FGBL": "0.01 point",
+        "FGBX": "0.02 point",
     }
+    # Market grouping and quote conventions drive the panel selector (Issue #204).
+    markets = {c["code"]: c["market"] for c in payload["contracts"]}
+    assert markets == {
+        "ZT": "UST",
+        "ZF": "UST",
+        "ZN": "UST",
+        "ZB": "UST",
+        "UXY": "UST",
+        "WN": "UST",
+        "FGBS": "EUREX_DE",
+        "FGBM": "EUREX_DE",
+        "FGBL": "EUREX_DE",
+        "FGBX": "EUREX_DE",
+    }
+    market_labels = {c["code"]: c["market_label"] for c in payload["contracts"]}
+    assert market_labels["ZN"] == "U.S. Treasury Futures"
+    assert market_labels["FGBL"] == "German Government Bond Futures (Eurex)"
+    conventions = {c["code"]: c["quote_convention"] for c in payload["contracts"]}
+    assert conventions["ZN"] == "32NDS"
+    assert conventions["FGBS"] == "DECIMAL"
+    assert [c["code"] for c in payload["contracts"] if c["market"] == "UST"] == [
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+        "UXY",
+        "WN",
+    ]
+    assert [c["code"] for c in payload["contracts"] if c["market"] == "EUREX_DE"] == [
+        "FGBS",
+        "FGBM",
+        "FGBL",
+        "FGBX",
+    ]
 
 
 # ---------------------------------------------------------------------------

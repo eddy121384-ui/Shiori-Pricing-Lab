@@ -67,6 +67,10 @@ def test_uxy_and_wn_are_supported_alongside_the_mvp_four() -> None:
         "ZB",
         "UXY",
         "WN",
+        "FGBS",
+        "FGBM",
+        "FGBL",
+        "FGBX",
     )
     assert get_contract("UXY").name == "Ultra 10-Year U.S. Treasury Note futures"
     assert get_contract("WN").name == "Ultra U.S. Treasury Bond futures"

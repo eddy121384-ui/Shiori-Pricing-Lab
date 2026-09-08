@@ -410,12 +410,14 @@ from shiori_pricing_lab.pricing.bli_ust_coupon_payment_date import (
     UST_COUPON_PAYMENT_ROLL_CONVENTION,
 )
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
+    MARKET_LABELS,
     SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES,
     TreasuryFuturesContractError,
     TreasuryFuturesQuoteError,
     get_contract,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+    METHODOLOGY_NOTE_BY_MARKET,
     TreasuryFuturesYieldError,
     futures_price_from_target_yield,
     implied_yield_from_futures_price,
@@ -2974,7 +2976,10 @@ def treasury_futures_contract_catalogue() -> dict:
 
     The browser never hard-codes a tick size or a sub-32nd alphabet: it renders
     what this returns, so the page and the calculation always agree on what
-    ZT/ZF/ZN/ZB actually trade in.
+    ZT/ZF/ZN/ZB actually trade in. Issue #204 adds the market grouping and
+    quote-convention keys so the panel can separate U.S. Treasury Futures
+    from German Government Bond Futures (Eurex) and render decimal ticks
+    without guessing; every pre-existing key keeps its exact shape.
     """
 
     return {
@@ -2982,6 +2987,11 @@ def treasury_futures_contract_catalogue() -> dict:
             {
                 "code": contract.code,
                 "name": contract.name,
+                "market": contract.market,
+                "market_label": MARKET_LABELS[contract.market],
+                "quote_convention": contract.quote_convention,
+                "decimal_places": contract.decimal_places,
+                "methodology_note": METHODOLOGY_NOTE_BY_MARKET[contract.market],
                 "minimum_tick": contract.minimum_tick,
                 "minimum_tick_label": contract.minimum_tick_label,
                 "ticks_per_32nd": contract.ticks_per_32nd,

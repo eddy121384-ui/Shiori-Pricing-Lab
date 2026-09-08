@@ -86,6 +86,16 @@ convention switches to simple interest for a single remaining coupon and
 this module does not implement that convention. No contract in scope can
 reach it -- the shortest CTD in the basket still has years of coupons after
 delivery -- so this is a guard, not a limitation of the utility.
+
+**Eurex German leg (Issue #204).** ``FGBS``/``FGBM``/``FGBL``/``FGBX`` run
+the same invariant -- futures price x conversion factor -> CTD clean price
+-> market-correct yield -- with ``coupons_per_year=1`` (annual, ACT/ACT,
+the existing ``GERMAN_GOVT`` bond convention profile) instead of the UST
+semiannual grid. There is one code path, parameterized by frequency, never
+a German copy of the math; U.S. Treasury semiannual assumptions are never
+applied to a German CTD. The methodology stamp on every answer names the
+market, the ``GERMAN_GOVT`` profile and the Eurex basis so no consumer can
+mistake one leg's convention for the other's.
 """
 
 from __future__ import annotations
@@ -97,6 +107,7 @@ from datetime import date
 
 from shiori_pricing_lab.data.treasury_futures_ctd import TreasuryFuturesCTD
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
+    MARKET_EUREX_GERMAN,
     TreasuryFuturesQuote,
     format_futures_quote,
     get_contract,
@@ -111,6 +122,77 @@ TREASURY_COUPONS_PER_YEAR = 2
 TREASURY_COUPON_PERIOD_MONTHS = 12 // TREASURY_COUPONS_PER_YEAR
 TREASURY_DAY_COUNT = DayCount.ACT_ACT_BOND
 TREASURY_PAR = 100.0
+
+#: Issue #204: German government CTDs pay annual coupons (the existing
+#: ``GERMAN_GOVT`` bond convention profile: annual, ACT/ACT). The yield math
+#: below is shared -- one code path parameterized by coupons per year, never
+#: a German copy of it.
+EUREX_COUPON_FREQUENCY = Frequency.ANNUAL
+EUREX_COUPONS_PER_YEAR = 1
+
+#: Bond convention profile selected by market, recorded on every answer so no
+#: consumer can show a yield without the convention that produced it.
+BOND_CONVENTION_PROFILE_BY_MARKET = {
+    "UST": "UST",
+    MARKET_EUREX_GERMAN: "GERMAN_GOVT",
+}
+
+#: Methodology basis by market. The Eurex leg names no CME analytics: the
+#: shared invariant (futures price x conversion factor -> CTD clean price ->
+#: market-correct yield) is the same, but the benchmark it is reconciled
+#: against is Eurex/Bloomberg, not CME Treasury Analytics.
+METHODOLOGY_BASIS_BY_MARKET = {
+    "UST": "CME_TREASURY_ANALYTICS_CTD_IMPLIED_FORWARD_YIELD",
+    MARKET_EUREX_GERMAN: "EUREX_CTD_IMPLIED_FORWARD_YIELD",
+}
+
+#: Methodology note by market, served by the workbench catalogue so the panel
+#: can state the selected contract's convention without hard-coding copy.
+#: The UST sentence is the panel's long-standing subtitle, verbatim.
+METHODOLOGY_NOTE_BY_MARKET = {
+    "UST": (
+        "CME Treasury Analytics methodology: the CTD\u2019s yield to maturity, settled on the "
+        "contract\u2019s last delivery day, from futures price \u00d7 conversion factor. "
+        "Semiannual, U.S. Treasury Actual/Actual, par 100. "
+        "No net-basis, repo or carry adjustment."
+    ),
+    MARKET_EUREX_GERMAN: (
+        "Eurex methodology: the CTD\u2019s yield to maturity, settled on the contract\u2019s "
+        "last delivery day, from futures price \u00d7 conversion factor. "
+        "Annual, ACT/ACT, par 100. No net-basis, repo or carry adjustment."
+    ),
+}
+
+
+def _coupons_per_year(contract_code: str) -> int:
+    """Coupons per year for ``contract_code``'s CTD: 2 for UST, 1 for Eurex DE."""
+
+    if get_contract(contract_code).market == MARKET_EUREX_GERMAN:
+        return EUREX_COUPONS_PER_YEAR
+    return TREASURY_COUPONS_PER_YEAR
+
+
+def _market_of(contract_code: str) -> str:
+    """Market key for ``contract_code`` (``"UST"`` or ``"EUREX_DE"``)."""
+
+    market = get_contract(contract_code).market
+    if market == MARKET_EUREX_GERMAN:
+        return MARKET_EUREX_GERMAN
+    return "UST"
+
+
+def _street_convention_bond_phrase(coupons_per_year: int) -> str:
+    """Bond class named by final-period refusal messages (naming, not method)."""
+
+    if coupons_per_year == EUREX_COUPONS_PER_YEAR:
+        return "German government bond"
+    return "U.S. Treasury"
+
+
+def _compounding_adverb(coupons_per_year: int) -> str:
+    if coupons_per_year == EUREX_COUPONS_PER_YEAR:
+        return "annually"
+    return "semiannually"
 
 # Bisection bracket for the yield solve, in decimal per annum. Deliberately
 # far wider than any Treasury has ever traded so an unusual-but-real price
@@ -168,7 +250,7 @@ class TreasuryFuturesImpliedYield:
             "accrued_interest": self.accrued_interest,
             "dirty_price": self.dirty_price,
             "implied_yield_percent": self.implied_yield_percent,
-            "methodology": _methodology_payload(),
+            "methodology": _methodology_payload(_market_of(self.ctd.contract_code)),
             "ctd": self.ctd.as_display_payload(),
         }
 
@@ -206,18 +288,23 @@ class TreasuryFuturesPriceFromYield:
             "minimum_tick": self.minimum_tick,
             "on_tick": self.on_tick,
             "minimum_tick_label": contract.minimum_tick_label,
-            "methodology": _methodology_payload(),
+            "methodology": _methodology_payload(_market_of(self.ctd.contract_code)),
             "ctd": self.ctd.as_display_payload(),
         }
 
 
-def _methodology_payload() -> dict[str, object]:
+def _methodology_payload(market: str) -> dict[str, object]:
     """The convention every answer is stamped with -- never inferred by a consumer."""
 
+    frequency = (
+        EUREX_COUPON_FREQUENCY if market == MARKET_EUREX_GERMAN else TREASURY_COUPON_FREQUENCY
+    )
     return {
-        "basis": "CME_TREASURY_ANALYTICS_CTD_IMPLIED_FORWARD_YIELD",
+        "basis": METHODOLOGY_BASIS_BY_MARKET[market],
+        "market": market,
+        "bond_convention_profile": BOND_CONVENTION_PROFILE_BY_MARKET[market],
         "settlement_date_rule": "FUTURES_CONTRACT_LAST_DELIVERY_DAY",
-        "coupon_frequency": str(TREASURY_COUPON_FREQUENCY),
+        "coupon_frequency": str(frequency),
         "day_count": str(TREASURY_DAY_COUNT),
         "par": TREASURY_PAR,
         "carry_adjustment": "NONE",
@@ -241,12 +328,17 @@ def _add_months(value: date, months: int, *, month_end: bool) -> date:
     return date(year, month, last_day if month_end else min(value.day, last_day))
 
 
-def coupon_period_bounds(settlement_date: date, maturity_date: date) -> tuple[date, date]:
-    """Return the semiannual coupon dates bracketing ``settlement_date``.
+def coupon_period_bounds(
+    settlement_date: date, maturity_date: date, *, coupons_per_year: int = TREASURY_COUPONS_PER_YEAR
+) -> tuple[date, date]:
+    """Return the coupon dates bracketing ``settlement_date``.
 
     The grid is anchored on ``maturity_date`` and stepped backwards, which is
     how a Treasury's coupon dates are actually defined. Settlement exactly on
     a coupon date returns that date as the period start (zero accrued).
+    ``coupons_per_year`` selects the grid (2 for UST semiannual, 1 for Eurex
+    German annual); callers resolving it from the contract keep every
+    existing two-argument call on the UST grid.
     """
 
     if settlement_date >= maturity_date:
@@ -255,23 +347,24 @@ def coupon_period_bounds(settlement_date: date, maturity_date: date) -> tuple[da
             f"maturity {maturity_date.isoformat()}"
         )
 
+    period_months = 12 // coupons_per_year
     month_end = _is_month_end(maturity_date)
     next_coupon = maturity_date
     for step in range(1, _MAX_COUPON_PERIODS + 1):
-        previous_coupon = _add_months(
-            maturity_date, -TREASURY_COUPON_PERIOD_MONTHS * step, month_end=month_end
-        )
+        previous_coupon = _add_months(maturity_date, -period_months * step, month_end=month_end)
         if previous_coupon <= settlement_date:
             return previous_coupon, next_coupon
         next_coupon = previous_coupon
     raise TreasuryFuturesYieldError(
         f"CTD maturity {maturity_date.isoformat()} is more than "
-        f"{_MAX_COUPON_PERIODS // TREASURY_COUPONS_PER_YEAR} years after settlement "
+        f"{_MAX_COUPON_PERIODS // coupons_per_year} years after settlement "
         f"{settlement_date.isoformat()}"
     )
 
 
-def remaining_coupon_dates(settlement_date: date, maturity_date: date) -> list[date]:
+def remaining_coupon_dates(
+    settlement_date: date, maturity_date: date, *, coupons_per_year: int = TREASURY_COUPONS_PER_YEAR
+) -> list[date]:
     """Coupon dates strictly after ``settlement_date``, up to and including maturity.
 
     Every date is measured from ``maturity_date``, exactly as
@@ -283,33 +376,46 @@ def remaining_coupon_dates(settlement_date: date, maturity_date: date) -> list[d
     keeps this grid identical to the one accrued interest is prorated on.
     """
 
-    coupon_period_bounds(settlement_date, maturity_date)  # validates the pair
+    coupon_period_bounds(  # validates the pair
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    )
     month_end = _is_month_end(maturity_date)
     dates = [maturity_date]
+    period_months = 12 // coupons_per_year
     for step in range(1, _MAX_COUPON_PERIODS + 1):
-        coupon_date = _add_months(
-            maturity_date, -TREASURY_COUPON_PERIOD_MONTHS * step, month_end=month_end
-        )
+        coupon_date = _add_months(maturity_date, -period_months * step, month_end=month_end)
         if coupon_date <= settlement_date:
             dates.reverse()
             return dates
         dates.append(coupon_date)
     raise TreasuryFuturesYieldError(
         f"CTD maturity {maturity_date.isoformat()} is more than "
-        f"{_MAX_COUPON_PERIODS // TREASURY_COUPONS_PER_YEAR} years after settlement "
+        f"{_MAX_COUPON_PERIODS // coupons_per_year} years after settlement "
         f"{settlement_date.isoformat()}"
     )
 
 
 def accrued_interest_per_100(
-    settlement_date: date, maturity_date: date, coupon_percent: float
+    settlement_date: date,
+    maturity_date: date,
+    coupon_percent: float,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
 ) -> float:
-    """U.S. Treasury Actual/Actual (ISMA/Bond) accrued interest per 100 par."""
+    """Actual/actual accrued interest per 100 par for ``coupons_per_year``.
 
-    previous_coupon, next_coupon = coupon_period_bounds(settlement_date, maturity_date)
+    UST semiannual ISMA/Bond and German government annual ACT/ACT share this
+    shape: one coupon amount prorated by actual elapsed days over the actual
+    period length. The period the proration uses is the same one the
+    discounting below uses.
+    """
+
+    previous_coupon, next_coupon = coupon_period_bounds(
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    )
     period_days = (next_coupon - previous_coupon).days
     elapsed_days = (settlement_date - previous_coupon).days
-    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / TREASURY_COUPONS_PER_YEAR
+    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
     return coupon_amount * elapsed_days / period_days
 
 
@@ -323,29 +429,42 @@ def clean_price_from_yield(
     settlement_date: date,
     maturity_date: date,
     coupon_percent: float,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
 ) -> float:
-    """Treasury clean price per 100 from a semiannual-compounded YTM in percent."""
+    """Clean price per 100 from a compounded YTM in percent.
 
-    previous_coupon, next_coupon = coupon_period_bounds(settlement_date, maturity_date)
-    coupon_dates = remaining_coupon_dates(settlement_date, maturity_date)
+    ``coupons_per_year`` selects semiannual (UST) or annual (Eurex German)
+    compounding with the matching coupon amount and period grid. The UST
+    two-argument behavior is unchanged.
+    """
+
+    previous_coupon, next_coupon = coupon_period_bounds(
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    )
+    coupon_dates = remaining_coupon_dates(
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    )
     if len(coupon_dates) < 2:
         raise TreasuryFuturesYieldError(
             f"settlement {settlement_date.isoformat()} is inside the CTD's final coupon "
-            f"period (maturity {maturity_date.isoformat()}). The U.S. Treasury street "
+            f"period (maturity {maturity_date.isoformat()}). The "
+            f"{_street_convention_bond_phrase(coupons_per_year)} street "
             "convention discounts a single remaining coupon with simple interest, which "
             "this module does not implement, so no yield is reported rather than a "
             "compounded approximation of one."
         )
 
-    period_yield = (yield_percent / 100.0) / TREASURY_COUPONS_PER_YEAR
+    period_yield = (yield_percent / 100.0) / coupons_per_year
     if period_yield <= -1.0:
         raise TreasuryFuturesYieldError(
-            f"yield {yield_percent}% is too negative to discount semiannually"
+            f"yield {yield_percent}% is too negative to discount "
+            f"{_compounding_adverb(coupons_per_year)}"
         )
 
     period_days = (next_coupon - previous_coupon).days
     first_exponent = (next_coupon - settlement_date).days / period_days
-    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / TREASURY_COUPONS_PER_YEAR
+    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
 
     dirty_price = 0.0
     for index, coupon_date in enumerate(coupon_dates):
@@ -355,7 +474,7 @@ def clean_price_from_yield(
         dirty_price += cashflow / (1.0 + period_yield) ** (first_exponent + index)
 
     return dirty_price - accrued_interest_per_100(
-        settlement_date, maturity_date, coupon_percent
+        settlement_date, maturity_date, coupon_percent, coupons_per_year=coupons_per_year
     )
 
 
@@ -364,12 +483,15 @@ def yield_from_clean_price(
     settlement_date: date,
     maturity_date: date,
     coupon_percent: float,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
 ) -> float:
-    """Semiannual-compounded YTM in percent from a Treasury clean price per 100.
+    """Compounded YTM in percent from a clean price per 100.
 
     Bisection, because clean price is strictly decreasing in yield over the
     bracket: it cannot diverge, needs no derivative, and converges to full
     double precision in a fixed, deterministic number of steps.
+    ``coupons_per_year`` must match the one the price was computed with.
     """
 
     if clean_price <= 0:
@@ -377,7 +499,13 @@ def yield_from_clean_price(
 
     def residual(yield_percent: float) -> float:
         return (
-            clean_price_from_yield(yield_percent, settlement_date, maturity_date, coupon_percent)
+            clean_price_from_yield(
+                yield_percent,
+                settlement_date,
+                maturity_date,
+                coupon_percent,
+                coupons_per_year=coupons_per_year,
+            )
             - clean_price
         )
 
@@ -470,11 +598,14 @@ def implied_yield_from_futures_price(
     settlement_date = _settlement_date(ctd)
     quote = parse_futures_quote(ctd.contract_code, futures_price)
     clean_price = converted_clean_price(quote.decimal_price, ctd.conversion_factor)
+    coupons_per_year = _coupons_per_year(ctd.contract_code)
     accrued = accrued_interest_per_100(
-        settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent
+        settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent,
+        coupons_per_year=coupons_per_year,
     )
     implied_yield_percent = yield_from_clean_price(
-        clean_price, settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent
+        clean_price, settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent,
+        coupons_per_year=coupons_per_year,
     )
     return TreasuryFuturesImpliedYield(
         ctd=ctd,
@@ -509,12 +640,14 @@ def futures_price_from_target_yield(
         )
 
     settlement_date = _settlement_date(ctd)
+    coupons_per_year = _coupons_per_year(ctd.contract_code)
     try:
         clean_price = clean_price_from_yield(
             float(target_yield_percent),
             settlement_date,
             ctd.ctd_maturity_date,
             ctd.ctd_coupon_percent,
+            coupons_per_year=coupons_per_year,
         )
     except OverflowError as exc:
         # Extreme but finite yields (e.g. 1e308) can cause numerical overflow
@@ -528,7 +661,8 @@ def futures_price_from_target_yield(
             f"target yield {target_yield_percent}% implies a non-positive CTD clean price"
         )
     accrued = accrued_interest_per_100(
-        settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent
+        settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent,
+        coupons_per_year=coupons_per_year,
     )
     price = futures_price_from_clean_price(clean_price, ctd.conversion_factor)
     contract = get_contract(ctd.contract_code)

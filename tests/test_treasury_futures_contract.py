@@ -24,7 +24,18 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 
 
 def test_the_supported_contracts_are_the_mvp_four_plus_uxy_and_wn() -> None:
-    assert SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES == ("ZT", "ZF", "ZN", "ZB", "UXY", "WN")
+    assert SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES == (
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+        "UXY",
+        "WN",
+        "FGBS",
+        "FGBM",
+        "FGBL",
+        "FGBX",
+    )
 
 
 @pytest.mark.parametrize(
@@ -36,6 +47,10 @@ def test_the_supported_contracts_are_the_mvp_four_plus_uxy_and_wn() -> None:
         ("ZB", 1 / 32),  # one 32nd
         ("UXY", 1 / 64),  # one half of a 32nd, same grid as ZN
         ("WN", 1 / 32),  # one 32nd, same grid as ZB
+        ("FGBS", 0.005),  # Eurex decimal tick (Issue #204)
+        ("FGBM", 0.01),  # Eurex decimal tick (Issue #204)
+        ("FGBL", 0.01),  # Eurex decimal tick (Issue #204)
+        ("FGBX", 0.02),  # Eurex decimal tick (Issue #204)
     ],
 )
 def test_each_contract_has_its_own_published_minimum_tick(code, expected_tick) -> None:

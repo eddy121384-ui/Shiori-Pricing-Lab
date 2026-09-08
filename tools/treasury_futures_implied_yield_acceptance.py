@@ -59,6 +59,7 @@ import argparse
 import sys
 
 from shiori_pricing_lab.data.treasury_futures_ctd import (
+    EUREX_GERMAN_FUTURES_CODES,
     TreasuryFuturesCTDBloombergError,
     TreasuryFuturesCTDError,
     load_bloomberg_ctd_metadata,
@@ -167,7 +168,10 @@ def _report_contract(contract_code: str, futures_price: str) -> int:
     )
     print()
     print("  Benchmark comparison to run by hand")
-    print(f"    On CME Treasury Analytics / Bloomberg, set contract {ctd.contract_symbol},")
+    if ctd.contract_code in EUREX_GERMAN_FUTURES_CODES:
+        print(f"    On Bloomberg/Eurex analytics, set contract {ctd.contract_symbol},")
+    else:
+        print(f"    On CME Treasury Analytics / Bloomberg, set contract {ctd.contract_symbol},")
     print(f"    CTD {ctd.ctd_identifier} (CF {ctd.conversion_factor}), settlement "
           f"{ctd.last_delivery_date.isoformat()},")
     # The yield above is computed from decimal_price, so the benchmark must be

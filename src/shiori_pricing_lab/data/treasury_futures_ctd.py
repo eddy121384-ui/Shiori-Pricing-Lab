@@ -43,14 +43,20 @@ ZN    TYA Comdty     TYZ6          US91282CRJ26 4.500      0.920200 2026-12-31
 ZB    USA Comdty     USZ6          US912810UL07 5.000      0.889900 2026-12-31
 UXY   UXYA Comdty    UXYZ6         US91282CQQ77 4.375      0.885800 2026-12-31
 WN    WNA Comdty     WNZ6          US912810TL26 4.000      0.739300 2026-12-31
+FGBS  DUA Comdty     DUZ6          DE000BU22148 2.700      0.946091 2026-12-10
+FGBM  OEA Comdty     OEZ6          DE000BU25075 2.900      0.872911 2026-12-10
+FGBL  RXA Comdty     RXZ6          DE000BU2Z056 2.600      0.774902 2026-12-10
+FGBX  UBA Comdty     UBZ6          DE000BU2D004 2.500      0.751530 2026-12-10
 ===== ============== ============= ============ ========== ======== ==============
 
 CTD maturities returned alongside: 2028-09-30 (ZT), 2031-02-28 (ZF),
-2033-08-31 (ZN), 2045-05-15 (ZB), 2036-05-15 (UXY), 2052-11-15 (WN).
+2033-08-31 (ZN), 2045-05-15 (ZB), 2036-05-15 (UXY), 2052-11-15 (WN),
+2028-09-13 (FGBS), 2031-10-08 (FGBM), 2035-08-15 (FGBL), 2054-08-15 (FGBX).
 The ZT/ZF/ZN/ZB values are Issue #190 evidence; UXY/WN are Issue #202
-evidence (Eddy's Bloomberg workstation, 2026-09-07). Two of the first four
-are month-end maturities, which is exactly the coupon-grid case
-``pricing/treasury_futures_implied_yield`` anchors for.
+evidence (Eddy's Bloomberg workstation, 2026-09-07); FGBS/FGBM/FGBL/FGBX are
+Issue #204 evidence (Eddy's Bloomberg workstation, 2026-09-08, RED Gate 1).
+Two of the first four are month-end maturities, which is exactly the
+coupon-grid case ``pricing/treasury_futures_implied_yield`` anchors for.
 
 **``FUT_CTD_ISIN`` is the canonical CTD identifier.** ``FUT_CTD_CUSIP`` and
 ``FUT_CTD_TICKER`` are confirmed to return values too and are carried as
@@ -206,6 +212,8 @@ BLOOMBERG_ACTIVE_CONTRACT_FIELD = BLOOMBERG_CTD_FIELD_MAP["contract_symbol"]
 #: slice the delivery symbol that stage one resolves (``TYZ6`` -> root ``TY``
 #: + month ``Z`` + year ``6``). These are the actual futures roots, unchanged
 #: from the quarterly delivery symbols; they are *not* the active aliases.
+#: Eurex roots (``DU``/``OE``/``RX``/``UB``, Issue #204) are confirmed by the
+#: same live ``PARSEKYABLE_DES`` runs as the UST ones.
 BLOOMBERG_FUTURES_TICKER_ROOTS: dict[str, str] = {
     "ZT": "TU",
     "ZF": "FV",
@@ -213,6 +221,10 @@ BLOOMBERG_FUTURES_TICKER_ROOTS: dict[str, str] = {
     "ZB": "US",
     "UXY": "UXY",
     "WN": "WN",
+    "FGBS": "DU",
+    "FGBM": "OE",
+    "FGBL": "RX",
+    "FGBX": "UB",
 }
 
 #: Shiori contract code -> Bloomberg desk-active alias. These are the active
@@ -228,8 +240,27 @@ BLOOMBERG_FUTURES_ACTIVE_ALIASES: dict[str, str] = {
     "ZB": "USA",
     "UXY": "UXYA",
     "WN": "WNA",
+    "FGBS": "DUA",
+    "FGBM": "OEA",
+    "FGBL": "RXA",
+    "FGBX": "UBA",
 }
 BLOOMBERG_FUTURES_YELLOW_KEY = "Comdty"
+
+#: The Eurex German government bond futures contracts (Issue #204). These
+#: select the market-specific validation policies below -- German ISIN
+#: country rule, no CUSIP reconciliation, German display pattern, in-month
+#: delivery span -- while the two-stage sourcing itself is shared with UST.
+#: ``pricing/treasury_futures_contract`` carries the same membership via each
+#: contract's ``market``; the equality is pinned in tests so the two tables
+#: cannot drift apart.
+EUREX_GERMAN_FUTURES_CODES = ("FGBS", "FGBM", "FGBL", "FGBX")
+
+
+def _is_eurex_german(contract_code: str) -> bool:
+    """Whether ``contract_code`` is an Eurex German contract (Issue #204)."""
+
+    return str(contract_code).strip().upper() in EUREX_GERMAN_FUTURES_CODES
 
 
 class TreasuryFuturesCTDError(ValueError):
@@ -542,6 +573,14 @@ TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[
     # At least 25 years, with no upper bound (Issue #202 requires only the
     # floor). ``upper_inclusive`` is meaningless while the upper leg is None.
     "WN": (300, None, True),
+    # 1 year 9 months through 2 years 3 months (Issue #204: FGBS 1.75Y-2.25Y).
+    "FGBS": (21, 27, True),
+    # 4 years 6 months through 5 years 6 months (Issue #204: FGBM 4.5Y-5.5Y).
+    "FGBM": (54, 66, True),
+    # 8 years 6 months through 10 years 6 months (Issue #204: FGBL 8.5Y-10.5Y).
+    "FGBL": (102, 126, True),
+    # 24 years through 35 years (Issue #204: FGBX 24Y-35Y).
+    "FGBX": (288, 420, True),
 }
 
 #: Which month the reported last delivery day must fall in, as
@@ -556,6 +595,11 @@ TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS: dict[
 #:   day after the month's last one necessarily falls in the next month, so
 #:   their last delivery day is never in the delivery month -- ``(1, 2)``. Both
 #:   confirmed samples are 2026-10-05 for a September contract.
+#: * the four Eurex contracts last deliver inside the delivery month
+#:   (Issue #204: all four December 2026 contracts return ``2026-12-10``) --
+#:   ``(0, 1)``, like ZN/ZB/UXY/WN. This is a validation rule about which
+#:   month the date falls in, never a hard-coded day: future delivery months
+#:   answer their own date through the same span.
 #:
 #: This matters beyond provenance: ``last_delivery_date`` *is* the settlement
 #: date the implied yield is computed on, so accepting the wrong one moves the
@@ -568,6 +612,10 @@ TREASURY_FUTURES_LAST_DELIVERY_MONTH_SPAN: dict[str, tuple[int, int]] = {
     "ZB": (0, 1),
     "UXY": (0, 1),
     "WN": (0, 1),
+    "FGBS": (0, 1),
+    "FGBM": (0, 1),
+    "FGBL": (0, 1),
+    "FGBX": (0, 1),
 }
 
 _ISIN_LENGTH = 12
@@ -601,8 +649,9 @@ def _isin_check_digit_is_valid(identifier: str) -> bool:
     return total % 10 == 0
 
 
-def _require_isin(raw_value: str, field: str, security: str) -> str:
-    """Require a genuine U.S. ISIN, not merely an ISIN-shaped string.
+def _require_isin(raw_value: str, field: str, security: str, contract_code: str) -> str:
+    """Require a genuine government-bond ISIN for ``contract_code``, not merely
+    an ISIN-shaped string.
 
     Bloomberg can answer a field with a sentinel (``#N/A N/A``) or a
     placeholder that is neither absent nor blank, and a 12-alphanumeric shape
@@ -613,8 +662,10 @@ def _require_isin(raw_value: str, field: str, security: str) -> str:
 
     1. 12 alphanumeric characters -- the shape
        ``bloomberg_bond_quote.parse_bond_identifier`` already requires;
-    2. the ``US`` country prefix -- the CTD of a U.S. Treasury futures
-       contract is a U.S. Treasury;
+    2. the market's country prefix -- ``US`` for a U.S. Treasury futures CTD
+       (which is by definition a U.S. Treasury), ``DE`` for a Eurex German
+       government bond futures CTD (Issue #204; all four live CTDs are
+       ``DE...``);
     3. the ISO 6166 check digit.
 
     Deliberately stricter than the trader-entry parser, which checks only the
@@ -629,11 +680,17 @@ def _require_isin(raw_value: str, field: str, security: str) -> str:
             f"Bloomberg DAPI field {field} on {security!r} did not return a 12-character "
             f"alphanumeric ISIN: {raw_value!r}"
         )
-    if not identifier.startswith(_US_ISIN_COUNTRY_PREFIX):
+    if _is_eurex_german(contract_code):
+        expected_prefix = "DE"
+        market_phrase = "a German government bond"
+    else:
+        expected_prefix = _US_ISIN_COUNTRY_PREFIX
+        market_phrase = "a U.S. Treasury"
+    if not identifier.startswith(expected_prefix):
         raise TreasuryFuturesCTDBloombergError(
-            f"Bloomberg DAPI field {field} on {security!r} returned a non-U.S. ISIN "
-            f"{identifier!r} -- the CTD of a U.S. Treasury futures contract must be a "
-            "U.S. Treasury"
+            f"Bloomberg DAPI field {field} on {security!r} returned a non-{expected_prefix} "
+            f"ISIN {identifier!r} -- the CTD of a {contract_code} futures contract must be "
+            f"{market_phrase}"
         )
     if not _isin_check_digit_is_valid(identifier):
         raise TreasuryFuturesCTDBloombergError(
@@ -860,15 +917,28 @@ def _require_cusip_agrees_with_isin(
         )
 
 
-#: ``FUT_CTD_TICKER`` as all four confirmed contracts return it: ``T``, the
-#: coupon, and the maturity as ``mm/dd/yy`` (``T 4.25 05/31/33``).
+#: ``FUT_CTD_TICKER`` as all six confirmed UST contracts return it: ``T``,
+#: the coupon, and the maturity as ``mm/dd/yy`` (``T 4.25 05/31/33``).
 _CTD_DESCRIPTION_PATTERN = re.compile(
     r"^T\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]{2})/([0-9]{2})/([0-9]{2})$"
 )
 
+#: ``FUT_CTD_TICKER`` as the four confirmed Eurex contracts return it
+#: (Issue #204, live): ``BKO`` (Schatz), ``OBL`` (Bobl), ``DBR``
+#: (Bund/Buxl), then the same coupon and ``mm/dd/yy`` maturity
+#: (``DBR 2.6 08/15/35``). The prefixes are observed live values, and the
+#: coherence rule below is identical to the UST one.
+_EUREX_CTD_DESCRIPTION_PATTERN = re.compile(
+    r"^(BKO|OBL|DBR)\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]{2})/([0-9]{2})/([0-9]{2})$"
+)
+
 
 def _coherent_ctd_description(
-    raw_description: str | None, coupon_percent: float, maturity: date
+    raw_description: str | None,
+    coupon_percent: float,
+    maturity: date,
+    *,
+    contract_code: str,
 ) -> str | None:
     """Keep the display description only if it names the bond that was priced.
 
@@ -896,12 +966,18 @@ def _coherent_ctd_description(
     if not description:
         return None
 
-    match = _CTD_DESCRIPTION_PATTERN.match(description)
+    if _is_eurex_german(contract_code):
+        pattern = _EUREX_CTD_DESCRIPTION_PATTERN
+        coupon_group, date_groups = 2, (3, 4, 5)
+    else:
+        pattern = _CTD_DESCRIPTION_PATTERN
+        coupon_group, date_groups = 1, (2, 3, 4)
+    match = pattern.match(description)
     if match is None:
         return None
-    if abs(float(match.group(1)) - coupon_percent) > 1e-9:
+    if abs(float(match.group(coupon_group)) - coupon_percent) > 1e-9:
         return None
-    month, day, year_digits = (int(match.group(index)) for index in (2, 3, 4))
+    month, day, year_digits = (int(match.group(index)) for index in date_groups)
     if (month, day, year_digits) != (maturity.month, maturity.day, maturity.year % 100):
         return None
     return description
@@ -1007,6 +1083,7 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
         _required("ctd_identifier"),
         BLOOMBERG_CTD_FIELD_MAP["ctd_identifier"],
         delivery_security,
+        normalized_code,
     )
     coupon_percent = _parse_bloomberg_float(
         _required("ctd_coupon_percent"), coupon_field, delivery_security
@@ -1041,11 +1118,17 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
             f"{delivery_security!r}"
         )
 
-    _require_cusip_agrees_with_isin(
-        ctd_identifier,
-        ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_cusip"]),
-        delivery_security,
-    )
+    # A German ISIN does not embed a CUSIP the way a U.S. ISIN does, so the
+    # agreement check below would reject every coherent Eurex record (Issue
+    # #204: all four live ``FUT_CTD_CUSIP`` values name a different vendor
+    # identifier, not the ISIN's characters 3-11). CUSIP stays a display-only
+    # extra for Eurex -- never reconciled, never the identifier.
+    if not _is_eurex_german(normalized_code):
+        _require_cusip_agrees_with_isin(
+            ctd_identifier,
+            ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_cusip"]),
+            delivery_security,
+        )
 
     # Ties the CTD to the contract it was fetched for. Live path only: a manual
     # record is always visibly MANUAL_UNCONFIRMED and never claims to be
@@ -1073,6 +1156,7 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
             ctd_answered.get(BLOOMBERG_CTD_DISPLAY_FIELD_MAP["ctd_description"]),
             coupon_percent,
             ctd_maturity_date,
+            contract_code=normalized_code,
         ),
     )
 
