@@ -378,6 +378,121 @@ def _methodology_payload(policy: FuturesPricingPolicy) -> dict[str, object]:
 
 
 # --------------------------------------------------------------------------
+# Irregular first coupon (ACT/ACT ICMA, Issue #204 YAS diagnostic)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IrregularFirstCoupon:
+    """A bond's real first-coupon schedule, from live Bond Master evidence.
+
+    ``accrual_start`` (``ISSUE_DT``) is the day the first coupon starts
+    accruing from; ``first_coupon`` (``FIRST_CPN_DT``) the first actual
+    coupon date. Both or neither -- a half schedule is refused wherever one
+    is built, never completed by guessing.
+    """
+
+    accrual_start: date
+    first_coupon: date
+
+
+@dataclass(frozen=True)
+class _FirstCouponFrame:
+    """The ICMA decomposition of one irregular first coupon period.
+
+    The nominal (quasi) grid is the regular maturity-anchored grid; the
+    first actual coupon covers ``accrual_start`` -> ``first_coupon`` and is
+    worth ``first_factor`` whole coupons (full nominal periods plus the
+    stub fraction, all over ``nominal_days``). Accrued inside the first
+    period is one coupon times elapsed-since-accrual over ``nominal_days``;
+    discounting runs on the nominal grid. For a regular first coupon this
+    collapses exactly to the plain grid (factor 1, stub 0), which is why
+    seasoned bonds price identically with or without a schedule.
+    """
+
+    accrual_start: date
+    first_coupon: date
+    nominal_prev: date
+    nominal_days: int
+    first_factor: float
+    later_coupons: tuple[date, ...]
+
+
+def _first_coupon_frame(
+    settlement_date: date,
+    maturity_date: date,
+    coupons_per_year: int,
+    schedule: IrregularFirstCoupon | None,
+) -> _FirstCouponFrame | None:
+    """Return the ICMA frame when ``settlement_date`` needs it, else ``None``.
+
+    ``None`` means the plain maturity-anchored grid prices this settlement
+    exactly: no schedule, or settlement at/after the first coupon (the frame
+    only ever changes the first period). Anything structurally unusable --
+    settlement before accrual start, a first coupon off the nominal grid, an
+    accrual start at/after the first coupon -- fails closed.
+    """
+
+    if schedule is None or settlement_date >= schedule.first_coupon:
+        return None
+    accrual_start = schedule.accrual_start
+    first_coupon = schedule.first_coupon
+    if settlement_date < accrual_start:
+        raise TreasuryFuturesYieldError(
+            f"settlement date {settlement_date.isoformat()} is before the CTD's "
+            f"accrual start {accrual_start.isoformat()} -- no accrued interest exists"
+        )
+    if not accrual_start < first_coupon:
+        raise TreasuryFuturesYieldError(
+            f"accrual start {accrual_start.isoformat()} must be before the first "
+            f"coupon {first_coupon.isoformat()}"
+        )
+
+    period_months = 12 // coupons_per_year
+    month_end = _is_month_end(maturity_date)
+    # Nominal grid dates at or below the first coupon, newest first. Bounded
+    # like every other grid walk in this module.
+    grid_down: list[date] = [maturity_date]
+    for step in range(1, _MAX_COUPON_PERIODS + 1):
+        candidate = _add_months(maturity_date, -period_months * step, month_end=month_end)
+        grid_down.append(candidate)
+        if candidate <= accrual_start:
+            break
+    else:
+        raise TreasuryFuturesYieldError(
+            f"CTD maturity {maturity_date.isoformat()} is more than "
+            f"{_MAX_COUPON_PERIODS // coupons_per_year} years after accrual start "
+            f"{accrual_start.isoformat()}"
+        )
+    if first_coupon not in grid_down:
+        raise TreasuryFuturesYieldError(
+            f"first coupon {first_coupon.isoformat()} is not on the nominal "
+            f"{coupons_per_year}-per-year grid anchored on maturity "
+            f"{maturity_date.isoformat()} -- refusing to guess the reference period"
+        )
+    nominal_prev = max(candidate for candidate in grid_down if candidate < first_coupon)
+    nominal_days = (first_coupon - nominal_prev).days
+    first_after_accrual = min(
+        candidate for candidate in grid_down if candidate > accrual_start
+    )
+    stub_days = (first_after_accrual - accrual_start).days
+    full_periods = sum(
+        1 for candidate in grid_down if first_after_accrual <= candidate < first_coupon
+    )
+    later_coupons = tuple(
+        candidate for candidate in reversed(grid_down) if candidate > first_coupon
+    )
+    return _FirstCouponFrame(
+        accrual_start=accrual_start,
+        first_coupon=first_coupon,
+        nominal_prev=nominal_prev,
+        nominal_days=nominal_days,
+        first_factor=full_periods + stub_days / nominal_days,
+        later_coupons=later_coupons,
+    )
+
+
+# --------------------------------------------------------------------------
 # Coupon grid (unadjusted calendar dates, month-end aware)
 # --------------------------------------------------------------------------
 
@@ -395,7 +510,11 @@ def _add_months(value: date, months: int, *, month_end: bool) -> date:
 
 
 def coupon_period_bounds(
-    settlement_date: date, maturity_date: date, *, coupons_per_year: int = TREASURY_COUPONS_PER_YEAR
+    settlement_date: date,
+    maturity_date: date,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
 ) -> tuple[date, date]:
     """Return the coupon dates bracketing ``settlement_date``.
 
@@ -404,7 +523,10 @@ def coupon_period_bounds(
     a coupon date returns that date as the period start (zero accrued).
     ``coupons_per_year`` selects the grid (2 for UST semiannual, 1 for Eurex
     German annual); callers resolving it from the contract keep every
-    existing two-argument call on the UST grid.
+    existing two-argument call on the UST grid. With ``schedule`` and
+    settlement inside the first coupon period, the bracket is the nominal
+    first period (quasi date, first actual coupon) the ICMA treatment
+    discounts on.
     """
 
     if settlement_date >= maturity_date:
@@ -412,6 +534,10 @@ def coupon_period_bounds(
             f"settlement date {settlement_date.isoformat()} must be before the CTD's "
             f"maturity {maturity_date.isoformat()}"
         )
+
+    frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
+    if frame is not None:
+        return frame.nominal_prev, frame.first_coupon
 
     period_months = 12 // coupons_per_year
     month_end = _is_month_end(maturity_date)
@@ -429,7 +555,11 @@ def coupon_period_bounds(
 
 
 def remaining_coupon_dates(
-    settlement_date: date, maturity_date: date, *, coupons_per_year: int = TREASURY_COUPONS_PER_YEAR
+    settlement_date: date,
+    maturity_date: date,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
 ) -> list[date]:
     """Coupon dates strictly after ``settlement_date``, up to and including maturity.
 
@@ -443,8 +573,13 @@ def remaining_coupon_dates(
     """
 
     coupon_period_bounds(  # validates the pair
-        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year, schedule=schedule
     )
+    frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
+    if frame is not None:
+        # The quasi date carries no cashflow: the first payment is the long
+        # first coupon at ``first_coupon``, then the nominal grid resumes.
+        return [frame.first_coupon, *frame.later_coupons]
     month_end = _is_month_end(maturity_date)
     dates = [maturity_date]
     period_months = 12 // coupons_per_year
@@ -467,21 +602,28 @@ def accrued_interest_per_100(
     coupon_percent: float,
     *,
     coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
 ) -> float:
     """Actual/actual accrued interest per 100 par for ``coupons_per_year``.
 
     UST semiannual ISMA/Bond and German government annual ACT/ACT share this
     shape: one coupon amount prorated by actual elapsed days over the actual
     period length. The period the proration uses is the same one the
-    discounting below uses.
+    discounting below uses. Inside an irregular first coupon period the
+    elapsed days run from the real accrual start over the nominal period
+    (ACT/ACT ICMA), which is exactly the plain formula when the first
+    coupon is regular.
     """
 
+    frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
+    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
+    if frame is not None:
+        return coupon_amount * (settlement_date - frame.accrual_start).days / frame.nominal_days
     previous_coupon, next_coupon = coupon_period_bounds(
         settlement_date, maturity_date, coupons_per_year=coupons_per_year
     )
     period_days = (next_coupon - previous_coupon).days
     elapsed_days = (settlement_date - previous_coupon).days
-    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
     return coupon_amount * elapsed_days / period_days
 
 
@@ -497,13 +639,23 @@ def clean_price_from_yield(
     coupon_percent: float,
     *,
     coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
 ) -> float:
     """Clean price per 100 from a compounded YTM in percent.
 
     ``coupons_per_year`` selects semiannual (UST) or annual (Eurex German)
     compounding with the matching coupon amount and period grid. The UST
-    two-argument behavior is unchanged.
+    two-argument behavior is unchanged. With ``schedule`` and settlement
+    inside the first coupon period, the first cashflow is the genuine long
+    first coupon discounted on the nominal grid (ACT/ACT ICMA).
     """
+
+    frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
+    if frame is not None:
+        return _clean_price_first_coupon_frame(
+            yield_percent, settlement_date, maturity_date, coupon_percent,
+            coupons_per_year, frame,
+        )
 
     previous_coupon, next_coupon = coupon_period_bounds(
         settlement_date, maturity_date, coupons_per_year=coupons_per_year
@@ -544,6 +696,56 @@ def clean_price_from_yield(
     )
 
 
+def _clean_price_first_coupon_frame(
+    yield_percent: float,
+    settlement_date: date,
+    maturity_date: date,
+    coupon_percent: float,
+    coupons_per_year: int,
+    frame: _FirstCouponFrame,
+) -> float:
+    """Clean price with the genuine long first coupon (ACT/ACT ICMA).
+
+    The first cashflow is ``first_factor`` whole coupons at ``first_coupon``;
+    every later cashflow is one regular coupon on the nominal grid, plus
+    redemption at maturity. Discount exponents run on the nominal grid from
+    settlement, exactly as the plain path does once past the first coupon.
+    A frame whose only cashflow date is maturity itself is the single-payment
+    case the plain path also refuses rather than pricing with simple
+    interest it does not implement.
+    """
+
+    if not frame.later_coupons:
+        raise TreasuryFuturesYieldError(
+            f"settlement {settlement_date.isoformat()} is inside the CTD's final coupon "
+            f"period (maturity {maturity_date.isoformat()}). The "
+            f"{_street_convention_bond_phrase(coupons_per_year)} street "
+            "convention discounts a single remaining coupon with simple interest, which "
+            "this module does not implement, so no yield is reported rather than a "
+            "compounded approximation of one."
+        )
+
+    period_yield = (yield_percent / 100.0) / coupons_per_year
+    if period_yield <= -1.0:
+        raise TreasuryFuturesYieldError(
+            f"yield {yield_percent}% is too negative to discount "
+            f"{_compounding_adverb(coupons_per_year)}"
+        )
+
+    coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
+    first_exponent = (frame.first_coupon - settlement_date).days / frame.nominal_days
+    dirty_price = frame.first_factor * coupon_amount / (1.0 + period_yield) ** first_exponent
+    for index, coupon_date in enumerate(frame.later_coupons, start=1):
+        cashflow = coupon_amount
+        if coupon_date == maturity_date:
+            cashflow += TREASURY_PAR
+        dirty_price += cashflow / (1.0 + period_yield) ** (first_exponent + index)
+
+    return dirty_price - (
+        coupon_amount * (settlement_date - frame.accrual_start).days / frame.nominal_days
+    )
+
+
 def yield_from_clean_price(
     clean_price: float,
     settlement_date: date,
@@ -551,13 +753,16 @@ def yield_from_clean_price(
     coupon_percent: float,
     *,
     coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
 ) -> float:
     """Compounded YTM in percent from a clean price per 100.
 
     Bisection, because clean price is strictly decreasing in yield over the
     bracket: it cannot diverge, needs no derivative, and converges to full
     double precision in a fixed, deterministic number of steps.
-    ``coupons_per_year`` must match the one the price was computed with.
+    ``coupons_per_year`` must match the one the price was computed with, and
+    ``schedule`` must match too -- bisection inverts whichever pricing leg
+    ``clean_price_from_yield`` uses.
     """
 
     if clean_price <= 0:
@@ -571,6 +776,7 @@ def yield_from_clean_price(
                 maturity_date,
                 coupon_percent,
                 coupons_per_year=coupons_per_year,
+                schedule=schedule,
             )
             - clean_price
         )
@@ -650,6 +856,26 @@ def _settlement_date(ctd: TreasuryFuturesCTD) -> date:
     return ctd.last_delivery_date
 
 
+def _first_coupon_schedule(ctd: TreasuryFuturesCTD) -> IrregularFirstCoupon | None:
+    """The CTD's real first-coupon schedule, or ``None`` for the regular grid.
+
+    Both dates or neither: a record naming only one end of the first period
+    is refused rather than completed by guessing. ``None`` keeps the plain
+    maturity-anchored grid -- the UST path and every seasoned bond.
+    """
+
+    accrual_start = ctd.first_accrual_start
+    first_coupon = ctd.first_coupon_date
+    if accrual_start is None and first_coupon is None:
+        return None
+    if accrual_start is None or first_coupon is None:
+        raise TreasuryFuturesYieldError(
+            f"CTD {ctd.ctd_identifier} carries a half first-coupon schedule -- "
+            "accrual start and first coupon are required together, or neither"
+        )
+    return IrregularFirstCoupon(accrual_start=accrual_start, first_coupon=first_coupon)
+
+
 def implied_yield_from_futures_price(
     ctd: TreasuryFuturesCTD, futures_price: str | int | float
 ) -> TreasuryFuturesImpliedYield:
@@ -665,13 +891,14 @@ def implied_yield_from_futures_price(
     quote = parse_futures_quote(ctd.contract_code, futures_price)
     clean_price = converted_clean_price(quote.decimal_price, ctd.conversion_factor)
     coupons_per_year = _coupons_per_year(ctd.contract_code)
+    schedule = _first_coupon_schedule(ctd)
     accrued = accrued_interest_per_100(
         settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent,
-        coupons_per_year=coupons_per_year,
+        coupons_per_year=coupons_per_year, schedule=schedule,
     )
     implied_yield_percent = yield_from_clean_price(
         clean_price, settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent,
-        coupons_per_year=coupons_per_year,
+        coupons_per_year=coupons_per_year, schedule=schedule,
     )
     return TreasuryFuturesImpliedYield(
         ctd=ctd,
@@ -707,6 +934,7 @@ def futures_price_from_target_yield(
 
     settlement_date = _settlement_date(ctd)
     coupons_per_year = _coupons_per_year(ctd.contract_code)
+    schedule = _first_coupon_schedule(ctd)
     try:
         clean_price = clean_price_from_yield(
             float(target_yield_percent),
@@ -714,6 +942,7 @@ def futures_price_from_target_yield(
             ctd.ctd_maturity_date,
             ctd.ctd_coupon_percent,
             coupons_per_year=coupons_per_year,
+            schedule=schedule,
         )
     except OverflowError as exc:
         # Extreme but finite yields (e.g. 1e308) can cause numerical overflow
@@ -728,7 +957,7 @@ def futures_price_from_target_yield(
         )
     accrued = accrued_interest_per_100(
         settlement_date, ctd.ctd_maturity_date, ctd.ctd_coupon_percent,
-        coupons_per_year=coupons_per_year,
+        coupons_per_year=coupons_per_year, schedule=schedule,
     )
     price = futures_price_from_clean_price(clean_price, ctd.conversion_factor)
     contract = get_contract(ctd.contract_code)

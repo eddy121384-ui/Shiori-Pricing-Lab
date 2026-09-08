@@ -1415,6 +1415,8 @@ def test_the_display_payload_carries_the_full_ctd_small_print() -> None:
         "ctd_maturity_date",
         "conversion_factor",
         "last_delivery_date",
+        "first_accrual_start",
+        "first_coupon_date",
         "source",
         "as_of",
         "is_confirmed_source",

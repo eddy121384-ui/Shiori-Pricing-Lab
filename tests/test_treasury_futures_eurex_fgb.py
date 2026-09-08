@@ -37,6 +37,8 @@ from test_treasury_futures_ctd import (
     LIVE_STAGE_TWO,
     _install_fake_blpapi,
     _load_with,
+    _response_event,
+    _security_data,
     _two_stage_responder,
 )
 
@@ -49,12 +51,14 @@ from shiori_pricing_lab.data.treasury_futures_ctd import (
     EUREX_GERMAN_FUTURES_CODES,
     TREASURY_FUTURES_REMAINING_MATURITY_WINDOW_MONTHS,
     TreasuryFuturesCTDBloombergError,
+    TreasuryFuturesCTDError,
     TreasuryFuturesCTDSource,
     _delivery_month_first_day,
     _require_delivery_ticker,
     _require_remaining_maturity_plausible,
     bloomberg_active_contract,
     load_bloomberg_ctd_metadata,
+    treasury_futures_ctd_from_manual_entry,
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import get_convention_profile
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
@@ -104,6 +108,61 @@ EUREX_ROUND_TRIP_YIELDS = {
     "FGBL": 4.0,
     "FGBX": 4.0,
 }
+
+#: Stage-three live schedule evidence (Eddy's Bloomberg workstation,
+#: 2026-09-08): ISSUE_DT is the accrual start, FIRST_CPN_DT the first actual
+#: coupon. Same Bloomberg run as the RED Gate 1 stage-two values.
+LIVE_SCHEDULE = {
+    "FGBS": {"ISSUE_DT": "2026-07-16", "FIRST_CPN_DT": "2027-09-13"},
+    "FGBM": {"ISSUE_DT": "2026-07-23", "FIRST_CPN_DT": "2027-10-08"},
+    "FGBL": {"ISSUE_DT": "2025-07-04", "FIRST_CPN_DT": "2026-08-15"},
+    "FGBX": {"ISSUE_DT": "2024-02-06", "FIRST_CPN_DT": "2025-08-15"},
+}
+
+
+def _three_stage_responder(
+    *, active, delivery, bond, active_fields, stage_two_fields, schedule_fields
+):
+    """Fake DAPI answering all three Eurex stages, including the schedule."""
+
+    two_stage = _two_stage_responder(
+        active_fields=active_fields,
+        stage_two_fields=stage_two_fields,
+        active=active,
+        delivery=delivery,
+    )
+
+    def _respond(security):
+        if security == bond:
+            return _response_event([_security_data(security, schedule_fields)])
+        return two_stage(security)
+
+    return _respond
+
+
+def _load_eurex_with(monkeypatch, contract_code, *, stage_two=None, schedule=None):
+    """Run the live loader for one Eurex contract with chosen payloads."""
+
+    resolved = LIVE_DELIVERY_SYMBOL[contract_code]
+    live = LIVE_STAGE_TWO[contract_code]
+    _install_fake_blpapi(
+        monkeypatch,
+        _three_stage_responder(
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
+            stage_two_fields=dict(stage_two or live),
+            schedule_fields=dict(
+                schedule
+                or {
+                    "ISSUE_DT": LIVE_SCHEDULE[contract_code]["ISSUE_DT"],
+                    "FIRST_CPN_DT": LIVE_SCHEDULE[contract_code]["FIRST_CPN_DT"],
+                }
+            ),
+            active=bloomberg_active_contract(contract_code),
+            delivery=f"{resolved} Comdty",
+            bond=f"/isin/{live['FUT_CTD_ISIN']}",
+        ),
+    )
+    return load_bloomberg_ctd_metadata(contract_code)
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +313,7 @@ def test_a_non_numeric_quote_is_refused_with_decimal_guidance() -> None:
 
 @pytest.mark.parametrize("contract_code", EUREX_CODES)
 def test_confirmed_live_ctd_loads_with_no_synthetic_fallback(monkeypatch, contract_code) -> None:
-    ctd = _load_with(monkeypatch, contract_code)
+    ctd = _load_eurex_with(monkeypatch, contract_code)
     live = LIVE_STAGE_TWO[contract_code]
     assert ctd.contract_symbol == LIVE_DELIVERY_SYMBOL[contract_code]
     assert ctd.ctd_identifier == live["FUT_CTD_ISIN"]
@@ -268,24 +327,36 @@ def test_confirmed_live_ctd_loads_with_no_synthetic_fallback(monkeypatch, contra
 
 
 @pytest.mark.parametrize("contract_code", EUREX_CODES)
-def test_two_stage_lookup_resolves_the_eurex_active_alias(monkeypatch, contract_code) -> None:
+def test_three_stage_lookup_resolves_alias_then_ctd_then_schedule(
+    monkeypatch, contract_code
+) -> None:
     live = LIVE_STAGE_TWO[contract_code]
     resolved = LIVE_DELIVERY_SYMBOL[contract_code]
     active = bloomberg_active_contract(contract_code)
+    bond = f"/isin/{live['FUT_CTD_ISIN']}"
     harness = _install_fake_blpapi(
         monkeypatch,
-        _two_stage_responder(
+        _three_stage_responder(
             active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
             stage_two_fields=dict(live),
+            schedule_fields=dict(LIVE_SCHEDULE[contract_code]),
             active=active,
             delivery=f"{resolved} Comdty",
+            bond=bond,
         ),
     )
     ctd = load_bloomberg_ctd_metadata(contract_code)
     assert ctd.contract_symbol == resolved
+    assert ctd.first_accrual_start == date.fromisoformat(
+        LIVE_SCHEDULE[contract_code]["ISSUE_DT"]
+    )
+    assert ctd.first_coupon_date == date.fromisoformat(
+        LIVE_SCHEDULE[contract_code]["FIRST_CPN_DT"]
+    )
     assert [security for security, _ in harness["requests"]] == [
         active,
         f"{resolved} Comdty",
+        bond,
     ]
 
 
@@ -294,7 +365,7 @@ def test_a_us_isin_on_a_eurex_request_is_refused(monkeypatch) -> None:
 
     fields = dict(LIVE_STAGE_TWO["FGBM"], FUT_CTD_ISIN="US91282CRJ26")
     with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
-        _load_with(monkeypatch, "FGBM", stage_two=fields)
+        _load_eurex_with(monkeypatch, "FGBM", stage_two=fields)
     assert "non-DE ISIN" in str(exc.value)
 
 
@@ -310,7 +381,7 @@ def test_a_de_isin_on_a_ust_request_is_refused(monkeypatch) -> None:
 def test_a_de_isin_with_a_bad_check_digit_is_refused(monkeypatch) -> None:
     fields = dict(LIVE_STAGE_TWO["FGBS"], FUT_CTD_ISIN="DE000BU22149")
     with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
-        _load_with(monkeypatch, "FGBS", stage_two=fields)
+        _load_eurex_with(monkeypatch, "FGBS", stage_two=fields)
     assert "check digit is invalid" in str(exc.value)
 
 
@@ -324,7 +395,7 @@ def test_live_eurex_cusip_values_are_kept_as_display_only(monkeypatch, contract_
     """The live FUT_CTD_CUSIP values name a different vendor identifier, not
     the ISIN's characters -- and the load must still succeed with them kept."""
 
-    ctd = _load_with(monkeypatch, contract_code)
+    ctd = _load_eurex_with(monkeypatch, contract_code)
     live = LIVE_STAGE_TWO[contract_code]
     assert live["FUT_CTD_ISIN"][2:11] != live["FUT_CTD_CUSIP"]
     assert ctd.ctd_cusip == live["FUT_CTD_CUSIP"]
@@ -333,7 +404,7 @@ def test_live_eurex_cusip_values_are_kept_as_display_only(monkeypatch, contract_
 
 def test_a_contradictory_cusip_does_not_block_a_eurex_load(monkeypatch) -> None:
     fields = dict(LIVE_STAGE_TWO["FGBL"], FUT_CTD_CUSIP="CONTRADICT")
-    ctd = _load_with(monkeypatch, "FGBL", stage_two=fields)
+    ctd = _load_eurex_with(monkeypatch, "FGBL", stage_two=fields)
     assert ctd.ctd_identifier == "DE000BU2Z056"
     assert ctd.ctd_cusip == "CONTRADICT"
 
@@ -347,7 +418,7 @@ def test_a_contradictory_cusip_does_not_block_a_eurex_load(monkeypatch) -> None:
 def test_every_live_german_description_is_kept_because_it_agrees(
     monkeypatch, contract_code
 ) -> None:
-    ctd = _load_with(monkeypatch, contract_code)
+    ctd = _load_eurex_with(monkeypatch, contract_code)
     assert ctd.ctd_description == LIVE_STAGE_TWO[contract_code]["FUT_CTD_TICKER"]
 
 
@@ -363,7 +434,7 @@ def test_every_live_german_description_is_kept_because_it_agrees(
 )
 def test_a_german_description_that_disagrees_is_dropped(monkeypatch, description) -> None:
     fields = dict(LIVE_STAGE_TWO["FGBS"], FUT_CTD_TICKER=description)
-    ctd = _load_with(monkeypatch, "FGBS", stage_two=fields)
+    ctd = _load_eurex_with(monkeypatch, "FGBS", stage_two=fields)
     assert ctd.ctd_description is None
     assert ctd.ctd_identifier == "DE000BU22148"  # the priced record is unaffected
     assert ctd.ctd_coupon_percent == 2.7
@@ -451,10 +522,10 @@ def test_cross_substituted_eurex_ctds_fail_closed(monkeypatch, requested, donor)
         FUT_DLV_DT_LAST=LIVE_STAGE_TWO[requested]["FUT_DLV_DT_LAST"],
     )
     if requested == donor:
-        assert _load_with(monkeypatch, requested, stage_two=donor_fields) is not None
+        assert _load_eurex_with(monkeypatch, requested, stage_two=donor_fields) is not None
         return
     with pytest.raises(TreasuryFuturesCTDBloombergError) as exc:
-        _load_with(monkeypatch, requested, stage_two=donor_fields)
+        _load_eurex_with(monkeypatch, requested, stage_two=donor_fields)
     assert f"{requested}'s remaining-maturity window" in str(exc.value)
 
 
@@ -472,8 +543,9 @@ def test_cross_market_ctd_substitution_is_refused(monkeypatch, requested, donor)
         LIVE_STAGE_TWO[donor],
         FUT_DLV_DT_LAST=LIVE_STAGE_TWO[requested]["FUT_DLV_DT_LAST"],
     )
+    load = _load_eurex_with if requested in EUREX_CODES else _load_with
     with pytest.raises(TreasuryFuturesCTDBloombergError):
-        _load_with(monkeypatch, requested, stage_two=donor_fields)
+        load(monkeypatch, requested, stage_two=donor_fields)
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +555,7 @@ def test_cross_market_ctd_substitution_is_refused(monkeypatch, requested, donor)
 
 @pytest.mark.parametrize("contract_code", EUREX_CODES)
 def test_every_eurex_answer_is_stamped_german_govt_annual(monkeypatch, contract_code) -> None:
-    ctd = _load_with(monkeypatch, contract_code)
+    ctd = _load_eurex_with(monkeypatch, contract_code)
     for payload in (
         implied_yield_from_futures_price(ctd, EUREX_ROUND_TRIP_PRICES[contract_code]).as_payload(),
         futures_price_from_target_yield(
@@ -594,7 +666,7 @@ def test_annual_accrued_uses_one_coupon_over_actual_days() -> None:
 
 @pytest.mark.parametrize("contract_code", EUREX_CODES)
 def test_price_yield_price_residual_is_below_one_tick(monkeypatch, contract_code) -> None:
-    ctd = _load_with(monkeypatch, contract_code)
+    ctd = _load_eurex_with(monkeypatch, contract_code)
     price = EUREX_ROUND_TRIP_PRICES[contract_code]
     forward = implied_yield_from_futures_price(ctd, price)
     back = futures_price_from_target_yield(ctd, forward.implied_yield_percent)
@@ -605,11 +677,186 @@ def test_price_yield_price_residual_is_below_one_tick(monkeypatch, contract_code
 def test_yield_price_yield_residual_is_within_half_a_basis_point(
     monkeypatch, contract_code
 ) -> None:
-    ctd = _load_with(monkeypatch, contract_code)
+    ctd = _load_eurex_with(monkeypatch, contract_code)
     target = EUREX_ROUND_TRIP_YIELDS[contract_code]
     price_leg = futures_price_from_target_yield(ctd, target)
     round_trip = implied_yield_from_futures_price(ctd, price_leg.futures_price)
     assert abs(round_trip.implied_yield_percent - target) <= 0.005
+
+
+# ---------------------------------------------------------------------------
+# RED regression: Bloomberg YAS exact case (Sophira gate)
+# ---------------------------------------------------------------------------
+
+
+def _fgbs_yas_ctd():
+    return treasury_futures_ctd_from_manual_entry(
+        {
+            "contract_code": "FGBS",
+            "contract_symbol": "DUZ6",
+            "ctd_identifier": "DE000BU22148",
+            "ctd_coupon_percent": 2.7,
+            "ctd_maturity_date": "2028-09-13",
+            "conversion_factor": 0.946091,
+            "last_delivery_date": "2026-12-10",
+            "as_of": "2026-09-08T00:00:00Z",
+            "first_accrual_start": "2026-07-16",
+            "first_coupon_date": "2027-09-13",
+        }
+    )
+
+
+def test_yas_red_case_accrued_matches_bloomberg_to_displayed_precision() -> None:
+    from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+        IrregularFirstCoupon,
+        accrued_interest_per_100,
+    )
+
+    assert accrued_interest_per_100(
+        date(2026, 12, 10),
+        date(2028, 9, 13),
+        2.7,
+        coupons_per_year=1,
+        schedule=IrregularFirstCoupon(date(2026, 7, 16), date(2027, 9, 13)),
+    ) == pytest.approx(1.08739726, abs=1e-8)
+
+
+def test_yas_red_case_yield_matches_bloomberg() -> None:
+    fwd = implied_yield_from_futures_price(_fgbs_yas_ctd(), 105.065)
+    assert fwd.converted_clean_price == pytest.approx(99.401051, abs=1e-6)
+    assert fwd.accrued_interest == pytest.approx(1.08739726, abs=1e-8)
+    assert fwd.implied_yield_percent == pytest.approx(3.044683, abs=1e-6)
+
+
+def test_fgbm_same_mechanism_matches_its_independent_check() -> None:
+    ctd = treasury_futures_ctd_from_manual_entry(
+        {
+            "contract_code": "FGBM",
+            "contract_symbol": "OEZ6",
+            "ctd_identifier": "DE000BU25075",
+            "ctd_coupon_percent": 2.9,
+            "ctd_maturity_date": "2031-10-08",
+            "conversion_factor": 0.872911,
+            "last_delivery_date": "2026-12-10",
+            "as_of": "2026-09-08T00:00:00Z",
+            "first_accrual_start": "2026-07-23",
+            "first_coupon_date": "2027-10-08",
+        }
+    )
+    fwd = implied_yield_from_futures_price(ctd, 113.24)
+    # Sophira independent check: 3.155945% vs BB 3.1559% => 0.0045 bp
+    assert fwd.implied_yield_percent == pytest.approx(3.155945, abs=1e-5)
+
+
+def test_schedule_ignored_once_past_the_first_coupon_fgbl_fgbx_identical() -> None:
+    # FGBL seasoned past its first coupon (2026-08-15) => identical
+    base = {
+        "contract_code": "FGBL",
+        "contract_symbol": "RXZ6",
+        "ctd_identifier": "DE000BU2Z056",
+        "ctd_coupon_percent": 2.6,
+        "ctd_maturity_date": "2035-08-15",
+        "conversion_factor": 0.774902,
+        "last_delivery_date": "2026-12-10",
+        "as_of": "2026-09-08T00:00:00Z",
+    }
+    with_sched = dict(base, first_accrual_start="2025-07-04", first_coupon_date="2026-08-15")
+    a = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(base), 101.25
+    )
+    b = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(with_sched), 101.25
+    )
+    assert a.implied_yield_percent == b.implied_yield_percent
+    assert a.accrued_interest == b.accrued_interest
+    assert a.converted_clean_price == b.converted_clean_price
+
+
+def test_regular_first_coupon_collapses_to_the_plain_grid() -> None:
+    base = {
+        "contract_code": "FGBS",
+        "contract_symbol": "DUZ6",
+        "ctd_identifier": "DE000BU22148",
+        "ctd_coupon_percent": 2.7,
+        "ctd_maturity_date": "2028-09-13",
+        "conversion_factor": 0.946091,
+        "last_delivery_date": "2026-12-10",
+        "as_of": "2026-09-08T00:00:00Z",
+    }
+    # accrual_start == quasi date => factor 1, stub 0
+    with_regular = dict(
+        base, first_accrual_start="2026-09-13", first_coupon_date="2027-09-13"
+    )
+    a = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(base), 105.065
+    )
+    b = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(with_regular), 105.065
+    )
+    assert a.implied_yield_percent == b.implied_yield_percent
+
+
+def test_ust_with_a_past_schedule_is_untouched() -> None:
+    base = {
+        "contract_code": "ZN",
+        "contract_symbol": "TYZ6",
+        "ctd_identifier": "US91282CRJ26",
+        "ctd_coupon_percent": 4.5,
+        "ctd_maturity_date": "2033-08-31",
+        "conversion_factor": 0.9202,
+        "last_delivery_date": "2026-12-31",
+        "as_of": "2026-09-08T00:00:00Z",
+    }
+    with_past = dict(
+        base, first_accrual_start="2020-03-15", first_coupon_date="2020-09-15"
+    )
+    a = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(base), 112.515625
+    )
+    b = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(with_past), 112.515625
+    )
+    assert a.implied_yield_percent == b.implied_yield_percent
+
+
+def test_stage_three_missing_first_coupon_fails_closed(monkeypatch) -> None:
+    with pytest.raises(TreasuryFuturesCTDBloombergError):
+        _load_eurex_with(
+            monkeypatch, "FGBS", schedule={"ISSUE_DT": "2026-07-16"}
+        )
+
+
+def test_manual_half_schedule_is_refused() -> None:
+    with pytest.raises(TreasuryFuturesCTDError):
+        treasury_futures_ctd_from_manual_entry(
+            {
+                "contract_code": "FGBS",
+                "contract_symbol": "DUZ6",
+                "ctd_identifier": "DE000BU22148",
+                "ctd_coupon_percent": 2.7,
+                "ctd_maturity_date": "2028-09-13",
+                "conversion_factor": 0.946091,
+                "last_delivery_date": "2026-12-10",
+                "as_of": "2026-09-08T00:00:00Z",
+                "first_accrual_start": "2026-07-16",
+            }
+        )
+
+
+def test_settlement_before_accrual_start_is_refused() -> None:
+    from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+        IrregularFirstCoupon,
+        accrued_interest_per_100,
+    )
+
+    with pytest.raises(TreasuryFuturesYieldError):
+        accrued_interest_per_100(
+            date(2026, 7, 1),
+            date(2028, 9, 13),
+            2.7,
+            coupons_per_year=1,
+            schedule=IrregularFirstCoupon(date(2026, 7, 16), date(2027, 9, 13)),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -638,17 +885,20 @@ def test_acceptance_cli_reports_the_german_contracts(
     monkeypatch, capsys, contract_code, price
 ) -> None:
     resolved = LIVE_DELIVERY_SYMBOL[contract_code]
+    live = LIVE_STAGE_TWO[contract_code]
     _install_fake_blpapi(
         monkeypatch,
-        _two_stage_responder(
+        _three_stage_responder(
             active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
-            stage_two_fields=dict(LIVE_STAGE_TWO[contract_code]),
+            stage_two_fields=dict(live),
+            schedule_fields=dict(LIVE_SCHEDULE[contract_code]),
             active=bloomberg_active_contract(contract_code),
             delivery=f"{resolved} Comdty",
+            bond=f"/isin/{live['FUT_CTD_ISIN']}",
         ),
     )
     assert acceptance.main(["--price", f"{contract_code}={price}"]) == 0
     output = capsys.readouterr().out
     assert resolved in output
-    assert LIVE_STAGE_TWO[contract_code]["FUT_CTD_ISIN"] in output
+    assert live["FUT_CTD_ISIN"] in output
     assert "OUT OF TOLERANCE" not in output

@@ -5,13 +5,18 @@ converter -- the validated record of which cash Treasury is currently
 cheapest to deliver into one futures contract, and where that record came
 from. No pricing, no yield, no schedule, no quote parsing lives here.
 
-**Automatic Bloomberg sourcing, in two stages.** Bloomberg does not publish
+**Automatic Bloomberg sourcing, in two stages for UST and three for Eurex.**
+Bloomberg does not publish
 CTD metadata against the desk-active contract ticker's own delivery month
 directly, so one lookup is two requests:
 
 1. ``<root>A Comdty`` -> ``PARSEKYABLE_DES`` resolves the desk-active
    contract to the actual delivery month (``TUA Comdty`` -> ``TUZ6``).
 2. ``<actual> Comdty`` -> the CTD fields for that specific contract.
+3. (Eurex only) ``/isin/<CTD ISIN>`` -> the CTD bond's own first-coupon
+   schedule (``ISSUE_DT`` + ``FIRST_CPN_DT``), required because an Eurex
+   delivery can fall inside an irregular long first coupon (YAS diagnostic,
+   Issue #204).
 
 The active-contract ticker is the desk-active alias (``TUA``, ``FVA``,
 ``TYA``, ``USA``), **not** the generic continuation #1 (``TU1``, ``FV1``,
@@ -208,6 +213,19 @@ BLOOMBERG_CTD_DISPLAY_FIELD_MAP: dict[str, str] = {
 #: month.
 BLOOMBERG_ACTIVE_CONTRACT_FIELD = BLOOMBERG_CTD_FIELD_MAP["contract_symbol"]
 
+#: Stage-three Bond Master mnemonics for the CTD bond itself (Issue #204,
+#: YAS diagnostic). Both were confirmed in PR #141 (``bloomberg_bond_quote``)
+#: and re-confirmed live against all four German CTD ISINs on 2026-09-08:
+#: ``ISSUE_DT`` is the accrual start the first coupon accrues from,
+#: ``FIRST_CPN_DT`` the first actual coupon date. Queried against the
+#: symbology-qualified bond (``/isin/<ISIN>``), the same form
+#: ``data/bloomberg_bond_quote`` requests -- never against the futures
+#: contract, where Bond Master fields do not resolve.
+BLOOMBERG_CTD_SCHEDULE_FIELD_MAP: dict[str, str] = {
+    "accrual_start": "ISSUE_DT",
+    "first_coupon": "FIRST_CPN_DT",
+}
+
 #: Shiori contract code -> Bloomberg delivery-month root, used to validate and
 #: slice the delivery symbol that stage one resolves (``TYZ6`` -> root ``TY``
 #: + month ``Z`` + year ``6``). These are the actual futures roots, unchanged
@@ -291,6 +309,13 @@ class TreasuryFuturesCTD:
     ``ctd_cusip`` and ``ctd_description`` are display-only extras the
     automatic path fills in and the manual path may leave unset; nothing
     keyed on them ever reaches a calculation.
+
+    ``first_accrual_start`` / ``first_coupon_date`` carry the bond's real
+    first-coupon schedule (stage three, Eurex live path; optional on manual
+    entry; unset for UST). When both are present and settlement precedes the
+    first coupon, the yield engine prices the genuine ACT/ACT ICMA
+    irregular-first schedule instead of the maturity-anchored regular grid;
+    otherwise every number is identical with or without them.
     """
 
     contract_code: str
@@ -304,6 +329,8 @@ class TreasuryFuturesCTD:
     as_of: str
     ctd_cusip: str | None = None
     ctd_description: str | None = None
+    first_accrual_start: date | None = None
+    first_coupon_date: date | None = None
 
     @property
     def is_confirmed_source(self) -> bool:
@@ -324,6 +351,12 @@ class TreasuryFuturesCTD:
             "ctd_maturity_date": self.ctd_maturity_date.isoformat(),
             "conversion_factor": self.conversion_factor,
             "last_delivery_date": self.last_delivery_date.isoformat(),
+            "first_accrual_start": (
+                self.first_accrual_start.isoformat() if self.first_accrual_start else None
+            ),
+            "first_coupon_date": (
+                self.first_coupon_date.isoformat() if self.first_coupon_date else None
+            ),
             "source": str(self.source),
             "as_of": self.as_of,
             "is_confirmed_source": self.is_confirmed_source,
@@ -1019,9 +1052,12 @@ def _parse_bloomberg_date(raw_value: str, field: str, security: str) -> date:
 def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
     """Load current CTD metadata for ``contract_code`` from Bloomberg DAPI.
 
-    Two requests (see the module docstring): the desk-active contract alias
-    resolves the delivery month, then that delivery month answers the CTD
-    fields. Fails closed on anything missing, blank or unparseable, and never
+    Two requests for UST, three for Eurex (see the module docstring): the
+    desk-active contract alias resolves the delivery month, then that
+    delivery month answers the CTD fields; for Eurex the CTD bond itself
+    answers its first-coupon schedule (``ISSUE_DT`` + ``FIRST_CPN_DT``),
+    required because delivery can fall inside an irregular long first
+    coupon. Fails closed on anything missing, blank or unparseable, and never
     falls back to manual, cached or synthetic data -- in particular there is
     no fallback to the generic continuation #1, whose front contract lags the
     desk-active contract during roll.
@@ -1141,6 +1177,45 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
         delivery_security,
     )
 
+    # Stage three (Eurex only): the CTD bond's own first-coupon schedule.
+    # UST parity was proven without it and the UST path sends no third
+    # request at all. For Eurex the schedule is required: a German CTD can
+    # still be inside an irregular long first coupon at delivery (YAS
+    # diagnostic, Issue #204), and pricing it on the regular grid is the
+    # measured 0.58 bp FGBS defect. Both mnemonics are confirmed (PR #141)
+    # and re-confirmed live against all four German CTD ISINs.
+    first_accrual_start: date | None = None
+    first_coupon_date: date | None = None
+    if _is_eurex_german(normalized_code):
+        bond_security = f"/isin/{ctd_identifier}"
+        schedule_answered = _reference_data_fields(
+            bond_security, list(BLOOMBERG_CTD_SCHEDULE_FIELD_MAP.values())
+        )
+
+        def _scheduled(logical_field: str) -> str:
+            return _require_answered(
+                schedule_answered,
+                BLOOMBERG_CTD_SCHEDULE_FIELD_MAP[logical_field],
+                bond_security,
+            )
+
+        first_accrual_start = _parse_bloomberg_date(
+            _scheduled("accrual_start"),
+            BLOOMBERG_CTD_SCHEDULE_FIELD_MAP["accrual_start"],
+            bond_security,
+        )
+        first_coupon_date = _parse_bloomberg_date(
+            _scheduled("first_coupon"),
+            BLOOMBERG_CTD_SCHEDULE_FIELD_MAP["first_coupon"],
+            bond_security,
+        )
+        if not first_accrual_start < first_coupon_date:
+            raise TreasuryFuturesCTDBloombergError(
+                f"Bloomberg DAPI returned a first-coupon schedule for {bond_security!r} "
+                f"whose accrual start {first_accrual_start.isoformat()} is not before its "
+                f"first coupon {first_coupon_date.isoformat()}"
+            )
+
     return TreasuryFuturesCTD(
         contract_code=normalized_code,
         contract_symbol=contract_symbol,
@@ -1158,6 +1233,8 @@ def load_bloomberg_ctd_metadata(contract_code: str) -> TreasuryFuturesCTD:
             ctd_maturity_date,
             contract_code=normalized_code,
         ),
+        first_accrual_start=first_accrual_start,
+        first_coupon_date=first_coupon_date,
     )
 
 
@@ -1168,7 +1245,9 @@ def treasury_futures_ctd_from_manual_entry(payload: dict[str, object]) -> Treasu
     and ``as_of`` is required: an answer built on a missing conversion factor,
     maturity or delivery date would be wrong rather than approximate, so this
     fails closed instead of defaulting anything. The display-only extras
-    (``ctd_cusip``, ``ctd_description``) are optional.
+    (``ctd_cusip``, ``ctd_description``) are optional, as is the first-coupon
+    schedule (``first_accrual_start`` + ``first_coupon_date``, both or
+    neither -- a half schedule is refused, never completed by guessing).
     """
 
     if not isinstance(payload, dict):
@@ -1215,6 +1294,27 @@ def treasury_futures_ctd_from_manual_entry(payload: dict[str, object]) -> Treasu
         text = str(value).strip()
         return text or None
 
+    accrual_raw = _optional_text("first_accrual_start")
+    coupon_raw = _optional_text("first_coupon_date")
+    if (accrual_raw is None) != (coupon_raw is None):
+        raise TreasuryFuturesCTDError(
+            "first-coupon schedule needs both 'first_accrual_start' and "
+            "'first_coupon_date', or neither"
+        )
+    first_accrual_start: date | None = None
+    first_coupon_date: date | None = None
+    if accrual_raw is not None and coupon_raw is not None:
+        try:
+            first_accrual_start = _parse_iso_date(accrual_raw, "first_accrual_start")
+            first_coupon_date = _parse_iso_date(coupon_raw, "first_coupon_date")
+        except ValueError as exc:
+            raise TreasuryFuturesCTDError(str(exc)) from exc
+        if not first_accrual_start < first_coupon_date:
+            raise TreasuryFuturesCTDError(
+                f"first_accrual_start {first_accrual_start.isoformat()} must be before "
+                f"first_coupon_date {first_coupon_date.isoformat()}"
+            )
+
     return TreasuryFuturesCTD(
         contract_code=str(payload["contract_code"]).strip().upper(),
         contract_symbol=str(payload["contract_symbol"]).strip(),
@@ -1227,4 +1327,6 @@ def treasury_futures_ctd_from_manual_entry(payload: dict[str, object]) -> Treasu
         as_of=str(payload["as_of"]).strip(),
         ctd_cusip=_optional_text("ctd_cusip"),
         ctd_description=_optional_text("ctd_description"),
+        first_accrual_start=first_accrual_start,
+        first_coupon_date=first_coupon_date,
     )
