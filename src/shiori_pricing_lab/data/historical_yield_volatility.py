@@ -392,6 +392,34 @@ def _insufficient_history_warning(observation_count: int, requested: int) -> str
     )
 
 
+def _no_history_blocker(security: str, start_date: date, end_date: date) -> str:
+    """The one sentence a window with no observations carries.
+
+    Derived, not merely present, for the same reason as the short-window
+    warning: a fatal blocker is the only text the route shows when there is
+    no number, and a free-form one such as "Use a VCUB substitute instead"
+    passed as both the calculation blocker and the publication-refusal reason
+    (Codex review, PR #200). #197 forbids exactly that substitution, so the
+    sentence that says so is not a string a caller may choose.
+    """
+
+    return (
+        f"Bloomberg returned no Yield observations for {security!r} over "
+        f"{start_date.isoformat()}..{end_date.isoformat()} -- there is no approved proxy "
+        "for an instrument with no history, so no Historical Yield Vol is available"
+    )
+
+
+def _too_few_changes_blocker(change_count: int) -> str:
+    """The one sentence a window too short for the convention carries."""
+
+    return (
+        f"{change_count} Yield Change(s) is below the {_MINIMUM_CHANGES_FOR_STDEV} the "
+        f"{STANDARD_DEVIATION_CONVENTION} convention needs -- no standard deviation is "
+        "reported for this window"
+    )
+
+
 def _require_exact_integer_changes(
     window: Sequence[BondYieldObservation],
     values: list[float],
@@ -603,10 +631,11 @@ def calculate_historical_yield_volatility(
     if not window:
         status = HistoricalYieldVolStatus.NO_HISTORY
         blockers.append(
-            f"Bloomberg returned no Yield observations for {history.security!r} over "
-            f"{history.requested_start_date.isoformat()}.."
-            f"{history.requested_end_date.isoformat()} -- there is no approved proxy for an "
-            "instrument with no history, so no Historical Yield Vol is available"
+            _no_history_blocker(
+                history.security,
+                history.requested_start_date,
+                history.requested_end_date,
+            )
         )
     elif len(window) < requested:
         status = HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
@@ -619,11 +648,7 @@ def calculate_historical_yield_volatility(
         status = HistoricalYieldVolStatus.FULL_WINDOW
 
     if window and len(changes) < _MINIMUM_CHANGES_FOR_STDEV:
-        blockers.append(
-            f"{len(changes)} Yield Change(s) is below the {_MINIMUM_CHANGES_FOR_STDEV} the "
-            f"{STANDARD_DEVIATION_CONVENTION} convention needs -- no standard deviation is "
-            "reported for this window"
-        )
+        blockers.append(_too_few_changes_blocker(len(changes)))
 
     # Finite observations are not enough to make the arithmetic finite (Codex
     # review, PR #200). Subtracting two representable Yields can overflow --
@@ -960,6 +985,33 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
             f"this result for {result.security!r} reports {result.window_status.value} with "
             f"{list(result.warnings)!r}; that status carries exactly "
             f"{list(warnings_expected)!r}"
+        )
+
+    # The same rule for the fatal half, which had only been checked for being
+    # non-blank strings (Codex review, PR #200). A blocker is the *only* text
+    # the route shows when there is no number -- it is both the calculation
+    # blocker and the publication-refusal reason -- so "Use a VCUB substitute
+    # instead" answered HTTP 200 and was rendered as this calculator's own
+    # explanation of why there is none, for the two counts that have
+    # deterministic explanations and against the one substitution #197 most
+    # explicitly forbids. Derived from the counts already validated above, so
+    # the guard and the calculator cannot drift apart.
+    if result.window_status is HistoricalYieldVolStatus.NO_HISTORY:
+        blockers_expected: tuple[str, ...] = (
+            _no_history_blocker(
+                result.security, result.requested_start_date, result.requested_end_date
+            ),
+        )
+    elif result.yield_change_count < _MINIMUM_CHANGES_FOR_STDEV:
+        blockers_expected = (_too_few_changes_blocker(result.yield_change_count),)
+    else:
+        blockers_expected = ()
+    if result.blockers != blockers_expected:
+        return (
+            f"this result for {result.security!r} reports {result.window_status.value} with "
+            f"{result.yield_change_count} Yield Change(s) and blockers "
+            f"{list(result.blockers)!r}; that window carries exactly "
+            f"{list(blockers_expected)!r}"
         )
 
     # The methodology the route serializes under the hard-coded canonical

@@ -1294,6 +1294,62 @@ def test_a_fatal_blocker_forces_is_usable_false():
     assert blocked.is_usable == (not blocked.blockers)
 
 
+def test_a_blocked_window_must_keep_its_own_blocker():
+    """The fatal half of the same rule, which was only checked for non-blankness.
+
+    A blocker is the only text the route shows when there is no number -- it
+    is both the calculation blocker and the publication-refusal reason -- so
+    an invented one was rendered as this calculator's own explanation of why
+    there is no Historical Yield Vol, against the substitution #197 most
+    explicitly forbids (Codex review, #200).
+    """
+
+    empty = calculate_historical_yield_volatility(
+        _history([]), requested_observation_count=180
+    )
+    assert empty.window_status is HistoricalYieldVolStatus.NO_HISTORY
+    assert result_shape_problem(empty) is None
+
+    substituted = result_shape_problem(
+        dataclasses.replace(empty, blockers=("Use a VCUB substitute instead",))
+    )
+    assert substituted is not None
+    assert "Use a VCUB substitute instead" in substituted
+
+    # Stripping it is the other direction: no number, and nothing saying why.
+    assert result_shape_problem(dataclasses.replace(empty, blockers=())) is not None
+    # Two copies of the real blocker is not "the blocker" either.
+    doubled = dataclasses.replace(empty, blockers=empty.blockers + empty.blockers)
+    assert result_shape_problem(doubled) is not None
+
+
+def test_a_window_too_short_for_the_convention_must_keep_its_own_blocker():
+    short = calculate_historical_yield_volatility(
+        _history([4.00, 4.10]), requested_observation_count=180
+    )
+    assert short.yield_change_count == 1
+    assert result_shape_problem(short) is None
+
+    invented = result_shape_problem(
+        dataclasses.replace(
+            short, blockers=("Extend the window with the benchmark instead",)
+        )
+    )
+    assert invented is not None
+    assert "Extend the window with the benchmark instead" in invented
+
+
+def test_a_full_window_carries_no_blocker_at_all():
+    # The must-still-pass twin, and the third direction: a result that really
+    # is complete may not carry one either.
+    full = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+    assert full.window_status is HistoricalYieldVolStatus.FULL_WINDOW
+    assert full.blockers == ()
+    assert result_shape_problem(full) is None
+
+
 @pytest.mark.parametrize("missing", ["daily_yield_vol", "annualized_yield_vol"])
 def test_half_a_result_is_not_usable(missing):
     """The two figures exist together or not at all -- including here.
