@@ -63,6 +63,8 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
     QUOTE_CONVENTION_32NDS,
     QUOTE_CONVENTION_DECIMAL,
     SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES,
+    TREASURY_FUTURES_CONTRACTS,
+    TreasuryFuturesContract,
     TreasuryFuturesQuoteError,
     format_futures_quote,
     get_contract,
@@ -71,10 +73,14 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     BOND_CONVENTION_PROFILE_BY_MARKET,
+    TreasuryFuturesYieldError,
+    _policy_for_market,
+    _resolve_pricing_policy,
     accrued_interest_per_100,
     futures_price_from_target_yield,
     implied_yield_from_futures_price,
 )
+from shiori_pricing_lab.products.enums import DayCount, Frequency
 
 _REPOS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPOS_ROOT / "tools"))
@@ -485,7 +491,7 @@ def test_every_eurex_answer_is_stamped_german_govt_annual(monkeypatch, contract_
         ).as_payload(),
     ):
         methodology = payload["methodology"]
-        assert methodology["basis"] == "EUREX_CTD_IMPLIED_FORWARD_YIELD"
+        assert methodology["basis"] == "SHIORI_EUREX_GERMAN_CTD_IMPLIED_FORWARD_YIELD"
         assert methodology["market"] == "EUREX_DE"
         assert methodology["bond_convention_profile"] == "GERMAN_GOVT"
         assert methodology["coupon_frequency"] == "ANNUAL"
@@ -500,6 +506,68 @@ def test_the_german_govt_profile_is_the_registered_annual_act_act_target_profile
     assert profile.name == "GERMAN_GOVT"
     assert BOND_CONVENTION_PROFILE_BY_MARKET["EUREX_DE"] == "GERMAN_GOVT"
     assert BOND_CONVENTION_PROFILE_BY_MARKET["UST"] == "UST"
+
+
+# ---------------------------------------------------------------------------
+# Pricing policy: bound to the registered profile, fail-closed (Sophira gate)
+# ---------------------------------------------------------------------------
+
+
+def test_ust_contracts_resolve_to_the_registered_ust_profile() -> None:
+    for code in UST_CODES:
+        policy = _resolve_pricing_policy(code)
+        assert policy.market == "UST"
+        assert policy.convention_profile == "UST"
+        assert policy.coupon_frequency == Frequency.SEMI_ANNUAL
+        assert policy.coupons_per_year == 2
+        assert policy.day_count == DayCount.ACT_ACT_BOND
+
+
+@pytest.mark.parametrize("contract_code", EUREX_CODES)
+def test_eurex_contracts_resolve_to_the_registered_german_govt_profile(
+    contract_code,
+) -> None:
+    policy = _resolve_pricing_policy(contract_code)
+    assert policy.market == "EUREX_DE"
+    assert policy.convention_profile == "GERMAN_GOVT"
+    assert policy.coupon_frequency == Frequency.ANNUAL
+    assert policy.coupons_per_year == 1
+    assert policy.day_count == DayCount.ACT_ACT_BOND
+
+
+def test_german_policy_values_come_from_the_registered_profile() -> None:
+    """Frequency/day count are read off GERMAN_GOVT, not hard-coded for Eurex."""
+
+    profile = get_convention_profile("GERMAN_GOVT")
+    assert profile.coupon_frequencies == (Frequency.ANNUAL,)
+    assert profile.day_count == DayCount.ACT_ACT_BOND
+    policy = _policy_for_market("EUREX_DE")
+    assert policy.convention_profile == profile.name
+    assert policy.coupon_frequency == profile.coupon_frequencies[0]
+    assert policy.day_count == profile.day_count
+
+
+def test_an_unrecognized_market_cannot_silently_inherit_ust_behavior() -> None:
+    with pytest.raises(TreasuryFuturesYieldError) as exc:
+        _policy_for_market("MARS")
+    assert "no futures pricing policy is registered" in str(exc.value)
+
+
+def test_a_contract_on_an_unrecognized_market_cannot_inherit_ust_behavior(
+    monkeypatch,
+) -> None:
+    bogus = TreasuryFuturesContract(
+        code="XX",
+        name="Bogus futures",
+        market="MARS",
+        quote_convention=QUOTE_CONVENTION_DECIMAL,
+        ticks_per_point=100,
+        ticks_per_32nd=None,
+        decimal_places=2,
+    )
+    monkeypatch.setitem(TREASURY_FUTURES_CONTRACTS, "XX", bogus)
+    with pytest.raises(TreasuryFuturesYieldError):
+        _resolve_pricing_policy("XX")
 
 
 def test_ust_answers_keep_their_cme_basis_and_semiannual_stamp(monkeypatch) -> None:

@@ -89,13 +89,16 @@ delivery -- so this is a guard, not a limitation of the utility.
 
 **Eurex German leg (Issue #204).** ``FGBS``/``FGBM``/``FGBL``/``FGBX`` run
 the same invariant -- futures price x conversion factor -> CTD clean price
--> market-correct yield -- with ``coupons_per_year=1`` (annual, ACT/ACT,
-the existing ``GERMAN_GOVT`` bond convention profile) instead of the UST
-semiannual grid. There is one code path, parameterized by frequency, never
-a German copy of the math; U.S. Treasury semiannual assumptions are never
-applied to a German CTD. The methodology stamp on every answer names the
-market, the ``GERMAN_GOVT`` profile and the Eurex basis so no consumer can
-mistake one leg's convention for the other's.
+-> market-correct yield -- priced on the registered ``GERMAN_GOVT`` bond
+convention profile (annual, ACT/ACT), resolved explicitly through
+``_resolve_pricing_policy``: contract -> market -> registered profile ->
+frequency/day count -> shared yield engine. There is one code path,
+parameterized by the policy, never a German copy of the math; U.S. Treasury
+semiannual assumptions are never applied to a German CTD. The methodology
+stamp on every answer names the market, the ``GERMAN_GOVT`` profile and the
+Shiori-owned basis so no consumer can mistake one leg's convention for the
+other's -- the complete German calculation is Shiori's, reconciled against
+Bloomberg/Eurex analytics as UAT, not Eurex's own methodology.
 """
 
 from __future__ import annotations
@@ -106,6 +109,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from shiori_pricing_lab.data.treasury_futures_ctd import TreasuryFuturesCTD
+from shiori_pricing_lab.pricing.bli_bond_convention_profile import get_convention_profile
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
     MARKET_EUREX_GERMAN,
     TreasuryFuturesQuote,
@@ -116,18 +120,15 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 )
 from shiori_pricing_lab.products.enums import DayCount, Frequency
 
-#: Fixed by Issue #190's methodology anchor, and by U.S. Treasury convention.
-TREASURY_COUPON_FREQUENCY = Frequency.SEMI_ANNUAL
+#: UST semiannual coupons per year. This is the default grid for the shared
+#: math functions below; the production path always resolves the authoritative
+#: value from the registered convention profile (see ``_resolve_pricing_policy``).
 TREASURY_COUPONS_PER_YEAR = 2
-TREASURY_COUPON_PERIOD_MONTHS = 12 // TREASURY_COUPONS_PER_YEAR
-TREASURY_DAY_COUNT = DayCount.ACT_ACT_BOND
 TREASURY_PAR = 100.0
 
-#: Issue #204: German government CTDs pay annual coupons (the existing
-#: ``GERMAN_GOVT`` bond convention profile: annual, ACT/ACT). The yield math
-#: below is shared -- one code path parameterized by coupons per year, never
-#: a German copy of it.
-EUREX_COUPON_FREQUENCY = Frequency.ANNUAL
+#: German government CTDs pay annual coupons. Like ``TREASURY_COUPONS_PER_YEAR``,
+#: this is referenced through the registered ``GERMAN_GOVT`` profile, never
+#: applied by market-name checks in the engine.
 EUREX_COUPONS_PER_YEAR = 1
 
 #: Bond convention profile selected by market, recorded on every answer so no
@@ -137,13 +138,14 @@ BOND_CONVENTION_PROFILE_BY_MARKET = {
     MARKET_EUREX_GERMAN: "GERMAN_GOVT",
 }
 
-#: Methodology basis by market. The Eurex leg names no CME analytics: the
-#: shared invariant (futures price x conversion factor -> CTD clean price ->
-#: market-correct yield) is the same, but the benchmark it is reconciled
-#: against is Eurex/Bloomberg, not CME Treasury Analytics.
+#: Methodology basis by market. Neither leg attributes the complete yield
+#: algorithm to the venue: the UST basis names the long-standing CME Treasury
+#: Analytics anchor (Issue #190's RED contract); the Eurex leg is Shiori's own
+#: German-CTD calculation reconciled against Bloomberg/Eurex analytics as UAT,
+#: so the basis names Shiori, not Eurex, as the methodology owner.
 METHODOLOGY_BASIS_BY_MARKET = {
     "UST": "CME_TREASURY_ANALYTICS_CTD_IMPLIED_FORWARD_YIELD",
-    MARKET_EUREX_GERMAN: "EUREX_CTD_IMPLIED_FORWARD_YIELD",
+    MARKET_EUREX_GERMAN: "SHIORI_EUREX_GERMAN_CTD_IMPLIED_FORWARD_YIELD",
 }
 
 #: Methodology note by market, served by the workbench catalogue so the panel
@@ -157,28 +159,95 @@ METHODOLOGY_NOTE_BY_MARKET = {
         "No net-basis, repo or carry adjustment."
     ),
     MARKET_EUREX_GERMAN: (
-        "Eurex methodology: the CTD\u2019s yield to maturity, settled on the contract\u2019s "
-        "last delivery day, from futures price \u00d7 conversion factor. "
-        "Annual, ACT/ACT, par 100. No net-basis, repo or carry adjustment."
+        "Shiori Eurex German CTD implied forward yield: the CTD\u2019s yield to maturity, "
+        "settled on the contract\u2019s last delivery day, from futures price \u00d7 "
+        "conversion factor. Annual, ACT/ACT, par 100. "
+        "No net-basis, repo or carry adjustment."
     ),
 }
 
 
+#: Coupon frequencies the shared yield engine implements, keyed by the
+#: registered convention profile's frequency. Anything else (quarterly,
+#: monthly, ...) fails closed: the engine has no grid for it, and silently
+#: pricing it on an annual or semiannual grid would be a wrong answer.
+_COUPONS_PER_YEAR_BY_FREQUENCY = {
+    Frequency.ANNUAL: EUREX_COUPONS_PER_YEAR,
+    Frequency.SEMI_ANNUAL: TREASURY_COUPONS_PER_YEAR,
+}
+
+
+@dataclass(frozen=True)
+class FuturesPricingPolicy:
+    """Authoritative pricing convention for one futures contract's CTD leg.
+
+    Resolved as contract -> market -> registered bond convention profile
+    (``pricing/bli_bond_convention_profile``), never hard-coded per market:
+    the frequency and day count the engine prices on are read off the
+    registered profile and validated here. The shared deterministic yield
+    solver is unchanged; this policy is about authoritative convention
+    selection, not replacing the solver.
+    """
+
+    market: str
+    convention_profile: str
+    coupon_frequency: Frequency
+    coupons_per_year: int
+    day_count: DayCount
+
+
+def _policy_for_market(market: str) -> FuturesPricingPolicy:
+    """Resolve the pricing policy for ``market``, fail-closed.
+
+    An unrecognized market raises instead of inheriting UST behavior; a
+    profile with anything but exactly one supported frequency, or anything
+    but actual/actual day count, raises instead of being priced on a grid
+    the engine does not implement.
+    """
+
+    profile_name = BOND_CONVENTION_PROFILE_BY_MARKET.get(str(market))
+    if profile_name is None:
+        raise TreasuryFuturesYieldError(
+            f"no futures pricing policy is registered for market {market!r} -- "
+            f"registered: {', '.join(sorted(BOND_CONVENTION_PROFILE_BY_MARKET))}"
+        )
+    profile = get_convention_profile(profile_name)
+    if len(profile.coupon_frequencies) != 1:
+        raise TreasuryFuturesYieldError(
+            f"convention profile {profile.name!r} names {len(profile.coupon_frequencies)} "
+            "coupon frequencies -- the futures pricing path needs exactly one"
+        )
+    frequency = profile.coupon_frequencies[0]
+    coupons_per_year = _COUPONS_PER_YEAR_BY_FREQUENCY.get(frequency)
+    if coupons_per_year is None:
+        raise TreasuryFuturesYieldError(
+            f"convention profile {profile.name!r} uses coupon frequency {frequency!r}, "
+            "which the futures yield engine does not implement"
+        )
+    if profile.day_count != DayCount.ACT_ACT_BOND:
+        raise TreasuryFuturesYieldError(
+            f"convention profile {profile.name!r} uses day count {profile.day_count!r} -- "
+            "the futures yield engine implements actual/actual only"
+        )
+    return FuturesPricingPolicy(
+        market=str(market),
+        convention_profile=profile.name,
+        coupon_frequency=frequency,
+        coupons_per_year=coupons_per_year,
+        day_count=profile.day_count,
+    )
+
+
+def _resolve_pricing_policy(contract_code: str) -> FuturesPricingPolicy:
+    """Resolve the pricing policy for ``contract_code``'s market."""
+
+    return _policy_for_market(get_contract(contract_code).market)
+
+
 def _coupons_per_year(contract_code: str) -> int:
-    """Coupons per year for ``contract_code``'s CTD: 2 for UST, 1 for Eurex DE."""
+    """Coupons per year for ``contract_code``'s CTD, via the pricing policy."""
 
-    if get_contract(contract_code).market == MARKET_EUREX_GERMAN:
-        return EUREX_COUPONS_PER_YEAR
-    return TREASURY_COUPONS_PER_YEAR
-
-
-def _market_of(contract_code: str) -> str:
-    """Market key for ``contract_code`` (``"UST"`` or ``"EUREX_DE"``)."""
-
-    market = get_contract(contract_code).market
-    if market == MARKET_EUREX_GERMAN:
-        return MARKET_EUREX_GERMAN
-    return "UST"
+    return _resolve_pricing_policy(contract_code).coupons_per_year
 
 
 def _street_convention_bond_phrase(coupons_per_year: int) -> str:
@@ -250,7 +319,7 @@ class TreasuryFuturesImpliedYield:
             "accrued_interest": self.accrued_interest,
             "dirty_price": self.dirty_price,
             "implied_yield_percent": self.implied_yield_percent,
-            "methodology": _methodology_payload(_market_of(self.ctd.contract_code)),
+            "methodology": _methodology_payload(_resolve_pricing_policy(self.ctd.contract_code)),
             "ctd": self.ctd.as_display_payload(),
         }
 
@@ -288,24 +357,21 @@ class TreasuryFuturesPriceFromYield:
             "minimum_tick": self.minimum_tick,
             "on_tick": self.on_tick,
             "minimum_tick_label": contract.minimum_tick_label,
-            "methodology": _methodology_payload(_market_of(self.ctd.contract_code)),
+            "methodology": _methodology_payload(_resolve_pricing_policy(self.ctd.contract_code)),
             "ctd": self.ctd.as_display_payload(),
         }
 
 
-def _methodology_payload(market: str) -> dict[str, object]:
+def _methodology_payload(policy: FuturesPricingPolicy) -> dict[str, object]:
     """The convention every answer is stamped with -- never inferred by a consumer."""
 
-    frequency = (
-        EUREX_COUPON_FREQUENCY if market == MARKET_EUREX_GERMAN else TREASURY_COUPON_FREQUENCY
-    )
     return {
-        "basis": METHODOLOGY_BASIS_BY_MARKET[market],
-        "market": market,
-        "bond_convention_profile": BOND_CONVENTION_PROFILE_BY_MARKET[market],
+        "basis": METHODOLOGY_BASIS_BY_MARKET[policy.market],
+        "market": policy.market,
+        "bond_convention_profile": policy.convention_profile,
         "settlement_date_rule": "FUTURES_CONTRACT_LAST_DELIVERY_DAY",
-        "coupon_frequency": str(frequency),
-        "day_count": str(TREASURY_DAY_COUNT),
+        "coupon_frequency": str(policy.coupon_frequency),
+        "day_count": str(policy.day_count),
         "par": TREASURY_PAR,
         "carry_adjustment": "NONE",
     }
