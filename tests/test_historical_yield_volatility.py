@@ -71,6 +71,7 @@ def _history(
     security: str = "/isin/US0000000000",
     requested_start_date: date | None = None,
     requested_end_date: date | None = None,
+    source_system: str = "BLOOMBERG_DAPI",
 ) -> BloombergBondYieldHistory:
     """One synthetic #196 series: consecutive dates unless ``dates`` says otherwise."""
 
@@ -99,7 +100,7 @@ def _history(
             _default_end_date(dates, values) if requested_end_date is None else requested_end_date
         ),
         observations=observations,
-        source_system="BLOOMBERG_DAPI",
+        source_system=source_system,
         acquired_at="2026-09-07T09:00:00+08:00",
     )
 
@@ -1291,6 +1292,68 @@ def test_a_fatal_blocker_forces_is_usable_false():
 
     assert blocked.is_usable is False
     assert blocked.is_usable == (not blocked.blockers)
+
+
+@pytest.mark.parametrize("label", ["REUTERS", "BLOOMBERG_VCUB", "bloomberg_dapi"])
+def test_history_from_another_source_system_is_refused(label):
+    """The one acquisition path this statistic is built on.
+
+    A hand-built or future history carrying `source_system="REUTERS"` was
+    copied straight through, passed the guard, and published as an ACTIVE
+    source while the card displayed it as Bloomberg provenance (Codex
+    review, PR #200).
+
+    `bloomberg_dapi` is here on purpose: unlike the Yield unit, this label
+    never passes through a trader's typing, so there is nothing to tidy and
+    loosening the match would only widen what the card presents as audited.
+    """
+
+    result = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30], source_system=label),
+        requested_observation_count=4,
+    )
+
+    problem = result_shape_problem(result)
+
+    assert problem is not None
+    assert "is only taken over BLOOMBERG_DAPI history" in problem
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "not-a-time",
+        "",
+        # No offset: a local reading nobody can place.
+        "2026-09-01T14:05:00",
+        "2026-09-01",
+    ],
+)
+@pytest.mark.parametrize("field", ["acquired_at", "calculated_at"])
+def test_a_timestamp_that_records_no_placeable_moment_is_refused(stamp, field):
+    # Both are evidence of *when* -- when Bloomberg was read, and when this
+    # number was calculated -- and "not-a-time" was displayed as exactly
+    # that. The loader and this module both stamp an offset-aware ISO-8601
+    # string (Codex review, PR #200).
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    problem = result_shape_problem(dataclasses.replace(base, **{field: stamp}))
+
+    assert problem is not None
+    assert field in problem
+
+
+def test_the_loaders_own_timestamp_shape_is_accepted():
+    # The rule must not refuse what the #196 loader actually stamps:
+    # `datetime.now().astimezone().isoformat(timespec="seconds")`.
+    stamped = datetime.now().astimezone().isoformat(timespec="seconds")
+    base = calculate_historical_yield_volatility(
+        _history([4.00, 4.10, 3.80, 4.30]), requested_observation_count=4
+    )
+
+    assert result_shape_problem(dataclasses.replace(base, acquired_at=stamped)) is None
 
 
 def test_the_shared_shape_check_is_what_both_consumers_use():

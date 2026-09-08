@@ -150,6 +150,9 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIVolatilityInput,
 )
 from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    SOURCE_SYSTEM as BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM,
+)
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     BloombergBondYieldHistory,
     BondYieldObservation,
 )
@@ -1007,6 +1010,38 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
             return (
                 f"{name} must be a non-blank string for {result.security!r}, got {value!r} "
                 f"({type(value).__name__})"
+            )
+    # The one acquisition path this statistic is built on. `REUTERS` -- or
+    # any other non-blank label -- was copied through and published as an
+    # ACTIVE source while the card displayed it as Bloomberg provenance
+    # (Codex review, PR #200). Imported rather than restated: one constant,
+    # one place, the same reason the short-window warning is derived.
+    if result.source_system != BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM:
+        return (
+            f"source_system for {result.security!r} is {result.source_system!r}; this "
+            f"statistic is only taken over {BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM} history"
+        )
+    # Both timestamps are evidence of *when* -- when Bloomberg was read, and
+    # when this number was calculated -- and "not-a-time" was displayed as
+    # exactly that. The #196 loader and this module both stamp
+    # `datetime.now().astimezone().isoformat(timespec="seconds")`, so an
+    # offset-aware ISO-8601 string is the shape, and an offset is what makes
+    # the moment unambiguous rather than a local reading nobody can place.
+    for name, value in (
+        ("acquired_at", result.acquired_at),
+        ("calculated_at", result.calculated_at),
+    ):
+        try:
+            stamped = datetime.fromisoformat(value)
+        except ValueError:
+            return (
+                f"{name} for {result.security!r} is {value!r}, which is not an ISO-8601 "
+                "timestamp"
+            )
+        if stamped.tzinfo is None or stamped.utcoffset() is None:
+            return (
+                f"{name} for {result.security!r} is {value!r}, which names no UTC offset -- "
+                "the moment it records cannot be placed"
             )
     for name, value in (
         ("field_meaning", result.field_meaning),
