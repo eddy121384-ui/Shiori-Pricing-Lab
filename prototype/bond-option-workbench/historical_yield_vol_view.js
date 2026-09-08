@@ -95,6 +95,17 @@
   // A.8.1's closed vocabulary. Held here only to check what the card claims
   // was applied -- no value on screen is normalized by this page.
   const DECIMAL_ANNUAL_FACTORS = { DECIMAL: 1, PERCENT: 0.01, BASIS_POINTS: 0.0001 };
+  // Two observations make one change, and one change has no ddof=1 standard
+  // deviation -- the server refuses anything smaller before it calculates.
+  const MINIMUM_REQUESTED_OBSERVATIONS = 3;
+  // The labels the canonical source always carries. Not a vocabulary the card
+  // may extend: this route publishes one source and no other.
+  const PUBLISHED_SOURCE_LABELS = {
+    source_system: "HISTORICAL_YIELD_VOL_MO",
+    volatility_basis: "YIELD_VOL",
+    status: "ACTIVE",
+    volatility_unit: "DECIMAL_ANNUAL",
+  };
 
   // `decimal_annual_normalization_factor` trims and upper-cases before it
   // matches, and the server publishes `source_unit` as the trader typed it --
@@ -142,6 +153,13 @@
     }
     if (Number(rendered) !== value) {
       return `malformed response: "${textKey}" does not read back as "${numberKey}"`;
+    }
+    // A standard deviation, and its annualization, are never negative. The
+    // server's own result guard refuses this; the card rendered `-1` beside a
+    // matching "-1" because agreement and finiteness were the only tests
+    // (Codex review, PR #200).
+    if (value < 0) {
+      return `malformed response: "${numberKey}" is ${value}, and a volatility is never negative`;
     }
     return null;
   }
@@ -309,6 +327,40 @@
         `${candidate.observation_count} observations make ${expectedChanges}`
       );
     }
+    if (candidate.requested_observation_count < MINIMUM_REQUESTED_OBSERVATIONS) {
+      return (
+        `malformed response: "requested_observation_count" is ` +
+        `${candidate.requested_observation_count}; this calculation needs at least ` +
+        `${MINIMUM_REQUESTED_OBSERVATIONS}`
+      );
+    }
+    // The status is not an independent label: it is what the counts say. A
+    // short window reported as FULL_WINDOW got the green treatment and lost
+    // its qualification, and the counts underneath it said otherwise the
+    // whole time (Codex review, PR #200). The zero case is tested first, the
+    // same order the calculator uses.
+    const expectedStatus = candidate.observation_count === 0
+      ? "NO_HISTORY"
+      : candidate.observation_count === candidate.requested_observation_count
+        ? "FULL_WINDOW"
+        : "INSUFFICIENT_HISTORY";
+    if (candidate.window_status !== expectedStatus) {
+      return (
+        `malformed response: "window_status" is "${candidate.window_status}" for ` +
+        `${candidate.observation_count} of ${candidate.requested_observation_count} ` +
+        `observations, which is ${expectedStatus}`
+      );
+    }
+    // The warning is that qualification, so it belongs to exactly that status
+    // -- the same rule the server's own result guard carries.
+    const warningExpected = expectedStatus === "INSUFFICIENT_HISTORY";
+    if (candidate.warnings.length > 0 !== warningExpected) {
+      return (
+        `malformed response: ${expectedStatus} with ` +
+        (candidate.warnings.length > 0 ? `${candidate.warnings.length} warning(s)` : "no warning") +
+        ", and only INSUFFICIENT_HISTORY carries one"
+      );
+    }
     for (const key of ["blockers", "warnings"]) {
       if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
     }
@@ -346,13 +398,24 @@
       if (typeof source !== "object" || Array.isArray(source)) {
         return 'malformed response: "volatility_source" is neither an object nor null';
       }
+      // Four of these are fixed by the contract, not free text: this route
+      // can serialize only the canonical source, and `BLIVolatilityInput`
+      // itself refuses a non-active one. `status: "STALE"` and
+      // `volatility_basis: "PRICE_VOL"` were drawn in the normal block as
+      // though published (Codex review, PR #200). Exact matches on purpose --
+      // these are enum `.value` strings the server generates, never anything
+      // a trader typed, so there is nothing here to canonicalize.
+      for (const [key, fixed] of Object.entries(PUBLISHED_SOURCE_LABELS)) {
+        if (source[key] !== fixed) {
+          return (
+            `malformed response: volatility_source."${key}" is ` +
+            `${JSON.stringify(source[key])}; this card shows only ${fixed}`
+          );
+        }
+      }
       for (const key of [
-        "source_system",
-        "volatility_basis",
-        "status",
         // "volatility_text" is deliberately not here: it is checked below
         // against the number it is the text of, which subsumes non-blank.
-        "volatility_unit",
         "source_unit",
         // Always populated by the publication helper, and the only place a
         // published number's calculation provenance appears on this card --

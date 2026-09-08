@@ -756,6 +756,111 @@ def test_the_provenance_counts_must_be_the_calculators_own_arithmetic(
     assert _is_actually_hidden(page, "hyv-result")
 
 
+@pytest.mark.parametrize(
+    "source_overrides",
+    [
+        {"status": "STALE"},
+        {"volatility_basis": "PRICE_VOL"},
+        {"volatility_basis": "EQUIVALENT_PRICE_VOL"},
+        {"source_system": "BLOOMBERG_VCUB"},
+        {"volatility_unit": "PERCENT"},
+    ],
+)
+def test_only_the_canonical_sources_labels_are_rendered(
+    server_url, page, source_overrides
+) -> None:
+    """This route publishes one source, and the card must show only that one.
+
+    `status: "STALE"` and `volatility_basis: "PRICE_VOL"` were drawn in the
+    normal normalized-source block as though published -- the four labels were
+    checked for non-blankness and nothing else (Codex review, PR #200). A
+    VCUB or PRICE_VOL label under this card's Middle Office heading is the
+    exact confusion Issue #197 asked to keep separate.
+    """
+
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": {**_FULL_PAYLOAD["volatility_source"], **source_overrides},
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"daily_yield_vol": -1.0, "daily_yield_vol_text": "-1.0"},
+        {"annualized_yield_vol": -1.0, "annualized_yield_vol_text": "-1.0"},
+    ],
+)
+def test_a_negative_headline_volatility_is_refused(server_url, page, overrides) -> None:
+    # Number and text agreed, and both were finite -- so the card printed a
+    # negative standard deviation, which the server's own guard refuses.
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "never negative" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # A short window wearing the full-window label gets the green pill and
+        # loses its qualification, while the counts underneath say otherwise.
+        {
+            "series_observation_count": 100,
+            "observation_count": 100,
+            "yield_change_count": 99,
+            "window_status": "FULL_WINDOW",
+            "warnings": [],
+        },
+        # A full window claiming to be short.
+        {"window_status": "INSUFFICIENT_HISTORY"},
+        # The right status, but the qualification stripped off it.
+        {
+            "series_observation_count": 100,
+            "observation_count": 100,
+            "yield_change_count": 99,
+            "window_status": "INSUFFICIENT_HISTORY",
+            "warnings": [],
+        },
+        # A warning on a window that is not short.
+        {"warnings": ["Applied VCUB substitute"]},
+        # A requested count below what a ddof=1 standard deviation needs.
+        {
+            "requested_observation_count": 2,
+            "series_observation_count": 2,
+            "observation_count": 2,
+            "yield_change_count": 1,
+        },
+    ],
+)
+def test_the_window_status_must_follow_its_own_counts(server_url, page, overrides) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:
