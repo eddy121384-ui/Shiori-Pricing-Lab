@@ -30,6 +30,9 @@ import pytest
 
 from shiori_pricing_lab.app.standalone_option_workbench_server import create_server
 from shiori_pricing_lab.data.treasury_futures_ctd import treasury_futures_ctd_from_manual_entry
+from shiori_pricing_lab.pricing.treasury_futures_contract import (
+    SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES,
+)
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     futures_price_from_target_yield,
     implied_yield_from_futures_price,
@@ -111,8 +114,10 @@ def _open_futures_yield(page, server_url: str):
     page.goto(server_url)
     page.click("#nav-futures-yield")
     _wait_until(lambda: not _is_actually_hidden(page, "view-futures-yield"))
+    expected_options = len(SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES)
     _wait_until(
-        lambda: page.eval_on_selector("#fy-contract-select", "el => el.options.length") == 4
+        lambda: page.eval_on_selector("#fy-contract-select", "el => el.options.length")
+        == expected_options
     )
     return page
 
@@ -164,7 +169,7 @@ def test_the_nav_item_switches_to_the_view_and_pricing_switches_back(page, serve
 def test_the_contract_selector_is_filled_from_the_server_catalogue(page, server_url) -> None:
     _open_futures_yield(page, server_url)
     codes = page.eval_on_selector_all("#fy-contract-select option", "els => els.map(e => e.value)")
-    assert codes == ["ZT", "ZF", "ZN", "ZB"]
+    assert codes == list(SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES)
 
 
 @_PLAYWRIGHT_SKIP
@@ -175,6 +180,17 @@ def test_the_tick_summary_follows_the_selected_contract(page, server_url) -> Non
     page.select_option("#fy-contract-select", "ZT")
     _wait_until(lambda: "1/256 point" in page.text_content("#fy-tick-summary"))
     assert "0, 1, 2, 3, 5, 6, 7, 8" in page.text_content("#fy-tick-summary")
+
+
+@_PLAYWRIGHT_SKIP
+def test_the_tick_summary_follows_the_new_contracts(page, server_url) -> None:
+    # Issue #202: UXY shares ZN's 1/64 grid, WN shares ZB's whole-32nd grid.
+    _open_futures_yield(page, server_url)
+    page.select_option("#fy-contract-select", "UXY")
+    _wait_until(lambda: "1/64 point" in page.text_content("#fy-tick-summary"))
+    assert "0, 5" in page.text_content("#fy-tick-summary")
+    page.select_option("#fy-contract-select", "WN")
+    _wait_until(lambda: "1/32 point" in page.text_content("#fy-tick-summary"))
 
 
 @_PLAYWRIGHT_SKIP
