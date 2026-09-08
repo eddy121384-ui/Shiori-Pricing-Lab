@@ -1136,6 +1136,58 @@ def test_the_card_accepts_what_the_real_route_actually_serializes(
     assert _is_actually_hidden(page, "hyv-error")
 
 
+@pytest.mark.parametrize("days", [365, 250, "252", None])
+def test_an_unapproved_annualization_is_refused(server_url, page, days) -> None:
+    # The card prints this as "x sqrt(252)", the convention behind both
+    # figures. It was left out of the methodology label check, so 365 was
+    # displayed as the annualization used (Codex review, PR #200).
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, "annualization_trading_days": days})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "this card shows only 252" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize("unit", [{"unit": "PERCENT"}, 252, "", "   ", []])
+def test_a_field_unit_that_is_not_a_unit_is_refused_even_with_no_source(
+    server_url, page, unit
+) -> None:
+    """The unit was only ever checked against a published source's copy of it.
+
+    On the deliberate figure-without-published-source path -- an unconfirmed
+    Yield unit -- nothing looked at `field_unit` at all, and an object reached
+    the card as "[object Object]" beside two real risk figures, labelling
+    what unit they are in (Codex review, PR #200).
+    """
+
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_NO_UNIT_PAYLOAD, "field_unit": unit})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_an_unconfirmed_unit_is_still_shown_as_unconfirmed(server_url, page) -> None:
+    # null stays legitimate: that IS the unconfirmed-unit answer, and the card
+    # exists to show it. The rule must not turn it into a refusal.
+    _route_other_markets_away(page)
+    _route_vol(page, payload=_NO_UNIT_PAYLOAD)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:

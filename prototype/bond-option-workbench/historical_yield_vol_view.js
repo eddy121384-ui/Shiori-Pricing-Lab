@@ -100,6 +100,8 @@
   const MINIMUM_REQUESTED_OBSERVATIONS = 3;
   // Two changes is what a ddof=1 standard deviation needs.
   const MINIMUM_CHANGES_FOR_STDEV = 2;
+  // The one annualization this calculation uses, printed as "x sqrt(252)".
+  const ANNUALIZATION_TRADING_DAYS = 252;
   // The one methodology this route emits, under the one convention it uses.
   const CARD_METHODOLOGY_LABELS = {
     methodology: "HISTORICAL_YIELD_VOL_MO",
@@ -307,6 +309,23 @@
           `this card shows only ${fixed}`
         );
       }
+    }
+    // The annualization is part of that same methodology and the card prints
+    // it as "x sqrt(252)". Left out of the label check, `365` was displayed
+    // as the convention behind the figures (Codex review, PR #200).
+    if (candidate.annualization_trading_days !== ANNUALIZATION_TRADING_DAYS) {
+      return (
+        `malformed response: "annualization_trading_days" is ` +
+        `${JSON.stringify(candidate.annualization_trading_days)}; this card shows only ` +
+        `${ANNUALIZATION_TRADING_DAYS}`
+      );
+    }
+    // The Yield field's own unit, printed beside both figures whether or not
+    // anything was published. Only checked when a source existed, so on the
+    // deliberate figure-without-source path an object reached the card as
+    // "[object Object]" beside two real risk numbers (Codex review, #200).
+    if (candidate.field_unit !== null && !isNonBlankString(candidate.field_unit)) {
+      return 'malformed response: "field_unit" is neither a non-blank string nor null';
     }
     for (const key of [
       "window_status",
