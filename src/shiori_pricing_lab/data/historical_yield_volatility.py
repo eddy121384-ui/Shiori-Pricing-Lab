@@ -360,6 +360,25 @@ def _require_finite_step(
             )
 
 
+def _insufficient_history_warning(observation_count: int, requested: int) -> str:
+    """The one short-window qualification, built from the counts that cause it.
+
+    One construction, used by the calculator and asserted by
+    :func:`result_shape_problem`, rather than a sentence in one place and a
+    presence check in the other. Checking only that *a* warning exists let
+    ("Applied VCUB substitute",) through, and the result then carried that
+    beside an audit line stating no substitute had been applied -- two
+    contradictory answers to the same question, in the same result (Codex
+    review, PR #200).
+    """
+
+    return (
+        f"INSUFFICIENT_HISTORY: {observation_count} of the requested {requested} Yield "
+        "observations exist. This is not a full-window Historical Yield Vol, and no "
+        "flat extension, benchmark, index or VCUB substitute has been applied"
+    )
+
+
 def _require_exact_integer_changes(
     window: Sequence[BondYieldObservation],
     values: list[float],
@@ -582,11 +601,7 @@ def calculate_historical_yield_volatility(
         # window's number reaching the publication helper's remaining checks
         # (a declared, supported unit; a positive sigma), and what must never
         # happen is it being read as a full-window result.
-        warnings.append(
-            f"INSUFFICIENT_HISTORY: {len(window)} of the requested {requested} Yield "
-            "observations exist. This is not a full-window Historical Yield Vol, and no "
-            "flat extension, benchmark, index or VCUB substitute has been applied"
-        )
+        warnings.append(_insufficient_history_warning(len(window), requested))
     else:
         status = HistoricalYieldVolStatus.FULL_WINDOW
 
@@ -914,15 +929,24 @@ def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
     # ("Applied VCUB substitute",) and an INSUFFICIENT_HISTORY result carrying
     # none are both shapes this module cannot produce, and the route displays
     # either as calculation output (Codex review, PR #200).
-    warnings_expected = result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
-    if bool(result.warnings) != warnings_expected:
+    if result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY:
+        warnings_expected: tuple[str, ...] = (
+            _insufficient_history_warning(
+                result.observation_count, result.requested_observation_count
+            ),
+        )
+    else:
+        warnings_expected = ()
+    # The exact warning, not merely one: an arbitrary string here passed and
+    # published, so a result could carry ("Applied VCUB substitute",) beside
+    # an audit line saying none had been (Codex review, PR #200). The text is
+    # built from the counts this function has already validated, so it is
+    # derived rather than restated.
+    if result.warnings != warnings_expected:
         return (
             f"this result for {result.security!r} reports {result.window_status.value} with "
-            + (
-                f"{len(result.warnings)} warning(s), and only INSUFFICIENT_HISTORY carries one"
-                if result.warnings
-                else "no warning, and INSUFFICIENT_HISTORY always carries one"
-            )
+            f"{list(result.warnings)!r}; that status carries exactly "
+            f"{list(warnings_expected)!r}"
         )
 
     # The methodology the route serializes under the hard-coded canonical

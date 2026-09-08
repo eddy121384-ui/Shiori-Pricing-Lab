@@ -384,7 +384,13 @@
       "observation_count",
       "yield_change_count",
     ]) {
-      if (!Number.isInteger(candidate[key])) return `malformed response: "${key}" is not an integer`;
+      // isSafeInteger, not isInteger: 9007199254740993 on the wire is parsed
+      // as ...992 and displayed as a different observation contract from the
+      // one received. The query path has refused exactly this since the third
+      // round; the response path had not (Codex review, PR #200).
+      if (!Number.isSafeInteger(candidate[key])) {
+        return `malformed response: "${key}" is not a whole number this page can represent`;
+      }
       // Integrality is not the question a count answers. `-1 of -1
       // observations` satisfied every arithmetic rule below and was rendered
       // as this figure's provenance (Codex review, PR #200).

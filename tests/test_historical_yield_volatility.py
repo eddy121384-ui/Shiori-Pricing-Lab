@@ -1199,7 +1199,7 @@ def test_publication_never_raises_anything_but_its_own_error_on_a_real_result():
         ({"standard_deviation_convention": "POPULATION_STDEV_P"}, "this calculator produces"),
         ({"annualization_trading_days": 365}, "annualization by sqrt"),
         # A full window does not carry the short-window qualification.
-        ({"warnings": ("Applied VCUB substitute",)}, "only INSUFFICIENT_HISTORY carries one"),
+        ({"warnings": ("Applied VCUB substitute",)}, "that status carries exactly"),
         # _write_json calls json.dumps outside the handler's exception
         # boundary, so an unserializable provenance value terminated the
         # response instead of returning the promised HTTP 400.
@@ -1256,7 +1256,21 @@ def test_an_insufficient_history_result_must_keep_its_warning():
     problem = result_shape_problem(dataclasses.replace(short, warnings=()))
 
     assert problem is not None
-    assert "always carries one" in problem
+    assert "that status carries exactly" in problem
+
+    # And it must be that warning, not merely one: an arbitrary string here
+    # published beside an audit line contradicting it (Codex review, #200).
+    contradictory = result_shape_problem(
+        dataclasses.replace(short, warnings=("Applied VCUB substitute",))
+    )
+    assert contradictory is not None
+    assert "Applied VCUB substitute" in contradictory
+
+    # Two copies of the real warning is not "a warning" either.
+    doubled = result_shape_problem(
+        dataclasses.replace(short, warnings=short.warnings + short.warnings)
+    )
+    assert doubled is not None
 
 
 def test_a_fatal_blocker_forces_is_usable_false():

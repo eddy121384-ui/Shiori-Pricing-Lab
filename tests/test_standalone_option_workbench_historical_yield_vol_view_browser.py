@@ -261,7 +261,24 @@ _NO_UNIT_PAYLOAD = {
 }
 
 
-def _route_vol(page, *, payload=None, error: str | None = None, status: int = 400):
+def _raw_payload_with(key: str, literal: str) -> str:
+    """The full payload as wire JSON, with one number replaced verbatim.
+
+    `json.dumps` of a Python int would already have lost the precision this
+    exercises, so the literal is spliced into the encoded body instead --
+    9007199254740993 has to reach the browser as those digits to be parsed
+    into a different number.
+    """
+
+    encoded = json.dumps(_FULL_PAYLOAD)
+    original = f'"{key}": {_FULL_PAYLOAD[key]}'
+    assert original in encoded
+    return encoded.replace(original, f'"{key}": {literal}', 1)
+
+
+def _route_vol(
+    page, *, payload=None, error: str | None = None, status: int = 400, raw_payload=None
+):
     calls: list[dict] = []
 
     def _handle(route):
@@ -272,6 +289,9 @@ def _route_vol(page, *, payload=None, error: str | None = None, status: int = 40
                 content_type="application/json",
                 body=json.dumps({"error": error}),
             )
+            return
+        if raw_payload is not None:
+            route.fulfill(status=200, content_type="application/json", body=raw_payload)
             return
         route.fulfill(
             status=200,
@@ -1250,6 +1270,31 @@ def test_observations_outside_the_requested_range_are_refused(server_url, page, 
     _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
 
     assert "outside the requested range" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "series_observation_count",
+        "requested_observation_count",
+        "observation_count",
+        "yield_change_count",
+    ],
+)
+def test_a_count_javascript_cannot_represent_exactly_is_refused(server_url, page, key) -> None:
+    # 9007199254740993 on the wire is parsed as ...992, so the card would
+    # display a different observation contract from the one it received. The
+    # query path has refused this since the third round; the response path had
+    # not (Codex review, PR #200).
+    _route_other_markets_away(page)
+    _route_vol(page, raw_payload=_raw_payload_with(key, "9007199254740993"))
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "this page can represent" in page.inner_text("#hyv-error-detail")
     assert _is_actually_hidden(page, "hyv-result")
 
 
