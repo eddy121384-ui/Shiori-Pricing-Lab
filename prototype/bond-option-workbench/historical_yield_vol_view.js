@@ -516,13 +516,21 @@
     // substitute beside an audit line saying none was applied.
     if (expectedWarnings === 1) {
       const qualification = candidate.warnings[0];
-      const counts =
-        `${candidate.observation_count} of the requested ` +
-        `${candidate.requested_observation_count}`;
-      if (!qualification.startsWith(`${expectedStatus}:`) || !qualification.includes(counts)) {
+      // A fixed prefix for the window's own count, and a whole-token match
+      // for the requested one. An unbounded substring was wrong: searching
+      // for "90 of the requested 180" finds it inside "190 of the requested
+      // 180", so a warning contradicting the count beside it passed (Codex
+      // review, PR #200). The counts are validated safe integers, so they are
+      // digits and safe to place in a pattern.
+      const prefix = `${expectedStatus}: ${candidate.observation_count} `;
+      const namesRequested = new RegExp(
+        `\\b${candidate.requested_observation_count}\\b`,
+      ).test(qualification);
+      if (!qualification.startsWith(prefix) || !namesRequested) {
         return (
           `malformed response: the short-window warning is ${JSON.stringify(qualification)}; ` +
-          `it must qualify ${expectedStatus} and name ${counts} observations`
+          `it must begin ${JSON.stringify(prefix)} and name ` +
+          `${candidate.requested_observation_count}`
         );
       }
     }

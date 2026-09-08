@@ -1309,6 +1309,18 @@ def test_a_count_javascript_cannot_represent_exactly_is_refused(server_url, page
             "INSUFFICIENT_HISTORY: 12 of the requested 34 Yield observations exist. This is "
             "not a full-window Historical Yield Vol"
         ],
+        # 90 is a suffix of 190: an unbounded substring search found the
+        # window's own count inside a larger, contradictory one (Codex
+        # review, PR #200).
+        [
+            "INSUFFICIENT_HISTORY: 190 of the requested 180 Yield observations exist. This "
+            "is not a full-window Historical Yield Vol"
+        ],
+        # The requested count as a suffix of a larger number, likewise.
+        [
+            "INSUFFICIENT_HISTORY: 90 of the requested 1180 Yield observations exist. This "
+            "is not a full-window Historical Yield Vol"
+        ],
         # Two warnings is not "a warning".
         [_SHORT_PAYLOAD["warnings"][0], _SHORT_PAYLOAD["warnings"][0]],
     ],
