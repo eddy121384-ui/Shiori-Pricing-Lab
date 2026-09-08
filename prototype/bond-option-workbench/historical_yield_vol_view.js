@@ -617,6 +617,20 @@
       if (typeof source !== "object" || Array.isArray(source)) {
         return 'malformed response: "volatility_source" is neither an object nor null';
       }
+      // Publication either succeeded or it did not: the route fills exactly
+      // one of these two from one try/except. A payload carrying both was
+      // accepted here, and `render()` takes the source branch -- so the card
+      // drew an ACTIVE normalized risk source while the same payload said
+      // publication had failed, and said why where nobody could read it
+      // (Codex review, PR #200).
+      const refusal = candidate.volatility_source_unavailable_reason;
+      if (refusal !== null && refusal !== undefined) {
+        return (
+          'malformed response: "volatility_source" is published and ' +
+          `"volatility_source_unavailable_reason" is ${JSON.stringify(refusal)}; ` +
+          "publication cannot both succeed and be refused"
+        );
+      }
       // Four of these are fixed by the contract, not free text: this route
       // can serialize only the canonical source, and `BLIVolatilityInput`
       // itself refuses a non-active one. `status: "STALE"` and

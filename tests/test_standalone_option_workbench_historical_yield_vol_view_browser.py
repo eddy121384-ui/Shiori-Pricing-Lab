@@ -1641,6 +1641,52 @@ def test_a_half_understood_volatility_source_is_refused(server_url, page, source
     assert _is_actually_hidden(page, "hyv-result")
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "no Historical Yield Vol is available for this bond",
+        # Blank too: the point is that the field was filled at all, not what
+        # it says.
+        "   ",
+    ],
+)
+def test_a_published_source_and_a_refusal_reason_cannot_both_stand(
+    server_url, page, reason
+) -> None:
+    # The route fills exactly one of these from one try/except, and `render()`
+    # takes the source branch -- so a payload carrying both drew an ACTIVE
+    # normalized risk source while the same payload said publication had
+    # failed (Codex review, #200).
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={**_FULL_PAYLOAD, "volatility_source_unavailable_reason": reason},
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "cannot both succeed and be refused" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+def test_a_published_source_without_a_refusal_still_renders(server_url, page) -> None:
+    # The must-still-render twin: the rule may not reach past the one shape
+    # the route cannot emit. A payload that simply omits the key is the same
+    # answer as one that sends it null.
+    payload = {**_FULL_PAYLOAD}
+    del payload["volatility_source_unavailable_reason"]
+    _route_other_markets_away(page)
+    _route_vol(page, payload=payload)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert "HISTORICAL_YIELD_VOL_MO" in page.inner_text("#hyv-source-detail")
+
+
 def test_no_source_and_no_reason_is_also_refused(server_url, page) -> None:
     _route_other_markets_away(page)
     _route_vol(
