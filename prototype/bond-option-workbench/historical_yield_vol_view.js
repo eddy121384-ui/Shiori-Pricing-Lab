@@ -98,6 +98,21 @@
   // Two observations make one change, and one change has no ddof=1 standard
   // deviation -- the server refuses anything smaller before it calculates.
   const MINIMUM_REQUESTED_OBSERVATIONS = 3;
+  // Two changes is what a ddof=1 standard deviation needs.
+  const MINIMUM_CHANGES_FOR_STDEV = 2;
+  // The one methodology this route emits, under the one convention it uses.
+  const CARD_METHODOLOGY_LABELS = {
+    methodology: "HISTORICAL_YIELD_VOL_MO",
+    standard_deviation_convention: "SAMPLE_STDEV_S_DDOF_1",
+  };
+
+  // A strict ISO calendar date, the way the route serializes one. Parsed and
+  // then compared back, so "2026-02-31" is refused rather than rolled over.
+  function isIsoCalendarDate(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }
   // The labels the canonical source always carries. Not a vocabulary the card
   // may extend: this route publishes one source and no other.
   const PUBLISHED_SOURCE_LABELS = {
@@ -281,10 +296,20 @@
     // just the three that shape the layout (Codex review, PR #200). render()
     // coerces whatever it is given, so an object or a number arrived on
     // screen looking like a source system or an acquisition timestamp.
+    // The methodology and the convention are not free text either: this route
+    // emits one methodology under one convention, and the card prints both as
+    // the method behind the figure. `POPULATION_STDEV_P` was rendered as the
+    // methodology of a successful Middle Office result (Codex review, #200).
+    for (const [key, fixed] of Object.entries(CARD_METHODOLOGY_LABELS)) {
+      if (candidate[key] !== fixed) {
+        return (
+          `malformed response: "${key}" is ${JSON.stringify(candidate[key])}; ` +
+          `this card shows only ${fixed}`
+        );
+      }
+    }
     for (const key of [
       "window_status",
-      "standard_deviation_convention",
-      "methodology",
       "source_system",
       "acquired_at",
       "calculated_at",
@@ -295,6 +320,20 @@
         return `malformed response: "${key}" is missing`;
       }
     }
+    // The Bloomberg request range, printed verbatim as this calculation's
+    // provenance. Never inspected at all before -- an object rendered as
+    // "[object Object]" under "requested range" (Codex review, PR #200).
+    for (const key of ["requested_start_date", "requested_end_date"]) {
+      if (!isIsoCalendarDate(candidate[key])) {
+        return `malformed response: "${key}" is not an ISO calendar date`;
+      }
+    }
+    if (candidate.requested_start_date > candidate.requested_end_date) {
+      return (
+        `malformed response: the requested range ${candidate.requested_start_date}..` +
+        `${candidate.requested_end_date} ends before it starts`
+      );
+    }
     for (const key of [
       "series_observation_count",
       "requested_observation_count",
@@ -302,6 +341,10 @@
       "yield_change_count",
     ]) {
       if (!Number.isInteger(candidate[key])) return `malformed response: "${key}" is not an integer`;
+      // Integrality is not the question a count answers. `-1 of -1
+      // observations` satisfied every arithmetic rule below and was rendered
+      // as this figure's provenance (Codex review, PR #200).
+      if (candidate[key] < 0) return `malformed response: "${key}" is ${candidate[key]}`;
     }
     // The counts are this card's provenance for the figure above them, and
     // they are not three independent numbers: the window is the smaller of
@@ -363,6 +406,13 @@
     }
     for (const key of ["blockers", "warnings"]) {
       if (!Array.isArray(candidate[key])) return `malformed response: "${key}" must be an array`;
+      // These entries ARE the refusal and the qualification a trader reads.
+      // An object rendered as "[object Object]" and a blank string as an
+      // empty bullet, in the one place the card explains itself (Codex
+      // review, PR #200). Checked before any length is treated as meaningful.
+      if (!candidate[key].every(isNonBlankString)) {
+        return `malformed response: every "${key}" entry must be a non-blank string`;
+      }
     }
     // The two headline figures are printed from these strings verbatim, so a
     // string that is not a number is a fabricated risk figure on screen under
@@ -434,6 +484,18 @@
         source.volatility,
       );
       if (publishedProblem !== null) return publishedProblem;
+      // Strictly positive, and only here. A zero headline is an honest flat
+      // window -- identical Yield Changes really do give sigma 0 -- and the
+      // publication helper refuses exactly that with a reason, so the shared
+      // figure rule must keep allowing it. Requiring it everywhere would
+      // refuse a legitimate answer, which is the mistake the `percent`
+      // canonicalization finding already cost (Codex review, PR #200).
+      if (source.volatility <= 0) {
+        return (
+          'malformed response: volatility_source."volatility" is ' +
+          `${source.volatility}; a published volatility is never zero or negative`
+        );
+      }
       // The card prints "source unit x factor" as the exact normalization
       // applied to an ACTIVE risk source, so an arbitrary finite number there
       // is false provenance, not a cosmetic slip -- `PERCENT` beside `-1` was
@@ -491,6 +553,17 @@
       return 'malformed response: one Historical Yield Vol figure is present and the other is not';
     }
     const figuresPresent = present(candidate.annualized_yield_vol);
+    // Availability follows the change count, which is what the convention
+    // actually needs -- two observations and one change with populated
+    // figures passed every other rule, and ddof=1 cannot produce a standard
+    // deviation from one change (Codex review, PR #200).
+    if (figuresPresent !== candidate.yield_change_count >= MINIMUM_CHANGES_FOR_STDEV) {
+      return (
+        `malformed response: ${candidate.yield_change_count} Yield Change(s) ` +
+        (figuresPresent ? "cannot produce" : "produce") +
+        ` the ${MINIMUM_CHANGES_FOR_STDEV}-change standard deviation this card shows`
+      );
+    }
     if (candidate.blockers.length === 0 && !figuresPresent) {
       return 'malformed response: no "blockers", yet no Historical Yield Vol to show';
     }

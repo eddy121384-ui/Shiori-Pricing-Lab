@@ -861,6 +861,203 @@ def test_the_window_status_must_follow_its_own_counts(server_url, page, override
     assert _is_actually_hidden(page, "hyv-result")
 
 
+def test_a_flat_window_still_shows_its_honest_zero(server_url, page) -> None:
+    """The one payload the strict-positive rule must NOT refuse.
+
+    Identical Yield Changes give an exact sigma of 0, the calculator reports
+    it with no blocker, and the publication helper refuses to publish it with
+    a reason. Requiring a positive figure everywhere would have refused that
+    whole answer -- the same class of mistake as rejecting a unit typed
+    "percent" (Codex review, PR #200).
+    """
+
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "daily_yield_vol": 0.0,
+            "daily_yield_vol_text": "0.0",
+            "annualized_yield_vol": 0.0,
+            "annualized_yield_vol_text": "0.0",
+            "volatility_source": None,
+            "volatility_source_unavailable_reason": "the Historical Yield Vol of the selected "
+            "180-observation window is 0.0 DECIMAL_ANNUAL, which is not positive",
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert page.inner_text("#hyv-annualized").strip() == "0.0"
+
+
+@pytest.mark.parametrize("volatility", [0, 0.0, -0.0])
+def test_a_zero_published_volatility_is_refused(server_url, page, volatility) -> None:
+    # Strictly positive where it is published: the publication helper refuses
+    # a zero, so an ACTIVE source carrying one cannot have come from it.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "volatility_source": {
+                **_FULL_PAYLOAD["volatility_source"],
+                "volatility": volatility,
+                "volatility_text": repr(volatility),
+            },
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "never zero or negative" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"requested_start_date": {"y": 2026}},
+        {"requested_start_date": "2026-02-31"},
+        {"requested_start_date": "01/01/2026"},
+        {"requested_end_date": None},
+        # Inverted: an end before its own start.
+        {"requested_start_date": "2026-09-01", "requested_end_date": "2026-01-01"},
+    ],
+)
+def test_the_displayed_request_range_must_be_a_real_ordered_range(
+    server_url, page, overrides
+) -> None:
+    # Printed verbatim as this calculation's Bloomberg provenance, and never
+    # inspected at all -- an object reached the card as "[object Object]".
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # Two observations, one change, and a figure: ddof=1 cannot make a
+        # standard deviation from one change.
+        {
+            "series_observation_count": 2,
+            "observation_count": 2,
+            "yield_change_count": 1,
+            "window_status": "INSUFFICIENT_HISTORY",
+            "warnings": ["INSUFFICIENT_HISTORY: 2 of the requested 180 observations exist"],
+        },
+    ],
+)
+def test_figures_must_follow_the_change_count(server_url, page, overrides) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"warnings": [{"text": "short"}]},
+        {"warnings": [""]},
+        {"warnings": ["   "]},
+        {"blockers": [{"text": "blocked"}]},
+        {"blockers": [""]},
+    ],
+)
+def test_every_blocker_and_warning_entry_must_be_readable(server_url, page, overrides) -> None:
+    # These entries are the refusal and the qualification a trader reads. An
+    # object rendered as "[object Object]" and a blank string as an empty
+    # bullet, in the one place the card explains itself.
+    payload = {**_FULL_PAYLOAD, **overrides}
+    if "warnings" in overrides:
+        payload = {
+            **payload,
+            "series_observation_count": 90,
+            "observation_count": 90,
+            "yield_change_count": 89,
+            "window_status": "INSUFFICIENT_HISTORY",
+        }
+    else:
+        payload = {
+            **payload,
+            "daily_yield_vol": None,
+            "daily_yield_vol_text": None,
+            "annualized_yield_vol": None,
+            "annualized_yield_vol_text": None,
+            "series_observation_count": 2,
+            "observation_count": 2,
+            "yield_change_count": 1,
+            "window_status": "INSUFFICIENT_HISTORY",
+            "warnings": ["INSUFFICIENT_HISTORY: 2 of the requested 180 observations exist"],
+            "volatility_source": None,
+            "volatility_source_unavailable_reason": "no Historical Yield Vol is available",
+        }
+    _route_other_markets_away(page)
+    _route_vol(page, payload=payload)
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "non-blank string" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"methodology": "BLOOMBERG_VCUB"},
+        {"standard_deviation_convention": "POPULATION_STDEV_P"},
+    ],
+)
+def test_only_the_canonical_methodology_labels_are_rendered(server_url, page, overrides) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "this card shows only" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"series_observation_count": -1, "observation_count": -1, "yield_change_count": 0},
+        {"requested_observation_count": -180},
+    ],
+)
+def test_negative_counts_are_refused(server_url, page, overrides) -> None:
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, **overrides})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "malformed response" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:
