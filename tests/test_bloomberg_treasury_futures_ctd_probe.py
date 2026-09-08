@@ -118,10 +118,17 @@ def test_an_unsupported_contract_code_is_refused_not_guessed() -> None:
         module.default_security("ZQ")
 
 
-def test_all_four_mvp_contracts_are_probed_when_fields_are_given(fake_dapi) -> None:
+def test_all_supported_contracts_are_probed_when_fields_are_given(fake_dapi) -> None:
     assert module.main(["--fields", "SOME_NEW_CANDIDATE"]) == 0
     probed = [security for security, _ in fake_dapi["probe"]]
-    assert probed == ["TUA Comdty", "FVA Comdty", "TYA Comdty", "USA Comdty"]
+    assert probed == [
+        "TUA Comdty",
+        "FVA Comdty",
+        "TYA Comdty",
+        "USA Comdty",
+        "UXYA Comdty",
+        "WNA Comdty",
+    ]
 
 
 def test_an_explicit_security_is_sent_verbatim(fake_dapi) -> None:

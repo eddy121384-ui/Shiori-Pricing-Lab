@@ -6,12 +6,14 @@ data -- it turns a trader-entered futures quote into an exact decimal price
 per 100 par, and a decimal price back into the exchange's own display for
 that specific contract.
 
-**Why this is contract-driven and not one generic 32nds parser.** The four
-MVP contracts do not share a minimum price increment, so a single parser
-cannot be correct for all of them (Issue #190's explicit rejection of PR
-#9's generic "third digit is tenths of a 32nd" reading). Each contract's
-outright minimum tick, from the CME contract specifications quoted in Issue
-#190 and cross-checked against each contract's published tick value:
+**Why this is contract-driven and not one generic 32nds parser.** The
+supported contracts do not share a minimum price increment, so a single
+parser cannot be correct for all of them (Issue #190's explicit rejection
+of PR #9's generic "third digit is tenths of a 32nd" reading). Each
+contract's outright minimum tick, from the CME contract specifications
+quoted in Issue #190 (ZT/ZF/ZN/ZB) and Issue #202 (UXY/WN, confirmed as the
+same tick grid as ZN and ZB respectively) and cross-checked against each
+contract's published tick value:
 
 ===== ==================================== ================= ===========
 Code  Contract                              Minimum tick      Tick value
@@ -20,6 +22,8 @@ ZT    2-Year U.S. Treasury Note futures     1/8 of 1/32       $7.8125
 ZF    5-Year U.S. Treasury Note futures     1/4 of 1/32       $7.8125
 ZN    10-Year U.S. Treasury Note futures    1/2 of 1/32       $15.625
 ZB    U.S. Treasury Bond futures            1/32              $31.25
+UXY   Ultra 10-Year Treasury Note futures   1/2 of 1/32       $15.625
+WN    Ultra Treasury Bond futures           1/32              $31.25
 ===== ==================================== ================= ===========
 
 (ZT is on a $200,000 contract, the other three on $100,000, which is why ZT
@@ -203,9 +207,9 @@ def _sub_32nd_digits(ticks_per_32nd: int) -> dict[str, int]:
     return digits
 
 
-# The four MVP contracts of Issue #190. Adding 3-Year / Ultra 10-Year / Ultra
-# Bond later is one row each -- but each row asserts that contract's real
-# exchange tick, so none is added here without its own confirmation.
+# The Issue #190 MVP contracts plus the Issue #202 expansion (Ultra 10-Year
+# and Ultra Bond). Each row asserts that contract's real exchange tick, so
+# none is added here without its own confirmation.
 TREASURY_FUTURES_CONTRACTS: dict[str, TreasuryFuturesContract] = {
     contract.code: contract
     for contract in (
@@ -227,6 +231,16 @@ TREASURY_FUTURES_CONTRACTS: dict[str, TreasuryFuturesContract] = {
         TreasuryFuturesContract(
             code="ZB",
             name="U.S. Treasury Bond futures",
+            ticks_per_32nd=1,
+        ),
+        TreasuryFuturesContract(
+            code="UXY",
+            name="Ultra 10-Year U.S. Treasury Note futures",
+            ticks_per_32nd=2,
+        ),
+        TreasuryFuturesContract(
+            code="WN",
+            name="Ultra U.S. Treasury Bond futures",
             ticks_per_32nd=1,
         ),
     )

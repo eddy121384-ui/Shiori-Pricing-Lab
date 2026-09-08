@@ -23,8 +23,8 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 )
 
 
-def test_the_four_mvp_contracts_are_supported() -> None:
-    assert SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES == ("ZT", "ZF", "ZN", "ZB")
+def test_the_supported_contracts_are_the_mvp_four_plus_uxy_and_wn() -> None:
+    assert SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES == ("ZT", "ZF", "ZN", "ZB", "UXY", "WN")
 
 
 @pytest.mark.parametrize(
@@ -34,6 +34,8 @@ def test_the_four_mvp_contracts_are_supported() -> None:
         ("ZF", 1 / 128),  # one quarter of a 32nd
         ("ZN", 1 / 64),  # one half of a 32nd
         ("ZB", 1 / 32),  # one 32nd
+        ("UXY", 1 / 64),  # one half of a 32nd, same grid as ZN
+        ("WN", 1 / 32),  # one 32nd, same grid as ZB
     ],
 )
 def test_each_contract_has_its_own_published_minimum_tick(code, expected_tick) -> None:
@@ -49,6 +51,8 @@ def test_each_contract_has_its_own_published_minimum_tick(code, expected_tick) -
         ("ZF", ["0", "2", "5", "7"]),
         ("ZN", ["0", "5"]),
         ("ZB", ["0"]),
+        ("UXY", ["0", "5"]),
+        ("WN", ["0"]),
     ],
 )
 def test_the_sub_32nd_digit_alphabet_is_the_exchange_display_alphabet(
@@ -85,6 +89,14 @@ def test_the_sub_32nd_digit_alphabet_is_the_exchange_display_alphabet(
         ("ZB", "118-16", 118 + 16 / 32),
         ("ZB", "118-160", 118 + 16 / 32),
         ("ZB", "118-31", 118 + 31 / 32),
+        # UXY -- halves of a 32nd, same grid as ZN
+        ("UXY", "104-08", 104 + 8 / 32),
+        ("UXY", "104-085", 104 + 8.5 / 32),
+        ("UXY", "104-08+", 104 + 8.5 / 32),
+        # WN -- whole 32nds, same grid as ZB
+        ("WN", "132-24", 132 + 24 / 32),
+        ("WN", "132-240", 132 + 24 / 32),
+        ("WN", "132-31", 132 + 31 / 32),
     ],
 )
 def test_a_valid_exchange_quote_parses_to_its_decimal_price(code, raw, expected) -> None:
@@ -101,6 +113,10 @@ def test_a_valid_exchange_quote_parses_to_its_decimal_price(code, raw, expected)
         ("ZN", 112.5, "112-16"),
         ("ZB", 118.5, "118-16"),
         ("ZB", 119.0, "119-00"),
+        ("UXY", 104 + 8.5 / 32, "104-08 1/2"),
+        ("UXY", 104.25, "104-08"),
+        ("WN", 132.75, "132-24"),
+        ("WN", 133.0, "133-00"),
     ],
 )
 def test_a_decimal_price_formats_back_to_its_exchange_quote(code, price, expected) -> None:
@@ -139,6 +155,11 @@ def test_a_decimal_price_formats_back_to_its_exchange_quote(code, price, expecte
         ("ZN", "112-16 ½", 112 + 16.5 / 32),
         # ZB -- whole 32nds only (no fractions)
         ("ZB", "118-16", 118 + 16 / 32),
+        # UXY -- halves of a 32nd
+        ("UXY", "104-08 1/2", 104 + 8.5 / 32),
+        ("UXY", "104-08 \u00bd", 104 + 8.5 / 32),
+        # WN -- whole 32nds only (no fractions)
+        ("WN", "132-24", 132 + 24 / 32),
     ],
 )
 def test_bloomberg_style_quote_parses_to_correct_decimal(code, raw, expected) -> None:
@@ -163,6 +184,8 @@ def test_bloomberg_style_quote_parses_to_correct_decimal(code, raw, expected) ->
         ("ZF", "108-15+", "108-15 1/2", 108 + 15.5 / 32),
         ("ZN", "112-165", "112-16 1/2", 112 + 16.5 / 32),
         ("ZN", "112-16+", "112-16 1/2", 112 + 16.5 / 32),
+        ("UXY", "104-085", "104-08 1/2", 104 + 8.5 / 32),
+        ("UXY", "104-08+", "104-08 1/2", 104 + 8.5 / 32),
     ],
 )
 def test_shorthand_and_bloomberg_notation_are_equivalent(
@@ -186,6 +209,8 @@ def test_shorthand_and_bloomberg_notation_are_equivalent(
         ("ZB", "118-16 1/2"),  # ZB doesn't have fractions
         ("ZN", "112-16 1/4"),  # ZN doesn't have quarters
         ("ZF", "108-15 1/8"),  # ZF doesn't have eighths
+        ("UXY", "104-08 1/4"),  # UXY doesn't have quarters either
+        ("WN", "132-24 1/2"),  # WN doesn't have fractions either
     ],
 )
 def test_invalid_bloomberg_fraction_is_rejected(code, raw) -> None:
@@ -208,6 +233,11 @@ def test_parse_and_format_are_inverses_across_every_tick_of_a_point(code) -> Non
         # A half 32nd is not a tick on ZB.
         ("ZB", "118-16+"),
         ("ZB", "118-165"),
+        # Nor on WN, which shares ZB's whole-32nd grid.
+        ("WN", "132-24+"),
+        ("WN", "132-245"),
+        # A quarter is not a tick on UXY either, which shares ZN's grid.
+        ("UXY", "104-082"),
         # A quarter is not a tick on ZN, an eighth is not a tick on ZF.
         ("ZN", "112-162"),
         ("ZF", "108-151"),
@@ -305,7 +335,8 @@ def test_high_precision_fraction_counterexample() -> None:
         parse_futures_quote("ZN", "112-16 2/3")
     
     # Another edge case: very close to a tick but not exact
-    # 3/2 = 1.5 -> on ZF (4 ticks/32nd): 1.5*4 = 6 ticks -> exact! But 3/2 is not a standard fraction
+    # 3/2 = 1.5 -> on ZF (4 ticks/32nd): 1.5*4 = 6 ticks -> exact!
+    # But 3/2 is not a standard fraction
     # Actually 3/2 of a 32nd = 1.5 32nds = 1 32nd + 16 ticks = way out of range
     
     # Test that 1/6 on ZT is rejected (1*8=8, 8%6=2 != 0)
