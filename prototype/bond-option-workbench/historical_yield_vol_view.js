@@ -117,9 +117,33 @@
   // `acquired_at` exists precisely to tell two acquisitions apart.
   function isOffsetAwareTimestamp(value) {
     if (typeof value !== "string") return false;
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(value)) {
-      return false;
-    }
+    const parts =
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(
+        value
+      );
+    if (parts === null) return false;
+    // Digits alone are not a calendar. `2026-02-31T14:05:00+00:00` and
+    // `2026-01-01T24:00:00Z` both match the shape, and V8 rolls both over to
+    // a *different* moment -- the second into the next day -- while the
+    // server's `datetime.fromisoformat` refuses them outright (Codex review,
+    // PR #200). Walk the components back out, the way `isIsoCalendarDate`
+    // does, so a stamp can only mean the moment it spells.
+    const [, year, month, day, hour, minute, second] = parts;
+    const walked = new Date(
+      Date.UTC(
+        Number(year),
+        Number(month) - 1,
+        Number(day),
+        Number(hour),
+        Number(minute),
+        Number(second)
+      )
+    );
+    if (Number.isNaN(walked.getTime())) return false;
+    const spelled = `${year}-${month}-${day}T${hour}:${minute}:${second}`;
+    if (walked.toISOString().slice(0, 19) !== spelled) return false;
+    // The offset itself still has to name a real one: "+25:00" spells a
+    // shift no zone has, and only parsing the whole stamp catches it.
     return Number.isFinite(Date.parse(value));
   }
 

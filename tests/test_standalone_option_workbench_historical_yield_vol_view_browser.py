@@ -1403,6 +1403,18 @@ def test_the_card_shows_only_bloomberg_acquired_history(server_url, page, label)
         "2026-08-31T14:05:00",
         "2026-08-31",
         "31/08/2026 14:05:00+00:00",
+        # Right digits, wrong calendar. V8 rolls each of these over to a
+        # different moment than the one it spells -- February 31st into
+        # March, hour 24 into the next day -- while the server's
+        # `datetime.fromisoformat` refuses them outright (Codex review, #200).
+        "2026-02-31T14:05:00+00:00",
+        "2026-02-29T00:00:00Z",
+        "2026-01-01T24:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-01-01T12:60:00Z",
+        "2026-01-01T12:00:61Z",
+        # A shift no zone has.
+        "2026-01-01T00:00:00+25:00",
     ],
 )
 @pytest.mark.parametrize("key", ["acquired_at", "calculated_at"])
@@ -1420,7 +1432,15 @@ def test_a_displayed_timestamp_must_place_a_moment(server_url, page, key, stamp)
 
 @pytest.mark.parametrize(
     "stamp",
-    ["2026-08-31T14:05:00+00:00", "2026-08-31T14:05:00Z", "2026-09-08T17:21:10+08:00"],
+    [
+        "2026-08-31T14:05:00+00:00",
+        "2026-08-31T14:05:00Z",
+        "2026-09-08T17:21:10+08:00",
+        # A real leap day, and sub-second precision: the calendar round-trip
+        # must not refuse either.
+        "2024-02-29T00:00:00+00:00",
+        "2026-08-31T14:05:00.123456+00:00",
+    ],
 )
 def test_the_stamps_the_acquisition_path_produces_are_accepted(server_url, page, stamp) -> None:
     # The rule must not refuse what the loader actually emits:
