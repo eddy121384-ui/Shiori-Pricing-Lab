@@ -335,7 +335,12 @@
       "security",
       "yield_field",
     ]) {
-      if (typeof candidate[key] !== "string" || !candidate[key]) {
+      // isNonBlankString, not truthiness: "   " is truthy and renders as
+      // nothing, so the card showed visually blank audit provenance beside
+      // the risk figure. The same rule was already applied to the nested
+      // source's strings and to the unavailability reason, and this loop --
+      // the original one -- was left on truthiness (Codex review, PR #200).
+      if (!isNonBlankString(candidate[key])) {
         return `malformed response: "${key}" is missing`;
       }
     }
@@ -415,6 +420,19 @@
         `${candidate.requested_observation_count}; this calculation needs at least ` +
         `${MINIMUM_REQUESTED_OBSERVATIONS}`
       );
+    }
+    // Inside the range the card prints as the Bloomberg request. Ascending,
+    // counted and endpoint-matched was not enough: a list that begins before
+    // the requested start or ends after the requested end passed all three
+    // and displayed a request range its own observations contradict (Codex
+    // review, PR #200).
+    for (const used of candidate.observation_dates) {
+      if (used < candidate.requested_start_date || used > candidate.requested_end_date) {
+        return (
+          `malformed response: observation ${used} is outside the requested range ` +
+          `${candidate.requested_start_date}..${candidate.requested_end_date}`
+        );
+      }
     }
     if (candidate.observation_dates.length !== candidate.observation_count) {
       return (

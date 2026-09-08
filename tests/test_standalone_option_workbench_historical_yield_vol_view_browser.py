@@ -1202,6 +1202,57 @@ def test_the_card_accepts_what_the_real_route_actually_serializes(
     assert ("HISTORICAL_YIELD_VOL_MO" in detail) is published
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["source_system", "security", "yield_field", "acquired_at", "calculated_at"],
+)
+def test_whitespace_only_provenance_is_refused(server_url, page, key) -> None:
+    # Truthy and renders as nothing: the card showed visually blank audit
+    # provenance beside the risk figure. `isNonBlankString` was already used
+    # for the nested source's strings and the unavailability reason; this
+    # loop -- the original one -- was still on truthiness (Codex review, #200).
+    _route_other_markets_away(page)
+    _route_vol(page, payload={**_FULL_PAYLOAD, key: "   "})
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert f'"{key}" is missing' in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
+@pytest.mark.parametrize(
+    "dates",
+    [
+        # Begins before the requested start.
+        ["2025-12-31"] + _OBSERVATION_DATES[1:],
+        # Ends after the requested end.
+        _OBSERVATION_DATES[:-1] + ["2026-09-02"],
+    ],
+)
+def test_observations_outside_the_requested_range_are_refused(server_url, page, dates) -> None:
+    # Ascending, counted and endpoint-matched was not enough: the card
+    # displayed a Bloomberg request range its own observations contradict.
+    _route_other_markets_away(page)
+    _route_vol(
+        page,
+        payload={
+            **_FULL_PAYLOAD,
+            "observation_dates": dates,
+            "first_observation_date": dates[0],
+            "last_observation_date": dates[-1],
+        },
+    )
+    _open_card(page, server_url)
+    _fill_query(page)
+    _calculate(page)
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+
+    assert "outside the requested range" in page.inner_text("#hyv-error-detail")
+    assert _is_actually_hidden(page, "hyv-result")
+
+
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
     server_url, page
 ) -> None:
