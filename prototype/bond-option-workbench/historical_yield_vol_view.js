@@ -339,6 +339,26 @@
         return `malformed response: "${key}" is missing`;
       }
     }
+    // The observation dates behind the figure, and the two endpoints the card
+    // prints as "first/last observation used". Never checked against each
+    // other or against the count, so a null endpoint drew a dash and an
+    // object drew "[object Object]" beside the risk figure, and an endpoint
+    // contradicting the list was false Bloomberg provenance (Codex review,
+    // PR #200).
+    if (!Array.isArray(candidate.observation_dates)) {
+      return 'malformed response: "observation_dates" must be an array';
+    }
+    if (!candidate.observation_dates.every(isIsoCalendarDate)) {
+      return 'malformed response: every "observation_dates" entry must be an ISO calendar date';
+    }
+    for (let index = 1; index < candidate.observation_dates.length; index += 1) {
+      if (candidate.observation_dates[index - 1] >= candidate.observation_dates[index]) {
+        return (
+          `malformed response: "observation_dates" is not ascending at ` +
+          `${candidate.observation_dates[index]}`
+        );
+      }
+    }
     // The Bloomberg request range, printed verbatim as this calculation's
     // provenance. Never inspected at all before -- an object rendered as
     // "[object Object]" under "requested range" (Codex review, PR #200).
@@ -394,6 +414,32 @@
         `malformed response: "requested_observation_count" is ` +
         `${candidate.requested_observation_count}; this calculation needs at least ` +
         `${MINIMUM_REQUESTED_OBSERVATIONS}`
+      );
+    }
+    if (candidate.observation_dates.length !== candidate.observation_count) {
+      return (
+        `malformed response: "observation_count" is ${candidate.observation_count} and ` +
+        `${candidate.observation_dates.length} observation date(s) are listed`
+      );
+    }
+    const expectedFirst = candidate.observation_dates.length
+      ? candidate.observation_dates[0]
+      : null;
+    const expectedLast = candidate.observation_dates.length
+      ? candidate.observation_dates[candidate.observation_dates.length - 1]
+      : null;
+    if (candidate.first_observation_date !== expectedFirst) {
+      return (
+        `malformed response: "first_observation_date" is ` +
+        `${JSON.stringify(candidate.first_observation_date)}, and the observations used ` +
+        `start at ${JSON.stringify(expectedFirst)}`
+      );
+    }
+    if (candidate.last_observation_date !== expectedLast) {
+      return (
+        `malformed response: "last_observation_date" is ` +
+        `${JSON.stringify(candidate.last_observation_date)}, and the observations used ` +
+        `end at ${JSON.stringify(expectedLast)}`
       );
     }
     // The status is not an independent label: it is what the counts say. A

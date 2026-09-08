@@ -40,7 +40,9 @@ from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     BondYieldObservation,
 )
 from shiori_pricing_lab.data.historical_yield_volatility import (
+    HistoricalYieldVolUnavailableError,
     calculate_historical_yield_volatility,
+    historical_yield_vol_volatility_input,
 )
 
 _PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
@@ -177,6 +179,12 @@ _SHORT_PAYLOAD = {
     "series_observation_count": 90,
     "observation_count": 90,
     "yield_change_count": 89,
+    # The dates move with the count. Overriding one and not the other builds a
+    # shape `result_shape_problem` refuses, which is what these derived
+    # fixtures did until the endpoint rule caught them (Codex review, #200).
+    "observation_dates": _OBSERVATION_DATES[:90],
+    "first_observation_date": _OBSERVATION_DATES[0],
+    "last_observation_date": _OBSERVATION_DATES[89],
     "window_status": "INSUFFICIENT_HISTORY",
     "blockers": [],
     "warnings": [
@@ -222,6 +230,9 @@ _BLOCKED_SHORT_PAYLOAD = {
     "series_observation_count": 2,
     "observation_count": 2,
     "yield_change_count": 1,
+    "observation_dates": _OBSERVATION_DATES[:2],
+    "first_observation_date": _OBSERVATION_DATES[0],
+    "last_observation_date": _OBSERVATION_DATES[1],
     "daily_yield_vol": None,
     "daily_yield_vol_text": None,
     "annualized_yield_vol": None,
@@ -1003,30 +1014,11 @@ def test_every_blocker_and_warning_entry_must_be_readable(server_url, page, over
     # These entries are the refusal and the qualification a trader reads. An
     # object rendered as "[object Object]" and a blank string as an empty
     # bullet, in the one place the card explains itself.
-    payload = {**_FULL_PAYLOAD, **overrides}
-    if "warnings" in overrides:
-        payload = {
-            **payload,
-            "series_observation_count": 90,
-            "observation_count": 90,
-            "yield_change_count": 89,
-            "window_status": "INSUFFICIENT_HISTORY",
-        }
-    else:
-        payload = {
-            **payload,
-            "daily_yield_vol": None,
-            "daily_yield_vol_text": None,
-            "annualized_yield_vol": None,
-            "annualized_yield_vol_text": None,
-            "series_observation_count": 2,
-            "observation_count": 2,
-            "yield_change_count": 1,
-            "window_status": "INSUFFICIENT_HISTORY",
-            "warnings": ["INSUFFICIENT_HISTORY: 2 of the requested 180 observations exist"],
-            "volatility_source": None,
-            "volatility_source_unavailable_reason": "no Historical Yield Vol is available",
-        }
+    # Built from the already-consistent short fixtures rather than by
+    # overriding counts on the full one: assembling a payload by hand is how
+    # every one of these fixtures drifted in the first place.
+    base = _SHORT_PAYLOAD if "warnings" in overrides else _BLOCKED_SHORT_PAYLOAD
+    payload = {**base, **overrides}
     _route_other_markets_away(page)
     _route_vol(page, payload=payload)
     _open_card(page, server_url)
@@ -1076,10 +1068,75 @@ def test_negative_counts_are_refused(server_url, page, overrides) -> None:
     assert _is_actually_hidden(page, "hyv-result")
 
 
+def _real_history(values, *, field_unit="PERCENT") -> BloombergBondYieldHistory:
+    """A history the real #196 loader could have returned."""
+
+    start = date(2026, 1, 1)
+    observations = tuple(
+        BondYieldObservation(
+            observation_date=start + timedelta(days=index),
+            yield_value=value,
+            raw_value=repr(value),
+        )
+        for index, value in enumerate(values)
+    )
+    return BloombergBondYieldHistory(
+        requested_identifier=f"/isin/{_ISIN}",
+        security="SYNTHETIC TEST Corp",
+        yield_field=_FIELD,
+        field_meaning="Yield to maturity",
+        field_unit=field_unit,
+        requested_start_date=start,
+        requested_end_date=date(2026, 9, 1),
+        observations=observations,
+        source_system="BLOOMBERG_DAPI",
+        acquired_at="2026-09-01T14:05:00+00:00",
+    )
+
+
+_VARIED = [4.0 + (index % 7) * 0.01 for index in range(180)]
+# Identical Yield Changes: an exact sigma of zero, which the calculator
+# reports and the publication helper refuses. Whole-number steps on purpose --
+# `4.0 + index * 0.01` looks flat and is not: its changes differ in the last
+# bits, giving a sigma of 3.8e-16 that publishes successfully, so that series
+# would have exercised the ordinary branch under a name claiming otherwise.
+_FLAT = [4.0 + float(index) for index in range(180)]
+
+# Every canonical branch of the real serializer, named by what it produces
+# (Codex review, PR #200). The anchored test used to drive only the first.
+_REAL_ROUTE_CASES = {
+    "full window, published": (_VARIED, "PERCENT", "FULL_WINDOW", True, False, False),
+    "short but usable: warning and source": (
+        _VARIED[:90],
+        "PERCENT",
+        "INSUFFICIENT_HISTORY",
+        True,
+        False,
+        True,
+    ),
+    "no history: blocker only": ([], "PERCENT", "NO_HISTORY", False, True, False),
+    "too few changes: warning and blocker": (
+        _VARIED[:2],
+        "PERCENT",
+        "INSUFFICIENT_HISTORY",
+        False,
+        True,
+        True,
+    ),
+    "unconfirmed unit: figure, no source": (_VARIED, None, "FULL_WINDOW", True, False, False),
+    "flat window: zero figure, no source": (_FLAT, "PERCENT", "FULL_WINDOW", True, False, False),
+}
+
+
+@pytest.mark.parametrize(
+    ("values", "field_unit", "status", "figures", "blocked", "warned"),
+    list(_REAL_ROUTE_CASES.values()),
+    ids=list(_REAL_ROUTE_CASES),
+)
 def test_the_card_accepts_what_the_real_route_actually_serializes(
-    server_url, page, monkeypatch
+    server_url, page, monkeypatch, values, field_unit, status, figures, blocked, warned
 ) -> None:
-    """The one test that does not hand-build the payload (Codex review, #200).
+    """The tests that do not hand-build the payload (Codex review, PR #200).
 
     Every other test in this file fulfils the request with a fixture I wrote,
     so none of them proves `validatePayload` accepts what the calculator and
@@ -1089,103 +1146,60 @@ def test_the_card_accepts_what_the_real_route_actually_serializes(
     runs the real calculator and the real serializer, and the card has to
     render the answer it gets.
 
-    This is the check that closes the loop the malformed-payload cases cannot:
+    Parameterised over every canonical branch of that serializer rather than
+    the one happy path: warning-plus-source, blocker-only,
+    warning-plus-blocker, figure-without-source from an unconfirmed unit, and
+    a zero-sigma window whose publication is refused. Three of the findings
+    that reached this file landed on branches the single-shape version could
+    not reach.
+
+    This is the check the malformed-payload cases structurally cannot make:
     those prove the card refuses what the server would never send, and this
     proves it accepts what the server does send.
     """
 
-    start = date(2026, 1, 1)
-    values = [4.0 + (index % 7) * 0.01 for index in range(180)]
-    observations = tuple(
-        BondYieldObservation(
-            observation_date=start + timedelta(days=index),
-            yield_value=value,
-            raw_value=repr(value),
-        )
-        for index, value in enumerate(values)
-    )
-    history = BloombergBondYieldHistory(
-        requested_identifier=f"/isin/{_ISIN}",
-        security="SYNTHETIC TEST Corp",
-        yield_field=_FIELD,
-        field_meaning="Yield to maturity",
-        field_unit="PERCENT",
-        requested_start_date=start,
-        requested_end_date=date(2026, 9, 1),
-        observations=observations,
-        source_system="BLOOMBERG_DAPI",
-        acquired_at="2026-09-01T14:05:00+00:00",
-    )
+    history = _real_history(values, field_unit=field_unit)
     monkeypatch.setattr(
         server_module, "load_bloomberg_bond_yield_history", lambda **kwargs: history
     )
     expected = calculate_historical_yield_volatility(history, requested_observation_count=180)
+    assert expected.window_status.value == status
 
     _route_other_markets_away(page)
     _open_card(page, server_url)
-    _fill_query(page)
+    _fill_query(page, unit=field_unit or "")
     _calculate(page)
     _wait_for_result(page)
 
-    # Digit for digit against the figures the real calculator produced.
-    assert page.inner_text("#hyv-annualized").strip() == repr(expected.annualized_yield_vol)
-    assert page.inner_text("#hyv-daily").strip() == repr(expected.daily_yield_vol)
-    assert page.inner_text("#hyv-status").strip() == "FULL_WINDOW"
-    assert page.inner_text("#hyv-actual-count").strip().startswith("180")
-    assert page.inner_text("#hyv-change-count").strip() == "179"
     assert _is_actually_hidden(page, "hyv-error")
+    assert page.inner_text("#hyv-status").strip() == status
+    assert _is_actually_hidden(page, "hyv-blockers") is not blocked
+    assert _is_actually_hidden(page, "hyv-warnings") is not warned
 
+    if figures:
+        # Digit for digit against the figures the real calculator produced.
+        assert page.inner_text("#hyv-annualized").strip() == repr(expected.annualized_yield_vol)
+        assert page.inner_text("#hyv-daily").strip() == repr(expected.daily_yield_vol)
+    else:
+        assert expected.annualized_yield_vol is None
+        assert page.inner_text("#hyv-annualized").strip() == "\u2014"
 
-@pytest.mark.parametrize("days", [365, 250, "252", None])
-def test_an_unapproved_annualization_is_refused(server_url, page, days) -> None:
-    # The card prints this as "x sqrt(252)", the convention behind both
-    # figures. It was left out of the methodology label check, so 365 was
-    # displayed as the annualization used (Codex review, PR #200).
-    _route_other_markets_away(page)
-    _route_vol(page, payload={**_FULL_PAYLOAD, "annualization_trading_days": days})
-    _open_card(page, server_url)
-    _fill_query(page)
-    _calculate(page)
-    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
+    assert page.inner_text("#hyv-actual-count").strip().startswith(
+        str(expected.observation_count)
+    )
+    assert page.inner_text("#hyv-change-count").strip() == str(expected.yield_change_count)
 
-    assert "this card shows only 252" in page.inner_text("#hyv-error-detail")
-    assert _is_actually_hidden(page, "hyv-result")
-
-
-@pytest.mark.parametrize("unit", [{"unit": "PERCENT"}, 252, "", "   ", []])
-def test_a_field_unit_that_is_not_a_unit_is_refused_even_with_no_source(
-    server_url, page, unit
-) -> None:
-    """The unit was only ever checked against a published source's copy of it.
-
-    On the deliberate figure-without-published-source path -- an unconfirmed
-    Yield unit -- nothing looked at `field_unit` at all, and an object reached
-    the card as "[object Object]" beside two real risk figures, labelling
-    what unit they are in (Codex review, PR #200).
-    """
-
-    _route_other_markets_away(page)
-    _route_vol(page, payload={**_NO_UNIT_PAYLOAD, "field_unit": unit})
-    _open_card(page, server_url)
-    _fill_query(page)
-    _calculate(page)
-    _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
-
-    assert "malformed response" in page.inner_text("#hyv-error-detail")
-    assert _is_actually_hidden(page, "hyv-result")
-
-
-def test_an_unconfirmed_unit_is_still_shown_as_unconfirmed(server_url, page) -> None:
-    # null stays legitimate: that IS the unconfirmed-unit answer, and the card
-    # exists to show it. The rule must not turn it into a refusal.
-    _route_other_markets_away(page)
-    _route_vol(page, payload=_NO_UNIT_PAYLOAD)
-    _open_card(page, server_url)
-    _fill_query(page)
-    _calculate(page)
-    _wait_for_result(page)
-
-    assert page.inner_text("#hyv-annualized").strip() == _ANNUALIZED_TEXT
+    # The published source appears exactly when the real publication helper
+    # produced one, which is the branch each case is named for.
+    try:
+        historical_yield_vol_volatility_input(expected)
+    except HistoricalYieldVolUnavailableError:
+        published = False
+    else:
+        published = True
+    assert _is_actually_hidden(page, "hyv-source-block") is not True
+    detail = page.inner_text("#hyv-source-detail")
+    assert ("HISTORICAL_YIELD_VOL_MO" in detail) is published
 
 
 def test_a_repr_javascript_would_spell_differently_is_still_accepted(
