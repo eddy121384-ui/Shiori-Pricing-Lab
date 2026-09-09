@@ -1159,7 +1159,7 @@
           <div class="card-head-right"><span class="fy-source-pill" id="fy-source-pill">No CTD loaded</span></div>
         </div>
         <div class="card-body">
-          <div class="fy-subtitle">CME Treasury Analytics methodology: the CTD&rsquo;s yield to maturity, settled on the contract&rsquo;s last delivery day, from <span class="mono">futures price &times; conversion factor</span>. Semiannual, U.S. Treasury Actual/Actual, par 100. No net-basis, repo or carry adjustment.</div>
+          <div class="fy-subtitle" id="fy-methodology">CME Treasury Analytics methodology: the CTD&rsquo;s yield to maturity, settled on the contract&rsquo;s last delivery day, from <span class="mono">futures price &times; conversion factor</span>. Semiannual, U.S. Treasury Actual/Actual, par 100. No net-basis, repo or carry adjustment.</div>
         </div>
       </section>
 
@@ -1198,6 +1198,12 @@
             </div>
             <div class="form-row"><label for="fy-last-delivery">Last delivery date</label>
               <input class="control" id="fy-last-delivery" type="date">
+            </div>
+            <div class="form-row"><label for="fy-first-accrual-start">First accrual start</label>
+              <input class="control" id="fy-first-accrual-start" type="date">
+            </div>
+            <div class="form-row"><label for="fy-first-coupon-date">First coupon date</label>
+              <input class="control" id="fy-first-coupon-date" type="date">
             </div>
             <div class="form-row"><label for="fy-as-of">CTD as of</label>
               <input class="control" id="fy-as-of" type="text" placeholder="2026-08-25T14:00:00Z">

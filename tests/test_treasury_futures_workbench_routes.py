@@ -118,6 +118,9 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
     assert digits["ZN"] == ["0", "5"]
     assert digits["UXY"] == ["0", "5"]
     assert digits["WN"] == ["0"]
+    # Decimal contracts have no 32nds alphabet at all (Issue #204).
+    assert digits["FGBS"] == []
+    assert digits["FGBL"] == []
     # The tick's human label is the server's too, so the page never computes
     # a reciprocal to say what the tick is.
     labels = {c["code"]: c["minimum_tick_label"] for c in payload["contracts"]}
@@ -128,7 +131,45 @@ def test_the_catalogue_carries_each_contracts_own_tick_so_the_page_never_guesses
         "ZB": "1/32 point",
         "UXY": "1/64 point",
         "WN": "1/32 point",
+        "FGBS": "0.005 point",
+        "FGBM": "0.01 point",
+        "FGBL": "0.01 point",
+        "FGBX": "0.02 point",
     }
+    # Market grouping and quote conventions drive the panel selector (Issue #204).
+    markets = {c["code"]: c["market"] for c in payload["contracts"]}
+    assert markets == {
+        "ZT": "UST",
+        "ZF": "UST",
+        "ZN": "UST",
+        "ZB": "UST",
+        "UXY": "UST",
+        "WN": "UST",
+        "FGBS": "EUREX_DE",
+        "FGBM": "EUREX_DE",
+        "FGBL": "EUREX_DE",
+        "FGBX": "EUREX_DE",
+    }
+    market_labels = {c["code"]: c["market_label"] for c in payload["contracts"]}
+    assert market_labels["ZN"] == "U.S. Treasury Futures"
+    assert market_labels["FGBL"] == "German Government Bond Futures (Eurex)"
+    conventions = {c["code"]: c["quote_convention"] for c in payload["contracts"]}
+    assert conventions["ZN"] == "32NDS"
+    assert conventions["FGBS"] == "DECIMAL"
+    assert [c["code"] for c in payload["contracts"] if c["market"] == "UST"] == [
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+        "UXY",
+        "WN",
+    ]
+    assert [c["code"] for c in payload["contracts"] if c["market"] == "EUREX_DE"] == [
+        "FGBS",
+        "FGBM",
+        "FGBL",
+        "FGBX",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -524,3 +565,49 @@ def test_the_view_never_offers_a_carry_or_net_basis_control() -> None:
         lowered = control.lower()
         for forbidden in ("basis", "repo", "carry"):
             assert forbidden not in lowered, control
+
+
+# ---------------------------------------------------------------------------
+# Manual first-coupon schedule (Issue #204, Codex P1 #1)
+# ---------------------------------------------------------------------------
+
+FGBS_MANUAL_CTD_WITH_SCHEDULE = {
+    "contract_code": "FGBS",
+    "contract_symbol": "DUZ6",
+    "ctd_identifier": "DE000BU22148",
+    "ctd_coupon_percent": 2.7,
+    "ctd_maturity_date": "2028-09-13",
+    "conversion_factor": 0.946091,
+    "last_delivery_date": "2026-12-10",
+    "first_accrual_start": "2026-07-16",
+    "first_coupon_date": "2027-09-13",
+    "as_of": "2026-09-08T00:00:00Z",
+}
+
+
+def test_manual_conversion_with_schedule_prices_the_irregular_first_path(
+    server_url: str,
+) -> None:
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd": dict(FGBS_MANUAL_CTD_WITH_SCHEDULE), "futures_price": 105.065},
+    )
+    assert status == 200
+    assert payload["implied_yield"]["implied_yield_percent"] == pytest.approx(
+        3.044683, abs=1e-6
+    )
+    assert payload["ctd"]["first_accrual_start"] == "2026-07-16"
+    assert payload["ctd"]["first_coupon_date"] == "2027-09-13"
+
+
+def test_manual_conversion_with_half_schedule_reports_the_refusal(
+    server_url: str,
+) -> None:
+    half = dict(FGBS_MANUAL_CTD_WITH_SCHEDULE)
+    del half["first_coupon_date"]
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd": half, "futures_price": 105.065},
+    )
+    assert status == 400
+    assert "first-coupon schedule" in payload["error"]

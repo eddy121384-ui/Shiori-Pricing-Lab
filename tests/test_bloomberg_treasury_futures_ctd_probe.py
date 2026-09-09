@@ -128,6 +128,10 @@ def test_all_supported_contracts_are_probed_when_fields_are_given(fake_dapi) -> 
         "USA Comdty",
         "UXYA Comdty",
         "WNA Comdty",
+        "DUA Comdty",
+        "OEA Comdty",
+        "RXA Comdty",
+        "UBA Comdty",
     ]
 
 

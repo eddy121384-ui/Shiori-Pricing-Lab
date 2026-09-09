@@ -30,8 +30,8 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     _YIELD_SOLVE_LOWER,
     _YIELD_SOLVE_UPPER,
-    TREASURY_DAY_COUNT,
     TreasuryFuturesYieldError,
+    _resolve_pricing_policy,
     accrued_interest_per_100,
     clean_price_from_yield,
     converted_clean_price,
@@ -173,7 +173,7 @@ def test_accrued_interest_is_the_actual_actual_isma_proration() -> None:
 
 
 def test_the_convention_stamped_on_every_answer_is_the_treasury_one() -> None:
-    assert str(TREASURY_DAY_COUNT) == "ACT_ACT_BOND"
+    assert str(_resolve_pricing_policy("ZN").day_count) == "ACT_ACT_BOND"
 
 
 def test_a_par_price_on_a_coupon_date_yields_exactly_the_coupon() -> None:

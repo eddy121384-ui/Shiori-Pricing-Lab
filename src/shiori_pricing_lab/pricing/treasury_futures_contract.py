@@ -12,8 +12,9 @@ parser cannot be correct for all of them (Issue #190's explicit rejection
 of PR #9's generic "third digit is tenths of a 32nd" reading). Each
 contract's outright minimum tick, from the CME contract specifications
 quoted in Issue #190 (ZT/ZF/ZN/ZB) and Issue #202 (UXY/WN, confirmed as the
-same tick grid as ZN and ZB respectively) and cross-checked against each
-contract's published tick value:
+same tick grid as ZN and ZB respectively), the Eurex contract specifications
+quoted in Issue #204 (FGBS/FGBM/FGBL/FGBX, decimal ticks) and cross-checked
+against each contract's published tick value:
 
 ===== ==================================== ================= ===========
 Code  Contract                              Minimum tick      Tick value
@@ -24,6 +25,10 @@ ZN    10-Year U.S. Treasury Note futures    1/2 of 1/32       $15.625
 ZB    U.S. Treasury Bond futures            1/32              $31.25
 UXY   Ultra 10-Year Treasury Note futures   1/2 of 1/32       $15.625
 WN    Ultra Treasury Bond futures           1/32              $31.25
+FGBS  Euro-Schatz Futures                   0.005 (decimal)   EUR 5
+FGBM  Euro-Bobl Futures                     0.01 (decimal)    EUR 10
+FGBL  Euro-Bund Futures                     0.01 (decimal)    EUR 10
+FGBX  Euro-Buxl Futures                     0.02 (decimal)    EUR 20
 ===== ==================================== ================= ===========
 
 (ZT is on a $200,000 contract, the other three on $100,000, which is why ZT
@@ -72,6 +77,25 @@ import re
 from dataclasses import dataclass
 
 TREASURY_FUTURES_32NDS_PER_POINT = 32
+
+#: Markets a deliverable government bond futures contract can belong to. This
+#: is a market classification for quote/yield behavior, never issuer
+#: identification and never vendor symbology (Bloomberg roots/aliases stay in
+#: ``data/treasury_futures_ctd``, exactly as this module's contract docstring
+#: already requires).
+MARKET_US_TREASURY = "UST"
+MARKET_EUREX_GERMAN = "EUREX_DE"
+
+#: How a contract's outright price is quoted on its exchange.
+QUOTE_CONVENTION_32NDS = "32NDS"
+QUOTE_CONVENTION_DECIMAL = "DECIMAL"
+
+#: Human market labels, served by the workbench catalogue so the panel can
+#: group the selector without hard-coding market names (Issue #204).
+MARKET_LABELS: dict[str, str] = {
+    MARKET_US_TREASURY: "U.S. Treasury Futures",
+    MARKET_EUREX_GERMAN: "German Government Bond Futures (Eurex)",
+}
 
 # Trader shorthand for half a 32nd, accepted on input for any contract whose
 # tick actually divides 1/64. Never emitted: `format_futures_quote` always
@@ -141,11 +165,19 @@ class TreasuryFuturesQuoteError(ValueError):
 
 @dataclass(frozen=True)
 class TreasuryFuturesContract:
-    """One CBOT Treasury futures contract's quote convention.
+    """One deliverable government bond futures contract's quote convention.
 
-    ``ticks_per_32nd`` is the whole story: it fixes the minimum tick
-    (``1 / (32 * ticks_per_32nd)`` of a point), the legal sub-32nd digits,
-    and whether ``+`` is a legal shorthand.
+    ``ticks_per_point`` is the whole arithmetic story: it fixes the minimum
+    tick (``1 / ticks_per_point`` of a point) and the tick grid every parse,
+    format and rounding path works on. For 32nds contracts it is
+    ``32 * ticks_per_32nd``; for decimal contracts it is the outright tick
+    grid (FGBS ``0.005`` -> 200 ticks per point).
+
+    ``market`` selects behavior, never identity: ``UST`` contracts use the
+    CBOT 32nds notation below, ``EUREX_DE`` contracts use plain decimals.
+    ``ticks_per_32nd`` is the 32nds alphabet driver and is ``None`` for
+    decimal contracts; ``decimal_places`` is the display precision and is
+    ``None`` for 32nds contracts.
 
     There is deliberately no market-data vendor ticker here. The CTD probe
     tool in ``tools/`` keeps its own root-to-contract table instead: this
@@ -156,39 +188,49 @@ class TreasuryFuturesContract:
 
     code: str
     name: str
-    ticks_per_32nd: int
+    market: str
+    quote_convention: str
+    ticks_per_point: int
+    ticks_per_32nd: int | None
+    decimal_places: int | None
 
     @property
     def minimum_tick(self) -> float:
         """Minimum outright price increment, in points per 100 par."""
 
-        return 1.0 / (TREASURY_FUTURES_32NDS_PER_POINT * self.ticks_per_32nd)
-
-    @property
-    def ticks_per_point(self) -> int:
-        return TREASURY_FUTURES_32NDS_PER_POINT * self.ticks_per_32nd
-
-    @property
-    def minimum_tick_label(self) -> str:
-        """The tick as a trader reads it, e.g. ``"1/64 point"``.
-
-        Rendered here rather than in a consumer so no display layer has to do
-        arithmetic on ``minimum_tick`` to say what the tick is.
-        """
-
-        return f"1/{self.ticks_per_point} point"
+        return 1.0 / self.ticks_per_point
 
     @property
     def sub_32nd_digits(self) -> dict[str, int]:
-        """Legal sub-32nd display digit -> number of ticks into the 32nd."""
+        """Legal sub-32nd display digit -> number of ticks into the 32nd.
 
+        Empty for decimal contracts, which have no 32nds alphabet at all.
+        """
+
+        if self.ticks_per_32nd is None:
+            return {}
         return _sub_32nd_digits(self.ticks_per_32nd)
 
     @property
     def accepts_half_32nd_suffix(self) -> bool:
         """Whether ``"110-16+"`` is a price this contract can actually trade."""
 
+        if self.ticks_per_32nd is None:
+            return False
         return self.ticks_per_32nd % 2 == 0
+
+    @property
+    def minimum_tick_label(self) -> str:
+        """The tick as a trader reads it, e.g. ``"1/64 point"``.
+
+        Rendered here rather than in a consumer so no display layer has to do
+        arithmetic on ``minimum_tick`` to say what the tick is. Decimal
+        contracts read as their outright tick (``"0.005 point"``).
+        """
+
+        if self.quote_convention == QUOTE_CONVENTION_DECIMAL:
+            return f"{self.minimum_tick:.{self.decimal_places}f} point"
+        return f"1/{self.ticks_per_point} point"
 
 
 def _sub_32nd_digits(ticks_per_32nd: int) -> dict[str, int]:
@@ -207,41 +249,104 @@ def _sub_32nd_digits(ticks_per_32nd: int) -> dict[str, int]:
     return digits
 
 
-# The Issue #190 MVP contracts plus the Issue #202 expansion (Ultra 10-Year
-# and Ultra Bond). Each row asserts that contract's real exchange tick, so
-# none is added here without its own confirmation.
+# The Issue #190 MVP contracts, the Issue #202 expansion (Ultra 10-Year and
+# Ultra Bond), and the Issue #204 expansion (Eurex Euro-Schatz/Bobl/Bund/Buxl).
+# Each row asserts that contract's real exchange tick, so none is added here
+# without its own confirmation. For 32nds contracts ``ticks_per_point`` is
+# ``32 * ticks_per_32nd``; for Eurex decimal contracts it is the outright tick
+# grid (``0.005`` -> 200, ``0.01`` -> 100, ``0.02`` -> 50).
 TREASURY_FUTURES_CONTRACTS: dict[str, TreasuryFuturesContract] = {
     contract.code: contract
     for contract in (
         TreasuryFuturesContract(
             code="ZT",
             name="2-Year U.S. Treasury Note futures",
+            market=MARKET_US_TREASURY,
+            quote_convention=QUOTE_CONVENTION_32NDS,
+            ticks_per_point=256,
             ticks_per_32nd=8,
+            decimal_places=None,
         ),
         TreasuryFuturesContract(
             code="ZF",
             name="5-Year U.S. Treasury Note futures",
+            market=MARKET_US_TREASURY,
+            quote_convention=QUOTE_CONVENTION_32NDS,
+            ticks_per_point=128,
             ticks_per_32nd=4,
+            decimal_places=None,
         ),
         TreasuryFuturesContract(
             code="ZN",
             name="10-Year U.S. Treasury Note futures",
+            market=MARKET_US_TREASURY,
+            quote_convention=QUOTE_CONVENTION_32NDS,
+            ticks_per_point=64,
             ticks_per_32nd=2,
+            decimal_places=None,
         ),
         TreasuryFuturesContract(
             code="ZB",
             name="U.S. Treasury Bond futures",
+            market=MARKET_US_TREASURY,
+            quote_convention=QUOTE_CONVENTION_32NDS,
+            ticks_per_point=32,
             ticks_per_32nd=1,
+            decimal_places=None,
         ),
         TreasuryFuturesContract(
             code="UXY",
             name="Ultra 10-Year U.S. Treasury Note futures",
+            market=MARKET_US_TREASURY,
+            quote_convention=QUOTE_CONVENTION_32NDS,
+            ticks_per_point=64,
             ticks_per_32nd=2,
+            decimal_places=None,
         ),
         TreasuryFuturesContract(
             code="WN",
             name="Ultra U.S. Treasury Bond futures",
+            market=MARKET_US_TREASURY,
+            quote_convention=QUOTE_CONVENTION_32NDS,
+            ticks_per_point=32,
             ticks_per_32nd=1,
+            decimal_places=None,
+        ),
+        TreasuryFuturesContract(
+            code="FGBS",
+            name="Euro-Schatz Futures",
+            market=MARKET_EUREX_GERMAN,
+            quote_convention=QUOTE_CONVENTION_DECIMAL,
+            ticks_per_point=200,
+            ticks_per_32nd=None,
+            decimal_places=3,
+        ),
+        TreasuryFuturesContract(
+            code="FGBM",
+            name="Euro-Bobl Futures",
+            market=MARKET_EUREX_GERMAN,
+            quote_convention=QUOTE_CONVENTION_DECIMAL,
+            ticks_per_point=100,
+            ticks_per_32nd=None,
+            decimal_places=2,
+        ),
+        TreasuryFuturesContract(
+            code="FGBL",
+            name="Euro-Bund Futures",
+            market=MARKET_EUREX_GERMAN,
+            quote_convention=QUOTE_CONVENTION_DECIMAL,
+            ticks_per_point=100,
+            ticks_per_32nd=None,
+            decimal_places=2,
+        ),
+        TreasuryFuturesContract(
+            code="FGBX",
+            name="Euro-Buxl Futures",
+            market=MARKET_EUREX_GERMAN,
+            quote_convention=QUOTE_CONVENTION_DECIMAL,
+            ticks_per_point=50,
+            ticks_per_32nd=None,
+            decimal_places=2,
         ),
     )
 }
@@ -308,10 +413,15 @@ def round_to_tick(contract_code: str, price: float) -> float:
 def parse_futures_quote(contract_code: str, raw: str | int | float) -> TreasuryFuturesQuote:
     """Read a trader-entered futures quote for ``contract_code``.
 
-    Accepts a decimal price (``110.515625``, exact, on-tick or not) or a
-    CBOT fractional quote for this contract (``"110-16"``, ``"110-165"``,
-    ``"110'165"``, ``"110-16+"`` where a half 32nd is a real tick). An
-    off-tick fractional quote is rejected -- see the module docstring.
+    For 32nds contracts, accepts a decimal price (``110.515625``, exact,
+    on-tick or not) or a CBOT fractional quote for this contract
+    (``"110-16"``, ``"110-165"``, ``"110'165"``, ``"110-16+"`` where a half
+    32nd is a real tick). An off-tick fractional quote is rejected -- see the
+    module docstring.
+
+    For decimal contracts (Eurex), accepts a decimal price only -- a string
+    carrying a 32nds separator is refused rather than misread, because
+    ``"105-12"`` is not a price on a decimal grid.
     """
 
     contract = get_contract(contract_code)
@@ -331,12 +441,23 @@ def parse_futures_quote(contract_code: str, raw: str | int | float) -> TreasuryF
         try:
             decimal_price = float(text)
         except ValueError as exc:
+            if contract.quote_convention == QUOTE_CONVENTION_DECIMAL:
+                raise TreasuryFuturesQuoteError(
+                    f"{text!r} is not a valid {contract.code} quote "
+                    "(expected a decimal price like 105.125)"
+                ) from exc
             raise TreasuryFuturesQuoteError(
                 f"{text!r} is neither a decimal price nor a {contract.code} quote "
                 "(expected e.g. '110-16', '110-165' or 110.515625)"
             ) from exc
         return _build_quote(contract, _require_positive_finite_price(decimal_price))
 
+    if contract.quote_convention == QUOTE_CONVENTION_DECIMAL:
+        raise TreasuryFuturesQuoteError(
+            f"{text!r} is not a valid {contract.code} quote -- {contract.code} trades in "
+            f"decimals (minimum tick {contract.minimum_tick_label}), so a 32nds-style "
+            "quote is never valid here; pass a decimal price instead (e.g. 105.125)"
+        )
     return _build_quote(contract, _parse_fractional_quote(contract, text))
 
 
@@ -472,10 +593,17 @@ def format_futures_quote(contract_code: str, price: float) -> str:
     Uses fractional notation (e.g., "102-18 5/8") for contracts that trade
     in sub-32nd increments. For whole-32nd contracts (ZB), uses "102-16".
     The + shorthand for half-32nd is never emitted.
+
+    Decimal contracts (Eurex) render as plain decimals at the contract's own
+    precision (e.g. ``"105.125"`` for FGBS).
     """
 
     contract = get_contract(contract_code)
     price = _require_positive_finite_price(price)
+
+    if contract.quote_convention == QUOTE_CONVENTION_DECIMAL:
+        total_ticks = math.floor(price * contract.ticks_per_point + 0.5)
+        return f"{total_ticks / contract.ticks_per_point:.{contract.decimal_places}f}"
 
     total_ticks = math.floor(price * contract.ticks_per_point + 0.5)
     handle, remainder = divmod(total_ticks, contract.ticks_per_point)

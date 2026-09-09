@@ -30,6 +30,7 @@
     errorSection: document.getElementById("fy-error"),
     errorDetail: document.getElementById("fy-error-detail"),
     contractSelect: document.getElementById("fy-contract-select"),
+    methodology: document.getElementById("fy-methodology"),
     ctdSummary: document.getElementById("fy-ctd-summary"),
     tickSummary: document.getElementById("fy-tick-summary"),
     loadBloombergBtn: document.getElementById("fy-load-bloomberg-btn"),
@@ -40,6 +41,8 @@
     ctdMaturity: document.getElementById("fy-ctd-maturity"),
     conversionFactor: document.getElementById("fy-conversion-factor"),
     lastDelivery: document.getElementById("fy-last-delivery"),
+    firstAccrualStart: document.getElementById("fy-first-accrual-start"),
+    firstCouponDate: document.getElementById("fy-first-coupon-date"),
     asOf: document.getElementById("fy-as-of"),
     futuresPrice: document.getElementById("fy-futures-price"),
     targetYield: document.getElementById("fy-target-yield"),
@@ -123,12 +126,30 @@
       els.detailTick.textContent = NBSP_DASH;
       return;
     }
-    const digits = contract.sub_32nd_digits.join(", ");
     // The label is the server's, not derived from minimum_tick here: this
     // module does no arithmetic at all, display arithmetic included.
     const tick = contract.minimum_tick_label;
-    els.tickSummary.textContent = `${contract.code} tick ${tick} — sub-32nd digits ${digits}`;
+    if (contract.quote_convention === "DECIMAL") {
+      els.tickSummary.textContent = `${contract.code} tick ${tick} (decimal)`;
+    } else {
+      const digits = contract.sub_32nd_digits.join(", ");
+      els.tickSummary.textContent = `${contract.code} tick ${tick} — sub-32nd digits ${digits}`;
+    }
     els.detailTick.textContent = `${tick} (${contract.minimum_tick})`;
+    renderMethodology(contract);
+  }
+
+  function renderMethodology(contract) {
+    if (!els.methodology || !contract) return;
+    // Server copy, never composed here: the catalogue carries each market's
+    // own methodology sentence.
+    if (contract.methodology_note) {
+      els.methodology.textContent = contract.methodology_note;
+    }
+    if (els.futuresPrice) {
+      els.futuresPrice.placeholder =
+        contract.quote_convention === "DECIMAL" ? "105.125" : "112-165 or 112.515625";
+    }
   }
 
   function renderSourceStatus(ctd) {
@@ -184,6 +205,8 @@
     els.conversionFactor.value =
       ctd.conversion_factor == null ? "" : String(ctd.conversion_factor);
     els.lastDelivery.value = ctd.last_delivery_date || "";
+    els.firstAccrualStart.value = ctd.first_accrual_start || "";
+    els.firstCouponDate.value = ctd.first_coupon_date || "";
     els.asOf.value = ctd.as_of || "";
   }
 
@@ -210,6 +233,8 @@
       ctd_maturity_date: els.ctdMaturity.value || null,
       conversion_factor: numberOrRaw(els.conversionFactor.value.trim()),
       last_delivery_date: els.lastDelivery.value || null,
+      first_accrual_start: els.firstAccrualStart.value || null,
+      first_coupon_date: els.firstCouponDate.value || null,
       as_of: els.asOf.value.trim() || null,
     };
   }
@@ -243,11 +268,22 @@
     contracts = payload.contracts;
     contractsLoaded = true;
     els.contractSelect.innerHTML = "";
+    // Grouped by market, in catalogue order: U.S. Treasury Futures first,
+    // then German Government Bond Futures (Eurex). Labels come from the
+    // server; this only groups, it never names a market.
+    const groups = new Map();
     contracts.forEach((contract) => {
+      const label = contract.market_label || contract.market || "";
+      if (!groups.has(label)) {
+        const group = document.createElement("optgroup");
+        group.label = label;
+        groups.set(label, group);
+        els.contractSelect.appendChild(group);
+      }
       const option = document.createElement("option");
       option.value = contract.code;
       option.textContent = `${contract.code} — ${contract.name}`;
-      els.contractSelect.appendChild(option);
+      groups.get(label).appendChild(option);
     });
     renderTickSummary();
   }
@@ -387,6 +423,8 @@
     "ctdMaturity",
     "conversionFactor",
     "lastDelivery",
+    "firstAccrualStart",
+    "firstCouponDate",
     "asOf",
   ];
 
@@ -438,6 +476,18 @@
 
   CTD_INPUT_KEYS.forEach((key) => invalidateOnInput(key, true));
   ANSWER_ONLY_INPUT_KEYS.forEach((key) => invalidateOnInput(key, false));
+
+  // The schedule belongs to the bond named by the identifier: retyping the
+  // identifier orphans it, so it is cleared visibly in the form rather than
+  // silently submitted against the new bond. Programmatic fills (a Bloomberg
+  // load assigning `.value`) never fire input/change, so a fresh load still
+  // lands intact; only a human edit clears.
+  ["input", "change"].forEach((eventName) => {
+    els.ctdIdentifier.addEventListener(eventName, () => {
+      els.firstAccrualStart.value = "";
+      els.firstCouponDate.value = "";
+    });
+  });
 
   // Changing the contract is not an edit, it is a different instrument. The
   // CTD fields belong to the contract they were entered or loaded for, and

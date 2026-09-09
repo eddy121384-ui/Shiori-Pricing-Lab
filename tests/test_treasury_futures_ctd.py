@@ -120,6 +120,43 @@ LIVE_STAGE_TWO: dict[str, dict[str, str]] = {
         "FUT_CNVS_FACTOR": "0.739300",
         "FUT_DLV_DT_LAST": "2026-12-31",
     },
+    # Issue #204 evidence (Eddy's Bloomberg workstation, 2026-09-08, RED Gate 1).
+    "FGBS": {
+        "FUT_CTD_ISIN": "DE000BU22148",
+        "FUT_CTD_CUSIP": "DM9594068",
+        "FUT_CTD_TICKER": "BKO 2.7 09/13/28",
+        "FUT_CTD_CPN": "2.700000",
+        "FUT_CTD_MTY": "2028-09-13",
+        "FUT_CNVS_FACTOR": "0.946091",
+        "FUT_DLV_DT_LAST": "2026-12-10",
+    },
+    "FGBM": {
+        "FUT_CTD_ISIN": "DE000BU25075",
+        "FUT_CTD_CUSIP": "DN2144711",
+        "FUT_CTD_TICKER": "OBL 2.9 10/08/31",
+        "FUT_CTD_CPN": "2.900000",
+        "FUT_CTD_MTY": "2031-10-08",
+        "FUT_CNVS_FACTOR": "0.872911",
+        "FUT_DLV_DT_LAST": "2026-12-10",
+    },
+    "FGBL": {
+        "FUT_CTD_ISIN": "DE000BU2Z056",
+        "FUT_CTD_CUSIP": "YN7712345",
+        "FUT_CTD_TICKER": "DBR 2.6 08/15/35",
+        "FUT_CTD_CPN": "2.600000",
+        "FUT_CTD_MTY": "2035-08-15",
+        "FUT_CNVS_FACTOR": "0.774902",
+        "FUT_DLV_DT_LAST": "2026-12-10",
+    },
+    "FGBX": {
+        "FUT_CTD_ISIN": "DE000BU2D004",
+        "FUT_CTD_CUSIP": "ZF6607153",
+        "FUT_CTD_TICKER": "DBR 2.5 08/15/54",
+        "FUT_CTD_CPN": "2.500000",
+        "FUT_CTD_MTY": "2054-08-15",
+        "FUT_CNVS_FACTOR": "0.751530",
+        "FUT_DLV_DT_LAST": "2026-12-10",
+    },
 }
 LIVE_DELIVERY_SYMBOL = {
     "ZT": "TUZ6",
@@ -128,6 +165,10 @@ LIVE_DELIVERY_SYMBOL = {
     "ZB": "USZ6",
     "UXY": "UXYZ6",
     "WN": "WNZ6",
+    "FGBS": "DUZ6",
+    "FGBM": "OEZ6",
+    "FGBL": "RXZ6",
+    "FGBX": "UBZ6",
 }
 
 
@@ -359,6 +400,10 @@ def test_the_confirmed_active_aliases_cover_the_supported_contracts() -> None:
         "ZB": "USA",
         "UXY": "UXYA",
         "WN": "WNA",
+        "FGBS": "DUA",
+        "FGBM": "OEA",
+        "FGBL": "RXA",
+        "FGBX": "UBA",
     }
     # The delivery-month roots are unchanged: the active alias (TYA) is not the
     # delivery symbol the resolved month starts with (TYZ6 -> TY).
@@ -369,6 +414,10 @@ def test_the_confirmed_active_aliases_cover_the_supported_contracts() -> None:
         "ZB": "US",
         "UXY": "UXY",
         "WN": "WN",
+        "FGBS": "DU",
+        "FGBM": "OE",
+        "FGBL": "RX",
+        "FGBX": "UB",
     }
 
 
@@ -1105,15 +1154,18 @@ def test_every_confirmed_live_last_delivery_day_sits_inside_its_contracts_span()
     """The spans must not be narrower than the real contracts.
 
     ZN, ZB, UXY and WN last deliver inside the delivery month; ZT and ZF a
-    few business days into the next one. Pinned so the spans cannot be
-    tightened onto real data.
+    few business days into the next one; the four Eurex contracts inside
+    theirs (December 2026 -> 2026-12-10, Issue #204). Pinned so the spans
+    cannot be tightened onto real data.
     """
 
     for contract_code, symbol in LIVE_DELIVERY_SYMBOL.items():
         last_delivery = date.fromisoformat(LIVE_STAGE_TWO[contract_code]["FUT_DLV_DT_LAST"])
         reference = module._delivery_month_first_day(symbol, contract_code, last_delivery)
         assert reference == date(2026, 12, 1)
-        expected_month = 12 if contract_code in {"ZN", "ZB", "UXY", "WN"} else 1
+        expected_month = (
+            12 if contract_code in {"ZN", "ZB", "UXY", "WN", "FGBS", "FGBM", "FGBL", "FGBX"} else 1
+        )
         assert last_delivery.month == expected_month
 
 
@@ -1363,6 +1415,8 @@ def test_the_display_payload_carries_the_full_ctd_small_print() -> None:
         "ctd_maturity_date",
         "conversion_factor",
         "last_delivery_date",
+        "first_accrual_start",
+        "first_coupon_date",
         "source",
         "as_of",
         "is_confirmed_source",
