@@ -126,6 +126,15 @@ def _report_contract(contract_code: str, futures_price: str) -> int:
     print(f"    maturity             {ctd.ctd_maturity_date.isoformat()}")
     print(f"    conversion factor    {ctd.conversion_factor}")
     print(f"    last delivery date   {ctd.last_delivery_date.isoformat()}  <- settlement date")
+    # The irregular-first schedule is a pricing input wherever present: a
+    # saved run without it cannot reproduce an FGBS/FGBM answer. UST and
+    # seasoned records carry no schedule and print nothing here -- never a
+    # fabricated date.
+    if ctd.first_accrual_start is not None or ctd.first_coupon_date is not None:
+        accrual = ctd.first_accrual_start.isoformat() if ctd.first_accrual_start else "-"
+        first = ctd.first_coupon_date.isoformat() if ctd.first_coupon_date else "-"
+        print(f"    first accrual start  {accrual}")
+        print(f"    first coupon date    {first}")
     print(f"    source               {ctd.source}")
     print(f"    acquired at          {ctd.as_of}")
     print()
@@ -174,6 +183,9 @@ def _report_contract(contract_code: str, futures_price: str) -> int:
         print(f"    On CME Treasury Analytics / Bloomberg, set contract {ctd.contract_symbol},")
     print(f"    CTD {ctd.ctd_identifier} (CF {ctd.conversion_factor}), settlement "
           f"{ctd.last_delivery_date.isoformat()},")
+    if ctd.first_accrual_start is not None and ctd.first_coupon_date is not None:
+        print(f"    first accrual {ctd.first_accrual_start.isoformat()}, first coupon "
+              f"{ctd.first_coupon_date.isoformat()} -- reproduce the long first coupon,")
     # The yield above is computed from decimal_price, so the benchmark must be
     # set to decimal_price. Naming exchange_quote here would have compared two
     # yields from different inputs whenever the entered price is off-tick,

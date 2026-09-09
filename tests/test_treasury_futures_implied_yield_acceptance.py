@@ -26,12 +26,19 @@ from test_treasury_futures_ctd import (
     _install_fake_blpapi,
     _two_stage_responder,
 )
+from test_treasury_futures_eurex_fgb import (
+    LIVE_DELIVERY_SYMBOL,
+    LIVE_SCHEDULE,
+    LIVE_STAGE_TWO,
+    _three_stage_responder,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "tools"))
 import treasury_futures_implied_yield_acceptance as module  # noqa: E402
 
 from shiori_pricing_lab.data.treasury_futures_ctd import (  # noqa: E402
+    bloomberg_active_contract,
     load_bloomberg_ctd_metadata,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (  # noqa: E402
@@ -211,3 +218,45 @@ def test_contracts_are_reported_in_a_stable_order(monkeypatch, capsys) -> None:
     module.main(["--price", "ZN=112-165"])
     output = capsys.readouterr().out
     assert output.count("IMPLIED YIELD") == 1
+
+
+@pytest.mark.parametrize(
+    "contract_code, price, accrual_start, first_coupon",
+    [
+        ("FGBS", "105.065", "2026-07-16", "2027-09-13"),
+        ("FGBM", "113.24", "2026-07-23", "2027-10-08"),
+    ],
+)
+def test_german_reports_print_the_irregular_first_schedule(
+    monkeypatch, capsys, contract_code, price, accrual_start, first_coupon
+) -> None:
+    """Codex P2: an FGBS/FGBM run is reproducible only with its schedule."""
+    live = LIVE_STAGE_TWO[contract_code]
+    resolved = LIVE_DELIVERY_SYMBOL[contract_code]
+    _install_fake_blpapi(
+        monkeypatch,
+        _three_stage_responder(
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
+            stage_two_fields=dict(live),
+            schedule_fields=dict(LIVE_SCHEDULE[contract_code]),
+            active=bloomberg_active_contract(contract_code),
+            delivery=f"{resolved} Comdty",
+            bond=f"/isin/{live['FUT_CTD_ISIN']}",
+        ),
+    )
+    assert module.main(["--price", f"{contract_code}={price}"]) == 0
+    output = capsys.readouterr().out
+    assert "first accrual start" in output
+    assert accrual_start in output
+    assert "first coupon date" in output
+    assert first_coupon in output
+    assert "reproduce the long first coupon" in output
+
+
+def test_ust_report_prints_no_schedule_dates(monkeypatch, capsys) -> None:
+    _install_fake_blpapi(monkeypatch, _two_stage_responder())
+    assert module.main(["--price", "ZN=112-165"]) == 0
+    output = capsys.readouterr().out
+    assert "first accrual start" not in output
+    assert "first coupon date" not in output
+    assert "reproduce the long first coupon" not in output
