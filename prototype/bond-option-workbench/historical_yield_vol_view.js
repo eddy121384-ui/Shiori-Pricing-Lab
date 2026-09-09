@@ -15,8 +15,9 @@
 //     from the payload's own *_text strings -- Python's own repr of the two
 //     floats -- so what a trader reads is digit-for-digit what was computed;
 //   * guess a Yield field, a unit, a window length, or an expiry -> lookback
-//     mapping. The count box starts at Middle Office's confirmed 180 and is
-//     sent verbatim; the unit is typed from workstation evidence and is never
+//     mapping. The count box starts at Middle Office's confirmed 181
+//     observations -- their 180-Yield-Change 6M horizon -- and is sent
+//     verbatim; the unit is typed from workstation evidence and is never
 //     inferred, and the normalization it drives happens on the server;
 //   * rescale anything. The headline figures are in the Yield field's own
 //     unit and the normalized volatility source is in DECIMAL_ANNUAL; both
@@ -276,7 +277,7 @@
     if (!start || !end) return { error: "Enter both a start date and an end date above." };
     if (start > end) return { error: "The start date must not be after the end date." };
     if (!/^\d+$/.test(rawCount)) {
-      return { error: "Enter the number of Yield observations as a whole number (180 = Middle Office's 6M window)." };
+      return { error: "Enter the number of Yield observations as a whole number (181 = Middle Office's 6M horizon of 180 Yield Changes)." };
     }
     // A count past 2^53-1 does not survive Number(): 9007199254740993 arrives
     // as ...992, and the server would then calculate and audit a window the

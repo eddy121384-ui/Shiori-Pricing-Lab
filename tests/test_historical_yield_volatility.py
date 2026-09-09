@@ -34,6 +34,7 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     ANNUALIZATION_TRADING_DAYS,
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+    MIDDLE_OFFICE_6M_YIELD_CHANGE_COUNT,
     PUBLISHED_VOLATILITY_UNIT,
     STANDARD_DEVIATION_CONVENTION,
     HistoricalYieldVolInputError,
@@ -105,20 +106,76 @@ def _history(
     )
 
 
-# --- The provisional convention, pinned ------------------------------------
+# --- The parity-confirmed convention, pinned -------------------------------
 
 
-def test_one_hundred_eighty_observations_produce_exactly_one_hundred_seventy_nine_changes():
+def test_the_middle_office_horizon_is_180_changes_over_181_observations():
+    # The correction the Middle Office parity UAT forced. "180-day" is 180
+    # Yield CHANGES, and N changes need N+1 observations -- so the standard
+    # window is 181 observations, not the 180 this module provisionally
+    # assumed. Both constants are asserted against literals rather than
+    # against each other, because deriving one from the other in the test is
+    # how the original 180 -> 179 error survived its own test suite.
+    assert MIDDLE_OFFICE_6M_YIELD_CHANGE_COUNT == 180
+    assert MIDDLE_OFFICE_6M_OBSERVATION_COUNT == 181
+
     values = [4.0 + (index % 7) * 0.01 for index in range(MIDDLE_OFFICE_6M_OBSERVATION_COUNT)]
     result = calculate_historical_yield_volatility(_history(values))
 
-    assert result.observation_count == 180
-    assert result.requested_observation_count == 180
-    assert result.yield_change_count == 179
+    assert result.observation_count == 181
+    assert result.requested_observation_count == 181
+    assert result.yield_change_count == 180
     assert result.window_status is HistoricalYieldVolStatus.FULL_WINDOW
     assert result.blockers == ()
     assert result.warnings == ()
     assert result.is_usable is True
+
+
+def test_the_default_window_is_the_middle_office_horizon():
+    # The default is the contract: a caller that names no window gets 181
+    # observations and exactly 180 changes, without having to know either
+    # number. This is the path the workbench route and the card both take.
+    values = [4.0 + (index % 7) * 0.01 for index in range(400)]
+    result = calculate_historical_yield_volatility(_history(values))
+
+    assert result.requested_observation_count == 181
+    assert result.observation_count == 181
+    assert result.yield_change_count == 180
+
+
+def test_the_whole_middle_office_chain_end_to_end_on_the_default_window():
+    # The five steps of the parity-confirmed methodology in one place, each
+    # checked against an independently computed expectation rather than
+    # against the calculator's own intermediate: 181 PERCENT observations ->
+    # 180 changes -> STDEV.S -> x sqrt(252) -> /100 into DECIMAL_ANNUAL.
+    #
+    # Every previous convention error in this module survived because the
+    # pieces were pinned separately and nothing checked that the assembled
+    # chain was the one Middle Office runs.
+    values = [4.0 + math.sin(index) * 0.03 for index in range(181)]
+    result = calculate_historical_yield_volatility(
+        _history(values, field_unit="PERCENT")
+    )
+
+    # strict=False for the same reason the calculator uses it: pairing a
+    # series with its own tail is the one place unequal lengths are the point.
+    expected_changes = [
+        current - previous for previous, current in zip(values, values[1:], strict=False)
+    ]
+    assert len(expected_changes) == 180
+
+    expected_daily = statistics.stdev(expected_changes)
+    assert result.daily_yield_vol == expected_daily
+    assert result.annualized_yield_vol == expected_daily * math.sqrt(252)
+
+    # The headline figures stay in the Yield field's own unit -- PERCENT --
+    # which is the number a Middle Office parity run compares against.
+    assert result.field_unit == "PERCENT"
+
+    # Normalization to the published contract's unit happens only at
+    # publication, and only by the explicit declared factor.
+    published = historical_yield_vol_volatility_input(result)
+    assert published.volatility == result.annualized_yield_vol * 0.01
 
 
 def test_daily_changes_are_exactly_current_minus_previous():
@@ -518,7 +575,7 @@ def test_short_history_is_labelled_insufficient_with_both_counts():
     result = calculate_historical_yield_volatility(_history(values))
 
     assert result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
-    assert result.requested_observation_count == 180
+    assert result.requested_observation_count == 181
     assert result.observation_count == 90
     assert result.yield_change_count == 89
     assert result.annualized_yield_vol is not None
@@ -528,7 +585,7 @@ def test_short_history_is_labelled_insufficient_with_both_counts():
     assert result.blockers == ()
     assert result.is_usable is True
     assert any("INSUFFICIENT_HISTORY" in warning for warning in result.warnings)
-    assert any("90 of the requested 180" in warning for warning in result.warnings)
+    assert any("90 of the requested 181" in warning for warning in result.warnings)
 
 
 def test_short_history_is_never_flat_extended_to_the_requested_window():
@@ -737,7 +794,7 @@ def test_an_insufficient_window_publishes_only_with_an_explicit_audit():
 
     assert published.override_or_fallback_audit is not None
     assert "INSUFFICIENT_HISTORY" in published.override_or_fallback_audit
-    assert "90 of the requested 180" in published.override_or_fallback_audit
+    assert "90 of the requested 181" in published.override_or_fallback_audit
 
 
 def test_zero_history_cannot_be_published_as_a_volatility_source():

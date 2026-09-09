@@ -6,8 +6,13 @@ Yield Volatility from one bond's own Bloomberg Yield history (Issue #197).
 -- the merged Issue #196 contract, the only historical bond-Yield path in this
 repository -- and turns it into an auditable Historical Yield Vol:
 
-``180 Yield observations -> 179 daily Yield Changes -> STDEV.S (ddof=1)
+``181 Yield observations -> 180 daily Yield Changes -> STDEV.S (ddof=1)
 -> x sqrt(252)``
+
+The horizon is counted in **Yield Changes**, not observations: Middle Office's
+"180-day" window is 180 changes, and 180 changes need 181 observations. The
+observation count is the derived quantity, and it is the one this module takes
+as its contract because it is what a Bloomberg request can actually ask for.
 
 Audit and request provenance travels with every result -- everything Issue
 #197 §3 asks for: which security Bloomberg resolved, which Yield mnemonic was
@@ -28,15 +33,23 @@ values reads them from the #196 loader for the same query.
 same second carry the same string. Two *different* timestamps prove two
 acquisitions; two equal ones prove nothing (Codex review, PR #200).
 
-**The convention is PROVISIONAL, not methodology-final (Issue #197).** Middle
-Office has confirmed the underlying's own Yield, daily Yield *Change*, a
-180-observation 6M-style window, sqrt(252) annualization, and that an
-instrument with no history has no approved proxy. It has *not* yet confirmed
-179-vs-180 changes or STDEV.S-vs-STDEV.P. This module implements the issue's
-explicitly provisional choice -- 179 changes, ddof=1 -- and names it in the
-result (``standard_deviation_convention``) precisely so a parity run against
-one Middle Office reference case can disprove it cheaply. Nothing here should
-be read as evidence that the provisional half is settled.
+**The convention is parity-confirmed (Issue #197).** Middle Office supplied
+its own Excel calculation and a reference case with sufficient history, and
+the arithmetic parity run passed: the underlying's own Yield, the daily Yield
+*Change* ``Y_t - Y_{t-1}``, a 180-*change* 6M-style horizon over 181
+observations, STDEV.S (ddof=1), sqrt(252) annualization, a PERCENT source
+Yield unit normalizing to ``DECIMAL_ANNUAL`` by ``/100``, and no approved
+proxy for an instrument with no history.
+
+The earlier provisional reading -- 180 observations giving 179 changes -- was
+disproved by that evidence and is gone. On the reference case Middle Office
+reports ``0.0073070244`` ``DECIMAL_ANNUAL`` and this module returns
+``0.007305746211681411``, a residual of roughly ``0.0128`` bp of annualized
+Yield Vol. That residual is float-arithmetic ordering against Excel's, not a
+signal of a different statistic or annualization convention, and it is not
+grounds for reopening either. ``standard_deviation_convention`` is still named
+in every result, because a stated convention is what makes the next parity run
+cheap rather than because this one is unsettled.
 
 **What this module deliberately is not.**
 
@@ -56,11 +69,12 @@ be read as evidence that the provisional half is settled.
   does not promise that every active day came back, and this module performs
   no completeness check and has no trading calendar to perform one with. So
   a change spanning an omitted active day is a multi-day move counted once,
-  and 180 returned observations can span more than 180 trading days. Where
+  and 181 returned observations can span more than 180 trading days. Where
   Bloomberg returned every active day the two readings coincide, which is the
   ordinary case -- but Middle Office's "180 trading days" and this module's
-  "180 returned observations" are not the same statement, and a parity
-  mismatch should check the returned dates before it blames the convention.
+  "180 changes between 181 returned observations" are not the same statement,
+  and a parity mismatch should check the returned dates before it blames the
+  convention.
 - **The calculated result** converts no units. The standard deviation of a
   difference carries the unit of the values differenced, so the vol this
   module reports is in the Yield field's own unit -- ``field_unit``, carried
@@ -164,13 +178,22 @@ from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
 # consumer must be able to tell it apart from all of them at a glance.
 HISTORICAL_YIELD_VOL_MO_SOURCE = "HISTORICAL_YIELD_VOL_MO"
 
-# Middle Office's confirmed 6M-style window and annualization.
-MIDDLE_OFFICE_6M_OBSERVATION_COUNT = 180
+# Middle Office's confirmed 6M-style horizon, counted the way Middle Office
+# counts it: in Yield *Changes*. The parity run settled this -- "180-day"
+# means 180 changes, and N changes need N+1 observations, so the standard
+# window is 181 observations. The two constants exist separately because the
+# horizon is the methodology and the observation count is what a request can
+# ask for; collapsing them into one 180 was the arithmetic error the parity
+# run found.
+MIDDLE_OFFICE_6M_YIELD_CHANGE_COUNT = 180
+MIDDLE_OFFICE_6M_OBSERVATION_COUNT = MIDDLE_OFFICE_6M_YIELD_CHANGE_COUNT + 1
 ANNUALIZATION_TRADING_DAYS = 252
 ANNUALIZATION_FACTOR = math.sqrt(ANNUALIZATION_TRADING_DAYS)
 
-# PROVISIONAL (Issue #197): sample standard deviation, Excel's STDEV.S.
-# Named in every result so the Middle Office parity gate can disprove it.
+# Sample standard deviation, Excel's STDEV.S -- confirmed against Middle
+# Office's own calculation by the Issue #197 parity run. Still named in every
+# result, so the next parity check reads the convention rather than inferring
+# it from the number.
 STANDARD_DEVIATION_CONVENTION = "SAMPLE_STDEV_S_DDOF_1"
 
 # The unit BLIVolatilityInput's own contract states (docs/30 §1), and
@@ -538,9 +561,10 @@ def calculate_historical_yield_volatility(
 
     ``history`` is the underlying bond's **own** Yield series, exactly as the
     Issue #196 loader returned it. ``requested_observation_count`` is the
-    explicit observation contract; it defaults to Middle Office's confirmed
-    180-observation 6M-style window and is never derived from an expiry, a
-    tenor, or a date range.
+    explicit observation contract; it defaults to
+    :data:`MIDDLE_OFFICE_6M_OBSERVATION_COUNT` -- 181 observations, which is
+    Middle Office's confirmed 180-*change* 6M-style horizon -- and is never
+    derived from an expiry, a tenor, or a date range.
 
     Raises :class:`HistoricalYieldVolInputError` for every fail-closed
     condition in the module docstring. Returns a result with
@@ -619,7 +643,7 @@ def calculate_historical_yield_volatility(
     # arithmetic the Middle Office spreadsheet performs on the same values.
     # `strict=False` is deliberate, not an oversight: pairing a series with
     # its own tail is the one place unequal lengths are the point -- N values
-    # make exactly N-1 changes, which is the 180 -> 179 contract itself.
+    # make exactly N-1 changes, which is the 181 -> 180 contract itself.
     changes = [
         current - previous for previous, current in zip(values, values[1:], strict=False)
     ]

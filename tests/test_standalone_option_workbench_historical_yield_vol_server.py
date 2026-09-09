@@ -9,8 +9,9 @@ value below is made up.
 The things this file exists to hold down: the route reuses the existing
 ISIN/CUSIP identity path and the one canonical #196 loader (it never opens a
 second historical-data path), it computes nothing of its own, it defaults to
-Middle Office's confirmed 180-observation window without deriving one from an
-expiry or a tenor, it publishes the result only as the normalized
+Middle Office's confirmed horizon of 180 Yield Changes -- 181 observations --
+without deriving one from an expiry or a tenor, it publishes the result only
+as the normalized
 ``HISTORICAL_YIELD_VOL_MO`` source, and it reports insufficient/zero history
 honestly rather than substituting anything.
 """
@@ -188,16 +189,20 @@ def test_no_unit_is_supplied_when_the_trader_states_none(server_url, monkeypatch
 # --- the calculation contract -------------------------------------------------
 
 
-def test_the_default_window_is_middle_offices_confirmed_180(server_url, monkeypatch) -> None:
+def test_the_default_window_is_the_middle_office_horizon(server_url, monkeypatch) -> None:
+    # A body naming no window gets Middle Office's parity-confirmed horizon:
+    # 180 Yield Changes, which is 181 observations. The route imports the
+    # constant rather than repeating the number, so this test is what proves
+    # the default a trader actually receives is the corrected one.
     _stub_loader(monkeypatch, history=_history([4.0 + (index % 7) * 0.01 for index in range(200)]))
 
     body = {k: v for k, v in _body().items() if k != "requested_observation_count"}
     status, payload = _post_json(f"{server_url}{_ROUTE}", body)
 
     assert status == 200
-    assert payload["requested_observation_count"] == 180
-    assert payload["observation_count"] == 180
-    assert payload["yield_change_count"] == 179
+    assert payload["requested_observation_count"] == 181
+    assert payload["observation_count"] == 181
+    assert payload["yield_change_count"] == 180
     assert payload["window_status"] == "FULL_WINDOW"
 
 
@@ -618,8 +623,9 @@ _EXPECTED_CARD_INTRO = """
 _EXPECTED_CARD_NOTE = """
     Sends the bond identifier, Yield field and date range entered above as a fresh Bloomberg
     request, then uses the most recent <span class="mono">N</span> observations <em>that</em>
-    request returned. 180 is Middle Office's confirmed 6M-style window; it is not derived from
-    an expiry or a tenor, so change it only against evidence. The unit is never inferred from
+    request returned. 181 observations is Middle Office's confirmed 6M-style horizon of 180
+    Yield <em>Changes</em>; it is not derived from an expiry or a tenor, so change it only
+    against evidence. The unit is never inferred from
     how large the numbers look. It is optional for the calculation &mdash; without it the
     volatility is still calculated and shown in the field&rsquo;s own unit &mdash; but
     publishing to the normalized volatility source needs a declared <span

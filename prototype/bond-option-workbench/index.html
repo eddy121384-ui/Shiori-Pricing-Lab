@@ -999,7 +999,7 @@
             <div class="byh-query">
               <div class="byh-field byh-field-narrow">
                 <label class="byh-label" for="hyv-observation-count">Yield observations</label>
-                <input class="control" id="hyv-observation-count" type="number" min="3" step="1" value="180" />
+                <input class="control" id="hyv-observation-count" type="number" min="3" step="1" value="181" />
               </div>
               <div class="byh-field">
                 <label class="byh-label" for="hyv-field-unit">Yield field unit (as confirmed)</label>
@@ -1010,9 +1010,10 @@
             <div class="byh-field-note">
               Sends the bond identifier, Yield field and date range entered above as a fresh Bloomberg
               request, then uses the most recent <span class="mono">N</span> observations
-              <em>that</em> request returned. 180 is Middle Office's confirmed
-              6M-style window; it is not derived from an expiry or a tenor, so change it only against
-              evidence. The unit is never inferred from how large the numbers look. It is optional
+              <em>that</em> request returned. 181 observations is Middle Office's confirmed
+              6M-style horizon of 180 Yield <em>Changes</em>; it is not derived from an expiry or a
+              tenor, so change it only against evidence. The unit is never inferred from how large
+              the numbers look. It is optional
               for the calculation &mdash; without it the volatility is still calculated and shown in
               the field&rsquo;s own unit &mdash; but publishing to the normalized volatility source
               needs a declared <span class="mono">DECIMAL</span>, <span class="mono">PERCENT</span> or
@@ -1086,10 +1087,11 @@
                 volatility-source block come from the publication step that normalizes that
                 calculator's result. Both are printed here exactly as the server returned them: this
                 page performs no standard deviation, no annualization, no unit conversion and no
-                rounding of its own. The
-                <span class="mono">179 changes + STDEV.S</span> half of this convention is
-                <strong>provisional</strong> and awaits a Middle Office parity check; the underlying's own
-                Yield, the daily Yield Change, the 180-observation window and &radic;252 are confirmed.
+                rounding of its own. This convention is <strong>confirmed</strong> against Middle
+                Office's own calculation by the Issue #197 parity run: the underlying's own Yield,
+                the daily Yield Change, a horizon of
+                <span class="mono">180 changes over 181 observations</span>,
+                <span class="mono">STDEV.S</span> and &radic;252.
               </div>
             </div>
           </div>

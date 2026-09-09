@@ -40,6 +40,7 @@ from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     BondYieldObservation,
 )
 from shiori_pricing_lab.data.historical_yield_volatility import (
+    MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
     HistoricalYieldVolUnavailableError,
     calculate_historical_yield_volatility,
     historical_yield_vol_volatility_input,
@@ -120,13 +121,17 @@ def page():
         browser.close()
 
 
-# 180 ascending dates whose endpoints are the ones the card displays. Built
+# 181 ascending dates whose endpoints are the ones the card displays. Built
 # rather than abbreviated: the fixture used to count 180 observations and list
 # two dates, a shape `result_shape_problem` refuses and the server can never
 # emit, and every test in this file treated it as canonical (Codex review,
 # PR #200).
+#
+# 181, not 180, because this fixture stands for the STANDARD full window and
+# that is Middle Office's parity-confirmed horizon: 180 Yield Changes over 181
+# observations.
 _OBSERVATION_DATES = [
-    (date(2026, 1, 8) + timedelta(days=offset)).isoformat() for offset in range(179)
+    (date(2026, 1, 8) + timedelta(days=offset)).isoformat() for offset in range(180)
 ] + ["2026-09-01"]
 
 _FULL_PAYLOAD = {
@@ -142,12 +147,12 @@ _FULL_PAYLOAD = {
     "requested_start_date": "2026-01-01",
     "requested_end_date": "2026-09-01",
     "series_observation_count": 200,
-    "requested_observation_count": 180,
-    "observation_count": 180,
+    "requested_observation_count": 181,
+    "observation_count": 181,
     "observation_dates": _OBSERVATION_DATES,
     "first_observation_date": "2026-01-08",
     "last_observation_date": "2026-09-01",
-    "yield_change_count": 179,
+    "yield_change_count": 180,
     "standard_deviation_convention": "SAMPLE_STDEV_S_DDOF_1",
     "annualization_trading_days": 252,
     "annualization_factor": 15.874507866387544,
@@ -168,7 +173,7 @@ _FULL_PAYLOAD = {
         "normalization_factor": 0.01,
         "status": "ACTIVE",
         "override_or_fallback_audit": "HISTORICAL_YIELD_VOL_MO FULL_WINDOW: calculated from "
-        "180 of the requested 180 Yield observations (179 Yield Changes); source unit PERCENT "
+        "181 of the requested 181 Yield observations (180 Yield Changes); source unit PERCENT "
         "normalized to DECIMAL_ANNUAL by factor 0.01.",
     },
     "volatility_source_unavailable_reason": None,
@@ -340,7 +345,7 @@ def _open_card(page, server_url: str) -> None:
     _wait_until(lambda: not _is_actually_hidden(page, "markets-panel-yield-history"))
 
 
-def _fill_query(page, *, identifier=_ISIN, field=_FIELD, count="180", unit="PERCENT"):
+def _fill_query(page, *, identifier=_ISIN, field=_FIELD, count="181", unit="PERCENT"):
     page.fill("#byh-identifier", identifier)
     page.fill("#byh-yield-field", field)
     page.fill("#byh-start", "2026-01-01")
@@ -372,12 +377,15 @@ def test_the_card_lives_in_the_bond_yield_history_view_and_starts_idle(server_ur
     assert page.evaluate("() => window.__shioriTestHistoricalYieldVolRequestedRoutes()") == []
 
 
-def test_the_window_defaults_to_middle_offices_confirmed_180(server_url, page) -> None:
+def test_the_window_defaults_to_the_middle_office_horizon(server_url, page) -> None:
+    # The box a trader sees before touching anything is the parity-confirmed
+    # horizon expressed the way the request takes it: 181 observations, which
+    # is Middle Office's 180 Yield Changes.
     _route_other_markets_away(page)
     _route_vol(page)
     _open_card(page, server_url)
 
-    assert page.input_value("#hyv-observation-count") == "180"
+    assert page.input_value("#hyv-observation-count") == "181"
 
 
 # --- what the page sends ------------------------------------------------------
@@ -779,9 +787,12 @@ def test_the_two_headline_figures_must_exist_together(server_url, page, override
 @pytest.mark.parametrize(
     "overrides",
     [
-        # 180 observations and no changes, printed as this figure's provenance.
+        # 181 observations and no changes, printed as this figure's provenance.
+        # 181 observations make exactly 180 changes, so both a short count and
+        # an over-count are shapes the server cannot emit.
         {"yield_change_count": 0},
-        {"yield_change_count": 180},
+        {"yield_change_count": 179},
+        {"yield_change_count": 181},
         # The window is the smaller of what was asked for and what came back.
         {"observation_count": 200},
         {"series_observation_count": 100},
@@ -1114,13 +1125,17 @@ def _real_history(values, *, field_unit="PERCENT") -> BloombergBondYieldHistory:
     )
 
 
-_VARIED = [4.0 + (index % 7) * 0.01 for index in range(180)]
+# Sized from the constant, not from a literal: this test drives the REAL route
+# with the count the card actually sends, so a full window here has to be the
+# standard window. Pinning 180 while the default moved to 181 is exactly how
+# the "full window, published" case silently became INSUFFICIENT_HISTORY.
+_VARIED = [4.0 + (index % 7) * 0.01 for index in range(MIDDLE_OFFICE_6M_OBSERVATION_COUNT)]
 # Identical Yield Changes: an exact sigma of zero, which the calculator
 # reports and the publication helper refuses. Whole-number steps on purpose --
 # `4.0 + index * 0.01` looks flat and is not: its changes differ in the last
 # bits, giving a sigma of 3.8e-16 that publishes successfully, so that series
 # would have exercised the ordinary branch under a name claiming otherwise.
-_FLAT = [4.0 + float(index) for index in range(180)]
+_FLAT = [4.0 + float(index) for index in range(MIDDLE_OFFICE_6M_OBSERVATION_COUNT)]
 
 # Every canonical branch of the real serializer, named by what it produces
 # (Codex review, PR #200). The anchored test used to drive only the first.
@@ -1182,7 +1197,9 @@ def test_the_card_accepts_what_the_real_route_actually_serializes(
     monkeypatch.setattr(
         server_module, "load_bloomberg_bond_yield_history", lambda **kwargs: history
     )
-    expected = calculate_historical_yield_volatility(history, requested_observation_count=180)
+    expected = calculate_historical_yield_volatility(
+        history, requested_observation_count=MIDDLE_OFFICE_6M_OBSERVATION_COUNT
+    )
     assert expected.window_status.value == status
 
     _route_other_markets_away(page)
@@ -1492,9 +1509,9 @@ def test_the_full_provenance_is_on_screen(server_url, page) -> None:
     assert page.inner_text("#hyv-field").strip() == _FIELD
     assert page.inner_text("#hyv-unit").strip() == "PERCENT"
     assert page.inner_text("#hyv-source").strip() == "BLOOMBERG_DAPI"
-    assert page.inner_text("#hyv-requested-count").strip() == "180"
-    assert "180 of 200" in page.inner_text("#hyv-actual-count")
-    assert page.inner_text("#hyv-change-count").strip() == "179"
+    assert page.inner_text("#hyv-requested-count").strip() == "181"
+    assert "181 of 200" in page.inner_text("#hyv-actual-count")
+    assert page.inner_text("#hyv-change-count").strip() == "180"
     assert page.inner_text("#hyv-first-observation").strip() == "2026-01-08"
     assert page.inner_text("#hyv-last-observation").strip() == "2026-09-01"
     assert page.inner_text("#hyv-stdev-convention").strip() == "SAMPLE_STDEV_S_DDOF_1"

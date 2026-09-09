@@ -2578,10 +2578,10 @@ def fetch_historical_yield_volatility(body: dict) -> dict:
     response's values with another response's statistic.
 
     ``requested_observation_count`` is optional and defaults to Middle
-    Office's confirmed 180-observation 6M-style window. It is never derived
-    from an expiry, a tenor, or the date range -- Issue #197 forbids
-    inventing an expiry -> lookback mapping, so a trader who wants a
-    different window states it.
+    Office's confirmed 6M-style horizon, which is 180 Yield *Changes* and
+    therefore 181 observations. It is never derived from an expiry, a tenor,
+    or the date range -- Issue #197 forbids inventing an expiry -> lookback
+    mapping, so a trader who wants a different window states it.
 
     ``field_meaning``/``field_unit`` are optional provenance strings passed
     through to the #196 loader verbatim. Neither is inferred here. Without a
