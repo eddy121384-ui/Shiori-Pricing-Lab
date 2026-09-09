@@ -844,8 +844,13 @@ def test_manual_half_schedule_is_refused() -> None:
 
 
 def test_settlement_before_accrual_start_is_refused() -> None:
+    # Local import on purpose: under the full suite another module reload
+    # rebinds this module's classes, so the raises-guard must reference the
+    # same (current) module object as the function under test -- importing
+    # the exception from the top of this file holds a stale identity there.
     from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
         IrregularFirstCoupon,
+        TreasuryFuturesYieldError,
         accrued_interest_per_100,
     )
 
