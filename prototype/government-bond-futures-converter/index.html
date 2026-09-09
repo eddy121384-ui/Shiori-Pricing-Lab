@@ -100,18 +100,19 @@
     </div>
   </section>
 
-  <!-- Advanced. Holds the methodology statement, the irregular-first schedule
-       fields (present only for some German CTDs) and the validated manual CTD
-       path, kept as a secondary mode -- none of it belongs on the normal
-       trader screen, whose fields are the contract, the connection, the two
-       inputs, the CTD and the result. -->
+  <!-- Advanced. Holds the irregular-first schedule fields (present only for
+       some German CTDs) and the validated manual CTD path, kept as a secondary
+       mode -- neither belongs on the normal trader screen, whose fields are the
+       contract, the connection, the two inputs, the CTD and the result.
+
+       The catalogue's methodology note is deliberately NOT rendered anywhere in
+       this app, under Details or otherwise: it carries the internal product
+       name, which must never appear on a company-facing surface. The server
+       still returns it unaltered -- the provenance is production semantics and
+       is not mutated -- this app simply does not display it. -->
   <details class="advanced" id="advanced">
     <summary>Details &amp; manual CTD</summary>
     <div class="advanced-body">
-      <!-- The selected contract's convention, verbatim from the server's own
-           catalogue. Never composed or edited here: it names the methodology
-           owner and the day-count basis the answer was computed on. -->
-      <div class="methodology" id="methodology">Select a contract to load its current cheapest-to-deliver bond from Bloomberg.</div>
       <div class="advanced-note">
         Loaded automatically from Bloomberg when you pick a contract. Editing any field
         below switches this conversion to <strong>manual, unconfirmed</strong> input &mdash; the

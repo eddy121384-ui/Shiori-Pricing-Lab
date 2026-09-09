@@ -148,15 +148,6 @@ select.control { cursor: pointer; }
 
 /* ---------- Contract row ---------- */
 .contract-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; }
-.methodology {
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--muted);
-  padding-bottom: 12px;
-  margin-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-}
-
 /* ---------- Convert ---------- */
 .convert-grid {
   display: grid;

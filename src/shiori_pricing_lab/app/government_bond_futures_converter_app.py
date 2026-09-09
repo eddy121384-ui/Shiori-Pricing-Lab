@@ -9,16 +9,18 @@ to type, and no second process to leave behind.
 **Why one process rather than a launcher plus a server.** The Workbench
 launcher has to detect a stale server, classify an occupied port, and reuse or
 refuse -- because its server is a separate long-lived process on a fixed port
-8765. This app has none of those failure modes to handle, because it does not
+8765. Two of those failure modes do not exist here, because this app does not
 create them:
 
 - *Stale prior process*: the backend is a daemon thread of this process, so it
   cannot outlive the window. Nothing can be left listening.
 - *Port collision*: the backend binds port ``0``, so the OS hands out a free
   ephemeral port. There is no fixed port to collide on.
-- *Duplicate launch*: a second double-click gets its own port, its own browser
-  profile and its own window. Two instances cannot interfere, so neither has
-  to be refused.
+
+*Duplicate launch* is handled rather than designed away: one instance at a
+time, enforced by :func:`acquire_single_instance`. A second double-click is
+told the app is already running and exits without starting a backend or
+opening a window.
 
 What is left to handle is genuine: the browser being absent, the backend
 failing to start, and Bloomberg being unavailable. The first two raise
@@ -57,8 +59,102 @@ EDGE_RELATIVE_PATH = Path("Microsoft") / "Edge" / "Application" / "msedge.exe"
 EDGE_SEARCH_ENV_VARS = ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")
 
 
+#: Session-scoped name of the mutex that makes this app single-instance. The
+#: ``Local\`` prefix scopes it to the logged-on session, which is the right
+#: boundary for a desktop app: two traders on the same terminal server each get
+#: their own instance, while one trader cannot start two.
+SINGLE_INSTANCE_MUTEX_NAME = "Local\\GovernmentBondFuturesConverter.SingleInstance"
+
+#: Windows ``ERROR_ALREADY_EXISTS``. ``CreateMutexW`` still returns a valid
+#: handle when the mutex exists, so the last-error code -- not a null handle --
+#: is what says another instance owns it.
+_ERROR_ALREADY_EXISTS = 183
+
+#: Distinct from the generic failure code so a smoke test, or a shortcut that
+#: checks it, can tell "already running" from "could not start".
+EXIT_ALREADY_RUNNING = 3
+
+
 class ConverterAppError(RuntimeError):
     """A startup failure with a message written for a trader, not a developer."""
+
+
+class AlreadyRunningError(ConverterAppError):
+    """Another instance of the app already owns the single-instance mutex."""
+
+
+def _windows_mutex_api():
+    """Return ``(CreateMutexW, GetLastError, CloseHandle)``, or ``None`` off Windows.
+
+    Resolved lazily and behind a try/except so importing this module never
+    depends on ``ctypes`` finding ``kernel32`` -- the tests import it on Linux.
+    """
+
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        return kernel32.CreateMutexW, (lambda: ctypes.get_last_error()), kernel32.CloseHandle
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+def acquire_single_instance(
+    create_mutex=None,
+    last_error=None,
+    close_handle=None,
+    name: str = SINGLE_INSTANCE_MUTEX_NAME,
+) -> object | None:
+    """Claim the single-instance mutex, or refuse because one is already held.
+
+    Returns the OS handle, which the caller keeps for the life of the process.
+    **Nothing has to release it:** Windows drops the handle when the process
+    ends for any reason, a crash or a kill included, so there is no stale state
+    to detect or clean up -- which is exactly why this is a kernel object and
+    not a lock file. A lock file would need a liveness check, a PID, and a
+    recovery path for the case where the app was killed, and every one of those
+    is a way to lock a trader out of their own tool.
+
+    Off Windows there is no guard: this app ships only for Windows, and the
+    kernel-object semantics above are the whole reason the design is safe. The
+    two callables are injectable so the refusal path is testable anywhere, and
+    ``name`` so a test can exercise the real syscall without colliding with a
+    converter the trader actually has open.
+    """
+
+    if create_mutex is None or last_error is None:
+        resolved = _windows_mutex_api()
+        if resolved is None:
+            return None
+        create_mutex, last_error, resolved_close = resolved
+        close_handle = resolved_close if close_handle is None else close_handle
+
+    handle = create_mutex(None, True, name)
+    if not handle:
+        # The guard itself failed, which is not a reason to keep a trader out
+        # of the converter. Start anyway: a duplicate window is a far smaller
+        # problem than an app that will not open.
+        return None
+    if last_error() == _ERROR_ALREADY_EXISTS:
+        # CreateMutexW hands back a *second* handle to the existing mutex, so
+        # it is released here rather than left to process exit -- the refusing
+        # process does exit immediately, but a caller that recovers instead
+        # (the tests do) must not accumulate handles.
+        if close_handle is not None:
+            close_handle(handle)
+        raise AlreadyRunningError(
+            f"{APP_NAME} is already running.\n\n"
+            "Switch to the window that is already open. If you cannot find it, "
+            "close it from Task Manager and start the app again."
+        )
+    return handle
 
 
 def find_browser(
@@ -169,6 +265,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     server = None
     profile_dir = None
     try:
+        # First, before anything is started: a refused second launch must not
+        # bind a port, spawn a browser or create a profile directory. Held in a
+        # local for the life of `run`, which is the life of the process.
+        instance_guard = acquire_single_instance()  # noqa: F841 - held, not used
         browser = None if no_window else find_browser()
         server, url = start_backend()
         if no_window:
@@ -191,6 +291,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         # its private backend cleanly".
         process.wait()
         return 0
+    except AlreadyRunningError as exc:
+        # Not a failure, just a second double-click. Same short sentence either
+        # way; only the channel differs, because a windowed build has no
+        # console and a smoke test has no one to click a dialog.
+        if no_window:
+            print(str(exc), file=sys.stderr, flush=True)
+        else:
+            show_error_dialog(str(exc))
+        return EXIT_ALREADY_RUNNING
     except ConverterAppError as exc:
         show_error_dialog(str(exc))
         return 1

@@ -77,6 +77,48 @@ def _post(url: str, body: dict, timeout: float = 60.0) -> tuple[int, dict]:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+#: Matches ``government_bond_futures_converter_app.EXIT_ALREADY_RUNNING``. Not
+#: imported, deliberately: this script drives the *packaged* executable as a
+#: black box, and reading the constant from the source tree would let a build
+#: that shipped a different value still pass.
+EXIT_ALREADY_RUNNING = 3
+
+
+def _check_single_instance_guard() -> None:
+    """A second launch must refuse while the first is still running.
+
+    Called with the smoke-test instance already up, so this really is a second
+    launch against a live guard -- the named mutex is held by the process the
+    caller started. Windows only: the guard is a kernel object, and off Windows
+    :func:`acquire_single_instance` is a documented no-op.
+    """
+
+    if sys.platform != "win32":
+        print("  single-instance guard: skipped (Windows-only kernel object)")
+        return
+    second = subprocess.run(
+        [str(BUILT_APP), "--no-window"],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        cwd=str(BUILT_APP.parent),
+    )
+    message = (second.stderr or "") + (second.stdout or "")
+    if second.returncode != EXIT_ALREADY_RUNNING:
+        raise SystemExit(
+            "SMOKE FAILED: a second launch was not refused.\n"
+            f"  exit code {second.returncode} (expected {EXIT_ALREADY_RUNNING})\n"
+            f"  output: {message.strip()!r}"
+        )
+    if "already running" not in message:
+        raise SystemExit(
+            f"SMOKE FAILED: the refusal did not say the app is already running: {message.strip()!r}"
+        )
+    if "Traceback" in message:
+        raise SystemExit(f"SMOKE FAILED: the refusal showed a traceback: {message.strip()!r}")
+    print(f"  single-instance guard: second launch refused ({message.strip().splitlines()[0]})")
+
+
 def smoke_test(check_bloomberg: bool) -> None:
     """Start the packaged app headless and exercise its real routes."""
 
@@ -128,6 +170,8 @@ def smoke_test(check_bloomberg: bool) -> None:
                 f"SMOKE FAILED: blpapi did not load from the packaged runtime.\n  {detail}"
             )
         print(f"  blpapi loaded from the bundle (CTD route answered HTTP {status})")
+
+        _check_single_instance_guard()
 
         if not check_bloomberg:
             print("\nPASS (packaging). Live Bloomberg not checked -- pass --bloomberg on a")

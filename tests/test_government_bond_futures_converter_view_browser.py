@@ -40,6 +40,7 @@ from shiori_pricing_lab.app.government_bond_futures_converter_server import crea
 from shiori_pricing_lab.data.treasury_futures_ctd import treasury_futures_ctd_from_manual_entry
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
     MARKET_EUREX_GERMAN,
+    MARKET_US_TREASURY,
     SUPPORTED_TREASURY_FUTURES_CONTRACT_CODES,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
@@ -202,6 +203,12 @@ def _text(page, element_id: str) -> str:
     return page.eval_on_selector(f"#{element_id}", "el => el.textContent")
 
 
+def _fetch(page, server_url: str, path: str) -> str:
+    """Read one URL from the app's own server, through the page's own origin."""
+
+    return page.evaluate("p => fetch(p).then(r => r.text())", f"{server_url}/{path}")
+
+
 # ---------------------------------------------------------------------------
 # Startup and the contract list
 # ---------------------------------------------------------------------------
@@ -220,51 +227,91 @@ def test_the_window_offers_every_registry_contract_grouped_by_market(page, serve
 
 
 @_PLAYWRIGHT_SKIP
-def test_the_window_shows_no_internal_branding(page, server_url) -> None:
-    """The trader's normal screen never names the repository or the product.
+def test_no_internal_branding_survives_the_whole_trader_flow(page, server_url) -> None:
+    """Nowhere a trader can look, at any point in the flow, names the product.
 
-    Checked on the *rendered* page, not on the static files: the contract
-    catalogue supplies its own copy, so a server-side string can put branding
-    on screen that a file scan would never see.
+    Checked on the *rendered* page rather than on the static files, and after
+    every step that pulls fresh server copy onto the screen: the contract
+    catalogue carries a methodology note that begins with the internal product
+    name, so a file scan alone would miss it. Details is expanded too -- the
+    ban is on the app surface, not merely on its first screen.
     """
 
     route = _CtdRoute(page, payload=FGBS_CTD_PAYLOAD)
+
+    def visible_text() -> str:
+        return page.eval_on_selector("body", "el => el.innerText")
+
+    def assert_unbranded(step: str) -> None:
+        assert "shiori" not in visible_text().lower(), f"internal branding visible after {step}"
+
+    # 1. page load
     _open(page, server_url)
+    assert page.title() == "Government Bond Futures Converter"
+    assert_unbranded("page load")
+
+    # 2. Bloomberg CTD load
     page.select_option("#contract-select", "FGBS")
     _wait_until(page, lambda: len(route.requests) >= 2)
     _wait_until(page, lambda: "BKO 2.7 09/13/28" in _text(page, "d-ctd"))
+    assert_unbranded("the Bloomberg CTD load")
 
-    assert page.title() == "Government Bond Futures Converter"
-    visible = page.eval_on_selector("body", "el => el.innerText")
-    assert "Shiori" not in visible
-    assert "shiori" not in visible.lower()
+    # 3. a successful conversion
+    page.fill("#futures-price", "105.065")
+    page.click("#convert-btn")
+    _wait_until(page, lambda: _text(page, "implied-yield") != "—")
+    assert "%" in _text(page, "implied-yield")
+    assert_unbranded("a successful conversion")
+
+    # 4. Details expanded
+    page.eval_on_selector("#advanced", "el => { el.open = true; }")
+    _wait_until(page, lambda: page.is_visible("#m-conversion-factor"))
+    assert_unbranded("expanding Details")
+
+    # Belt and braces: the served files carry none of it either.
+    for file_name in ("index.html", "app.css", "app.js"):
+        assert "shiori" not in _fetch(page, server_url, file_name).lower()
 
 
 @_PLAYWRIGHT_SKIP
-def test_the_methodology_attribution_lives_under_details(page, server_url) -> None:
-    """The German methodology note names its owner, and that stays off the desk screen.
+def test_the_methodology_note_is_never_rendered_anywhere(page, server_url) -> None:
+    """The catalogue's methodology note is served, and deliberately not displayed.
 
-    ``METHODOLOGY_NOTE_BY_MARKET`` deliberately attributes the German
-    calculation to its owner rather than to Eurex (PR #205), so the sentence
-    carries a name Issue #206 keeps off the trader's normal screen. Both
-    requirements are met by putting the note under Details, verbatim: the
-    attribution is never rewritten here, and it is never on the primary
-    screen. Rewriting that sentence would be a methodology-attribution
-    change, not a packaging one.
+    ``METHODOLOGY_NOTE_BY_MARKET`` attributes the German calculation to its
+    owner rather than to Eurex (PR #205). That is validated production
+    provenance and is not rewritten, renamed or stripped from the response --
+    this company-facing app simply does not render it, under Details or
+    anywhere else. So the route still returns it in full, and no element on the
+    page ever shows it.
     """
 
     route = _CtdRoute(page, payload=FGBS_CTD_PAYLOAD)
     _open(page, server_url)
     page.select_option("#contract-select", "FGBS")
     _wait_until(page, lambda: len(route.requests) >= 2)
+    page.eval_on_selector("#advanced", "el => { el.open = true; }")
 
-    note = _text(page, "methodology")
-    assert note == METHODOLOGY_NOTE_BY_MARKET[MARKET_EUREX_GERMAN]
-    # Present in the DOM, but not on screen until the trader opens Details.
-    assert page.is_visible("#methodology") is False
-    assert page.eval_on_selector("#advanced", "el => el.open") is False
-    # It lives inside the disclosure, not merely next to it.
-    assert page.eval_on_selector("#methodology", "el => !!el.closest('#advanced')") is True
+    # The server's response is untouched: the note is there, verbatim.
+    catalogue = json.loads(_fetch(page, server_url, "api/treasury-futures/contracts"))
+    served = {c["code"]: c["methodology_note"] for c in catalogue["contracts"]}
+    assert served["FGBS"] == METHODOLOGY_NOTE_BY_MARKET[MARKET_EUREX_GERMAN]
+    assert served["ZN"] == METHODOLOGY_NOTE_BY_MARKET[MARKET_US_TREASURY]
+
+    # And no fragment of either note reaches the page, expanded or not.
+    rendered = page.eval_on_selector("body", "el => el.innerText")
+    for note in (served["FGBS"], served["ZN"]):
+        assert note not in rendered
+        assert note.split(":")[0] not in rendered
+    # No element is wired to receive it, so it cannot come back by accident.
+    assert page.query_selector("#methodology") is None
+    # Executable lines only: the comment explaining why the field is skipped
+    # names it, and naming it there is the point.
+    code = "\n".join(
+        line
+        for line in _fetch(page, server_url, "app.js").splitlines()
+        if not line.lstrip().startswith("//")
+    )
+    assert "methodology_note" not in code
 
 
 # ---------------------------------------------------------------------------

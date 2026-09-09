@@ -6,12 +6,17 @@
 // Every one of those lives in `pricing/treasury_futures_implied_yield` and
 // `pricing/treasury_futures_contract`, reached through
 // POST /api/treasury-futures/convert and rendered here exactly as received.
-// Even the tick size, the legal sub-32nd digits and each market's methodology
-// sentence come from GET /api/treasury-futures/contracts rather than a
-// constant in this file, so the window and Python can never disagree about
-// what a contract trades in. This is the same canonical-path discipline the
-// Workbench's `treasury_futures_yield.js` is held to, and the same test
-// enforces it here.
+// Even the tick size and the legal sub-32nd digits come from
+// GET /api/treasury-futures/contracts rather than a constant in this file, so
+// the window and Python can never disagree about what a contract trades in.
+// This is the same canonical-path discipline the Workbench's
+// `treasury_futures_yield.js` is held to, and the same test enforces it here.
+//
+// The catalogue's `methodology_note` is the one field this app deliberately
+// does not render. It carries the internal product name, which must not appear
+// on a company-facing surface -- and the fix is to leave it undisplayed, not to
+// reword it: the note and the basis it belongs to are validated production
+// provenance, and the server's response is never mutated to suit this window.
 //
 // What this file does own, and the Workbench module does not, is the desk
 // app's flow: the contract list loads at startup, picking a contract fetches
@@ -31,7 +36,6 @@
     retryBtn: el("retry-btn"),
     contractSelect: el("contract-select"),
     loadCtdBtn: el("load-ctd-btn"),
-    methodology: el("methodology"),
     tickSummary: el("tick-summary"),
     convertSummary: el("convert-summary"),
     futuresPrice: el("futures-price"),
@@ -145,7 +149,6 @@
         ? `${contract.market_label} · tick ${tick} (decimal)`
         : `${contract.market_label} · tick ${tick} · sub-32nd digits ${contract.sub_32nd_digits.join(", ")}`;
     els.convertSummary.textContent = `${contract.code} · min tick ${tick}`;
-    if (contract.methodology_note) els.methodology.textContent = contract.methodology_note;
     els.futuresPrice.placeholder =
       contract.quote_convention === "DECIMAL" ? "105.065" : "112-165 or 112.515625";
   }

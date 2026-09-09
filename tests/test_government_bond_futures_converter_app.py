@@ -23,9 +23,12 @@ import ast
 import json
 import re
 import socket
+import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -458,20 +461,43 @@ def test_the_backend_takes_an_ephemeral_port_so_it_can_never_collide() -> None:
 
 
 def test_closing_the_app_leaves_no_listener_behind() -> None:
+    """After shutdown the old endpoint answers nothing. Closing the window is
+    the trader's only stop button, so a backend that kept serving after it
+    would be a listener nobody knows is there.
+
+    The assertion is deliberately *"nothing answers there any more"* and not
+    *"the port can be rebound"*. Those are different claims: a correctly
+    closed listening socket can still leave the port unavailable for a while
+    because the connection just made sits in TCP TIME_WAIT, which is how this
+    test failed on Linux in CI while the production shutdown was perfectly
+    correct. Rebindability is a kernel timing detail; not serving is the
+    behaviour that matters.
+    """
+
     server, url = app_module.start_backend()
-    port = int(url.rsplit(":", 1)[1].rstrip("/"))
-    with urllib.request.urlopen(f"{url}api/health") as response:
+    health_url = f"{url}api/health"
+    with urllib.request.urlopen(health_url, timeout=10) as response:
         assert json.loads(response.read())["api_contract"] == converter.API_CONTRACT_ID
 
     server.shutdown()
     server.server_close()
 
-    # The port is free again, which is only true if the backend really stopped.
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind(("127.0.0.1", port))
-    finally:
-        probe.close()
+    # Bounded poll rather than a single immediate probe: shutdown() returns
+    # once the serve loop has stopped, and the OS can take a moment to stop
+    # accepting on a socket that is already closed. A connection that is
+    # refused, reset or simply times out all mean the same thing here -- no
+    # listener -- so the loop ends on any of them and only a *successful*
+    # health response is a failure.
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            with urllib.request.urlopen(health_url, timeout=1) as response:
+                served = response.read()
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return
+        assert time.monotonic() < deadline, (
+            f"the backend was still serving {health_url} 10s after shutdown: {served!r}"
+        )
 
 
 def test_the_serving_thread_is_a_daemon_so_it_cannot_outlive_the_app() -> None:
@@ -694,3 +720,133 @@ def test_the_app_never_introduces_a_lan_listener_or_a_cache() -> None:
     source = Path(app_module.__file__).read_text(encoding="utf-8")
     for forbidden in ("0.0.0.0", "requests.get", "sqlite3", "pickle", "urlopen"):
         assert forbidden not in source
+
+
+# ---------------------------------------------------------------------------
+# 12. One instance at a time
+# ---------------------------------------------------------------------------
+
+
+class _FakeMutexApi:
+    """A stand-in for CreateMutexW/GetLastError, so the guard is testable anywhere.
+
+    The real guard is a Windows kernel object, and CI runs on Linux -- but the
+    behaviour worth pinning is the decision the guard makes, not the syscall.
+    """
+
+    def __init__(self, *, handle=4242, error=0):
+        self.handle = handle
+        self.error = error
+        self.calls: list[tuple] = []
+        self.closed: list[object] = []
+
+    def create_mutex(self, security, initial_owner, name):
+        self.calls.append((security, initial_owner, name))
+        return self.handle
+
+    def last_error(self):
+        return self.error
+
+    def close_handle(self, handle):
+        self.closed.append(handle)
+        return True
+
+
+def test_the_first_instance_takes_the_guard_and_starts() -> None:
+    api = _FakeMutexApi(handle=4242, error=0)
+    assert app_module.acquire_single_instance(api.create_mutex, api.last_error) == 4242
+    assert api.closed == []
+    security, initial_owner, name = api.calls[0]
+    assert initial_owner is True
+    assert name == app_module.SINGLE_INSTANCE_MUTEX_NAME
+
+
+def test_a_second_instance_is_refused_in_words_a_trader_can_act_on() -> None:
+    api = _FakeMutexApi(error=183)  # ERROR_ALREADY_EXISTS
+    with pytest.raises(app_module.AlreadyRunningError) as exc:
+        app_module.acquire_single_instance(api.create_mutex, api.last_error, api.close_handle)
+    message = str(exc.value)
+    assert message.startswith("Government Bond Futures Converter is already running.")
+    assert "Traceback" not in message
+    # The duplicate handle CreateMutexW returned is released, not leaked.
+    assert api.closed == [api.handle]
+
+
+def test_a_second_launch_starts_no_backend_and_opens_no_window(monkeypatch) -> None:
+    shown: list[str] = []
+    monkeypatch.setattr(
+        app_module, "show_error_dialog", lambda message, **kw: shown.append(message)
+    )
+    api = _FakeMutexApi(error=183)
+    # Bound before patching: the replacement must call the real function, not
+    # the name it is about to occupy.
+    real_acquire = app_module.acquire_single_instance
+    monkeypatch.setattr(
+        app_module,
+        "acquire_single_instance",
+        lambda: real_acquire(api.create_mutex, api.last_error, api.close_handle),
+    )
+    # Either of these running would mean the refusal came too late.
+    monkeypatch.setattr(
+        app_module, "start_backend", lambda: pytest.fail("a second instance started a backend")
+    )
+    monkeypatch.setattr(
+        app_module, "find_browser", lambda: pytest.fail("a second instance opened a window")
+    )
+
+    assert app_module.run([]) == app_module.EXIT_ALREADY_RUNNING
+    assert shown and shown[0].startswith("Government Bond Futures Converter is already running.")
+
+
+def test_a_failed_guard_never_locks_the_trader_out() -> None:
+    """A guard that cannot be created must not stop the app from opening.
+
+    A duplicate window is a smaller problem than a converter that will not
+    start, so a null handle means "carry on unguarded", not "refuse".
+    """
+
+    api = _FakeMutexApi(handle=0, error=0)
+    assert app_module.acquire_single_instance(api.create_mutex, api.last_error) is None
+
+
+def test_the_guard_is_an_os_object_with_no_stale_state_to_clean_up() -> None:
+    """No lock file, no PID file, no liveness check -- the kernel owns it.
+
+    Windows releases the mutex when the process ends for any reason, so a crash
+    or a kill cannot leave a guard behind that locks the desk out of its own
+    tool. That property is the whole reason for choosing a mutex, so a future
+    edit to a file-based scheme has to fail here first.
+    """
+
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+    for forbidden in (".lock", "lockfile", "lock_file", "pidfile", "pid_file", "O_EXCL"):
+        assert forbidden not in source
+    assert "CreateMutexW" in source
+    # Session-scoped, not machine-wide: two traders on one terminal server each
+    # get their own instance.
+    assert app_module.SINGLE_INSTANCE_MUTEX_NAME.startswith("Local\\")
+    assert not app_module.SINGLE_INSTANCE_MUTEX_NAME.startswith("Global\\")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the guard is a Windows kernel object")
+def test_on_windows_the_real_second_acquisition_is_refused() -> None:
+    """The real kernel32 path, on a name of this test's own.
+
+    Deliberately not the app's own mutex name: taking that would fail whenever
+    a trader actually has the converter open, and would leave the suite holding
+    the guard against the next launch. A per-run name exercises the same
+    syscall with no such coupling, and both handles are closed explicitly so
+    nothing outlives the test.
+    """
+
+    import ctypes
+
+    name = f"Local\\GovernmentBondFuturesConverter.Test.{uuid.uuid4().hex}"
+    first = app_module.acquire_single_instance(name=name)
+    assert first is not None
+    try:
+        with pytest.raises(app_module.AlreadyRunningError) as exc:
+            app_module.acquire_single_instance(name=name)
+        assert "already running" in str(exc.value)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(first)
