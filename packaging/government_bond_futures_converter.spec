@@ -42,10 +42,24 @@ analysis = Analysis(  # noqa: F821 - PyInstaller injects its own builtins
     hiddenimports=blpapi_hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    # None of these are on the converter's import path; excluding them keeps
-    # the shipped folder to what the desk actually runs. pandas and numpy are
-    # NOT excluded -- they are pulled in transitively by the production
-    # pricing package this app deliberately reuses unmodified.
+    # None of these is on the converter's import path; excluding them keeps the
+    # shipped folder to what the desk actually runs, which matters because the
+    # whole folder is what a coworker downloads once.
+    #
+    # pandas and numpy are NOT excluded -- they are pulled in transitively by
+    # the production pricing package this app reuses unmodified.
+    #
+    # QuantLib is NOT excluded either, and deliberately so. Blocking it leaves
+    # the FGBS/FGBM/ZN pins bit-identical, but it sits behind
+    # `get_convention_profile` on the pricing path: dropping a validated
+    # pricing dependency to save disk is a pricing decision, not a packaging
+    # one (Eddy, Issue #206).
+    #
+    # pyarrow (81 MB) and PIL (11 MB) are excluded on measured evidence: pyarrow
+    # arrives only as pandas' optional accelerator and PIL only via the VCUB OCR
+    # path, and with both blocked the three parity pins return to the last digit
+    # -- 3.044682726630157 / 3.155945428711533 / 5.917310711170529. That takes
+    # the download from 91.8 MB to 57.6 MB.
     excludes=[
         "streamlit",
         "plotly",
@@ -55,6 +69,8 @@ analysis = Analysis(  # noqa: F821 - PyInstaller injects its own builtins
         "pytest",
         "playwright",
         "rapidocr_onnxruntime",
+        "pyarrow",
+        "PIL",
     ],
     noarchive=False,
 )

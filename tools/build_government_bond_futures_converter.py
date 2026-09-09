@@ -2,9 +2,19 @@
 
     .venv\\Scripts\\python.exe tools\\build_government_bond_futures_converter.py
 
-Produces ``dist/Government Bond Futures Converter/`` -- a portable folder that
-is copied to the workstation as-is. No installer, no administrator rights, no
-registry write, no PATH entry.
+Produces ``dist/Government Bond Futures Converter/`` -- the **runtime payload**,
+not the thing a coworker downloads. Since Issue #206's bootstrapper phase the
+delivery model is two release assets:
+
+* ``Government_Bond_Futures_Converter_v<version>.exe`` -- ~10 KB, built by
+  ``build_government_bond_futures_converter_bootstrapper.py``. This is the
+  download.
+* ``Government_Bond_Futures_Converter_Runtime_v<version>.zip`` -- this folder,
+  zipped by ``--package-runtime`` below, fetched once by that bootstrapper and
+  installed under ``%LOCALAPPDATA%\\GovernmentBondFuturesConverter``.
+
+Either way no installer, no administrator rights, no registry write and no PATH
+entry are involved.
 
 The smoke test after the build is the point of running this rather than
 PyInstaller directly. It starts the *packaged* executable with ``--no-window``
@@ -26,11 +36,13 @@ too, which is what the Issue #206 UAT evidence is produced with.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -192,6 +204,45 @@ def smoke_test(check_bloomberg: bool) -> None:
             process.kill()
 
 
+def package_runtime() -> Path:
+    """Zip the built runtime and stamp its real hash into the manifest.
+
+    This is the second of the two release assets: the large payload the small
+    bootstrapper downloads once. The manifest is rewritten from the payload
+    that was actually produced -- ``sha256`` and ``size_bytes`` are never typed
+    by hand, because a wrong value there would not fail until it reached a
+    desk, where it would refuse every download.
+    """
+
+    manifest_path = PROJECT_ROOT / "packaging" / "runtime_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    version = manifest["runtime_version"]
+    zip_path = PROJECT_ROOT / "dist" / f"Government_Bond_Futures_Converter_Runtime_v{version}.zip"
+
+    print(f"Packaging the runtime payload for {version}...")
+    source = BUILT_APP.parent
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(source.parent))
+
+    digest = hashlib.sha256()
+    with zip_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    manifest["sha256"] = digest.hexdigest()
+    manifest["size_bytes"] = zip_path.stat().st_size
+    manifest["asset_name"] = zip_path.name
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    print(f"  payload : {zip_path} ({zip_path.stat().st_size / 1048576:.1f} MB)")
+    print(f"  sha256  : {manifest['sha256']}")
+    print(f"  manifest updated: {manifest_path}")
+    print("\n  Rebuild the bootstrapper now so it carries this hash:")
+    print("    python tools/build_government_bond_futures_converter_bootstrapper.py")
+    return zip_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=f"Build and smoke-test {APP_NAME}.")
     parser.add_argument(
@@ -204,6 +255,11 @@ def main() -> int:
         action="store_true",
         help="Smoke-test the existing dist/ build instead of rebuilding it.",
     )
+    parser.add_argument(
+        "--package-runtime",
+        action="store_true",
+        help="After smoke-testing, zip the runtime payload and stamp its hash into the manifest.",
+    )
     args = parser.parse_args()
 
     if not args.skip_build:
@@ -211,6 +267,8 @@ def main() -> int:
     elif not BUILT_APP.is_file():
         raise SystemExit(f"--skip-build was passed but {BUILT_APP} does not exist")
     smoke_test(args.bloomberg)
+    if args.package_runtime:
+        package_runtime()
     return 0
 
 
