@@ -179,6 +179,25 @@ _FULL_PAYLOAD = {
     "volatility_source_unavailable_reason": None,
 }
 
+# The same full window as _FULL_PAYLOAD but for a submitted count of 180, used
+# by the verbatim-send test so what comes back describes the window that was
+# asked for. Dropping the earliest date keeps the last observation, and with it
+# the endpoints the card prints, while making the counts 180/179.
+_SUBMITTED_180_PAYLOAD = {
+    **_FULL_PAYLOAD,
+    "requested_observation_count": 180,
+    "observation_count": 180,
+    "yield_change_count": 179,
+    "observation_dates": _OBSERVATION_DATES[1:],
+    "first_observation_date": _OBSERVATION_DATES[1],
+    "volatility_source": {
+        **_FULL_PAYLOAD["volatility_source"],
+        "override_or_fallback_audit": "HISTORICAL_YIELD_VOL_MO FULL_WINDOW: calculated from "
+        "180 of the requested 180 Yield observations (179 Yield Changes); source unit PERCENT "
+        "normalized to DECIMAL_ANNUAL by factor 0.01.",
+    },
+}
+
 _SHORT_PAYLOAD = {
     **_FULL_PAYLOAD,
     "series_observation_count": 90,
@@ -392,8 +411,13 @@ def test_the_window_defaults_to_the_middle_office_horizon(server_url, page) -> N
 
 
 def test_the_query_above_is_reused_and_the_count_is_sent_verbatim(server_url, page) -> None:
+    # A NON-DEFAULT count on purpose: 180 proves the box is read rather than
+    # the 181 default being hard-coded somewhere. The routed answer describes
+    # that same 180-observation window, because a fixture answering 181 to a
+    # submitted 180 is an incoherent pairing no server could produce -- and it
+    # reads as the card accepting a window the trader did not ask for.
     _route_other_markets_away(page)
-    calls = _route_vol(page)
+    calls = _route_vol(page, payload=_SUBMITTED_180_PAYLOAD)
     _open_card(page, server_url)
     _fill_query(page, count="180")
     _calculate(page)
