@@ -256,17 +256,27 @@ def test_no_internal_branding_survives_the_whole_trader_flow(page, server_url) -
     _wait_until(page, lambda: "BKO 2.7 09/13/28" in _text(page, "d-ctd"))
     assert_unbranded("the Bloomberg CTD load")
 
-    # 3. a successful conversion
+    # 3. Details expanded
+    page.eval_on_selector("#advanced", "el => { el.open = true; }")
+    _wait_until(page, lambda: page.is_visible("#m-conversion-factor"))
+    assert_unbranded("expanding Details")
+
+    # 4. a successful conversion.
+    #
+    # Deliberately through the manual path: a BLOOMBERG-sourced conversion is
+    # re-fetched server-side, so it would only answer on a machine with a live
+    # Terminal and this test would pass locally and hang in CI. Typing the same
+    # pinned FGBS record drops the request to MANUAL, which the real pricing
+    # library answers from the values on screen -- deterministic anywhere, and
+    # it still renders every field this test is looking at.
+    manual_fgbs = {key: FGBS_CTD_PAYLOAD[key] for key in MANUAL_FIELD_IDS}
+    manual_fgbs["contract_code"] = "FGBS"
+    _fill_manual_ctd(page, manual_fgbs)
     page.fill("#futures-price", "105.065")
     page.click("#convert-btn")
     _wait_until(page, lambda: _text(page, "implied-yield") != "—")
     assert "%" in _text(page, "implied-yield")
     assert_unbranded("a successful conversion")
-
-    # 4. Details expanded
-    page.eval_on_selector("#advanced", "el => { el.open = true; }")
-    _wait_until(page, lambda: page.is_visible("#m-conversion-factor"))
-    assert_unbranded("expanding Details")
 
     # Belt and braces: the served files carry none of it either.
     for file_name in ("index.html", "app.css", "app.js"):
