@@ -41,6 +41,8 @@
     ctdMaturity: document.getElementById("fy-ctd-maturity"),
     conversionFactor: document.getElementById("fy-conversion-factor"),
     lastDelivery: document.getElementById("fy-last-delivery"),
+    firstAccrualStart: document.getElementById("fy-first-accrual-start"),
+    firstCouponDate: document.getElementById("fy-first-coupon-date"),
     asOf: document.getElementById("fy-as-of"),
     futuresPrice: document.getElementById("fy-futures-price"),
     targetYield: document.getElementById("fy-target-yield"),
@@ -203,6 +205,8 @@
     els.conversionFactor.value =
       ctd.conversion_factor == null ? "" : String(ctd.conversion_factor);
     els.lastDelivery.value = ctd.last_delivery_date || "";
+    els.firstAccrualStart.value = ctd.first_accrual_start || "";
+    els.firstCouponDate.value = ctd.first_coupon_date || "";
     els.asOf.value = ctd.as_of || "";
   }
 
@@ -229,6 +233,8 @@
       ctd_maturity_date: els.ctdMaturity.value || null,
       conversion_factor: numberOrRaw(els.conversionFactor.value.trim()),
       last_delivery_date: els.lastDelivery.value || null,
+      first_accrual_start: els.firstAccrualStart.value || null,
+      first_coupon_date: els.firstCouponDate.value || null,
       as_of: els.asOf.value.trim() || null,
     };
   }
@@ -417,6 +423,8 @@
     "ctdMaturity",
     "conversionFactor",
     "lastDelivery",
+    "firstAccrualStart",
+    "firstCouponDate",
     "asOf",
   ];
 
@@ -468,6 +476,18 @@
 
   CTD_INPUT_KEYS.forEach((key) => invalidateOnInput(key, true));
   ANSWER_ONLY_INPUT_KEYS.forEach((key) => invalidateOnInput(key, false));
+
+  // The schedule belongs to the bond named by the identifier: retyping the
+  // identifier orphans it, so it is cleared visibly in the form rather than
+  // silently submitted against the new bond. Programmatic fills (a Bloomberg
+  // load assigning `.value`) never fire input/change, so a fresh load still
+  // lands intact; only a human edit clears.
+  ["input", "change"].forEach((eventName) => {
+    els.ctdIdentifier.addEventListener(eventName, () => {
+      els.firstAccrualStart.value = "";
+      els.firstCouponDate.value = "";
+    });
+  });
 
   // Changing the contract is not an edit, it is a different instrument. The
   // CTD fields belong to the contract they were entered or loaded for, and

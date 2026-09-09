@@ -397,25 +397,58 @@ class IrregularFirstCoupon:
 
 
 @dataclass(frozen=True)
+class _FrameSegment:
+    """One quasi-period slice of an irregular first coupon period.
+
+    ``denominator_days`` is the actual day count of the nominal (regular)
+    reference period this slice belongs to -- the determination period
+    ending at the slice's end date. A stub ending at a quasi date shares
+    that date's reference period, exactly as ACT/ACT ICMA attributes each
+    accrued day to its own determination period.
+    """
+
+    start: date
+    end: date
+    denominator_days: int
+
+
+@dataclass(frozen=True)
 class _FirstCouponFrame:
     """The ICMA decomposition of one irregular first coupon period.
 
     The nominal (quasi) grid is the regular maturity-anchored grid; the
-    first actual coupon covers ``accrual_start`` -> ``first_coupon`` and is
-    worth ``first_factor`` whole coupons (full nominal periods plus the
-    stub fraction, all over ``nominal_days``). Accrued inside the first
-    period is one coupon times elapsed-since-accrual over ``nominal_days``;
-    discounting runs on the nominal grid. For a regular first coupon this
-    collapses exactly to the plain grid (factor 1, stub 0), which is why
-    seasoned bonds price identically with or without a schedule.
+    first actual coupon covers ``accrual_start`` -> ``first_coupon`` as a
+    run of ``segments`` (a stub slice plus whole nominal periods), each
+    divided by its own reference-period day count. ``first_factor`` is the
+    whole-first-coupon worth in regular coupons. Accrued inside the first
+    period sums elapsed segment fractions; discounting runs on the nominal
+    grid with the remaining fraction as the first exponent. A schedule
+    whose first coupon is exactly one regular period after accrual start
+    never becomes a frame at all -- the plain grid prices it identically.
     """
 
     accrual_start: date
     first_coupon: date
     nominal_prev: date
-    nominal_days: int
+    segments: tuple[_FrameSegment, ...]
     first_factor: float
     later_coupons: tuple[date, ...]
+
+    def elapsed_fraction(self, settlement_date: date) -> float:
+        """Elapsed first-period fraction at ``settlement_date`` (ICMA sum)."""
+
+        total = 0.0
+        for segment in self.segments:
+            if settlement_date >= segment.end:
+                total += (segment.end - segment.start).days / segment.denominator_days
+            elif settlement_date > segment.start:
+                total += (
+                    (settlement_date - segment.start).days / segment.denominator_days
+                )
+                break
+            else:
+                break
+        return total
 
 
 def _first_coupon_frame(
@@ -471,24 +504,36 @@ def _first_coupon_frame(
             f"{maturity_date.isoformat()} -- refusing to guess the reference period"
         )
     nominal_prev = max(candidate for candidate in grid_down if candidate < first_coupon)
-    nominal_days = (first_coupon - nominal_prev).days
-    first_after_accrual = min(
-        candidate for candidate in grid_down if candidate > accrual_start
-    )
-    stub_days = (first_after_accrual - accrual_start).days
-    full_periods = sum(
-        1 for candidate in grid_down if first_after_accrual <= candidate < first_coupon
-    )
-    later_coupons = tuple(
-        candidate for candidate in reversed(grid_down) if candidate > first_coupon
+    if accrual_start == nominal_prev and not any(
+        accrual_start < candidate < first_coupon for candidate in grid_down
+    ):
+        # Exactly one regular period: the plain grid prices this identically,
+        # so no frame -- seasoned and regular-first bonds never diverge.
+        return None
+    grid_up = sorted(candidate for candidate in grid_down if candidate > accrual_start)
+    segments = tuple(
+        _FrameSegment(
+            start=previous,
+            end=current,
+            denominator_days=(
+                current - max(candidate for candidate in grid_down if candidate < current)
+            ).days,
+        )
+        for previous, current in zip([accrual_start, *grid_up[:-1]], grid_up, strict=True)
+        if current <= first_coupon
     )
     return _FirstCouponFrame(
         accrual_start=accrual_start,
         first_coupon=first_coupon,
         nominal_prev=nominal_prev,
-        nominal_days=nominal_days,
-        first_factor=full_periods + stub_days / nominal_days,
-        later_coupons=later_coupons,
+        segments=segments,
+        first_factor=sum(
+            (segment.end - segment.start).days / segment.denominator_days
+            for segment in segments
+        ),
+        later_coupons=tuple(
+            candidate for candidate in reversed(grid_down) if candidate > first_coupon
+        ),
     )
 
 
@@ -618,7 +663,7 @@ def accrued_interest_per_100(
     frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
     coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
     if frame is not None:
-        return coupon_amount * (settlement_date - frame.accrual_start).days / frame.nominal_days
+        return coupon_amount * frame.elapsed_fraction(settlement_date)
     previous_coupon, next_coupon = coupon_period_bounds(
         settlement_date, maturity_date, coupons_per_year=coupons_per_year
     )
@@ -733,7 +778,7 @@ def _clean_price_first_coupon_frame(
         )
 
     coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
-    first_exponent = (frame.first_coupon - settlement_date).days / frame.nominal_days
+    first_exponent = frame.first_factor - frame.elapsed_fraction(settlement_date)
     dirty_price = frame.first_factor * coupon_amount / (1.0 + period_yield) ** first_exponent
     for index, coupon_date in enumerate(frame.later_coupons, start=1):
         cashflow = coupon_amount
@@ -741,9 +786,7 @@ def _clean_price_first_coupon_frame(
             cashflow += TREASURY_PAR
         dirty_price += cashflow / (1.0 + period_yield) ** (first_exponent + index)
 
-    return dirty_price - (
-        coupon_amount * (settlement_date - frame.accrual_start).days / frame.nominal_days
-    )
+    return dirty_price - coupon_amount * frame.elapsed_fraction(settlement_date)
 
 
 def yield_from_clean_price(

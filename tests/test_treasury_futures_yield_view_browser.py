@@ -701,3 +701,118 @@ def test_converting_with_neither_input_asks_for_one_instead_of_calling_the_serve
     page.click("#fy-convert-btn")
     _wait_until(lambda: not _is_actually_hidden(page, "fy-error"))
     assert "futures price" in page.text_content("#fy-error-detail")
+
+
+# Issue #204, Codex P1 #1: the first-coupon schedule must survive the
+# Bloomberg -> MANUAL round trip through visible form fields, never hidden
+# JS state, and must never stick to a retyped identifier.
+FGBS_SCHEDULE_CTD_ENTRY = {
+    "contract_code": "FGBS",
+    "contract_symbol": "DUZ6",
+    "ctd_identifier": "DE000BU22148",
+    "ctd_coupon_percent": 2.7,
+    "ctd_maturity_date": "2028-09-13",
+    "conversion_factor": 0.946091,
+    "last_delivery_date": "2026-12-10",
+    "first_accrual_start": "2026-07-16",
+    "first_coupon_date": "2027-09-13",
+    "as_of": "2026-09-08T00:00:00Z",
+}
+
+
+def _fill_fgbs_ctd_with_schedule(page) -> None:
+    page.select_option("#fy-contract-select", "FGBS")
+    page.fill("#fy-contract-symbol", FGBS_SCHEDULE_CTD_ENTRY["contract_symbol"])
+    page.fill("#fy-ctd-identifier", FGBS_SCHEDULE_CTD_ENTRY["ctd_identifier"])
+    page.fill("#fy-ctd-coupon", str(FGBS_SCHEDULE_CTD_ENTRY["ctd_coupon_percent"]))
+    page.fill("#fy-ctd-maturity", FGBS_SCHEDULE_CTD_ENTRY["ctd_maturity_date"])
+    page.fill("#fy-conversion-factor", str(FGBS_SCHEDULE_CTD_ENTRY["conversion_factor"]))
+    page.fill("#fy-last-delivery", FGBS_SCHEDULE_CTD_ENTRY["last_delivery_date"])
+    page.fill("#fy-first-accrual-start", FGBS_SCHEDULE_CTD_ENTRY["first_accrual_start"])
+    page.fill("#fy-first-coupon-date", FGBS_SCHEDULE_CTD_ENTRY["first_coupon_date"])
+    page.fill("#fy-as-of", FGBS_SCHEDULE_CTD_ENTRY["as_of"])
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_loaded_schedule_reaches_the_form_and_survives_an_edit_into_manual(
+    page, server_url
+) -> None:
+    loaded_ctd = treasury_futures_ctd_from_manual_entry(
+        dict(FGBS_SCHEDULE_CTD_ENTRY)
+    ).as_display_payload()
+    _open_futures_yield(page, server_url)
+    page.select_option("#fy-contract-select", "FGBS")
+    page.route(
+        "**/api/treasury-futures/ctd",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                dict(loaded_ctd, source="BLOOMBERG_DAPI", is_confirmed_source=True)
+            ),
+        ),
+    )
+    page.click("#fy-load-bloomberg-btn")
+    _wait_until(lambda: page.input_value("#fy-first-accrual-start") == "2026-07-16")
+    assert page.input_value("#fy-first-coupon-date") == "2027-09-13"
+
+    # An unrelated edit drops to MANUAL; the schedule must still be submitted.
+    page.fill("#fy-as-of", "2026-09-09T00:00:00Z")
+    page.fill("#fy-futures-price", "105.065")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+
+    ctd = treasury_futures_ctd_from_manual_entry(dict(FGBS_SCHEDULE_CTD_ENTRY))
+    expected = implied_yield_from_futures_price(ctd, 105.065).implied_yield_percent
+    assert page.text_content("#fy-implied-yield").strip() == f"{expected:.4f}%"
+    assert page.input_value("#fy-first-accrual-start") == "2026-07-16"
+    assert page.input_value("#fy-first-coupon-date") == "2027-09-13"
+
+
+@_PLAYWRIGHT_SKIP
+def test_a_genuine_manual_german_ctd_can_supply_both_dates(page, server_url) -> None:
+    _open_futures_yield(page, server_url)
+    _fill_fgbs_ctd_with_schedule(page)
+    page.fill("#fy-futures-price", "105.065")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+
+    ctd = treasury_futures_ctd_from_manual_entry(dict(FGBS_SCHEDULE_CTD_ENTRY))
+    expected = implied_yield_from_futures_price(ctd, 105.065).implied_yield_percent
+    assert expected == pytest.approx(3.044683, abs=1e-6)
+    assert page.text_content("#fy-implied-yield").strip() == f"{expected:.4f}%"
+
+
+@_PLAYWRIGHT_SKIP
+def test_changing_the_identifier_clears_the_schedule_visibly(page, server_url) -> None:
+    _open_futures_yield(page, server_url)
+    _fill_fgbs_ctd_with_schedule(page)
+    page.fill("#fy-ctd-identifier", "DE000BU2D004")
+    assert page.input_value("#fy-first-accrual-start") == ""
+    assert page.input_value("#fy-first-coupon-date") == ""
+
+    # With the schedule visibly gone, the answer prices the regular grid --
+    # never the previous bond's long first coupon smuggled in.
+    page.fill("#fy-futures-price", "105.065")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: page.text_content("#fy-implied-yield").strip() not in ("", "—"))
+
+    entry = dict(FGBS_SCHEDULE_CTD_ENTRY, ctd_identifier="DE000BU2D004")
+    del entry["first_accrual_start"]
+    del entry["first_coupon_date"]
+    expected = implied_yield_from_futures_price(
+        treasury_futures_ctd_from_manual_entry(entry), 105.065
+    ).implied_yield_percent
+    assert page.text_content("#fy-implied-yield").strip() == f"{expected:.4f}%"
+
+
+@_PLAYWRIGHT_SKIP
+def test_half_schedule_is_refused_in_the_panel(page, server_url) -> None:
+    _open_futures_yield(page, server_url)
+    _fill_fgbs_ctd_with_schedule(page)
+    page.fill("#fy-first-coupon-date", "")
+    page.fill("#fy-futures-price", "105.065")
+    page.click("#fy-convert-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "fy-error"))
+    assert "first-coupon schedule" in page.text_content("#fy-error-detail")
+    assert page.text_content("#fy-implied-yield").strip() == "—"

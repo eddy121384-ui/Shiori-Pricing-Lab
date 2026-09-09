@@ -43,6 +43,7 @@ from test_treasury_futures_ctd import (
 )
 
 from shiori_pricing_lab.app.standalone_option_workbench_server import (
+    load_treasury_futures_ctd,
     treasury_futures_contract_catalogue,
 )
 from shiori_pricing_lab.data.treasury_futures_ctd import (
@@ -77,12 +78,16 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     BOND_CONVENTION_PROFILE_BY_MARKET,
+    IrregularFirstCoupon,
     TreasuryFuturesYieldError,
+    _first_coupon_frame,
     _policy_for_market,
     _resolve_pricing_policy,
     accrued_interest_per_100,
+    clean_price_from_yield,
     futures_price_from_target_yield,
     implied_yield_from_futures_price,
+    yield_from_clean_price,
 )
 from shiori_pricing_lab.products.enums import DayCount, Frequency
 
@@ -865,8 +870,94 @@ def test_settlement_before_accrual_start_is_refused() -> None:
 
 
 # ---------------------------------------------------------------------------
+# RED regression: leap-year quasi periods use their own denominators (P1 #2)
+# ---------------------------------------------------------------------------
+#
+# Synthetic annual math fixture -- NOT market evidence. Maturity 2029-06-15
+# puts a 366-day nominal period (2027-06-15 -> 2028-06-15, holding
+# 2028-02-29) beside 365-day ones, so a single-denominator treatment is
+# observably wrong here while the all-365 YAS cases cannot tell.
+
+
+def _leap_schedule():
+    return IrregularFirstCoupon(date(2027, 1, 10), date(2028, 6, 15))
+
+
+def test_leap_stub_fraction_uses_its_own_nominal_period_denominator() -> None:
+    frame = _first_coupon_frame(
+        date(2027, 9, 20), date(2029, 6, 15), 1, _leap_schedule()
+    )
+    assert frame is not None
+    assert [(s.start, s.end, s.denominator_days) for s in frame.segments] == [
+        (date(2027, 1, 10), date(2027, 6, 15), 365),
+        (date(2027, 6, 15), date(2028, 6, 15), 366),
+    ]
+    # 156/365 + one full period -- not 522/366, not 522/365.
+    assert frame.first_factor == pytest.approx(156 / 365 + 1, abs=1e-12)
+
+
+def test_leap_accrued_spanning_the_quasi_boundary_sums_segment_fractions() -> None:
+    accrued = accrued_interest_per_100(
+        date(2027, 9, 20),
+        date(2029, 6, 15),
+        3.0,
+        coupons_per_year=1,
+        schedule=_leap_schedule(),
+    )
+    assert accrued == pytest.approx(3.0 * (156 / 365 + 97 / 366), abs=1e-12)
+    # A single denominator cannot reproduce this: total elapsed over either
+    # candidate reference period disagrees well beyond arithmetic noise.
+    assert abs(accrued - 3.0 * 253 / 366) > 1e-6
+    assert abs(accrued - 3.0 * 253 / 365) > 1e-6
+
+
+def test_leap_first_coupon_cashflow_uses_the_same_decomposition() -> None:
+    frame = _first_coupon_frame(
+        date(2027, 9, 20), date(2029, 6, 15), 1, _leap_schedule()
+    )
+    assert frame is not None
+    # 156 stub days over their own 365-day reference period, plus one full
+    # 366-day period counted whole: 3.0 * (156/365 + 1).
+    assert frame.first_factor * 3.0 == pytest.approx(3.0 * (156 / 365 + 1), abs=1e-12)
+
+
+def test_leap_price_yield_price_round_trip_is_stable() -> None:
+    price = clean_price_from_yield(
+        4.0, date(2027, 9, 20), date(2029, 6, 15), 3.0,
+        coupons_per_year=1, schedule=_leap_schedule(),
+    )
+    assert yield_from_clean_price(
+        price, date(2027, 9, 20), date(2029, 6, 15), 3.0,
+        coupons_per_year=1, schedule=_leap_schedule(),
+    ) == pytest.approx(4.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # Registry exposure: workbench catalogue and acceptance CLI
 # ---------------------------------------------------------------------------
+
+
+def test_bloomberg_fgbs_load_returns_the_live_schedule_for_the_panel(
+    monkeypatch,
+) -> None:
+    """Codex P1 #1 point 1: what the panel fills the schedule inputs from."""
+    resolved = LIVE_DELIVERY_SYMBOL["FGBS"]
+    live = LIVE_STAGE_TWO["FGBS"]
+    _install_fake_blpapi(
+        monkeypatch,
+        _three_stage_responder(
+            active_fields={"PARSEKYABLE_DES": f"{resolved} Comdty"},
+            stage_two_fields=dict(live),
+            schedule_fields=dict(LIVE_SCHEDULE["FGBS"]),
+            active=bloomberg_active_contract("FGBS"),
+            delivery=f"{resolved} Comdty",
+            bond=f"/isin/{live['FUT_CTD_ISIN']}",
+        ),
+    )
+    payload = load_treasury_futures_ctd({"contract_code": "FGBS"})
+    assert payload["is_confirmed_source"] is True
+    assert payload["first_accrual_start"] == "2026-07-16"
+    assert payload["first_coupon_date"] == "2027-09-13"
 
 
 def test_workbench_catalogue_lists_the_german_market_with_decimal_ticks() -> None:

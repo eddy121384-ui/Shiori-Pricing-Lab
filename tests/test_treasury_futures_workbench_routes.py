@@ -565,3 +565,49 @@ def test_the_view_never_offers_a_carry_or_net_basis_control() -> None:
         lowered = control.lower()
         for forbidden in ("basis", "repo", "carry"):
             assert forbidden not in lowered, control
+
+
+# ---------------------------------------------------------------------------
+# Manual first-coupon schedule (Issue #204, Codex P1 #1)
+# ---------------------------------------------------------------------------
+
+FGBS_MANUAL_CTD_WITH_SCHEDULE = {
+    "contract_code": "FGBS",
+    "contract_symbol": "DUZ6",
+    "ctd_identifier": "DE000BU22148",
+    "ctd_coupon_percent": 2.7,
+    "ctd_maturity_date": "2028-09-13",
+    "conversion_factor": 0.946091,
+    "last_delivery_date": "2026-12-10",
+    "first_accrual_start": "2026-07-16",
+    "first_coupon_date": "2027-09-13",
+    "as_of": "2026-09-08T00:00:00Z",
+}
+
+
+def test_manual_conversion_with_schedule_prices_the_irregular_first_path(
+    server_url: str,
+) -> None:
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd": dict(FGBS_MANUAL_CTD_WITH_SCHEDULE), "futures_price": 105.065},
+    )
+    assert status == 200
+    assert payload["implied_yield"]["implied_yield_percent"] == pytest.approx(
+        3.044683, abs=1e-6
+    )
+    assert payload["ctd"]["first_accrual_start"] == "2026-07-16"
+    assert payload["ctd"]["first_coupon_date"] == "2027-09-13"
+
+
+def test_manual_conversion_with_half_schedule_reports_the_refusal(
+    server_url: str,
+) -> None:
+    half = dict(FGBS_MANUAL_CTD_WITH_SCHEDULE)
+    del half["first_coupon_date"]
+    status, payload = _post(
+        f"{server_url}/api/treasury-futures/convert",
+        {"ctd": half, "futures_price": 105.065},
+    )
+    assert status == 400
+    assert "first-coupon schedule" in payload["error"]
