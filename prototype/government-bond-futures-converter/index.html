@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Government Bond Futures Converter</title>
+<link rel="stylesheet" href="app.css" />
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <span class="logo">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10"/><path d="M11 4l3 3-3 3"/><path d="M20 17H10"/><path d="M13 14l-3 3 3 3"/></svg>
+    </span>
+    <h1>Government Bond Futures Converter</h1>
+    <span class="spacer"></span>
+    <span class="pill" id="bloomberg-pill"><span class="dot"></span><span id="bloomberg-pill-text">Checking Bloomberg…</span></span>
+  </header>
+
+  <!-- Startup / Bloomberg failure. Carries its own Retry, so a trader who
+       arrives before the Terminal is logged in never has to restart the app. -->
+  <section class="banner is-error" id="error-banner" hidden>
+    <div class="banner-title" id="error-title">Unable to load</div>
+    <div class="banner-detail" id="error-detail">&mdash;</div>
+    <div class="banner-actions"><button type="button" class="btn" id="retry-btn">Retry</button></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">Contract</div>
+      <span class="card-summary" id="tick-summary">&mdash;</span>
+    </div>
+    <div class="card-body">
+      <div class="contract-row">
+        <div class="form-row">
+          <label for="contract-select">Contract</label>
+          <select class="control" id="contract-select" aria-describedby="tick-summary"></select>
+        </div>
+        <button type="button" class="btn" id="load-ctd-btn" title="Re-fetch the cheapest-to-deliver bond from Bloomberg">Reload Bloomberg CTD</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">Convert</div>
+      <span class="card-summary" id="convert-summary">&mdash;</span>
+    </div>
+    <div class="card-body">
+      <div class="convert-grid">
+        <div class="convert-cell">
+          <div class="form-row">
+            <label for="futures-price">Futures Price</label>
+            <input class="control mono" id="futures-price" type="text" autocomplete="off" placeholder="112-165 or 112.515625">
+          </div>
+          <div class="answer">
+            <span class="answer-label">Implied Yield</span>
+            <span class="answer-value mono" id="implied-yield">&mdash;</span>
+          </div>
+          <div class="answer-note" id="implied-yield-note">&mdash;</div>
+        </div>
+
+        <div class="convert-cell">
+          <div class="form-row">
+            <label for="target-yield">Target Yield (%)</label>
+            <input class="control mono" id="target-yield" type="text" inputmode="decimal" autocomplete="off" placeholder="4.20">
+          </div>
+          <div class="answer">
+            <span class="answer-label">Futures Price</span>
+            <span class="answer-value mono" id="futures-price-out">&mdash;</span>
+          </div>
+          <div class="answer-note" id="futures-price-note">&mdash;</div>
+        </div>
+      </div>
+
+      <div class="convert-actions">
+        <button type="button" class="btn primary" id="convert-btn">Convert</button>
+        <span class="convert-hint">Enter a futures price, a target yield, or both. Enter also converts.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">Cheapest to deliver</div>
+      <span class="card-summary" id="ctd-summary">&mdash;</span>
+    </div>
+    <div class="card-body">
+      <dl class="ctd-strip">
+        <div><dt>CTD</dt><dd id="d-ctd">&mdash;</dd></div>
+        <div><dt>Identifier</dt><dd class="mono" id="d-identifier">&mdash;</dd></div>
+        <div><dt>Coupon</dt><dd class="mono" id="d-coupon">&mdash;</dd></div>
+        <div><dt>Maturity</dt><dd class="mono" id="d-maturity">&mdash;</dd></div>
+        <div><dt>Conversion factor</dt><dd class="mono" id="d-cf">&mdash;</dd></div>
+        <div><dt>Delivery date</dt><dd class="mono" id="d-delivery">&mdash;</dd></div>
+        <div><dt>Source</dt><dd id="d-source">&mdash;</dd></div>
+        <div><dt>As of</dt><dd class="mono" id="d-as-of">&mdash;</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <!-- Advanced. Holds the methodology statement, the irregular-first schedule
+       fields (present only for some German CTDs) and the validated manual CTD
+       path, kept as a secondary mode -- none of it belongs on the normal
+       trader screen, whose fields are the contract, the connection, the two
+       inputs, the CTD and the result. -->
+  <details class="advanced" id="advanced">
+    <summary>Details &amp; manual CTD</summary>
+    <div class="advanced-body">
+      <!-- The selected contract's convention, verbatim from the server's own
+           catalogue. Never composed or edited here: it names the methodology
+           owner and the day-count basis the answer was computed on. -->
+      <div class="methodology" id="methodology">Select a contract to load its current cheapest-to-deliver bond from Bloomberg.</div>
+      <div class="advanced-note">
+        Loaded automatically from Bloomberg when you pick a contract. Editing any field
+        below switches this conversion to <strong>manual, unconfirmed</strong> input &mdash; the
+        answer is then computed from what is typed here, not from live market data.
+        Use <em>Reload Bloomberg CTD</em> to go back to the confirmed live record.
+      </div>
+      <div class="manual-grid">
+        <div class="form-row"><label for="m-contract-symbol">Contract symbol</label>
+          <input class="control mono" id="m-contract-symbol" type="text" autocomplete="off" placeholder="e.g. TYZ6"></div>
+        <div class="form-row"><label for="m-ctd-identifier">CTD (ISIN / CUSIP)</label>
+          <input class="control mono" id="m-ctd-identifier" type="text" autocomplete="off" placeholder="CTD security identifier"></div>
+        <div class="form-row"><label for="m-ctd-coupon">CTD coupon (%)</label>
+          <input class="control mono" id="m-ctd-coupon" type="text" inputmode="decimal" autocomplete="off" placeholder="e.g. 4.25"></div>
+        <div class="form-row"><label for="m-ctd-maturity">CTD maturity</label>
+          <input class="control mono" id="m-ctd-maturity" type="date"></div>
+        <div class="form-row"><label for="m-conversion-factor">Conversion factor</label>
+          <input class="control mono" id="m-conversion-factor" type="text" inputmode="decimal" autocomplete="off" placeholder="e.g. 0.8012"></div>
+        <div class="form-row"><label for="m-last-delivery">Last delivery date</label>
+          <input class="control mono" id="m-last-delivery" type="date"></div>
+        <div class="form-row"><label for="m-first-accrual-start">First accrual start</label>
+          <input class="control mono" id="m-first-accrual-start" type="date"></div>
+        <div class="form-row"><label for="m-first-coupon-date">First coupon date</label>
+          <input class="control mono" id="m-first-coupon-date" type="date"></div>
+        <div class="form-row"><label for="m-as-of">CTD as of</label>
+          <input class="control mono" id="m-as-of" type="text" autocomplete="off" placeholder="2026-09-09T03:25:52Z"></div>
+      </div>
+      <div class="advanced-actions">
+        <button type="button" class="btn" id="clear-ctd-btn">Clear CTD fields</button>
+      </div>
+    </div>
+  </details>
+
+  <p class="footnote" id="footnote">
+    Every number is computed by the production pricing library and shown exactly as returned.
+    No market data is cached, and no value is ever estimated when Bloomberg does not answer.
+  </p>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

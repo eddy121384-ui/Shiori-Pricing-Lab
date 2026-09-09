@@ -34,6 +34,10 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.5",
   "playwright>=1.40",
+  # Builds the Government Bond Futures Converter desk app (Issue #206) via
+  # packaging/government_bond_futures_converter.spec. Build-time only -- the
+  # shipped app bundles its own runtime and needs nothing installed.
+  "pyinstaller>=6.10",
 ]
 quant = [
   "QuantLib>=1.32",
