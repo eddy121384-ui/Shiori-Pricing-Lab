@@ -14,11 +14,15 @@
 //     (data/historical_yield_volatility.py), and the two figures are printed
 //     from the payload's own *_text strings -- Python's own repr of the two
 //     floats -- so what a trader reads is digit-for-digit what was computed;
-//   * guess a Yield field, a unit, a window length, or an expiry -> lookback
-//     mapping. The count box starts at Middle Office's confirmed 181
-//     observations -- their 180-Yield-Change 6M horizon -- and is sent
-//     verbatim; the unit is typed from workstation evidence and is never
-//     inferred, and the normalization it drives happens on the server;
+//   * guess a window length or an expiry -> lookback mapping on the trader's
+//     behalf. The count box starts at Middle Office's confirmed 181
+//     observations -- their 180-Yield-Change 6M horizon -- the shared Yield
+//     field box starts on YLD_YTM_MID and the unit box starts on PERCENT
+//     (Issue #208); all three are ordinary editable defaults, never
+//     server-side inferences, and whatever is currently in each box at
+//     submit time is sent verbatim. The unit is never inferred from a
+//     value's magnitude, and the normalization it drives happens on the
+//     server;
 //   * rescale anything. The headline figures are in the Yield field's own
 //     unit and the normalized volatility source is in DECIMAL_ANNUAL; both
 //     arrive already computed, each carrying its own unit label, and this
@@ -270,8 +274,9 @@
     if (!yieldField) {
       return {
         error:
-          "Enter the Bloomberg Yield field confirmed on the workstation above. This " +
-          "calculation has no default field and will not guess one.",
+          "Enter the Bloomberg Yield field confirmed on the workstation above. The box starts " +
+          "on YLD_YTM_MID as a convenience default, but with it cleared this calculation will " +
+          "not guess or substitute a field of its own.",
       };
     }
     if (!start || !end) return { error: "Enter both a start date and an end date above." };

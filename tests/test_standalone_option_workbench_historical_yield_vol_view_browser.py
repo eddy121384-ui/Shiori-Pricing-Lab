@@ -407,6 +407,22 @@ def test_the_window_defaults_to_the_middle_office_horizon(server_url, page) -> N
     assert page.input_value("#hyv-observation-count") == "181"
 
 
+def test_the_field_unit_starts_on_percent_and_stays_freely_editable(server_url, page) -> None:
+    # A UI convenience default (Issue #208), not a server-side inference:
+    # replacing it is what gets submitted, the same as any other input here.
+    _route_other_markets_away(page)
+    calls = _route_vol(page)
+    _open_card(page, server_url)
+
+    assert page.input_value("#hyv-field-unit") == "PERCENT"
+
+    _fill_query(page, unit="BASIS_POINTS")
+    _calculate(page)
+    _wait_for_result(page)
+
+    assert calls[0]["field_unit"] == "BASIS_POINTS"
+
+
 # --- what the page sends ------------------------------------------------------
 
 
@@ -447,6 +463,8 @@ def test_an_empty_unit_box_sends_no_unit_at_all(server_url, page) -> None:
 
 
 def test_no_yield_field_sends_no_request_at_all(server_url, page) -> None:
+    # The box carries a convenience default (Issue #208), but clearing it
+    # deliberately is still refused rather than guessed or substituted.
     _route_other_markets_away(page)
     calls = _route_vol(page)
     _open_card(page, server_url)
@@ -455,7 +473,7 @@ def test_no_yield_field_sends_no_request_at_all(server_url, page) -> None:
     _wait_until(lambda: not _is_actually_hidden(page, "hyv-error"))
 
     assert calls == []
-    assert "will not guess one" in page.inner_text("#hyv-error-detail")
+    assert "will not guess or substitute a field of its own" in page.inner_text("#hyv-error-detail")
 
 
 def test_a_non_integer_observation_count_sends_no_request_at_all(server_url, page) -> None:

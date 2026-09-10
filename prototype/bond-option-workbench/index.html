@@ -863,10 +863,12 @@
            Read-only. Loads one bond's own raw Bloomberg historical Yield
            series over an explicit date range and shows exactly those dated
            observations, numerically and graphically. Nothing here prices,
-           stores, captures, or computes a volatility statistic; the Yield
-           field is typed by the trader from workstation evidence and has no
-           default anywhere. The chart is inline SVG with no charting
-           library and no CDN. -->
+           stores, captures, or computes a volatility statistic. The Yield
+           field box starts pre-filled with YLD_YTM_MID as an operator
+           convenience (Issue #208); that is a UI default only, never a
+           server-side guess, and the trader is free to replace it with
+           whatever the workstation confirms. The chart is inline SVG with
+           no charting library and no CDN. -->
       <div class="markets-panel" id="markets-panel-yield-history" data-market-view="yield-history" hidden>
 
         <section class="card markets-header-card">
@@ -883,7 +885,7 @@
             </div>
             <div class="byh-field">
               <label class="byh-label" for="byh-yield-field">Bloomberg Yield field</label>
-              <input class="control" id="byh-yield-field" type="text" autocomplete="off" spellcheck="false" placeholder="confirmed mnemonic" />
+              <input class="control" id="byh-yield-field" type="text" autocomplete="off" spellcheck="false" placeholder="confirmed mnemonic" value="YLD_YTM_MID" />
             </div>
             <div class="byh-field byh-field-narrow">
               <label class="byh-label" for="byh-start">Start date</label>
@@ -896,8 +898,11 @@
             <span class="btn primary" id="byh-load-btn">Load</span>
           </div>
           <div class="byh-field-note">
-            The Yield field is not guessed and has no default: enter the mnemonic confirmed on the
-            Bloomberg workstation (<span class="mono">tools/bloomberg_bond_yield_field_probe.py</span>).
+            The Yield field starts on <span class="mono">YLD_YTM_MID</span> as an operator
+            convenience &mdash; it is never guessed or substituted by the server. Replace it with
+            whatever mnemonic the Bloomberg workstation confirms
+            (<span class="mono">tools/bloomberg_bond_yield_field_probe.py</span>) when the evidence
+            calls for a different field.
           </div>
           <div class="vol-surface-provenance" id="byh-provenance" hidden>
             <div class="vsp-item"><span class="vsp-k">Requested</span><span class="vsp-v mono" id="byh-requested-identifier">&mdash;</span></div>
@@ -926,59 +931,11 @@
           <div class="markets-error-detail" id="byh-error-detail">&mdash;</div>
         </section>
 
-        <section class="card markets-chart-card" id="byh-chart-card" hidden>
-          <div class="card-head">
-            <div class="card-title">Yield history</div>
-          </div>
-          <div class="card-body">
-            <div class="markets-chart-wrap">
-              <div class="markets-chart-ylabel" id="byh-chart-ylabel">Yield</div>
-              <div class="markets-chart-svg-wrap" id="byh-chart-svg-wrap"></div>
-            </div>
-            <div class="vol-surface-axis-note">
-              One dot per returned observation, positioned by its own observation date. Only the dots
-              are data. The line between them is a reading aid: it joins consecutive returned
-              observations and therefore does cross dates Bloomberg returned nothing for &mdash; a
-              weekend, a holiday, or a stretch this bond simply has no history over. Because the axis
-              is scaled by real dates, such a stretch shows as a wider empty span rather than as an
-              extra point; the table below is the authoritative record of exactly which dates came
-              back. A row Bloomberg <em>did</em> return but with no value is different: it is drawn as
-              no dot at all and the line breaks at it, never as zero and never as the previous
-              observation's number.
-            </div>
-          </div>
-        </section>
-
-        <section class="card markets-table-card" id="byh-table-card" hidden>
-          <div class="card-head">
-            <div class="card-title">Observations</div>
-            <div class="card-head-right">
-              <label class="byh-toggle"><input type="checkbox" id="byh-show-change" /> Show daily Yield change</label>
-            </div>
-          </div>
-          <div class="card-body">
-            <div class="markets-table-wrap">
-              <table class="markets-table" id="byh-table">
-                <thead>
-                  <tr><th>Date</th><th class="num">Yield</th><th class="num byh-change-col" hidden>&Delta; vs previous observation</th></tr>
-                </thead>
-                <tbody id="byh-table-body"></tbody>
-              </table>
-            </div>
-            <div class="byh-change-note" id="byh-change-note" hidden>
-              Display derivative only: each row's <span class="mono">Yield<sub>t</sub> &minus; Yield<sub>t&minus;1</sub></span>
-              against the <em>previous returned observation</em>, which is not necessarily the previous
-              calendar day. It is computed in this page for reading only, is never stored, and is not a
-              volatility statistic: nothing on this page computes a standard deviation or an
-              annualization from it. The Historical Yield Vol card below <em>does</em> show both, but
-              they are calculated server-side by the canonical calculator from its own Bloomberg
-              request &mdash; not from this column and not from this page.
-            </div>
-          </div>
-        </section>
-
-
-        <!-- ===== Historical Yield Vol (Issue #197) ===== -->
+        <!-- ===== Historical Yield Vol (Issue #197) =====
+             Shown before the raw chart/table (Issue #208 reorder) -- it is a
+             trader's primary reason to open this panel, and it does not
+             depend on the raw-data section below being loaded or open: the
+             two cards are wired to two independent Bloomberg requests. -->
         <section class="card hyv-card">
           <div class="card-head">
             <div class="card-title">Historical Yield Vol &mdash; Middle Office</div>
@@ -988,8 +945,8 @@
             <div class="hyv-intro">
               A Middle Office-style historical volatility of <em>this bond's own</em> Yield, calculated
               server-side: daily Yield <em>Change</em>, sample standard deviation, annualized by
-              &radic;252. It does <strong>not</strong> read the series displayed above &mdash; it sends
-              the same query to Bloomberg again and calculates from that answer, so its observations are
+              &radic;252. It does <strong>not</strong> read the series in the raw-data section below
+              &mdash; it sends the same query to Bloomberg again and calculates from that answer, so its observations are
               its own and its <span class="mono">Acquired at</span> below is the one that governs. If
               Bloomberg&rsquo;s answer changed between the two requests, the two panels are two
               acquisitions, not one. This is also <strong>not</strong> Bloomberg implied vol and not a
@@ -1003,7 +960,7 @@
               </div>
               <div class="byh-field">
                 <label class="byh-label" for="hyv-field-unit">Yield field unit (as confirmed)</label>
-                <input class="control" id="hyv-field-unit" type="text" autocomplete="off" spellcheck="false" placeholder="DECIMAL / PERCENT / BASIS_POINTS" />
+                <input class="control" id="hyv-field-unit" type="text" autocomplete="off" spellcheck="false" placeholder="DECIMAL / PERCENT / BASIS_POINTS" value="PERCENT" />
               </div>
               <span class="btn primary" id="hyv-calculate-btn">Calculate Historical Vol</span>
             </div>
@@ -1012,8 +969,10 @@
               request, then uses the most recent <span class="mono">N</span> observations
               <em>that</em> request returned. 181 observations is Middle Office's confirmed
               6M-style horizon of 180 Yield <em>Changes</em>; it is not derived from an expiry or a
-              tenor, so change it only against evidence. The unit is never inferred from how large
-              the numbers look. It is optional
+              tenor, so change it only against evidence. The unit starts on
+              <span class="mono">PERCENT</span> as an operator convenience and is never inferred
+              from how large the numbers look &mdash; replace it with whatever the workstation
+              confirms. It is optional
               for the calculation &mdash; without it the volatility is still calculated and shown in
               the field&rsquo;s own unit &mdash; but publishing to the normalized volatility source
               needs a declared <span class="mono">DECIMAL</span>, <span class="mono">PERCENT</span> or
@@ -1096,6 +1055,70 @@
             </div>
           </div>
         </section>
+
+        <!-- ===== Raw history: chart + table (Issue #196), collapsed by default (Issue #208) =====
+             Exposed only after a successful Load, and re-collapsed on every
+             fresh one -- the trader opens it deliberately, it never blocks
+             recalculating Historical Yield Vol above, and it never opens
+             itself back up behind the trader's back. byh-chart-card and
+             byh-table-card keep their own `hidden` toggling exactly as
+             before #208: this wrapper's hidden/open state governs whether
+             the section is visible at all, not whether the two cards inside
+             it are internally well-formed. -->
+        <details class="byh-raw-details" id="byh-raw-details" hidden>
+          <summary class="byh-raw-summary" id="byh-raw-summary">Historical Yield Data</summary>
+
+          <section class="card markets-chart-card" id="byh-chart-card" hidden>
+            <div class="card-head">
+              <div class="card-title">Yield history</div>
+            </div>
+            <div class="card-body">
+              <div class="markets-chart-wrap">
+                <div class="markets-chart-ylabel" id="byh-chart-ylabel">Yield</div>
+                <div class="markets-chart-svg-wrap" id="byh-chart-svg-wrap"></div>
+              </div>
+              <div class="vol-surface-axis-note">
+                One dot per returned observation, positioned by its own observation date. Only the dots
+                are data. The line between them is a reading aid: it joins consecutive returned
+                observations and therefore does cross dates Bloomberg returned nothing for &mdash; a
+                weekend, a holiday, or a stretch this bond simply has no history over. Because the axis
+                is scaled by real dates, such a stretch shows as a wider empty span rather than as an
+                extra point; the table below is the authoritative record of exactly which dates came
+                back. A row Bloomberg <em>did</em> return but with no value is different: it is drawn as
+                no dot at all and the line breaks at it, never as zero and never as the previous
+                observation's number.
+              </div>
+            </div>
+          </section>
+
+          <section class="card markets-table-card" id="byh-table-card" hidden>
+            <div class="card-head">
+              <div class="card-title">Observations</div>
+              <div class="card-head-right">
+                <label class="byh-toggle"><input type="checkbox" id="byh-show-change" /> Show daily Yield change</label>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="markets-table-wrap">
+                <table class="markets-table" id="byh-table">
+                  <thead>
+                    <tr><th>Date</th><th class="num">Yield</th><th class="num byh-change-col" hidden>&Delta; vs previous observation</th></tr>
+                  </thead>
+                  <tbody id="byh-table-body"></tbody>
+                </table>
+              </div>
+              <div class="byh-change-note" id="byh-change-note" hidden>
+                Display derivative only: each row's <span class="mono">Yield<sub>t</sub> &minus; Yield<sub>t&minus;1</sub></span>
+                against the <em>previous returned observation</em>, which is not necessarily the previous
+                calendar day. It is computed in this page for reading only, is never stored, and is not a
+                volatility statistic: nothing on this page computes a standard deviation or an
+                annualization from it. The Historical Yield Vol card above <em>does</em> show both, but
+                they are calculated server-side by the canonical calculator from its own Bloomberg
+                request &mdash; not from this column and not from this page.
+              </div>
+            </div>
+          </section>
+        </details>
 
       </div>
       <!-- /#markets-panel-yield-history -->

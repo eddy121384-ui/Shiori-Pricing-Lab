@@ -8,9 +8,12 @@
 //
 // What this file never does, and must never start doing:
 //
-//   * guess, default, remember, or substitute a Bloomberg Yield field. The
-//     mnemonic is typed by the trader from workstation evidence; with the box
-//     empty this view sends no request at all;
+//   * guess or substitute a Bloomberg Yield field on the trader's behalf. The
+//     box starts pre-filled with YLD_YTM_MID as an operator convenience
+//     (Issue #208) -- an ordinary editable default, not a server-side
+//     inference -- and whatever is currently in the box at submit time is
+//     what is sent, verbatim. With the box empty this view sends no request
+//     at all, exactly as before there was a default;
 //   * fill, interpolate, forward-fill, back-fill, smooth, or resample. A date
 //     Bloomberg did not answer for is absent -- it gets no row and no dot --
 //     and a returned row with no value is drawn as no dot and rendered as an
@@ -62,6 +65,8 @@
     tableBody: document.getElementById("byh-table-body"),
     showChange: document.getElementById("byh-show-change"),
     changeNote: document.getElementById("byh-change-note"),
+    rawDetails: document.getElementById("byh-raw-details"),
+    rawSummary: document.getElementById("byh-raw-summary"),
   };
   for (const key of Object.keys(els)) {
     if (!els[key]) return;
@@ -175,6 +180,14 @@
     const showSeries = section === "series";
     els.chartCard.hidden = !showSeries;
     els.tableCard.hidden = !showSeries;
+    // The collapsible wrapper (Issue #208) is exposed exactly when the two
+    // cards inside it are, and it is explicitly re-collapsed on every fresh
+    // successful load -- a trader who opened it on a previous bond must not
+    // find this one already open. `.open = false` is set unconditionally
+    // here rather than only once, because a native <details> otherwise keeps
+    // whatever open/closed state the trader last left it in.
+    els.rawDetails.hidden = !showSeries;
+    if (showSeries) els.rawDetails.open = false;
     // Provenance stays on screen for an empty series too: "Bloomberg returned
     // nothing for this field over this range" is an answer worth auditing.
     els.provenance.hidden = !(showSeries || section === "empty");
@@ -197,8 +210,9 @@
     if (!yieldField) {
       return {
         error:
-          "Enter the Bloomberg Yield field confirmed on the workstation. This view has no " +
-          "default field and will not guess one.",
+          "Enter the Bloomberg Yield field confirmed on the workstation. The box starts on " +
+          "YLD_YTM_MID as a convenience default, but with it cleared this view will not guess " +
+          "or substitute a field of its own.",
       };
     }
     if (!start || !end) return { error: "Enter both a start date and an end date." };
@@ -292,6 +306,12 @@
     els.chartYLabel.textContent = payload.field_unit
       ? `${payload.yield_field} (${payload.field_unit})`
       : `${payload.yield_field} (unit not confirmed)`;
+    // The collapsed section's own label (Issue #208): named by the count this
+    // response actually returned, so a trader can tell what is behind it
+    // without opening it. Set for the empty case too, even though the
+    // wrapper stays hidden there -- harmless, and one code path instead of two.
+    const count = payload.observations.length;
+    els.rawSummary.textContent = `Historical Yield Data — ${count} observation${count === 1 ? "" : "s"}`;
   }
 
   // ---- Table -----------------------------------------------------------------
