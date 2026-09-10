@@ -1,0 +1,84 @@
+{
+  "schema": "issue-153-phase-2-redacted-evidence-v1",
+  "notice": "Redacted manual transcription. No screenshot, raw payload, terminal identifier, credential, or unredacted security identifier is committed.",
+  "case": {
+    "case_id": "UST_OVME_CASE_A_20260804_REDACTED_V1",
+    "case_shape": "NO_COUPON_BEFORE_EXPIRY_CANDIDATE",
+    "qualification_status": "UNRESOLVED",
+    "redacted_underlying_key": "UST_CASE_A_UNDERLYING_REDACTED_V1",
+    "scope_confirmed": {"market": "UST", "bond_type": "FIXED_COUPON_BULLET", "exercise_style": "EUROPEAN", "payoff_basis": "PRICE"}
+  },
+  "provenance": {
+    "acquisition_method": "MANUAL_OVME_REDACTED_TRANSCRIPTION_PROVIDED_BY_EDDY",
+    "ovme_observation_timestamp": "2026-08-04T10:37:00+08:00",
+    "ovme_observation_timezone": "UTC+08:00",
+    "trade_settlement_date": "2026-08-05",
+    "evidence_reference_redacted": "USER_PROVIDED_LOCAL_CROP_NOT_COMMITTED",
+    "raw_material_committed": false
+  },
+  "product": {
+    "style": {"value": "VANILLA", "source": "MANUAL_OVME"},
+    "exercise": {"value": "EUROPEAN", "source": "MANUAL_OVME"},
+    "option_type": {"value": "CALL", "source": "MANUAL_OVME"},
+    "direction": {"value": "BUY", "source": "MANUAL_OVME"},
+    "model": {"value": "BLACK", "source": "MANUAL_OVME"},
+    "position_display": {"value": "1.00", "source": "MANUAL_OVME"},
+    "currency": {"value": "USD", "source": "MANUAL_OVME"}
+  },
+  "terms_and_dates": {
+    "valuation_date": {"value": "2026-08-04", "source": "SHIORI_DERIVED", "derivation": "calendar date of the explicit observation timestamp; not trade settlement"},
+    "pricing_timestamp": {"value": "2026-08-04T10:37:00+08:00", "source": "SHIORI_DERIVED", "derivation": "set equal to the recorded OVME observation timestamp for a prospective replay"},
+    "expiry_timestamp": {"value": "2026-10-04T06:20:00+08:00", "source": "MANUAL_OVME"},
+    "reporting_date": {"value": null, "source": "UNRESOLVED"},
+    "forward_settlement_date": {"value": null, "source": "UNRESOLVED"},
+    "option_settlement_date": {"value": null, "source": "UNRESOLVED"},
+    "delivery_delay_display": {"value": "1", "source": "MANUAL_OVME", "rule": "first business day after expiry", "calendar": null, "calendar_status": "UNRESOLVED"},
+    "bond_terms": {"issue_date": null, "coupon_rate_decimal": null, "coupon_frequency": null, "maturity_date": null, "first_coupon_date": null, "last_coupon_date": null, "day_count": null, "redemption_amount": null, "settlement_convention": null, "source": "UNRESOLVED", "capture_artifact": "LOCAL_ONLY_PENDING_EDDY_DAPI_RUN"}
+  },
+  "underlying_and_strike": {
+    "underlying_display_identifier_committed": false,
+    "quote_side": {"value": "MID", "source": "MANUAL_OVME"},
+    "underlying_clean_fraction_verbatim": {"value": "98-18+", "source": "MANUAL_OVME"},
+    "underlying_clean_price_per_100": {"value": 98.578125, "source": "SHIORI_DERIVED", "normalization": "TREASURY_32NDS_PLUS_HALF_32ND"},
+    "strike_clean_fraction_verbatim": {"value": "98-18+", "source": "MANUAL_OVME"},
+    "strike_clean_price_per_100": {"value": 98.578125, "source": "SHIORI_DERIVED", "normalization": "TREASURY_32NDS_PLUS_HALF_32ND"},
+    "strike_moneyness_label": {"value": "ATM", "source": "MANUAL_OVME"},
+    "strike_yield_decimal": {"value": 0.044355, "source": "SHIORI_DERIVED", "display_value": "4.4355%"}
+  },
+  "forward": {
+    "mode_label": {"value": "Carry", "source": "MANUAL_OVME"},
+    "display_fraction_verbatim": {"value": "98-16+", "source": "MANUAL_OVME"},
+    "explicit_clean_price_per_100": {"value": 98.515625, "source": "SHIORI_DERIVED", "normalization": "TREASURY_32NDS_PLUS_HALF_32ND"},
+    "repo_display_value": {"value": "3.77837%", "source": "MANUAL_OVME"},
+    "repo_source_curve_security_adjustment": {"value": null, "source": "UNRESOLVED", "display_status": "NOT DISPLAYED"},
+    "annex_forward": {"value": null, "source": "UNRESOLVED", "status": "DATA_ROUTE_MISSING"}
+  },
+  "volatility": {
+    "price_volatility_display": {"value": "3.942%", "source": "MANUAL_OVME"},
+    "price_volatility_decimal_annual": {"value": 0.03942, "source": "SHIORI_DERIVED", "basis": "PRICE_VOL"},
+    "normal_yield_vol_display": {"value": "87.000 bp", "source": "MANUAL_OVME", "use": "EVIDENCE_ONLY"},
+    "lognormal_yield_vol_display": {"value": "19.60%", "source": "MANUAL_OVME", "use": "EVIDENCE_ONLY"},
+    "conversion_mode": null
+  },
+  "discounting": {
+    "usd_rate_label": {"value": "MMkt", "source": "MANUAL_OVME"},
+    "displayed_rate": {"value": "3.704%", "source": "MANUAL_OVME"},
+    "curve_source_zero_representation_compounding_basis_interpolation_horizon": {"value": null, "source": "UNRESOLVED", "display_status": "NOT DISPLAYED"},
+    "shiori_option_discount_curve": {"value": null, "source": "UNRESOLVED", "status": "OWNER_DECISION_REQUIRED"}
+  },
+  "coupon_schedule": {"payment_dates": [], "coupons_in_valuation_expiry_window": [], "coupon_count": null, "accrued_interest_at_valuation_per_100": null, "accrued_interest_at_expiry_per_100": null, "accrued_interest_at_forward_settlement_per_100": null, "source": "UNRESOLVED", "qualification": "CASE_A_NO_COUPON_BEFORE_EXPIRY_UNRESOLVED"},
+  "premium": {
+    "ovme_buckets": [
+      {"label": "Price (Unit)", "display_verbatim": null, "normalized_value": null, "source": "UNRESOLVED", "mapping_status": "DISPLAY_BUCKET_UNRESOLVED"},
+      {"label": "Price (%)", "display_verbatim": "0.6159", "normalized_value": 0.6159, "source": "MANUAL_OVME", "mapping_status": "UNIT_MAPPING_UNRESOLVED"},
+      {"label": "Price (Total)", "display_verbatim": "6.07 USD", "normalized_value": 6.07, "currency": "USD", "source": "MANUAL_OVME", "mapping_status": "POSITION_SCALING_UNRESOLVED"}
+    ],
+    "shiori_model_fair_premium_per_100": null,
+    "shiori_total_notional_model_fair_premium": null,
+    "position_sign_applied_to_shiori_model_premium": false
+  },
+  "shiori_run_binding": {"pricing_status": "BLOCKED", "blocking_errors": ["Option settlement date cannot be derived without an approved business calendar.", "Reporting date is not evidenced.", "No approved OPTION_DISCOUNT_CURVE input or mapping from the observed MMkt display exists.", "Complete bond terms required for accrued interest are pending the local DAPI capture and owner-approved mappings."], "request_contract_name": "BLIStandaloneBondOptionRequest", "pricing_engine_name": null, "pricing_engine_version": null, "pricing_method": null, "contract_code_git_commit_sha": "3cb7940be3573ad7abee1548c78e420fffee8c8b", "normalized_request_sha256": null, "current_run_export_sha256": null, "assumptions": [], "warnings": ["No test-only curve assumption is presented as a market reconciliation."]},
+  "owner_decisions_required": ["Approved option-settlement business calendar and resulting exact date.", "Explicit reporting-date role for this replay.", "Approved Option Discount Curve source/normalization and whether the UST standalone horizon is expiry or option settlement/reporting."],
+  "unresolved": ["Price (Unit) verbatim display was not supplied in text and was not guessed.", "DAPI bond terms and schedule/accrual outputs await the local workstation capture.", "Repo source, curve mechanics, security-specific adjustment, unit basis and side.", "MMkt curve source, zero-rate representation, compounding, basis, interpolation and exact horizon.", "All OVME-to-Shiori premium-unit and position mappings."],
+  "redaction_check": {"contains_raw_bloomberg_payload": false, "contains_credentials": false, "contains_terminal_identifier": false, "contains_unredacted_screenshot": false, "contains_unredacted_underlying_identifier": false}
+}
