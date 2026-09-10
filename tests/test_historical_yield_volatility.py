@@ -417,6 +417,47 @@ def test_observation_dates_are_typed_before_they_are_ordered(dates):
     assert "calendar date" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("bad_row", [None, "2026-01-01", 42, object()])
+def test_a_row_that_is_not_an_observation_fails_closed(bad_row):
+    # The row is typed before anything is read off it. This guard exists for
+    # producers that are not the #196 loader, and it used to dereference
+    # `.observation_date` on whatever the sequence held -- so `(None,)` raised
+    # AttributeError instead of this module's one error type, and the route
+    # answered HTTP 500 under a docstring promising HTTP 400 (Codex review,
+    # PR #200).
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    broken = dataclasses.replace(history, observations=(bad_row,) + history.observations[1:])
+
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(broken, requested_observation_count=4)
+
+    assert "BondYieldObservation" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad_series", [None, "abc", 123, 4.5])
+def test_a_series_that_is_not_a_sequence_fails_closed(bad_series):
+    # The neighbouring case one level up: `observations=None` is not iterable
+    # and raised TypeError, which is the same contract breach as a malformed
+    # row. Codex reported the row; this is the container.
+    broken = dataclasses.replace(_history([4.00, 4.10, 3.80]), observations=bad_series)
+
+    with pytest.raises(HistoricalYieldVolInputError) as excinfo:
+        calculate_historical_yield_volatility(broken, requested_observation_count=3)
+
+    assert "must be a sequence" in str(excinfo.value)
+
+
+def test_an_empty_series_is_still_a_legitimate_no_history():
+    # The sequence guard must not swallow the honest empty answer: zero
+    # observations is NO_HISTORY, not a malformed series.
+    result = calculate_historical_yield_volatility(
+        _history([]), requested_observation_count=181
+    )
+
+    assert result.window_status is HistoricalYieldVolStatus.NO_HISTORY
+    assert result.blockers != ()
+
+
 def test_an_integer_no_float_represents_exactly_fails_closed():
     """The one finding so far that was a wrong number, not a refusal.
 

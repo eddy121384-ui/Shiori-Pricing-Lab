@@ -516,8 +516,32 @@ def _require_consistent_observation_dates(history: BloombergBondYieldHistory) ->
             f"{history.requested_end_date.isoformat()}"
         )
 
+    # The series itself before the rows in it: `observations=None` is not
+    # iterable and raised TypeError one line below, which is the same contract
+    # breach as a malformed row, one level up. Codex reported the row; fixing
+    # only what was reported is how this PR kept finding the same defect in a
+    # second location.
+    if not isinstance(history.observations, Sequence) or isinstance(
+        history.observations, (str, bytes)
+    ):
+        raise HistoricalYieldVolInputError(
+            f"the historical Yield series for {history.security!r} must be a sequence of "
+            f"BondYieldObservation, got {type(history.observations).__name__}"
+        )
+
     previous: date | None = None
     for observation in history.observations:
+        # The row itself is typed before anything is read off it (Codex
+        # review, PR #200). This guard existed for producers that are not the
+        # #196 loader, and then dereferenced `.observation_date` on whatever
+        # the sequence held -- so `observations=(None,)` raised AttributeError
+        # rather than this module's one error type, and the route answered
+        # HTTP 500 under a docstring promising HTTP 400.
+        if not isinstance(observation, BondYieldObservation):
+            raise HistoricalYieldVolInputError(
+                f"every entry in the historical Yield series for {history.security!r} must be "
+                f"a BondYieldObservation, got {observation!r} ({type(observation).__name__})"
+            )
         # Typed before compared (Codex review, PR #200). `<=` on a mixed
         # date/None or date/str sequence raises TypeError -- not this module's
         # error type -- and an all-string sequence orders lexicographically,
