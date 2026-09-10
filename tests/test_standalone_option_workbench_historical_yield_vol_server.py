@@ -611,9 +611,10 @@ def _served_block(page: str, pattern: str) -> str:
 _EXPECTED_CARD_INTRO = """
     A Middle Office-style historical volatility of <em>this bond's own</em> Yield, calculated
     server-side: daily Yield <em>Change</em>, sample standard deviation, annualized by
-    &radic;252. It does <strong>not</strong> read the series displayed above &mdash; it sends
-    the same query to Bloomberg again and calculates from that answer, so its observations are
-    its own and its <span class="mono">Acquired at</span> below is the one that governs. If
+    &radic;252. It does <strong>not</strong> read the series in the raw-data section below
+    &mdash; it sends the same query to Bloomberg again and calculates from that answer, so
+    its observations are its own and its <span class="mono">Acquired at</span> below is the
+    one that governs. If
     Bloomberg&rsquo;s answer changed between the two requests, the two panels are two
     acquisitions, not one. This is also <strong>not</strong> Bloomberg implied vol and not a
     VCUB number, and it is not wired into pricing &mdash; it is a Yield Vol, and no approved
@@ -625,8 +626,10 @@ _EXPECTED_CARD_NOTE = """
     request, then uses the most recent <span class="mono">N</span> observations <em>that</em>
     request returned. 181 observations is Middle Office's confirmed 6M-style horizon of 180
     Yield <em>Changes</em>; it is not derived from an expiry or a tenor, so change it only
-    against evidence. The unit is never inferred from
-    how large the numbers look. It is optional for the calculation &mdash; without it the
+    against evidence. The unit starts on
+    <span class="mono">PERCENT</span> as an operator convenience and is never inferred
+    from how large the numbers look &mdash; replace it with whatever the workstation
+    confirms. It is optional for the calculation &mdash; without it the
     volatility is still calculated and shown in the field&rsquo;s own unit &mdash; but
     publishing to the normalized volatility source needs a declared <span
     class="mono">DECIMAL</span>, <span class="mono">PERCENT</span> or <span

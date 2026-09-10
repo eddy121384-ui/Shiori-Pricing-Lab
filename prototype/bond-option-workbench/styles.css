@@ -996,13 +996,34 @@ select.control:focus { border-color: var(--blue); }
   font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--muted);
 }
-/* The Yield field is typed from workstation evidence, never defaulted -- this
-   note stays visible whether or not a series has been loaded. */
+/* The Yield field box starts pre-filled with an operator-convenience default
+   (Issue #208); this note stays visible whether or not a series has been
+   loaded, and says so, but never claims the server guesses or infers it. */
 .byh-field-note { margin-top: 10px; font-size: 12px; color: var(--muted); }
 .byh-toggle { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
 .byh-change-note { margin-top: 10px; font-size: 12px; color: var(--muted); }
 .byh-chart-empty { font-size: 12.5px; color: var(--muted-2); padding: 18px 0; }
 .markets-chart-svg-wrap .byh-dot { fill: var(--chart-line); }
+
+/* Raw chart/table, collapsed behind a native <details> by default (Issue
+   #208). The summary is left mixed-case -- unlike the uppercase .card-title
+   convention around it -- because it states the returned observation count
+   as its own sentence ("Historical Yield Data — N observations"), not a
+   section label; `text-transform: uppercase` would SHOUT the count too, and
+   a browser's own `innerText` renders CSS text-transform, so a test reading
+   the visible summary text would have to shout it right back. The two cards
+   inside keep the same 9px rhythm they had as direct .main children before
+   this wrapper existed (.main's flex `gap` no longer reaches them). */
+.byh-raw-details { margin-top: 0; }
+.byh-raw-details[hidden] { display: none; }
+.byh-raw-details > summary {
+  cursor: pointer;
+  font-size: 12.5px; font-weight: 700;
+  color: #55607a;
+  padding: 4px 0;
+}
+.byh-raw-details[open] > summary { margin-bottom: 9px; }
+.byh-raw-details > .markets-chart-card { margin-bottom: 9px; }
 
 /* ===== Historical Yield Vol -- Middle Office (Issue #197) ============== */
 

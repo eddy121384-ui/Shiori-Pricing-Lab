@@ -201,6 +201,15 @@ def _wait_for_series(page) -> None:
     _wait_until(lambda: not _is_actually_hidden(page, "byh-table-card"))
 
 
+def _open_raw_details(page) -> None:
+    # The raw chart/table live behind a native <details> that is closed by
+    # default after every successful Load (Issue #208), so anything inside
+    # it -- the daily-change checkbox included -- is not actionable until a
+    # trader (or this test) opens it, exactly like a real click would.
+    page.click("#byh-raw-summary")
+    _wait_until(lambda: page.is_visible("#byh-show-change"))
+
+
 def _table_rows(page):
     return page.evaluate(
         """() => Array.from(document.querySelectorAll('#byh-table-body tr')).map(
@@ -262,6 +271,8 @@ def test_opening_the_view_loads_nothing_on_its_own(server_url, page) -> None:
 
 
 def test_an_empty_yield_field_sends_no_request_at_all(server_url, page) -> None:
+    # The box carries a convenience default (Issue #208), but clearing it
+    # deliberately is still refused rather than guessed or substituted.
     _route_other_markets_away(page)
     calls = _route_history(page)
     _open_yield_history(page, server_url)
@@ -270,7 +281,7 @@ def test_an_empty_yield_field_sends_no_request_at_all(server_url, page) -> None:
     _wait_until(lambda: not _is_actually_hidden(page, "byh-error"))
 
     assert calls == []
-    assert "no default field" in page.inner_text("#byh-error-detail")
+    assert "will not guess or substitute a field of its own" in page.inner_text("#byh-error-detail")
 
 
 def test_the_traders_own_field_is_what_is_requested(server_url, page) -> None:
@@ -291,6 +302,32 @@ def test_the_traders_own_field_is_what_is_requested(server_url, page) -> None:
     ]
 
 
+# --- editable defaults (Issue #208) -------------------------------------------
+
+
+def test_the_yield_field_starts_on_yld_ytm_mid_and_stays_freely_editable(
+    server_url, page
+) -> None:
+    """A UI convenience default, never a server-side guess.
+
+    The box is pre-filled so a trader is not forced to type the common case
+    every time, but nothing about that changes what gets sent: replacing it
+    is what is submitted, exactly like any other editable input.
+    """
+
+    _route_other_markets_away(page)
+    calls = _route_history(page)
+    _open_yield_history(page, server_url)
+
+    assert page.input_value("#byh-yield-field") == "YLD_YTM_MID"
+
+    _fill_query(page, field="ANOTHER_TEST_FIELD")
+    _load(page)
+    _wait_for_series(page)
+
+    assert calls[0]["yield_field"] == "ANOTHER_TEST_FIELD"
+
+
 def test_an_inverted_date_range_is_refused_before_the_request(server_url, page) -> None:
     _route_other_markets_away(page)
     calls = _route_history(page)
@@ -301,6 +338,111 @@ def test_an_inverted_date_range_is_refused_before_the_request(server_url, page) 
 
     assert calls == []
     assert "must not be after" in page.inner_text("#byh-error-detail")
+
+
+# --- layout: Historical Yield Vol before raw history, collapsed (Issue #208) --
+
+
+def test_historical_yield_vol_appears_before_the_raw_data_section(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_history(page)
+    _open_yield_history(page, server_url)
+    _fill_query(page)
+    _load(page)
+    _wait_for_series(page)
+
+    # DOM order, not visual position: unambiguous regardless of CSS.
+    hyv_before_raw = page.evaluate(
+        """() => {
+             const hyv = document.querySelector('#markets-panel-yield-history .hyv-card');
+             const raw = document.getElementById('byh-raw-details');
+             const relation = hyv.compareDocumentPosition(raw);
+             return Boolean(relation & Node.DOCUMENT_POSITION_FOLLOWING);
+           }"""
+    )
+    assert hyv_before_raw is True
+
+
+def test_the_raw_data_section_is_exposed_closed_and_named_by_its_count(
+    server_url, page
+) -> None:
+    _route_other_markets_away(page)
+    _route_history(page)
+    _open_yield_history(page, server_url)
+    _fill_query(page)
+    _load(page)
+    _wait_for_series(page)
+
+    # Exposed -- the wrapper itself is no longer [hidden] once a series loads.
+    assert not _is_actually_hidden(page, "byh-raw-details")
+    # But CLOSED: a native <details> defaults to closed, and showOnly()
+    # re-asserts that explicitly on every fresh successful load so a trader
+    # who left it open for a previous bond does not carry that state forward.
+    assert page.eval_on_selector("#byh-raw-details", "el => el.open") is False
+    assert (
+        page.inner_text("#byh-raw-summary")
+        == f"Historical Yield Data — {len(_OBSERVATIONS)} observations"
+    )
+
+
+def test_opening_the_raw_data_section_reveals_the_chart_and_table(server_url, page) -> None:
+    _route_other_markets_away(page)
+    _route_history(page)
+    _open_yield_history(page, server_url)
+    _fill_query(page)
+    _load(page)
+    _wait_for_series(page)
+
+    # Closed: neither is actionable/visible to a trader yet, even though both
+    # were already rendered into the DOM (Codex-caught cases elsewhere in
+    # this suite read them by attribute regardless of visibility -- this
+    # assertion is deliberately the opposite check, on rendered visibility).
+    assert not page.is_visible("#byh-chart-svg-wrap svg")
+    assert not page.is_visible("#byh-table")
+
+    page.click("#byh-raw-summary")
+
+    assert page.is_visible("#byh-chart-svg-wrap svg")
+    assert page.is_visible("#byh-table")
+
+
+def test_recalculating_historical_yield_vol_does_not_need_the_raw_section_open(
+    server_url, page
+) -> None:
+    """The two cards are two independent Bloomberg requests (Issue #197/#208).
+
+    Loading the raw #196 history leaves the collapsible section closed; the
+    Historical Yield Vol card above it must calculate successfully without
+    the trader ever opening that section, and opening it is never a
+    side-effect of calculating.
+    """
+
+    from test_standalone_option_workbench_historical_yield_vol_view_browser import (
+        _FULL_PAYLOAD,
+    )
+
+    _route_other_markets_away(page)
+    _route_history(page)
+    _open_yield_history(page, server_url)
+    _fill_query(page)
+    _load(page)
+    _wait_for_series(page)
+
+    assert page.eval_on_selector("#byh-raw-details", "el => el.open") is False
+
+    hyv_calls: list[dict] = []
+
+    def _handle_hyv(route):
+        hyv_calls.append(json.loads(route.request.post_data))
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(_FULL_PAYLOAD))
+
+    page.route("**/api/bloomberg/historical-yield-vol", _handle_hyv)
+    page.click("#hyv-calculate-btn")
+    _wait_until(lambda: not _is_actually_hidden(page, "hyv-result"))
+
+    assert len(hyv_calls) == 1
+    # Untouched by the calculation that just happened.
+    assert page.eval_on_selector("#byh-raw-details", "el => el.open") is False
 
 
 # --- the table shows exactly what came back -----------------------------------
@@ -371,6 +513,10 @@ def test_an_unconfirmed_unit_is_never_claimed(server_url, page) -> None:
 
     assert page.inner_text("#byh-field-unit") == "Not confirmed by this request"
     assert page.inner_text("#byh-field-meaning") == "Not confirmed by this request"
+    # The y-axis label lives inside the collapsed raw-data section (Issue
+    # #208): open it before reading rendered text, exactly as a trader would
+    # have to.
+    _open_raw_details(page)
     assert "unit not confirmed" in page.inner_text("#byh-chart-ylabel")
 
 
@@ -387,6 +533,7 @@ def test_a_confirmed_unit_is_shown_verbatim(server_url, page) -> None:
 
     assert page.inner_text("#byh-field-unit") == "percent"
     assert page.inner_text("#byh-field-meaning") == "Synthetic test meaning"
+    _open_raw_details(page)
     assert page.inner_text("#byh-chart-ylabel") == f"{_FIELD} (percent)"
 
 
@@ -578,6 +725,7 @@ def test_the_daily_change_is_exact_and_never_bridges_a_hole(server_url, page) ->
     _fill_query(page)
     _load(page)
     _wait_for_series(page)
+    _open_raw_details(page)
     page.check("#byh-show-change")
 
     rows = _table_rows(page)
@@ -598,6 +746,7 @@ def test_the_daily_change_carries_no_volatility_statistic(server_url, page) -> N
     _fill_query(page)
     _load(page)
     _wait_for_series(page)
+    _open_raw_details(page)
     page.check("#byh-show-change")
 
     panel_text = page.inner_text("#markets-panel-yield-history").lower()
@@ -669,6 +818,7 @@ def test_the_view_calls_only_the_one_read_only_route(server_url, page) -> None:
     _fill_query(page)
     _load(page)
     _wait_for_series(page)
+    _open_raw_details(page)
     page.check("#byh-show-change")
 
     assert page.evaluate("() => window.__shioriTestYieldHistoryRequestedRoutes()") == [
