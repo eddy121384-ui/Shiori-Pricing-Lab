@@ -15,9 +15,11 @@ not touch pricing, the VCUB store or resolver, PRICE_VOL/YIELD_VOL, Forward,
 or Discounting, and it never selects a benchmark or proxy series when the
 bond's own history is thin or absent. Issue #196 stops at the observations.
 The statistic lives in the separate module named above, under its own issue
-and its own approval -- which, at the time of writing, it has not yet
-received: #197's convention is provisional pending a Middle Office parity
-run, and nothing in this module depends on how that lands.
+and its own approval. Its convention is no longer provisional: the Middle
+Office parity run passed, fixing a horizon of 180 Yield Changes over 181
+observations, STDEV.S (ddof=1) and sqrt(252). Approval is a separate thing
+and #197 has not received it, so that module stays unmerged -- and nothing
+in this module depends on either fact.
 
 **The Yield field is never guessed here.** ``yield_field`` is a required,
 caller-supplied Bloomberg mnemonic with no default anywhere in this module,
