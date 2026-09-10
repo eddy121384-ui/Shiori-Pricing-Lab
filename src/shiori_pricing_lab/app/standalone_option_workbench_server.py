@@ -297,6 +297,26 @@ a newer schema version, a missing one, a file that is not a vol-surface
 store -- is refused rather than repaired, and a store with no database file
 yet simply holds nothing.
 
+**Issue #197: Middle Office Historical Yield Vol.** One more read-only route
+behind the same Markets -> Bond Yield History view,
+``POST /api/bloomberg/historical-yield-vol``. It calls the merged Issue #196
+loader for the bond's own Yield series and then the one canonical calculator
+``data/historical_yield_volatility.calculate_historical_yield_volatility``,
+and returns that calculation with everything needed to reproduce it:
+requested vs actual observation counts, the dates used, the number of Yield
+Changes, the standard-deviation convention, the annualization factor, the
+daily and annualized figures, the unit, both timestamps, the window status
+and any blocker. It creates no second historical-data path, computes no
+statistic of its own, and stores nothing.
+
+The result is a **Yield Vol** and stops there. It is published only as the
+normalized ``HISTORICAL_YIELD_VOL_MO`` source, distinct from VCUB, from a
+manual override and from PRICE_VOL/EQUIVALENT_PRICE_VOL, and reaches no
+pricing route: the required-input guard refuses ``YIELD_VOL`` outright and
+this issue does not change that. Nothing about VCUB capture/store/resolution,
+the Forward, the Option Discount Curve, the DCF conventions or Black-76 is
+touched by this route.
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -368,6 +388,18 @@ from shiori_pricing_lab.data.bloomberg_usd_sofr_par_rate_curve import (
 from shiori_pricing_lab.data.bloomberg_vcub_capture import VCUBATMCapture
 from shiori_pricing_lab.data.bloomberg_vcub_ocr import VCUBOCRUnavailableError
 from shiori_pricing_lab.data.bloomberg_vcub_otm_capture import VCUBOTMCapture
+from shiori_pricing_lab.data.historical_yield_volatility import (
+    HISTORICAL_YIELD_VOL_MO_SOURCE,
+    MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+    PUBLISHED_VOLATILITY_UNIT,
+    HistoricalYieldVolInputError,
+    HistoricalYieldVolUnavailableError,
+    calculate_historical_yield_volatility,
+    decimal_annual_normalization_factor,
+    historical_yield_vol_volatility_input,
+    result_shape_problem,
+    validate_requested_observation_count,
+)
 from shiori_pricing_lab.data.treasury_futures_ctd import (
     TreasuryFuturesCTDBloombergError,
     TreasuryFuturesCTDError,
@@ -449,6 +481,10 @@ _STATIC_FILES = {
     ),
     "/bond_yield_history_view.js": (
         "bond_yield_history_view.js",
+        "application/javascript; charset=utf-8",
+    ),
+    "/historical_yield_vol_view.js": (
+        "historical_yield_vol_view.js",
         "application/javascript; charset=utf-8",
     ),
 }
@@ -670,7 +706,14 @@ DEFAULT_PORT = 8765
 # bond_yield_history_view.js as new served content. A stale -v26 process
 # would 404 this route and never serve the new static file, so the view
 # would look available and do nothing.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v27"
+# Bumped to -v28 for Issue #197's Middle Office Historical Yield Vol: the
+# server gained the read-only route POST /api/bloomberg/historical-yield-vol,
+# plus that card's own static file historical_yield_vol_view.js. A stale -v27
+# process serves this commit's page -- whose Bond Yield History view now has a
+# Historical Yield Vol card with its own Calculate button -- against a route
+# table that 404s that route and never serves the new file, so the card would
+# look available and compute nothing.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v28"
 
 
 def load_base_case() -> dict:
@@ -2440,8 +2483,13 @@ def fetch_bloomberg_bond_yield_history(body: dict) -> dict:
     including its raw Bloomberg value string and an explicit ``null`` for a
     returned row that carried no value. Nothing is filled, interpolated,
     rounded, resampled, or converted, and no Yield Change, standard
-    deviation, annualization, or volatility is computed here or anywhere
-    downstream of here in this issue.
+    deviation, annualization, or volatility is computed here.
+
+    Issue #197 later added a statistic, and it is deliberately not here: it
+    lives behind its own route, :func:`fetch_historical_yield_volatility`,
+    which makes its own acquisition through the same #196 loader. This route
+    still answers exactly what Bloomberg returned and nothing more, and no
+    consumer of this payload computes a volatility from it.
 
     Raises ``ValueError`` for a malformed request body or identifier, and
     ``BLIBloombergDapiError`` for any Bloomberg-side failure -- never caught
@@ -2486,6 +2534,189 @@ def fetch_bloomberg_bond_yield_history(body: dict) -> dict:
             }
             for observation in history.observations
         ],
+    }
+
+
+_HISTORICAL_YIELD_VOL_REQUIRED_KEYS = ("bond_identifier", "yield_field", "start_date", "end_date")
+
+_HISTORICAL_YIELD_VOL_PROVENANCE_KEYS = ("field_meaning", "field_unit")
+
+
+def fetch_historical_yield_volatility(body: dict) -> dict:
+    """Calculate one bond's Middle Office-style Historical Yield Vol (Issue #197).
+
+    Two calls, in this order, and nothing else: the one canonical Issue #196
+    loader :func:`load_bloomberg_bond_yield_history` for the bond's own Yield
+    series -- reached through the same :func:`parse_bond_identifier` bridge
+    :func:`fetch_bloomberg_bond_yield_history` already uses, so no second
+    historical-data path exists -- and then the one canonical calculator
+    :func:`calculate_historical_yield_volatility` for the statistic. This
+    bridge computes no Yield Change, no standard deviation and no
+    annualization of its own; it serializes what the calculator returned.
+
+    The series is re-loaded here rather than taken from whatever the browser
+    is currently displaying. A trader who loads a history and then calculates
+    a vol therefore spends two Bloomberg round trips, deliberately: an
+    observation this process did not fetch and validate itself is not
+    evidence, and the result's provenance -- security, field, range, dates
+    used, acquisition timestamp -- then describes its own acquisition rather
+    than a page's state.
+
+    What that provenance does and does not support, precisely (Codex review,
+    PR #200). It carries everything Issue #197 §3 asks for: enough to
+    *re-issue* the identical request and to *re-run* the identical convention
+    over its answer. It does **not** carry the Yield values or the Yield
+    Changes the statistic was taken over, so the arithmetic cannot be
+    replayed from this payload by itself -- and once Bloomberg's answer for
+    that range changes, re-issuing the request no longer reproduces these
+    figures either. A consumer needing the values has the #196 route for the
+    same query.
+
+    ``acquired_at`` is temporal provenance, not an acquisition identifier
+    (Codex review, PR #200): the #196 loader stamps it to whole seconds, so
+    two requests answered inside the same second carry the same string. Two
+    *different* timestamps prove two acquisitions; two equal ones prove
+    nothing, and nothing here should be read as licence to pair one
+    response's values with another response's statistic.
+
+    ``requested_observation_count`` is optional and defaults to Middle
+    Office's confirmed 6M-style horizon, which is 180 Yield *Changes* and
+    therefore 181 observations. It is never derived from an expiry, a tenor,
+    or the date range -- Issue #197 forbids inventing an expiry -> lookback
+    mapping, so a trader who wants a different window states it.
+
+    ``field_meaning``/``field_unit`` are optional provenance strings passed
+    through to the #196 loader verbatim. Neither is inferred here. Without a
+    confirmed unit -- or with one outside the supported normalization
+    vocabulary -- the calculation still runs and is still displayed in the
+    field's own unit, but it cannot be published as a normalized volatility
+    source: see ``volatility_source_unavailable_reason``.
+
+    Note the two different units in this payload, deliberately.
+    ``daily_yield_vol``/``annualized_yield_vol`` are in the Yield field's own
+    unit, which is what a Middle Office parity run compares against.
+    ``volatility_source.volatility`` is the same number normalized to
+    ``DECIMAL_ANNUAL``, the unit ``BLIVolatilityInput`` states, alongside the
+    source unit and the exact factor applied.
+
+    ``daily_yield_vol_text``/``annualized_yield_vol_text`` carry Python's own
+    repr of the two floats so the browser can print exactly the digits this
+    process computed, the same reason the #196 payload carries Bloomberg's
+    own ``raw_value`` string. The browser recomputes nothing.
+
+    Raises ``ValueError`` (including ``HistoricalYieldVolInputError``) for a
+    malformed body, identifier, mnemonic, date range, observation contract or
+    unusable window, and ``BLIBloombergDapiError`` for any Bloomberg-side
+    failure -- never caught or remapped here.
+    """
+
+    if not isinstance(body, dict):
+        raise ValueError("request body must be a JSON object")
+    missing = [key for key in _HISTORICAL_YIELD_VOL_REQUIRED_KEYS if key not in body]
+    if missing:
+        raise ValueError(f"request body is missing {', '.join(missing)}")
+
+    # Validated here, before the loader, so an unusable observation contract
+    # is refused without spending a Bloomberg round trip on a series this
+    # request could never use -- the same order the #196 loader keeps.
+    requested_observation_count = validate_requested_observation_count(
+        body.get("requested_observation_count", MIDDLE_OFFICE_6M_OBSERVATION_COUNT)
+    )
+    provenance = {
+        key: body[key] for key in _HISTORICAL_YIELD_VOL_PROVENANCE_KEYS if body.get(key) is not None
+    }
+
+    _, bloomberg_identifier = parse_bond_identifier(body["bond_identifier"])
+    history = load_bloomberg_bond_yield_history(
+        identifier=bloomberg_identifier,
+        yield_field=body["yield_field"],
+        start_date=body["start_date"],
+        end_date=body["end_date"],
+        **provenance,
+    )
+    result = calculate_historical_yield_volatility(
+        history, requested_observation_count=requested_observation_count
+    )
+
+    # Checked before anything is serialized, including for results publication
+    # refuses (Codex review, PR #200). This route reads `window_status.value`
+    # and calls `.isoformat()` on dates for EVERY response, so a malformed
+    # result answered HTTP 500 even after the publication helper had correctly
+    # refused it -- the refusal was caught, and then the same bad field was
+    # dereferenced two lines later. Publishability is a separate question this
+    # route does not ask; being serializable is one it cannot avoid.
+    shape_problem = result_shape_problem(result)
+    if shape_problem is not None:
+        raise HistoricalYieldVolInputError(shape_problem)
+
+    # The normalized volatility source is built by the one canonical helper,
+    # never assembled here. A result it refuses is reported as refused, with
+    # that helper's own reason -- there is no second, looser publication path.
+    #
+    # The published number is in DECIMAL_ANNUAL, which is not the unit the
+    # calculated result above is in, so the payload states both the source
+    # unit and the exact factor between them (Annex A §A.8.1): a normalized
+    # value and a raw one must never be mistaken for each other.
+    volatility_source: dict | None = None
+    volatility_source_unavailable_reason: str | None = None
+    try:
+        published = historical_yield_vol_volatility_input(result)
+    except HistoricalYieldVolUnavailableError as exc:
+        volatility_source_unavailable_reason = str(exc)
+    else:
+        volatility_source = {
+            "source_system": published.source_system,
+            "volatility_basis": published.volatility_basis.value,
+            "volatility": published.volatility,
+            "volatility_text": repr(published.volatility),
+            "volatility_unit": PUBLISHED_VOLATILITY_UNIT,
+            "source_unit": result.field_unit,
+            "normalization_factor": decimal_annual_normalization_factor(result.field_unit),
+            "status": published.status.value,
+            "override_or_fallback_audit": published.override_or_fallback_audit,
+        }
+
+    return {
+        "methodology": HISTORICAL_YIELD_VOL_MO_SOURCE,
+        "requested_identifier": result.requested_identifier,
+        "security": result.security,
+        "yield_field": result.yield_field,
+        "field_meaning": result.field_meaning,
+        "field_unit": result.field_unit,
+        "source_system": result.source_system,
+        "acquired_at": result.acquired_at,
+        "calculated_at": result.calculated_at,
+        "requested_start_date": result.requested_start_date.isoformat(),
+        "requested_end_date": result.requested_end_date.isoformat(),
+        "series_observation_count": result.series_observation_count,
+        "requested_observation_count": result.requested_observation_count,
+        "observation_count": result.observation_count,
+        "observation_dates": [used.isoformat() for used in result.observation_dates],
+        "first_observation_date": (
+            result.first_observation_date.isoformat() if result.first_observation_date else None
+        ),
+        "last_observation_date": (
+            result.last_observation_date.isoformat() if result.last_observation_date else None
+        ),
+        "yield_change_count": result.yield_change_count,
+        "standard_deviation_convention": result.standard_deviation_convention,
+        "annualization_trading_days": result.annualization_trading_days,
+        "annualization_factor": result.annualization_factor,
+        "daily_yield_vol": result.daily_yield_vol,
+        "daily_yield_vol_text": (
+            None if result.daily_yield_vol is None else repr(result.daily_yield_vol)
+        ),
+        "annualized_yield_vol": result.annualized_yield_vol,
+        "annualized_yield_vol_text": (
+            None if result.annualized_yield_vol is None else repr(result.annualized_yield_vol)
+        ),
+        "window_status": result.window_status.value,
+        # Two lists, not one: a blocker means there is no number, a warning
+        # means there is one that must not be read as a full window.
+        "blockers": list(result.blockers),
+        "warnings": list(result.warnings),
+        "volatility_source": volatility_source,
+        "volatility_source_unavailable_reason": volatility_source_unavailable_reason,
     }
 
 
@@ -3382,6 +3613,40 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, payload)
 
+    def _handle_api_historical_yield_vol(self, raw_body: bytes) -> None:
+        """Calculate one bond's Historical Yield Vol. Reads Bloomberg; writes nothing.
+
+        A malformed body, identifier, field mnemonic, date range or
+        observation contract is HTTP 400, as is a window this calculation
+        refuses (a row Bloomberg returned with no value, a non-finite value,
+        observations out of order) -- the refusal travels verbatim. A
+        Bloomberg-side failure is HTTP 502. A window with no honest number
+        (no history, or too few Yield Changes) is a normal HTTP 200 result
+        carrying its status and blockers: "there is no Historical Yield Vol
+        for this bond" is an answer, not an error.
+        """
+
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            self._write_json(400, {"error": f"invalid JSON body: {exc}"})
+            return
+        try:
+            payload = fetch_historical_yield_volatility(body)
+        except BLIBloombergDapiError as exc:
+            self._write_json(502, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            # HistoricalYieldVolInputError is a ValueError, so this one arm
+            # covers a malformed body, a malformed identifier/mnemonic/date
+            # range and a window the calculation refuses alike.
+            self._write_json(400, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._write_json(200, payload)
+
     def _handle_export(self, raw_body: bytes, export_fn) -> None:
         try:
             body = json.loads(raw_body)
@@ -3609,6 +3874,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/bond/convention-profile/candidates": _handle_api_bond_profile_candidates,
         "/api/bloomberg/option-discount-curve": _handle_api_bloomberg_option_discount_curve,
         "/api/bloomberg/bond-yield-history": _handle_api_bloomberg_bond_yield_history,
+        "/api/bloomberg/historical-yield-vol": _handle_api_historical_yield_vol,
         "/api/vcub/atm/parse": _handle_api_vcub_atm_parse,
         "/api/vcub/atm/confirm": _handle_api_vcub_atm_confirm,
         "/api/vcub/atm/reject": _handle_api_vcub_atm_reject,

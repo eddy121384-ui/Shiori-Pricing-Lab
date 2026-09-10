@@ -1,0 +1,1326 @@
+"""``calculate_historical_yield_volatility``: Middle Office-style Historical
+Yield Volatility from one bond's own Bloomberg Yield history (Issue #197).
+
+**What this module is.** One canonical, deterministic calculator that reads a
+:class:`~shiori_pricing_lab.data.bloomberg_bond_yield_history.BloombergBondYieldHistory`
+-- the merged Issue #196 contract, the only historical bond-Yield path in this
+repository -- and turns it into an auditable Historical Yield Vol:
+
+``181 Yield observations -> 180 daily Yield Changes -> STDEV.S (ddof=1)
+-> x sqrt(252)``
+
+The horizon is counted in **Yield Changes**, not observations: Middle Office's
+"180-day" window is 180 changes, and 180 changes need 181 observations. The
+observation count is the derived quantity, and it is the one this module takes
+as its contract because it is what a Bloomberg request can actually ask for.
+
+Audit and request provenance travels with every result -- everything Issue
+#197 §3 asks for: which security Bloomberg resolved, which Yield mnemonic was
+asked for, the requested date range, the requested and the *actual*
+observation counts, the exact dates used, the number of changes, the
+standard-deviation convention, the annualization factor, the daily and the
+annualized figure, the unit, both timestamps, and any warning or blocker.
+
+That is enough to *re-issue* the identical request and *re-run* the identical
+convention over its answer. It is deliberately **not** enough to replay the
+arithmetic: the Yield values and the Yield Changes themselves are not carried
+(Codex review, PR #200), and once Bloomberg's answer for that range changes,
+re-issuing does not reproduce these figures either. A consumer needing the
+values reads them from the #196 loader for the same query.
+
+``acquired_at`` is temporal provenance, not an acquisition identifier: the
+#196 loader stamps it to whole seconds, so two requests answered inside the
+same second carry the same string. Two *different* timestamps prove two
+acquisitions; two equal ones prove nothing (Codex review, PR #200).
+
+**The convention is parity-confirmed (Issue #197).** Middle Office supplied
+its own Excel calculation and a reference case with sufficient history, and
+the arithmetic parity run passed: the underlying's own Yield, the daily Yield
+*Change* ``Y_t - Y_{t-1}``, a 180-*change* 6M-style horizon over 181
+observations, STDEV.S (ddof=1), sqrt(252) annualization, a PERCENT source
+Yield unit normalizing to ``DECIMAL_ANNUAL`` by ``/100``, and no approved
+proxy for an instrument with no history.
+
+The earlier provisional reading -- 180 observations giving 179 changes -- was
+disproved by that evidence and is gone. On the reference case Middle Office
+reports ``0.0073070244`` ``DECIMAL_ANNUAL`` and this module returns
+``0.007305746211681411``, a residual of roughly ``0.0128`` bp of annualized
+Yield Vol. That residual is float-arithmetic ordering against Excel's, not a
+signal of a different statistic or annualization convention, and it is not
+grounds for reopening either. ``standard_deviation_convention`` is still named
+in every result, because a stated convention is what makes the next parity run
+cheap rather than because this one is unsettled.
+
+**What this module deliberately is not.**
+
+- It acquires nothing. It never opens a Bloomberg session, never widens a
+  date range, and never re-requests a field. It is handed a series that the
+  #196 loader already validated, and it is the only consumer-side statistic
+  in this slice.
+- It fills nothing. A date Bloomberg did not answer for is simply not in the
+  series, and this module neither notices its absence nor manufactures it: no
+  interpolation, forward-fill, back-fill, smoothing, winsorization,
+  resampling, or synthetic observation exists here. Consequently a Yield
+  Change is the change between two *consecutive returned observations*, and
+  the window is *observation*-based throughout -- never day-based.
+
+  That distinction matters at the parity gate (Codex review, PR #200).
+  ``ACTIVE_DAYS_ONLY`` stops Bloomberg filling a non-trading day in, but it
+  does not promise that every active day came back, and this module performs
+  no completeness check and has no trading calendar to perform one with. So
+  a change spanning an omitted active day is a multi-day move counted once,
+  and 181 returned observations can span more than 180 trading days. Where
+  Bloomberg returned every active day the two readings coincide, which is the
+  ordinary case -- but Middle Office's "180 trading days" and this module's
+  "180 changes between 181 returned observations" are not the same statement,
+  and a parity mismatch should check the returned dates before it blames the
+  convention.
+- **The calculated result** converts no units. The standard deviation of a
+  difference carries the unit of the values differenced, so the vol this
+  module reports is in the Yield field's own unit -- ``field_unit``, carried
+  verbatim from #196 and ``None`` when the request did not establish it.
+  That is the number a Middle Office parity run compares against, so it is
+  never rescaled behind the reader's back.
+
+  **Publication to the normalized volatility layer** is where a unit is
+  normalized, and only there, because that layer's contract states a unit:
+  ``BLIVolatilityInput`` carries a *decimal annual* volatility
+  (docs/30 §1). Annex A §A.8.1 fixes the discipline this module follows --
+  read only an explicitly declared unit, normalize it by an explicit factor
+  (``1 bp = 1e-4``), never infer a unit from a value's magnitude, and fail
+  closed on a unit that is undeclared or cannot be pinned. So
+  :func:`decimal_annual_normalization_factor` accepts exactly
+  ``DECIMAL``/``PERCENT``/``BASIS_POINTS`` and refuses everything else,
+  including ``None``, and every published input records the source unit and
+  the factor applied.
+- It prices nothing. The output is a **Yield Vol**. This repository has no
+  approved Yield-Vol -> Price-Vol conversion -- ``pricing/
+  bli_mvp_required_input_guard.py`` refuses ``YIELD_VOL`` outright, in both
+  the bundle and the standalone path, saying so in as many words -- so this
+  result stops at the normalized volatility layer and enters no pricing
+  chain. Inventing that conversion is a separate, separately approved issue.
+- It chooses no proxy. Zero observations is an answer (``NO_HISTORY``), not a
+  cue to reach for a benchmark, an index, VCUB, ``VOLATILITY_90D``, or a flat
+  synthetic number.
+
+**Window selection.** The window is the *tail* of the returned series: the
+most recent ``requested_observation_count`` observations. A trader who asks
+Bloomberg for a wider date range than the window still gets exactly the most
+recent N observations, and the first/last dates actually used are reported so
+the window is never taken on trust.
+
+**Fail-closed conditions**, every one raising
+:class:`HistoricalYieldVolInputError` before any statistic exists:
+
+- a ``requested_observation_count`` that is not an ``int`` >= 3 (two
+  observations make one change, and one change has no ddof=1 standard
+  deviation -- this is arithmetic, not a methodology choice);
+- a series whose observation dates are not strictly ascending (the #196
+  loader guarantees this; the guard exists so a hand-built or future series
+  cannot quietly reorder the changes);
+- a non-finite Yield value anywhere in the selected window;
+- an integer Yield value no float represents exactly, or an integer pair
+  whose Yield Change loses precision on subtraction. Both are conversions
+  that succeed while changing the number the statistic is taken over, which
+  is the one failure this module cannot detect after the fact;
+- a row inside the selected window that Bloomberg returned with **no value**.
+  This one is a refusal on purpose. Dropping the row would compute a change
+  across the hole -- a two-day move recorded as a one-day move -- and keeping
+  it would require a number nobody observed. Both are inventions, and which
+  one Middle Office would sanction is not established, so the calculation
+  stops and names the dates instead.
+
+**Statuses.** ``FULL_WINDOW`` (actual == requested), ``INSUFFICIENT_HISTORY``
+(some history, but fewer observations than requested), ``NO_HISTORY`` (none at
+all, blocking). An ``INSUFFICIENT_HISTORY`` result still carries whatever the
+available observations support, but it can never be mistaken for a full
+window: the status, both counts, and a warning line travel with it. Fatal
+``blockers`` and non-fatal ``warnings`` are separate fields precisely so a
+consumer cannot read "this window is short" as "there is no number here". The "use
+the longest available vol flat for the missing horizon" behaviour Middle
+Office once mentioned is **not** implemented -- doing so needs an expiry ->
+lookback mapping this repository does not have and Issue #197 forbids
+inventing.
+
+**No clock inside the statistic.** ``calculated_at`` is provenance, read once
+after the arithmetic is complete; no window boundary, count, or value depends
+on today's date.
+"""
+
+from __future__ import annotations
+
+import math
+import statistics
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from enum import StrEnum
+from fractions import Fraction
+
+from shiori_pricing_lab.data._validation import _require_finite_number
+from shiori_pricing_lab.data.bli_snapshot import (
+    BLIMarketDataStatus,
+    BLIVolatilityBasis,
+    BLIVolatilityInput,
+)
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    SOURCE_SYSTEM as BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM,
+)
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
+    BloombergBondYieldHistory,
+    BondYieldObservation,
+)
+
+# The canonical normalized volatility-source label for this calculation.
+# Deliberately distinct from Bloomberg VCUB / market-implied vol, from a
+# manual override, and from PRICE_VOL / EQUIVALENT_PRICE_VOL: this is a
+# Middle Office-style historical statistic on the bond's own Yield, and a
+# consumer must be able to tell it apart from all of them at a glance.
+HISTORICAL_YIELD_VOL_MO_SOURCE = "HISTORICAL_YIELD_VOL_MO"
+
+# Middle Office's confirmed 6M-style horizon, counted the way Middle Office
+# counts it: in Yield *Changes*. The parity run settled this -- "180-day"
+# means 180 changes, and N changes need N+1 observations, so the standard
+# window is 181 observations. The two constants exist separately because the
+# horizon is the methodology and the observation count is what a request can
+# ask for; collapsing them into one 180 was the arithmetic error the parity
+# run found.
+MIDDLE_OFFICE_6M_YIELD_CHANGE_COUNT = 180
+MIDDLE_OFFICE_6M_OBSERVATION_COUNT = MIDDLE_OFFICE_6M_YIELD_CHANGE_COUNT + 1
+ANNUALIZATION_TRADING_DAYS = 252
+ANNUALIZATION_FACTOR = math.sqrt(ANNUALIZATION_TRADING_DAYS)
+
+# Sample standard deviation, Excel's STDEV.S -- confirmed against Middle
+# Office's own calculation by the Issue #197 parity run. Still named in every
+# result, so the next parity check reads the convention rather than inferring
+# it from the number.
+STANDARD_DEVIATION_CONVENTION = "SAMPLE_STDEV_S_DDOF_1"
+
+# The unit BLIVolatilityInput's own contract states (docs/30 §1), and
+# therefore the unit anything published into it must already be in.
+PUBLISHED_VOLATILITY_UNIT = "DECIMAL_ANNUAL"
+
+# The only Yield-field units this module will normalize, and the exact factor
+# each takes. Annex A §A.8.1: read a *declared* unit, normalize by an explicit
+# factor (1 bp = 1e-4), never infer one from a value's magnitude, fail closed
+# on anything undeclared. There is no fuzzy matching and no alias list here --
+# a unit outside this vocabulary is refused with the vocabulary named, which
+# is what tells a trader what to confirm on the workstation.
+_DECIMAL_ANNUAL_NORMALIZATION_FACTORS: dict[str, float] = {
+    "DECIMAL": 1.0,
+    "PERCENT": 1e-2,
+    "BASIS_POINTS": 1e-4,
+}
+
+SUPPORTED_PUBLICATION_YIELD_UNITS: tuple[str, ...] = tuple(
+    sorted(_DECIMAL_ANNUAL_NORMALIZATION_FACTORS)
+)
+
+# ddof=1 needs two changes, and two changes need three observations.
+_MINIMUM_OBSERVATIONS_FOR_STDEV = 3
+_MINIMUM_CHANGES_FOR_STDEV = 2
+
+
+class HistoricalYieldVolInputError(ValueError):
+    """The supplied series or contract cannot produce an honest statistic."""
+
+
+class HistoricalYieldVolUnavailableError(ValueError):
+    """This result cannot be published as a normalized volatility source."""
+
+
+class HistoricalYieldVolStatus(StrEnum):
+    """How much of the requested observation window actually existed."""
+
+    FULL_WINDOW = "FULL_WINDOW"
+    INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+    NO_HISTORY = "NO_HISTORY"
+
+
+@dataclass(frozen=True)
+class HistoricalYieldVolResult:
+    """One Historical Yield Vol calculation, with everything needed to redo it.
+
+    ``field_unit`` is the unit of ``daily_yield_vol`` and
+    ``annualized_yield_vol`` as well as of the Yield observations: a standard
+    deviation of differences carries the unit of what was differenced, and
+    nothing here rescales. ``None`` means the request did not establish a
+    unit (#196 never infers one), which a consumer must display as unknown
+    rather than assume.
+
+    ``blockers`` and ``warnings`` are deliberately two fields, because the
+    two have opposite consequences and conflating them is how a consumer
+    ends up discarding a result it was meant to use (Codex review, PR #200):
+
+    - ``blockers`` is **fatal**. ``daily_yield_vol``/``annualized_yield_vol``
+      are ``None`` exactly when ``blockers`` is non-empty -- there is no
+      number, and every entry says why. :attr:`is_usable` is that test
+      together with both figures actually being there.
+    - ``warnings`` is **not fatal**. An ``INSUFFICIENT_HISTORY`` window that
+      still supports the standard-deviation convention carries a number
+      *and* a warning: the window being short is not itself a bar to
+      publication, but the number is not a full-window result and must never
+      be presented as one. A consumer that drops it has lost the only honest
+      answer available for that bond.
+
+      "Not a bar to publication" is not a promise that it *will* publish
+      (Codex review, PR #200): :func:`historical_yield_vol_volatility_input`
+      applies its own conditions on top -- a declared and supported unit, and
+      a positive standard deviation -- and a short window failing either of
+      those is refused exactly as a full window would be.
+
+    A short window with too few Yield Changes carries both: the warning that
+    says the window is short, and the blocker that says it is too short to
+    produce a standard deviation at all.
+    """
+
+    # -- Provenance carried verbatim from the #196 acquisition --------------
+    requested_identifier: str
+    security: str
+    yield_field: str
+    field_meaning: str | None
+    field_unit: str | None
+    source_system: str
+    acquired_at: str
+    requested_start_date: date
+    requested_end_date: date
+
+    # -- The window this calculation actually used -------------------------
+    series_observation_count: int
+    requested_observation_count: int
+    observation_count: int
+    observation_dates: tuple[date, ...]
+    first_observation_date: date | None
+    last_observation_date: date | None
+    yield_change_count: int
+
+    # -- The convention, stated rather than assumed ------------------------
+    standard_deviation_convention: str
+    annualization_trading_days: int
+    annualization_factor: float
+
+    # -- The result --------------------------------------------------------
+    daily_yield_vol: float | None
+    annualized_yield_vol: float | None
+    window_status: HistoricalYieldVolStatus
+    blockers: tuple[str, ...]
+    warnings: tuple[str, ...]
+    calculated_at: str
+
+    @property
+    def is_usable(self) -> bool:
+        """Whether this result carries a Historical Yield Vol at all.
+
+        A ``True`` here says only that a complete number exists --
+        ``window_status`` and ``warnings`` still decide how it may be
+        presented.
+
+        Every half of the documented invariant is tested, not the one that
+        happened to be in mind (Codex review, PR #200). The calculator emits
+        neither a blocker beside a figure nor one figure without the other,
+        but this is a public accessor on a plain dataclass, read by callers
+        who are not going through :func:`result_shape_problem` or the
+        publication guard -- that is the whole reason the property exists.
+        A directly constructed or future result carrying
+        ``blockers=("this result must not be used",)`` beside a number, or an
+        ``annualized_yield_vol`` with no ``daily_yield_vol`` under it,
+        answered ``True`` here in turn. The class contract is that the two
+        figures exist together or not at all, and that both are ``None``
+        exactly when ``blockers`` is non-empty; this property is that
+        sentence, so it has to be all of it.
+        """
+
+        return (
+            not self.blockers
+            and self.daily_yield_vol is not None
+            and self.annualized_yield_vol is not None
+        )
+
+
+def _calculation_now() -> datetime:
+    """One offset-aware calculation timestamp, read from the platform clock.
+
+    Called only once the arithmetic is finished, so nothing in the statistic
+    can depend on it. Module-level for the same reason ``bloomberg_bond_
+    yield_history._acquisition_now`` is: tests monkeypatch it and no real
+    clock is read in CI.
+    """
+
+    return datetime.now().astimezone()
+
+
+def validate_requested_observation_count(value: object) -> int:
+    """Return ``value`` as a usable observation contract, or refuse it.
+
+    Public so a caller can refuse a bad contract *before* spending a
+    Bloomberg round trip on a request whose result it would then throw away
+    -- the same "caller-input problems raise before anything is sent"
+    convention the #196 loader already follows. The calculator calls it too,
+    so the check cannot drift between the two.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HistoricalYieldVolInputError(
+            f"requested_observation_count must be an int, got {value!r}"
+        )
+    if value < _MINIMUM_OBSERVATIONS_FOR_STDEV:
+        raise HistoricalYieldVolInputError(
+            "requested_observation_count must be at least "
+            f"{_MINIMUM_OBSERVATIONS_FOR_STDEV} -- {value} observations yield "
+            f"{max(value - 1, 0)} Yield Change(s), and the {STANDARD_DEVIATION_CONVENTION} "
+            f"convention needs at least {_MINIMUM_CHANGES_FOR_STDEV}"
+        )
+    return value
+
+
+def _require_finite_step(
+    values: list[float], history: BloombergBondYieldHistory, *, what: str = "Yield Change"
+) -> None:
+    """Refuse an intermediate the arithmetic could not represent.
+
+    Separate from the input check on purpose: the observations can each be
+    perfectly finite and their difference, or the annualization of their
+    standard deviation, still overflow. A non-finite intermediate is not a
+    small numerical wobble -- it means the magnitudes involved are outside
+    what this statistic can express, so it fails closed rather than reporting
+    ``inf`` as a volatility.
+    """
+
+    for value in values:
+        if not math.isfinite(value):
+            raise HistoricalYieldVolInputError(
+                f"the {what} for {history.security!r} on {history.yield_field} is "
+                f"{value!r}, which is not a finite number -- the Yield magnitudes in this "
+                "window overflow the arithmetic, so no Historical Yield Vol is reported "
+                "for it"
+            )
+
+
+def _insufficient_history_warning(observation_count: int, requested: int) -> str:
+    """The one short-window qualification, built from the counts that cause it.
+
+    One construction, used by the calculator and asserted by
+    :func:`result_shape_problem`, rather than a sentence in one place and a
+    presence check in the other. Checking only that *a* warning exists let
+    ("Applied VCUB substitute",) through, and the result then carried that
+    beside an audit line stating no substitute had been applied -- two
+    contradictory answers to the same question, in the same result (Codex
+    review, PR #200).
+    """
+
+    return (
+        f"INSUFFICIENT_HISTORY: {observation_count} of the requested {requested} Yield "
+        "observations exist. This is not a full-window Historical Yield Vol, and no "
+        "flat extension, benchmark, index or VCUB substitute has been applied"
+    )
+
+
+def _no_history_blocker(security: str, start_date: date, end_date: date) -> str:
+    """The one sentence a window with no observations carries.
+
+    Derived, not merely present, for the same reason as the short-window
+    warning: a fatal blocker is the only text the route shows when there is
+    no number, and a free-form one such as "Use a VCUB substitute instead"
+    passed as both the calculation blocker and the publication-refusal reason
+    (Codex review, PR #200). #197 forbids exactly that substitution, so the
+    sentence that says so is not a string a caller may choose.
+    """
+
+    return (
+        f"Bloomberg returned no Yield observations for {security!r} over "
+        f"{start_date.isoformat()}..{end_date.isoformat()} -- there is no approved proxy "
+        "for an instrument with no history, so no Historical Yield Vol is available"
+    )
+
+
+def _too_few_changes_blocker(change_count: int) -> str:
+    """The one sentence a window too short for the convention carries."""
+
+    return (
+        f"{change_count} Yield Change(s) is below the {_MINIMUM_CHANGES_FOR_STDEV} the "
+        f"{STANDARD_DEVIATION_CONVENTION} convention needs -- no standard deviation is "
+        "reported for this window"
+    )
+
+
+def _require_exact_integer_changes(
+    window: Sequence[BondYieldObservation],
+    values: list[float],
+    changes: list[float],
+    history: BloombergBondYieldHistory,
+) -> None:
+    """Refuse an integer pair whose Yield Change loses precision on subtraction.
+
+    Checking each integer observation converts exactly is not enough (Codex
+    review, PR #200). ``[1, 2**100, 2**101]`` converts exactly value by value
+    -- every one of the three is representable -- yet the exact changes are
+    ``[2**100 - 1, 2**100]`` while float subtraction returns ``2**100`` for
+    both. The sample standard deviation of the exact changes is ``sqrt(1/2)``;
+    of the rounded ones, zero. No overflow, no exception: this module
+    answering with a number the data does not support.
+
+    The rule applies only to a pair with an integer endpoint, and deliberately
+    not to a pair of floats. A float observation *is* its float value, and
+    subtracting two of them is the ordinary IEEE754 operation the Middle
+    Office spreadsheet performs on the same numbers -- rounding there is the
+    method, not a corruption of the input. An integer is different: it carries
+    a value this module converts, and the conversion must not change the
+    statistic. Applying the exact-difference rule to float pairs as well would
+    refuse honest data, not protect it: a negative-yield series crossing zero
+    produces inexact differences on roughly 0.3% of ordinary pairs.
+    """
+
+    for index, change in enumerate(changes):
+        previous_value = window[index].yield_value
+        current_value = window[index + 1].yield_value
+        if not isinstance(previous_value, int) and not isinstance(current_value, int):
+            continue
+        exact = Fraction(values[index + 1]) - Fraction(values[index])
+        if exact == Fraction(change):
+            continue
+        raise HistoricalYieldVolInputError(
+            f"the Yield Change between {window[index].observation_date} and "
+            f"{window[index + 1].observation_date} for {history.security!r} is "
+            f"{exact} exactly, and subtracting the two observations as floats gives "
+            f"{change!r} -- the integer Yield values in this window cannot be "
+            "differenced without changing the standard deviation they produce, so no "
+            "Historical Yield Vol is reported for it"
+        )
+
+
+def _require_consistent_observation_dates(history: BloombergBondYieldHistory) -> None:
+    """Every observation is a calendar date, ascending, and inside the range.
+
+    The range half matters because the result copies
+    ``requested_start_date``/``requested_end_date`` verbatim and the route
+    serializes them as this calculation's provenance. A window built from
+    observations outside the range it reports is published as an ``ACTIVE``
+    risk source carrying false request provenance (Codex review, PR #200).
+    The #196 loader already refuses an out-of-range observation for the same
+    reason; this repeats the rule for producers that are not it.
+    """
+
+    for name, value in (
+        ("requested_start_date", history.requested_start_date),
+        ("requested_end_date", history.requested_end_date),
+    ):
+        if not isinstance(value, date) or isinstance(value, datetime):
+            raise HistoricalYieldVolInputError(
+                f"{name} must be a calendar date for {history.security!r}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    if history.requested_start_date > history.requested_end_date:
+        raise HistoricalYieldVolInputError(
+            f"the declared range for {history.security!r} starts "
+            f"{history.requested_start_date.isoformat()}, after it ends "
+            f"{history.requested_end_date.isoformat()}"
+        )
+
+    # The series itself before the rows in it: `observations=None` is not
+    # iterable and raised TypeError one line below, which is the same contract
+    # breach as a malformed row, one level up. Codex reported the row; fixing
+    # only what was reported is how this PR kept finding the same defect in a
+    # second location.
+    if not isinstance(history.observations, Sequence) or isinstance(
+        history.observations, (str, bytes)
+    ):
+        raise HistoricalYieldVolInputError(
+            f"the historical Yield series for {history.security!r} must be a sequence of "
+            f"BondYieldObservation, got {type(history.observations).__name__}"
+        )
+
+    previous: date | None = None
+    for observation in history.observations:
+        # The row itself is typed before anything is read off it (Codex
+        # review, PR #200). This guard existed for producers that are not the
+        # #196 loader, and then dereferenced `.observation_date` on whatever
+        # the sequence held -- so `observations=(None,)` raised AttributeError
+        # rather than this module's one error type, and the route answered
+        # HTTP 500 under a docstring promising HTTP 400.
+        if not isinstance(observation, BondYieldObservation):
+            raise HistoricalYieldVolInputError(
+                f"every entry in the historical Yield series for {history.security!r} must be "
+                f"a BondYieldObservation, got {observation!r} ({type(observation).__name__})"
+            )
+        # Typed before compared (Codex review, PR #200). `<=` on a mixed
+        # date/None or date/str sequence raises TypeError -- not this module's
+        # error type -- and an all-string sequence orders lexicographically,
+        # passes, and produces a result whose `.isoformat()` blows up in the
+        # route later. The #196 loader only ever produces `date`, but this
+        # guard exists precisely for the producers that are not it.
+        if not isinstance(observation.observation_date, date) or isinstance(
+            observation.observation_date, datetime
+        ):
+            raise HistoricalYieldVolInputError(
+                f"every historical Yield observation must carry a calendar date for "
+                f"{history.security!r}, got {observation.observation_date!r} "
+                f"({type(observation.observation_date).__name__})"
+            )
+        if previous is not None and observation.observation_date <= previous:
+            raise HistoricalYieldVolInputError(
+                "historical Yield observations must be strictly ascending by date before "
+                f"a Yield Change is taken -- {observation.observation_date.isoformat()} "
+                f"follows {previous.isoformat()} for {history.security!r}"
+            )
+        if (
+            observation.observation_date < history.requested_start_date
+            or observation.observation_date > history.requested_end_date
+        ):
+            raise HistoricalYieldVolInputError(
+                f"observation {observation.observation_date.isoformat()} for "
+                f"{history.security!r} falls outside the declared range "
+                f"{history.requested_start_date.isoformat()}.."
+                f"{history.requested_end_date.isoformat()} -- a window cannot report a "
+                "request range its own observations do not sit in"
+            )
+        previous = observation.observation_date
+
+
+def calculate_historical_yield_volatility(
+    history: BloombergBondYieldHistory,
+    *,
+    requested_observation_count: int = MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
+) -> HistoricalYieldVolResult:
+    """Return the Historical Yield Vol of ``history``'s most recent window.
+
+    ``history`` is the underlying bond's **own** Yield series, exactly as the
+    Issue #196 loader returned it. ``requested_observation_count`` is the
+    explicit observation contract; it defaults to
+    :data:`MIDDLE_OFFICE_6M_OBSERVATION_COUNT` -- 181 observations, which is
+    Middle Office's confirmed 180-*change* 6M-style horizon -- and is never
+    derived from an expiry, a tenor, or a date range.
+
+    Raises :class:`HistoricalYieldVolInputError` for every fail-closed
+    condition in the module docstring. Returns a result with
+    ``annualized_yield_vol=None`` and a non-empty ``blockers`` for the two
+    honest "no number" cases -- no history at all, and history too short to
+    support the standard-deviation convention.
+    """
+
+    if not isinstance(history, BloombergBondYieldHistory):
+        raise HistoricalYieldVolInputError(
+            "history must be a BloombergBondYieldHistory produced by the Issue #196 "
+            f"loader, got {type(history).__name__}"
+        )
+    requested = validate_requested_observation_count(requested_observation_count)
+    _require_consistent_observation_dates(history)
+
+    window = history.observations[-requested:]
+    dates = tuple(observation.observation_date for observation in window)
+
+    unvalued = [
+        observation.observation_date.isoformat()
+        for observation in window
+        if observation.yield_value is None
+    ]
+    if unvalued:
+        raise HistoricalYieldVolInputError(
+            f"Bloomberg returned {len(unvalued)} row(s) with no Yield value inside the "
+            f"selected {len(window)}-observation window for {history.security!r} "
+            f"({', '.join(unvalued)}) -- a Yield Change is neither taken across such a "
+            "row nor invented for it, so this window produces no Historical Yield Vol"
+        )
+
+    values: list[float] = []
+    for observation in window:
+        try:
+            _require_finite_number(
+                observation.yield_value, f"{history.yield_field} on {observation.observation_date}"
+            )
+            converted = float(observation.yield_value)  # type: ignore[arg-type]
+        except (ValueError, OverflowError) as exc:
+            # Converted, not propagated: this module promises one error type
+            # for every fail-closed condition, and the workbench route maps
+            # that type to an HTTP 400 carrying the refusal verbatim.
+            #
+            # OverflowError belongs here as much as ValueError (Codex review,
+            # PR #200). An int observation beyond the float range -- 10**400
+            # from a hand-built or future producer -- overflows inside
+            # math.isfinite, and float() overflows on the same value. Neither
+            # is a ValueError, so both used to escape this module as an
+            # HTTP 500 while its docstring promised one error type.
+            raise HistoricalYieldVolInputError(
+                f"{history.yield_field} on {observation.observation_date} is not a usable "
+                f"Yield value for {history.security!r}: {exc}"
+            ) from exc
+
+        # Raised outside the conversion guard so its message is not wrapped in
+        # that guard's. An int beyond 2**53 converts to a float that is not
+        # equal to it, and float() SUCCEEDS while doing so, so no overflow
+        # handling ever sees it (Codex review, PR #200).
+        # [2**53, 2**53+1, 2**53+2] has identical integer changes and an exact
+        # sigma of zero; converted it becomes changes of [0.0, 2.0] and a daily
+        # sigma of sqrt(2). Not a refusal and not a crash -- this module
+        # answering with a number the data does not support, which is the one
+        # outcome it exists to prevent.
+        if isinstance(observation.yield_value, int) and converted != observation.yield_value:
+            raise HistoricalYieldVolInputError(
+                f"{history.yield_field} on {observation.observation_date} is "
+                f"{observation.yield_value!r} for {history.security!r}, which no float "
+                "represents exactly -- converting it would silently change the observation "
+                "this calculation is taken over"
+            )
+        values.append(converted)
+
+    # Y_t - Y_{t-1} between consecutive returned observations, in the field's
+    # own unit. Ordinary float subtraction on purpose: it is the same
+    # arithmetic the Middle Office spreadsheet performs on the same values.
+    # `strict=False` is deliberate, not an oversight: pairing a series with
+    # its own tail is the one place unequal lengths are the point -- N values
+    # make exactly N-1 changes, which is the 181 -> 180 contract itself.
+    changes = [
+        current - previous for previous, current in zip(values, values[1:], strict=False)
+    ]
+
+    # Fatal (no number) and non-fatal (a number, but a qualified one) are
+    # kept apart on purpose -- see HistoricalYieldVolResult's docstring.
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not window:
+        status = HistoricalYieldVolStatus.NO_HISTORY
+        blockers.append(
+            _no_history_blocker(
+                history.security,
+                history.requested_start_date,
+                history.requested_end_date,
+            )
+        )
+    elif len(window) < requested:
+        status = HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+        # A warning, not a blocker: being short does not by itself stop this
+        # window's number reaching the publication helper's remaining checks
+        # (a declared, supported unit; a positive sigma), and what must never
+        # happen is it being read as a full-window result.
+        warnings.append(_insufficient_history_warning(len(window), requested))
+    else:
+        status = HistoricalYieldVolStatus.FULL_WINDOW
+
+    if window and len(changes) < _MINIMUM_CHANGES_FOR_STDEV:
+        blockers.append(_too_few_changes_blocker(len(changes)))
+
+    # Finite observations are not enough to make the arithmetic finite (Codex
+    # review, PR #200). Subtracting two representable Yields can overflow --
+    # 1e308 - -1e308 is inf -- and so can annualizing a large daily sigma, and
+    # `statistics.stdev` raises AttributeError rather than a ValueError when
+    # handed an inf. Left unguarded, this module returned inf as a usable
+    # volatility with no blocker at all, and the route turned the other case
+    # into an HTTP 500. Every intermediate is checked instead, so an
+    # unrepresentable magnitude fails closed on this module's own error type.
+    _require_exact_integer_changes(window, values, changes, history)
+    _require_finite_step(changes, history)
+
+    if len(changes) >= _MINIMUM_CHANGES_FOR_STDEV:
+        # Sample standard deviation, ddof=1 -- Excel's STDEV.S. The stdlib
+        # accumulates the sum of squares in exact rational arithmetic, so the
+        # answer is the correctly-rounded value of the ddof=1 formula over
+        # these changes rather than an accumulation-order artifact.
+        #
+        # That exactness is why the call is wrapped (Codex review, PR #200).
+        # I had reasoned the Fraction accumulation made an internal overflow
+        # impossible and said so; it is wrong. The accumulation is exact, but
+        # converting the exact result *back* to a float can still overflow --
+        # stdev([float_info.max, -float_info.max]) raises OverflowError, from
+        # changes this module has already checked finite. The guard below
+        # never ran, and the route answered HTTP 500 under a docstring
+        # promising one error type.
+        try:
+            daily: float | None = statistics.stdev(changes)
+        except (OverflowError, ArithmeticError) as exc:
+            raise HistoricalYieldVolInputError(
+                f"the {STANDARD_DEVIATION_CONVENTION} standard deviation of the "
+                f"{len(changes)} Yield Changes for {history.security!r} cannot be "
+                f"represented as a finite number: {type(exc).__name__}: {exc}"
+            ) from exc
+        _require_finite_step([daily], history, what="daily standard deviation")
+
+        # A zero sigma is only honest when the changes really were all equal.
+        # Subnormal changes -- [5e-324, 0.0, 0.0, 0.0] -- have a strictly
+        # positive exact standard deviation that rounds to 0.0 on the way back
+        # to a float, and reporting that as a usable zero volatility with no
+        # blocker is a false risk figure, not a flat window (Codex review,
+        # PR #200).
+        if daily == 0.0 and len(set(changes)) > 1:
+            raise HistoricalYieldVolInputError(
+                f"the {STANDARD_DEVIATION_CONVENTION} standard deviation of the "
+                f"{len(changes)} Yield Changes for {history.security!r} is strictly "
+                "positive but underflows to zero as a float -- the changes are too small "
+                "to express a volatility, and a zero is not reported in their place"
+            )
+
+        annualized: float | None = daily * ANNUALIZATION_FACTOR
+        _require_finite_step([annualized], history, what="annualized Historical Yield Vol")
+    else:
+        daily = None
+        annualized = None
+
+    return HistoricalYieldVolResult(
+        requested_identifier=history.requested_identifier,
+        security=history.security,
+        yield_field=history.yield_field,
+        field_meaning=history.field_meaning,
+        field_unit=history.field_unit,
+        source_system=history.source_system,
+        acquired_at=history.acquired_at,
+        requested_start_date=history.requested_start_date,
+        requested_end_date=history.requested_end_date,
+        series_observation_count=len(history.observations),
+        requested_observation_count=requested,
+        observation_count=len(window),
+        observation_dates=dates,
+        first_observation_date=dates[0] if dates else None,
+        last_observation_date=dates[-1] if dates else None,
+        yield_change_count=len(changes),
+        standard_deviation_convention=STANDARD_DEVIATION_CONVENTION,
+        annualization_trading_days=ANNUALIZATION_TRADING_DAYS,
+        annualization_factor=ANNUALIZATION_FACTOR,
+        daily_yield_vol=daily,
+        annualized_yield_vol=annualized,
+        window_status=status,
+        blockers=tuple(blockers),
+        warnings=tuple(warnings),
+        calculated_at=_calculation_now().isoformat(timespec="seconds"),
+    )
+
+
+def decimal_annual_normalization_factor(field_unit: object) -> float:
+    """Return the factor that takes ``field_unit`` to ``DECIMAL_ANNUAL``.
+
+    Annex A §A.8.1's rule, applied to this module's own output: the unit must
+    have been *declared*, it is normalized by an explicit factor, and a unit
+    that is absent or outside the supported vocabulary fails closed rather
+    than being guessed from how large the number looks.
+
+    Raises :class:`HistoricalYieldVolUnavailableError` for ``None``, for a
+    non-string, and for any string outside
+    :data:`SUPPORTED_PUBLICATION_YIELD_UNITS`. Surrounding whitespace and
+    case are normalized before matching -- that is lexical tidying of the
+    trader's own typing, never an interpretation of what a unit means.
+    """
+
+    if not isinstance(field_unit, str) or not field_unit.strip():
+        raise HistoricalYieldVolUnavailableError(
+            "the Yield field's unit was not established by this request, so its Historical "
+            f"Yield Vol cannot be normalized to {PUBLISHED_VOLATILITY_UNIT} -- confirm the "
+            "unit on the workstation and supply one of "
+            f"{', '.join(SUPPORTED_PUBLICATION_YIELD_UNITS)}"
+        )
+    candidate = field_unit.strip().upper()
+    if candidate not in _DECIMAL_ANNUAL_NORMALIZATION_FACTORS:
+        raise HistoricalYieldVolUnavailableError(
+            f"Yield field unit {field_unit!r} has no approved normalization to "
+            f"{PUBLISHED_VOLATILITY_UNIT} -- this module normalizes only "
+            f"{', '.join(SUPPORTED_PUBLICATION_YIELD_UNITS)} and refuses to infer a unit "
+            "from a value's magnitude (Annex A §A.8.1)"
+        )
+    return _DECIMAL_ANNUAL_NORMALIZATION_FACTORS[candidate]
+
+
+def result_shape_problem(result: HistoricalYieldVolResult) -> str | None:
+    """Return why ``result``'s own fields contradict each other, or ``None``.
+
+    The checks every consumer needs, whatever it intends to do with the
+    result: the status is the enum, the counts are non-negative integers that
+    agree with each other and with the status, and the dates are dates. A
+    result failing any of these cannot be serialized honestly, let alone
+    published.
+
+    Returns a message rather than raising, because its two callers owe their
+    own error types (Codex review, PR #200):
+    :func:`historical_yield_vol_volatility_input` promises
+    ``HistoricalYieldVolUnavailableError`` and the workbench route needs
+    ``HistoricalYieldVolInputError`` for its HTTP 400. Sharing a raiser would
+    have one of them breaking the contract the other keeps -- which is the
+    failure this whole review has been about.
+
+    A ``HistoricalYieldVolResult`` reaching a consumer is normally one this
+    module just built. It need not be: the dataclass is public,
+    ``dataclasses.replace`` is one call, and a future producer is a different
+    author.
+    """
+
+    if not isinstance(result.window_status, HistoricalYieldVolStatus):
+        return (
+            f"window_status must be a HistoricalYieldVolStatus for {result.security!r}, got "
+            f"{result.window_status!r} ({type(result.window_status).__name__})"
+        )
+
+    # Typed before their truthiness is read (Codex review, PR #200).
+    # bool(None) is False, so a result with blockers=None looked blocker-free,
+    # published, and then made the route raise TypeError at list(...) for an
+    # HTTP 500. warnings was not inspected at all and failed the same way.
+    for name, collection in (("blockers", result.blockers), ("warnings", result.warnings)):
+        if not isinstance(collection, tuple):
+            return (
+                f"{name} must be a tuple for {result.security!r}, got "
+                f"{type(collection).__name__}"
+            )
+        for entry in collection:
+            if not isinstance(entry, str) or not entry.strip():
+                return f"every {name} entry for {result.security!r} must be a non-blank string"
+
+    counts = {
+        "series_observation_count": result.series_observation_count,
+        "requested_observation_count": result.requested_observation_count,
+        "observation_count": result.observation_count,
+        "yield_change_count": result.yield_change_count,
+    }
+    for name, value in counts.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return f"{name} must be a non-negative int for {result.security!r}, got {value!r}"
+
+    # The calculator refuses any requested count below this before it
+    # calculates anything, so a result claiming one describes provenance for a
+    # calculation this module cannot produce.
+    if result.requested_observation_count < _MINIMUM_OBSERVATIONS_FOR_STDEV:
+        return (
+            f"this result for {result.security!r} reports a requested window of "
+            f"{result.requested_observation_count} Yield observations, below the "
+            f"{_MINIMUM_OBSERVATIONS_FOR_STDEV} this calculator accepts"
+        )
+
+    expected_changes = max(result.observation_count - 1, 0)
+    if result.yield_change_count != expected_changes:
+        return (
+            f"{result.observation_count} Yield observations make {expected_changes} Yield "
+            f"Changes, but this result for {result.security!r} claims "
+            f"{result.yield_change_count} -- its counts do not describe one calculation"
+        )
+    # Equality, not two inequalities (Codex review, PR #200). The calculator
+    # takes `observations[-requested:]`, so it always uses exactly
+    # min(series, requested) -- and a result reporting series=200,
+    # requested=180, used=4 satisfied both inequalities while describing a
+    # window this module would never produce.
+    expected_used = min(result.series_observation_count, result.requested_observation_count)
+    if result.observation_count != expected_used:
+        return (
+            f"this result for {result.security!r} used {result.observation_count} Yield "
+            f"observations, but a series of {result.series_observation_count} against a "
+            f"requested {result.requested_observation_count} yields exactly {expected_used}"
+        )
+
+    expected_status = (
+        HistoricalYieldVolStatus.NO_HISTORY
+        if result.observation_count == 0
+        else HistoricalYieldVolStatus.FULL_WINDOW
+        if result.observation_count == result.requested_observation_count
+        else HistoricalYieldVolStatus.INSUFFICIENT_HISTORY
+    )
+    if result.window_status is not expected_status:
+        return (
+            f"this result for {result.security!r} reports {result.window_status.value} for "
+            f"{result.observation_count} of {result.requested_observation_count} Yield "
+            f"observations, which is {expected_status.value}"
+        )
+
+    for name, value in (
+        ("requested_start_date", result.requested_start_date),
+        ("requested_end_date", result.requested_end_date),
+    ):
+        if not isinstance(value, date) or isinstance(value, datetime):
+            return (
+                f"{name} must be a calendar date for {result.security!r}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    if result.requested_start_date > result.requested_end_date:
+        return (
+            f"the declared range for {result.security!r} starts "
+            f"{result.requested_start_date.isoformat()}, after it ends "
+            f"{result.requested_end_date.isoformat()}"
+        )
+
+    # The dates are provenance the route displays as "which observations this
+    # number came from", so they are checked against the counts rather than
+    # taken on trust: an empty, duplicated, out-of-range or simply different
+    # tuple published false calculation provenance (Codex review, PR #200).
+    # Both figures are present exactly when there is no blocker. This is the
+    # invariant the dataclass documents, and it belongs here rather than only
+    # in the publication path: the route serializes EVERY result, so a half-
+    # populated one answered HTTP 200 showing a daily risk figure with no
+    # fatal blocker beside it (Codex review, PR #200).
+    figures_present = result.daily_yield_vol is not None and result.annualized_yield_vol is not None
+    figures_absent = result.daily_yield_vol is None and result.annualized_yield_vol is None
+    if not (figures_present or figures_absent):
+        return (
+            f"this result for {result.security!r} carries a daily standard deviation of "
+            f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
+            f"{result.annualized_yield_vol!r} -- the two figures exist together or not at all"
+        )
+    if figures_present == bool(result.blockers):
+        return (
+            f"this result for {result.security!r} "
+            + (
+                "carries both figures alongside a fatal blocker"
+                if result.blockers
+                else "carries no figures and no blocker explaining why"
+            )
+            + f" ({'; '.join(str(blocker) for blocker in result.blockers) or 'no blockers'})"
+        )
+    # Availability follows the change count, not merely the absence of a
+    # blocker: two observations make one change, which has no ddof=1 standard
+    # deviation, so a figure there is one the calculator could not have
+    # produced (Codex review, PR #200).
+    if figures_present != (result.yield_change_count >= _MINIMUM_CHANGES_FOR_STDEV):
+        return (
+            f"this result for {result.security!r} "
+            + ("carries figures from " if figures_present else "carries no figures from ")
+            + f"{result.yield_change_count} Yield Change(s), and the "
+            f"{STANDARD_DEVIATION_CONVENTION} convention produces one exactly when there "
+            f"are at least {_MINIMUM_CHANGES_FOR_STDEV}"
+        )
+    # Present means usable-as-a-number, here as well as at publication: the
+    # route serializes these two for every response, so "x"/"y" reached an
+    # HTTP 200 as repr strings beside an unavailability reason.
+    if figures_present:
+        for name, value in (
+            ("daily_yield_vol", result.daily_yield_vol),
+            ("annualized_yield_vol", result.annualized_yield_vol),
+        ):
+            try:
+                _require_finite_number(value, name)
+            except (ValueError, OverflowError, TypeError) as exc:
+                return f"{name} for {result.security!r} is not a finite number: {exc}"
+
+    if not isinstance(result.observation_dates, tuple):
+        return (
+            f"observation_dates must be a tuple for {result.security!r}, got "
+            f"{type(result.observation_dates).__name__}"
+        )
+    if len(result.observation_dates) != result.observation_count:
+        return (
+            f"this result for {result.security!r} reports {result.observation_count} "
+            f"observations but lists {len(result.observation_dates)} dates"
+        )
+    previous: date | None = None
+    for used in result.observation_dates:
+        if not isinstance(used, date) or isinstance(used, datetime):
+            return (
+                f"every date in observation_dates must be a calendar date for "
+                f"{result.security!r}, got {used!r} ({type(used).__name__})"
+            )
+        if previous is not None and used <= previous:
+            return (
+                f"observation_dates for {result.security!r} must be strictly ascending -- "
+                f"{used.isoformat()} follows {previous.isoformat()}"
+            )
+        if used < result.requested_start_date or used > result.requested_end_date:
+            return (
+                f"observation date {used.isoformat()} for {result.security!r} falls outside "
+                f"the declared range {result.requested_start_date.isoformat()}.."
+                f"{result.requested_end_date.isoformat()}"
+            )
+        previous = used
+
+    # A warning is the calculator's qualification of a short window, so it
+    # belongs to exactly that status. A FULL_WINDOW result carrying
+    # ("Applied VCUB substitute",) and an INSUFFICIENT_HISTORY result carrying
+    # none are both shapes this module cannot produce, and the route displays
+    # either as calculation output (Codex review, PR #200).
+    if result.window_status is HistoricalYieldVolStatus.INSUFFICIENT_HISTORY:
+        warnings_expected: tuple[str, ...] = (
+            _insufficient_history_warning(
+                result.observation_count, result.requested_observation_count
+            ),
+        )
+    else:
+        warnings_expected = ()
+    # The exact warning, not merely one: an arbitrary string here passed and
+    # published, so a result could carry ("Applied VCUB substitute",) beside
+    # an audit line saying none had been (Codex review, PR #200). The text is
+    # built from the counts this function has already validated, so it is
+    # derived rather than restated.
+    if result.warnings != warnings_expected:
+        return (
+            f"this result for {result.security!r} reports {result.window_status.value} with "
+            f"{list(result.warnings)!r}; that status carries exactly "
+            f"{list(warnings_expected)!r}"
+        )
+
+    # The same rule for the fatal half, which had only been checked for being
+    # non-blank strings (Codex review, PR #200). A blocker is the *only* text
+    # the route shows when there is no number -- it is both the calculation
+    # blocker and the publication-refusal reason -- so "Use a VCUB substitute
+    # instead" answered HTTP 200 and was rendered as this calculator's own
+    # explanation of why there is none, for the two counts that have
+    # deterministic explanations and against the one substitution #197 most
+    # explicitly forbids. Derived from the counts already validated above, so
+    # the guard and the calculator cannot drift apart.
+    if result.window_status is HistoricalYieldVolStatus.NO_HISTORY:
+        blockers_expected: tuple[str, ...] = (
+            _no_history_blocker(
+                result.security, result.requested_start_date, result.requested_end_date
+            ),
+        )
+    elif result.yield_change_count < _MINIMUM_CHANGES_FOR_STDEV:
+        blockers_expected = (_too_few_changes_blocker(result.yield_change_count),)
+    else:
+        blockers_expected = ()
+    if result.blockers != blockers_expected:
+        return (
+            f"this result for {result.security!r} reports {result.window_status.value} with "
+            f"{result.yield_change_count} Yield Change(s) and blockers "
+            f"{list(result.blockers)!r}; that window carries exactly "
+            f"{list(blockers_expected)!r}"
+        )
+
+    # The methodology the route serializes under the hard-coded canonical
+    # label. Enforced here and not only at publication, because the route
+    # returns the raw figures under that label whether or not the normalized
+    # source was published.
+    if result.standard_deviation_convention != STANDARD_DEVIATION_CONVENTION:
+        return (
+            f"this result for {result.security!r} claims the "
+            f"{result.standard_deviation_convention!r} convention; this calculator produces "
+            f"{STANDARD_DEVIATION_CONVENTION}"
+        )
+    if (
+        result.annualization_trading_days != ANNUALIZATION_TRADING_DAYS
+        or result.annualization_factor != ANNUALIZATION_FACTOR
+    ):
+        return (
+            f"this result for {result.security!r} claims annualization by sqrt("
+            f"{result.annualization_trading_days!r}) = {result.annualization_factor!r}; this "
+            f"calculator uses sqrt({ANNUALIZATION_TRADING_DAYS})"
+        )
+
+    # Consistency, not merely finiteness: daily=99.0 beside the real
+    # annualized figure is two finite numbers that cannot both be true, and
+    # the route serialized both as headline figures.
+    if figures_present:
+        if result.daily_yield_vol < 0:
+            return (
+                f"the daily standard deviation for {result.security!r} is "
+                f"{result.daily_yield_vol!r}, and a standard deviation is never negative"
+            )
+        if not math.isclose(
+            result.annualized_yield_vol,
+            result.daily_yield_vol * ANNUALIZATION_FACTOR,
+            rel_tol=1e-12,
+            abs_tol=0.0,
+        ):
+            return (
+                f"this result for {result.security!r} reports a daily standard deviation of "
+                f"{result.daily_yield_vol!r} and an annualized Historical Yield Vol of "
+                f"{result.annualized_yield_vol!r}, which is not that daily figure times "
+                f"sqrt({ANNUALIZATION_TRADING_DAYS})"
+            )
+
+    # Everything the route puts in its JSON payload has to survive json.dumps.
+    # `_write_json` serializes outside the handler's exception boundary, so an
+    # unserializable value there terminates the response rather than answering
+    # the promised HTTP 400 (Codex review, PR #200).
+    for name, value in (
+        ("requested_identifier", result.requested_identifier),
+        ("security", result.security),
+        ("yield_field", result.yield_field),
+        ("source_system", result.source_system),
+        ("acquired_at", result.acquired_at),
+        ("calculated_at", result.calculated_at),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            return (
+                f"{name} must be a non-blank string for {result.security!r}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    # The one acquisition path this statistic is built on. `REUTERS` -- or
+    # any other non-blank label -- was copied through and published as an
+    # ACTIVE source while the card displayed it as Bloomberg provenance
+    # (Codex review, PR #200). Imported rather than restated: one constant,
+    # one place, the same reason the short-window warning is derived.
+    if result.source_system != BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM:
+        return (
+            f"source_system for {result.security!r} is {result.source_system!r}; this "
+            f"statistic is only taken over {BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM} history"
+        )
+    # Both timestamps are evidence of *when* -- when Bloomberg was read, and
+    # when this number was calculated -- and "not-a-time" was displayed as
+    # exactly that. The #196 loader and this module both stamp
+    # `datetime.now().astimezone().isoformat(timespec="seconds")`, so an
+    # offset-aware ISO-8601 string is the shape, and an offset is what makes
+    # the moment unambiguous rather than a local reading nobody can place.
+    for name, value in (
+        ("acquired_at", result.acquired_at),
+        ("calculated_at", result.calculated_at),
+    ):
+        try:
+            stamped = datetime.fromisoformat(value)
+        except ValueError:
+            return (
+                f"{name} for {result.security!r} is {value!r}, which is not an ISO-8601 "
+                "timestamp"
+            )
+        if stamped.tzinfo is None or stamped.utcoffset() is None:
+            return (
+                f"{name} for {result.security!r} is {value!r}, which names no UTC offset -- "
+                "the moment it records cannot be placed"
+            )
+    for name, value in (
+        ("field_meaning", result.field_meaning),
+        ("field_unit", result.field_unit),
+    ):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            return (
+                f"{name} must be a non-blank string or None for {result.security!r}, got "
+                f"{value!r} ({type(value).__name__})"
+            )
+
+    expected_first = result.observation_dates[0] if result.observation_dates else None
+    expected_last = result.observation_dates[-1] if result.observation_dates else None
+    if result.first_observation_date != expected_first:
+        return (
+            f"first_observation_date for {result.security!r} is "
+            f"{result.first_observation_date!r}, not the first date used ({expected_first!r})"
+        )
+    if result.last_observation_date != expected_last:
+        return (
+            f"last_observation_date for {result.security!r} is "
+            f"{result.last_observation_date!r}, not the last date used ({expected_last!r})"
+        )
+    return None
+
+
+def _require_publishable_shape(result: HistoricalYieldVolResult) -> None:
+    """Refuse a result that must not become a normalized volatility source.
+
+    Everything :func:`result_shape_problem` covers, plus the rules that are
+    about publication specifically: no blocker, both figures present and
+    consistent, and the approved methodology under the canonical label.
+    """
+
+    problem = result_shape_problem(result)
+    if problem is not None:
+        raise HistoricalYieldVolUnavailableError(problem)
+
+    if result.blockers:
+        raise HistoricalYieldVolUnavailableError(
+            f"no Historical Yield Vol is available for {result.security!r} "
+            f"({result.window_status.value}): "
+            f"{'; '.join(str(blocker) for blocker in result.blockers)}"
+        )
+    if result.annualized_yield_vol is None:
+        raise HistoricalYieldVolUnavailableError(
+            f"this result for {result.security!r} ({result.window_status.value}) carries no "
+            "Historical Yield Vol and no blocker explaining why, so there is nothing to "
+            "publish and no reason to give"
+        )
+
+    # A figure has to have come from enough changes to be one. Without this a
+    # NO_HISTORY result carrying a positive number published an ACTIVE source
+    # whose audit said it was "calculated from 0 of the requested 0 Yield
+    # observations (0 Yield Changes)" (Codex review, PR #200).
+    if result.yield_change_count < _MINIMUM_CHANGES_FOR_STDEV:
+        raise HistoricalYieldVolUnavailableError(
+            f"this result for {result.security!r} carries a Historical Yield Vol computed "
+            f"from {result.yield_change_count} Yield Change(s), below the "
+            f"{_MINIMUM_CHANGES_FOR_STDEV} the {STANDARD_DEVIATION_CONVENTION} convention "
+            "needs -- no window this short produces a standard deviation"
+        )
+
+    # Both figures' finiteness, their annualization relationship and the
+    # methodology constants are enforced by result_shape_problem above, which
+    # every caller of this function runs first. They are properties of any
+    # serializable result, not only of a publishable one, so this function
+    # keeps no second copy: two rules for one invariant, with only one of them
+    # reachable, is the defect and not the safeguard (Codex review, PR #200).
+    # Everything this function checks itself is publication-only: whether this
+    # particular result may be published under this particular label.
+
+
+def historical_yield_vol_volatility_input(
+    result: HistoricalYieldVolResult,
+) -> BLIVolatilityInput:
+    """Publish ``result`` as Shiori's normalized ``HISTORICAL_YIELD_VOL_MO`` source.
+
+    The already-reviewed ``BLIVolatilityInput`` is the one normalized
+    volatility contract in this repository, so this function constructs one
+    rather than adding a second schema beside it -- the same
+    "one model, a canonical source label for its existing ``source_system``"
+    shape ``pricing/bli_effective_forward.py`` established for the Forward.
+    The basis is ``YIELD_VOL``, which the MVP/standalone required-input guard
+    refuses outright: this source is therefore visible and auditable without
+    being able to reach Black-76 through any existing path.
+
+    **The value is normalized to ``DECIMAL_ANNUAL`` on the way in**, because
+    that is the unit ``BLIVolatilityInput`` states (docs/30 §1) and the
+    contract carries no unit field of its own to say otherwise. A ``PERCENT``
+    Yield field whose Historical Vol is ``6.35`` publishes as ``0.0635``; a
+    ``BASIS_POINTS`` field normalizes by ``1e-4``. The factor comes from
+    :func:`decimal_annual_normalization_factor`, so an undeclared or
+    unsupported unit refuses publication instead of putting a
+    hundred-times-too-large number into a risk contract. The calculated
+    result itself is left in the field's own unit -- that is the number the
+    Middle Office parity run compares against.
+
+    Nothing is overwritten or replaced here. A VCUB capture, a manual
+    override and this historical statistic are three separately labelled
+    inputs; producing one never consumes another.
+
+    ``override_or_fallback_audit`` is always populated, never ``None``. A
+    Historical Yield Vol is a computed statistic, not the "directly observed
+    value" a blank audit would claim, and Annex A §A.8.1 requires the source
+    unit and the normalization factor to travel with every resolved result --
+    so a consumer holding only this input can still see the window status,
+    both observation counts, the convention, and exactly how the number was
+    rescaled.
+
+    Raises :class:`HistoricalYieldVolUnavailableError` when the result cannot
+    honestly enter that layer: it carries no volatility (``NO_HISTORY``, or
+    too few changes); its unit is undeclared or outside the supported
+    vocabulary; or the window's standard deviation is not positive, which
+    ``BLIVolatilityInput`` refuses and which this module reports as the
+    degenerate window it is rather than publishing.
+    """
+
+    if not isinstance(result, HistoricalYieldVolResult):
+        raise HistoricalYieldVolUnavailableError(
+            f"result must be a HistoricalYieldVolResult, got {type(result).__name__}"
+        )
+    _require_publishable_shape(result)
+    # An INSUFFICIENT_HISTORY result reaching here is publishable by design,
+    # and its warning is carried into the audit string below rather than
+    # being dropped at the boundary.
+
+    factor = decimal_annual_normalization_factor(result.field_unit)
+    normalized = result.annualized_yield_vol * factor
+
+    if not normalized > 0:
+        # Two different causes end up here and they must not be confused: the
+        # window really was flat, or a strictly positive vol underflowed to
+        # zero on the way into the published unit (0.0 / 5e-324 / 0.0 in
+        # PERCENT does exactly that). Blaming identical changes for the second
+        # would be a refusal message asserting something untrue, which is the
+        # same defect as any other overclaim in this module.
+        if not result.annualized_yield_vol > 0:
+            cause = (
+                "every Yield Change in the window was identical, so this degenerate window "
+                "is reported as what it is rather than published as a volatility"
+            )
+        else:
+            cause = (
+                f"its Historical Yield Vol of {result.annualized_yield_vol!r} "
+                f"{result.field_unit} is too small to represent in "
+                f"{PUBLISHED_VOLATILITY_UNIT} and underflowed to zero under the "
+                f"{factor!r} normalization -- a volatility that cannot survive its own "
+                "unit conversion is refused rather than published as zero"
+            )
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol of the selected {result.observation_count}-observation "
+            f"window for {result.security!r} is {normalized!r} {PUBLISHED_VOLATILITY_UNIT}, "
+            f"which is not positive -- {cause}"
+        )
+
+    audit = (
+        f"{HISTORICAL_YIELD_VOL_MO_SOURCE} {result.window_status.value}: calculated from "
+        f"{result.observation_count} of the requested {result.requested_observation_count} "
+        f"Yield observations ({result.yield_change_count} Yield Changes), "
+        f"{result.standard_deviation_convention} x sqrt({result.annualization_trading_days}); "
+        f"source unit {result.field_unit} normalized to {PUBLISHED_VOLATILITY_UNIT} by factor "
+        f"{factor!r}. No flat extension, benchmark, index or VCUB substitute applied."
+    )
+
+    return BLIVolatilityInput(
+        volatility=normalized,
+        volatility_basis=BLIVolatilityBasis.YIELD_VOL,
+        source_system=HISTORICAL_YIELD_VOL_MO_SOURCE,
+        status=BLIMarketDataStatus.ACTIVE,
+        override_or_fallback_audit=audit,
+    )

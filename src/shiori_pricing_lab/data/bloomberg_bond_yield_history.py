@@ -5,14 +5,21 @@ observations (Issue #196).
 Desktop API for one bond's own historical Yield series over one explicit date
 range, and returns exactly the dated observations Bloomberg answered with,
 plus the provenance needed to audit them later. It is the raw market-data
-foundation the future Historical Volatility work will read from.
+foundation the Historical Volatility work reads from -- Issue #197's
+``data/historical_yield_volatility.py`` consumes this module's
+``BloombergBondYieldHistory`` and is its only statistical consumer.
 
 **What this module is deliberately not.** It computes no Yield Change, no
 standard deviation, no annualization, and no volatility of any kind. It does
 not touch pricing, the VCUB store or resolver, PRICE_VOL/YIELD_VOL, Forward,
 or Discounting, and it never selects a benchmark or proxy series when the
-bond's own history is thin or absent. Issue #196 stops at the observations;
-the statistical methodology is a later, separately approved issue.
+bond's own history is thin or absent. Issue #196 stops at the observations.
+The statistic lives in the separate module named above, under its own issue
+and its own approval. Its convention is no longer provisional: the Middle
+Office parity run passed, fixing a horizon of 180 Yield Changes over 181
+observations, STDEV.S (ddof=1) and sqrt(252). Approval is a separate thing
+and #197 has not received it, so that module stays unmerged -- and nothing
+in this module depends on either fact.
 
 **The Yield field is never guessed here.** ``yield_field`` is a required,
 caller-supplied Bloomberg mnemonic with no default anywhere in this module,
