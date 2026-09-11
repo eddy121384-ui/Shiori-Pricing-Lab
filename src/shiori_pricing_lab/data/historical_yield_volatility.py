@@ -1324,3 +1324,92 @@ def historical_yield_vol_volatility_input(
         status=BLIMarketDataStatus.ACTIVE,
         override_or_fallback_audit=audit,
     )
+
+
+#: Derived fields a re-run of :func:`calculate_historical_yield_volatility`
+#: must reproduce. Inputs are excluded on purpose -- they are what the re-run
+#: is fed, so comparing them would only compare each value with itself.
+#: ``calculated_at``/``acquired_at`` are excluded too: they timestamp *when*
+#: a calculation ran, not what it produced, and a re-run carries its own.
+_REPRODUCED_FIELDS: tuple[str, ...] = (
+    "security",
+    "yield_field",
+    "field_unit",
+    "observation_count",
+    "requested_observation_count",
+    "yield_change_count",
+    "first_observation_date",
+    "last_observation_date",
+    "observation_dates",
+    "standard_deviation_convention",
+    "annualization_trading_days",
+    "daily_yield_vol",
+    "annualized_yield_vol",
+    "window_status",
+)
+
+
+def require_reproducible_historical_yield_vol(
+    result: HistoricalYieldVolResult,
+    history: BloombergBondYieldHistory,
+) -> None:
+    """Refuse ``result`` unless re-running this calculator over ``history``
+    returns the same statistic.
+
+    **Why this lives here.** A :class:`HistoricalYieldVolResult` cannot be
+    checked against itself. It deliberately carries neither the Yield values
+    nor the Yield Changes (see this module's docstring), so scaling its daily
+    and annualized figures together preserves the ``sqrt(252)`` relationship
+    :func:`result_shape_problem` tests, and every internal check passes while
+    the number means something else entirely. The only thing that can settle
+    it is the series -- which this module's docstring already names as where
+    a consumer needing the values should go.
+
+    Knowing *how to verify* a #197 result belongs next to knowing how to
+    produce one, so a consumer never has to carry a copy of this field list.
+
+    Raises :class:`HistoricalYieldVolUnavailableError` when the series is
+    unusable, is for another bond, or does not reproduce the statistic.
+    """
+
+    if not isinstance(result, HistoricalYieldVolResult):
+        raise HistoricalYieldVolUnavailableError(
+            f"result must be a HistoricalYieldVolResult, got {type(result).__name__}"
+        )
+    if not isinstance(history, BloombergBondYieldHistory):
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} is accompanied by no usable "
+            f"Yield series (got {type(history).__name__}), so its statistic cannot be "
+            "re-derived and must not be trusted"
+        )
+    if history.security != result.security:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} is accompanied by a Yield "
+            f"series for {history.security!r} -- one bond's statistic is never verified "
+            "against another bond's observations"
+        )
+
+    try:
+        reproduced = calculate_historical_yield_volatility(
+            history, requested_observation_count=result.requested_observation_count
+        )
+    except (HistoricalYieldVolInputError, ValueError) as exc:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} cannot be re-derived from "
+            f"its own Yield series: {exc}"
+        ) from exc
+
+    for field_name in _REPRODUCED_FIELDS:
+        recorded = getattr(result, field_name)
+        expected = getattr(reproduced, field_name)
+        if isinstance(recorded, float) and isinstance(expected, float):
+            if math.isclose(recorded, expected, rel_tol=1e-12, abs_tol=0.0):
+                continue
+        elif recorded == expected:
+            continue
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} records {field_name}="
+            f"{recorded!r}, but re-running this calculator over its own Yield series "
+            f"gives {expected!r} -- the statistic is not reproducible, so it describes "
+            "no calculation that happened"
+        )
