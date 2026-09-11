@@ -106,13 +106,16 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
 )
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
     DURATION_METHODOLOGY_VERSION,
+    BLIBondDurationError,
     BLIBondModifiedDuration,
+    calculate_bond_modified_duration,
     duration_type_for_basis,
 )
 from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
     BondOptionPriceBasis,
     require_bond_option_price_basis,
 )
+from shiori_pricing_lab.pricing.treasury_futures_implied_yield import IrregularFirstCoupon
 
 # The approved conversion, named. A different bridge -- a convexity term, a
 # relative-vol round-trip, a DCF adjustment -- is a different version string.
@@ -193,6 +196,131 @@ class BLIHistoricalEquivalentPriceVol:
     methodology_version: str
     calculated_at: str
     warnings: tuple[str, ...] = ()
+
+
+#: Derived fields a re-run of the duration producer must reproduce. The
+#: *inputs* are excluded on purpose -- they are what the re-run is fed, so
+#: comparing them would only compare each value with itself.
+_REPRODUCED_FLOAT_FIELDS: tuple[str, ...] = (
+    "accrued_interest_per_100",
+    "dirty_price_per_100",
+    "basis_price_per_100",
+    "base_yield_percent",
+    "yield_bump_basis_points",
+    "bumped_yield_up_percent",
+    "bumped_yield_down_percent",
+    "bumped_clean_price_up_per_100",
+    "bumped_clean_price_down_per_100",
+    "price_derivative_per_unit_yield",
+    "modified_duration",
+    "absolute_modified_duration",
+)
+
+_REPRODUCED_EXACT_FIELDS: tuple[str, ...] = (
+    "coupons_per_year",
+    "day_count",
+    "duration_type",
+    "price_basis",
+    "source",
+    "methodology_version",
+)
+
+
+def equivalent_price_vol_from(
+    absolute_modified_duration: float, historical_yield_vol_decimal_annual: float
+) -> float:
+    """The Annex A v1.4 §A.8.6 conversion itself: ``|D_B| x sigma_hist_abs``.
+
+    Separated from :func:`historical_equivalent_price_vol` because the two
+    answer different questions. This is the *formula*, and it is the same
+    formula on either price basis. That function additionally establishes
+    that a particular pair of records may be multiplied at all -- same bond,
+    reproducible duration, consistent basis, publishable unit -- which is
+    where nearly all of its code lives.
+
+    Keeping the formula addressable on its own is what lets the approved
+    numerical fixture (``6.5 x 0.0073070244 = 0.0474956586``) be pinned as a
+    generic formula test, rather than requiring a real bond whose duration
+    happens to land on a round number.
+
+    ``abs()`` is applied here as well as at the duration, so a sign
+    convention can never reach Black-76 as a negative sigma even if a caller
+    hands this the signed figure.
+    """
+
+    return abs(absolute_modified_duration) * historical_yield_vol_decimal_annual
+
+
+def _schedule_of(duration: BLIBondModifiedDuration) -> IrregularFirstCoupon | None:
+    """Rebuild the irregular schedule the record says it was calculated under.
+
+    Both dates or neither, the same rule ``IrregularFirstCoupon`` itself
+    enforces: a half schedule is refused rather than completed by guessing.
+    """
+
+    start = duration.schedule_accrual_start
+    first = duration.schedule_first_coupon
+    if start is None and first is None:
+        return None
+    if start is None or first is None:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} carries half an irregular first-coupon "
+            f"schedule (accrual start {start!r}, first coupon {first!r}) -- neither the "
+            "cashflows it used nor the ones it did not can be established from that"
+        )
+    return IrregularFirstCoupon(accrual_start=start, first_coupon=first)
+
+
+def _require_reproducible_duration(duration: BLIBondModifiedDuration) -> None:
+    """Re-run the duration producer over ``duration``'s own inputs and compare.
+
+    Every derived figure must come back identical (floats at
+    :data:`_DURATION_REL_TOL`, labels exactly). A genuine record reproduces
+    exactly; a reconstructed one whose derived fields were edited -- even
+    edited *consistently with each other* -- does not.
+    """
+
+    schedule = _schedule_of(duration)
+    try:
+        reproduced = calculate_bond_modified_duration(
+            security=duration.security,
+            convention_profile=duration.convention_profile,
+            price_basis=duration.price_basis,
+            clean_price_per_100=duration.clean_price_per_100,
+            settlement_date=duration.settlement_date,
+            maturity_date=duration.maturity_date,
+            coupon_percent=duration.coupon_percent,
+            pricing_timestamp=duration.pricing_timestamp,
+            calculated_at=duration.calculated_at,
+            schedule=schedule,
+        )
+    except BLIBondDurationError as exc:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} cannot be reproduced from the inputs "
+            f"it declares: {exc}"
+        ) from exc
+
+    for field_name in _REPRODUCED_EXACT_FIELDS:
+        recorded = getattr(duration, field_name)
+        expected = getattr(reproduced, field_name)
+        if recorded != expected:
+            raise BLIHistoricalEquivalentPriceVolError(
+                f"the duration for {duration.security!r} records {field_name}="
+                f"{recorded!r}, but its own declared inputs produce {expected!r} -- the "
+                "record is not reproducible, so the volatility it would produce describes "
+                "no calculation that happened"
+            )
+
+    for field_name in _REPRODUCED_FLOAT_FIELDS:
+        recorded = getattr(duration, field_name)
+        expected = getattr(reproduced, field_name)
+        if not math.isclose(recorded, expected, rel_tol=_DURATION_REL_TOL, abs_tol=0.0):
+            raise BLIHistoricalEquivalentPriceVolError(
+                f"the duration for {duration.security!r} records {field_name}="
+                f"{recorded!r}, but re-running the duration producer over its own declared "
+                f"inputs gives {expected!r} -- the record is not reproducible, so the "
+                "volatility it would produce describes no calculation that happened"
+            )
 
 
 def historical_equivalent_price_vol(
@@ -276,37 +404,20 @@ def historical_equivalent_price_vol(
             "methodology is not silently accepted onto this path"
         )
 
-    # Recompute the duration from the record's own numerator and denominator
-    # (Codex review, PR #212). The three checks above confirm the *labels*
-    # agree with each other; none of them confirms that the reported
-    # magnitude was actually produced by that denominator. A reconstructed or
-    # deserialized CLEAN record whose duration fields were replaced with the
-    # DIRTY values satisfies every label gate, and the dirty-derived number
-    # would then be published as CLEAN. This is the check that catches it,
-    # and it is cheap: one division over values the record already carries.
-    expected_duration = -duration.price_derivative_per_unit_yield / (
-        duration.basis_price_per_100
-    )
-    if not math.isclose(
-        duration.modified_duration, expected_duration, rel_tol=_DURATION_REL_TOL, abs_tol=0.0
-    ):
-        raise BLIHistoricalEquivalentPriceVolError(
-            f"the duration for {duration.security!r} reports {duration.modified_duration!r} "
-            f"on the {basis.value} basis, but -({duration.price_derivative_per_unit_yield!r}) "
-            f"/ {duration.basis_price_per_100!r} is {expected_duration!r} -- the reported "
-            "magnitude was not calculated from the denominator it declares, so it belongs "
-            "to no stated basis"
-        )
-    reported_absolute = duration.absolute_modified_duration
-    if not math.isclose(
-        reported_absolute, abs(expected_duration), rel_tol=_DURATION_REL_TOL, abs_tol=0.0
-    ):
-        raise BLIHistoricalEquivalentPriceVolError(
-            f"the duration for {duration.security!r} reports an absolute duration of "
-            f"{reported_absolute!r}, which is not abs({expected_duration!r}) -- the "
-            "magnitude this conversion would multiply is not the one the record's own "
-            "arithmetic produces"
-        )
+    # Reproduce the whole duration from the record's own declared inputs
+    # (Codex review, PR #212). Re-deriving only ``-(dP/dY) / P_basis`` was not
+    # enough: a record whose numerator *and* both magnitudes are scaled
+    # together stays self-consistent, so every label and quotient gate passes
+    # while sigma_P moves and the recorded bumped prices no longer support any
+    # of it. Doubling those three fields doubled the published volatility.
+    #
+    # So the test is reproducibility, not internal agreement: the record
+    # carries every input its own producer needs, and re-running that one
+    # deterministic producer over them must return the same derived figures.
+    # That subsumes the quotient check, the bump convention, the numerator,
+    # the accrual and the denominator in a single statement, and it adds no
+    # second implementation of anything -- it calls the same function.
+    _require_reproducible_duration(duration)
 
     if calculated_at is None:
         calculated_at = duration.calculated_at
@@ -351,9 +462,10 @@ def historical_equivalent_price_vol(
             "volatility, and this path publishes no substitute"
         )
 
-    # abs() on purpose and stated in the contract: a sign convention on D_B
-    # must never be able to hand Black-76 a negative sigma.
-    equivalent_price_vol = absolute_duration * sigma_hist_abs
+    # The formula itself lives in one addressable place; abs() is applied
+    # there, so a sign convention on D_B can never hand Black-76 a negative
+    # sigma.
+    equivalent_price_vol = equivalent_price_vol_from(absolute_duration, sigma_hist_abs)
 
     if not math.isfinite(equivalent_price_vol):
         raise BLIHistoricalEquivalentPriceVolError(
@@ -457,6 +569,44 @@ def historical_equivalent_price_vol_volatility_input(
     # downstream, because once a BLIVolatilityInput exists the engine cannot
     # tell which price basis its number belongs to.
     basis = require_bond_option_price_basis(converted.price_basis, "converted.price_basis")
+
+    # The top-level basis is a *label*; the volatility's actual basis is
+    # whatever the nested duration divided by (Codex review, PR #212).
+    # Checking the allowlist against the label alone let a CLEAN conversion
+    # be relabelled DIRTY -- `dataclasses.replace(converted,
+    # price_basis=DIRTY)` -- and published straight into the dirty-F/K
+    # engine, which is the exact state this allowlist exists to prevent. So
+    # the label must agree with the duration, and the arithmetic between them
+    # must still hold, before the allowlist is consulted at all.
+    duration_basis = require_bond_option_price_basis(
+        converted.duration.price_basis, "converted.duration.price_basis"
+    )
+    if duration_basis is not basis:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol of {converted.security!r} is labelled "
+            f"{basis.value} but its duration divided by the {duration_basis.value} price "
+            f"({converted.duration.basis_price_per_100!r}) -- the value is "
+            f"{duration_basis.value}-derived and relabelling it does not change what it "
+            "is, so it is refused rather than published under a basis it does not have"
+        )
+
+    _require_reproducible_duration(converted.duration)
+
+    expected_vol = (
+        converted.duration.absolute_modified_duration
+        * converted.historical_yield_vol_decimal_annual
+    )
+    if not math.isclose(
+        converted.equivalent_price_vol, expected_vol, rel_tol=_DURATION_REL_TOL, abs_tol=0.0
+    ):
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol of {converted.security!r} is "
+            f"{converted.equivalent_price_vol!r}, but |D_B| "
+            f"{converted.duration.absolute_modified_duration!r} x Historical Yield Vol "
+            f"{converted.historical_yield_vol_decimal_annual!r} is {expected_vol!r} -- the "
+            "value carried is not the one its own recorded parents produce"
+        )
+
     if basis not in PUBLISHABLE_PRICE_BASES:
         raise BLIHistoricalEquivalentPriceVolError(
             f"the {basis.value}-basis Equivalent Price Vol of {converted.security!r} "

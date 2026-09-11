@@ -36,6 +36,7 @@ from shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol import (
     PUBLISHABLE_PRICE_BASES,
     VOLATILITY_KIND,
     BLIHistoricalEquivalentPriceVolError,
+    equivalent_price_vol_from,
     historical_equivalent_price_vol,
     historical_equivalent_price_vol_volatility_input,
 )
@@ -107,19 +108,21 @@ def _duration(*, security=_SECURITY, price_basis=BondOptionPriceBasis.DIRTY,
     )
 
 
-def _duration_with(target, *, security=_SECURITY, price_basis=BondOptionPriceBasis.DIRTY):
-    """A real duration object retargeted to an exact ``D_B``, kept consistent.
+def _retargeted_duration(target, *, security=_SECURITY,
+                         price_basis=BondOptionPriceBasis.DIRTY):
+    """A real duration record tampered to report ``target``, self-consistently.
 
-    ``dataclasses.replace`` on a genuine result rather than a hand-built
-    stub: every other provenance field stays real, so a test that needs one
-    exact number does not quietly also test a fictional bond.
+    Numerator and both magnitudes move together, so the record satisfies
+    every *internal* check -- basis, type label, denominator, and the
+    ``-(dP/dY) / P_basis`` quotient. It is nonetheless a lie: re-running the
+    duration producer over the record's own declared inputs does not return
+    these figures, because the recorded bumped prices never supported them.
 
-    The numerator moves with the target. The conversion producer re-derives
-    ``-price_derivative_per_unit_yield / basis_price_per_100`` and refuses a
-    record whose reported magnitude was not produced by its own denominator,
-    so retargeting only the duration fields would build exactly the corrupted
-    record that gate exists to reject. ``_inconsistent_duration`` below does
-    that deliberately, where it is the point of the test.
+    That is exactly the case the conversion's reproducibility gate exists to
+    catch, so every use of this helper below expects a refusal. There is
+    deliberately no helper that fabricates an *accepted* duration magnitude:
+    since the gate re-runs the producer, the only durations the conversion
+    accepts are ones a real bond actually produces.
     """
 
     base = _duration(security=security, price_basis=price_basis)
@@ -135,50 +138,64 @@ def _duration_with(target, *, security=_SECURITY, price_basis=BondOptionPriceBas
 
 
 def test_the_canonical_conversion_vector():
-    # sigma_hist_abs = 0.0073070244 (the #197 Middle Office parity figure)
-    # D_B            = 6.5
-    # -> sigma_P     = 0.0474956586
+    # The approved fixture, pinned as a generic formula test:
+    #   sigma_hist_abs = 0.0073070244 (the #197 Middle Office parity figure)
+    #   |D_B|          = 6.5
+    #   -> sigma_P     = 0.0474956586
     #
-    # DECIMAL source unit so the normalization factor is exactly 1.0 and this
-    # test pins the *conversion* rather than the unit arithmetic; the PERCENT
-    # path is pinned separately below.
-    result = _result_with_vol(0.0073070244)
+    # Against the formula rather than the producer, because the producer now
+    # requires a *reproducible* duration -- and no real bond's duration lands
+    # on exactly 6.5. The producer's use of this same formula is pinned by
+    # test_the_conversion_is_exactly_the_product_and_nothing_else below.
+    assert equivalent_price_vol_from(6.5, 0.0073070244) == 0.0474956586
 
-    converted = historical_equivalent_price_vol(result, _duration_with(6.5))
 
-    assert converted.historical_yield_vol_decimal_annual == 0.0073070244
-    assert converted.duration.absolute_modified_duration == 6.5
-    assert converted.equivalent_price_vol == 0.0474956586
+def test_the_formula_is_the_same_on_either_basis():
+    # There is one conversion, selected twice -- not two conversions.
+    assert equivalent_price_vol_from(7.086987080284323, 0.0073070244) == (
+        0.05178478751812231
+    )
+    assert equivalent_price_vol_from(6.9418247524496595, 0.0073070244) == (
+        0.05072408284667362
+    )
+
+
+@pytest.mark.parametrize("signed", [6.5, -6.5])
+def test_the_formula_cannot_return_a_negative_volatility(signed):
+    # abs() is in the contract so a sign convention on D_B can never reach
+    # Black-76 as a negative sigma, whichever figure a caller passes.
+    assert equivalent_price_vol_from(signed, 0.0073070244) == 0.0474956586
 
 
 def test_the_conversion_is_exactly_the_product_and_nothing_else():
     # No forward yield, no convexity, no DCF factor, no fitted multiplier:
-    # whatever the inputs, the output is the bare product.
+    # whatever the inputs, the output is the bare product -- and it is the
+    # same formula the canonical fixture above pins.
     result = _vol_result()
     duration = _duration()
 
     converted = historical_equivalent_price_vol(result, duration)
-    expected = (
-        duration.absolute_modified_duration
-        * historical_yield_vol_volatility_input(result).volatility
+    sigma_hist = historical_yield_vol_volatility_input(result).volatility
+    assert converted.equivalent_price_vol == (
+        duration.absolute_modified_duration * sigma_hist
     )
-    assert converted.equivalent_price_vol == expected
+    assert converted.equivalent_price_vol == equivalent_price_vol_from(
+        duration.absolute_modified_duration, sigma_hist
+    )
 
 
 # --- Sign, units, labelling --------------------------------------------------
 
 
-def test_a_negative_duration_cannot_make_the_volatility_negative():
-    # abs(D_B) is in the contract precisely so a sign convention on the
-    # duration can never hand Black-76 a negative sigma.
-    result = _result_with_vol(0.0073070244)
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_the_published_volatility_is_positive_on_a_real_record(basis):
+    # The producer side of the abs() contract: a genuine duration carries
+    # absolute == abs(signed), so the product cannot come out negative.
+    duration = _duration(price_basis=basis)
+    converted = historical_equivalent_price_vol(_vol_result(), duration)
 
-    negative = historical_equivalent_price_vol(result, _duration_with(-6.5))
-    positive = historical_equivalent_price_vol(result, _duration_with(6.5))
-
-    assert negative.duration.modified_duration == -6.5
-    assert negative.equivalent_price_vol > 0
-    assert negative.equivalent_price_vol == positive.equivalent_price_vol == 0.0474956586
+    assert duration.absolute_modified_duration == abs(duration.modified_duration)
+    assert converted.equivalent_price_vol > 0
 
 
 def test_the_unit_conversion_happens_exactly_once():
@@ -187,14 +204,15 @@ def test_the_unit_conversion_happens_exactly_once():
     # twice (or not at all) is a 100x error in sigma_P in either direction,
     # so all three candidates are checked apart.
     result = _vol_result(field_unit="PERCENT")
-    duration = _duration_with(6.5)
+    duration = _duration()
+    d = duration.absolute_modified_duration
     raw = result.annualized_yield_vol
 
     converted = historical_equivalent_price_vol(result, duration)
 
-    once = 6.5 * (raw * 1e-2)
-    never = 6.5 * raw
-    twice = 6.5 * (raw * 1e-2 * 1e-2)
+    once = d * (raw * 1e-2)
+    never = d * raw
+    twice = d * (raw * 1e-2 * 1e-2)
 
     assert converted.equivalent_price_vol == once
     assert converted.equivalent_price_vol != never
@@ -209,10 +227,13 @@ def test_the_unit_conversion_happens_exactly_once():
 )
 def test_each_supported_source_unit_normalizes_by_its_own_declared_factor(unit, factor):
     result = _vol_result(field_unit=unit)
-    converted = historical_equivalent_price_vol(result, _duration_with(6.5))
+    duration = _duration()
+    converted = historical_equivalent_price_vol(result, duration)
 
     assert converted.historical_yield_vol_normalization_factor == factor
-    assert converted.equivalent_price_vol == 6.5 * (result.annualized_yield_vol * factor)
+    assert converted.equivalent_price_vol == (
+        duration.absolute_modified_duration * (result.annualized_yield_vol * factor)
+    )
 
 
 def test_the_result_is_labelled_equivalent_price_vol_and_never_price_or_yield_vol():
@@ -326,6 +347,69 @@ def test_clean_publication_into_the_pricing_contract_is_explicitly_refused():
     assert "Phase 4/5" in message
 
 
+def test_a_clean_conversion_relabelled_dirty_cannot_be_published():
+    # The gap Codex found: the allowlist was checked against the top-level
+    # label, which `dataclasses.replace` can flip while the nested duration
+    # -- and the volatility itself -- stay clean-derived.
+    clean = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.CLEAN)
+    )
+    relabelled = dataclasses.replace(clean, price_basis=BondOptionPriceBasis.DIRTY)
+
+    assert relabelled.price_basis is BondOptionPriceBasis.DIRTY
+    assert relabelled.duration.price_basis is BondOptionPriceBasis.CLEAN
+    assert relabelled.equivalent_price_vol == clean.equivalent_price_vol
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(relabelled)
+    message = str(excinfo.value)
+    assert "labelled DIRTY" in message
+    assert "CLEAN" in message
+
+
+def test_a_dirty_conversion_relabelled_clean_cannot_be_published_either():
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    relabelled = dataclasses.replace(dirty, price_basis=BondOptionPriceBasis.CLEAN)
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(relabelled)
+
+
+def test_a_tampered_published_volatility_value_is_refused():
+    # The published number must still be the product of its own recorded
+    # parents; editing it alone does not make it that product.
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    tampered = dataclasses.replace(
+        dirty, equivalent_price_vol=dirty.equivalent_price_vol * 2
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(tampered)
+    assert "not the one its own recorded parents produce" in str(excinfo.value)
+
+
+def test_publication_also_revalidates_the_nested_duration():
+    # A conversion whose nested duration was tampered after the fact must not
+    # publish either, even though the conversion itself was built legitimately.
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    tampered = dataclasses.replace(
+        dirty,
+        duration=dataclasses.replace(
+            dirty.duration, bumped_clean_price_up_per_100=999.0
+        ),
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(tampered)
+    assert "not reproducible" in str(excinfo.value)
+
+
 def test_the_clean_conversion_result_itself_still_exists_and_is_auditable():
     # Refusing publication must not delete the CLEAN answer: it stays fully
     # computable and inspectable, and is never coerced to DIRTY.
@@ -422,7 +506,7 @@ def test_a_clean_record_carrying_the_dirty_duration_magnitude_is_refused():
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
         historical_equivalent_price_vol(_vol_result(), corrupted)
-    assert "not calculated from the denominator it declares" in str(excinfo.value)
+    assert "not reproducible" in str(excinfo.value)
 
 
 def test_a_dirty_record_carrying_the_clean_duration_magnitude_is_refused():
@@ -436,7 +520,7 @@ def test_a_dirty_record_carrying_the_clean_duration_magnitude_is_refused():
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
         historical_equivalent_price_vol(_vol_result(), corrupted)
-    assert "not calculated from the denominator it declares" in str(excinfo.value)
+    assert "not reproducible" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
@@ -466,6 +550,71 @@ def test_a_tampered_numerator_alone_is_refused():
     )
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         historical_equivalent_price_vol(_vol_result(), duration)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("clean_price_per_100", 100.0),
+        ("accrued_interest_per_100", 0.5),
+        ("dirty_price_per_100", 104.0),
+        ("basis_price_per_100", 104.0),
+        ("base_yield_percent", 3.9),
+        ("bumped_yield_up_percent", 4.5),
+        ("bumped_yield_down_percent", 3.5),
+        ("bumped_clean_price_up_per_100", 99.0),
+        ("bumped_clean_price_down_per_100", 103.0),
+        ("yield_bump_basis_points", 5.0),
+        ("coupon_percent", 5.0),
+        ("coupons_per_year", 1),
+        ("schedule_accrual_start", date(2026, 11, 20)),
+    ],
+)
+def test_tampering_with_any_single_recorded_field_is_refused(field_name, value):
+    # The reproducibility gate is a chain, not a spot check: every field that
+    # feeds or records the calculation is covered, so no single edit produces
+    # a different sigma_P while still passing.
+    duration = dataclasses.replace(_duration(), **{field_name: value})
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol(_vol_result(), duration)
+
+
+def test_a_half_irregular_schedule_on_a_record_is_refused():
+    duration = dataclasses.replace(_duration(), schedule_first_coupon=date(2027, 8, 15))
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol(_vol_result(), duration)
+    assert "half an irregular first-coupon schedule" in str(excinfo.value)
+
+
+def test_an_irregular_duration_reproduces_and_converts():
+    # The reproduction path must rebuild the schedule from the record, or
+    # every irregular bond would be refused as unreproducible.
+    from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+        IrregularFirstCoupon,
+    )
+
+    schedule = IrregularFirstCoupon(
+        accrual_start=date(2026, 11, 20), first_coupon=date(2027, 8, 15)
+    )
+    duration = calculate_bond_modified_duration(
+        security=_SECURITY,
+        convention_profile="UST",
+        price_basis=BondOptionPriceBasis.DIRTY,
+        clean_price_per_100=101.067593,
+        settlement_date=date(2027, 1, 10),
+        maturity_date=date(2035, 8, 15),
+        coupon_percent=4.25,
+        pricing_timestamp="2027-01-08T16:00:00+00:00",
+        calculated_at="2027-01-08T16:00:05+00:00",
+        schedule=schedule,
+    )
+    converted = historical_equivalent_price_vol(_vol_result(), duration)
+
+    assert duration.schedule_accrual_start == schedule.accrual_start
+    assert converted.equivalent_price_vol > 0
+    assert historical_equivalent_price_vol_volatility_input(converted).volatility == (
+        converted.equivalent_price_vol
+    )
 
 
 @pytest.mark.parametrize("bad", [None, "", "GROSS", 1])
@@ -636,32 +785,33 @@ def test_an_unsupported_source_unit_refuses_conversion():
         )
 
 
-@pytest.mark.parametrize("bad", [0.0, -6.5])
-def test_a_non_positive_duration_refuses_conversion(bad):
-    # Internally consistent, so this reaches the positivity check rather
-    # than the arithmetic-consistency gate above it.
-    result = _vol_result()
-    duration = _duration_with(bad)
-    if bad == 0.0:
-        with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-            historical_equivalent_price_vol(result, duration)
-        assert "not positive" in str(excinfo.value)
-    else:
-        # A negative *signed* duration with a correct absolute value is not a
-        # corrupt record -- abs() is in the contract precisely so a sign
-        # convention cannot produce a negative volatility.
-        converted = historical_equivalent_price_vol(result, duration)
-        assert converted.equivalent_price_vol > 0
+@pytest.mark.parametrize("target", [0.0, -6.5, 6.5, 13.883649504899319])
+def test_a_self_consistently_retargeted_duration_is_still_refused(target):
+    # The gap Codex found: scaling the numerator and both magnitudes together
+    # keeps every internal check satisfied while sigma_P moves and the
+    # recorded bumped prices support none of it. The last parameter is
+    # exactly twice the genuine DIRTY duration -- the reported doubling case.
+    duration = _retargeted_duration(target)
+
+    # The internal quotient still holds on this record; that is the point.
+    if duration.basis_price_per_100:
+        assert duration.modified_duration == pytest.approx(
+            -duration.price_derivative_per_unit_yield / duration.basis_price_per_100
+        )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol(_vol_result(), duration)
+    assert "not reproducible" in str(excinfo.value)
 
 
 def test_a_negative_absolute_duration_refuses_conversion():
     # absolute_modified_duration must be abs(modified_duration); a record
-    # claiming otherwise is caught by the arithmetic gate, not silently used.
+    # claiming otherwise is caught rather than silently used.
     result = _vol_result()
     duration = dataclasses.replace(_duration(), absolute_modified_duration=-6.5)
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
         historical_equivalent_price_vol(result, duration)
-    assert "absolute duration" in str(excinfo.value)
+    assert "absolute_modified_duration" in str(excinfo.value)
 
 
 def test_a_non_finite_duration_refuses_conversion():
@@ -675,17 +825,20 @@ def test_a_non_finite_duration_refuses_conversion():
         historical_equivalent_price_vol(result, duration)
 
 
-def test_a_product_that_underflows_its_own_conversion_is_refused_not_published():
-    # Both parents strictly positive and internally consistent; only their
-    # product underflows. Reported as underflow, never as a flat window.
+def test_the_smallest_publishable_yield_vol_still_produces_a_positive_price_vol():
+    # The conversion keeps an underflow guard, but it is now unreachable from
+    # the public entry point and this test says so rather than pretending
+    # otherwise: the reproducibility gate admits only durations a real bond
+    # produces (O(1)-O(30)), and #197 refuses to publish a yield vol whose
+    # daily figure is not strictly positive -- so the smallest product that
+    # can arrive here is still many orders of magnitude above underflow. The
+    # guard stays as defence in depth for a future caller; what is asserted
+    # here is the reachable boundary.
     result = _result_with_vol(5e-324 * ANNUALIZATION_FACTOR)
-    duration = _duration_with(0.01)
-    assert result.annualized_yield_vol > 0
-    assert duration.absolute_modified_duration > 0
+    duration = _duration()
 
-    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol(result, duration)
-    assert "underflow" in str(excinfo.value)
+    converted = historical_equivalent_price_vol(result, duration)
+    assert converted.equivalent_price_vol > 0
 
 
 @pytest.mark.parametrize("bad", [None, "vol", 0.01])
