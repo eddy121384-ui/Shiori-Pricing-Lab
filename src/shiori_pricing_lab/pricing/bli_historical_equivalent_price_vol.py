@@ -183,7 +183,13 @@ class BLIHistoricalEquivalentPriceVol:
     historical_yield_vol_annualization_trading_days: int
     historical_yield_vol_calculated_at: str
 
-    # --- Duration lineage (full object, not a copied number) --------------
+    # --- Parent lineages, whole (the objects, not copied numbers) ---------
+    #
+    # Both parents are retained in full so publication can revalidate them
+    # rather than trusting the flattened scalars above (Codex review, PR
+    # #212). Those scalars stay for audit and display; they are checked
+    # against these on the way out, never read in their place.
+    historical_yield_vol: HistoricalYieldVolResult
     duration: BLIBondModifiedDuration
 
     # --- Result ------------------------------------------------------------
@@ -321,6 +327,91 @@ def _require_reproducible_duration(duration: BLIBondModifiedDuration) -> None:
                 f"inputs gives {expected!r} -- the record is not reproducible, so the "
                 "volatility it would produce describes no calculation that happened"
             )
+
+
+#: Flattened #197 fields that must still agree with the retained parent.
+_ECHOED_HISTORICAL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("historical_yield_vol_field_unit", "field_unit"),
+    ("historical_yield_vol_in_field_unit", "annualized_yield_vol"),
+    ("historical_yield_vol_observation_count", "observation_count"),
+    ("historical_yield_vol_requested_observation_count", "requested_observation_count"),
+    ("historical_yield_vol_change_count", "yield_change_count"),
+    ("historical_yield_vol_convention", "standard_deviation_convention"),
+    ("historical_yield_vol_annualization_trading_days", "annualization_trading_days"),
+    ("historical_yield_vol_calculated_at", "calculated_at"),
+)
+
+
+def _require_normalized_yield_vol_matches(
+    converted: BLIHistoricalEquivalentPriceVol,
+) -> float:
+    """Return the normalized yield vol #197 itself produces for the parent.
+
+    The retained :class:`HistoricalYieldVolResult` is put back through
+    #197's own reviewed publication helper -- the single normalization point
+    -- and the recorded ``historical_yield_vol_decimal_annual`` must equal
+    what comes back. The flattened echoes are checked against the parent too,
+    so a record cannot carry a source-unit lineage describing one calculation
+    and a normalized value from another.
+    """
+
+    parent = converted.historical_yield_vol
+    if not isinstance(parent, HistoricalYieldVolResult):
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol of {converted.security!r} carries no usable "
+            f"Historical Yield Vol parent (got {type(parent).__name__}), so its "
+            "normalized volatility cannot be revalidated"
+        )
+    if parent.security != converted.security:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol of {converted.security!r} retains a Historical "
+            f"Yield Vol for {parent.security!r} -- one bond's volatility is never "
+            "published under another bond's name"
+        )
+
+    for echoed_name, parent_name in _ECHOED_HISTORICAL_FIELDS:
+        echoed = getattr(converted, echoed_name)
+        original = getattr(parent, parent_name)
+        # ``field_unit`` is echoed through ``str()`` at construction.
+        if echoed_name == "historical_yield_vol_field_unit":
+            original = str(original)
+        if echoed != original:
+            raise BLIHistoricalEquivalentPriceVolError(
+                f"the Equivalent Price Vol of {converted.security!r} records "
+                f"{echoed_name}={echoed!r}, but its retained Historical Yield Vol says "
+                f"{original!r} -- the lineage it displays is not the calculation it came "
+                "from"
+            )
+
+    try:
+        expected_factor = decimal_annual_normalization_factor(parent.field_unit)
+        normalized = historical_yield_vol_volatility_input(parent).volatility
+    except (HistoricalYieldVolUnavailableError, ValueError) as exc:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol retained for {converted.security!r} can no longer "
+            f"be published by #197's own helper, so it cannot be revalidated: {exc}"
+        ) from exc
+
+    if converted.historical_yield_vol_normalization_factor != expected_factor:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol of {converted.security!r} records a normalization "
+            f"factor of {converted.historical_yield_vol_normalization_factor!r}, but "
+            f"{parent.field_unit!r} normalizes by {expected_factor!r} -- the unit and the "
+            "factor it claims to have applied do not agree"
+        )
+    if not math.isclose(
+        converted.historical_yield_vol_decimal_annual,
+        normalized,
+        rel_tol=_DURATION_REL_TOL,
+        abs_tol=0.0,
+    ):
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol of {converted.security!r} records a Historical "
+            f"Yield Vol of {converted.historical_yield_vol_decimal_annual!r} "
+            f"{converted.unit}, but normalizing its own retained result gives "
+            f"{normalized!r} -- the value carried is not the one #197 produces"
+        )
+    return normalized
 
 
 def historical_equivalent_price_vol(
@@ -505,6 +596,7 @@ def historical_equivalent_price_vol(
             historical_yield_vol.annualization_trading_days
         ),
         historical_yield_vol_calculated_at=historical_yield_vol.calculated_at,
+        historical_yield_vol=historical_yield_vol,
         duration=duration,
         equivalent_price_vol=equivalent_price_vol,
         volatility_basis=BLIVolatilityBasis.EQUIVALENT_PRICE_VOL,
@@ -592,10 +684,22 @@ def historical_equivalent_price_vol_volatility_input(
 
     _require_reproducible_duration(converted.duration)
 
-    expected_vol = (
-        converted.duration.absolute_modified_duration
-        * converted.historical_yield_vol_decimal_annual
-    )
+    # The normalized yield vol is an editable field too (Codex review, PR
+    # #212). Checking it only against ``equivalent_price_vol`` compared two
+    # editable numbers with each other, so doubling both published double the
+    # calculated risk figure while the retained source-unit lineage still
+    # recorded the original.
+    #
+    # #197 cannot be re-run the way the duration producer can -- it
+    # deliberately does not carry the Yield values or the Yield Changes, so
+    # its arithmetic is unreplayable by design. What *is* replayable is its
+    # normalization, so the retained result is put back through #197's own
+    # publication helper and the answer must match. That helper also re-runs
+    # #197's internal shape checks, so a tampered parent fails there rather
+    # than here.
+    sigma_hist = _require_normalized_yield_vol_matches(converted)
+
+    expected_vol = converted.duration.absolute_modified_duration * sigma_hist
     if not math.isclose(
         converted.equivalent_price_vol, expected_vol, rel_tol=_DURATION_REL_TOL, abs_tol=0.0
     ):

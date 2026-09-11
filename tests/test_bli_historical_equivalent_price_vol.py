@@ -392,6 +392,100 @@ def test_a_tampered_published_volatility_value_is_refused():
     assert "not the one its own recorded parents produce" in str(excinfo.value)
 
 
+def test_scaling_the_normalized_yield_vol_and_the_volatility_together_is_refused():
+    # The gap Codex found: both fields are editable, so checking them only
+    # against each other let a doubled pair publish double the calculated
+    # risk figure while the retained source-unit lineage still recorded the
+    # original. Caught now by revalidating against the retained #197 parent.
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    doubled = dataclasses.replace(
+        dirty,
+        historical_yield_vol_decimal_annual=dirty.historical_yield_vol_decimal_annual * 2,
+        equivalent_price_vol=dirty.equivalent_price_vol * 2,
+    )
+
+    # The old check passes on this record; that is the point.
+    assert doubled.equivalent_price_vol == pytest.approx(
+        doubled.duration.absolute_modified_duration
+        * doubled.historical_yield_vol_decimal_annual
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(doubled)
+    assert "not the one #197 produces" in str(excinfo.value)
+
+
+def test_a_clean_volatility_copied_onto_a_dirty_conversion_is_refused():
+    # The combined attack Codex named: a reproducible DIRTY duration carrying
+    # the numeric volatility copied from the CLEAN conversion.
+    clean = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.CLEAN)
+    )
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    forged = dataclasses.replace(
+        dirty,
+        equivalent_price_vol=clean.equivalent_price_vol,
+        historical_yield_vol_decimal_annual=(
+            clean.equivalent_price_vol / dirty.duration.absolute_modified_duration
+        ),
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(forged)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("historical_yield_vol_normalization_factor", 1.0),
+        ("historical_yield_vol_field_unit", "DECIMAL"),
+        ("historical_yield_vol_in_field_unit", 9.99),
+        ("historical_yield_vol_observation_count", 3),
+        ("historical_yield_vol_change_count", 2),
+        ("historical_yield_vol_convention", "POPULATION_STDEV"),
+        ("historical_yield_vol_annualization_trading_days", 260),
+        ("historical_yield_vol_calculated_at", "1999-01-01T00:00:00+00:00"),
+    ],
+)
+def test_a_flattened_historical_field_that_contradicts_its_parent_is_refused(
+    field_name, value
+):
+    # The displayed lineage must be the calculation the value came from.
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    tampered = dataclasses.replace(dirty, **{field_name: value})
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(tampered)
+
+
+def test_a_conversion_retaining_another_bonds_yield_vol_is_refused():
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    swapped = dataclasses.replace(
+        dirty, historical_yield_vol=_vol_result(security="/isin/DE0000000000")
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(swapped)
+    assert "DE0000000000" in str(excinfo.value)
+
+
+def test_both_parents_are_retained_whole_on_the_conversion():
+    result = _vol_result()
+    duration = _duration()
+    converted = historical_equivalent_price_vol(result, duration)
+
+    assert converted.historical_yield_vol is result
+    assert converted.duration is duration
+
+
 def test_publication_also_revalidates_the_nested_duration():
     # A conversion whose nested duration was tampered after the fact must not
     # publish either, even though the conversion itself was built legitimately.
