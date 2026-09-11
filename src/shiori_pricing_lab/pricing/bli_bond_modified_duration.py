@@ -87,7 +87,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     PROVENANCE_SHIORI_DERIVED,
@@ -187,12 +187,6 @@ class BLIBondModifiedDuration:
     methodology_version: str
     calculated_at: str
     warnings: tuple[str, ...] = ()
-
-
-def _calculation_now() -> datetime:
-    """Wall clock for ``calculated_at``, isolated so tests can pin it."""
-
-    return datetime.now(UTC)
 
 
 def _require_finite_number(value: object, field_name: str) -> float:
@@ -295,6 +289,7 @@ def calculate_bond_modified_duration(
     maturity_date: date,
     coupon_percent: float,
     pricing_timestamp: str,
+    calculated_at: str,
     schedule: IrregularFirstCoupon | None = None,
 ) -> BLIBondModifiedDuration:
     """Return ``D_B = -(1 / P_dirty) x dP/dY`` for one bond at ``settlement_date``.
@@ -304,6 +299,14 @@ def calculate_bond_modified_duration(
     cash-bond spot settlement (``tS``) that every cashflow calculation runs
     on. Use :func:`spot_settlement_date` to derive ``tS`` from a pricing date
     on the profile's own calendar.
+
+    ``calculated_at`` is a required argument rather than a clock reading. No
+    module under ``shiori_pricing_lab/pricing/`` may read the system clock --
+    ``tests/test_pricing_engine.py`` enforces that directly over the
+    package's source, scanning for the wall-clock call forms -- because a
+    pricing result that silently depends on when it ran is not reproducible.
+    The caller that owns the run supplies its timestamp, the same way
+    ``time_to_expiry`` reaches Black-76 as an already-resolved number.
 
     ``schedule`` is passed through to the reusable price<->yield primitive
     unchanged, for a bond still inside an irregular first coupon period. It
@@ -334,6 +337,12 @@ def calculate_bond_modified_duration(
         raise BLIBondDurationError(
             "pricing_timestamp is required and must record the market-state timestamp t0, "
             f"got {pricing_timestamp!r}"
+        )
+    if not isinstance(calculated_at, str) or not calculated_at.strip():
+        raise BLIBondDurationError(
+            "calculated_at is required and must be supplied by the caller -- no module "
+            "under pricing/ reads the system clock, so this timestamp is never defaulted, "
+            f"got {calculated_at!r}"
         )
 
     # Raises ValueError on a missing/blank/unregistered selection -- Shiori
@@ -452,5 +461,5 @@ def calculate_bond_modified_duration(
         price_basis=DURATION_PRICE_BASIS,
         source=PROVENANCE_SHIORI_DERIVED,
         methodology_version=DURATION_METHODOLOGY_VERSION,
-        calculated_at=_calculation_now().isoformat(timespec="seconds"),
+        calculated_at=calculated_at,
     )

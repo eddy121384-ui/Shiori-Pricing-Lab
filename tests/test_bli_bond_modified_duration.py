@@ -42,6 +42,7 @@ _MATURITY = date(2035, 8, 15)
 _COUPON = 4.25
 _CLEAN = 101.067593
 _T0 = "2027-02-12T16:00:00+00:00"
+_CALCULATED_AT = "2027-02-12T16:00:05+00:00"
 
 
 def _duration(**overrides):
@@ -53,6 +54,7 @@ def _duration(**overrides):
         "maturity_date": _MATURITY,
         "coupon_percent": _COUPON,
         "pricing_timestamp": _T0,
+        "calculated_at": _CALCULATED_AT,
     }
     kwargs.update(overrides)
     return calculate_bond_modified_duration(**kwargs)
@@ -323,7 +325,27 @@ def test_the_result_carries_everything_needed_to_redo_the_arithmetic():
     assert result.duration_type == DURATION_TYPE
     assert result.source == "SHIORI_DERIVED"
     assert result.methodology_version == DURATION_METHODOLOGY_VERSION
-    assert result.calculated_at
+    assert result.calculated_at == _CALCULATED_AT
+
+
+def test_no_module_in_the_pricing_package_reads_the_system_clock():
+    # The repository invariant `tests/test_pricing_engine.py` enforces over
+    # the whole package, pinned here too so this module's own contribution to
+    # it is visible at the point of change: a pricing result that silently
+    # depends on when it ran is not reproducible, so every timestamp arrives
+    # as an argument.
+    from pathlib import Path
+
+    text = Path(module.__file__).read_text(encoding="utf-8")
+    assert "datetime.now(" not in text
+    assert "date.today(" not in text
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None])
+def test_a_blank_calculated_at_is_refused_rather_than_defaulted(bad):
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(calculated_at=bad)
+    assert "calculated_at" in str(excinfo.value)
 
 
 def test_the_duration_type_names_the_basis_rather_than_leaving_it_to_magnitude():

@@ -73,7 +73,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from shiori_pricing_lab.data.bli_snapshot import (
     BLIMarketDataStatus,
@@ -149,21 +148,24 @@ class BLIHistoricalEquivalentPriceVol:
     warnings: tuple[str, ...] = ()
 
 
-def _calculation_now() -> datetime:
-    """Wall clock for ``calculated_at``, isolated so tests can pin it."""
-
-    return datetime.now(UTC)
-
-
 def historical_equivalent_price_vol(
     historical_yield_vol: HistoricalYieldVolResult,
     duration: BLIBondModifiedDuration,
+    *,
+    calculated_at: str | None = None,
 ) -> BLIHistoricalEquivalentPriceVol:
     """Convert one #197 result and one approved ``D_B`` into ``sigma_P``.
 
     ``sigma_P = |D_B| x sigma_hist_abs``, where ``sigma_hist_abs`` is read
     from #197's own publication helper (the single normalization point) and
     ``|D_B|`` is the absolute dirty-price modified duration.
+
+    ``calculated_at`` defaults to the duration's own timestamp rather than to
+    a clock reading: no module under ``shiori_pricing_lab/pricing/`` may read
+    the system clock (``tests/test_pricing_engine.py`` enforces that over the
+    package source, scanning for the wall-clock call forms), because a
+    pricing result that silently depends on when it ran is not reproducible.
+    A caller that wants its own run timestamp passes one.
 
     Raises :class:`BLIHistoricalEquivalentPriceVolError` when the two parents
     are not the same bond, when the duration is unusable, or when the product
@@ -182,6 +184,13 @@ def historical_equivalent_price_vol(
     if not isinstance(duration, BLIBondModifiedDuration):
         raise BLIHistoricalEquivalentPriceVolError(
             f"duration must be a BLIBondModifiedDuration, got {type(duration).__name__}"
+        )
+    if calculated_at is None:
+        calculated_at = duration.calculated_at
+    elif not isinstance(calculated_at, str) or not calculated_at.strip():
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"calculated_at must be a non-blank timestamp when supplied, got "
+            f"{calculated_at!r}"
         )
 
     # Same bond, or no conversion. Neither parent checks this and nothing
@@ -268,7 +277,7 @@ def historical_equivalent_price_vol(
         volatility_character=VOLATILITY_CHARACTER,
         unit=PUBLISHED_VOLATILITY_UNIT,
         methodology_version=EQUIVALENT_PRICE_VOL_METHODOLOGY_VERSION,
-        calculated_at=_calculation_now().isoformat(timespec="seconds"),
+        calculated_at=calculated_at,
         warnings=warnings,
     )
 

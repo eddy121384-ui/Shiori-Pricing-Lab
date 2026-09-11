@@ -99,6 +99,7 @@ def _duration(*, security=_SECURITY):
         maturity_date=date(2035, 8, 15),
         coupon_percent=4.25,
         pricing_timestamp="2027-02-12T16:00:00+00:00",
+        calculated_at="2027-02-12T16:00:05+00:00",
     )
 
 
@@ -313,6 +314,35 @@ def test_the_published_audit_carries_both_parents_and_the_conversion():
         converted.duration.pricing_timestamp,
     ):
         assert expected in audit
+
+
+def test_no_module_in_the_pricing_package_reads_the_system_clock():
+    # Same repository invariant as the duration module: every timestamp is an
+    # argument, so a result never silently depends on when it ran.
+    from pathlib import Path
+
+    import shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol as converter
+
+    text = Path(converter.__file__).read_text(encoding="utf-8")
+    assert "datetime.now(" not in text
+    assert "date.today(" not in text
+
+
+def test_the_calculated_at_defaults_to_the_durations_own_timestamp():
+    duration = _duration()
+    converted = historical_equivalent_price_vol(_vol_result(), duration)
+    assert converted.calculated_at == duration.calculated_at
+
+    supplied = historical_equivalent_price_vol(
+        _vol_result(), duration, calculated_at="2027-03-01T09:00:00+00:00"
+    )
+    assert supplied.calculated_at == "2027-03-01T09:00:00+00:00"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 5])
+def test_a_blank_supplied_calculated_at_is_refused(bad):
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol(_vol_result(), _duration(), calculated_at=bad)
 
 
 def test_the_published_value_crosses_the_boundary_unrescaled():
