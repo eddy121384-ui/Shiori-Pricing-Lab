@@ -560,6 +560,114 @@ def test_a_genuine_conversion_carries_exactly_the_producers_own_labels():
     assert dirty.volatility_basis is BLIVolatilityBasis.EQUIVALENT_PRICE_VOL
 
 
+# --- Temporal coherence: no look-ahead (Codex review, PR #212) ---------------
+
+
+def _future_window_result(*, security=_SECURITY):
+    """A #197 result whose Yield observations post-date the pricing timestamp."""
+
+    values = [4.00, 4.10, 3.80, 4.30]
+    dates = [date(2030, 6, 1) + timedelta(days=i) for i in range(len(values))]
+    history = BloombergBondYieldHistory(
+        requested_identifier=security,
+        security=security,
+        yield_field="YLD_YTM_MID",
+        field_meaning="Yield to Maturity (Mid)",
+        field_unit="PERCENT",
+        requested_start_date=dates[0],
+        requested_end_date=dates[-1],
+        observations=tuple(
+            BondYieldObservation(
+                observation_date=day, yield_value=value, raw_value=repr(value)
+            )
+            for day, value in zip(dates, values, strict=True)
+        ),
+        source_system="BLOOMBERG_DAPI",
+        acquired_at="2030-06-05T09:00:00+00:00",
+    )
+    return calculate_historical_yield_volatility(
+        history, requested_observation_count=len(values)
+    )
+
+
+def test_a_yield_window_ending_after_the_pricing_time_is_refused():
+    # Look-ahead: a realized volatility built from observations that did not
+    # exist at t0 prices the past with knowledge of the future, and the
+    # published input carries one number and no dates for a reader to catch
+    # it with.
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol(_future_window_result(), _duration())
+
+    message = str(excinfo.value)
+    assert "2030-06-04" in message
+    assert "2027-02-12T16:00:00+00:00" in message
+
+
+def test_the_look_ahead_refusal_also_guards_the_publication_boundary():
+    # A conversion built legitimately and then given a future-dated parent
+    # must not publish either.
+    dirty = historical_equivalent_price_vol(_vol_result(), _duration())
+    tampered = dataclasses.replace(dirty, historical_yield_vol=_future_window_result())
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(tampered)
+
+
+def test_an_observation_dated_on_the_pricing_day_itself_is_allowed():
+    # The boundary is "after t0", not "before t0": a same-day observation is
+    # the ordinary case and must not be refused.
+    duration = calculate_bond_modified_duration(
+        security=_SECURITY,
+        convention_profile="UST",
+        price_basis=BondOptionPriceBasis.DIRTY,
+        clean_price_per_100=101.067593,
+        settlement_date=date(2027, 2, 14),
+        maturity_date=date(2035, 8, 15),
+        coupon_percent=4.25,
+        pricing_timestamp="2026-01-04T16:00:00+00:00",
+        calculated_at="2026-01-04T16:00:05+00:00",
+    )
+    result = _vol_result()
+
+    assert result.last_observation_date == date(2026, 1, 4)
+    converted = historical_equivalent_price_vol(result, duration)
+    assert converted.equivalent_price_vol > 0
+
+
+def test_a_pricing_timestamp_that_places_no_moment_is_refused_at_the_duration():
+    from shiori_pricing_lab.pricing.bli_bond_modified_duration import BLIBondDurationError
+
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration_with_timestamp("not-a-time")
+    assert "ISO-8601" in str(excinfo.value)
+
+
+def _duration_with_timestamp(stamp):
+    return calculate_bond_modified_duration(
+        security=_SECURITY,
+        convention_profile="UST",
+        price_basis=BondOptionPriceBasis.DIRTY,
+        clean_price_per_100=101.067593,
+        settlement_date=date(2027, 2, 14),
+        maturity_date=date(2035, 8, 15),
+        coupon_percent=4.25,
+        pricing_timestamp=stamp,
+        calculated_at="2027-02-12T16:00:05+00:00",
+    )
+
+
+def test_the_published_audit_states_the_observation_window():
+    # BLIVolatilityInput carries no dates, so the window has to reach a
+    # reader through the audit or not at all.
+    converted = historical_equivalent_price_vol(_vol_result(), _duration())
+    audit = historical_equivalent_price_vol_volatility_input(
+        converted
+    ).override_or_fallback_audit
+
+    assert "2026-01-01..2026-01-04" in audit
+    assert "at or before t0" in audit
+
+
 def test_both_parents_are_retained_whole_on_the_conversion():
     result = _vol_result()
     duration = _duration()

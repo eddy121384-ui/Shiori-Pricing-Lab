@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 
 from shiori_pricing_lab.data.bli_snapshot import (
     BLIMarketDataStatus,
@@ -357,6 +358,66 @@ _PUBLICATION_LABEL_CONSTANTS: tuple[tuple[str, object], ...] = (
 )
 
 
+def _observation_window_text(historical_yield_vol: HistoricalYieldVolResult) -> str:
+    """The Yield window's first and last dates, for the published audit.
+
+    Carried into the audit because ``BLIVolatilityInput`` holds one number
+    and no dates: without them a reader cannot see *when* a realized
+    volatility was measured, which is the fact that makes it honest about
+    ``t0`` (Codex review, PR #212).
+    """
+
+    first = historical_yield_vol.first_observation_date
+    last = historical_yield_vol.last_observation_date
+    if first is None or last is None:
+        return "(no observation window recorded)"
+    return f"{first.isoformat()}..{last.isoformat()}"
+
+
+def _require_no_look_ahead(
+    historical_yield_vol: HistoricalYieldVolResult,
+    duration: BLIBondModifiedDuration,
+) -> None:
+    """Refuse a Yield history that reaches past the moment being priced.
+
+    A realized volatility is only honest about ``t0`` if every observation it
+    was computed from existed at ``t0`` (Codex review, PR #212). A window
+    ending after the pricing timestamp is look-ahead: in a historical
+    valuation or a backtest it prices the past with knowledge of the future,
+    and nothing in the resulting ``BLIVolatilityInput`` -- which carries one
+    number and no dates -- would let a reader detect it.
+
+    Compared on calendar dates: an observation *from* the pricing day is the
+    ordinary case and is allowed; one dated after it is not.
+    """
+
+    last_observation = historical_yield_vol.last_observation_date
+    if last_observation is None:
+        # No window at all -- #197's own publication helper refuses this, and
+        # is the right place for that message.
+        return
+
+    try:
+        pricing_moment = datetime.fromisoformat(duration.pricing_timestamp)
+    except (TypeError, ValueError) as exc:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} carries pricing timestamp "
+            f"{duration.pricing_timestamp!r}, which places no moment in time, so whether "
+            f"the Yield history ending {last_observation.isoformat()} reaches past it "
+            f"cannot be established: {exc}"
+        ) from exc
+
+    if last_observation > pricing_moment.date():
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol of {duration.security!r} was calculated from Yield "
+            f"observations ending {last_observation.isoformat()}, which is after the "
+            f"pricing timestamp {duration.pricing_timestamp} -- a realized volatility may "
+            "not be built from observations that did not exist at the moment being "
+            "priced, and the published input carries no dates for a reader to catch it "
+            "with"
+        )
+
+
 def _require_publishable_identity(converted: BLIHistoricalEquivalentPriceVol) -> None:
     """Both parents must be the same bond, and every label must be this one's.
 
@@ -590,6 +651,8 @@ def historical_equivalent_price_vol(
             "never converted through another bond's duration"
         )
 
+    _require_no_look_ahead(historical_yield_vol, duration)
+
     # The one normalization point. Its refusals are this path's refusals.
     try:
         normalized_input = historical_yield_vol_volatility_input(historical_yield_vol)
@@ -761,6 +824,8 @@ def historical_equivalent_price_vol_volatility_input(
     # publication helper and the answer must match. That helper also re-runs
     # #197's internal shape checks, so a tampered parent fails there rather
     # than here.
+    _require_no_look_ahead(converted.historical_yield_vol, converted.duration)
+
     sigma_hist = _require_normalized_yield_vol_matches(converted)
 
     expected_vol = converted.duration.absolute_modified_duration * sigma_hist
@@ -808,7 +873,9 @@ def historical_equivalent_price_vol_volatility_input(
         f"{duration.dirty_price_per_100!r}, divided by "
         f"{duration.basis_price_per_100!r}, base yield "
         f"{duration.base_yield_percent!r}% bumped "
-        f"+/-{duration.yield_bump_basis_points!r}bp. Historical Yield Vol from "
+        f"+/-{duration.yield_bump_basis_points!r}bp. Historical Yield Vol over Yield "
+        f"observations {_observation_window_text(converted.historical_yield_vol)}, all at "
+        f"or before t0; from "
         f"{converted.historical_yield_vol_observation_count} of "
         f"{converted.historical_yield_vol_requested_observation_count} observations "
         f"({converted.historical_yield_vol_change_count} Yield Changes), "

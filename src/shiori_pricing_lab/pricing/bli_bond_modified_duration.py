@@ -390,6 +390,18 @@ def calculate_bond_modified_duration(
             "pricing_timestamp is required and must record the market-state timestamp t0, "
             f"got {pricing_timestamp!r}"
         )
+    # t0 must place a moment, not merely be non-blank: downstream consumers
+    # compare it against observation dates to establish that a historical
+    # window does not reach past the moment being priced, and a timestamp
+    # nothing can parse makes that comparison impossible rather than merely
+    # inconvenient.
+    try:
+        datetime.fromisoformat(pricing_timestamp)
+    except ValueError as exc:
+        raise BLIBondDurationError(
+            f"pricing_timestamp {pricing_timestamp!r} is not an ISO-8601 timestamp, so it "
+            f"places no moment in time: {exc}"
+        ) from exc
     if schedule is not None and not isinstance(schedule, IrregularFirstCoupon):
         raise BLIBondDurationError(
             "schedule must be an IrregularFirstCoupon or None (a half schedule is never "
