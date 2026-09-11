@@ -342,6 +342,68 @@ _ECHOED_HISTORICAL_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Labels whose only correct value is this producer's own constant. A
+#: reconstructed record can carry any string in them, and each one changes
+#: what a reader believes the number *is* rather than what it equals --
+#: which is the misrepresentation this whole source mode exists to prevent.
+_PUBLICATION_LABEL_CONSTANTS: tuple[tuple[str, object], ...] = (
+    ("historical_yield_vol_source", HISTORICAL_YIELD_VOL_MO_SOURCE),
+    ("source_system", HISTORICAL_YIELD_VOL_MO_SOURCE),
+    ("bond_vol_source_mode", BOND_VOL_SOURCE_MODE),
+    ("volatility_kind", VOLATILITY_KIND),
+    ("unit", PUBLISHED_VOLATILITY_UNIT),
+    ("methodology_version", EQUIVALENT_PRICE_VOL_METHODOLOGY_VERSION),
+    ("volatility_basis", BLIVolatilityBasis.EQUIVALENT_PRICE_VOL),
+)
+
+
+def _require_publishable_identity(converted: BLIHistoricalEquivalentPriceVol) -> None:
+    """Both parents must be the same bond, and every label must be this one's.
+
+    Two independent gaps with one cause (Codex review, PR #212): the parents
+    were revalidated *separately*, and the labels were not validated at all.
+
+    A reproducible duration for a different bond therefore passed, because
+    each parent was internally sound -- the conversion's own same-bond check
+    lives in :func:`historical_equivalent_price_vol`, and a reconstructed
+    record never goes through it. One bond's duration multiplied by another's
+    yield vol is a finite number that nothing downstream could recognize.
+
+    And a record relabelled ``VCUB_NORMAL_PROXY`` / ``IMPLIED`` /
+    ``BLOOMBERG_DAPI`` published a correct, fully-validated *number* under a
+    description that makes it a different risk figure entirely. The arithmetic
+    gates cannot see that, because the arithmetic is right.
+    """
+
+    security = converted.security
+    if not isinstance(security, str) or not security.strip():
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Equivalent Price Vol names no security (got {security!r}), so nothing "
+            "identifies what it is a volatility of"
+        )
+    for label, parent_security in (
+        ("duration", converted.duration.security),
+        ("Historical Yield Vol", converted.historical_yield_vol.security),
+    ):
+        if parent_security != security:
+            raise BLIHistoricalEquivalentPriceVolError(
+                f"the Equivalent Price Vol of {security!r} carries a {label} for "
+                f"{parent_security!r} -- one bond's duration is never combined with "
+                "another bond's yield volatility, and the product of the two identifies "
+                "no instrument at all"
+            )
+
+    for field_name, expected in _PUBLICATION_LABEL_CONSTANTS:
+        recorded = getattr(converted, field_name)
+        if recorded != expected:
+            raise BLIHistoricalEquivalentPriceVolError(
+                f"the Equivalent Price Vol of {security!r} records {field_name}="
+                f"{recorded!r}, but this producer only ever emits {expected!r} -- a "
+                "historical/realized proxy is never published under another source, "
+                "basis, unit or methodology"
+            )
+
+
 def _require_normalized_yield_vol_matches(
     converted: BLIHistoricalEquivalentPriceVol,
 ) -> float:
@@ -660,6 +722,8 @@ def historical_equivalent_price_vol_volatility_input(
     # Before anything is constructed: the refusal has to happen here, not
     # downstream, because once a BLIVolatilityInput exists the engine cannot
     # tell which price basis its number belongs to.
+    _require_publishable_identity(converted)
+
     basis = require_bond_option_price_basis(converted.price_basis, "converted.price_basis")
 
     # The top-level basis is a *label*; the volatility's actual basis is

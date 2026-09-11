@@ -477,6 +477,89 @@ def test_a_conversion_retaining_another_bonds_yield_vol_is_refused():
     assert "DE0000000000" in str(excinfo.value)
 
 
+def test_a_duration_for_another_bond_cannot_be_swapped_in_at_publication():
+    # The gap Codex found: both parents were revalidated independently, so a
+    # fully reproducible duration for a *different* bond passed every gate.
+    # The conversion's own same-bond check never runs on a reconstructed
+    # record, and one bond's duration times another's yield vol is a finite
+    # number identifying no instrument.
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    other = _duration(security="/isin/DE0000000000")
+    swapped = dataclasses.replace(
+        dirty,
+        duration=other,
+        equivalent_price_vol=(
+            other.absolute_modified_duration * dirty.historical_yield_vol_decimal_annual
+        ),
+    )
+
+    # The swapped-in duration is itself perfectly reproducible; that is why
+    # the arithmetic gates cannot see this.
+    assert other.modified_duration == (
+        -other.price_derivative_per_unit_yield / other.basis_price_per_100
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(swapped)
+    message = str(excinfo.value)
+    assert "DE0000000000" in message
+    assert "another bond's yield volatility" in message
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_conversion_naming_no_security_cannot_be_published(blank):
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(dirty, security=blank)
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("bond_vol_source_mode", "VCUB_NORMAL_PROXY"),
+        ("volatility_kind", "IMPLIED"),
+        ("source_system", "BLOOMBERG_DAPI"),
+        ("historical_yield_vol_source", "VCUB_NORMAL_PROXY"),
+        ("unit", "PERCENT_ANNUAL"),
+        ("methodology_version", "SOME_OTHER_METHODOLOGY_V9"),
+        ("volatility_basis", BLIVolatilityBasis.PRICE_VOL),
+    ],
+)
+def test_a_relabelled_conversion_cannot_be_published(field_name, value):
+    # The arithmetic can be entirely correct and the record still a
+    # misrepresentation: these labels decide what a reader believes the
+    # number *is*. A historical/realized proxy relabelled VCUB/IMPLIED is
+    # exactly the mislabelling this source mode exists to prevent.
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+    relabelled = dataclasses.replace(dirty, **{field_name: value})
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(relabelled)
+    assert field_name in str(excinfo.value)
+
+
+def test_a_genuine_conversion_carries_exactly_the_producers_own_labels():
+    dirty = historical_equivalent_price_vol(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+
+    assert dirty.bond_vol_source_mode == HISTORICAL_YIELD_VOL_MO_SOURCE
+    assert dirty.source_system == HISTORICAL_YIELD_VOL_MO_SOURCE
+    assert dirty.historical_yield_vol_source == HISTORICAL_YIELD_VOL_MO_SOURCE
+    assert dirty.volatility_kind == VOLATILITY_KIND
+    assert dirty.unit == PUBLISHED_VOLATILITY_UNIT
+    assert dirty.methodology_version == EQUIVALENT_PRICE_VOL_METHODOLOGY_VERSION
+    assert dirty.volatility_basis is BLIVolatilityBasis.EQUIVALENT_PRICE_VOL
+
+
 def test_both_parents_are_retained_whole_on_the_conversion():
     result = _vol_result()
     duration = _duration()
