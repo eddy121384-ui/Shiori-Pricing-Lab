@@ -215,7 +215,7 @@ MVP pricing model 明確定義如下，不得由開發者自行替換或腦補�
 
 | Option 類型 | MVP Pricing Model | Vol Convention |
 |---|---|---|
-| European price-based option | Black-76 on forward clean price | Model input 為 annualized lognormal bond price vol `σ_P`；預設 `BOND_VOL_SOURCE_MODE=VCUB_NORMAL_PROXY`，依 Annex A.8 由 VCUB normal swaption vol 推導 `σ_Y^N` 再以 duration 轉為 `σ_P` |
+| European price-based option | Black-76 on forward bond price（standalone production path 為 dirty forward / dirty strike，Issue #94 / PR #122；legacy bundle path 為 clean） | Model input 為 annualized lognormal bond price vol `σ_P`，與實際送入的 price state 同 basis；預設 `BOND_VOL_SOURCE_MODE=VCUB_NORMAL_PROXY`，依 Annex A.8 由 VCUB normal swaption vol 推導 `σ_Y^N` 再以 duration 轉為 `σ_P` |
 | European yield-based option | Annex A.3 `YIELD_OPTION_MODE`，預設 MODE_A：DV01-based closed-form；可切換 MODE_B：Numerical Conversion at Expiry | 使用 lognormal yield vol；與 VCUB-normal proxy 的 European price-based 主路徑分開治理 |
 | American price-based option | CRR binomial tree on clean price state | 使用 price vol；若來源為 VCUB proxy，沿用 Annex A.8 產生的 `σ_P` |
 | American yield-based option | CRR binomial tree on yield state；系統強制 MODE_B numerical conversion | 使用 lognormal yield vol |
