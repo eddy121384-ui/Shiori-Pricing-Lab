@@ -232,6 +232,7 @@ Model choice 需在每次 pricing result 中保存：
 - Market Data Snapshot ID
 - Annex A Mode Switches：
   - `YIELD_OPTION_MODE`
+  - `BOND_OPTION_PRICE_BASIS`
   - `BOND_VOL_SOURCE_MODE`
   - `CRR_STEPS`
   - `ENABLE_SHIFTED_BLACK`

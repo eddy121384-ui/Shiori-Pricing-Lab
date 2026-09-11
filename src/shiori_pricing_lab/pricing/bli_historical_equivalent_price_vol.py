@@ -370,6 +370,31 @@ _PUBLICATION_LABEL_CONSTANTS: tuple[tuple[str, object], ...] = (
 )
 
 
+def _coupon_schedule_text(duration: BLIBondModifiedDuration) -> str:
+    """Which coupon schedule the duration was calculated on, for the audit.
+
+    An irregular first coupon changes the accrued interest, the discounting
+    and therefore the published volatility, and the ``BLIVolatilityInput``
+    retains no structured duration -- so a consumer reading only the audit
+    could not otherwise tell irregular ICMA cashflows from a regular
+    maturity-anchored grid (Codex review, PR #212). Recording the schedule on
+    the duration was not enough; it has to survive this boundary too.
+    """
+
+    start = duration.schedule_accrual_start
+    first = duration.schedule_first_coupon
+    if start is None and first is None:
+        # Deliberately not phrased as "no irregular first coupon": that text
+        # contains the irregular case's own wording, so a reader (or a grep)
+        # scanning for it would find it on a regular bond.
+        return "regular maturity-anchored coupon grid (no first-coupon stub)"
+    return (
+        f"irregular first coupon (ACT/ACT ICMA: accrual start "
+        f"{start.isoformat() if start else None}, first coupon "
+        f"{first.isoformat() if first else None})"
+    )
+
+
 def _observation_window_text(historical_yield_vol: HistoricalYieldVolResult) -> str:
     """The Yield window's first and last dates, for the published audit.
 
@@ -911,7 +936,8 @@ def historical_equivalent_price_vol_volatility_input(
         f"{duration.dirty_price_per_100!r}, divided by "
         f"{duration.basis_price_per_100!r}, base yield "
         f"{duration.base_yield_percent!r}% bumped "
-        f"+/-{duration.yield_bump_basis_points!r}bp. Historical Yield Vol over Yield "
+        f"+/-{duration.yield_bump_basis_points!r}bp, "
+        f"{_coupon_schedule_text(duration)}. Historical Yield Vol over Yield "
         f"observations {_observation_window_text(converted.historical_yield_vol)}, all at "
         f"or before t0; from "
         f"{converted.historical_yield_vol_observation_count} of "

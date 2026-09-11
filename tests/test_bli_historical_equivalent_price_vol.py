@@ -713,6 +713,52 @@ def _duration_with_timestamp(stamp):
     )
 
 
+def test_the_published_audit_states_an_irregular_coupon_schedule():
+    # The BLIVolatilityInput retains no structured duration, so if the audit
+    # drops the schedule a consumer cannot tell irregular ICMA cashflows from
+    # a regular maturity-anchored grid -- and they change accrued interest,
+    # the derivative, and the published volatility.
+    from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+        IrregularFirstCoupon,
+    )
+
+    schedule = IrregularFirstCoupon(
+        accrual_start=date(2026, 11, 20), first_coupon=date(2027, 8, 15)
+    )
+    duration = calculate_bond_modified_duration(
+        security=_SECURITY,
+        convention_profile="UST",
+        price_basis=BondOptionPriceBasis.DIRTY,
+        clean_price_per_100=101.067593,
+        maturity_date=date(2035, 8, 15),
+        coupon_percent=4.25,
+        pricing_timestamp="2027-01-07T16:00:00+00:00",
+        calculated_at="2027-01-07T16:00:05+00:00",
+        schedule=schedule,
+    )
+    converted = _convert(_vol_result(), duration)
+    audit = historical_equivalent_price_vol_volatility_input(
+        converted
+    ).override_or_fallback_audit
+
+    assert "irregular first coupon" in audit
+    assert "ACT/ACT ICMA" in audit
+    assert "2026-11-20" in audit
+    assert "2027-08-15" in audit
+
+
+def test_the_published_audit_says_so_when_the_coupon_grid_is_regular():
+    # The absence of a schedule must be stated, not left to inference from a
+    # missing phrase.
+    converted = _convert(_vol_result(), _duration())
+    audit = historical_equivalent_price_vol_volatility_input(
+        converted
+    ).override_or_fallback_audit
+
+    assert "regular maturity-anchored coupon grid" in audit
+    assert "irregular first coupon" not in audit
+
+
 def test_the_published_audit_states_the_observation_window():
     # BLIVolatilityInput carries no dates, so the window has to reach a
     # reader through the audit or not at all.
