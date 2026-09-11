@@ -324,7 +324,6 @@ def calculate_bond_modified_duration(
     convention_profile: str,
     price_basis: BondOptionPriceBasis | str,
     clean_price_per_100: float,
-    settlement_date: date,
     maturity_date: date,
     coupon_percent: float,
     pricing_timestamp: str,
@@ -340,10 +339,19 @@ def calculate_bond_modified_duration(
     gets produced without anyone choosing it.
 
     ``clean_price_per_100`` is the market state observed at
-    ``pricing_timestamp`` (``t0``); ``settlement_date`` is the bond's current
-    cash-bond spot settlement (``tS``) that every cashflow calculation runs
-    on. Use :func:`spot_settlement_date` to derive ``tS`` from a pricing date
-    on the profile's own calendar.
+    ``pricing_timestamp`` (``t0``).
+
+    **``tS`` is derived, never supplied** (Codex review, PR #212). The bond's
+    current cash-bond spot settlement is ``t0`` rolled forward by the
+    profile's own ``settlement_business_days`` on the profile's own reviewed
+    calendar -- so it is computed here rather than taken as an argument.
+    Accepting it let a caller pass any pre-maturity date while the result and
+    the published audit went on calling it the current spot settlement: the
+    canonical fixture on the previous head passed a **Sunday**, and an
+    incorrect settlement moves the accrued interest, the yield solve, the
+    duration and the published volatility together, plausibly. There is no
+    longer an argument to get wrong. :func:`spot_settlement_date` remains
+    public for a caller that needs to know ``tS`` in advance.
 
     ``calculated_at`` is a required argument rather than a clock reading. No
     module under ``shiori_pricing_lab/pricing/`` may read the system clock --
@@ -396,7 +404,7 @@ def calculate_bond_modified_duration(
     # nothing can parse makes that comparison impossible rather than merely
     # inconvenient.
     try:
-        datetime.fromisoformat(pricing_timestamp)
+        pricing_moment = datetime.fromisoformat(pricing_timestamp)
     except ValueError as exc:
         raise BLIBondDurationError(
             f"pricing_timestamp {pricing_timestamp!r} is not an ISO-8601 timestamp, so it "
@@ -425,7 +433,10 @@ def calculate_bond_modified_duration(
     profile = get_convention_profile(convention_profile)
     coupons_per_year = _require_supported_profile(profile)
 
-    settlement = _require_date(settlement_date, "settlement_date")
+    # tS is the profile's own spot-settlement roll off t0, computed on the
+    # profile's own reviewed calendar -- never an argument, so it cannot be
+    # a weekend, a holiday, or simply the wrong date.
+    settlement = spot_settlement_date(pricing_moment.date(), profile)
     maturity = _require_date(maturity_date, "maturity_date")
     if settlement >= maturity:
         raise BLIBondDurationError(

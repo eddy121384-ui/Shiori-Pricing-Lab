@@ -97,11 +97,14 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIVolatilityBasis,
     BLIVolatilityInput,
 )
+from shiori_pricing_lab.data.bloomberg_bond_yield_history import BloombergBondYieldHistory
 from shiori_pricing_lab.data.historical_yield_volatility import (
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     PUBLISHED_VOLATILITY_UNIT,
+    HistoricalYieldVolInputError,
     HistoricalYieldVolResult,
     HistoricalYieldVolUnavailableError,
+    calculate_historical_yield_volatility,
     decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
 )
@@ -191,6 +194,14 @@ class BLIHistoricalEquivalentPriceVol:
     # #212). Those scalars stay for audit and display; they are checked
     # against these on the way out, never read in their place.
     historical_yield_vol: HistoricalYieldVolResult
+    #: The #196 series the statistic was calculated from. Retained because
+    #: #197's result deliberately carries neither the Yield values nor the
+    #: Yield Changes, so without the series the statistic is unverifiable:
+    #: scaling a retained result's daily and annualized figures together
+    #: preserves the sqrt(252) relationship and passes every shape check
+    #: (Codex review, PR #212). With it, #197's calculator can simply be
+    #: re-run, the same way the duration producer is.
+    yield_history: BloombergBondYieldHistory
     duration: BLIBondModifiedDuration
 
     # --- Result ------------------------------------------------------------
@@ -224,6 +235,9 @@ _REPRODUCED_FLOAT_FIELDS: tuple[str, ...] = (
 )
 
 _REPRODUCED_EXACT_FIELDS: tuple[str, ...] = (
+    # tS is derived from t0 and the profile, so it is an output to compare,
+    # never an input to feed back in (Codex review, PR #212).
+    "settlement_date",
     "coupons_per_year",
     "day_count",
     "duration_type",
@@ -294,7 +308,6 @@ def _require_reproducible_duration(duration: BLIBondModifiedDuration) -> None:
             convention_profile=duration.convention_profile,
             price_basis=duration.price_basis,
             clean_price_per_100=duration.clean_price_per_100,
-            settlement_date=duration.settlement_date,
             maturity_date=duration.maturity_date,
             coupon_percent=duration.coupon_percent,
             pricing_timestamp=duration.pricing_timestamp,
@@ -372,6 +385,85 @@ def _observation_window_text(historical_yield_vol: HistoricalYieldVolResult) -> 
     if first is None or last is None:
         return "(no observation window recorded)"
     return f"{first.isoformat()}..{last.isoformat()}"
+
+
+#: Derived #197 fields a re-run of its calculator must reproduce.
+_REPRODUCED_HISTORICAL_FIELDS: tuple[str, ...] = (
+    "security",
+    "yield_field",
+    "field_unit",
+    "observation_count",
+    "requested_observation_count",
+    "yield_change_count",
+    "first_observation_date",
+    "last_observation_date",
+    "observation_dates",
+    "standard_deviation_convention",
+    "annualization_trading_days",
+    "daily_yield_vol",
+    "annualized_yield_vol",
+    "window_status",
+)
+
+
+def _require_reproducible_historical_yield_vol(
+    historical_yield_vol: HistoricalYieldVolResult,
+    yield_history: BloombergBondYieldHistory,
+) -> None:
+    """Re-run #197's calculator over the retained series and compare.
+
+    #197's result is unverifiable on its own -- it deliberately carries
+    neither the Yield values nor the Yield Changes, so scaling its daily and
+    annualized figures together preserves the ``sqrt(252)`` relationship its
+    own shape check tests and passes (Codex review, PR #212). Its docstring
+    says where a consumer needing the values should go: the #196 loader. So
+    the series is retained alongside the statistic, and the statistic is
+    re-derived from it exactly as the duration is re-derived from its inputs.
+
+    ``calculated_at`` and ``acquired_at`` are excluded: they are timestamps of
+    *when* the calculation ran, not of what it produced, and a re-run
+    legitimately carries a different one.
+    """
+
+    if not isinstance(yield_history, BloombergBondYieldHistory):
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol for {historical_yield_vol.security!r} retains no "
+            f"usable Yield series (got {type(yield_history).__name__}), so its statistic "
+            "cannot be re-derived and must not be trusted"
+        )
+    if yield_history.security != historical_yield_vol.security:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol for {historical_yield_vol.security!r} retains a "
+            f"Yield series for {yield_history.security!r} -- one bond's statistic is never "
+            "verified against another bond's observations"
+        )
+
+    try:
+        reproduced = calculate_historical_yield_volatility(
+            yield_history,
+            requested_observation_count=historical_yield_vol.requested_observation_count,
+        )
+    except (HistoricalYieldVolInputError, ValueError) as exc:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol for {historical_yield_vol.security!r} cannot be "
+            f"re-derived from its own retained Yield series: {exc}"
+        ) from exc
+
+    for field_name in _REPRODUCED_HISTORICAL_FIELDS:
+        recorded = getattr(historical_yield_vol, field_name)
+        expected = getattr(reproduced, field_name)
+        if isinstance(recorded, float) and isinstance(expected, float):
+            if math.isclose(recorded, expected, rel_tol=_DURATION_REL_TOL, abs_tol=0.0):
+                continue
+        elif recorded == expected:
+            continue
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol for {historical_yield_vol.security!r} records "
+            f"{field_name}={recorded!r}, but re-running #197's calculator over its own "
+            f"retained Yield series gives {expected!r} -- the statistic is not "
+            "reproducible, so the volatility it would produce describes no calculation "
+            "that happened"
+        )
 
 
 def _require_no_look_ahead(
@@ -541,6 +633,7 @@ def historical_equivalent_price_vol(
     historical_yield_vol: HistoricalYieldVolResult,
     duration: BLIBondModifiedDuration,
     *,
+    yield_history: BloombergBondYieldHistory,
     calculated_at: str | None = None,
 ) -> BLIHistoricalEquivalentPriceVol:
     """Convert one #197 result and one approved ``D_B`` into ``sigma_P``.
@@ -651,6 +744,7 @@ def historical_equivalent_price_vol(
             "never converted through another bond's duration"
         )
 
+    _require_reproducible_historical_yield_vol(historical_yield_vol, yield_history)
     _require_no_look_ahead(historical_yield_vol, duration)
 
     # The one normalization point. Its refusals are this path's refusals.
@@ -722,6 +816,7 @@ def historical_equivalent_price_vol(
         ),
         historical_yield_vol_calculated_at=historical_yield_vol.calculated_at,
         historical_yield_vol=historical_yield_vol,
+        yield_history=yield_history,
         duration=duration,
         equivalent_price_vol=equivalent_price_vol,
         volatility_basis=BLIVolatilityBasis.EQUIVALENT_PRICE_VOL,
@@ -824,6 +919,9 @@ def historical_equivalent_price_vol_volatility_input(
     # publication helper and the answer must match. That helper also re-runs
     # #197's internal shape checks, so a tampered parent fails there rather
     # than here.
+    _require_reproducible_historical_yield_vol(
+        converted.historical_yield_vol, converted.yield_history
+    )
     _require_no_look_ahead(converted.historical_yield_vol, converted.duration)
 
     sigma_hist = _require_normalized_yield_vol_matches(converted)

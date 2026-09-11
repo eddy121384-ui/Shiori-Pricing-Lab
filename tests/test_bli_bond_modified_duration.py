@@ -43,13 +43,26 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
 # its final coupon period. Settlement sits deep inside a coupon period on
 # purpose: that is where clean and dirty denominators separate most, so a
 # test that passed on either basis would prove nothing.
+#
+# tS is derived from t0, never chosen (Codex review, PR #212). t0 =
+# 2027-02-11 is a Thursday, so UST T+1 settles Friday 2027-02-12 -- three
+# days before the 15 Feb coupon, giving near-maximal accrued. The previous
+# fixture named a settlement date directly and picked 2027-02-14, a *Sunday*,
+# which no UST ever settles on; that is precisely the class of error deriving
+# tS removes.
 _SECURITY = "/isin/US0000000000"
-_SETTLEMENT = date(2027, 2, 14)
 _MATURITY = date(2035, 8, 15)
 _COUPON = 4.25
 _CLEAN = 101.067593
-_T0 = "2027-02-12T16:00:00+00:00"
-_CALCULATED_AT = "2027-02-12T16:00:05+00:00"
+_T0 = "2027-02-11T16:00:00+00:00"
+_SETTLEMENT = date(2027, 2, 12)
+_CALCULATED_AT = "2027-02-11T16:00:05+00:00"
+
+# t0 whose UST T+1 lands exactly on a coupon date, so accrued is zero and the
+# two price bases coincide. 15 Feb 2027 is a US holiday, so the nearest such
+# date is 2028-02-15.
+_T0_ON_COUPON = "2028-02-14T16:00:00+00:00"
+_SETTLEMENT_ON_COUPON = date(2028, 2, 15)
 
 
 def _duration(**overrides):
@@ -58,7 +71,6 @@ def _duration(**overrides):
         "convention_profile": "UST",
         "price_basis": BondOptionPriceBasis.DIRTY,
         "clean_price_per_100": _CLEAN,
-        "settlement_date": _SETTLEMENT,
         "maturity_date": _MATURITY,
         "coupon_percent": _COUPON,
         "pricing_timestamp": _T0,
@@ -131,10 +143,14 @@ def test_with_no_accrued_interest_the_two_bases_coincide():
     # so the one derivative divided by either gives the same duration. The
     # bases are not arbitrary labels -- they collapse exactly when the thing
     # that separates them is zero.
-    on_coupon = date(2027, 2, 15)
-    clean = _duration(settlement_date=on_coupon, price_basis=BondOptionPriceBasis.CLEAN)
-    dirty = _duration(settlement_date=on_coupon, price_basis=BondOptionPriceBasis.DIRTY)
+    clean = _duration(
+        pricing_timestamp=_T0_ON_COUPON, price_basis=BondOptionPriceBasis.CLEAN
+    )
+    dirty = _duration(
+        pricing_timestamp=_T0_ON_COUPON, price_basis=BondOptionPriceBasis.DIRTY
+    )
 
+    assert clean.settlement_date == _SETTLEMENT_ON_COUPON
     assert clean.accrued_interest_per_100 == 0.0
     assert clean.basis_price_per_100 == dirty.basis_price_per_100
     assert clean.modified_duration == dirty.modified_duration
@@ -276,12 +292,15 @@ def test_the_duration_matches_quantlibs_own_analytic_modified_duration():
 _IRREGULAR = IrregularFirstCoupon(
     accrual_start=date(2026, 11, 20), first_coupon=date(2027, 8, 15)
 )
-_IRREGULAR_SETTLEMENT = date(2027, 1, 10)
+# t0 = Thursday 2027-01-07, so UST T+1 settles Friday 2027-01-08, inside the
+# stub and well before the 2027-08-15 first coupon.
+_IRREGULAR_T0 = "2027-01-07T16:00:00+00:00"
+_IRREGULAR_SETTLEMENT = date(2027, 1, 8)
 
 
 def _irregular(**overrides):
     return _duration(
-        settlement_date=_IRREGULAR_SETTLEMENT, schedule=_IRREGULAR, **overrides
+        pricing_timestamp=_IRREGULAR_T0, schedule=_IRREGULAR, **overrides
     )
 
 
@@ -310,7 +329,7 @@ def test_the_irregular_schedule_changes_the_duration_it_produces():
     # If supplying the schedule left the answer unchanged, the test above
     # would be pinning a field nobody uses.
     assert _irregular().modified_duration != _duration(
-        settlement_date=_IRREGULAR_SETTLEMENT
+        pricing_timestamp=_IRREGULAR_T0
     ).modified_duration
 
 
@@ -436,7 +455,7 @@ def test_an_unusable_clean_price_is_refused(bad):
 
 def test_a_settlement_at_or_after_maturity_is_refused():
     with pytest.raises(BLIBondDurationError) as excinfo:
-        _duration(settlement_date=_MATURITY)
+        _duration(pricing_timestamp="2035-08-20T16:00:00+00:00")
     assert "maturity" in str(excinfo.value)
 
 
@@ -445,7 +464,7 @@ def test_a_settlement_inside_the_final_coupon_period_is_refused_on_this_modules_
     # switches to simple interest there and it does not implement that. It
     # must surface as this module's error type, not as a futures error.
     with pytest.raises(BLIBondDurationError) as excinfo:
-        _duration(settlement_date=date(2035, 5, 1))
+        _duration(pricing_timestamp="2035-05-01T16:00:00+00:00")
     assert "final coupon period" in str(excinfo.value)
 
 
@@ -461,11 +480,46 @@ def test_a_blank_pricing_timestamp_is_refused(bad):
         _duration(pricing_timestamp=bad)
 
 
-def test_a_datetime_is_not_accepted_where_a_settlement_date_is_required():
-    from datetime import datetime
+@pytest.mark.parametrize("bad", ["not-a-time", "2027-02-11 16:00 EST", "11/02/2027"])
+def test_a_pricing_timestamp_that_places_no_moment_is_refused(bad):
+    # NB "20270211" is *not* in this list: ISO-8601 basic format is a real
+    # timestamp and `fromisoformat` accepts it, so refusing it would be a
+    # false positive.
+    # tS is derived from t0, so an unparseable t0 makes the settlement
+    # underivable rather than merely undocumented.
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(pricing_timestamp=bad)
+    assert "ISO-8601" in str(excinfo.value)
 
-    with pytest.raises(BLIBondDurationError):
-        _duration(settlement_date=datetime(2027, 2, 14, 12, 0))
+
+def test_the_settlement_date_is_derived_from_t0_and_cannot_be_supplied():
+    # The P1 this replaced: a caller could name any pre-maturity date while
+    # the result went on calling it the current spot settlement. The
+    # canonical fixture named a Sunday. There is now no argument to get wrong.
+    import inspect
+
+    signature = inspect.signature(calculate_bond_modified_duration)
+    assert "settlement_date" not in signature.parameters
+
+    result = _duration()
+    assert result.settlement_date == spot_settlement_date(
+        date(2027, 2, 11), get_convention_profile("UST")
+    )
+    assert result.settlement_date == _SETTLEMENT
+    assert result.settlement_date.weekday() < 5
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [("UST", date(2026, 9, 11)), ("GERMAN_GOVT", date(2026, 9, 14))],
+)
+def test_each_profile_rolls_settlement_by_its_own_convention(profile, expected):
+    # UST is T+1, German T+2 -- taken from the profile, and the German roll
+    # crosses the weekend from the same Thursday.
+    result = _duration(
+        convention_profile=profile, pricing_timestamp="2026-09-10T16:00:00+00:00"
+    )
+    assert result.settlement_date == expected
 
 
 def test_a_negative_coupon_is_refused():
