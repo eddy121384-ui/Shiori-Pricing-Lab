@@ -76,15 +76,45 @@ DF = discount factor from Option Discount Curve (pricing date → expiry date)
 N  = Bond Option Notional
 ```
 
-**Price basis（documentation drift correction，Issue #211）：** 已核准的 OVME-aligned
-**standalone production path 以 dirty forward / dirty strike 定價**（Issue #94 / PR #122
-`black76_dirty_price_option_pv_per_100`）；legacy bundle path 仍為 clean。本節先前僅寫
-"forward clean price"，與已核准的 standalone 方法論不一致，屬文件 drift，於此更正措辭，
-**不改變任何已核准的 pricing 行為**。
+**Price basis 為顯式可選的 model convention（Trading Desk decision，Issue #211）：**
+見 §A.12 `BOND_OPTION_PRICE_BASIS`（`DIRTY` / `CLEAN`，預設 `DIRTY`）。
 
-因此 `σ` 必須與實際送入 Black-76 的 price state 同 basis：standalone path 為 dirty-price
-lognormal vol。任何 `σ_P` 推導（§A.8.6）之 duration 分母必須採同一 basis，否則為 basis
-mismatch 並引入 coupon-cycle 相關的 scaling artifact。
+```text
+CLEAN:  F = Forward Clean              K = Strike Clean
+        D_B = -(1 / P_clean) × dP/dY   σ_P 由 D_B_clean 導出
+        → Black-76 clean-price wrapper
+
+DIRTY:  F = Forward Clean + AI_forward K = Strike Clean + AI_forward
+        D_B = -(1 / P_dirty) × dP/dY   σ_P 由 D_B_dirty 導出
+        → Black-76 dirty-price wrapper
+```
+
+**一致性 invariant：`F`、`K`、`σ_P` 與 duration 分母必須採用同一個 selected price basis。**
+以下 mixed state 一律禁止：
+
+- dirty `F`/`K` 搭配 clean-derived `σ_P`；
+- clean `F`/`K` 搭配 dirty-derived `σ_P`。
+
+由於 accrued interest 與 yield 無關，兩個 basis 共用同一個 price derivative，但 proportional
+量（duration、`σ_P`）永不相同；混用會引入隨 coupon cycle 變動的 scaling artifact。
+
+**兩個 basis 都是已核准的 model convention，沒有一個是普世正確：**
+
+- `DIRTY` 為**預設**，因為它保留 Issue #94 / PR #122 已核准的 OVME-aligned standalone
+  行為（`black76_dirty_price_option_pv_per_100`）；
+- `CLEAN` 為**一等公民的替代 basis**，供 internal-model reconciliation 使用（該內部系統
+  歷來採 clean forward / strike，與 Numerix 的 dirty 慣例差異本身即為 reconciliation
+  差異來源）。`CLEAN` 不是 legacy、不是 deprecated、不是 fallback。
+
+切換 basis 是 **model convention switch，不是 Black-76 公式變更**：兩個 basis 共用同一個
+Black-76 core，只是選用既有的 clean / dirty wrapper，不得因此建立第二套 pricing engine。
+
+本節先前僅寫 "forward clean price"，與已核准的 standalone 方法論不一致，屬文件 drift，
+於此一併更正，**不改變任何已核准的 pricing 行為**。
+
+**目前 wiring 狀態（如實陳述）：** 本 mode 已核准，且 Issue #211 Phase 2/3 的 duration 與
+Equivalent Price Vol producer 已 basis-aware；但 runtime pricing path 與 Workbench 目前
+仍只 wire `DIRTY`。Trader 可選 basis 的 end-to-end 整合為 #211 後續 slice。
 
 ---
 
@@ -649,13 +679,26 @@ D_B = -(1 / P) × dP/dY
 
 為 bond duration（以 deal-pricing 時點的 bond duration 作 constant approximation）。
 
-**`P` 的 price basis（Trading Desk decision，Issue #211）：** `P = P_dirty`。`σ_P` 必須描述
-Black-76 實際定價的那個 price state 的 proportional volatility，而已核准的 standalone
-production path 為 dirty basis（§A.2、Issue #94 / PR #122）。採 clean 分母會造成 basis
-mismatch，且因 accrued interest 與 yield 無關，其唯一效果是一個隨 coupon cycle 變動的
-scaling artifact。Date semantics：market state 取 pricing timestamp `t0`，bond analytics
-在該 bond 當前 cash-bond **spot settlement date `tS`** 上計算——為 current-time duration，
-非 option expiry、非 forward settlement。
+**`P` 的 price basis（Trading Desk decision，Issue #211）：** `P` 由 §A.12
+`BOND_OPTION_PRICE_BASIS` 決定，且必須與該次 pricing 的 `F`、`K`、`σ_P` 同 basis（§A.2）：
+
+```text
+CLEAN:  P = P_clean
+DIRTY:  P = P_dirty = P_clean + AI(tS)
+```
+
+`σ_P` 描述的是 Black-76 實際定價的那個 price state 的 proportional volatility，因此分母
+必須跟著所選 basis 走；混用即為 basis mismatch。因 accrued interest 與 yield 無關，兩者
+共用同一個 `dP/dY` numerator，僅分母不同——這使得混用不會報錯，只會安靜地產生一個隨
+coupon cycle 變動的 scaling artifact，所以 basis 必須顯式選定並寫入 provenance，不得由
+source / vendor / 數值大小推得。
+
+`DIRTY` 為預設（保留 Issue #94 / PR #122 已核准行為）；`CLEAN` 為已核准的替代 basis，
+供 internal-model reconciliation。兩者皆非普世正確。
+
+Date semantics：market state 取 pricing timestamp `t0`，bond analytics 在該 bond 當前
+cash-bond **spot settlement date `tS`** 上計算——為 current-time duration，非 option
+expiry、非 forward settlement。
 
 **方法論意義：**
 
@@ -828,6 +871,7 @@ d2 = d1 - σY √T
 | Switch | 預設值 | 可選值 | 誰可改 | Audit |
 |---|---|---|---|---|
 | `YIELD_OPTION_MODE` | `MODE_A` | `MODE_A` / `MODE_B` | Trader (per pricing) | ✅ |
+| `BOND_OPTION_PRICE_BASIS` | `DIRTY` | `DIRTY` / `CLEAN` | Trader (per pricing) | ✅ |
 | `BOND_VOL_SOURCE_MODE` | `VCUB_NORMAL_PROXY` | `VCUB_NORMAL_PROXY` / `DIRECT_PRICE_VOL` / `LOGNORMAL_YIELD_VOL_OVERRIDE` | Trader (per pricing, subject to data availability) | ✅ |
 | `CRR_STEPS` | `HIGH(500)` | `FAST(100)` / `STD(250)` / `HIGH(500)` / `ULTRA(1000)` / `MAX(2000)` | Trader (per pricing) | ✅ |
 | `ENABLE_SHIFTED_BLACK` | `false` | `true` / `false` | Trader (per pricing) | ✅ |

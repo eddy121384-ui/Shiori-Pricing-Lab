@@ -1,12 +1,15 @@
 """Deterministic pins for the Issue #211 current-time bond duration ``D_B``.
 
-The approved contract is ``D_B = -(1 / P_dirty) x dP/dY`` at the bond's
+The approved contract is ``D_B = -(1 / P_basis) x dP/dY`` at the bond's
 current cash-bond spot settlement, by 1 bp central difference over the
-existing reviewed price<->yield primitive. Every clause of that sentence is
-pinned below, because each one was a decision rather than a default: the
-denominator is the one the Trading Desk chose over a clean denominator worth
-up to ~10.6 vol bp of sigma_P, and the derivative is numerical rather than
-analytic only because the Phase-1 audit showed the two agree to ~1e-6.
+existing reviewed price<->yield primitive, on an explicitly selected price
+basis. Every clause of that sentence is pinned below, because each one was a
+decision rather than a default.
+
+The basis pins matter most: CLEAN and DIRTY share one derivative and differ
+only in the division, so the tests check that the numerator really is
+identical and that each denominator really is the one its label claims --
+the two durations are a few percent apart and both look entirely ordinary.
 """
 
 from __future__ import annotations
@@ -19,13 +22,16 @@ import shiori_pricing_lab.pricing.bli_bond_modified_duration as module
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import get_convention_profile
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
     DURATION_METHODOLOGY_VERSION,
-    DURATION_PRICE_BASIS,
-    DURATION_TYPE,
     SUPPORTED_DURATION_CONVENTION_PROFILES,
     YIELD_BUMP_BASIS_POINTS,
     BLIBondDurationError,
     calculate_bond_modified_duration,
+    duration_type_for_basis,
     spot_settlement_date,
+)
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    DEFAULT_BOND_OPTION_PRICE_BASIS,
+    BondOptionPriceBasis,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     accrued_interest_per_100,
@@ -49,6 +55,7 @@ def _duration(**overrides):
     kwargs = {
         "security": _SECURITY,
         "convention_profile": "UST",
+        "price_basis": BondOptionPriceBasis.DIRTY,
         "clean_price_per_100": _CLEAN,
         "settlement_date": _SETTLEMENT,
         "maturity_date": _MATURITY,
@@ -63,24 +70,106 @@ def _duration(**overrides):
 # --- The approved contract, pinned -------------------------------------------
 
 
-def test_the_denominator_is_the_dirty_price_not_the_clean_price():
-    # The decision this whole slice waited on. Reconstructed independently
-    # from the result's own recorded numerator rather than from the
-    # calculator's internals: -(dP/dY) divided by dirty must be what is
-    # reported, and dividing by clean must not be.
-    result = _duration()
+def test_both_bases_share_one_derivative_numerator():
+    # One primitive, one derivative calculation, basis-specific denominator.
+    # Same bond, same settlement, same base yield, same 1 bp central
+    # difference -- so dP/dY must be bit-identical and only the division may
+    # differ. If these ever diverge there are two engines, not one.
+    clean = _duration(price_basis=BondOptionPriceBasis.CLEAN)
+    dirty = _duration(price_basis=BondOptionPriceBasis.DIRTY)
 
-    expected_dirty = -result.price_derivative_per_unit_yield / result.dirty_price_per_100
-    expected_clean = -result.price_derivative_per_unit_yield / result.clean_price_per_100
+    assert clean.price_derivative_per_unit_yield == dirty.price_derivative_per_unit_yield
+    assert clean.base_yield_percent == dirty.base_yield_percent
+    assert clean.bumped_clean_price_up_per_100 == dirty.bumped_clean_price_up_per_100
+    assert clean.bumped_clean_price_down_per_100 == dirty.bumped_clean_price_down_per_100
 
-    assert result.modified_duration == expected_dirty
-    assert result.modified_duration != expected_clean
-    assert result.price_basis == "DIRTY"
-    assert DURATION_PRICE_BASIS == "DIRTY"
+    # Both price states are recorded on both results, whichever was selected.
+    assert clean.clean_price_per_100 == dirty.clean_price_per_100
+    assert clean.accrued_interest_per_100 == dirty.accrued_interest_per_100
+    assert clean.dirty_price_per_100 == dirty.dirty_price_per_100
 
-    # And the two really are materially apart on this bond -- if they were
-    # not, this test would be passing for the wrong reason.
-    assert abs(expected_clean / expected_dirty - 1) > 0.02
+
+def test_the_clean_basis_divides_by_the_clean_price():
+    result = _duration(price_basis=BondOptionPriceBasis.CLEAN)
+
+    assert result.price_basis is BondOptionPriceBasis.CLEAN
+    assert result.basis_price_per_100 == result.clean_price_per_100
+    assert result.modified_duration == (
+        -result.price_derivative_per_unit_yield / result.clean_price_per_100
+    )
+    assert result.duration_type == "MODIFIED_DURATION_CLEAN_PRICE"
+
+
+def test_the_dirty_basis_divides_by_the_dirty_price():
+    result = _duration(price_basis=BondOptionPriceBasis.DIRTY)
+
+    assert result.price_basis is BondOptionPriceBasis.DIRTY
+    assert result.basis_price_per_100 == result.dirty_price_per_100
+    assert result.basis_price_per_100 == (
+        result.clean_price_per_100 + result.accrued_interest_per_100
+    )
+    assert result.modified_duration == (
+        -result.price_derivative_per_unit_yield / result.dirty_price_per_100
+    )
+    assert result.duration_type == "MODIFIED_DURATION_DIRTY_PRICE"
+
+
+def test_with_accrued_interest_the_two_bases_differ_materially():
+    # The fixture settles deep inside a coupon period on purpose. If the two
+    # bases agreed here, every other basis test would be passing vacuously.
+    clean = _duration(price_basis=BondOptionPriceBasis.CLEAN)
+    dirty = _duration(price_basis=BondOptionPriceBasis.DIRTY)
+
+    assert clean.accrued_interest_per_100 > 0
+    assert clean.modified_duration != dirty.modified_duration
+    assert abs(clean.modified_duration / dirty.modified_duration - 1) > 0.02
+
+
+def test_with_no_accrued_interest_the_two_bases_coincide():
+    # On a coupon date the clean and dirty price states are the same number,
+    # so the one derivative divided by either gives the same duration. The
+    # bases are not arbitrary labels -- they collapse exactly when the thing
+    # that separates them is zero.
+    on_coupon = date(2027, 2, 15)
+    clean = _duration(settlement_date=on_coupon, price_basis=BondOptionPriceBasis.CLEAN)
+    dirty = _duration(settlement_date=on_coupon, price_basis=BondOptionPriceBasis.DIRTY)
+
+    assert clean.accrued_interest_per_100 == 0.0
+    assert clean.basis_price_per_100 == dirty.basis_price_per_100
+    assert clean.modified_duration == dirty.modified_duration
+
+
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_the_selected_basis_survives_onto_the_result(basis):
+    result = _duration(price_basis=basis)
+
+    assert result.price_basis is basis
+    assert result.duration_type == duration_type_for_basis(basis)
+
+
+@pytest.mark.parametrize("basis", ["CLEAN", "DIRTY"])
+def test_a_basis_given_as_a_plain_string_is_coerced_to_the_enum(basis):
+    result = _duration(price_basis=basis)
+    assert result.price_basis is BondOptionPriceBasis(basis)
+
+
+@pytest.mark.parametrize("bad", [None, "", "   ", "GROSS", "dirty ", 1, True])
+def test_a_missing_or_unknown_price_basis_fails_closed(bad):
+    # Never inferred, never defaulted inside the calculation.
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(price_basis=bad)
+    assert "price_basis" in str(excinfo.value)
+
+
+def test_the_default_basis_is_dirty_but_the_primitive_never_applies_it():
+    # Configuration and the later Workbench may default to DIRTY; the pure
+    # function must still require an explicit choice.
+    assert DEFAULT_BOND_OPTION_PRICE_BASIS is BondOptionPriceBasis.DIRTY
+
+    import inspect
+
+    signature = inspect.signature(calculate_bond_modified_duration)
+    assert signature.parameters["price_basis"].default is inspect.Parameter.empty
 
 
 def test_the_dirty_price_is_clean_plus_accrued_at_the_settlement_date():
@@ -307,22 +396,24 @@ def test_a_negative_coupon_is_refused():
 # --- Provenance --------------------------------------------------------------
 
 
-def test_the_result_carries_everything_needed_to_redo_the_arithmetic():
-    result = _duration()
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_the_result_carries_everything_needed_to_redo_the_arithmetic(basis):
+    result = _duration(price_basis=basis)
 
-    # A reviewer holding only this object recomputes the duration by hand.
+    # A reviewer holding only this object recomputes the duration by hand,
+    # on whichever basis it declares.
     redone = -(
         (result.bumped_clean_price_up_per_100 - result.bumped_clean_price_down_per_100)
         / (2.0 * result.yield_bump_basis_points / 100.0)
         * 100.0
-    ) / result.dirty_price_per_100
+    ) / result.basis_price_per_100
     assert redone == result.modified_duration
 
     assert result.security == _SECURITY
     assert result.maturity_date == _MATURITY
     assert result.coupon_percent == _COUPON
     assert result.day_count == "ACT_ACT_BOND"
-    assert result.duration_type == DURATION_TYPE
+    assert result.duration_type == duration_type_for_basis(basis)
     assert result.source == "SHIORI_DERIVED"
     assert result.methodology_version == DURATION_METHODOLOGY_VERSION
     assert result.calculated_at == _CALCULATED_AT
@@ -350,9 +441,26 @@ def test_a_blank_calculated_at_is_refused_rather_than_defaulted(bad):
 
 def test_the_duration_type_names_the_basis_rather_than_leaving_it_to_magnitude():
     # Phase-1 recorded Macaulay landing within 0.004 of a clean-denominator
-    # duration on a real bond. The label is the only safe discriminator.
-    assert DURATION_TYPE == "MODIFIED_DURATION_DIRTY_PRICE"
-    assert _duration().duration_type == DURATION_TYPE
+    # duration on a real bond, and CLEAN/DIRTY on this fixture are ~2% apart.
+    # The label is the only safe discriminator for any of the three.
+    assert duration_type_for_basis(BondOptionPriceBasis.CLEAN) == (
+        "MODIFIED_DURATION_CLEAN_PRICE"
+    )
+    assert duration_type_for_basis(BondOptionPriceBasis.DIRTY) == (
+        "MODIFIED_DURATION_DIRTY_PRICE"
+    )
+    assert "DIRTY" not in duration_type_for_basis(BondOptionPriceBasis.CLEAN)
+
+
+def test_the_methodology_version_is_not_basis_specific():
+    # CLEAN and DIRTY are two selections of one approved methodology, not two
+    # methodologies, so the basis is a per-result field rather than part of
+    # the version token.
+    assert "DIRTY" not in DURATION_METHODOLOGY_VERSION
+    assert "CLEAN" not in DURATION_METHODOLOGY_VERSION
+    clean = _duration(price_basis=BondOptionPriceBasis.CLEAN)
+    dirty = _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    assert clean.methodology_version == dirty.methodology_version
 
 
 def test_no_bloomberg_duration_field_is_read():

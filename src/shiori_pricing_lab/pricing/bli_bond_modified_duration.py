@@ -4,7 +4,7 @@ for the Historical Yield Vol -> Equivalent Price Vol path (Issue #211).
 **What this module is.** One canonical, deterministic producer of the bond
 duration Annex A v1.4 §A.8.6 consumes::
 
-    D_B = -(1 / P_dirty) x dP/dY
+    D_B = -(1 / P_basis) x dP/dY
 
 It is the *only* duration in this repository. It builds no cashflow engine of
 its own: every price and yield comes from the already-reviewed price<->yield
@@ -18,14 +18,23 @@ on the convention profile's own calendar.
 these was decided by the owner after the Phase-1 audit, and none of them is
 this module's choice to make:
 
-- **Denominator is the DIRTY price.** ``P_dirty = P_clean + AI(tS)``.
-  ``σ_P`` must describe the proportional volatility of the same price state
-  the approved standalone production path actually prices Black-76 on --
-  dirty forward and dirty strike, ratified in Issue #94 / PR #122. A clean
-  denominator would be a basis mismatch *and* a coupon-cycle artifact: the
-  Phase-1 audit measured the gap ranging from 0.011% just after a coupon to
-  2.091% just before one, which is up to ~10.6 vol bp of ``σ_P`` on a single
-  bond, arriving as a sawtooth with no market move behind it.
+- **The denominator follows an explicitly selected price basis.**
+  ``price_basis`` is a required argument -- ``CLEAN`` divides by ``P_clean``,
+  ``DIRTY`` by ``P_dirty = P_clean + AI(tS)``. Neither is "correct": ``DIRTY``
+  is the default elsewhere because it preserves the approved OVME-aligned
+  standalone behaviour (Issue #94 / PR #122), while ``CLEAN`` is a first-class
+  approved basis for reconciling against an internal model that has
+  historically used clean forward/strike. See
+  :mod:`shiori_pricing_lab.pricing.bli_bond_option_price_basis` for the
+  convention and the end-to-end consistency invariant.
+
+  **There is one derivative and two denominators, not two engines.** Accrued
+  interest on a settlement date does not depend on the yield, so
+  ``d(dirty)/dY == d(clean)/dY`` exactly: the repriced leg is computed once
+  and only the division differs. The choice is therefore never a different
+  calculation, but it is never cosmetic either -- the Phase-1 audit measured
+  the two denominators separating from 0.011% just after a coupon to 2.091%
+  just before one, up to ~10.6 vol bp of ``σ_P`` on a single bond.
 - **Two distinct dates, and they are not the same date.** The market state
   (the observed clean price) is taken at the pricing timestamp ``t0``; the
   bond analytics -- accrued interest, the coupon grid, the discounting -- run
@@ -43,13 +52,14 @@ this module's choice to make:
   ``tests/test_bli_bond_modified_duration.py``, which pins that cross-check
   rather than leaving it as a claim in prose.
 
-**Why the numerator may come from the clean-price function.** Accrued
-interest on a given settlement date does not depend on the yield, so
+**Why the numerator may come from the clean-price function on either basis.**
+Accrued interest on a given settlement date does not depend on the yield, so
 ``d(dirty)/dY == d(clean)/dY`` exactly. Bumping the clean price and dividing
-by the dirty price is therefore not a mixed basis -- it is the dirty-basis
-derivative, obtained from the one repriced leg that actually moves. The
-result records both prices and both bumped prices so a reviewer can redo the
-division without rerunning anything.
+by the selected basis price is therefore not a mixed basis -- it is that
+basis's derivative, obtained from the one repriced leg that actually moves.
+The result records the clean price, the accrued interest, the dirty price,
+the basis price actually used, and both bumped prices, so a reviewer can redo
+either division without rerunning anything.
 
 **Supported universe, fail-closed.** Only convention profiles whose stated
 conventions the reusable price<->yield primitive *exactly* implements:
@@ -97,6 +107,11 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     BLIConventionProfile,
     get_convention_profile,
 )
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    BondOptionPriceBasis,
+    basis_price_per_100,
+    require_bond_option_price_basis,
+)
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     EUREX_COUPONS_PER_YEAR,
     TREASURY_COUPONS_PER_YEAR,
@@ -109,17 +124,30 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
 from shiori_pricing_lab.products.enums import DayCount, Frequency
 
 # The one methodology token for this producer. It names the *approved
-# contract*, not the module: a future duration on another basis or another
-# bump is a different version string and therefore a different number in
-# every audit trail that carries it.
-DURATION_METHODOLOGY_VERSION = "SHIORI_DIRTY_MODIFIED_DURATION_V1"
+# contract*, not the module: a future duration on another bump or another
+# derivative convention is a different version string and therefore a
+# different number in every audit trail that carries it.
+#
+# The basis is deliberately NOT baked into this token -- it is a per-result
+# field, because CLEAN and DIRTY are two selections of one approved
+# methodology rather than two methodologies. (No version is being reused
+# here: the earlier dirty-only draft of this module never merged.)
+DURATION_METHODOLOGY_VERSION = "SHIORI_MODIFIED_DURATION_V1"
 
-# What the number is, spelled out. Recorded on every result because the
-# Phase-1 audit found Macaulay (7.0841) sitting within 0.004 of a
+# What the number is, spelled out per basis. Recorded on every result because
+# the Phase-1 audit found Macaulay (7.0841) sitting within 0.004 of a
 # clean-denominator duration (7.0870) on a real bond: duration types are not
 # distinguishable by magnitude and must never be identified that way.
-DURATION_TYPE = "MODIFIED_DURATION_DIRTY_PRICE"
-DURATION_PRICE_BASIS = "DIRTY"
+_DURATION_TYPE_BY_BASIS: dict[BondOptionPriceBasis, str] = {
+    BondOptionPriceBasis.CLEAN: "MODIFIED_DURATION_CLEAN_PRICE",
+    BondOptionPriceBasis.DIRTY: "MODIFIED_DURATION_DIRTY_PRICE",
+}
+
+
+def duration_type_for_basis(price_basis: object) -> str:
+    """Return the duration-type label naming ``price_basis`` explicitly."""
+
+    return _DURATION_TYPE_BY_BASIS[require_bond_option_price_basis(price_basis)]
 
 # The approved derivative convention (Trading Desk decision, Issue #211).
 YIELD_BUMP_BASIS_POINTS = 1.0
@@ -148,10 +176,12 @@ class BLIBondModifiedDuration:
     """One bond's current-time ``D_B``, with everything needed to redo it.
 
     Enough provenance to reproduce the value *and* the arithmetic: both
-    dates, all three prices, the base and both bumped yields, both bumped
-    prices, the derivative, and the signed and absolute duration. A reviewer
-    holding only this object can recompute ``-(dP/dY) / P_dirty`` by hand and
-    get the reported number back.
+    dates, the selected basis, all four prices (clean, accrued, dirty, and
+    the basis price actually divided by), the base and both bumped yields,
+    both bumped prices, the derivative, and the signed and absolute duration.
+    A reviewer holding only this object can recompute
+    ``-(dP/dY) / P_basis`` by hand and get the reported number back -- and can
+    see what the *other* basis would have produced without rerunning anything.
 
     ``modified_duration`` is signed and is negative for an ordinary bond
     (price falls as yield rises, so ``dP/dY < 0`` and ``-(dP/dY)/P > 0`` --
@@ -169,9 +199,11 @@ class BLIBondModifiedDuration:
     coupon_percent: float
     coupons_per_year: int
     day_count: str
+    price_basis: BondOptionPriceBasis
     clean_price_per_100: float
     accrued_interest_per_100: float
     dirty_price_per_100: float
+    basis_price_per_100: float
     base_yield_percent: float
     yield_bump_basis_points: float
     bumped_yield_up_percent: float
@@ -182,7 +214,6 @@ class BLIBondModifiedDuration:
     modified_duration: float
     absolute_modified_duration: float
     duration_type: str
-    price_basis: str
     source: str
     methodology_version: str
     calculated_at: str
@@ -284,6 +315,7 @@ def calculate_bond_modified_duration(
     *,
     security: str,
     convention_profile: str,
+    price_basis: BondOptionPriceBasis | str,
     clean_price_per_100: float,
     settlement_date: date,
     maturity_date: date,
@@ -292,7 +324,13 @@ def calculate_bond_modified_duration(
     calculated_at: str,
     schedule: IrregularFirstCoupon | None = None,
 ) -> BLIBondModifiedDuration:
-    """Return ``D_B = -(1 / P_dirty) x dP/dY`` for one bond at ``settlement_date``.
+    """Return ``D_B = -(1 / P_basis) x dP/dY`` for one bond at ``settlement_date``.
+
+    ``price_basis`` is required and is never defaulted here: ``CLEAN`` divides
+    the shared derivative by ``P_clean``, ``DIRTY`` by ``P_clean + AI(tS)``.
+    Configuration and the later Workbench selector may default to ``DIRTY``,
+    but a default buried inside a pure calculation is how a mixed-basis result
+    gets produced without anyone choosing it.
 
     ``clean_price_per_100`` is the market state observed at
     ``pricing_timestamp`` (``t0``); ``settlement_date`` is the bond's current
@@ -318,11 +356,15 @@ def calculate_bond_modified_duration(
     2. bump that yield by +/- 1 bp
     3. reprice clean at both bumped yields
     4. ``dP/dY`` = central difference, per **unit decimal** yield
-    5. divide by ``P_dirty = clean + AI(tS)`` and negate
+    5. divide by ``P_basis`` -- the price state ``price_basis`` names -- and
+       negate
 
-    Raises :class:`BLIBondDurationError` for every refusal: an unsupported or
-    unregistered convention profile, a non-finite or non-positive price, a
-    non-positive dirty price, a settlement date at or after maturity, a
+    Steps 1-4 are identical on both bases; only step 5 differs.
+
+    Raises :class:`BLIBondDurationError` for every refusal: a missing, blank
+    or unknown price basis, an unsupported or unregistered convention
+    profile, a non-finite or non-positive price, a non-positive basis price,
+    a settlement date at or after maturity, a
     settlement inside the final coupon period (the reusable primitive's own
     refusal, re-raised on this module's error type), or any intermediate that
     cannot be represented as a finite number.
@@ -345,8 +387,14 @@ def calculate_bond_modified_duration(
             f"got {calculated_at!r}"
         )
 
-    # Raises ValueError on a missing/blank/unregistered selection -- Shiori
-    # never falls back to a default profile.
+    # Both raise on a missing/blank/unregistered selection -- Shiori never
+    # falls back to a default profile, and never to a default price basis.
+    try:
+        basis = require_bond_option_price_basis(price_basis)
+    except ValueError as exc:
+        raise BLIBondDurationError(
+            f"no duration for {security!r}: {exc}"
+        ) from exc
     profile = get_convention_profile(convention_profile)
     coupons_per_year = _require_supported_profile(profile)
 
@@ -408,10 +456,19 @@ def calculate_bond_modified_duration(
             "convention models"
         )
     dirty = clean + accrued
+    # Both prices are recorded whichever basis was selected, so a reviewer can
+    # see what the other basis would have given without rerunning anything.
+    # `basis_price` is the one the division actually uses.
+    basis_price = basis_price_per_100(clean, accrued, basis)
     if not dirty > 0:
         raise BLIBondDurationError(
             f"dirty price is {dirty!r} for {security!r} (clean {clean!r} + accrued "
-            f"{accrued!r}) -- the approved D_B denominator must be positive"
+            f"{accrued!r}) -- a bond price state must be positive on either basis"
+        )
+    if not basis_price > 0:
+        raise BLIBondDurationError(
+            f"the {basis.value} price is {basis_price!r} for {security!r} -- the D_B "
+            "denominator must be positive"
         )
 
     base_yield = _require_finite_number(base_yield, "base_yield_percent")
@@ -427,7 +484,9 @@ def calculate_bond_modified_duration(
     derivative = (price_up - price_down) / (2.0 * bump_percent) * _BASIS_POINTS_PER_PERCENT
     derivative = _require_finite_number(derivative, "price_derivative_per_unit_yield")
 
-    duration = -derivative / dirty
+    # One derivative, one division -- the basis chose the denominator, not a
+    # different calculation.
+    duration = -derivative / basis_price
     duration = _require_finite_number(duration, "modified_duration")
     if duration == 0.0:
         raise BLIBondDurationError(
@@ -445,9 +504,11 @@ def calculate_bond_modified_duration(
         coupon_percent=coupon,
         coupons_per_year=coupons_per_year,
         day_count=profile.day_count.value,
+        price_basis=basis,
         clean_price_per_100=clean,
         accrued_interest_per_100=accrued,
         dirty_price_per_100=dirty,
+        basis_price_per_100=basis_price,
         base_yield_percent=base_yield,
         yield_bump_basis_points=YIELD_BUMP_BASIS_POINTS,
         bumped_yield_up_percent=yield_up,
@@ -457,8 +518,7 @@ def calculate_bond_modified_duration(
         price_derivative_per_unit_yield=derivative,
         modified_duration=duration,
         absolute_modified_duration=abs(duration),
-        duration_type=DURATION_TYPE,
-        price_basis=DURATION_PRICE_BASIS,
+        duration_type=duration_type_for_basis(basis),
         source=PROVENANCE_SHIORI_DERIVED,
         methodology_version=DURATION_METHODOLOGY_VERSION,
         calculated_at=calculated_at,

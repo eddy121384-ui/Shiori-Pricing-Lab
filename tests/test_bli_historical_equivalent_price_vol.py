@@ -30,9 +30,10 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
     calculate_bond_modified_duration,
 )
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import BondOptionPriceBasis
 from shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol import (
     EQUIVALENT_PRICE_VOL_METHODOLOGY_VERSION,
-    VOLATILITY_CHARACTER,
+    VOLATILITY_KIND,
     BLIHistoricalEquivalentPriceVolError,
     historical_equivalent_price_vol,
     historical_equivalent_price_vol_volatility_input,
@@ -90,12 +91,14 @@ def _result_with_vol(annualized, *, field_unit="DECIMAL", security=_SECURITY):
     )
 
 
-def _duration(*, security=_SECURITY):
+def _duration(*, security=_SECURITY, price_basis=BondOptionPriceBasis.DIRTY,
+              settlement_date=date(2027, 2, 14)):
     return calculate_bond_modified_duration(
         security=security,
         convention_profile="UST",
+        price_basis=price_basis,
         clean_price_per_100=101.067593,
-        settlement_date=date(2027, 2, 14),
+        settlement_date=settlement_date,
         maturity_date=date(2035, 8, 15),
         coupon_percent=4.25,
         pricing_timestamp="2027-02-12T16:00:00+00:00",
@@ -214,13 +217,100 @@ def test_the_result_is_labelled_equivalent_price_vol_and_never_price_or_yield_vo
 def test_the_source_is_never_presented_as_implied_or_as_vcub():
     converted = historical_equivalent_price_vol(_vol_result(), _duration())
 
-    assert converted.volatility_character == VOLATILITY_CHARACTER == "HISTORICAL_REALIZED"
+    assert converted.volatility_kind == VOLATILITY_KIND == "HISTORICAL_REALIZED"
     assert converted.bond_vol_source_mode == HISTORICAL_YIELD_VOL_MO_SOURCE
     assert "VCUB" not in converted.bond_vol_source_mode
 
     published = historical_equivalent_price_vol_volatility_input(converted)
     assert "not Bloomberg implied vol" in published.override_or_fallback_audit
     assert "no VCUB DCF adjustment" in published.override_or_fallback_audit
+
+
+# --- Price basis is inherited, never chosen ----------------------------------
+
+
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_the_equivalent_price_vol_follows_the_durations_basis(basis):
+    result = _vol_result()
+    duration = _duration(price_basis=basis)
+    converted = historical_equivalent_price_vol(result, duration)
+
+    sigma_hist = historical_yield_vol_volatility_input(result).volatility
+    assert converted.price_basis is basis
+    assert converted.equivalent_price_vol == (
+        duration.absolute_modified_duration * sigma_hist
+    )
+
+
+def test_the_two_bases_give_different_volatilities_when_accrued_is_non_zero():
+    # Both are ordinary-looking numbers a few percent apart; only the carried
+    # basis distinguishes them, which is why it must never be droppable.
+    result = _vol_result()
+    clean = historical_equivalent_price_vol(
+        result, _duration(price_basis=BondOptionPriceBasis.CLEAN)
+    )
+    dirty = historical_equivalent_price_vol(
+        result, _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+
+    assert clean.duration.accrued_interest_per_100 > 0
+    assert clean.equivalent_price_vol != dirty.equivalent_price_vol
+    assert clean.equivalent_price_vol > dirty.equivalent_price_vol
+    assert clean.price_basis is BondOptionPriceBasis.CLEAN
+    assert dirty.price_basis is BondOptionPriceBasis.DIRTY
+
+
+def test_the_two_bases_agree_when_there_is_no_accrued_interest():
+    on_coupon = date(2027, 2, 15)
+    result = _vol_result()
+    clean = historical_equivalent_price_vol(
+        result, _duration(price_basis=BondOptionPriceBasis.CLEAN, settlement_date=on_coupon)
+    )
+    dirty = historical_equivalent_price_vol(
+        result, _duration(price_basis=BondOptionPriceBasis.DIRTY, settlement_date=on_coupon)
+    )
+
+    assert clean.duration.accrued_interest_per_100 == 0.0
+    assert clean.equivalent_price_vol == dirty.equivalent_price_vol
+
+
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_the_basis_survives_into_the_published_input_audit(basis):
+    converted = historical_equivalent_price_vol(_vol_result(), _duration(price_basis=basis))
+    published = historical_equivalent_price_vol_volatility_input(converted)
+
+    audit = published.override_or_fallback_audit
+    assert f"{basis.value} price basis" in audit
+    assert f"only be composed with {basis.value} forward/strike" in audit
+
+
+def test_a_duration_whose_basis_and_label_disagree_is_refused():
+    # The last point at which a corrupted basis is detectable at all: after
+    # the multiplication the two are indistinguishable by inspection.
+    duration = dataclasses.replace(
+        _duration(price_basis=BondOptionPriceBasis.DIRTY),
+        price_basis=BondOptionPriceBasis.CLEAN,
+    )
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol(_vol_result(), duration)
+    assert "disagree" in str(excinfo.value)
+
+
+def test_a_duration_that_divided_by_the_wrong_price_state_is_refused():
+    duration = dataclasses.replace(
+        _duration(price_basis=BondOptionPriceBasis.DIRTY), basis_price_per_100=101.067593
+    )
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol(_vol_result(), duration)
+    assert "inconsistent" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", [None, "", "GROSS", 1])
+def test_a_duration_carrying_no_usable_basis_is_refused(bad):
+    duration = dataclasses.replace(_duration(), price_basis=bad)
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol(_vol_result(), duration)
+    assert "price basis" in str(excinfo.value)
 
 
 # --- The pricing guard is not weakened ---------------------------------------
@@ -289,7 +379,9 @@ def test_both_lineages_survive_the_conversion():
 
     # Duration lineage, whole -- not a copied number.
     assert converted.duration is duration
-    assert converted.duration.price_basis == "DIRTY"
+    assert converted.duration.price_basis is BondOptionPriceBasis.DIRTY
+    assert converted.price_basis is converted.duration.price_basis
+    assert converted.duration.basis_price_per_100 == converted.duration.dirty_price_per_100
     assert converted.duration.dirty_price_per_100 == (
         duration.clean_price_per_100 + duration.accrued_interest_per_100
     )

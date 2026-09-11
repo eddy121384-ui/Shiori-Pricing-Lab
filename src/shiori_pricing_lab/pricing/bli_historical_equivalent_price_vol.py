@@ -8,8 +8,25 @@ Annex A v1.4 §A.8.6 Equivalent Price Vol (Issue #211).
 
 where ``sigma_hist_abs`` is the merged Issue #197 Historical Yield Vol
 normalized to absolute decimal Yield units per annum, and ``D_B`` is the
-approved current-time dirty-price modified duration from
+approved current-time modified duration from
 :mod:`shiori_pricing_lab.pricing.bli_bond_modified_duration`.
+
+**The result inherits the duration's price basis; it never picks one.**
+``sigma_P`` is the proportional volatility of a specific bond price state, so
+a ``CLEAN`` duration yields a ``CLEAN`` Equivalent Price Vol and a ``DIRTY``
+duration a ``DIRTY`` one::
+
+    sigma_P_clean = |D_B_clean| x sigma_hist_abs
+    sigma_P_dirty = |D_B_dirty| x sigma_hist_abs
+
+Neither is "the" answer -- see
+:mod:`shiori_pricing_lab.pricing.bli_bond_option_price_basis` for why both are
+approved and for the end-to-end rule that a composition must use one basis for
+``F``, ``K``, ``sigma_P`` and the duration denominator alike. This module's
+part of that rule is to make the basis **impossible to lose**: it is carried
+on every result, and a duration whose declared basis and duration-type label
+disagree is refused rather than converted, because after the multiplication
+nothing downstream could tell the two apart by inspection.
 
 **Why this is the whole formula.** Issue #210's audit established that #197
 produces an *absolute* (normal) annualized yield volatility -- a sample
@@ -87,7 +104,14 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
 )
-from shiori_pricing_lab.pricing.bli_bond_modified_duration import BLIBondModifiedDuration
+from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+    BLIBondModifiedDuration,
+    duration_type_for_basis,
+)
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    BondOptionPriceBasis,
+    require_bond_option_price_basis,
+)
 
 # The approved conversion, named. A different bridge -- a convexity term, a
 # relative-vol round-trip, a DCF adjustment -- is a different version string.
@@ -99,7 +123,7 @@ BOND_VOL_SOURCE_MODE = HISTORICAL_YIELD_VOL_MO_SOURCE
 
 # Carried on every result so a consumer never has to infer that this is a
 # backward-looking statistic from the source name alone.
-VOLATILITY_CHARACTER = "HISTORICAL_REALIZED"
+VOLATILITY_KIND = "HISTORICAL_REALIZED"
 
 
 class BLIHistoricalEquivalentPriceVolError(ValueError):
@@ -111,13 +135,20 @@ class BLIHistoricalEquivalentPriceVol:
     """One Equivalent Price Vol, with both parent lineages intact.
 
     ``equivalent_price_vol`` is the ``DECIMAL_ANNUAL`` lognormal bond *price*
-    volatility Black-76 consumes. ``historical_yield_vol_decimal_annual`` is
-    the absolute *yield* volatility it came from -- the two are different
-    quantities in different bases and are deliberately both present, named
-    apart, so no reader has to work out which one a bare number is.
+    volatility Black-76 consumes, on the price basis ``price_basis`` names.
+    ``historical_yield_vol_decimal_annual`` is the absolute *yield* volatility
+    it came from -- the two are different quantities in different bases and
+    are deliberately both present, named apart, so no reader has to work out
+    which one a bare number is.
+
+    ``price_basis`` is inherited from the duration, never chosen here. It must
+    travel with the value: a ``CLEAN`` and a ``DIRTY`` Equivalent Price Vol
+    for the same bond are both ordinary-looking numbers a few percent apart,
+    and only this field distinguishes them.
     """
 
     security: str
+    price_basis: BondOptionPriceBasis
 
     # --- #197 Historical Yield Vol lineage --------------------------------
     historical_yield_vol_source: str
@@ -141,7 +172,7 @@ class BLIHistoricalEquivalentPriceVol:
     volatility_basis: BLIVolatilityBasis
     source_system: str
     bond_vol_source_mode: str
-    volatility_character: str
+    volatility_kind: str
     unit: str
     methodology_version: str
     calculated_at: str
@@ -185,6 +216,42 @@ def historical_equivalent_price_vol(
         raise BLIHistoricalEquivalentPriceVolError(
             f"duration must be a BLIBondModifiedDuration, got {type(duration).__name__}"
         )
+    # The basis lineage must be present and self-consistent before anything
+    # is multiplied. After the multiplication a CLEAN and a DIRTY sigma_P for
+    # the same bond are both ordinary-looking numbers a few percent apart, so
+    # this is the last point at which a corrupted basis is detectable at all.
+    try:
+        basis = require_bond_option_price_basis(
+            duration.price_basis, "duration.price_basis"
+        )
+    except ValueError as exc:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} carries no usable price basis: {exc}"
+        ) from exc
+
+    expected_type = duration_type_for_basis(basis)
+    if duration.duration_type != expected_type:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} declares price basis {basis.value} "
+            f"but is labelled {duration.duration_type!r} rather than {expected_type!r} -- "
+            "a duration whose basis and type disagree is refused rather than converted, "
+            "because the resulting volatility would be indistinguishable from the other "
+            "basis's"
+        )
+
+    expected_basis_price = (
+        duration.clean_price_per_100
+        if basis is BondOptionPriceBasis.CLEAN
+        else duration.dirty_price_per_100
+    )
+    if duration.basis_price_per_100 != expected_basis_price:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} declares price basis {basis.value} "
+            f"but divided by {duration.basis_price_per_100!r} rather than "
+            f"{expected_basis_price!r} -- its own provenance is inconsistent, so the "
+            "volatility it would produce belongs to no stated basis"
+        )
+
     if calculated_at is None:
         calculated_at = duration.calculated_at
     elif not isinstance(calculated_at, str) or not calculated_at.strip():
@@ -253,6 +320,7 @@ def historical_equivalent_price_vol(
 
     return BLIHistoricalEquivalentPriceVol(
         security=duration.security,
+        price_basis=basis,
         historical_yield_vol_source=HISTORICAL_YIELD_VOL_MO_SOURCE,
         historical_yield_vol_decimal_annual=sigma_hist_abs,
         historical_yield_vol_field_unit=str(historical_yield_vol.field_unit),
@@ -274,7 +342,7 @@ def historical_equivalent_price_vol(
         volatility_basis=BLIVolatilityBasis.EQUIVALENT_PRICE_VOL,
         source_system=HISTORICAL_YIELD_VOL_MO_SOURCE,
         bond_vol_source_mode=BOND_VOL_SOURCE_MODE,
-        volatility_character=VOLATILITY_CHARACTER,
+        volatility_kind=VOLATILITY_KIND,
         unit=PUBLISHED_VOLATILITY_UNIT,
         methodology_version=EQUIVALENT_PRICE_VOL_METHODOLOGY_VERSION,
         calculated_at=calculated_at,
@@ -312,18 +380,22 @@ def historical_equivalent_price_vol_volatility_input(
 
     duration = converted.duration
     audit = (
-        f"{converted.bond_vol_source_mode} {converted.volatility_character}: "
+        f"{converted.bond_vol_source_mode} {converted.volatility_kind} "
+        f"{converted.price_basis.value} price basis: "
         f"{converted.methodology_version} sigma_P = |D_B| x sigma_hist_abs = "
         f"{duration.absolute_modified_duration!r} x "
         f"{converted.historical_yield_vol_decimal_annual!r} = "
         f"{converted.equivalent_price_vol!r} {converted.unit}. "
-        f"D_B is {duration.duration_type} ({duration.price_basis} price basis, "
-        f"{duration.methodology_version}) for {duration.security!r} on the "
+        f"This volatility is on the {converted.price_basis.value} price basis and must "
+        f"only be composed with {converted.price_basis.value} forward/strike. "
+        f"D_B is {duration.duration_type} ({duration.methodology_version}) for "
+        f"{duration.security!r} on the "
         f"{duration.convention_profile} convention: t0={duration.pricing_timestamp}, "
         f"tS={duration.settlement_date.isoformat()}, clean "
         f"{duration.clean_price_per_100!r} + accrued "
         f"{duration.accrued_interest_per_100!r} = dirty "
-        f"{duration.dirty_price_per_100!r}, base yield "
+        f"{duration.dirty_price_per_100!r}, divided by "
+        f"{duration.basis_price_per_100!r}, base yield "
         f"{duration.base_yield_percent!r}% bumped "
         f"+/-{duration.yield_bump_basis_points!r}bp. Historical Yield Vol from "
         f"{converted.historical_yield_vol_observation_count} of "
