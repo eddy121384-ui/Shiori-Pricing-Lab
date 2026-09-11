@@ -34,6 +34,7 @@ from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
     BondOptionPriceBasis,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+    IrregularFirstCoupon,
     accrued_interest_per_100,
     clean_price_from_yield,
 )
@@ -264,6 +265,85 @@ def test_the_duration_matches_quantlibs_own_analytic_modified_duration():
         settle,
     )
     assert abs(result.modified_duration - macaulay) > 0.1
+
+
+# --- Irregular first coupon (Codex review, PR #212) --------------------------
+
+# A long first coupon: issued 2026-11-20, first coupon on the nominal grid at
+# 2027-08-15, settling inside that stub. Everything the duration touches --
+# accrued interest, the yield solve, both bumped repricings -- must run on the
+# same ICMA frame.
+_IRREGULAR = IrregularFirstCoupon(
+    accrual_start=date(2026, 11, 20), first_coupon=date(2027, 8, 15)
+)
+_IRREGULAR_SETTLEMENT = date(2027, 1, 10)
+
+
+def _irregular(**overrides):
+    return _duration(
+        settlement_date=_IRREGULAR_SETTLEMENT, schedule=_IRREGULAR, **overrides
+    )
+
+
+def test_the_irregular_schedule_reaches_the_accrued_interest_too():
+    # The regression: accrued was computed on the regular maturity-anchored
+    # grid while the numerator used the irregular ICMA cashflows, so P_dirty
+    # and dP/dY came from two different schedules. Both figures below are
+    # real and a few tenths apart -- the bug produced an ordinary-looking
+    # duration, which is why it needs an explicit pin.
+    result = _irregular()
+
+    with_schedule = accrued_interest_per_100(
+        _IRREGULAR_SETTLEMENT, _MATURITY, _COUPON, coupons_per_year=2, schedule=_IRREGULAR
+    )
+    without_schedule = accrued_interest_per_100(
+        _IRREGULAR_SETTLEMENT, _MATURITY, _COUPON, coupons_per_year=2
+    )
+
+    assert with_schedule != without_schedule
+    assert result.accrued_interest_per_100 == with_schedule
+    assert result.accrued_interest_per_100 != without_schedule
+    assert result.dirty_price_per_100 == _CLEAN + with_schedule
+
+
+def test_the_irregular_schedule_changes_the_duration_it_produces():
+    # If supplying the schedule left the answer unchanged, the test above
+    # would be pinning a field nobody uses.
+    assert _irregular().modified_duration != _duration(
+        settlement_date=_IRREGULAR_SETTLEMENT
+    ).modified_duration
+
+
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_the_irregular_duration_is_still_the_declared_basis_quotient(basis):
+    result = _irregular(price_basis=basis)
+
+    assert result.modified_duration == (
+        -result.price_derivative_per_unit_yield / result.basis_price_per_100
+    )
+
+
+def test_the_irregular_schedule_is_recorded_on_the_result():
+    # A stored duration must say which cashflows produced it; otherwise an
+    # irregular bond is indistinguishable from a regular one after the fact.
+    result = _irregular()
+
+    assert result.schedule_accrual_start == _IRREGULAR.accrual_start
+    assert result.schedule_first_coupon == _IRREGULAR.first_coupon
+
+
+def test_a_regular_bond_records_no_schedule_rather_than_inventing_one():
+    result = _duration()
+
+    assert result.schedule_accrual_start is None
+    assert result.schedule_first_coupon is None
+
+
+@pytest.mark.parametrize("bad", [("2026-11-20", "2027-08-15"), "2026-11-20", 7])
+def test_a_schedule_that_is_not_an_irregular_first_coupon_is_refused(bad):
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(schedule=bad)
+    assert "IrregularFirstCoupon" in str(excinfo.value)
 
 
 # --- Date semantics ----------------------------------------------------------

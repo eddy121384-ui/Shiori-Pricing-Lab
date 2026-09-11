@@ -199,6 +199,13 @@ class BLIBondModifiedDuration:
     coupon_percent: float
     coupons_per_year: int
     day_count: str
+    # The irregular first-coupon schedule actually applied, if any (Codex
+    # review, PR #212). Both dates or neither -- they decide the accrual and
+    # every discounted cashflow when settlement precedes the first coupon, so
+    # a stored result without them cannot be reconstructed, and a reader
+    # cannot tell an irregular bond from a regular one.
+    schedule_accrual_start: date | None
+    schedule_first_coupon: date | None
     price_basis: BondOptionPriceBasis
     clean_price_per_100: float
     accrued_interest_per_100: float
@@ -348,7 +355,10 @@ def calculate_bond_modified_duration(
 
     ``schedule`` is passed through to the reusable price<->yield primitive
     unchanged, for a bond still inside an irregular first coupon period. It
-    is not interpreted here.
+    is not interpreted here, but it *is* applied to **every** leg that
+    depends on it -- the accrued interest as well as the yield solve and both
+    bumped repricings -- and its two dates are recorded on the result, so a
+    stored duration says which cashflows produced it.
 
     The five steps, each recorded on the result:
 
@@ -379,6 +389,11 @@ def calculate_bond_modified_duration(
         raise BLIBondDurationError(
             "pricing_timestamp is required and must record the market-state timestamp t0, "
             f"got {pricing_timestamp!r}"
+        )
+    if schedule is not None and not isinstance(schedule, IrregularFirstCoupon):
+        raise BLIBondDurationError(
+            "schedule must be an IrregularFirstCoupon or None (a half schedule is never "
+            f"completed by guessing), got {type(schedule).__name__}"
         )
     if not isinstance(calculated_at, str) or not calculated_at.strip():
         raise BLIBondDurationError(
@@ -424,8 +439,16 @@ def calculate_bond_modified_duration(
     # price implying a yield outside the solve bracket, an unusable schedule)
     # must not escape under a name naming a futures contract.
     try:
+        # `schedule` belongs here too, not only on the repricing legs (Codex
+        # review, PR #212). Inside an irregular first coupon period the
+        # accrual runs from the real accrual start over the nominal period
+        # (ACT/ACT ICMA); omitting it built P_dirty from the regular
+        # maturity-anchored accrual while the numerator used the irregular
+        # ICMA cashflows -- a duration mixing two schedules, wrong by the
+        # size of the stub and perfectly ordinary-looking.
         accrued = accrued_interest_per_100(
-            settlement, maturity, coupon, coupons_per_year=coupons_per_year
+            settlement, maturity, coupon,
+            coupons_per_year=coupons_per_year, schedule=schedule,
         )
         base_yield = yield_from_clean_price(
             clean, settlement, maturity, coupon,
@@ -504,6 +527,8 @@ def calculate_bond_modified_duration(
         coupon_percent=coupon,
         coupons_per_year=coupons_per_year,
         day_count=profile.day_count.value,
+        schedule_accrual_start=None if schedule is None else schedule.accrual_start,
+        schedule_first_coupon=None if schedule is None else schedule.first_coupon,
         price_basis=basis,
         clean_price_per_100=clean,
         accrued_interest_per_100=accrued,

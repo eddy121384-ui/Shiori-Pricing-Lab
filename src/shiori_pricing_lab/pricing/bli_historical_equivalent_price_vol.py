@@ -105,6 +105,7 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     historical_yield_vol_volatility_input,
 )
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+    DURATION_METHODOLOGY_VERSION,
     BLIBondModifiedDuration,
     duration_type_for_basis,
 )
@@ -124,6 +125,21 @@ BOND_VOL_SOURCE_MODE = HISTORICAL_YIELD_VOL_MO_SOURCE
 # Carried on every result so a consumer never has to infer that this is a
 # backward-looking statistic from the source name alone.
 VOLATILITY_KIND = "HISTORICAL_REALIZED"
+
+# Tolerance for re-deriving a duration from its own recorded numerator and
+# denominator. The same relative tolerance #197 uses to re-check its own
+# annualization (`historical_yield_volatility._require_publishable_shape`):
+# a genuine record reproduces exactly, so this only absorbs a float
+# round-trip, never a basis substitution -- CLEAN and DIRTY are percent
+# apart, some twelve orders of magnitude outside it.
+_DURATION_REL_TOL = 1e-12
+
+# Which price bases may currently be published into the shared
+# ``BLIVolatilityInput`` pricing contract. DIRTY only, and deliberately so:
+# see :func:`historical_equivalent_price_vol_volatility_input`.
+PUBLISHABLE_PRICE_BASES: frozenset[BondOptionPriceBasis] = frozenset(
+    {BondOptionPriceBasis.DIRTY}
+)
 
 
 class BLIHistoricalEquivalentPriceVolError(ValueError):
@@ -252,6 +268,46 @@ def historical_equivalent_price_vol(
             "volatility it would produce belongs to no stated basis"
         )
 
+    if duration.methodology_version != DURATION_METHODOLOGY_VERSION:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} was produced by "
+            f"{duration.methodology_version!r}, but this conversion is approved only "
+            f"against {DURATION_METHODOLOGY_VERSION!r} -- a duration from another "
+            "methodology is not silently accepted onto this path"
+        )
+
+    # Recompute the duration from the record's own numerator and denominator
+    # (Codex review, PR #212). The three checks above confirm the *labels*
+    # agree with each other; none of them confirms that the reported
+    # magnitude was actually produced by that denominator. A reconstructed or
+    # deserialized CLEAN record whose duration fields were replaced with the
+    # DIRTY values satisfies every label gate, and the dirty-derived number
+    # would then be published as CLEAN. This is the check that catches it,
+    # and it is cheap: one division over values the record already carries.
+    expected_duration = -duration.price_derivative_per_unit_yield / (
+        duration.basis_price_per_100
+    )
+    if not math.isclose(
+        duration.modified_duration, expected_duration, rel_tol=_DURATION_REL_TOL, abs_tol=0.0
+    ):
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} reports {duration.modified_duration!r} "
+            f"on the {basis.value} basis, but -({duration.price_derivative_per_unit_yield!r}) "
+            f"/ {duration.basis_price_per_100!r} is {expected_duration!r} -- the reported "
+            "magnitude was not calculated from the denominator it declares, so it belongs "
+            "to no stated basis"
+        )
+    reported_absolute = duration.absolute_modified_duration
+    if not math.isclose(
+        reported_absolute, abs(expected_duration), rel_tol=_DURATION_REL_TOL, abs_tol=0.0
+    ):
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration for {duration.security!r} reports an absolute duration of "
+            f"{reported_absolute!r}, which is not abs({expected_duration!r}) -- the "
+            "magnitude this conversion would multiply is not the one the record's own "
+            "arithmetic produces"
+        )
+
     if calculated_at is None:
         calculated_at = duration.calculated_at
     elif not isinstance(calculated_at, str) or not calculated_at.strip():
@@ -360,6 +416,25 @@ def historical_equivalent_price_vol_volatility_input(
     than adding a second schema beside it -- the same shape #197's own
     publication helper and ``pricing/bli_effective_forward.py`` established.
 
+    **CLEAN publication is refused until the basis-aware pricing wiring
+    exists** (Codex review, PR #212). ``BLIVolatilityInput`` carries a
+    volatility and a ``volatility_basis``, but no *price* basis -- and the
+    current standalone engine takes ``snapshot.volatility_input.volatility``
+    and applies it unconditionally to a dirty forward and a dirty strike
+    (``bli_pricing_engine.black76_dirty_price_option_pv_per_100``). So a
+    ``CLEAN`` volatility published into this contract would be consumed as
+    though it were ``DIRTY``, silently constructing exactly the mixed
+    clean-vol / dirty-F/K state the convention forbids -- and it would not
+    raise anywhere, because both numbers are ordinary.
+
+    Refusing here, at the boundary where the value would enter the shared
+    pricing contract, is the smallest safe answer: the ``CLEAN`` conversion
+    result itself remains fully computable, inspectable and auditable, and it
+    simply cannot be handed to a runtime that has no way to honour its basis.
+    ``PUBLISHABLE_PRICE_BASES`` becomes a one-line change when Phase 4/5
+    carries the price basis structurally to the pricing boundary; nothing
+    here coerces ``CLEAN`` to ``DIRTY``, and no basis is dropped to prose.
+
     No rescaling happens here either: ``equivalent_price_vol`` is already
     ``DECIMAL_ANNUAL``, which is the unit ``BLIVolatilityInput`` states
     (docs/30 §1). The value crosses this boundary unchanged.
@@ -376,6 +451,24 @@ def historical_equivalent_price_vol_volatility_input(
         raise BLIHistoricalEquivalentPriceVolError(
             "converted must be a BLIHistoricalEquivalentPriceVol, got "
             f"{type(converted).__name__}"
+        )
+
+    # Before anything is constructed: the refusal has to happen here, not
+    # downstream, because once a BLIVolatilityInput exists the engine cannot
+    # tell which price basis its number belongs to.
+    basis = require_bond_option_price_basis(converted.price_basis, "converted.price_basis")
+    if basis not in PUBLISHABLE_PRICE_BASES:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the {basis.value}-basis Equivalent Price Vol of {converted.security!r} "
+            f"({converted.equivalent_price_vol!r} {converted.unit}) cannot be published "
+            f"into BLIVolatilityInput: that contract carries no price basis, and the "
+            "current standalone pricing path applies whatever volatility it receives to a "
+            "dirty forward and a dirty strike -- publishing this value would silently "
+            f"create the forbidden {basis.value}-vol / DIRTY-F/K state. Only "
+            f"{sorted(member.value for member in PUBLISHABLE_PRICE_BASES)!r} is publishable "
+            "until the basis-aware pricing wiring of Issue #211 Phase 4/5 exists. The "
+            f"{basis.value} conversion result itself remains available for inspection and "
+            "audit; it is not coerced to DIRTY and no substitute is published in its place"
         )
 
     duration = converted.duration
