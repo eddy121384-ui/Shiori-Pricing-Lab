@@ -102,6 +102,7 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     PUBLISHED_VOLATILITY_UNIT,
     BloombergBondYieldHistory,
     HistoricalYieldVolResult,
+    HistoricalYieldVolStatus,
     HistoricalYieldVolUnavailableError,
     decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
@@ -120,7 +121,8 @@ from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     IrregularFirstCoupon,
-    _first_coupon_frame,
+    TreasuryFuturesYieldError,
+    first_coupon_schedule_shape,
 )
 
 # The approved conversion, named. A different bridge -- a convexity term, a
@@ -384,41 +386,81 @@ def _coupon_schedule_text(duration: BLIBondModifiedDuration) -> str:
     the duration was not enough; it has to survive this boundary too.
     """
 
-    # The grid described must be the grid *used*, not inferred from whether
-    # schedule dates are present (Codex review, PR #212). Once settlement is
-    # on or after the first coupon the primitive deliberately drops the ICMA
-    # frame and prices on the regular grid, while the record still carries the
-    # bond's genuine schedule dates. So the decision is taken from the
-    # primitive's own frame selector rather than restated here, and the audit
-    # cannot disagree with the arithmetic it describes.
+    # The grid described must be the grid *used*, and the date relationship
+    # stated must be the true one (Codex review, PR #212). "No ICMA frame"
+    # has two different causes -- a first period that is exactly one regular
+    # period (settlement may still be before the first coupon), and a seasoned
+    # bond whose settlement has reached the first coupon -- so the audit
+    # classifies with the owning module's own schedule shape rather than
+    # reading the frame selector's `None` as "stub expired". The branches
+    # below are the same ones `_first_coupon_frame` takes.
+    #
+    # None of the regular-grid wordings uses the word "irregular", so a reader
+    # or a grep scanning for it cannot find it on a bond priced on the grid.
     schedule = _schedule_of(duration)
-    frame_applied = schedule is not None and (
-        _first_coupon_frame(
-            duration.settlement_date,
-            duration.maturity_date,
-            duration.coupons_per_year,
-            schedule,
-        )
-        is not None
-    )
-    if frame_applied:
-        return (
-            f"irregular first-coupon grid (ACT/ACT ICMA: accrual start "
-            f"{schedule.accrual_start.isoformat()}, first coupon "
-            f"{schedule.first_coupon.isoformat()}, settlement "
-            f"{duration.settlement_date.isoformat()} before the first coupon)"
-        )
-    # Deliberately not phrased with the irregular case's wording ("no
-    # irregular first coupon" contains it), so a reader or a grep scanning
-    # for it cannot find it on a bond priced on the regular grid.
     if schedule is None:
-        return "regular maturity-anchored coupon grid (no first-coupon stub)"
+        return "regular maturity-anchored coupon grid (no first-coupon schedule supplied)"
+
+    try:
+        shape = first_coupon_schedule_shape(
+            duration.maturity_date, duration.coupons_per_year, schedule
+        )
+    except TreasuryFuturesYieldError as exc:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the first-coupon schedule recorded for {duration.security!r} is not a valid "
+            f"schedule, so the coupon grid used cannot be described: {exc}"
+        ) from exc
+
+    settlement = duration.settlement_date.isoformat()
+    accrual_start = schedule.accrual_start.isoformat()
+    first_coupon = schedule.first_coupon.isoformat()
+
+    if duration.settlement_date >= schedule.first_coupon:
+        first_period = (
+            f"its regular first period from {accrual_start} is complete"
+            if shape.regular_first_period
+            else f"the first-coupon stub from {accrual_start} no longer applies"
+        )
+        return (
+            f"regular maturity-anchored coupon grid (seasoned: settlement {settlement} is "
+            f"on or after the first coupon {first_coupon}, so {first_period})"
+        )
+    if shape.regular_first_period:
+        return (
+            f"regular maturity-anchored coupon grid (supplied first period {accrual_start} "
+            f"to {first_coupon} is exactly one regular period, so the grid prices it "
+            f"identically; settlement {settlement} is before the first coupon)"
+        )
     return (
-        f"regular maturity-anchored coupon grid (settlement "
-        f"{duration.settlement_date.isoformat()} is on or after the first coupon "
-        f"{schedule.first_coupon.isoformat()}, so the bond's first-coupon stub from "
-        f"{schedule.accrual_start.isoformat()} no longer applies)"
+        f"irregular first-coupon grid (ACT/ACT ICMA: accrual start {accrual_start}, first "
+        f"coupon {first_coupon}, settlement {settlement} before the first coupon)"
     )
+
+
+def _window_qualification_text(converted: BLIHistoricalEquivalentPriceVol) -> str:
+    """The window status and every retained warning, stated in the audit.
+
+    An ``INSUFFICIENT_HISTORY`` #197 result is publishable by design, but it
+    is a short-window figure and carries a warning saying so. The published
+    ``BLIVolatilityInput`` keeps the existing #197 ``ACTIVE`` market-data
+    status and has no structured window field, so without this the
+    qualification survived only as a count ratio a consumer would have to
+    notice and interpret (Codex review, PR #212). The status is always
+    stated; a short window is called out in words, and the warnings travel
+    verbatim rather than being summarized or dropped.
+    """
+
+    status = converted.historical_yield_vol_window_status
+    text = f"Historical Yield Vol window status {status}"
+    if status != HistoricalYieldVolStatus.FULL_WINDOW.value:
+        text += (
+            " -- SHORT-WINDOW RESULT: fewer observations than requested, so this is not "
+            "a full-window Historical Yield Vol"
+        )
+    text += ". "
+    if converted.warnings:
+        text += "Warnings: " + " | ".join(converted.warnings) + ". "
+    return text
 
 
 def _observation_window_text(historical_yield_vol: HistoricalYieldVolResult) -> str:
@@ -973,6 +1015,7 @@ def historical_equivalent_price_vol_volatility_input(
         f"{converted.historical_yield_vol_annualization_trading_days}), source unit "
         f"{converted.historical_yield_vol_field_unit} normalized by factor "
         f"{converted.historical_yield_vol_normalization_factor!r}. "
+        f"{_window_qualification_text(converted)}"
         "Realized/historical proxy for internal-model reconciliation -- not Bloomberg "
         "implied vol, no VCUB DCF adjustment, no convexity correction, no fitted factor."
     )

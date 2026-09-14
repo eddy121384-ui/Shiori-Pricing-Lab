@@ -365,6 +365,74 @@ def test_a_schedule_that_is_not_an_irregular_first_coupon_is_refused(bad):
     assert "IrregularFirstCoupon" in str(excinfo.value)
 
 
+# --- Schedule provenance is validated even once seasoned (Codex review) ------
+#
+# The pricing primitive only checks a schedule while settlement precedes its
+# first coupon. A seasoned bond prices on the regular grid, but the schedule
+# it records is still bond provenance, so impossible dates must fail closed.
+# t0 2028-06-01 -> tS 2028-06-02, well after any first coupon below.
+
+_SEASONED_T0 = "2028-06-01T16:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("accrual_start", "first_coupon", "reason"),
+    [
+        (date(2028, 3, 1), date(2028, 2, 15), "must be before the first coupon"),
+        (date(2028, 2, 15), date(2028, 2, 15), "must be before the first coupon"),
+        (date(2027, 5, 20), date(2028, 2, 14), "not on the nominal"),
+        (date(2027, 5, 20), date(2028, 1, 15), "not on the nominal"),
+    ],
+)
+def test_an_impossible_seasoned_schedule_is_refused(accrual_start, first_coupon, reason):
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(
+            pricing_timestamp=_SEASONED_T0,
+            schedule=IrregularFirstCoupon(
+                accrual_start=accrual_start, first_coupon=first_coupon
+            ),
+        )
+    message = str(excinfo.value)
+    assert "not a valid schedule" in message
+    assert reason in message
+
+
+def test_an_impossible_schedule_is_refused_before_the_first_coupon_too():
+    # The same rule on both sides of the boundary, from the one owning helper.
+    with pytest.raises(BLIBondDurationError):
+        _duration(
+            pricing_timestamp="2028-02-11T16:00:00+00:00",
+            schedule=IrregularFirstCoupon(
+                accrual_start=date(2027, 5, 20), first_coupon=date(2028, 2, 14)
+            ),
+        )
+
+
+def test_a_valid_seasoned_schedule_is_accepted_and_prices_on_the_regular_grid():
+    schedule = IrregularFirstCoupon(
+        accrual_start=date(2027, 5, 20), first_coupon=date(2028, 2, 15)
+    )
+    seasoned = _duration(pricing_timestamp=_SEASONED_T0, schedule=schedule)
+    regular = _duration(pricing_timestamp=_SEASONED_T0)
+
+    assert seasoned.schedule_first_coupon == date(2028, 2, 15)
+    assert seasoned.modified_duration == regular.modified_duration
+
+
+def test_schedule_validation_is_the_owning_modules_rule_not_a_copy():
+    # Duration delegates to the treasury-futures module's shape helper, which
+    # `_first_coupon_frame` itself now uses -- one rule, two callers.
+    from pathlib import Path
+
+    from shiori_pricing_lab.pricing import treasury_futures_implied_yield as owner
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "first_coupon_schedule_shape(" in source
+    assert "not on the nominal" not in source
+    owner_source = Path(owner.__file__).read_text(encoding="utf-8")
+    assert "shape = first_coupon_schedule_shape(" in owner_source
+
+
 # --- Date semantics ----------------------------------------------------------
 
 

@@ -451,30 +451,42 @@ class _FirstCouponFrame:
         return total
 
 
-def _first_coupon_frame(
-    settlement_date: date,
-    maturity_date: date,
-    coupons_per_year: int,
-    schedule: IrregularFirstCoupon | None,
-) -> _FirstCouponFrame | None:
-    """Return the ICMA frame when ``settlement_date`` needs it, else ``None``.
+@dataclass(frozen=True)
+class FirstCouponScheduleShape:
+    """A structurally valid first-coupon schedule, classified against the grid.
 
-    ``None`` means the plain maturity-anchored grid prices this settlement
-    exactly: no schedule, or settlement at/after the first coupon (the frame
-    only ever changes the first period). Anything structurally unusable --
-    settlement before accrual start, a first coupon off the nominal grid, an
-    accrual start at/after the first coupon -- fails closed.
+    ``grid_down`` holds the nominal maturity-anchored grid dates from maturity
+    down to the first one at or before ``accrual_start``, newest first;
+    ``nominal_prev`` is the grid date immediately before ``first_coupon``;
+    ``regular_first_period`` is true when ``accrual_start -> first_coupon`` is
+    exactly one regular period, which the plain grid already prices
+    identically.
     """
 
-    if schedule is None or settlement_date >= schedule.first_coupon:
-        return None
+    grid_down: tuple[date, ...]
+    nominal_prev: date
+    regular_first_period: bool
+
+
+def first_coupon_schedule_shape(
+    maturity_date: date,
+    coupons_per_year: int,
+    schedule: IrregularFirstCoupon,
+) -> FirstCouponScheduleShape:
+    """Validate ``schedule``'s structure and classify it, independent of settlement.
+
+    The one home for the schedule rules :func:`_first_coupon_frame` enforces
+    when a frame is needed -- accrual start strictly before the first coupon,
+    the first coupon on the nominal grid anchored on maturity, and a bounded
+    grid walk -- factored out so a caller can hold a schedule to the same rules
+    whether or not its first period still affects pricing. A seasoned bond is
+    priced on the regular grid, but the schedule it records is still bond
+    provenance, and impossible dates must fail closed rather than ride along
+    unchecked (Codex review, PR #212). Raises :class:`TreasuryFuturesYieldError`.
+    """
+
     accrual_start = schedule.accrual_start
     first_coupon = schedule.first_coupon
-    if settlement_date < accrual_start:
-        raise TreasuryFuturesYieldError(
-            f"settlement date {settlement_date.isoformat()} is before the CTD's "
-            f"accrual start {accrual_start.isoformat()} -- no accrued interest exists"
-        )
     if not accrual_start < first_coupon:
         raise TreasuryFuturesYieldError(
             f"accrual start {accrual_start.isoformat()} must be before the first "
@@ -504,12 +516,48 @@ def _first_coupon_frame(
             f"{maturity_date.isoformat()} -- refusing to guess the reference period"
         )
     nominal_prev = max(candidate for candidate in grid_down if candidate < first_coupon)
-    if accrual_start == nominal_prev and not any(
+    regular_first_period = accrual_start == nominal_prev and not any(
         accrual_start < candidate < first_coupon for candidate in grid_down
-    ):
+    )
+    return FirstCouponScheduleShape(
+        grid_down=tuple(grid_down),
+        nominal_prev=nominal_prev,
+        regular_first_period=regular_first_period,
+    )
+
+
+def _first_coupon_frame(
+    settlement_date: date,
+    maturity_date: date,
+    coupons_per_year: int,
+    schedule: IrregularFirstCoupon | None,
+) -> _FirstCouponFrame | None:
+    """Return the ICMA frame when ``settlement_date`` needs it, else ``None``.
+
+    ``None`` means the plain maturity-anchored grid prices this settlement
+    exactly: no schedule, or settlement at/after the first coupon (the frame
+    only ever changes the first period). Anything structurally unusable --
+    settlement before accrual start, a first coupon off the nominal grid, an
+    accrual start at/after the first coupon -- fails closed.
+    """
+
+    if schedule is None or settlement_date >= schedule.first_coupon:
+        return None
+    accrual_start = schedule.accrual_start
+    first_coupon = schedule.first_coupon
+    if settlement_date < accrual_start:
+        raise TreasuryFuturesYieldError(
+            f"settlement date {settlement_date.isoformat()} is before the CTD's "
+            f"accrual start {accrual_start.isoformat()} -- no accrued interest exists"
+        )
+
+    shape = first_coupon_schedule_shape(maturity_date, coupons_per_year, schedule)
+    if shape.regular_first_period:
         # Exactly one regular period: the plain grid prices this identically,
         # so no frame -- seasoned and regular-first bonds never diverge.
         return None
+    grid_down = list(shape.grid_down)
+    nominal_prev = shape.nominal_prev
     grid_up = sorted(candidate for candidate in grid_down if candidate > accrual_start)
     segments = tuple(
         _FrameSegment(

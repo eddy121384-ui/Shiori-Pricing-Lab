@@ -122,6 +122,7 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     TreasuryFuturesYieldError,
     accrued_interest_per_100,
     clean_price_from_yield,
+    first_coupon_schedule_shape,
     yield_from_clean_price,
 )
 from shiori_pricing_lab.products.enums import DayCount, Frequency
@@ -452,6 +453,22 @@ def calculate_bond_modified_duration(
             f"{maturity.isoformat()} for {security!r} -- a matured or same-day bond has no "
             "duration"
         )
+
+    # A supplied schedule is bond provenance and must be structurally valid
+    # whether or not its first period still affects pricing (Codex review, PR
+    # #212). The pricing primitive only validates it while settlement precedes
+    # the first coupon, so a seasoned record could otherwise carry an accrual
+    # start after its first coupon, or an off-grid first coupon, and publish
+    # those impossible dates. The rules are the owning module's own, not
+    # restated here.
+    if schedule is not None:
+        try:
+            first_coupon_schedule_shape(maturity, coupons_per_year, schedule)
+        except TreasuryFuturesYieldError as exc:
+            raise BLIBondDurationError(
+                f"the irregular first-coupon schedule supplied for {security!r} is not a "
+                f"valid schedule for maturity {maturity.isoformat()}: {exc}"
+            ) from exc
 
     clean = _require_finite_number(clean_price_per_100, "clean_price_per_100")
     if not clean > 0:

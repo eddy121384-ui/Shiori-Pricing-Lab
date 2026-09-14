@@ -839,7 +839,129 @@ def test_settlement_after_the_first_coupon_is_described_as_the_regular_grid():
     audit = _published_audit(past)
     assert past.schedule_accrual_start == date(2027, 5, 20)
     assert "regular maturity-anchored coupon grid" in audit
+    assert "seasoned" in audit
     assert "irregular" not in audit
+
+
+# The fourth case Codex found: a supplied schedule whose first period is
+# exactly one regular period (accrual start 2027-08-15 is itself on the grid).
+# The primitive builds no frame -- not because the stub expired, but because
+# the grid already prices it identically -- and settlement is still *before*
+# the first coupon.
+
+
+def _regular_first_duration(pricing_timestamp, *, schedule=True):
+    from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+        IrregularFirstCoupon,
+    )
+
+    return calculate_bond_modified_duration(
+        security=_SECURITY,
+        convention_profile="UST",
+        price_basis=BondOptionPriceBasis.DIRTY,
+        clean_price_per_100=101.067593,
+        maturity_date=date(2035, 8, 15),
+        coupon_percent=4.25,
+        pricing_timestamp=pricing_timestamp,
+        calculated_at="2028-01-01T00:00:00+00:00",
+        schedule=(
+            IrregularFirstCoupon(
+                accrual_start=date(2027, 8, 15), first_coupon=date(2028, 2, 15)
+            )
+            if schedule
+            else None
+        ),
+    )
+
+
+def test_a_regular_first_period_before_its_first_coupon_is_not_called_a_seasoned_stub():
+    # t0 Friday 2028-02-11 -> tS Monday 2028-02-14, before the 2028-02-15 first
+    # coupon. The previous wording claimed settlement was on or after that
+    # still-future coupon and that a stub had expired -- both false.
+    with_schedule = _regular_first_duration("2028-02-11T16:00:00+00:00")
+    no_schedule = _regular_first_duration("2028-02-11T16:00:00+00:00", schedule=False)
+
+    assert with_schedule.settlement_date < date(2028, 2, 15)
+    assert with_schedule.modified_duration == no_schedule.modified_duration
+
+    audit = _published_audit(with_schedule)
+    assert "regular maturity-anchored coupon grid" in audit
+    assert "exactly one regular period" in audit
+    assert "settlement 2028-02-14 is before the first coupon" in audit
+    for false_claim in ("seasoned", "on or after the first coupon", "no longer applies"):
+        assert false_claim not in audit
+    assert "irregular" not in audit
+
+
+def test_a_seasoned_regular_first_period_is_not_called_a_stub_either():
+    seasoned = _regular_first_duration("2028-06-01T16:00:00+00:00")
+
+    audit = _published_audit(seasoned)
+    assert "seasoned" in audit
+    assert "regular first period from 2027-08-15 is complete" in audit
+    assert "stub" not in audit
+    assert "irregular" not in audit
+
+
+def test_a_reconstructed_record_with_impossible_seasoned_schedule_is_refused():
+    # Provenance mutation on a seasoned record: the pricing numbers are still
+    # the regular grid's, but the reproducibility gate re-runs the producer,
+    # which now validates the schedule regardless of whether it prices.
+    seasoned = _boundary_duration("2028-06-01T16:00:00+00:00")
+    tampered = dataclasses.replace(
+        seasoned, schedule_accrual_start=date(2028, 3, 1)
+    )
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        _convert(_vol_result(), tampered)
+    assert "must be before the first coupon" in str(excinfo.value)
+
+
+# --- Short-window qualification survives publication (Codex review) ---------
+
+
+def _short_window_pair():
+    """A publishable INSUFFICIENT_HISTORY result: 4 of 6 requested observations."""
+
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    return (
+        calculate_historical_yield_volatility(history, requested_observation_count=6),
+        history,
+    )
+
+
+def test_a_full_window_publication_states_its_status_and_no_short_window_warning():
+    result, history = _vol_result_with_history()
+    assert result.window_status.value == "FULL_WINDOW"
+
+    published = historical_equivalent_price_vol_volatility_input(
+        _convert(result, _duration(), history=history)
+    )
+    audit = published.override_or_fallback_audit
+    assert "window status FULL_WINDOW" in audit
+    assert "SHORT-WINDOW" not in audit
+    assert "INSUFFICIENT_HISTORY" not in audit
+
+
+def test_a_short_window_publication_carries_its_status_and_warning_verbatim():
+    result, history = _short_window_pair()
+    assert result.window_status.value == "INSUFFICIENT_HISTORY"
+    assert result.warnings
+
+    converted = _convert(result, _duration(), history=history)
+    published = historical_equivalent_price_vol_volatility_input(converted)
+    audit = published.override_or_fallback_audit
+
+    # Not forced to FULL_WINDOW anywhere on the way out.
+    assert converted.historical_yield_vol_window_status == "INSUFFICIENT_HISTORY"
+    assert "window status INSUFFICIENT_HISTORY" in audit
+    assert "SHORT-WINDOW RESULT" in audit
+    assert "not a full-window Historical Yield Vol" in audit
+    # The retained warning travels verbatim, not summarized.
+    for warning in result.warnings:
+        assert warning in audit
+    # The existing #197 contract keeps ACTIVE; the qualification is in words.
+    assert published.status is BLIMarketDataStatus.ACTIVE
 
 
 def test_the_published_audit_states_the_observation_window():
