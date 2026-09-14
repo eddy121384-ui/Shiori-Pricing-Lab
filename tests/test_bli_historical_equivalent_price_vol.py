@@ -24,10 +24,12 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     ANNUALIZATION_FACTOR,
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     PUBLISHED_VOLATILITY_UNIT,
+    HistoricalYieldVolResult,
     calculate_historical_yield_volatility,
     historical_yield_vol_volatility_input,
 )
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+    BLIBondModifiedDuration,
     calculate_bond_modified_duration,
 )
 from shiori_pricing_lab.pricing.bli_bond_option_price_basis import BondOptionPriceBasis
@@ -35,6 +37,7 @@ from shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol import (
     EQUIVALENT_PRICE_VOL_METHODOLOGY_VERSION,
     PUBLISHABLE_PRICE_BASES,
     VOLATILITY_KIND,
+    BLIHistoricalEquivalentPriceVol,
     BLIHistoricalEquivalentPriceVolError,
     equivalent_price_vol_from,
     historical_equivalent_price_vol,
@@ -1090,7 +1093,9 @@ def test_changing_acquisition_provenance_on_an_unchanged_series_is_refused(
         _convert(tampered, _duration(), history=history)
     message = str(excinfo.value)
     assert field_name in message
-    assert "not reproducible" in message
+    # Refused by the replay, or earlier by #197's own structural rule where it
+    # already constrains the field (a non-Bloomberg source_system).
+    assert "not reproducible" in message or "not a structurally valid result" in message
 
 
 def test_only_the_calculators_own_timestamp_may_differ_on_a_replay():
@@ -1380,7 +1385,7 @@ def test_a_duration_carrying_no_usable_basis_is_refused(bad):
     duration = dataclasses.replace(_duration(), price_basis=bad)
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
         _convert(_vol_result(), duration)
-    assert "price basis" in str(excinfo.value)
+    assert "price_basis" in str(excinfo.value)
 
 
 # --- The pricing guard is not weakened ---------------------------------------
@@ -1675,3 +1680,110 @@ def test_a_malformed_retained_series_is_refused_not_raised_as_a_type_error(obser
     malformed = dataclasses.replace(history, observations=observations)
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         _convert(result, _duration(), history=malformed)
+
+
+# --- Malformed reconstructed records: only the documented refusal (Codex) ----
+#
+# Every field of the conversion, of its nested duration, and of its nested
+# #197 result is set to None and to a wrongly-typed value, and publication
+# must refuse on this module's own error type -- never AttributeError or
+# TypeError. Generated from the dataclass fields, so a field added later is
+# covered without being listed.
+
+
+def _wrong_type_for(value):
+    return 12345 if isinstance(value, str) else "not-the-right-type"
+
+
+def _field_names(record_type):
+    return [record_field.name for record_field in dataclasses.fields(record_type)]
+
+
+def _genuine_conversion():
+    return _convert(_vol_result(), _duration())
+
+
+@pytest.mark.parametrize("replacement_kind", ["none", "wrong_type"])
+@pytest.mark.parametrize(
+    "field_name",
+    _field_names(BLIHistoricalEquivalentPriceVol),
+)
+def test_a_malformed_conversion_field_is_refused_on_the_documented_type(
+    field_name, replacement_kind
+):
+    genuine = _genuine_conversion()
+    original = getattr(genuine, field_name)
+    value = None if replacement_kind == "none" else _wrong_type_for(original)
+    if field_name == "warnings" and replacement_kind == "wrong_type":
+        value = (123,)
+    tampered = dataclasses.replace(genuine, **{field_name: value})
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(tampered)
+
+
+@pytest.mark.parametrize("replacement_kind", ["none", "wrong_type"])
+@pytest.mark.parametrize(
+    "field_name",
+    _field_names(BLIBondModifiedDuration),
+)
+def test_a_malformed_nested_duration_field_is_refused_on_the_documented_type(
+    field_name, replacement_kind
+):
+    genuine = _genuine_conversion()
+    original = getattr(genuine.duration, field_name)
+    value = None if replacement_kind == "none" else _wrong_type_for(original)
+    if field_name == "warnings" and replacement_kind == "wrong_type":
+        value = (123,)
+    if value is None and field_name.startswith("schedule_"):
+        pytest.skip("None is a legitimate value for a schedule date")
+    tampered_duration = dataclasses.replace(genuine.duration, **{field_name: value})
+
+    # Both entry points: publication of a reconstructed record, and conversion.
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(genuine, duration=tampered_duration)
+        )
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        _convert(_vol_result(), tampered_duration)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    _field_names(HistoricalYieldVolResult),
+)
+def test_a_malformed_nested_result_field_is_refused_on_the_documented_type(field_name):
+    genuine = _genuine_conversion()
+    tampered_result = dataclasses.replace(genuine.historical_yield_vol, **{field_name: object()})
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(genuine, historical_yield_vol=tampered_result)
+        )
+
+
+@pytest.mark.parametrize("parent", ["duration", "historical_yield_vol", "yield_history"])
+def test_a_missing_nested_parent_is_refused_not_dereferenced(parent):
+    # Codex's exact case: a nested parent that is None after deserialization.
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(_genuine_conversion(), **{parent: None})
+        )
+
+
+def test_a_plain_string_basis_is_refused_even_though_it_equals_the_enum():
+    # "DIRTY" == BondOptionPriceBasis.DIRTY is True for a StrEnum, so only an
+    # instance check stops it before a later `.value`.
+    genuine = _genuine_conversion()
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(genuine, price_basis="DIRTY")
+        )
+
+
+def test_a_tampered_convention_profile_is_refused_on_the_documented_type():
+    # The producer used to let get_convention_profile's plain ValueError out.
+    genuine = _genuine_conversion()
+    tampered = dataclasses.replace(genuine.duration, convention_profile="GILT")
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        _convert(_vol_result(), tampered)

@@ -107,13 +107,16 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
     decimal_annual_normalization_factor,
     historical_yield_vol_volatility_input,
     require_reproducible_historical_yield_vol,
+    result_shape_problem,
 )
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
     DURATION_METHODOLOGY_VERSION,
     BLIBondDurationError,
     BLIBondModifiedDuration,
+    bond_modified_duration_shape_problem,
     calculate_bond_modified_duration,
     duration_type_for_basis,
+    record_field_type_problem,
 )
 from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
     BondOptionPriceBasis,
@@ -148,6 +151,16 @@ _DURATION_REL_TOL = 1e-12
 # Which price bases may currently be published into the shared
 # ``BLIVolatilityInput`` pricing contract. DIRTY only, and deliberately so:
 # see :func:`historical_equivalent_price_vol_volatility_input`.
+#: Classes a reconstructed conversion's class- and enum-typed fields must be
+#: real instances of (see :func:`record_field_type_problem`).
+_CONVERSION_FIELD_CLASSES: dict[str, type] = {
+    "BondOptionPriceBasis": BondOptionPriceBasis,
+    "BLIVolatilityBasis": BLIVolatilityBasis,
+    "HistoricalYieldVolResult": HistoricalYieldVolResult,
+    "BloombergBondYieldHistory": BloombergBondYieldHistory,
+    "BLIBondModifiedDuration": BLIBondModifiedDuration,
+}
+
 PUBLISHABLE_PRICE_BASES: frozenset[BondOptionPriceBasis] = frozenset(
     {BondOptionPriceBasis.DIRTY}
 )
@@ -495,6 +508,37 @@ def _observation_window_text(historical_yield_vol: HistoricalYieldVolResult) -> 
     return f"{first.isoformat()}..{last.isoformat()}"
 
 
+def _require_structurally_valid_parents(
+    historical_yield_vol: HistoricalYieldVolResult,
+    duration: BLIBondModifiedDuration,
+) -> None:
+    """Type-check both parents in full before any of their fields is read.
+
+    A reconstructed parent can carry ``None`` or a wrong type in any field;
+    every later check reads fields, so without this they escaped as
+    ``AttributeError``/``TypeError`` instead of this module's refusal (Codex
+    review, PR #212). Each parent is held to its own module's structural rule
+    -- #197's :func:`result_shape_problem` and the duration's
+    :func:`bond_modified_duration_shape_problem` -- rather than a copy here.
+    """
+
+    duration_problem = bond_modified_duration_shape_problem(duration)
+    if duration_problem is not None:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the duration is not a structurally valid record: {duration_problem}"
+        )
+    if not isinstance(historical_yield_vol, HistoricalYieldVolResult):
+        raise BLIHistoricalEquivalentPriceVolError(
+            "the Historical Yield Vol is not a HistoricalYieldVolResult, got "
+            f"{type(historical_yield_vol).__name__}"
+        )
+    result_problem = result_shape_problem(historical_yield_vol)
+    if result_problem is not None:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the Historical Yield Vol is not a structurally valid result: {result_problem}"
+        )
+
+
 def _require_reproducible_statistic(
     historical_yield_vol: HistoricalYieldVolResult,
     yield_history: BloombergBondYieldHistory,
@@ -738,6 +782,7 @@ def historical_equivalent_price_vol(
         raise BLIHistoricalEquivalentPriceVolError(
             f"duration must be a BLIBondModifiedDuration, got {type(duration).__name__}"
         )
+    _require_structurally_valid_parents(historical_yield_vol, duration)
     # The basis lineage must be present and self-consistent before anything
     # is multiplied. After the multiplication a CLEAN and a DIRTY sigma_P for
     # the same bond are both ordinary-looking numbers a few percent apart, so
@@ -947,6 +992,15 @@ def historical_equivalent_price_vol_volatility_input(
             "converted must be a BLIHistoricalEquivalentPriceVol, got "
             f"{type(converted).__name__}"
         )
+    # Every field typed, and both nested parents typed, before a single one is
+    # read -- including the identities `_require_publishable_identity` compares
+    # next (Codex review, PR #212).
+    problem = record_field_type_problem(converted, _CONVERSION_FIELD_CLASSES)
+    if problem is not None:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"this Equivalent Price Vol is not a structurally valid record: {problem}"
+        )
+    _require_structurally_valid_parents(converted.historical_yield_vol, converted.duration)
 
     # Before anything is constructed: the refusal has to happen here, not
     # downstream, because once a BLIVolatilityInput exists the engine cannot

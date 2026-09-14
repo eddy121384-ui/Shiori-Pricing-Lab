@@ -96,7 +96,8 @@ non-ACT/ACT bond through an allowlist that still spells the same name.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
 from datetime import date, datetime
 
 from shiori_pricing_lab.data.bli_standalone_option_request import (
@@ -229,6 +230,75 @@ class BLIBondModifiedDuration:
     methodology_version: str
     calculated_at: str
     warnings: tuple[str, ...] = ()
+
+
+def record_field_type_problem(
+    record: object, known_classes: Mapping[str, type] | None = None
+) -> str | None:
+    """Return why ``record``'s fields do not have their declared types, or ``None``.
+
+    Driven by the dataclass's own annotations, so every field is checked and a
+    field added later is covered without anyone listing it -- and an
+    annotation with no rule here is itself a refusal, so a schema change fails
+    closed instead of passing unchecked. It exists for *reconstructed* records
+    (deserialized, or built with ``dataclasses.replace``): a field that is
+    ``None`` or the wrong type must be refused on the caller's own error type
+    before anything is read off it, rather than escaping as ``AttributeError``
+    or ``TypeError`` (Codex review, PR #212).
+
+    Enum and class fields require a real instance: a ``StrEnum`` member
+    compares equal to its string, so an equality check alone would let a plain
+    ``"DIRTY"`` through to a later ``.value``.
+    """
+
+    classes = dict(known_classes or {})
+    for record_field in fields(record):  # type: ignore[arg-type]
+        name = record_field.name
+        annotation = str(record_field.type)
+        value = getattr(record, name)
+        if annotation == "str":
+            ok = isinstance(value, str)
+        elif annotation == "int":
+            ok = isinstance(value, int) and not isinstance(value, bool)
+        elif annotation == "float":
+            ok = (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            )
+        elif annotation == "date":
+            ok = isinstance(value, date) and not isinstance(value, datetime)
+        elif annotation == "date | None":
+            ok = value is None or (isinstance(value, date) and not isinstance(value, datetime))
+        elif annotation == "tuple[str, ...]":
+            ok = isinstance(value, tuple) and all(isinstance(entry, str) for entry in value)
+        elif annotation in classes:
+            ok = isinstance(value, classes[annotation])
+        else:
+            return (
+                f"{type(record).__name__}.{name} is annotated {annotation!r}, which has no "
+                "structural type rule -- refused rather than left unchecked"
+            )
+        if not ok:
+            return (
+                f"{type(record).__name__}.{name} must be {annotation}, got {value!r} "
+                f"({type(value).__name__})"
+            )
+    return None
+
+
+def bond_modified_duration_shape_problem(duration: object) -> str | None:
+    """Return why ``duration`` is not a structurally valid duration record, or ``None``.
+
+    The type check only; whether its figures are the ones its inputs produce is
+    what re-running :func:`calculate_bond_modified_duration` settles.
+    """
+
+    if not isinstance(duration, BLIBondModifiedDuration):
+        return f"expected a BLIBondModifiedDuration, got {type(duration).__name__}"
+    return record_field_type_problem(
+        duration, {"BondOptionPriceBasis": BondOptionPriceBasis}
+    )
 
 
 def _require_finite_number(value: object, field_name: str) -> float:
@@ -439,7 +509,14 @@ def calculate_bond_modified_duration(
         raise BLIBondDurationError(
             f"no duration for {security!r}: {exc}"
         ) from exc
-    profile = get_convention_profile(convention_profile)
+    # `get_convention_profile` refuses a missing or unregistered selection
+    # with a plain ValueError. Re-raised on this module's own type so the one
+    # refusal type this producer promises holds -- a caller re-running it over
+    # a reconstructed record catches exactly that type (Codex review, PR #212).
+    try:
+        profile = get_convention_profile(convention_profile)
+    except ValueError as exc:
+        raise BLIBondDurationError(f"no duration for {security!r}: {exc}") from exc
     coupons_per_year = _require_supported_profile(profile)
 
     # tS is the profile's own spot-settlement roll off t0, computed on the
