@@ -116,6 +116,7 @@ from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
     bond_modified_duration_shape_problem,
     calculate_bond_modified_duration,
     duration_type_for_basis,
+    is_finite_real,
     record_field_type_problem,
 )
 from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
@@ -875,10 +876,13 @@ def historical_equivalent_price_vol(
     factor = decimal_annual_normalization_factor(historical_yield_vol.field_unit)
 
     absolute_duration = duration.absolute_modified_duration
-    if not isinstance(absolute_duration, float) or not math.isfinite(absolute_duration):
+    # The same finite-real rule the structural check applies (Codex review, PR
+    # #212): a strict `float` test here refused an integer the structural
+    # check and the replay had both accepted, with a misleading message.
+    if not is_finite_real(absolute_duration):
         raise BLIHistoricalEquivalentPriceVolError(
-            f"the duration for {duration.security!r} carries a non-finite "
-            f"absolute_modified_duration ({absolute_duration!r}), which cannot scale a "
+            f"the duration for {duration.security!r} carries absolute_modified_duration "
+            f"{absolute_duration!r}, which is not a finite real number and cannot scale a "
             "volatility"
         )
     if not absolute_duration > 0:

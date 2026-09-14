@@ -1457,9 +1457,19 @@ def require_reproducible_historical_yield_vol(
             continue
         recorded = getattr(result, field_name)
         expected = getattr(reproduced, field_name)
-        if isinstance(recorded, float) and isinstance(expected, float):
-            if math.isclose(recorded, expected, rel_tol=1e-12, abs_tol=0.0):
-                continue
+        # Numbers compare numerically whether written as int or float, and an
+        # integer too large to convert is a mismatch rather than an
+        # OverflowError escaping the replay (Codex review, PR #212).
+        numeric = all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (recorded, expected)
+        )
+        if numeric:
+            try:
+                if math.isclose(recorded, expected, rel_tol=1e-12, abs_tol=0.0):
+                    continue
+            except OverflowError:
+                pass
         elif recorded == expected:
             continue
         raise HistoricalYieldVolUnavailableError(

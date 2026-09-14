@@ -753,3 +753,52 @@ def test_no_bloomberg_duration_field_is_read():
         text = handle.read()
     assert "DUR_ADJ" not in text.split('"""', 2)[2]
     assert _duration().source == "SHIORI_DERIVED"
+
+
+# --- One finite-real rule for reconstructed float fields (Codex review) ------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (6.0, True),
+        (6, True),
+        (-7.25, True),
+        (10**400, False),
+        (-(10**400), False),
+        (float("inf"), False),
+        (float("nan"), False),
+        (True, False),
+        ("6.0", False),
+        (None, False),
+    ],
+)
+def test_is_finite_real(value, expected):
+    from shiori_pricing_lab.pricing.bli_bond_modified_duration import is_finite_real
+
+    assert is_finite_real(value) is expected
+
+
+def test_an_oversized_integer_in_a_float_field_is_a_type_problem_not_an_overflow():
+    import dataclasses
+
+    from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+        bond_modified_duration_shape_problem,
+    )
+
+    tampered = dataclasses.replace(_duration(), modified_duration=10**400)
+    problem = bond_modified_duration_shape_problem(tampered)
+    assert problem is not None
+    assert "modified_duration" in problem
+
+
+def test_an_integer_equal_to_a_float_field_passes_the_structural_check():
+    import dataclasses
+
+    from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+        bond_modified_duration_shape_problem,
+    )
+
+    assert bond_modified_duration_shape_problem(
+        dataclasses.replace(_duration(), yield_bump_basis_points=1)
+    ) is None

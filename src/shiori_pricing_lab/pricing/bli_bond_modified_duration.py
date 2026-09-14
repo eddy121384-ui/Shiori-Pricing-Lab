@@ -232,6 +232,27 @@ class BLIBondModifiedDuration:
     warnings: tuple[str, ...] = ()
 
 
+def is_finite_real(value: object) -> bool:
+    """The one numeric rule for a reconstructed ``float`` field.
+
+    An ``int`` or ``float`` (never a ``bool``) whose float value is finite.
+    Integers are accepted because a deserializer may legitimately write ``6``
+    for ``6.0``, and every consumer that compares such a value does so
+    numerically -- so every *gate* must accept them too, or one check refuses
+    what the next accepts (Codex review, PR #212). An integer too large to
+    convert, such as ``10**400``, is simply not finite: ``math.isfinite``
+    raises ``OverflowError`` on it, and that must never escape a structural
+    check as an exception instead of a refusal.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
 def record_field_type_problem(
     record: object, known_classes: Mapping[str, type] | None = None
 ) -> str | None:
@@ -261,11 +282,7 @@ def record_field_type_problem(
         elif annotation == "int":
             ok = isinstance(value, int) and not isinstance(value, bool)
         elif annotation == "float":
-            ok = (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-            )
+            ok = is_finite_real(value)
         elif annotation == "date":
             ok = isinstance(value, date) and not isinstance(value, datetime)
         elif annotation == "date | None":

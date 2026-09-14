@@ -1725,3 +1725,16 @@ def test_a_malformed_series_is_refused_on_the_replay_error_type(observations):
 
     with pytest.raises(HistoricalYieldVolUnavailableError):
         module.require_reproducible_historical_yield_vol(result, malformed)
+
+
+def test_a_replay_treats_an_oversized_integer_as_a_mismatch_not_an_overflow():
+    # math.isclose(10**400, x) raises OverflowError; the replay must refuse it
+    # on its own error type instead (Codex review, PR #212).
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        module.require_reproducible_historical_yield_vol(
+            dataclasses.replace(result, annualized_yield_vol=10**400), history
+        )
+    assert "annualized_yield_vol" in str(excinfo.value)

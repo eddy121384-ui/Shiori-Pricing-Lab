@@ -1787,3 +1787,53 @@ def test_a_tampered_convention_profile_is_refused_on_the_documented_type():
     tampered = dataclasses.replace(genuine.duration, convention_profile="GILT")
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         _convert(_vol_result(), tampered)
+
+
+@pytest.mark.parametrize("field_name", ["modified_duration", "absolute_modified_duration"])
+def test_an_oversized_integer_duration_is_refused_not_raised_as_overflow(field_name):
+    # Codex's case: 10**400 reached math.isfinite and raised OverflowError past
+    # both entry points.
+    genuine = _genuine_conversion()
+    tampered_duration = dataclasses.replace(genuine.duration, **{field_name: 10**400})
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        _convert(_vol_result(), tampered_duration)
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(genuine, duration=tampered_duration)
+        )
+
+
+def test_an_oversized_integer_in_a_conversion_float_field_is_refused():
+    genuine = _genuine_conversion()
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(genuine, equivalent_price_vol=10**400)
+        )
+
+
+def test_an_integer_representation_of_a_float_field_converts_end_to_end():
+    # A float field written as an equal integer (1 for 1.0) is accepted by the
+    # structural check and by the replay, so the conversion succeeds.
+    genuine = _duration()
+    as_int = dataclasses.replace(genuine, yield_bump_basis_points=1)
+    assert as_int.yield_bump_basis_points == 1 and isinstance(
+        as_int.yield_bump_basis_points, int
+    )
+    converted = _convert(_vol_result(), as_int)
+    assert converted.equivalent_price_vol == _convert(_vol_result(), genuine).equivalent_price_vol
+
+
+def test_the_absolute_duration_gate_uses_the_same_rule_as_the_structural_check(monkeypatch):
+    # Codex's second case: an integer absolute duration the structural check
+    # accepts was refused by the gate's strict `float` test with a misleading
+    # "non-finite" message. Isolate the gate by standing in for the replay,
+    # then give it an integral duration.
+    import shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol as converter
+
+    monkeypatch.setattr(converter, "_require_reproducible_duration", lambda duration: None)
+    duration = dataclasses.replace(
+        _duration(), modified_duration=7, absolute_modified_duration=7
+    )
+    converted = _convert(_vol_result(), duration)
+    assert converted.duration.absolute_modified_duration == 7
+    assert converted.equivalent_price_vol > 0
