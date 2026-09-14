@@ -248,6 +248,9 @@ _REPRODUCED_EXACT_FIELDS: tuple[str, ...] = (
     "price_basis",
     "source",
     "methodology_version",
+    # The conversion's warnings are derived from these, so they must be the
+    # producer's own too (Codex review, PR #212).
+    "warnings",
 )
 
 
@@ -448,9 +451,13 @@ def _window_qualification_text(converted: BLIHistoricalEquivalentPriceVol) -> st
     notice and interpret (Codex review, PR #212). The status is always
     stated; a short window is called out in words, and the warnings travel
     verbatim rather than being summarized or dropped.
+
+    Read from the retained, re-derived parents rather than the flattened
+    echoes, which are editable (Codex review, PR #212); the echoes are
+    refused upstream when they disagree.
     """
 
-    status = converted.historical_yield_vol_window_status
+    status = converted.historical_yield_vol.window_status.value
     text = f"Historical Yield Vol window status {status}"
     if status != HistoricalYieldVolStatus.FULL_WINDOW.value:
         text += (
@@ -458,9 +465,18 @@ def _window_qualification_text(converted: BLIHistoricalEquivalentPriceVol) -> st
             "a full-window Historical Yield Vol"
         )
     text += ". "
-    if converted.warnings:
-        text += "Warnings: " + " | ".join(converted.warnings) + ". "
+    warnings = _derived_warnings(converted.historical_yield_vol, converted.duration)
+    if warnings:
+        text += "Warnings: " + " | ".join(warnings) + ". "
     return text
+
+
+def _derived_warnings(
+    historical_yield_vol: HistoricalYieldVolResult, duration: BLIBondModifiedDuration
+) -> tuple[str, ...]:
+    """The conversion's warnings: both parents', in order, nothing added or dropped."""
+
+    return tuple(historical_yield_vol.warnings) + tuple(duration.warnings)
 
 
 def _observation_window_text(historical_yield_vol: HistoricalYieldVolResult) -> str:
@@ -629,6 +645,28 @@ def _require_normalized_yield_vol_matches(
                 f"{echoed_name}={echoed!r}, but its retained Historical Yield Vol says "
                 f"{original!r} -- the lineage it displays is not the calculation it came "
                 "from"
+            )
+
+    # The window qualification and the warnings decide whether a reader sees
+    # a short-window figure for what it is, so neither echo may disagree with
+    # the re-derived parents (Codex review, PR #212).
+    for echoed_name, echoed, original in (
+        (
+            "historical_yield_vol_window_status",
+            converted.historical_yield_vol_window_status,
+            parent.window_status.value,
+        ),
+        (
+            "warnings",
+            converted.warnings,
+            _derived_warnings(parent, converted.duration),
+        ),
+    ):
+        if echoed != original:
+            raise BLIHistoricalEquivalentPriceVolError(
+                f"the Equivalent Price Vol of {converted.security!r} records "
+                f"{echoed_name}={echoed!r}, but its retained parents say {original!r} -- a "
+                "window qualification is never published other than as calculated"
             )
 
     try:
@@ -827,7 +865,7 @@ def historical_equivalent_price_vol(
             "published as zero"
         )
 
-    warnings = tuple(historical_yield_vol.warnings) + tuple(duration.warnings)
+    warnings = _derived_warnings(historical_yield_vol, duration)
 
     return BLIHistoricalEquivalentPriceVol(
         security=duration.security,

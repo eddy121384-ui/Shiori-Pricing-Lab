@@ -964,6 +964,43 @@ def test_a_short_window_publication_carries_its_status_and_warning_verbatim():
     assert published.status is BLIMarketDataStatus.ACTIVE
 
 
+@pytest.mark.parametrize(
+    "edits",
+    [
+        # Codex's reproduction: both echoes rewritten to look full-window.
+        {"historical_yield_vol_window_status": "FULL_WINDOW", "warnings": ()},
+        {"historical_yield_vol_window_status": "FULL_WINDOW"},
+        {"warnings": ()},
+        {"warnings": ("an unrelated warning",)},
+    ],
+)
+def test_a_short_window_cannot_be_republished_as_full_window_by_editing_echoes(edits):
+    result, history = _short_window_pair()
+    converted = _convert(result, _duration(), history=history)
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(converted, **edits)
+        )
+    assert "retained parents say" in str(excinfo.value)
+
+
+def test_a_duration_carrying_warnings_its_producer_never_emits_is_refused():
+    result, history = _vol_result_with_history()
+    converted = _convert(result, _duration(), history=history)
+    tampered_duration = dataclasses.replace(converted.duration, warnings=("injected",))
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        historical_equivalent_price_vol_volatility_input(
+            dataclasses.replace(
+                converted,
+                duration=tampered_duration,
+                warnings=converted.warnings + ("injected",),
+            )
+        )
+    assert "warnings" in str(excinfo.value)
+
+
 def test_the_published_audit_states_the_observation_window():
     # BLIVolatilityInput carries no dates, so the window has to reach a
     # reader through the audit or not at all.
