@@ -14,7 +14,7 @@ the two durations are a few percent apart and both look entirely ordinary.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -802,3 +802,44 @@ def test_an_integer_equal_to_a_float_field_passes_the_structural_check():
     assert bond_modified_duration_shape_problem(
         dataclasses.replace(_duration(), yield_bump_basis_points=1)
     ) is None
+
+
+# --- Direct-caller inputs never leak an undocumented exception (Codex) -------
+
+
+@pytest.mark.parametrize(
+    ("accrual_start", "first_coupon"),
+    [
+        (None, date(2028, 2, 15)),
+        (date(2027, 5, 20), None),
+        ("2027-05-20", date(2028, 2, 15)),
+        (date(2027, 5, 20), "2028-02-15"),
+        (datetime(2027, 5, 20), date(2028, 2, 15)),
+        (date(2027, 5, 20), 20280215),
+    ],
+)
+def test_a_schedule_with_a_non_date_member_is_refused_on_the_documented_type(
+    accrual_start, first_coupon
+):
+    # Codex's case: the container type passed and a member reached `<`,
+    # raising TypeError. A datetime member fails the same way against a date.
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(
+            schedule=IrregularFirstCoupon(
+                accrual_start=accrual_start, first_coupon=first_coupon
+            )
+        )
+    assert "schedule." in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["1800-01-01T16:00:00+00:00", "2300-01-01T16:00:00+00:00", "9999-12-30T16:00:00+00:00"],
+)
+def test_a_pricing_timestamp_outside_the_settlement_calendar_is_refused(stamp):
+    # Found while sweeping for the same class: QuantLib's calendar covers only
+    # 1901-2199, and a t0 outside it raised RuntimeError from the settlement
+    # roll.
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(pricing_timestamp=stamp, maturity_date=date(9999, 12, 31))
+    assert "no spot settlement can be derived" in str(excinfo.value)

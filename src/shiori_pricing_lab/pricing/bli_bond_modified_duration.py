@@ -511,6 +511,14 @@ def calculate_bond_modified_duration(
             "schedule must be an IrregularFirstCoupon or None (a half schedule is never "
             f"completed by guessing), got {type(schedule).__name__}"
         )
+    if schedule is not None:
+        # The container's type says nothing about its members (Codex review, PR
+        # #212). A reconstructed schedule with `None`, a string, or a datetime
+        # member reached the shape check's `accrual_start < first_coupon` and
+        # raised TypeError -- `datetime` against `date` included -- instead of
+        # this module's refusal. Both members are calendar dates, or no schedule.
+        _require_date(schedule.accrual_start, "schedule.accrual_start")
+        _require_date(schedule.first_coupon, "schedule.first_coupon")
     if not isinstance(calculated_at, str) or not calculated_at.strip():
         raise BLIBondDurationError(
             "calculated_at is required and must be supplied by the caller -- no module "
@@ -539,7 +547,18 @@ def calculate_bond_modified_duration(
     # tS is the profile's own spot-settlement roll off t0, computed on the
     # profile's own reviewed calendar -- never an argument, so it cannot be
     # a weekend, a holiday, or simply the wrong date.
-    settlement = spot_settlement_date(pricing_moment.date(), profile)
+    # The roll runs on the profile's QuantLib calendar, which only covers
+    # 1901-2199: a t0 outside that range raised RuntimeError straight out of
+    # this producer. Found sweeping the producer's direct-caller inputs after
+    # the schedule-member finding (Codex review, PR #212) -- same class, not
+    # reported. A settlement that cannot be derived is a refusal.
+    try:
+        settlement = spot_settlement_date(pricing_moment.date(), profile)
+    except (RuntimeError, ValueError) as exc:
+        raise BLIBondDurationError(
+            f"no spot settlement can be derived for {security!r} from pricing_timestamp "
+            f"{pricing_timestamp!r} on the {profile.name} calendar: {exc}"
+        ) from exc
     maturity = _require_date(maturity_date, "maturity_date")
     if settlement >= maturity:
         raise BLIBondDurationError(
