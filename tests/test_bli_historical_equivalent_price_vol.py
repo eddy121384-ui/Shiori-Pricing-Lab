@@ -1620,3 +1620,50 @@ def test_a_non_result_input_is_refused(bad):
 def test_publishing_a_non_converted_object_is_refused():
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         historical_equivalent_price_vol_volatility_input("not a conversion")
+
+
+# --- Retained Yield series must be Bloomberg's own evidence (Codex review) ---
+
+
+def _altered_float_pair():
+    """A series whose floats were changed but whose Bloomberg strings were not,
+    with the #197 result computed from the changed floats (so it reproduces)."""
+
+    dates = [_START + timedelta(days=index) for index in range(4)]
+    rows = [(4.00, "4.00"), (4.50, "4.10"), (3.10, "3.80"), (4.90, "4.30")]
+    history = BloombergBondYieldHistory(
+        requested_identifier=_SECURITY,
+        security=_SECURITY,
+        yield_field="YLD_YTM_MID",
+        field_meaning="Yield to Maturity (Mid)",
+        field_unit="PERCENT",
+        requested_start_date=dates[0],
+        requested_end_date=dates[-1],
+        observations=tuple(
+            BondYieldObservation(observation_date=day, yield_value=value, raw_value=raw)
+            for day, (value, raw) in zip(dates, rows, strict=True)
+        ),
+        source_system="BLOOMBERG_DAPI",
+        acquired_at="2026-09-11T09:00:00+00:00",
+    )
+    return (
+        calculate_historical_yield_volatility(history, requested_observation_count=4),
+        history,
+    )
+
+
+def test_a_conversion_from_altered_yield_floats_is_refused():
+    result, history = _altered_float_pair()
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        _convert(result, _duration(), history=history)
+    assert "not the ones Bloomberg sent" in str(excinfo.value)
+
+
+def test_publication_refuses_a_retained_series_altered_after_conversion():
+    genuine = _convert(_vol_result(), _duration())
+    altered_result, altered_history = _altered_float_pair()
+    tampered = dataclasses.replace(
+        genuine, historical_yield_vol=altered_result, yield_history=altered_history
+    )
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        historical_equivalent_price_vol_volatility_input(tampered)

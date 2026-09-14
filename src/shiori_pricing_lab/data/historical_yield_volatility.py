@@ -163,6 +163,10 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIVolatilityBasis,
     BLIVolatilityInput,
 )
+from shiori_pricing_lab.data.bloomberg_bond_quote import (
+    BLIBloombergDapiError,
+    _parse_finite_float,
+)
 from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     SOURCE_SYSTEM as BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM,
 )
@@ -1341,6 +1345,54 @@ def historical_yield_vol_volatility_input(
 _REPLAY_EXCLUDED_FIELDS: frozenset[str] = frozenset({"calculated_at"})
 
 
+def _require_observations_match_their_raw_evidence(history: BloombergBondYieldHistory) -> None:
+    """Refuse a series whose numeric values are not Bloomberg's own strings.
+
+    :class:`BondYieldObservation` carries one Bloomberg value twice:
+    ``raw_value`` is the exact string Bloomberg sent, and ``yield_value`` is
+    that string parsed -- both ``None`` together for a row Bloomberg returned
+    without a value. A replay recalculates from the floats, so a reconstructed
+    series whose floats were altered reproduced perfectly while the retained
+    Bloomberg strings supported different numbers (Codex review, PR #212).
+
+    The relationship is the #196 loader's own, reused rather than restated:
+    a blank string is the hole (``None``), and a value is
+    ``_parse_finite_float(raw_value)`` exactly. Equality is exact, because the
+    loader produces the float by that one deterministic parse.
+    """
+
+    for observation in history.observations:
+        where = f"{history.yield_field} on {observation.observation_date} for {history.security!r}"
+        raw = observation.raw_value
+        numeric = observation.yield_value
+        if raw is None or numeric is None:
+            if raw is None and numeric is None:
+                continue
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries yield_value={numeric!r} but raw_value={raw!r} -- the two "
+                "represent one Bloomberg value and are absent only together, so this series "
+                "is not the evidence it claims to be"
+            )
+        if not isinstance(raw, str) or not raw.strip():
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries raw_value={raw!r} beside yield_value={numeric!r} -- the "
+                "#196 loader records a blank Bloomberg string as a hole, never as a value"
+            )
+        try:
+            parsed = _parse_finite_float(raw, f"{history.yield_field} historical")
+        except BLIBloombergDapiError as exc:
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries a raw Bloomberg string the #196 loader could not have "
+                f"parsed: {exc}"
+            ) from exc
+        if isinstance(numeric, bool) or parsed != numeric:
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries yield_value={numeric!r}, but its retained Bloomberg string "
+                f"{raw!r} parses to {parsed!r} -- the numbers a statistic would be replayed "
+                "from are not the ones Bloomberg sent"
+            )
+
+
 def require_reproducible_historical_yield_vol(
     result: HistoricalYieldVolResult,
     history: BloombergBondYieldHistory,
@@ -1380,6 +1432,8 @@ def require_reproducible_historical_yield_vol(
             f"series for {history.security!r} -- one bond's statistic is never verified "
             "against another bond's observations"
         )
+
+    _require_observations_match_their_raw_evidence(history)
 
     try:
         reproduced = calculate_historical_yield_volatility(
