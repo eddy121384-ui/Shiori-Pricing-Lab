@@ -1433,8 +1433,6 @@ def require_reproducible_historical_yield_vol(
             "against another bond's observations"
         )
 
-    _require_observations_match_their_raw_evidence(history)
-
     try:
         reproduced = calculate_historical_yield_volatility(
             history, requested_observation_count=result.requested_observation_count
@@ -1444,6 +1442,14 @@ def require_reproducible_historical_yield_vol(
             f"the Historical Yield Vol for {result.security!r} cannot be re-derived from "
             f"its own Yield series: {exc}"
         ) from exc
+
+    # After the replay, not before (Codex review, PR #212). The calculator is
+    # what types the series and every row in it -- a non-sequence, or a row
+    # that is not a BondYieldObservation, is refused there on this module's
+    # error type. Scanning raw evidence first dereferenced those rows and let
+    # `observations=None` or `(None,)` escape as TypeError/AttributeError, the
+    # exact failure the calculator's own guard was written to prevent.
+    _require_observations_match_their_raw_evidence(history)
 
     for result_field in fields(HistoricalYieldVolResult):
         field_name = result_field.name

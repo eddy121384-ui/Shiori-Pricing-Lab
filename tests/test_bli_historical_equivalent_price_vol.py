@@ -1667,3 +1667,11 @@ def test_publication_refuses_a_retained_series_altered_after_conversion():
     )
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         historical_equivalent_price_vol_volatility_input(tampered)
+
+
+@pytest.mark.parametrize("observations", [None, (None,)])
+def test_a_malformed_retained_series_is_refused_not_raised_as_a_type_error(observations):
+    result, history = _vol_result_with_history()
+    malformed = dataclasses.replace(history, observations=observations)
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError):
+        _convert(result, _duration(), history=malformed)

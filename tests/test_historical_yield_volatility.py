@@ -1708,3 +1708,20 @@ def test_a_genuine_hole_and_a_differently_written_number_still_replay():
     result = calculate_historical_yield_volatility(history, requested_observation_count=4)
 
     module.require_reproducible_historical_yield_vol(result, history)
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [None, (None,), ("not an observation",), 42, "4.10"],
+)
+def test_a_malformed_series_is_refused_on_the_replay_error_type(observations):
+    # The raw-evidence scan used to run before the calculator's structural
+    # validation, so these escaped as TypeError/AttributeError and could reach
+    # a route as HTTP 500 (Codex review, PR #212). They must be refused on the
+    # replay's own error type, which the pricing wrapper catches.
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+    malformed = dataclasses.replace(history, observations=observations)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError):
+        module.require_reproducible_historical_yield_vol(result, malformed)
