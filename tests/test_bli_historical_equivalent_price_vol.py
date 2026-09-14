@@ -741,7 +741,7 @@ def test_the_published_audit_states_an_irregular_coupon_schedule():
         converted
     ).override_or_fallback_audit
 
-    assert "irregular first coupon" in audit
+    assert "irregular first-coupon grid" in audit
     assert "ACT/ACT ICMA" in audit
     assert "2026-11-20" in audit
     assert "2027-08-15" in audit
@@ -756,7 +756,90 @@ def test_the_published_audit_says_so_when_the_coupon_grid_is_regular():
     ).override_or_fallback_audit
 
     assert "regular maturity-anchored coupon grid" in audit
-    assert "irregular first coupon" not in audit
+    assert "irregular" not in audit
+
+
+# --- The audit describes the grid actually used (Codex review, PR #212) ------
+#
+# A bond keeps its genuine first-coupon schedule for life, but the primitive
+# only prices on the ICMA frame while settlement precedes the first coupon.
+# Schedule: accrual 2027-05-20, first coupon Tuesday 2028-02-15.
+
+
+def _boundary_duration(pricing_timestamp, *, schedule=True):
+    from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+        IrregularFirstCoupon,
+    )
+
+    return calculate_bond_modified_duration(
+        security=_SECURITY,
+        convention_profile="UST",
+        price_basis=BondOptionPriceBasis.DIRTY,
+        clean_price_per_100=101.067593,
+        maturity_date=date(2035, 8, 15),
+        coupon_percent=4.25,
+        pricing_timestamp=pricing_timestamp,
+        calculated_at="2028-01-01T00:00:00+00:00",
+        schedule=(
+            IrregularFirstCoupon(
+                accrual_start=date(2027, 5, 20), first_coupon=date(2028, 2, 15)
+            )
+            if schedule
+            else None
+        ),
+    )
+
+
+def _published_audit(duration):
+    return historical_equivalent_price_vol_volatility_input(
+        _convert(_vol_result(), duration)
+    ).override_or_fallback_audit
+
+
+def test_the_day_before_the_first_coupon_is_described_as_the_irregular_grid():
+    # t0 Friday 2028-02-11 -> tS Monday 2028-02-14, one day before the first
+    # coupon: the ICMA frame is live, and it genuinely changes the numbers.
+    with_schedule = _boundary_duration("2028-02-11T16:00:00+00:00")
+    regular = _boundary_duration("2028-02-11T16:00:00+00:00", schedule=False)
+
+    assert with_schedule.settlement_date == date(2028, 2, 14)
+    assert with_schedule.accrued_interest_per_100 != regular.accrued_interest_per_100
+
+    audit = _published_audit(with_schedule)
+    assert "irregular first-coupon grid" in audit
+    assert "before the first coupon" in audit
+    assert "regular maturity-anchored" not in audit
+
+
+def test_settlement_on_the_first_coupon_is_described_as_the_regular_grid():
+    # t0 Monday 2028-02-14 -> tS Tuesday 2028-02-15, exactly the first coupon:
+    # the primitive drops the frame, so the record keeps the schedule dates
+    # but every number equals the regular grid's -- and the audit must say
+    # regular, not irregular.
+    with_schedule = _boundary_duration("2028-02-14T16:00:00+00:00")
+    regular = _boundary_duration("2028-02-14T16:00:00+00:00", schedule=False)
+
+    assert with_schedule.settlement_date == date(2028, 2, 15)
+    assert with_schedule.schedule_first_coupon == date(2028, 2, 15)
+    assert with_schedule.modified_duration == regular.modified_duration
+    assert with_schedule.accrued_interest_per_100 == regular.accrued_interest_per_100
+
+    audit = _published_audit(with_schedule)
+    assert "regular maturity-anchored coupon grid" in audit
+    assert "irregular" not in audit
+    # The schedule is kept as provenance, explicitly marked inactive.
+    assert "on or after the first coupon 2028-02-15" in audit
+    assert "no longer applies" in audit
+
+
+def test_settlement_after_the_first_coupon_is_described_as_the_regular_grid():
+    # Well past the stub: still regular, still marked inactive.
+    past = _boundary_duration("2028-06-01T16:00:00+00:00")
+
+    audit = _published_audit(past)
+    assert past.schedule_accrual_start == date(2027, 5, 20)
+    assert "regular maturity-anchored coupon grid" in audit
+    assert "irregular" not in audit
 
 
 def test_the_published_audit_states_the_observation_window():
@@ -816,6 +899,49 @@ def test_tampering_with_any_recorded_statistic_field_is_refused(field_name, valu
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         _convert(tampered, _duration(), history=history)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("requested_identifier", "/isin/US9999999999"),
+        ("requested_start_date", date(2025, 12, 1)),
+        ("requested_end_date", date(2026, 2, 1)),
+        ("yield_field", "YLD_YTM_BID"),
+        ("field_meaning", "Yield to Maturity (Bid)"),
+        ("series_observation_count", 181),
+        ("source_system", "SOME_OTHER_SOURCE"),
+        ("acquired_at", "2026-09-11T10:00:00+00:00"),
+    ],
+)
+def test_changing_acquisition_provenance_on_an_unchanged_series_is_refused(
+    field_name, value
+):
+    # The gap Codex found: the statistic still reproduces from the retained
+    # series, so an allowlist comparing only statistic fields let the parent
+    # claim a Bloomberg request -- a different identifier, date range, field,
+    # observation count or acquisition time -- that its series never answered.
+    result, history = _vol_result_with_history()
+    tampered = dataclasses.replace(result, **{field_name: value})
+
+    # Same series, and the statistic itself is untouched.
+    assert tampered.annualized_yield_vol == result.annualized_yield_vol
+
+    with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
+        _convert(tampered, _duration(), history=history)
+    message = str(excinfo.value)
+    assert field_name in message
+    assert "not reproducible" in message
+
+
+def test_only_the_calculators_own_timestamp_may_differ_on_a_replay():
+    # A re-run legitimately stamps its own calculated_at; nothing else about
+    # the result may change.
+    result, history = _vol_result_with_history()
+    later = dataclasses.replace(result, calculated_at="2031-01-01T00:00:00+00:00")
+
+    converted = _convert(later, _duration(), history=history)
+    assert converted.historical_yield_vol.calculated_at == "2031-01-01T00:00:00+00:00"
 
 
 def test_a_yield_series_for_another_bond_cannot_verify_the_statistic():

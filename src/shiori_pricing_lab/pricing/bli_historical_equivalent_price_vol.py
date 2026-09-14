@@ -118,7 +118,10 @@ from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
     BondOptionPriceBasis,
     require_bond_option_price_basis,
 )
-from shiori_pricing_lab.pricing.treasury_futures_implied_yield import IrregularFirstCoupon
+from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
+    IrregularFirstCoupon,
+    _first_coupon_frame,
+)
 
 # The approved conversion, named. A different bridge -- a convexity term, a
 # relative-vol round-trip, a DCF adjustment -- is a different version string.
@@ -381,17 +384,40 @@ def _coupon_schedule_text(duration: BLIBondModifiedDuration) -> str:
     the duration was not enough; it has to survive this boundary too.
     """
 
-    start = duration.schedule_accrual_start
-    first = duration.schedule_first_coupon
-    if start is None and first is None:
-        # Deliberately not phrased as "no irregular first coupon": that text
-        # contains the irregular case's own wording, so a reader (or a grep)
-        # scanning for it would find it on a regular bond.
+    # The grid described must be the grid *used*, not inferred from whether
+    # schedule dates are present (Codex review, PR #212). Once settlement is
+    # on or after the first coupon the primitive deliberately drops the ICMA
+    # frame and prices on the regular grid, while the record still carries the
+    # bond's genuine schedule dates. So the decision is taken from the
+    # primitive's own frame selector rather than restated here, and the audit
+    # cannot disagree with the arithmetic it describes.
+    schedule = _schedule_of(duration)
+    frame_applied = schedule is not None and (
+        _first_coupon_frame(
+            duration.settlement_date,
+            duration.maturity_date,
+            duration.coupons_per_year,
+            schedule,
+        )
+        is not None
+    )
+    if frame_applied:
+        return (
+            f"irregular first-coupon grid (ACT/ACT ICMA: accrual start "
+            f"{schedule.accrual_start.isoformat()}, first coupon "
+            f"{schedule.first_coupon.isoformat()}, settlement "
+            f"{duration.settlement_date.isoformat()} before the first coupon)"
+        )
+    # Deliberately not phrased with the irregular case's wording ("no
+    # irregular first coupon" contains it), so a reader or a grep scanning
+    # for it cannot find it on a bond priced on the regular grid.
+    if schedule is None:
         return "regular maturity-anchored coupon grid (no first-coupon stub)"
     return (
-        f"irregular first coupon (ACT/ACT ICMA: accrual start "
-        f"{start.isoformat() if start else None}, first coupon "
-        f"{first.isoformat() if first else None})"
+        f"regular maturity-anchored coupon grid (settlement "
+        f"{duration.settlement_date.isoformat()} is on or after the first coupon "
+        f"{schedule.first_coupon.isoformat()}, so the bond's first-coupon stub from "
+        f"{schedule.accrual_start.isoformat()} no longer applies)"
     )
 
 

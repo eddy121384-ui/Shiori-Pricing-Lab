@@ -492,6 +492,86 @@ def test_a_pricing_timestamp_that_places_no_moment_is_refused(bad):
     assert "ISO-8601" in str(excinfo.value)
 
 
+# --- t0 is an unambiguous market-state moment (Codex review, PR #212) ---------
+#
+# The contract is the standalone pricing request's own, reused rather than
+# restated: a full ISO-8601 datetime with an explicit UTC offset, and the
+# valuation date is the *local* date of the offset the caller stated.
+
+
+@pytest.mark.parametrize("bare_date", ["2027-02-11", "2028-02-14"])
+def test_a_bare_date_is_not_a_pricing_timestamp(bare_date):
+    # A date names a day, not a moment; it used to parse and derive tS.
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(pricing_timestamp=bare_date)
+    assert "offset-aware" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "naive", ["2027-02-11T16:00:00", "2027-02-11T23:30:00", "2027-02-11T10:30:00.250000"]
+)
+def test_a_naive_datetime_is_not_a_pricing_timestamp(naive):
+    # No offset, so no instant: the same wall-clock reading is a different
+    # moment in every market, and its date cannot safely derive settlement.
+    with pytest.raises(BLIBondDurationError) as excinfo:
+        _duration(pricing_timestamp=naive)
+    assert "explicit UTC offset" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "2027-02-11T10:30:00+08:00",
+        "2027-02-11T02:30:00+00:00",
+        "2027-02-11T02:30:00Z",
+        "2027-02-11T21:30:00-05:00",
+    ],
+)
+def test_an_offset_aware_pricing_timestamp_is_accepted(stamp):
+    result = _duration(pricing_timestamp=stamp)
+    assert result.pricing_timestamp == stamp
+    assert result.settlement_date == _SETTLEMENT
+
+
+def test_the_reused_contract_also_refuses_a_lowercase_separator():
+    # Inherited from the standalone request parser, not re-implemented:
+    # `fromisoformat` alone would accept this.
+    with pytest.raises(BLIBondDurationError):
+        _duration(pricing_timestamp="2027-02-11t16:00:00+00:00")
+
+
+def test_equivalent_instants_on_the_same_local_date_price_identically():
+    # 10:30 in Singapore and 02:30 UTC are one instant on one local date, so
+    # they must derive the same settlement and the same duration.
+    asia = _duration(pricing_timestamp="2027-02-11T10:30:00+08:00")
+    utc = _duration(pricing_timestamp="2027-02-11T02:30:00+00:00")
+
+    assert asia.settlement_date == utc.settlement_date == date(2027, 2, 12)
+    assert asia.modified_duration == utc.modified_duration
+
+
+def test_settlement_follows_the_local_date_of_the_stated_offset():
+    # The existing standalone contract makes the valuation date the local
+    # date of the stated offset (`pricing_timestamp.date()` must equal
+    # `valuation_date`), and this producer inherits that rather than choosing
+    # UTC. So one instant stated in two offsets that straddle midnight names
+    # two valuation dates: Thursday 2027-02-11 in New York rolls T+1 to
+    # Friday 02-12, while Friday 02-12 in UTC rolls past the Presidents' Day
+    # holiday to Tuesday 02-16 -- and the durations differ accordingly.
+    from datetime import datetime as _datetime
+
+    new_york = "2027-02-11T21:30:00-05:00"
+    utc = "2027-02-12T02:30:00+00:00"
+    assert _datetime.fromisoformat(new_york) == _datetime.fromisoformat(utc)
+
+    ny_result = _duration(pricing_timestamp=new_york)
+    utc_result = _duration(pricing_timestamp=utc)
+
+    assert ny_result.settlement_date == date(2027, 2, 12)
+    assert utc_result.settlement_date == date(2027, 2, 16)
+    assert ny_result.modified_duration != utc_result.modified_duration
+
+
 def test_the_settlement_date_is_derived_from_t0_and_cannot_be_supplied():
     # The P1 this replaced: a caller could name any pre-maturity date while
     # the result went on calling it the current spot settlement. The

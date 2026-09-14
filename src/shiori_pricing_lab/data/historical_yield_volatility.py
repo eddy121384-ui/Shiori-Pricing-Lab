@@ -152,7 +152,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime
 from enum import StrEnum
 from fractions import Fraction
@@ -1326,27 +1326,19 @@ def historical_yield_vol_volatility_input(
     )
 
 
-#: Derived fields a re-run of :func:`calculate_historical_yield_volatility`
-#: must reproduce. Inputs are excluded on purpose -- they are what the re-run
-#: is fed, so comparing them would only compare each value with itself.
-#: ``calculated_at``/``acquired_at`` are excluded too: they timestamp *when*
-#: a calculation ran, not what it produced, and a re-run carries its own.
-_REPRODUCED_FIELDS: tuple[str, ...] = (
-    "security",
-    "yield_field",
-    "field_unit",
-    "observation_count",
-    "requested_observation_count",
-    "yield_change_count",
-    "first_observation_date",
-    "last_observation_date",
-    "observation_dates",
-    "standard_deviation_convention",
-    "annualization_trading_days",
-    "daily_yield_vol",
-    "annualized_yield_vol",
-    "window_status",
-)
+#: The one field a replay may legitimately change: this calculator's own
+#: clock reading. Every other field of a result -- the statistic *and* the
+#: acquisition provenance copied verbatim from the #196 history
+#: (``requested_identifier``, ``field_meaning``, the requested date range,
+#: ``series_observation_count``, ``source_system``, ``acquired_at``, ...) --
+#: is a deterministic function of the series and must come back identical
+#: (Codex review, PR #212). An allowlist of fields to compare let those
+#: provenance fields be replaced with shape-valid values while the statistic
+#: still reproduced, so the retained parent could claim a Bloomberg request
+#: its series never answered. Comparing everything except this exclusion
+#: means a field added to the result later is covered without anyone having
+#: to remember to list it.
+_REPLAY_EXCLUDED_FIELDS: frozenset[str] = frozenset({"calculated_at"})
 
 
 def require_reproducible_historical_yield_vol(
@@ -1399,7 +1391,10 @@ def require_reproducible_historical_yield_vol(
             f"its own Yield series: {exc}"
         ) from exc
 
-    for field_name in _REPRODUCED_FIELDS:
+    for result_field in fields(HistoricalYieldVolResult):
+        field_name = result_field.name
+        if field_name in _REPLAY_EXCLUDED_FIELDS:
+            continue
         recorded = getattr(result, field_name)
         expected = getattr(reproduced, field_name)
         if isinstance(recorded, float) and isinstance(expected, float):

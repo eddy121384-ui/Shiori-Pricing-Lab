@@ -1578,3 +1578,50 @@ def test_the_yield_vol_basis_is_still_refused_by_the_pricing_input_guard():
     assert _SUPPORTED_VOLATILITY_BASES == frozenset(
         {BLIVolatilityBasis.PRICE_VOL, BLIVolatilityBasis.EQUIVALENT_PRICE_VOL}
     )
+
+
+# --- Replay: every field but the calculator's own timestamp (Issue #211) ----
+
+
+def test_a_replay_compares_every_result_field_except_calculated_at():
+    # Not an allowlist of fields to compare, which is how acquisition
+    # provenance was once left out (Codex review, PR #212): every field of the
+    # result is compared, and the one exclusion is the calculator's own clock.
+    assert module._REPLAY_EXCLUDED_FIELDS == frozenset({"calculated_at"})
+    assert "calculated_at" in {field.name for field in dataclasses.fields(
+        module.HistoricalYieldVolResult
+    )}
+
+
+def test_a_genuine_result_replays_from_its_own_series():
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    module.require_reproducible_historical_yield_vol(result, history)
+    module.require_reproducible_historical_yield_vol(
+        dataclasses.replace(result, calculated_at="2031-01-01T00:00:00+00:00"), history
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("requested_identifier", "/isin/US9999999999"),
+        ("field_meaning", "a different field meaning"),
+        ("requested_start_date", date(2025, 12, 1)),
+        ("series_observation_count", 181),
+        ("acquired_at", "2026-01-05T09:00:00+00:00"),
+        ("annualized_yield_vol", 1.0),
+    ],
+)
+def test_a_replay_refuses_provenance_or_statistic_that_the_series_did_not_produce(
+    field_name, value
+):
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        module.require_reproducible_historical_yield_vol(
+            dataclasses.replace(result, **{field_name: value}), history
+        )
+    assert field_name in str(excinfo.value)

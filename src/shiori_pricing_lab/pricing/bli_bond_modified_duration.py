@@ -99,6 +99,9 @@ import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from shiori_pricing_lab.data.bli_standalone_option_request import (
+    _parse_offset_aware_datetime,
+)
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     PROVENANCE_SHIORI_DERIVED,
     advance_settlement_business_days,
@@ -398,17 +401,22 @@ def calculate_bond_modified_duration(
             "pricing_timestamp is required and must record the market-state timestamp t0, "
             f"got {pricing_timestamp!r}"
         )
-    # t0 must place a moment, not merely be non-blank: downstream consumers
-    # compare it against observation dates to establish that a historical
-    # window does not reach past the moment being priced, and a timestamp
-    # nothing can parse makes that comparison impossible rather than merely
-    # inconvenient.
+    # t0 must place an unambiguous market-state moment (Codex review, PR
+    # #212). `datetime.fromisoformat` alone accepted a bare date or a naive
+    # datetime, neither of which names an instant, and the local date taken
+    # from it then derived spot settlement and was published as t0. The
+    # standalone pricing request already defines this contract -- a full
+    # ISO-8601 datetime with an explicit UTC offset, uppercase `T` separator
+    # -- so its parser is reused rather than a second one written here. Its
+    # date semantics carry over too: the valuation date is the *local* date
+    # of the offset the caller stated (`pricing_timestamp.date()` must equal
+    # `valuation_date` in that contract), and tS is rolled from that date.
     try:
-        pricing_moment = datetime.fromisoformat(pricing_timestamp)
+        pricing_moment = _parse_offset_aware_datetime(pricing_timestamp, "pricing_timestamp")
     except ValueError as exc:
         raise BLIBondDurationError(
-            f"pricing_timestamp {pricing_timestamp!r} is not an ISO-8601 timestamp, so it "
-            f"places no moment in time: {exc}"
+            "pricing_timestamp is not an offset-aware ISO-8601 datetime, so it places no "
+            f"unambiguous market-state moment: {exc}"
         ) from exc
     if schedule is not None and not isinstance(schedule, IrregularFirstCoupon):
         raise BLIBondDurationError(
