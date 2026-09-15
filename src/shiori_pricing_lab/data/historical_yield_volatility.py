@@ -152,7 +152,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime
 from enum import StrEnum
 from fractions import Fraction
@@ -162,6 +162,10 @@ from shiori_pricing_lab.data.bli_snapshot import (
     BLIMarketDataStatus,
     BLIVolatilityBasis,
     BLIVolatilityInput,
+)
+from shiori_pricing_lab.data.bloomberg_bond_quote import (
+    BLIBloombergDapiError,
+    _parse_finite_float,
 )
 from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     SOURCE_SYSTEM as BLOOMBERG_BOND_YIELD_SOURCE_SYSTEM,
@@ -1324,3 +1328,153 @@ def historical_yield_vol_volatility_input(
         status=BLIMarketDataStatus.ACTIVE,
         override_or_fallback_audit=audit,
     )
+
+
+#: The one field a replay may legitimately change: this calculator's own
+#: clock reading. Every other field of a result -- the statistic *and* the
+#: acquisition provenance copied verbatim from the #196 history
+#: (``requested_identifier``, ``field_meaning``, the requested date range,
+#: ``series_observation_count``, ``source_system``, ``acquired_at``, ...) --
+#: is a deterministic function of the series and must come back identical
+#: (Codex review, PR #212). An allowlist of fields to compare let those
+#: provenance fields be replaced with shape-valid values while the statistic
+#: still reproduced, so the retained parent could claim a Bloomberg request
+#: its series never answered. Comparing everything except this exclusion
+#: means a field added to the result later is covered without anyone having
+#: to remember to list it.
+_REPLAY_EXCLUDED_FIELDS: frozenset[str] = frozenset({"calculated_at"})
+
+
+def _require_observations_match_their_raw_evidence(history: BloombergBondYieldHistory) -> None:
+    """Refuse a series whose numeric values are not Bloomberg's own strings.
+
+    :class:`BondYieldObservation` carries one Bloomberg value twice:
+    ``raw_value`` is the exact string Bloomberg sent, and ``yield_value`` is
+    that string parsed -- both ``None`` together for a row Bloomberg returned
+    without a value. A replay recalculates from the floats, so a reconstructed
+    series whose floats were altered reproduced perfectly while the retained
+    Bloomberg strings supported different numbers (Codex review, PR #212).
+
+    The relationship is the #196 loader's own, reused rather than restated:
+    a blank string is the hole (``None``), and a value is
+    ``_parse_finite_float(raw_value)`` exactly. Equality is exact, because the
+    loader produces the float by that one deterministic parse.
+    """
+
+    for observation in history.observations:
+        where = f"{history.yield_field} on {observation.observation_date} for {history.security!r}"
+        raw = observation.raw_value
+        numeric = observation.yield_value
+        if raw is None or numeric is None:
+            if raw is None and numeric is None:
+                continue
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries yield_value={numeric!r} but raw_value={raw!r} -- the two "
+                "represent one Bloomberg value and are absent only together, so this series "
+                "is not the evidence it claims to be"
+            )
+        if not isinstance(raw, str) or not raw.strip():
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries raw_value={raw!r} beside yield_value={numeric!r} -- the "
+                "#196 loader records a blank Bloomberg string as a hole, never as a value"
+            )
+        try:
+            parsed = _parse_finite_float(raw, f"{history.yield_field} historical")
+        except BLIBloombergDapiError as exc:
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries a raw Bloomberg string the #196 loader could not have "
+                f"parsed: {exc}"
+            ) from exc
+        if isinstance(numeric, bool) or parsed != numeric:
+            raise HistoricalYieldVolUnavailableError(
+                f"{where} carries yield_value={numeric!r}, but its retained Bloomberg string "
+                f"{raw!r} parses to {parsed!r} -- the numbers a statistic would be replayed "
+                "from are not the ones Bloomberg sent"
+            )
+
+
+def require_reproducible_historical_yield_vol(
+    result: HistoricalYieldVolResult,
+    history: BloombergBondYieldHistory,
+) -> None:
+    """Refuse ``result`` unless re-running this calculator over ``history``
+    returns the same statistic.
+
+    **Why this lives here.** A :class:`HistoricalYieldVolResult` cannot be
+    checked against itself. It deliberately carries neither the Yield values
+    nor the Yield Changes (see this module's docstring), so scaling its daily
+    and annualized figures together preserves the ``sqrt(252)`` relationship
+    :func:`result_shape_problem` tests, and every internal check passes while
+    the number means something else entirely. The only thing that can settle
+    it is the series -- which this module's docstring already names as where
+    a consumer needing the values should go.
+
+    Knowing *how to verify* a #197 result belongs next to knowing how to
+    produce one, so a consumer never has to carry a copy of this field list.
+
+    Raises :class:`HistoricalYieldVolUnavailableError` when the series is
+    unusable, is for another bond, or does not reproduce the statistic.
+    """
+
+    if not isinstance(result, HistoricalYieldVolResult):
+        raise HistoricalYieldVolUnavailableError(
+            f"result must be a HistoricalYieldVolResult, got {type(result).__name__}"
+        )
+    if not isinstance(history, BloombergBondYieldHistory):
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} is accompanied by no usable "
+            f"Yield series (got {type(history).__name__}), so its statistic cannot be "
+            "re-derived and must not be trusted"
+        )
+    if history.security != result.security:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} is accompanied by a Yield "
+            f"series for {history.security!r} -- one bond's statistic is never verified "
+            "against another bond's observations"
+        )
+
+    try:
+        reproduced = calculate_historical_yield_volatility(
+            history, requested_observation_count=result.requested_observation_count
+        )
+    except (HistoricalYieldVolInputError, ValueError) as exc:
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} cannot be re-derived from "
+            f"its own Yield series: {exc}"
+        ) from exc
+
+    # After the replay, not before (Codex review, PR #212). The calculator is
+    # what types the series and every row in it -- a non-sequence, or a row
+    # that is not a BondYieldObservation, is refused there on this module's
+    # error type. Scanning raw evidence first dereferenced those rows and let
+    # `observations=None` or `(None,)` escape as TypeError/AttributeError, the
+    # exact failure the calculator's own guard was written to prevent.
+    _require_observations_match_their_raw_evidence(history)
+
+    for result_field in fields(HistoricalYieldVolResult):
+        field_name = result_field.name
+        if field_name in _REPLAY_EXCLUDED_FIELDS:
+            continue
+        recorded = getattr(result, field_name)
+        expected = getattr(reproduced, field_name)
+        # Numbers compare numerically whether written as int or float, and an
+        # integer too large to convert is a mismatch rather than an
+        # OverflowError escaping the replay (Codex review, PR #212).
+        numeric = all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (recorded, expected)
+        )
+        if numeric:
+            try:
+                if math.isclose(recorded, expected, rel_tol=1e-12, abs_tol=0.0):
+                    continue
+            except OverflowError:
+                pass
+        elif recorded == expected:
+            continue
+        raise HistoricalYieldVolUnavailableError(
+            f"the Historical Yield Vol for {result.security!r} records {field_name}="
+            f"{recorded!r}, but re-running this calculator over its own Yield series "
+            f"gives {expected!r} -- the statistic is not reproducible, so it describes "
+            "no calculation that happened"
+        )

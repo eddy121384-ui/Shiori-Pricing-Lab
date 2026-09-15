@@ -1578,3 +1578,163 @@ def test_the_yield_vol_basis_is_still_refused_by_the_pricing_input_guard():
     assert _SUPPORTED_VOLATILITY_BASES == frozenset(
         {BLIVolatilityBasis.PRICE_VOL, BLIVolatilityBasis.EQUIVALENT_PRICE_VOL}
     )
+
+
+# --- Replay: every field but the calculator's own timestamp (Issue #211) ----
+
+
+def test_a_replay_compares_every_result_field_except_calculated_at():
+    # Not an allowlist of fields to compare, which is how acquisition
+    # provenance was once left out (Codex review, PR #212): every field of the
+    # result is compared, and the one exclusion is the calculator's own clock.
+    assert module._REPLAY_EXCLUDED_FIELDS == frozenset({"calculated_at"})
+    assert "calculated_at" in {field.name for field in dataclasses.fields(
+        module.HistoricalYieldVolResult
+    )}
+
+
+def test_a_genuine_result_replays_from_its_own_series():
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    module.require_reproducible_historical_yield_vol(result, history)
+    module.require_reproducible_historical_yield_vol(
+        dataclasses.replace(result, calculated_at="2031-01-01T00:00:00+00:00"), history
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("requested_identifier", "/isin/US9999999999"),
+        ("field_meaning", "a different field meaning"),
+        ("requested_start_date", date(2025, 12, 1)),
+        ("series_observation_count", 181),
+        ("acquired_at", "2026-01-05T09:00:00+00:00"),
+        ("annualized_yield_vol", 1.0),
+    ],
+)
+def test_a_replay_refuses_provenance_or_statistic_that_the_series_did_not_produce(
+    field_name, value
+):
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        module.require_reproducible_historical_yield_vol(
+            dataclasses.replace(result, **{field_name: value}), history
+        )
+    assert field_name in str(excinfo.value)
+
+
+# --- Replay: numeric observations must be Bloomberg's own strings ------------
+#
+# A BondYieldObservation carries one Bloomberg value twice (Codex review, PR
+# #212). A replay recalculates from the floats, so a series whose floats were
+# altered -- and a statistic computed from those altered floats -- reproduced
+# perfectly while the retained Bloomberg strings supported different numbers.
+
+
+def _raw_history(rows, *, field_unit="PERCENT"):
+    """A #196 series from explicit ``(yield_value, raw_value)`` pairs."""
+
+    dates = [_START + timedelta(days=index) for index in range(len(rows))]
+    return BloombergBondYieldHistory(
+        requested_identifier="/isin/US0000000000",
+        security="/isin/US0000000000",
+        yield_field="SYNTHETIC_TEST_YIELD_FIELD",
+        field_meaning="synthetic test field",
+        field_unit=field_unit,
+        requested_start_date=dates[0],
+        requested_end_date=dates[-1],
+        observations=tuple(
+            BondYieldObservation(observation_date=day, yield_value=value, raw_value=raw)
+            for day, (value, raw) in zip(dates, rows, strict=True)
+        ),
+        source_system="BLOOMBERG_DAPI",
+        acquired_at="2026-01-10T09:00:00+00:00",
+    )
+
+
+def test_a_statistic_computed_from_altered_floats_is_refused_by_the_raw_evidence():
+    # The exact exploit: the floats were changed, the result was computed from
+    # the changed floats (so it reproduces), and the Bloomberg strings were
+    # left as Bloomberg sent them.
+    genuine = [(4.00, "4.00"), (4.10, "4.10"), (3.80, "3.80"), (4.30, "4.30")]
+    altered = [(4.00, "4.00"), (4.50, "4.10"), (3.10, "3.80"), (4.90, "4.30")]
+    history = _raw_history(altered)
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    assert result.annualized_yield_vol != calculate_historical_yield_volatility(
+        _raw_history(genuine), requested_observation_count=4
+    ).annualized_yield_vol
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        module.require_reproducible_historical_yield_vol(result, history)
+    message = str(excinfo.value)
+    assert "4.5" in message and "'4.10'" in message
+    assert "not the ones Bloomberg sent" in message
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        ((4.10, None), "absent only together"),
+        ((None, "4.10"), "absent only together"),
+        ((4.10, "   "), "blank Bloomberg string"),
+        ((4.10, "N/A"), "could not have parsed"),
+        ((4.10, "inf"), "could not have parsed"),
+        ((4.10, "4.11"), "not the ones Bloomberg sent"),
+        ((True, "1"), "not the ones Bloomberg sent"),
+    ],
+)
+def test_an_observation_whose_float_and_string_disagree_is_refused(row, reason):
+    # The mismatch sits outside the selected window on purpose: the series as
+    # a whole is the retained evidence, not only the rows the statistic used.
+    rows = [row, (4.00, "4.00"), (4.10, "4.10"), (3.80, "3.80"), (4.30, "4.30")]
+    history = _raw_history(rows)
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        module.require_reproducible_historical_yield_vol(result, history)
+    assert reason in str(excinfo.value)
+
+
+def test_a_genuine_hole_and_a_differently_written_number_still_replay():
+    # No false positives: a row Bloomberg returned without a value is both
+    # None, and "4.10" is the string for the float 4.1.
+    rows = [(None, None), (4.00, "4.0"), (4.1, "4.10"), (3.8, "3.800"), (4.3, "4.30")]
+    history = _raw_history(rows)
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    module.require_reproducible_historical_yield_vol(result, history)
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [None, (None,), ("not an observation",), 42, "4.10"],
+)
+def test_a_malformed_series_is_refused_on_the_replay_error_type(observations):
+    # The raw-evidence scan used to run before the calculator's structural
+    # validation, so these escaped as TypeError/AttributeError and could reach
+    # a route as HTTP 500 (Codex review, PR #212). They must be refused on the
+    # replay's own error type, which the pricing wrapper catches.
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+    malformed = dataclasses.replace(history, observations=observations)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError):
+        module.require_reproducible_historical_yield_vol(result, malformed)
+
+
+def test_a_replay_treats_an_oversized_integer_as_a_mismatch_not_an_overflow():
+    # math.isclose(10**400, x) raises OverflowError; the replay must refuse it
+    # on its own error type instead (Codex review, PR #212).
+    history = _history([4.00, 4.10, 3.80, 4.30])
+    result = calculate_historical_yield_volatility(history, requested_observation_count=4)
+
+    with pytest.raises(HistoricalYieldVolUnavailableError) as excinfo:
+        module.require_reproducible_historical_yield_vol(
+            dataclasses.replace(result, annualized_yield_vol=10**400), history
+        )
+    assert "annualized_yield_vol" in str(excinfo.value)
