@@ -139,7 +139,7 @@ def test_api_base_matches_direct_call_to_price_standalone_option_case(server_url
     assert status == 200
 
     base_case = load_base_case()
-    _, _, expected_display = price_standalone_option_case(base_case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(base_case)
 
     assert payload["display"] == expected_display
     assert payload["overlay"] == extract_standalone_option_case_overlay(base_case)
@@ -158,7 +158,7 @@ def test_api_price_matches_direct_call_to_price_standalone_option_case(server_ur
     assert status == 200
 
     overlaid_case = apply_standalone_option_case_overlay(base_case, overlay)
-    _, _, expected_display = price_standalone_option_case(overlaid_case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(overlaid_case)
 
     assert payload == expected_display
 
@@ -223,7 +223,7 @@ def test_api_case_matches_direct_call_to_price_standalone_option_case(server_url
     assert status == 200
 
     case = json.loads(case_bytes.decode("utf-8"))
-    _, _, expected_display = price_standalone_option_case(case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(case)
 
     assert payload["case"] == case
     assert payload["display"] == expected_display
@@ -291,7 +291,7 @@ def test_api_case_price_matches_direct_call_to_price_standalone_option_case(
     assert status == 200
 
     overlaid_case = apply_standalone_option_case_overlay(case, overlay)
-    _, _, expected_display = price_standalone_option_case(overlaid_case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(overlaid_case)
     assert payload == expected_display
 
 
@@ -328,7 +328,7 @@ def test_api_case_price_uses_the_given_case_not_the_bundled_one(server_url: str)
     status, payload = _post_json(f"{server_url}/api/case/price", {"case": case, "overlay": overlay})
     assert status == 200
 
-    _, _, expected_display = price_standalone_option_case(case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(case)
     assert payload == expected_display
 
 
@@ -1158,7 +1158,7 @@ def test_api_case_injects_the_live_curve_and_prices_when_curve_points_is_empty(
         assert point["source_system"] == "BLOOMBERG_DAPI"
 
     injected_case = server_module.inject_live_option_discount_curve_if_absent(case)
-    _, _, expected_display = price_standalone_option_case(injected_case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(injected_case)
     assert payload["display"] == expected_display
 
 
@@ -4075,7 +4075,7 @@ def test_api_case_price_leaves_a_legacy_case_byte_for_byte_unchanged(
     assert status == 200
     assert calls == []
     assert "effective_forward" not in display
-    _, _, expected_display = price_standalone_option_case(case)
+    _, _, expected_display, _priced_case = price_standalone_option_case(case)
     assert display == json.loads(json.dumps(expected_display))
 
 

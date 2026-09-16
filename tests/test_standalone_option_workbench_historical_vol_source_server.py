@@ -38,9 +38,6 @@ import pytest
 import shiori_pricing_lab.app.standalone_option_historical_vol_source as source_module
 import shiori_pricing_lab.app.standalone_option_workbench as workbench_module
 import shiori_pricing_lab.app.standalone_option_workbench_server as server_module
-from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
-    HistoricalVolSourceUnavailableError,
-)
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
@@ -57,7 +54,6 @@ from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     BloombergBondYieldHistory,
     BondYieldObservation,
 )
-from shiori_pricing_lab.pricing.bli_bond_option_price_basis import BondOptionPriceBasis
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 
 _requires_quantlib = pytest.mark.skipif(
@@ -594,185 +590,106 @@ def test_the_explicit_case_overlay_route_re_derives_too(server_url, monkeypatch)
 
 
 # --- A case declaring this source is never priced from its envelope ----------
-
-
-def test_pricing_a_historical_case_without_deriving_it_is_refused() -> None:
-    # Codex review, PR #215 (P1). `price_standalone_option_case` is public and
-    # reached directly by the Streamlit UI and both benchmark compositions. A
-    # case declaring this source used to be priced there from whatever number
-    # its envelope carried, while the result labelled it a Shiori derivation.
-    case = _historical_case()
-    case["volatility_input"] = {**case["volatility_input"], "volatility": 0.99}
-
-    with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
-        price_standalone_option_case(case)
-
-    message = str(excinfo.value)
-    assert "apply_historical_equivalent_price_vol_to_case" in message
-    assert "never priced as-is" in message
-
-
-def test_the_benchmark_composition_refuses_an_underived_historical_case() -> None:
-    # Reached through the same function, so it inherits the same refusal
-    # rather than needing its own copy of the rule.
-    case = _historical_case()
-    case["volatility_input"] = {**case["volatility_input"], "volatility": 0.99}
-
-    with pytest.raises(HistoricalVolSourceUnavailableError):
-        price_standalone_option_case_with_benchmark(
-            case, _BENCHMARK_CASE, active_quote_side="MID"
-        )
+#
+# Codex review, PR #215, rounds 1-3. Two earlier designs let a caller derive
+# the volatility and then present evidence of having done so -- first the
+# provenance mapping, then a single-use licence object -- and each had the same
+# hole somewhere new, because any value a caller holds is a value a caller can
+# hold again or rebuild. `price_standalone_option_case` derives it itself now,
+# immediately before the request is built, so there is no interval to exploit
+# and nothing below is testing a guard: it is testing that the derivation
+# happens where the pricing happens.
 
 
 @_requires_quantlib
-def test_a_derivation_cannot_license_a_case_it_was_not_derived_from(monkeypatch) -> None:
-    # The licence is bound to the inputs it read. A case edited afterwards --
-    # here, its volatility replaced -- is not the case it covers.
-    _stub_yield_loader(monkeypatch)
-    case = _historical_case()
-    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
-        case, BondOptionPriceBasis.DIRTY, calculated_at="2026-07-01T16:00:05+00:00"
-    )
-    edited = {
-        **derived_case,
-        "volatility_input": {**derived_case["volatility_input"], "volatility": 0.99},
-    }
-
-    with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
-        price_standalone_option_case(edited, historical_volatility_derivation=derivation)
-    assert "produced for different inputs" in str(excinfo.value)
-
-
-@_requires_quantlib
-def test_a_re_quoted_bond_invalidates_the_licence(monkeypatch) -> None:
-    # The case the derivation read included the spot quote D_B was taken at,
-    # so a re-quote between deriving and pricing is not covered either.
-    _stub_yield_loader(monkeypatch)
-    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
-        _historical_case(), BondOptionPriceBasis.DIRTY,
-        calculated_at="2026-07-01T16:00:05+00:00",
-    )
-    re_quoted = {
-        **derived_case,
-        "bond_quote": {**derived_case["bond_quote"], "clean_price_per_100": 97.5},
-    }
-
-    with pytest.raises(HistoricalVolSourceUnavailableError):
-        price_standalone_option_case(re_quoted, historical_volatility_derivation=derivation)
-
-
-@_requires_quantlib
-def test_a_derivation_on_the_other_basis_does_not_license_this_one(monkeypatch) -> None:
-    _stub_yield_loader(monkeypatch)
-    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
-        _historical_case(bond_option_price_basis="CLEAN"),
-        BondOptionPriceBasis.CLEAN,
-        calculated_at="2026-07-01T16:00:05+00:00",
-    )
-    # The same derived number, now claimed for a DIRTY run.
-    mixed_case = {**derived_case, "bond_option_price_basis": "DIRTY"}
-
-    with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
-        price_standalone_option_case(
-            mixed_case, historical_volatility_derivation=derivation
-        )
-    assert "price basis" in str(excinfo.value)
-
-
-@_requires_quantlib
-def test_a_licence_prices_exactly_one_run(monkeypatch) -> None:
-    # Codex review, PR #215, round 2: the serializable provenance travels into
-    # the display and the exported run, so a caller could keep one and offer it
-    # again against an unchanged case -- and if Bloomberg has since corrected an
-    # observation in the window, the stale sigma_P would price while the result
-    # claimed it was derived for that run. A licence is spent on use.
-    _stub_yield_loader(monkeypatch)
-    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
-        _historical_case(), BondOptionPriceBasis.DIRTY,
-        calculated_at="2026-07-01T16:00:05+00:00",
-    )
-
-    _request, result, display = price_standalone_option_case(
-        derived_case, historical_volatility_derivation=derivation
-    )
-    assert result.status.value == "SUCCESS"
-    assert display["historical_volatility_source"] == derivation.provenance
-    assert display["assumptions"]["price_volatility"] == (
-        derivation.provenance["equivalent_price_vol"]
-    )
-
-    with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
-        price_standalone_option_case(
-            derived_case, historical_volatility_derivation=derivation
-        )
-    assert "already priced a run" in str(excinfo.value)
-
-
-@_requires_quantlib
-def test_the_serializable_provenance_is_not_itself_a_licence(monkeypatch) -> None:
-    # What survives an export round trip is a record of a derivation, never
-    # permission to price from one.
-    _stub_yield_loader(monkeypatch)
-    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
-        _historical_case(), BondOptionPriceBasis.DIRTY,
-        calculated_at="2026-07-01T16:00:05+00:00",
-    )
-    round_tripped = json.loads(json.dumps(derivation.provenance))
-
-    with pytest.raises(ValueError) as excinfo:
-        price_standalone_option_case(
-            derived_case, historical_volatility_derivation=round_tripped
-        )
-    assert "never a licence to price from one" in str(excinfo.value)
-
-
-def test_a_derivation_for_a_non_historical_case_is_refused() -> None:
-    # The other direction: a derivation attached to a case whose volatility
-    # did not come from this source would mislabel a trader's own number.
-    with pytest.raises(ValueError) as excinfo:
-        price_standalone_option_case(
-            _manual_case(),
-            historical_volatility_derivation=source_module.BLIHistoricalVolatilityDerivation(
-                provenance={}, fingerprint=""
-            ),
-        )
-    assert "never describes a volatility that did not come from it" in str(excinfo.value)
-
-
-# --- The quote the duration is taken at must be this ticket's bond -----------
-
-
-def test_a_quote_for_another_bond_is_refused_before_any_duration(
-    server_url, monkeypatch
+def test_pricing_a_historical_case_derives_it_rather_than_trusting_the_envelope(
+    monkeypatch,
 ) -> None:
-    # Codex review, PR #215 (P2). The review route would otherwise take
-    # another bond's clean price, differentiate it against this ticket's
-    # cashflows, and display the result as a priceable sigma_P -- for a case
-    # the typed pricing request refuses outright.
     calls = _stub_yield_loader(monkeypatch)
-    _no_live_curve(monkeypatch)
-    case = _historical_case()
-    case["bond_quote"] = {**case["bond_quote"], "isin": "XS0000000009"}
+    # A number left in the envelope by some earlier run, deliberately nothing
+    # like what this bond's inputs produce.
+    stale = _historical_case()
+    stale["volatility_input"] = {**stale["volatility_input"], "volatility": 0.99}
 
-    status, payload = _post_json(f"{server_url}{_REVIEW_ROUTE}", {"case": case})
+    _request, result, display, priced_case = price_standalone_option_case(stale)
 
-    assert status == 400
-    assert "XS0000000009" in payload["error"]
-    assert "XS0000000001" in payload["error"]
-    assert calls == []
+    assert len(calls) == 1
+    provenance = display["historical_volatility_source"]
+    priced_volatility = display["assumptions"]["price_volatility"]
+    assert result.status.value == "SUCCESS"
+    assert priced_volatility == provenance["equivalent_price_vol"]
+    assert priced_volatility != 0.99
+    # And the envelope handed back is the one that priced, so a caller echoing
+    # it to a client echoes the derived number rather than the stale one.
+    assert priced_case["volatility_input"]["volatility"] == priced_volatility
 
 
-def test_a_quote_in_another_currency_is_refused_too(server_url, monkeypatch) -> None:
+@_requires_quantlib
+def test_the_streamlit_style_direct_caller_derives_too(monkeypatch) -> None:
+    # The exposure Codex found in round 1: this entry point is reached directly
+    # by the Streamlit UI, which never ran a transform of its own.
     calls = _stub_yield_loader(monkeypatch)
-    _no_live_curve(monkeypatch)
+
+    _request, _result, display, _priced = price_standalone_option_case(
+        json.dumps(_historical_case())
+    )
+
+    assert len(calls) == 1
+    assert display["historical_volatility_source"]["vol_source"] == (
+        source_module.HISTORICAL_YIELD_VOL_SOURCE
+    )
+
+
+@_requires_quantlib
+def test_the_benchmark_composition_derives_too(monkeypatch) -> None:
+    calls = _stub_yield_loader(monkeypatch)
+
+    _request, result, _benchmark, _comparison, _calibration, display = (
+        price_standalone_option_case_with_benchmark(
+            _historical_case(), _BENCHMARK_CASE, active_quote_side="MID"
+        )
+    )
+
+    assert len(calls) == 1
+    assert result.status.value == "SUCCESS"
+    assert display["assumptions"]["price_volatility"] == (
+        display["historical_volatility_source"]["equivalent_price_vol"]
+    )
+
+
+@_requires_quantlib
+def test_each_run_derives_again_rather_than_reusing_the_previous_one(monkeypatch) -> None:
+    # The scenario behind round 2's finding: if Bloomberg corrects an
+    # observation in the requested window between two runs, the second run must
+    # see the correction. It does, because it measures the series again.
+    values = [list(_YIELD_VALUES), [4.00, 4.10, 3.80, 4.55]]
+
+    def _fake(**kwargs):
+        return _history(kwargs["identifier"], values.pop(0), field_unit=kwargs.get("field_unit"))
+
+    monkeypatch.setattr(source_module, "load_bloomberg_bond_yield_history", _fake)
     case = _historical_case()
-    case["bond_quote"] = {**case["bond_quote"], "currency": "EUR"}
 
-    status, payload = _post_json(f"{server_url}{_REVIEW_ROUTE}", {"case": case})
+    _r1, _res1, first, _c1 = price_standalone_option_case(case)
+    _r2, _res2, second, _c2 = price_standalone_option_case(case)
 
-    assert status == 400
-    assert "EUR" in payload["error"]
+    assert values == []
+    assert (
+        second["assumptions"]["price_volatility"]
+        != first["assumptions"]["price_volatility"]
+    )
+
+
+def test_a_case_that_does_not_name_the_source_makes_no_acquisition(monkeypatch) -> None:
+    # The no-op branch: every pre-#214 envelope, every fixture, the bundled
+    # example. No Bloomberg call, and the case's own volatility prices.
+    calls = _stub_yield_loader(monkeypatch)
+
+    _request, _result, display, priced_case = price_standalone_option_case(_manual_case())
+
     assert calls == []
+    assert "historical_volatility_source" not in display
+    assert priced_case["volatility_input"] == _manual_case()["volatility_input"]
 
 
 # --- A refresh says it re-sourced the Yield history and the volatility -------

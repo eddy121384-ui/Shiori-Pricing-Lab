@@ -193,7 +193,7 @@ def test_accepts_string_or_already_parsed_mapping():
 
 @_requires_quantlib
 def test_example_reaches_engine_and_reproduces_pinned_premium():
-    _request, result, display = price_standalone_option_case(_example_text())
+    _request, result, display, _priced_case = price_standalone_option_case(_example_text())
 
     assert result.status is PricingStatus.SUCCESS
     assert result.pv == pytest.approx(_EXPECTED_PV)
@@ -209,7 +209,9 @@ def test_example_reaches_engine_and_reproduces_pinned_premium():
 
 @_requires_quantlib
 def test_workflow_result_equals_direct_builder_and_engine_output():
-    _request, workflow_result, _display = price_standalone_option_case(_example_text())
+    _request, workflow_result, _display, _priced_case = price_standalone_option_case(
+        _example_text()
+    )
 
     direct_request = _direct_reference_request()
     direct_result = price_bli_mvp_standalone_option(direct_request)
@@ -219,14 +221,14 @@ def test_workflow_result_equals_direct_builder_and_engine_output():
 
 @_requires_quantlib
 def test_repeated_pricing_is_deterministic():
-    _r1, res1, _d1 = price_standalone_option_case(_example_text())
-    _r2, res2, _d2 = price_standalone_option_case(_example_text())
+    _r1, res1, _d1, _priced_case = price_standalone_option_case(_example_text())
+    _r2, res2, _d2, _priced_case = price_standalone_option_case(_example_text())
     assert res1 == res2
 
 
 @_requires_quantlib
 def test_display_copies_result_values_verbatim():
-    _request, result, display = price_standalone_option_case(_example_text())
+    _request, result, display, _priced_case = price_standalone_option_case(_example_text())
 
     # Every display number is a verbatim read from the result.
     assert display["total_notional_model_fair_premium"] == result.pv
@@ -247,7 +249,7 @@ def test_display_copies_result_values_verbatim():
 
 @_requires_quantlib
 def test_per_100_and_total_premium_are_separate_fields():
-    _request, result, display = price_standalone_option_case(_example_text())
+    _request, result, display, _priced_case = price_standalone_option_case(_example_text())
     per_100 = display["model_fair_premium_per_100"]
     total = display["total_notional_model_fair_premium"]
     assert per_100 == pytest.approx(_EXPECTED_BLACK76_PV_PER_100)
@@ -274,7 +276,7 @@ _DISPLAY_GREEK_KEYS = _DISPLAY_GREEK_PER_100_KEYS + _DISPLAY_GREEK_POSITION_TOTA
 
 @_requires_quantlib
 def test_display_exposes_every_greek_verbatim_under_its_documented_name():
-    _request, result, display = price_standalone_option_case(_example_text())
+    _request, result, display, _priced_case = price_standalone_option_case(_example_text())
 
     for key in _DISPLAY_GREEK_KEYS:
         # Verbatim read: not rounded, rescaled, re-signed, or re-derived here.
@@ -286,7 +288,7 @@ def test_display_exposes_every_greek_verbatim_under_its_documented_name():
 
 @_requires_quantlib
 def test_display_names_distinguish_instrument_per_100_from_position_totals():
-    _request, _result, display = price_standalone_option_case(_example_text())
+    _request, _result, display, _priced_case = price_standalone_option_case(_example_text())
 
     # Every position-signed field is prefixed; no bare *_total field exists
     # that could hide whether the BUY/SELL sign is baked in.
@@ -318,7 +320,7 @@ def test_display_sell_case_negates_only_the_position_totals():
     envelope["bond_option"] = {**envelope["bond_option"], "position": "SELL"}
     request = build_request_from_standalone_option_case(envelope)
     sell_display = prepare_standalone_display(price_bli_mvp_standalone_option(request), request)
-    _request, _result, buy_display = price_standalone_option_case(_example_text())
+    _request, _result, buy_display, _priced_case = price_standalone_option_case(_example_text())
 
     assert buy_display["position"] == "BUY"
     assert sell_display["position"] == "SELL"
@@ -495,7 +497,7 @@ def test_pricing_failed_preserves_none_pv_and_errors():
         **envelope["volatility_input"],
         "volatility_basis": "YIELD_VOL",
     }
-    _request, result, display = price_standalone_option_case(envelope)
+    _request, result, display, _priced_case = price_standalone_option_case(envelope)
 
     assert result.status is PricingStatus.FAILED
     assert result.errors[0].code is PricingErrorCode.UNSUPPORTED_PRODUCT
@@ -518,7 +520,7 @@ def test_failed_display_preserves_structured_error_detail_verbatim():
         **envelope["volatility_input"],
         "volatility_basis": "YIELD_VOL",
     }
-    _request, result, display = price_standalone_option_case(envelope)
+    _request, result, display, _priced_case = price_standalone_option_case(envelope)
 
     assert result.status is PricingStatus.FAILED
     assert len(display["errors"]) == len(result.errors)
@@ -774,7 +776,9 @@ def test_bounded_workflow_equals_direct_pricing_comparison_and_calibration_calls
         _example_text(), _synthetic_benchmark_text(), active_quote_side=BLIBenchmarkQuoteSide.MID
     )
 
-    direct_request, direct_result, _direct_display = price_standalone_option_case(_example_text())
+    direct_request, direct_result, _direct_display, _priced_case = (
+        price_standalone_option_case(_example_text())
+    )
     direct_benchmark = build_benchmark_from_standalone_option_benchmark_case(
         _synthetic_benchmark_text()
     )
@@ -1606,7 +1610,7 @@ def test_local_calendar_dates_are_compared_across_a_utc_date_boundary():
     assert request.pricing_timestamp == "2026-07-01T08:00:00+08:00"
     assert request.expiry_timestamp == "2026-09-29T05:20:00+08:00"
     # And it prices -- the local dates match, so the contract is satisfied.
-    _, result, _ = price_standalone_option_case(envelope)
+    _, result, _, _priced_case = price_standalone_option_case(envelope)
     assert result.status.value == "SUCCESS"
 
 

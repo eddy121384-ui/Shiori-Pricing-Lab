@@ -394,7 +394,7 @@ def test_markdown_greek_zero_is_not_reported_as_missing():
 
 @_requires_quantlib
 def test_price_only_success_export_is_complete():
-    _request, _result, display = price_standalone_option_case(_example_text())
+    _request, _result, display, _priced_case = price_standalone_option_case(_example_text())
     assert display["status"] == "SUCCESS"
 
     json_text = render_standalone_run_as_json(display)
@@ -472,7 +472,7 @@ def test_pricing_failed_export_preserves_errors_and_no_premium():
         **envelope["volatility_input"],
         "volatility_basis": "YIELD_VOL",
     }
-    _request, _result, display = price_standalone_option_case(envelope)
+    _request, _result, display, _priced_case = price_standalone_option_case(envelope)
     assert display["status"] == "FAILED"
     assert display["errors"]
 
@@ -729,7 +729,7 @@ def test_real_pricing_failed_workflow_with_reasons_list_exports_cleanly():
         **envelope["volatility_input"],
         "volatility_basis": "YIELD_VOL",
     }
-    _request, _result, display = price_standalone_option_case(envelope)
+    _request, _result, display, _priced_case = price_standalone_option_case(envelope)
     assert display["status"] == "FAILED"
     assert isinstance(display["errors"][0]["detail"]["reasons"], list)
 

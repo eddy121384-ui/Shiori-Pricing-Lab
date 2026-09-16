@@ -323,14 +323,17 @@ above still reaches no pricing route. What does is its **converted**
 source on the field that already names where a volatility came from,
 ``volatility_input.source_system = HISTORICAL_YIELD_VOL_MO``, exactly as
 Issue #177's two Forward modes are declared on
-``forward_clean_price_input.source_system``. Every pricing route then runs
-:func:`apply_historical_volatility_source_to_case`, which re-derives the
-whole chain -- #196 series, #197 statistic, current-time ``D_B`` on the
-selected basis, the ``sigma_P = |D_B| x sigma_hist_abs`` conversion, the one
-publication step -- and replaces ``volatility_input`` wholesale. Nothing is
-kept between runs, so no previous bond's, basis's or price state's volatility
-can survive into a later ticket. A case that does not declare the source is
-untouched, and every existing vol-source behaviour is unchanged.
+``forward_clean_price_input.source_system``. The whole chain -- #196 series,
+#197 statistic, current-time ``D_B`` on the selected basis, the
+``sigma_P = |D_B| x sigma_hist_abs`` conversion, the one publication step --
+is then re-run by ``price_standalone_option_case`` itself, immediately before
+the request is built, and ``volatility_input`` is replaced wholesale. No route
+here derives it and hands it on: that is where the two earlier designs failed
+review (PR #215, rounds 1-3), because any value a caller holds between
+deriving and pricing is a value that can be held again. Nothing is kept
+between runs, so no previous bond's, basis's or price state's volatility can
+survive into a later ticket, and a case that does not declare the source is
+untouched -- every existing vol-source behaviour is unchanged.
 
 ``POST /api/pricing/historical-equivalent-price-vol`` is the trader's review
 step before committing to it: the same derivation, the same function, no
@@ -365,9 +368,7 @@ from pathlib import Path
 
 from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
     HISTORICAL_YIELD_VOL_SOURCE,
-    BLIHistoricalVolatilityDerivation,
     HistoricalVolSourceUnavailableError,
-    apply_historical_equivalent_price_vol_to_case,
     case_declares_historical_vol_source,
     require_historical_vol_query_names_this_ticket,
     resolve_historical_equivalent_price_vol,
@@ -785,7 +786,7 @@ def price_base_case() -> dict:
     """
 
     base_case = load_base_case()
-    _, _, display = price_standalone_option_case(base_case)
+    _, _, display, _priced_case = price_standalone_option_case(base_case)
     return {
         "case": base_case,
         "overlay": extract_standalone_option_case_overlay(base_case),
@@ -805,7 +806,7 @@ def price_overlay_case(overlay: dict) -> dict:
 
     base_case = load_base_case()
     overlaid_case = apply_standalone_option_case_overlay(base_case, overlay)
-    _, _, display = price_standalone_option_case(overlaid_case)
+    _, _, display, _priced_case = price_standalone_option_case(overlaid_case)
     return display
 
 
@@ -1236,10 +1237,10 @@ def price_uploaded_case(case: dict) -> dict:
     case, effective_forward = apply_effective_forward_to_case(case)
     # After the Forward, because the two are independent derivations off the
     # same case and this one must see the case that is about to price.
-    case, historical_volatility_derivation = apply_historical_volatility_source_to_case(case)
-    _, _, display = price_standalone_option_case(
-        case, historical_volatility_derivation=historical_volatility_derivation
-    )
+    # The Historical volatility is resolved by the pricing entry point itself,
+    # which returns the envelope it priced -- so the case echoed back below is
+    # still the one behind the result, derived volatility included.
+    _, _, display, case = price_standalone_option_case(case)
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     return {
@@ -1812,12 +1813,7 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     validate_deterministic_forward_inputs(overlaid_case)
     validate_deterministic_historical_vol_inputs(overlaid_case)
     overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
-    overlaid_case, historical_volatility_derivation = (
-        apply_historical_volatility_source_to_case(overlaid_case)
-    )
-    _, _, display = price_standalone_option_case(
-        overlaid_case, historical_volatility_derivation=historical_volatility_derivation
-    )
+    _, _, display, _priced_case = price_standalone_option_case(overlaid_case)
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     return display
@@ -1891,26 +1887,10 @@ def price_case_with_bloomberg_quote(
     # instead of widening that contract.
     captured: dict = {}
 
-    def _apply_effective_forward(
-        bloomberg_case: dict,
-    ) -> tuple[dict, BLIHistoricalVolatilityDerivation | None]:
+    def _apply_effective_forward(bloomberg_case: dict) -> dict:
         effective_case, effective_forward = apply_effective_forward_to_case(bloomberg_case)
         captured["effective_forward"] = effective_forward
-        # Inside the same transform, and deliberately: the workflow has just
-        # substituted the freshly acquired spot quote and stamped this run's
-        # own pricing_timestamp, and the Historical source's duration is a
-        # function of both. Deriving it outside would convert the refreshed
-        # Yield statistic through a duration taken at the previous quote and
-        # the previous t0 -- the stale-input failure this whole seam exists
-        # to prevent, exactly as it does for the Forward.
-        effective_case, historical_volatility_derivation = (
-            apply_historical_volatility_source_to_case(effective_case)
-        )
-        captured["historical_volatility_derivation"] = historical_volatility_derivation
-        # Handed back rather than only captured: pricing a Historical-source
-        # case requires the single-use licence for the derivation done for
-        # *this* run, so it has to travel with the case it licenses.
-        return effective_case, historical_volatility_derivation
+        return effective_case
 
     _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case,
@@ -1919,7 +1899,10 @@ def price_case_with_bloomberg_quote(
         case_transform=_apply_effective_forward,
     )
     effective_forward = captured.get("effective_forward")
-    historical_volatility_derivation = captured.get("historical_volatility_derivation")
+    # Resolved by the pricing entry point, after this transform and after the
+    # fresh quote and this run's own t0 were substituted, so it is reported
+    # from the priced run's own display rather than captured out of a closure.
+    historical_volatility_source = display.get("historical_volatility_source")
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     # The derivation forces its own fresh production Curve #490 acquisition
@@ -1954,7 +1937,7 @@ def price_case_with_bloomberg_quote(
         # re-derived the volatility Black-76 priced with, against the quote it
         # had just acquired -- so a run claiming BOND_QUOTE_ONLY would be
         # describing inputs it did not price from (Codex review, PR #215).
-        historical_volatility_derived=historical_volatility_derivation is not None,
+        historical_volatility_derived=historical_volatility_source is not None,
     )
     return {"case": priced_case, "display": display}
 
@@ -2552,51 +2535,6 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         "shiori_derived_forward": derived_trace,
     }
     return effective_case, provenance
-
-
-def apply_historical_volatility_source_to_case(
-    case: dict,
-) -> tuple[dict, BLIHistoricalVolatilityDerivation | None]:
-    """Resolve this run's volatility when the case declares the Historical source.
-
-    The volatility counterpart of :func:`apply_effective_forward_to_case`, and
-    deliberately the same shape: a case whose
-    ``volatility_input.source_system`` is not ``HISTORICAL_YIELD_VOL_MO`` is
-    returned unchanged with ``None`` provenance and no Bloomberg call, so
-    every existing vol-source behaviour -- a trader-entered ``PRICE_VOL``, an
-    ``EQUIVALENT_PRICE_VOL`` supplied upstream -- is untouched.
-
-    For a case that does declare it, the whole chain is re-run here and the
-    volatility is replaced wholesale, for the same reason the derived Forward
-    is: the number the envelope arrived carrying was derived for the inputs
-    it was derived from, and this run's may differ. That is what makes a new
-    bond, a refreshed quote, a changed convention profile or a changed
-    ``BOND_OPTION_PRICE_BASIS`` structurally incapable of pricing against the
-    previous state's volatility -- nothing is kept, so nothing can go stale.
-
-    The basis handed to the derivation is read by
-    :func:`standalone_option_case_price_basis` from the case's own
-    ``bond_option_price_basis``, which is the same single value the pricing
-    call reads for ``F``/``K`` and the Black-76 wrapper. One field, one read
-    per consumer: a mixed-basis run is not constructible from this path.
-
-    ``calculated_at`` is this process's own acquisition stamp -- the pricing
-    package may not read a clock, so the caller that owns the run supplies
-    the timestamp, exactly as the duration producer's contract requires.
-
-    Raises :class:`HistoricalVolSourceUnavailableError` (a ``ValueError``,
-    mapped to HTTP 400 like every other refusal in this module) with the
-    composed primitive's own reason when the source cannot produce a usable
-    volatility. Nothing is substituted in its place.
-    """
-
-    if not case_declares_historical_vol_source(case):
-        return case, None
-    return apply_historical_equivalent_price_vol_to_case(
-        case,
-        standalone_option_case_price_basis(case),
-        calculated_at=_shiori_acquisition_now().isoformat(timespec="seconds"),
-    )
 
 
 def historical_equivalent_price_vol_preview(case: dict) -> dict:
