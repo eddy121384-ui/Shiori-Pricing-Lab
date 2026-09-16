@@ -335,16 +335,32 @@ def resolve_historical_equivalent_price_vol(
     provenance_kwargs = {
         key: query[key] for key in _OPTIONAL_QUERY_KEYS if key in query
     }
-    history = load_bloomberg_bond_yield_history(
-        identifier=bloomberg_identifier,
-        yield_field=query["yield_field"],
-        start_date=query["start_date"],
-        end_date=query["end_date"],
-        **provenance_kwargs,
-    )
-    statistic = calculate_historical_yield_volatility(
-        history, requested_observation_count=query["requested_observation_count"]
-    )
+    # A Bloomberg-side failure is a ``BLIBloombergDapiError`` (a
+    # ``RuntimeError``) and deliberately passes through untouched, so the HTTP
+    # layer can still answer 502 rather than reporting an outage as a bad
+    # input. Every *input* refusal these two raise -- a malformed mnemonic or
+    # date range, a window with no usable Yield Changes -- is a refusal of
+    # this source, and is re-raised as one with its own reason preserved
+    # verbatim.
+    try:
+        history = load_bloomberg_bond_yield_history(
+            identifier=bloomberg_identifier,
+            yield_field=query["yield_field"],
+            start_date=query["start_date"],
+            end_date=query["end_date"],
+            **provenance_kwargs,
+        )
+        statistic = calculate_historical_yield_volatility(
+            history, requested_observation_count=query["requested_observation_count"]
+        )
+    except HistoricalVolSourceUnavailableError:
+        raise
+    except ValueError as exc:
+        raise HistoricalVolSourceUnavailableError(
+            f"no Historical Yield Vol for this ticket, so the "
+            f"{HISTORICAL_YIELD_VOL_SOURCE} source cannot produce a price volatility: "
+            f"{exc}"
+        ) from exc
 
     try:
         duration = calculate_bond_modified_duration(

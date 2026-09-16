@@ -290,7 +290,10 @@ def test_an_unusable_historical_result_blocks_the_run_rather_than_substituting(
     )
 
     assert status == 400
-    assert "error" in payload
+    # #197's own reason, carried verbatim rather than rewritten into
+    # something vaguer on the way out.
+    assert "Yield Change" in payload["error"]
+    assert "SAMPLE_STDEV_S_DDOF_1" in payload["error"]
     # Not a different source, not a flat vol, not the last good value.
     assert "0.18" not in payload["error"]
 
