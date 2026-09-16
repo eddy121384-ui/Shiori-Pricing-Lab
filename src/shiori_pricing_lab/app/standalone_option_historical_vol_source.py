@@ -47,6 +47,14 @@ VCUB, not another window, not a flat vol, not the last successful value and
 not the previous bond's. A trader may explicitly select a different source;
 this module never selects one.
 
+**The window may not reach past the valuation being priced.** The query is
+bounded by the case's own ``valuation_date`` before any Bloomberg request, so
+asking for observations that did not exist at ``t0`` is refused as the bad
+question it is rather than after a round trip. The conversion producer
+separately refuses observations dated after ``t0`` in whatever Bloomberg
+actually returned, so a future-informed ``sigma_P`` was never priceable; this
+bound makes the refusal cheap and names the real cause.
+
 **Every bond in the chain must be the same bond.** The Historical Yield query
 names one, the ticket names one, and the spot quote the duration is taken at
 names one. All three are compared by exact ISIN -- the query before any
@@ -196,7 +204,53 @@ def historical_yield_vol_query(case: dict) -> dict:
         value = query.get(key)
         if value is not None:
             resolved[key] = value
+    _require_window_ends_by_the_valuation_date(case, resolved["end_date"])
     return resolved
+
+
+def _require_window_ends_by_the_valuation_date(case: dict, end_date: str) -> None:
+    """Refuse a Yield window reaching past the valuation this run prices.
+
+    A realized volatility is only honest about ``t0`` if every observation it
+    was measured over existed at ``t0``. The conversion producer already
+    enforces that on the observations Bloomberg actually returned
+    (``_require_no_look_ahead`` in
+    ``pricing/bli_historical_equivalent_price_vol``, which compares the last
+    observation used against ``t0`` and refuses) -- so a future-informed
+    sigma_P cannot price, and this check adds no protection that was missing.
+
+    What it adds is *where* and *why* the refusal happens (Codex review, PR
+    #215). Asking Bloomberg for observations dated after the valuation being
+    priced is a bad question, not a bad answer, and this module's ordering
+    rule is that an input this run could never price is refused for its own
+    deterministic reason rather than from behind a DAPI round trip. Left to
+    the downstream gate, a backdated case spent a Bloomberg request and then
+    reported the *observations* as the problem, when the window asked for them.
+
+    The bound is the case's own ``valuation_date``, and a window ending **on**
+    it is the ordinary same-day case and is allowed. A ``valuation_date`` that
+    is missing or malformed is left entirely to the request constructor, whose
+    refusal for it is the reviewed one; this check simply does not apply.
+    """
+
+    valuation_date = case.get("valuation_date")
+    if not isinstance(valuation_date, str):
+        return
+    try:
+        valuation = date.fromisoformat(valuation_date)
+        window_end = date.fromisoformat(end_date)
+    except ValueError:
+        # Both are the owning contracts' to refuse -- the request constructor
+        # for the valuation date, the #196 loader for the window.
+        return
+    if window_end > valuation:
+        raise HistoricalVolSourceUnavailableError(
+            f"the Historical Yield window ends {window_end.isoformat()}, which is after "
+            f"this ticket's valuation date {valuation.isoformat()} -- a realized "
+            "volatility is measured over observations that existed at the moment being "
+            "priced, so the window may not reach past it. End the window on or before "
+            "the valuation date"
+        )
 
 
 def _resolved_reference_record(case: dict) -> BLIStandaloneBondReferenceData:

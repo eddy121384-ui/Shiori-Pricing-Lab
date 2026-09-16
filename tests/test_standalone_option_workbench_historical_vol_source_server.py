@@ -692,6 +692,58 @@ def test_a_case_that_does_not_name_the_source_makes_no_acquisition(monkeypatch) 
     assert priced_case["volatility_input"] == _manual_case()["volatility_input"]
 
 
+# --- The window may not reach past the valuation being priced ----------------
+
+
+def test_a_window_ending_after_the_valuation_date_is_refused_before_bloomberg(
+    server_url, monkeypatch
+) -> None:
+    # Codex review, PR #215, round 4. The conversion producer already refuses
+    # observations dated after t0, so a future-informed sigma_P was never
+    # priceable -- what this adds is refusing the *question* deterministically,
+    # before a DAPI round trip, and naming the window rather than the answer.
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    # The bundled case values at 2026-07-01.
+    case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY] = {
+        **case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY],
+        "end_date": "2026-07-31",
+    }
+
+    status, payload = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert status == 400
+    assert "2026-07-31" in payload["error"]
+    assert "2026-07-01" in payload["error"]
+    assert calls == []
+
+
+def test_a_window_ending_on_the_valuation_date_is_the_ordinary_case(
+    server_url, monkeypatch
+) -> None:
+    # Same-day is not look-ahead: an observation from the valuation day itself
+    # existed at t0.
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY] = {
+        **case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY],
+        "end_date": "2026-07-01",
+    }
+
+    status, payload = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert status == 200
+    assert len(calls) == 1
+    assert calls[0]["end_date"] == "2026-07-01"
+    # With the window bounded here, the conversion producer's own look-ahead
+    # gate (`_require_no_look_ahead`, pinned in
+    # tests/test_bli_historical_equivalent_price_vol.py) becomes defence in
+    # depth on this path rather than the thing standing between a future
+    # observation and a priced premium.
+
+
 # --- A refresh says it re-sourced the Yield history and the volatility -------
 
 
