@@ -159,6 +159,15 @@ _CONTEXT_FIELDS = (
 _PRICING_FIELDS = (
     ("Model fair premium per 100", "model_fair_premium_per_100"),
     ("Total notional model fair premium", "total_notional_model_fair_premium"),
+    # Issue #214: the basis the run was asked for, and the one the engine
+    # reports having priced. Both, because the first is present even on a
+    # FAILED result (which carries no assumptions at all) and the second is
+    # the engine's own echo of what F, K and the Black-76 wrapper actually
+    # were -- a reader should never have to infer either from a premium.
+    ("Bond option price basis (selected)", "bond_option_price_basis"),
+    ("Bond option price basis (priced)", "priced_bond_option_price_basis"),
+    ("Model forward price per 100", "model_forward_price_per_100"),
+    ("Model strike price per 100", "model_strike_price_per_100"),
     ("Forward clean price per 100", "forward_clean_price_per_100"),
     # Issue #177: which source produced the Forward this run priced from.
     ("Forward source", "forward_source"),

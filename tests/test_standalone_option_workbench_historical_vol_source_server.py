@@ -527,6 +527,38 @@ def test_a_changed_clean_price_changes_the_volatility_that_prices(
     )
 
 
+@_requires_quantlib
+def test_the_explicit_case_overlay_route_re_derives_too(server_url, monkeypatch) -> None:
+    # POST /api/case/price is a reachable pricing endpoint, so it must
+    # re-derive like the others -- otherwise a case declaring this source
+    # would be priced from whatever number its envelope carried, under a label
+    # saying Shiori derived it.
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    stale = {**case, "volatility_input": {**case["volatility_input"], "volatility": 0.99}}
+    overlay = {
+        "option_type": case["bond_option"]["option_type"],
+        "position": case["bond_option"]["position"],
+        "strike_price": case["bond_option"]["strike_price"],
+        "notional": case["bond_option"]["notional"],
+        "volatility": 0.99,
+        "forward_clean_price_per_100": (
+            case["forward_clean_price_input"]["forward_clean_price_per_100"]
+        ),
+    }
+
+    status, display = _post_json(
+        f"{server_url}/api/case/price", {"case": stale, "overlay": overlay}
+    )
+
+    assert status == 200
+    assert len(calls) == 1
+    provenance = display["historical_volatility_source"]
+    assert display["assumptions"]["price_volatility"] == provenance["equivalent_price_vol"]
+    assert display["assumptions"]["price_volatility"] != 0.99
+
+
 # --- The review route is the same derivation ---------------------------------
 
 

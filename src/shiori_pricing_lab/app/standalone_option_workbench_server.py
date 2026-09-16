@@ -1790,6 +1790,15 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     result labelled that number ``SHIORI_DERIVED_S490``. A run must not claim
     a source that did not produce its F.
 
+    **Issue #214** wires the Historical volatility source through here for the
+    identical reason, and it is the stronger case of the two: a case declaring
+    ``HISTORICAL_YIELD_VOL_MO`` would otherwise be priced from whatever number
+    its envelope carried -- a previous run's derivation, for a possibly
+    different bond, price state or price basis -- while the result labelled
+    that number a Shiori derivation. The source's whole contract is that the
+    volatility is re-derived on every run, so every route that prices must
+    re-derive it.
+
     Deliberately *not* changed: this route still does not inject the live
     Option Discount Curve. That is Issue #171's own decision for the
     explicit-case path, unrelated to which Forward is priced, and outside
@@ -1803,10 +1812,19 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     # Same order as every other pricing route: the deterministic, entirely
     # local refusals run before anything can reach Bloomberg.
     validate_deterministic_forward_inputs(overlaid_case)
+    validate_deterministic_historical_vol_inputs(overlaid_case)
     overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
+    overlaid_case, historical_volatility_source = apply_historical_volatility_source_to_case(
+        overlaid_case
+    )
     _, _, display = price_standalone_option_case(overlaid_case)
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
+    if historical_volatility_source is not None:
+        display = {
+            **display,
+            "historical_volatility_source": historical_volatility_source,
+        }
     return display
 
 
