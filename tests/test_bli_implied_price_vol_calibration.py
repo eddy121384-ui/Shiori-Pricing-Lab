@@ -59,6 +59,7 @@ from shiori_pricing_lab.pricing import bli_implied_price_vol_calibration as cali
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
     black76_dirty_price_option_pv_per_100,
 )
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import BondOptionPriceBasis
 from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
     BLIImpliedPriceVolCalibrationReason,
     BLIImpliedPriceVolCalibrationStatus,
@@ -449,6 +450,11 @@ def test_resolver_and_solver_are_each_called_exactly_once(monkeypatch):
         accrued_interest_at_forward_settlement_per_100=0.95,
         forward_dirty_price_per_100=102.25,
         strike_dirty_price_per_100=100.45,
+        # This path is DIRTY only (Issue #214): the calibration solver prices
+        # dirty forward/strike, so the model pair is the dirty pair.
+        price_basis=BondOptionPriceBasis.DIRTY,
+        model_forward_price_per_100=102.25,
+        model_strike_price_per_100=100.45,
         time_to_expiry_year_fraction=0.25,
         pricing_to_reporting_discount_factor=1.0,
         pricing_to_option_settlement_discount_factor=0.99,
@@ -490,6 +496,11 @@ def test_successful_solve_maps_to_success_calibrated(monkeypatch):
         accrued_interest_at_forward_settlement_per_100=0.95,
         forward_dirty_price_per_100=102.25,
         strike_dirty_price_per_100=100.45,
+        # This path is DIRTY only (Issue #214): the calibration solver prices
+        # dirty forward/strike, so the model pair is the dirty pair.
+        price_basis=BondOptionPriceBasis.DIRTY,
+        model_forward_price_per_100=102.25,
+        model_strike_price_per_100=100.45,
         time_to_expiry_year_fraction=0.25,
         pricing_to_reporting_discount_factor=1.0,
         pricing_to_option_settlement_discount_factor=0.99,
@@ -523,6 +534,11 @@ def test_economic_solver_failure_maps_to_solver_failed(monkeypatch):
         accrued_interest_at_forward_settlement_per_100=0.95,
         forward_dirty_price_per_100=102.25,
         strike_dirty_price_per_100=100.45,
+        # This path is DIRTY only (Issue #214): the calibration solver prices
+        # dirty forward/strike, so the model pair is the dirty pair.
+        price_basis=BondOptionPriceBasis.DIRTY,
+        model_forward_price_per_100=102.25,
+        model_strike_price_per_100=100.45,
         time_to_expiry_year_fraction=0.25,
         pricing_to_reporting_discount_factor=1.0,
         pricing_to_option_settlement_discount_factor=0.99,

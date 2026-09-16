@@ -169,6 +169,11 @@ from shiori_pricing_lab.pricing.bli_benchmark_comparison import (
     BLIBenchmarkComparisonResult,
     compare_bli_benchmark,
 )
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    DEFAULT_BOND_OPTION_PRICE_BASIS,
+    BondOptionPriceBasis,
+    require_bond_option_price_basis,
+)
 from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
     BLIImpliedPriceVolCalibrationResult,
     calibrate_bli_implied_price_vol,
@@ -211,12 +216,25 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
 # reproduces its own Forward from the case alone, instead of depending on live
 # browser state; the wiring that reads them is
 # ``app/standalone_option_workbench_server.apply_effective_forward_to_case``.
+# ``bond_option_price_basis`` and ``historical_yield_vol_request`` (Issue
+# #214) join the same category for the same reason. The first selects which
+# already-approved Black-76 representation the run prices; the second is the
+# Historical Yield query the ``HISTORICAL_YIELD_VOL_MO`` source re-derives its
+# volatility from -- an input to *producing* a ``volatility_input``, exactly
+# as ``spot_settlement_date`` is an input to producing a
+# ``forward_clean_price_input``. Both therefore belong to the envelope a saved
+# or re-sent case reproduces itself from, not to the typed request contract,
+# which is unchanged by #214. An absent basis means DIRTY, which is what every
+# pre-#214 case, fixture and saved envelope already priced, and an absent
+# Historical query is simply a case not using that source.
 _OPTIONAL_TOP_LEVEL_KEYS = frozenset(
     {
         "deposit_rate_observation",
         "bond_reference_source_name",
         "spot_settlement_date",
         "convention_profile",
+        "bond_option_price_basis",
+        "historical_yield_vol_request",
     }
 )
 _ALLOWED_TOP_LEVEL_KEYS = _REQUIRED_TOP_LEVEL_KEYS | _OPTIONAL_TOP_LEVEL_KEYS
@@ -414,10 +432,30 @@ def build_request_from_standalone_option_case(
     )
 
 
+def standalone_option_case_price_basis(case: str | dict) -> BondOptionPriceBasis:
+    """Return the ``BOND_OPTION_PRICE_BASIS`` ``case`` declares.
+
+    One reader for the one envelope key, so the Historical Equivalent Price
+    Vol derivation, the pricing call and the Workbench display cannot each
+    resolve the basis their own way. An absent or ``None`` key means
+    ``DIRTY`` -- the default that preserves every pre-#214 case's behaviour
+    -- and anything else goes through ``require_bond_option_price_basis``,
+    which refuses an unknown or blank value rather than falling back.
+    """
+
+    envelope = _parse_standalone_option_case(case)
+    declared = envelope.get("bond_option_price_basis")
+    if declared is None:
+        return DEFAULT_BOND_OPTION_PRICE_BASIS
+    return require_bond_option_price_basis(declared, "bond_option_price_basis")
+
+
 def prepare_standalone_display(
     result: PricingResult,
     request: BLIStandaloneBondOptionRequest,
     retrieved_at: str | None = None,
+    *,
+    price_basis: BondOptionPriceBasis | None = None,
 ) -> dict:
     """Return a bounded display context read **verbatim** from ``result``/``request``.
 
@@ -454,6 +492,14 @@ def prepare_standalone_display(
         "product_type": result.product_type,
         "valuation_date": result.valuation_date,
         "result_currency": result.result_currency,
+        # Issue #214. Caller-supplied, exactly like ``retrieved_at``: the
+        # basis the run was *asked* for, so a FAILED result -- which carries
+        # no assumptions at all -- still says which representation was
+        # refused. The engine's own echo below is what it actually priced.
+        "bond_option_price_basis": None if price_basis is None else price_basis.value,
+        "priced_bond_option_price_basis": assumptions.get("bond_option_price_basis"),
+        "model_forward_price_per_100": assumptions.get("model_forward_price_per_100"),
+        "model_strike_price_per_100": assumptions.get("model_strike_price_per_100"),
         # Premium: per-100 and total notional exposed as separate fields.
         "model_fair_premium_per_100": assumptions.get("black76_pv_per_100"),
         "total_notional_model_fair_premium": result.pv,
@@ -540,9 +586,12 @@ def price_standalone_option_case(
     caller-supplied and flows only into the display context.
     """
 
+    price_basis = standalone_option_case_price_basis(case)
     request = build_request_from_standalone_option_case(case)
-    result = price_bli_mvp_standalone_option(request)
-    display = prepare_standalone_display(result, request, retrieved_at=retrieved_at)
+    result = price_bli_mvp_standalone_option(request, price_basis=price_basis)
+    display = prepare_standalone_display(
+        result, request, retrieved_at=retrieved_at, price_basis=price_basis
+    )
     return request, result, display
 
 
@@ -750,6 +799,24 @@ def price_standalone_option_case_with_benchmark(
     ``comparison`` / ``calibration`` sections. Never mutates any input or
     result object.
     """
+
+    # Issue #214: the implied-vol calibration below is the unmodified Issue
+    # #125 solver, which prices dirty F/K. Running it beside a CLEAN priced
+    # result would report a DIRTY implied sigma_P as this run's, and nothing
+    # in either number would show it. Basis-aware calibration is not in
+    # #214's scope, so this composition refuses the combination rather than
+    # producing a mixed one. Pricing alone is unaffected on either basis, and
+    # the live Workbench does not reach this path at all.
+    price_basis = standalone_option_case_price_basis(case)
+    if price_basis is not BondOptionPriceBasis.DIRTY:
+        raise ValueError(
+            f"benchmark comparison and implied-vol calibration are available on "
+            f"{BondOptionPriceBasis.DIRTY.value} only; this case declares "
+            f"bond_option_price_basis={price_basis.value}. The calibration solver prices "
+            "dirty forward/strike, so pairing it with a "
+            f"{price_basis.value} priced result would report an implied volatility on a "
+            "different price basis than the premium beside it"
+        )
 
     request, result, display = price_standalone_option_case(case, retrieved_at=retrieved_at)
     benchmark = build_benchmark_from_standalone_option_benchmark_case(benchmark_case)
