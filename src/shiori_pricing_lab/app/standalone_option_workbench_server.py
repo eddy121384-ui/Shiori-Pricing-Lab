@@ -323,7 +323,7 @@ above still reaches no pricing route. What does is its **converted**
 source on the field that already names where a volatility came from,
 ``volatility_input.source_system = HISTORICAL_YIELD_VOL_MO``, exactly as
 Issue #177's two Forward modes are declared on
-``forward_clean_price_input.source_system``. Both pricing routes then run
+``forward_clean_price_input.source_system``. Every pricing route then runs
 :func:`apply_historical_volatility_source_to_case`, which re-derives the
 whole chain -- #196 series, #197 statistic, current-time ``D_B`` on the
 selected basis, the ``sigma_P = |D_B| x sigma_hist_abs`` conversion, the one
@@ -1525,7 +1525,7 @@ def validate_deterministic_historical_vol_inputs(case: object) -> None:
     outcome that depends on real data -- the window, the unit, the duration
     itself, the conversion -- stays at Price time, against the real series.
 
-    Called by both the readiness route and the two pricing routes, before any
+    Called by the readiness route and by every pricing route, before any
     Bloomberg call, so an input this run could never price is refused for its
     own deterministic reason rather than from behind a DAPI failure -- the
     same ordering :func:`validate_deterministic_forward_inputs` keeps.

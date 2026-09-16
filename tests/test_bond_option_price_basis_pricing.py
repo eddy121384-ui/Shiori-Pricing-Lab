@@ -18,10 +18,15 @@ left to the older files to imply.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from shiori_pricing_lab.app.standalone_option_workbench import (
+    price_standalone_option_case_with_benchmark,
+)
 from shiori_pricing_lab.data.bli_mvp_input_bundle_fixtures import (
     SYNTHETIC_BLI_MVP_INPUT_BUNDLE,
 )
@@ -53,6 +58,27 @@ from shiori_pricing_lab.pricing.bli_standalone_option_pricing_inputs import (
 )
 from shiori_pricing_lab.pricing.result import PricingStatus
 from shiori_pricing_lab.products.enums import TreasuryFTPQuoteSide
+
+_BASE_CASE_PATH = Path(__file__).resolve().parents[1] / "examples" / "standalone_option_case.json"
+
+# A synthetic benchmark quote for the bundled synthetic case. Made up, like
+# everything else in that case; it exists only to reach the calibration path.
+_BENCHMARK_CASE = {
+    "benchmark_id": "TEST-BENCHMARK-0001",
+    "source_type": "VENDOR",
+    "source_system": "SYNTHETIC_TEST_BENCHMARK",
+    "source_as_of": "2026-07-01T16:00:00Z",
+    "retrieved_at": "2026-07-01T16:00:05Z",
+    "quote_side": "MID",
+    "premium_per_100": 4.5,
+    "total_premium": 2.25,
+    "currency": "USD",
+    "product_id": "BONDOPT-SYNTHETIC-0001",
+    "snapshot_id": "SANITIZED_SYNTHETIC_STANDALONE_SNAPSHOT_0001",
+    "underlying_id": "XS0000000001",
+    "source_reference": "SYNTHETIC_TEST_REFERENCE",
+    "notes": None,
+}
 
 _requires_quantlib = pytest.mark.skipif(
     not is_quantlib_available(), reason="QuantLib is not installed in this environment"
@@ -283,6 +309,44 @@ def test_selecting_a_basis_selects_a_wrapper_and_never_a_second_formula():
     ) == black76_dirty_price_option_greeks_per_100(
         forward_dirty_price=102.259, strike_dirty_price=100.459, **shared
     )
+
+
+# --- The calibration path stays DIRTY, and says so ---------------------------
+
+
+def test_the_benchmark_calibration_refuses_a_non_dirty_case():
+    # The #125 implied-vol solver prices dirty F/K. Reporting a DIRTY implied
+    # sigma_P beside a CLEAN premium is the mixed-basis state this convention
+    # exists to prevent, and neither number would show it -- so the
+    # combination is refused rather than quietly produced. Basis-aware
+    # calibration is out of Issue #214's scope.
+    case = json.loads(_BASE_CASE_PATH.read_text(encoding="utf-8"))
+    case["bond_option_price_basis"] = "CLEAN"
+
+    with pytest.raises(ValueError) as excinfo:
+        price_standalone_option_case_with_benchmark(
+            case, _BENCHMARK_CASE, active_quote_side="MID"
+        )
+
+    message = str(excinfo.value)
+    assert "CLEAN" in message
+    assert "DIRTY" in message
+
+
+@_requires_quantlib
+def test_the_benchmark_calibration_still_runs_on_a_dirty_case():
+    # The refusal above must not have turned into a refusal of the ordinary
+    # path: an unset basis is DIRTY and calibrates exactly as before.
+    case = json.loads(_BASE_CASE_PATH.read_text(encoding="utf-8"))
+
+    _request, result, _benchmark, _comparison, calibration, _display = (
+        price_standalone_option_case_with_benchmark(
+            case, _BENCHMARK_CASE, active_quote_side="MID"
+        )
+    )
+
+    assert result.status is PricingStatus.SUCCESS
+    assert calibration is not None
 
 
 # --- An unknown basis is a refusal, never a default --------------------------

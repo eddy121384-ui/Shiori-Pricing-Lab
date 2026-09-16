@@ -765,6 +765,34 @@ def prepare_standalone_benchmark_display(
     }
 
 
+def _require_dirty_basis_for_calibration(case: str | dict) -> None:
+    """Refuse to pair a non-``DIRTY`` priced run with the #125 calibration.
+
+    The implied-vol calibration is the unmodified Issue #125 solver, and it
+    prices dirty forward/strike. Running it beside a ``CLEAN`` priced result
+    would report a ``DIRTY`` implied sigma_P as that run's, and nothing in
+    either number would show it -- the mixed-basis state
+    ``BOND_OPTION_PRICE_BASIS`` exists to prevent, in the one place a
+    volatility is produced rather than consumed.
+
+    Basis-aware calibration is out of Issue #214's scope, so the combination
+    is refused rather than quietly produced. Pricing alone is unaffected on
+    either basis, and the live Workbench reaches no calibration path at all.
+    """
+
+    price_basis = standalone_option_case_price_basis(case)
+    if price_basis is BondOptionPriceBasis.DIRTY:
+        return
+    raise ValueError(
+        "benchmark comparison and implied-vol calibration are available on "
+        f"{BondOptionPriceBasis.DIRTY.value} only; this case declares "
+        f"bond_option_price_basis={price_basis.value}. The calibration solver prices "
+        f"dirty forward/strike, so pairing it with a {price_basis.value} priced result "
+        "would report an implied volatility on a different price basis than the premium "
+        "beside it"
+    )
+
+
 def price_standalone_option_case_with_benchmark(
     case: str | dict,
     benchmark_case: str | dict,
@@ -800,23 +828,7 @@ def price_standalone_option_case_with_benchmark(
     result object.
     """
 
-    # Issue #214: the implied-vol calibration below is the unmodified Issue
-    # #125 solver, which prices dirty F/K. Running it beside a CLEAN priced
-    # result would report a DIRTY implied sigma_P as this run's, and nothing
-    # in either number would show it. Basis-aware calibration is not in
-    # #214's scope, so this composition refuses the combination rather than
-    # producing a mixed one. Pricing alone is unaffected on either basis, and
-    # the live Workbench does not reach this path at all.
-    price_basis = standalone_option_case_price_basis(case)
-    if price_basis is not BondOptionPriceBasis.DIRTY:
-        raise ValueError(
-            f"benchmark comparison and implied-vol calibration are available on "
-            f"{BondOptionPriceBasis.DIRTY.value} only; this case declares "
-            f"bond_option_price_basis={price_basis.value}. The calibration solver prices "
-            "dirty forward/strike, so pairing it with a "
-            f"{price_basis.value} priced result would report an implied volatility on a "
-            "different price basis than the premium beside it"
-        )
+    _require_dirty_basis_for_calibration(case)
 
     request, result, display = price_standalone_option_case(case, retrieved_at=retrieved_at)
     benchmark = build_benchmark_from_standalone_option_benchmark_case(benchmark_case)
@@ -1031,6 +1043,12 @@ def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
     orchestration shape exactly, with the live quote inserted as an
     additional returned value.
     """
+
+    # Issue #214: the same refusal as the non-live benchmark path above, and
+    # for the same reason -- checked before the Bloomberg call, so a
+    # combination this composition will not produce never costs a DAPI
+    # request.
+    _require_dirty_basis_for_calibration(case)
 
     (
         request,
