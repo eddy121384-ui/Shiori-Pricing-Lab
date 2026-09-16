@@ -30,7 +30,7 @@ whoever currently picks it would make the next system's arrival a rename.
 **Never inferred, never silently switched.** The basis is not derived from a
 source system, a vendor name, a model name, or a price's magnitude. A caller
 states it; an unknown, blank or missing value fails closed. Configuration and
-(later) the Workbench may *default* to ``DIRTY``, but the pure calculation
+the Workbench may *default* to ``DIRTY``, but the pure calculation
 primitives require it explicitly, because a default buried in a pure function
 is exactly how a mixed-basis result gets produced without anyone choosing it.
 
@@ -62,10 +62,20 @@ Both wrappers delegate to the single shared Black-76 core
 already-existing wrapper a composition uses; it is **not** a change to the
 Black-76 formula, and it must never become a second pricing engine.
 
-**Current wiring status, stated truthfully.** As of Issue #211 Phase 2/3 the
-mode is approved and the duration and Equivalent-Price-Vol producers are
-basis-aware, but the runtime pricing path and Workbench still wire ``DIRTY``
-only. Trader-selectable basis end-to-end is a later slice of #211.
+**Current wiring status, stated truthfully.** As of Issue #214 the basis is
+wired end to end: the trader selects it in the Workbench, the case carries it
+as ``bond_option_price_basis``, and that one value drives the duration
+denominator, the Historical Equivalent Price Vol, the ``F``/``K`` pair
+``resolve_standalone_option_pricing_inputs`` returns, and which of the two
+already-existing Black-76 wrappers the standalone engine calls. ``DIRTY``
+remains the default, so an unset selection prices exactly the OVME-aligned
+composition ratified in Issue #94.
+
+Publishing a Historical Equivalent Price Vol into the shared
+``BLIVolatilityInput`` contract now requires the caller to name the basis of
+the composition it is entering, and refuses a mismatch -- that contract still
+carries no price basis of its own, so that boundary is the last point at
+which a mixed-basis volatility is detectable at all.
 """
 
 from __future__ import annotations

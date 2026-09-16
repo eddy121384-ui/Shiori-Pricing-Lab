@@ -165,9 +165,15 @@ from shiori_pricing_lab.data.bli_standalone_option_request import (
 from shiori_pricing_lab.pricing.bli_black76_price_option import (
     CALENDAR_DAYS_PER_YEAR,
     VOLATILITY_POINT,
+    black76_clean_price_option_greeks_per_100,
     black76_dirty_price_option_greeks_per_100,
     black76_dirty_price_option_pv_per_100,
     black76_price_option_pv_per_100,
+)
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    DEFAULT_BOND_OPTION_PRICE_BASIS,
+    BondOptionPriceBasis,
+    require_bond_option_price_basis,
 )
 from shiori_pricing_lab.pricing.bli_curve_discount_factor import (
     discount_factor_from_continuous_zero_curve,
@@ -207,6 +213,53 @@ ENGINE_VERSION = "1.0.0"
 STANDALONE_ENGINE_NAME = "bli_standalone_bond_option_ovme_black76_engine"
 STANDALONE_ENGINE_VERSION = "1.0.0"
 _METHOD_STANDALONE_OVME_BLACK76 = "black76_forward_dirty_price_ovme_v1"
+
+# Issue #214: the same OVME-aligned composition expressed on the approved
+# alternate CLEAN price basis. A separate method token because the method a
+# result reports must name the representation it actually priced -- the
+# DIRTY token above is unchanged and is still what every default run carries.
+_METHOD_STANDALONE_OVME_BLACK76_CLEAN = "black76_forward_clean_price_ovme_v1"
+
+# Per-basis provenance labels. Selecting a basis selects which already
+# existing Black-76 wrapper the composition uses (see
+# ``pricing/bli_bond_option_price_basis``); it is never a second engine, so
+# these vary only the *names* a result reports, never the arithmetic.
+_STANDALONE_BASIS_METHOD = {
+    BondOptionPriceBasis.DIRTY: _METHOD_STANDALONE_OVME_BLACK76,
+    BondOptionPriceBasis.CLEAN: _METHOD_STANDALONE_OVME_BLACK76_CLEAN,
+}
+_STANDALONE_BASIS_METHODOLOGY = {
+    BondOptionPriceBasis.DIRTY: (
+        "ovme_dirty_price_black76_act_act_option_discount_curve"
+    ),
+    BondOptionPriceBasis.CLEAN: (
+        "ovme_clean_price_black76_act_act_option_discount_curve"
+    ),
+}
+_STANDALONE_BASIS_GREEKS_METHODOLOGY = {
+    BondOptionPriceBasis.DIRTY: "black76_forward_dirty_price_closed_form_european_v1",
+    BondOptionPriceBasis.CLEAN: "black76_forward_clean_price_closed_form_european_v1",
+}
+_STANDALONE_BASIS_PV_WRAPPER = {
+    BondOptionPriceBasis.DIRTY: black76_dirty_price_option_pv_per_100,
+    BondOptionPriceBasis.CLEAN: black76_price_option_pv_per_100,
+}
+_STANDALONE_BASIS_GREEKS_WRAPPER = {
+    BondOptionPriceBasis.DIRTY: black76_dirty_price_option_greeks_per_100,
+    BondOptionPriceBasis.CLEAN: black76_clean_price_option_greeks_per_100,
+}
+# Each wrapper names its own two arguments after the price state it takes,
+# which is the whole reason both exist -- so the call sites below pass them
+# by the wrapper's own names rather than through a ``*_dirty_*`` keyword
+# carrying a clean number.
+_STANDALONE_BASIS_FORWARD_KEYWORD = {
+    BondOptionPriceBasis.DIRTY: "forward_dirty_price",
+    BondOptionPriceBasis.CLEAN: "forward_clean_price",
+}
+_STANDALONE_BASIS_STRIKE_KEYWORD = {
+    BondOptionPriceBasis.DIRTY: "strike_dirty_price",
+    BondOptionPriceBasis.CLEAN: "strike_clean_price",
+}
 
 # Method identifiers distinguish "never attempted real pricing" (the
 # guard rejected the bundle) from "pricing was attempted" (success or a
@@ -507,6 +560,8 @@ def _classify_standalone_guard_rejection_from_fields(
 
 def price_bli_mvp_standalone_option(
     request: BLIStandaloneBondOptionRequest,
+    *,
+    price_basis: BondOptionPriceBasis | str = DEFAULT_BOND_OPTION_PRICE_BASIS,
 ) -> PricingResult:
     """Return a deterministic ``PricingResult`` for a standalone bond option (OVME-aligned).
 
@@ -525,9 +580,25 @@ def price_bli_mvp_standalone_option(
        forward / dirty strike; ACT/ACT option time; Option Discount Curve DF
        to option settlement divided by DF to reporting date);
     3. read ``PRICE_VOL`` / ``EQUIVALENT_PRICE_VOL`` directly as sigma;
-    4. call the dirty-price Black wrapper
-       (:func:`black76_dirty_price_option_pv_per_100`);
+    4. call the Black wrapper ``price_basis`` names
+       (:func:`black76_dirty_price_option_pv_per_100` on ``DIRTY``,
+       :func:`black76_price_option_pv_per_100` on ``CLEAN``);
     5. scale total PV = premium_per_100 * notional / 100.
+
+    **``price_basis`` (Issue #214)** selects the whole composition's price
+    state at once: the ``F``/``K`` pair the resolver returns and the already
+    existing Black-76 wrapper (premium *and* Greeks) they are handed to. It
+    defaults to ``DIRTY``, which is byte-for-byte the composition this
+    engine has always run, so every existing caller and pinned result is
+    unchanged. ``CLEAN`` selects the other approved representation -- the
+    clean wrappers that delegate to the same shared Black-76 core. This is
+    never a second pricing engine and never a second formula; see
+    ``pricing/bli_bond_option_price_basis``. The basis the run actually
+    priced on is reported in ``assumptions["bond_option_price_basis"]``,
+    beside the ``model_*`` ``F``/``K`` it selected, so a reader never has to
+    infer it. The caller is responsible for handing in a volatility on the
+    same basis -- the historical source's own publication helper refuses to
+    publish one for a composition whose basis it does not match.
 
     Uses separate ``STANDALONE_ENGINE_NAME`` / ``STANDALONE_ENGINE_VERSION``
     provenance so the legacy bundle constants and pinned results never
@@ -548,6 +619,11 @@ def price_bli_mvp_standalone_option(
 
     bond_option = request.bond_option
     snapshot = request.market_data_snapshot
+    # Refused before anything else, and never defaulted silently inside the
+    # composition: an unknown basis names no representation, so there is no
+    # run to produce.
+    basis = require_bond_option_price_basis(price_basis)
+    basis_method = _STANDALONE_BASIS_METHOD[basis]
 
     common_fields = dict(
         product_id=bond_option.product_id,
@@ -580,31 +656,29 @@ def price_bli_mvp_standalone_option(
         )
 
     try:
-        inputs = resolve_standalone_option_pricing_inputs(request)
+        inputs = resolve_standalone_option_pricing_inputs(request, price_basis=basis)
         price_volatility = snapshot.volatility_input.volatility
-        pv_per_100 = black76_dirty_price_option_pv_per_100(
-            forward_dirty_price=inputs.forward_dirty_price_per_100,
-            strike_dirty_price=inputs.strike_dirty_price_per_100,
-            price_volatility=price_volatility,
-            time_to_expiry=inputs.time_to_expiry_year_fraction,
-            discount_factor=inputs.effective_reporting_date_discount_factor,
-            option_type=bond_option.option_type,
-        )
+        # One F/K pair, selected once by the basis and passed to both the
+        # premium and the Greeks under the wrapper's own argument names, so a
+        # clean number is never carried through a keyword that claims it is
+        # dirty (Issue #214).
+        black76_model_inputs = {
+            _STANDALONE_BASIS_FORWARD_KEYWORD[basis]: inputs.model_forward_price_per_100,
+            _STANDALONE_BASIS_STRIKE_KEYWORD[basis]: inputs.model_strike_price_per_100,
+            "price_volatility": price_volatility,
+            "time_to_expiry": inputs.time_to_expiry_year_fraction,
+            "discount_factor": inputs.effective_reporting_date_discount_factor,
+            "option_type": bond_option.option_type,
+        }
+        pv_per_100 = _STANDALONE_BASIS_PV_WRAPPER[basis](**black76_model_inputs)
         # Issue #133 Slice A: the same five resolved inputs the premium
         # above just used -- never a second resolve, curve read, or bump.
-        greeks = black76_dirty_price_option_greeks_per_100(
-            forward_dirty_price=inputs.forward_dirty_price_per_100,
-            strike_dirty_price=inputs.strike_dirty_price_per_100,
-            price_volatility=price_volatility,
-            time_to_expiry=inputs.time_to_expiry_year_fraction,
-            discount_factor=inputs.effective_reporting_date_discount_factor,
-            option_type=bond_option.option_type,
-        )
+        greeks = _STANDALONE_BASIS_GREEKS_WRAPPER[basis](**black76_model_inputs)
     except ValueError as exc:
         return PricingResult(
             **common_fields,
             status=PricingStatus.FAILED,
-            method=_METHOD_STANDALONE_OVME_BLACK76,
+            method=basis_method,
             errors=(
                 PricingMessage(
                     code=PricingErrorCode.ENGINE_ERROR,
@@ -627,10 +701,15 @@ def price_bli_mvp_standalone_option(
     return PricingResult(
         **common_fields,
         status=PricingStatus.SUCCESS,
-        method=_METHOD_STANDALONE_OVME_BLACK76,
+        method=basis_method,
         pv=pv,
         assumptions={
-            "methodology": "ovme_dirty_price_black76_act_act_option_discount_curve",
+            "methodology": _STANDALONE_BASIS_METHODOLOGY[basis],
+            # Issue #214: which price state F, K, sigma and the Black-76
+            # representation are all expressed in for this run.
+            "bond_option_price_basis": basis.value,
+            "model_forward_price_per_100": inputs.model_forward_price_per_100,
+            "model_strike_price_per_100": inputs.model_strike_price_per_100,
             "forward_clean_price_per_100": inputs.forward_clean_price_per_100,
             "forward_clean_price_source_system": forward_input.source_system,
             "forward_clean_price_quote_side": forward_input.quote_side.value,
@@ -684,7 +763,7 @@ def price_bli_mvp_standalone_option(
             ),
             "theta_per_year_per_100": greeks.theta_per_year_per_100,
             "theta_effective_continuous_rate": greeks.theta_effective_continuous_rate,
-            "greeks_methodology": "black76_forward_dirty_price_closed_form_european_v1",
+            "greeks_methodology": _STANDALONE_BASIS_GREEKS_METHODOLOGY[basis],
             "greeks_per_100_basis": "instrument_analytics_option_type_direction_only",
             "greeks_per_100_position_sign_applied": False,
             "greeks_position_total_basis": "trader_position_risk_notional_and_buy_sell_sign",
