@@ -116,6 +116,32 @@
     forwardSourceLine: document.getElementById("forward-source-line"),
     forwardUseDerivedBtn: document.getElementById("forward-use-derived-btn"),
     volatility: document.getElementById("volatility-input"),
+    // Issue #214: the vol source and the bond option price basis.
+    volSource: document.getElementById("vol-source-select"),
+    priceBasis: document.getElementById("price-basis-select"),
+    priceBasisStatus: document.getElementById("price-basis-status"),
+    historicalVolPanel: document.getElementById("historical-vol-panel"),
+    hevSecurity: document.getElementById("hev-security"),
+    hevYieldField: document.getElementById("hev-yield-field"),
+    hevFieldUnit: document.getElementById("hev-field-unit"),
+    hevStart: document.getElementById("hev-start"),
+    hevEnd: document.getElementById("hev-end"),
+    hevObservationCount: document.getElementById("hev-observation-count"),
+    hevDeriveBtn: document.getElementById("hev-derive-btn"),
+    hevUseBtn: document.getElementById("hev-use-btn"),
+    hevStatus: document.getElementById("hev-status"),
+    hevFields: document.getElementById("hev-fields"),
+    hevMethodRow: document.getElementById("hev-method-row"),
+    hevTrace: document.getElementById("hev-trace"),
+    hevTraceBody: document.getElementById("hev-trace-body"),
+    hevYieldVolFieldUnit: document.getElementById("hev-yield-vol-field-unit"),
+    hevYieldVolDecimal: document.getElementById("hev-yield-vol-decimal"),
+    hevDuration: document.getElementById("hev-duration"),
+    hevEquivalentPriceVol: document.getElementById("hev-equivalent-price-vol"),
+    hevSource: document.getElementById("hev-source"),
+    hevPriceBasis: document.getElementById("hev-price-basis"),
+    hevDurationType: document.getElementById("hev-duration-type"),
+    hevWindowStatus: document.getElementById("hev-window-status"),
     volatilityBasis: document.getElementById("volatility-basis-select"),
     volReviewStatus: document.getElementById("vol-review-status"),
     volSourcingNote: document.getElementById("vol-sourcing-note"),
@@ -941,18 +967,40 @@
       advanced: false,
       resolved: (draft) => present(draft.volatility_input.volatility),
       locator: "#volatility-input",
-      unresolved: {
-        title: "Direct price volatility cannot be sourced from Bloomberg",
-        missing: "A direct PRICE_VOL or EQUIVALENT_PRICE_VOL, as a decimal.",
-        why:
-          "No confirmed ReferenceData route supplies a direct price volatility " +
-          "for these securities.",
-        evidence: EVIDENCE_VOL,
-        next:
-          "Enter a direct price volatility and its basis. YIELD_VOL is not a " +
-          "substitute and no yield-to-price volatility conversion is approved, so " +
-          "neither is offered anywhere on this page.",
-      },
+      // Issue #214: two sources, two genuinely different reasons to be here,
+      // so this is a function of the current draft rather than one fixed
+      // panel -- the same shape the discounting group below already uses.
+      unresolved: () =>
+        historicalVolSourceSelected()
+          ? {
+              title: "The Historical Equivalent Price Vol has not been used for pricing yet",
+              missing:
+                "The derived σ_P, adopted into this ticket by pressing Use for Pricing.",
+              why:
+                "This ticket's vol source is the Historical Yield Vol, which Shiori " +
+                "derives server-side. Selecting the source does not by itself price " +
+                "anything: the σ_P has to be calculated and then explicitly taken into " +
+                "use, so nothing is ever priced from a figure the trader has not seen.",
+              evidence: EVIDENCE_VOL,
+              next:
+                "In the Historical Yield Vol section, enter the workstation-confirmed " +
+                "Bloomberg Yield field and the history window, press Calculate, review " +
+                "the Historical Yield Vol, D_B and the derived σ_P, then press Use for " +
+                "Pricing. You never retype the converted volatility, and no other source " +
+                "is substituted if this one cannot produce a number.",
+            }
+          : {
+              title: "Direct price volatility cannot be sourced from Bloomberg",
+              missing: "A direct PRICE_VOL or EQUIVALENT_PRICE_VOL, as a decimal.",
+              why:
+                "No confirmed ReferenceData route supplies a direct price volatility " +
+                "for these securities.",
+              evidence: EVIDENCE_VOL,
+              next:
+                "Enter a direct price volatility and its basis, or switch the Vol source " +
+                "to the Historical Yield Vol and let Shiori derive one. Raw YIELD_VOL is " +
+                "never a substitute for either: the pricing guard refuses it outright.",
+            },
     },
     {
       id: "discounting-review",
@@ -2529,6 +2577,24 @@
     // Volatility basis is the one select with a real default: PRICE_VOL is the
     // direct, no-conversion basis the guard accepts.
     els.volatilityBasis.value = "PRICE_VOL";
+    // Issue #214: a fresh ticket starts on the direct trader-entered source
+    // and on DIRTY, the already-validated default basis. Both are reset here,
+    // in the one function that starts a fresh ticket, so a Historical vol
+    // derived for the previous bond cannot survive a Clear or a second Load --
+    // the derivation state itself goes with them.
+    els.volSource.value = DIRECT_PRICE_VOL_SOURCE;
+    els.priceBasis.value = "DIRTY";
+    els.hevYieldField.value = DEFAULT_HISTORICAL_YIELD_FIELD;
+    els.hevFieldUnit.value = "PERCENT";
+    els.hevStart.value = "";
+    els.hevEnd.value = "";
+    els.hevObservationCount.value = MIDDLE_OFFICE_OBSERVATION_COUNT;
+    historicalVolResult = null;
+    historicalVolError = null;
+    historicalVolPending = false;
+    historicalVolAdoptedText = null;
+    historicalVolGeneration += 1;
+    lastHistoricalVolKey = undefined;
     // The one other pre-filled control (Issue #161). Set here, in the single
     // function that starts a fresh ticket, so "new ticket" and "offset back
     // to +08:00" are the same event by construction -- there is nowhere else
@@ -2697,6 +2763,18 @@
 
     currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
     currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
+    // Issue #214: which source this run's volatility comes from, carried on
+    // the existing contract's own source_system field rather than a second
+    // model -- the same place Issue #177 states the Forward's source. In
+    // Historical mode the server re-derives the whole chain from the query
+    // below and replaces this input wholesale on every priced run.
+    currentDraft.volatility_input.source_system = historicalVolSourceSelected()
+      ? HISTORICAL_VOL_SOURCE
+      : MANUAL_SOURCE_SYSTEM;
+    currentDraft.bond_option_price_basis = selectedPriceBasis();
+    currentDraft.historical_yield_vol_request = historicalVolSourceSelected()
+      ? historicalVolQueryForCase()
+      : null;
     currentDraft.forward_clean_price_input.forward_clean_price_per_100 =
       inputNormalization.forward.value;
     // Issue #177: which of the two sources this run's Forward came from,
@@ -2835,6 +2913,13 @@
       // from the Spot Settlement Date field and the Convention Profile picker.
       spot_settlement_date: null,
       convention_profile: null,
+      // Issue #214 optional envelope keys: the price basis every leg of the
+      // run is expressed in, and the Historical Yield query the
+      // HISTORICAL_YIELD_VOL_MO source derives its volatility from. Filled by
+      // applyManualInputsToDraft from the two selectors and the Historical
+      // panel; a fresh ticket starts on DIRTY with no Historical query.
+      bond_option_price_basis: "DIRTY",
+      historical_yield_vol_request: null,
       curve_points: [],
       volatility_input: {
         volatility: null,
@@ -3152,10 +3237,20 @@
       "spot quote — traced in full in the Shiori Derived Forward section above — " +
       "and a value you type here overrides it. Shiori still never reconstructs a " +
       "forward from FTP, MMkt or a par rate.",
-    vol:
-      "Not sourced. Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned " +
-      "BAD_FLD. YIELD_VOL is not a substitute and no yield-to-price conversion is " +
-      "approved, so neither is offered here.",
+    // Issue #214: two sources now, and the honest note differs between them.
+    // Evaluated per render (see renderMarketReview) rather than fixed, so the
+    // row never describes the source the ticket is not using.
+    vol: () =>
+      historicalVolSourceSelected()
+        ? "Derived, not sourced. Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL still " +
+          "return BAD_FLD, so this ticket's σ_P is Shiori's own conversion of this " +
+          "bond's Middle-Office-parity Historical Yield Vol through its current-time " +
+          "duration, on the selected price basis — a historical / realized proxy for " +
+          "internal-model reconciliation, not a market-implied volatility. Raw " +
+          "YIELD_VOL still never reaches Black-76."
+        : "Not sourced. Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned " +
+          "BAD_FLD. YIELD_VOL is not a substitute and the only approved conversion is " +
+          "the Historical Yield Vol source, which you select above.",
     discounting:
       "Sourced automatically from Bloomberg's live USD SOFR Option Discount Curve " +
       "(S0490Z, Curve #490) unless a manual override is entered in Advanced. " +
@@ -3181,7 +3276,7 @@
       statusEl.textContent = unresolved ? "Trader override required" : "Reviewed";
       statusEl.classList.toggle("is-outstanding", unresolved);
       statusEl.classList.toggle("is-reviewed", !unresolved);
-      noteEl.textContent = note;
+      noteEl.textContent = typeof note === "function" ? note() : note;
     });
     els.marketReviewSummary.textContent =
       outstanding === 0 ? "All reviewed" : `${outstanding} awaiting review`;
@@ -3482,6 +3577,12 @@
     // a second edit-tracking mechanism. See the function's own doc comment
     // for why it is idempotent and safe to call this often.
     maybeRefreshS490Parity();
+
+    // Issue #214: the same single call site, for the same reason. Unlike the
+    // S490 panel this never *starts* a derivation -- the Historical source is
+    // only ever reached for by an explicit trader action -- but it is where a
+    // derived or adopted value whose inputs have moved gets withdrawn.
+    syncHistoricalVolPanel();
 
     // Issue #177: Reset / Use Shiori Derived asks for an immediate reprice,
     // but the draft only becomes priceable once the asynchronous typed-builder
@@ -3986,6 +4087,7 @@
   // the one behind the numbers on screen. Any panel request still in flight
   // is voided by the generation bump.
   function adoptDerivationFromPricedRun(display) {
+    adoptHistoricalVolFromPricedRun(display);
     const effective = display && display.effective_forward;
     // A run outside the two Issue #177 Forward modes carries no such section
     // and had no derivation to adopt; the panel keeps whatever it had.
@@ -3996,6 +4098,24 @@
     s490ParityError = effective.shiori_derived_forward_error || null;
     lastS490ParityKey = s490ParityKey();
     renderS490Parity();
+  }
+
+  // Issue #214: a priced run in Historical mode *is* a derivation, done
+  // server-side over the inputs it actually priced -- so the panel adopts it
+  // rather than treating the run's own moved inputs (a refreshed quote, a new
+  // t0) as staleness and withdrawing the value that had just priced. Exactly
+  // the reasoning of the Forward adoption above. A run in any other vol mode
+  // carries no such section and changes nothing here.
+  function adoptHistoricalVolFromPricedRun(display) {
+    const derived = display && display.historical_volatility_source;
+    if (!derived) return;
+    historicalVolGeneration += 1;
+    historicalVolPending = false;
+    historicalVolError = null;
+    historicalVolResult = derived;
+    historicalVolAdoptedText = derived.equivalent_price_vol_text;
+    lastHistoricalVolKey = historicalVolDependencyKey();
+    renderHistoricalVolPanel();
   }
 
   // Explicit retry after a failed S490 request (Codex P2 review of PR #174,
@@ -4076,6 +4196,415 @@
       }
     }
     renderForwardSource();
+  }
+
+
+  // --- Historical Yield Vol -> Equivalent Price Vol (Issue #214) ------------
+  //
+  // The trader-facing half of the Historical vol source. What this section
+  // does is narrow on purpose:
+  //
+  //   * it sends the ticket's own case, plus the Historical Yield query typed
+  //     in this panel, to POST /api/pricing/historical-equivalent-price-vol
+  //     and prints the answer;
+  //   * "Use for Pricing" adopts the *server's* number into the draft.
+  //
+  // What it never does, and must never start doing: compute a standard
+  // deviation, a duration, a unit conversion or a Yield-Vol -> Price-Vol
+  // conversion. There is no arithmetic on a volatility or a duration anywhere
+  // below -- every figure printed comes from the payload's own `*_text`
+  // strings, which are Python's own repr of the numbers the server computed,
+  // so what a trader reads is digit-for-digit what was calculated. Adopting a
+  // value copies that same string into the draft; the page never derives one.
+  //
+  // It also never keeps one. The derivation is re-run server-side on every
+  // Price, and an adopted value here is withdrawn the moment any input it
+  // depended on changes -- see `historicalVolDependencyKey`.
+
+  const DIRECT_PRICE_VOL_SOURCE = "DIRECT_PRICE_VOL";
+  const HISTORICAL_VOL_SOURCE = "HISTORICAL_YIELD_VOL_MO";
+  const HISTORICAL_VOL_ROUTE = "/api/pricing/historical-equivalent-price-vol";
+  // `data/historical_yield_volatility.MIDDLE_OFFICE_6M_OBSERVATION_COUNT`:
+  // 181 observations is Middle Office's confirmed 180-Yield-Change horizon.
+  // An ordinary editable default, never a server-side inference, and never
+  // derived from this ticket's expiry or tenor.
+  const MIDDLE_OFFICE_OBSERVATION_COUNT = "181";
+  // An ordinary editable default matching the Markets Historical Yield Vol
+  // card's own starting field (Issue #208). Whatever is in the box at
+  // calculate time is what is sent; with it cleared, nothing is substituted.
+  const DEFAULT_HISTORICAL_YIELD_FIELD = "YLD_YTM_MID";
+
+  let historicalVolResult = null;
+  let historicalVolError = null;
+  let historicalVolPending = false;
+  // The derived value the trader has explicitly adopted, as the server's own
+  // text. Null until "Use for Pricing" is pressed -- selecting the source is
+  // not by itself an adoption, so Price stays blocked until the trader has
+  // seen the number and said yes to it.
+  let historicalVolAdoptedText = null;
+  let historicalVolGeneration = 0;
+  // Deliberately not any real key's value, so the first render after load is
+  // a genuine change rather than being mistaken for "nothing moved".
+  let lastHistoricalVolKey;
+
+  function historicalVolSourceSelected() {
+    return els.volSource.value === HISTORICAL_VOL_SOURCE;
+  }
+
+  function selectedPriceBasis() {
+    return els.priceBasis.value || "DIRTY";
+  }
+
+  // Exactly the inputs the server's own derivation reads. A change to any of
+  // them makes a previously derived sigma_P describe a calculation that no
+  // longer matches this ticket, so it is withdrawn rather than left on screen
+  // beside inputs it does not belong to. This is the same shape as
+  // `s490RelevantFingerprint`, for the same reason.
+  function historicalVolDependencyKey() {
+    if (currentDraft === null) return "__HEV_NO_DRAFT__";
+    return JSON.stringify({
+      // Bond identity, and the reference terms the duration is calculated
+      // from.
+      underlying_isin: currentDraft.bond_option.underlying_isin,
+      bond_reference_data_universe: currentDraft.bond_reference_data_universe,
+      // The clean price and the market-state moment D_B is taken at.
+      bond_quote: currentDraft.bond_quote,
+      pricing_timestamp: currentDraft.pricing_timestamp,
+      // The market conventions the duration is calculated on.
+      convention_profile: currentDraft.convention_profile,
+      // The price state the duration's denominator and sigma_P are in.
+      bond_option_price_basis: selectedPriceBasis(),
+      // The Historical Yield query itself.
+      historical_yield_vol_request: historicalVolQueryFromForm(),
+    });
+  }
+
+  // Read verbatim off this panel's own fields -- no default is substituted
+  // for a blank one here, and no window is inferred from the ticket. The
+  // server refuses an incomplete query with its own message, which is the
+  // message the trader should see.
+  function historicalVolQueryFromForm() {
+    return {
+      bond_identifier: currentDraft === null ? null : currentDraft.bond_option.underlying_isin,
+      yield_field: (els.hevYieldField.value || "").trim(),
+      start_date: (els.hevStart.value || "").trim(),
+      end_date: (els.hevEnd.value || "").trim(),
+      requested_observation_count: (els.hevObservationCount.value || "").trim(),
+      field_unit: els.hevFieldUnit.value || null,
+    };
+  }
+
+  // The query as the case carries it. The observation count crosses as a
+  // number because that is what the contract states; an entry that is not a
+  // whole number is left as the string it is, so the server refuses it rather
+  // than this page rounding it into something the trader did not type.
+  function historicalVolQueryForCase() {
+    const query = historicalVolQueryFromForm();
+    const rawCount = query.requested_observation_count;
+    return {
+      ...query,
+      requested_observation_count:
+        /^\d+$/.test(rawCount) && Number.isSafeInteger(Number(rawCount))
+          ? Number(rawCount)
+          : rawCount,
+    };
+  }
+
+  // Withdraw a derived or adopted value whose inputs have moved. Called from
+  // `syncDraftGating`, so every state change the page already reacts to -- a
+  // fresh Bloomberg Load, Clear, a re-quote, a profile answer, a basis change,
+  // an edit in this panel -- reaches it without a second tracking mechanism.
+  function syncHistoricalVolPanel() {
+    const key = historicalVolDependencyKey();
+    if (key !== lastHistoricalVolKey) {
+      lastHistoricalVolKey = key;
+      // Anything outstanding described the previous inputs. Bumping the
+      // generation voids an in-flight answer rather than letting it repaint.
+      historicalVolGeneration += 1;
+      historicalVolPending = false;
+      historicalVolResult = null;
+      historicalVolError = null;
+      if (historicalVolAdoptedText !== null) {
+        historicalVolAdoptedText = null;
+        // The number in the field belonged to the withdrawn derivation, so it
+        // goes with it -- a stale figure that still reads as a number is
+        // exactly what must not survive.
+        els.volatility.value = "";
+        applyManualInputsToDraft();
+        return;
+      }
+    }
+    renderHistoricalVolPanel();
+  }
+
+  function renderHistoricalVolPanel() {
+    const historical = historicalVolSourceSelected();
+    els.historicalVolPanel.hidden = !historical;
+    els.priceBasisStatus.textContent = selectedPriceBasis();
+    // The vol field is the server's to fill in Historical mode. Leaving it
+    // typable would offer exactly the manual re-entry this source exists to
+    // remove, and would let a hand-typed number be priced under a label
+    // saying Shiori derived it.
+    els.volatility.readOnly = historical;
+    els.volatility.placeholder = historical
+      ? "Derived by Shiori — press Use for Pricing"
+      : "Not entered";
+    els.volatilityBasis.disabled = historical;
+    if (!historical) {
+      els.hevSecurity.value = "";
+      return;
+    }
+
+    els.hevSecurity.value =
+      currentDraft === null ? "" : currentDraft.bond_option.underlying_isin || "";
+    els.hevUseBtn.hidden = historicalVolResult === null || historicalVolAdoptedText !== null;
+    els.hevDeriveBtn.classList.toggle("is-disabled", historicalVolPending);
+    els.hevStatus.classList.toggle("is-invalid", historicalVolError !== null);
+
+    if (currentDraft === null) {
+      els.hevStatus.textContent =
+        "Bloomberg Load a supported bond before calculating its Historical Yield Vol.";
+    } else if (historicalVolPending) {
+      els.hevStatus.textContent = "Calculating Historical Yield Vol and deriving σ_P…";
+    } else if (historicalVolError !== null) {
+      els.hevStatus.textContent = historicalVolError;
+    } else if (historicalVolResult === null) {
+      els.hevStatus.textContent =
+        "Enter the Bloomberg Yield field confirmed on the workstation and the history " +
+        "window, then calculate. Nothing is priced from this source until you press Use " +
+        "for Pricing.";
+    } else if (historicalVolAdoptedText !== null) {
+      els.hevStatus.textContent =
+        "In use for pricing. Shiori re-derives this whole chain server-side on every " +
+        "Price, so the priced σ_P always belongs to the inputs on screen.";
+    } else {
+      els.hevStatus.textContent =
+        "Review the figures below, then press Use for Pricing. Nothing is priced from " +
+        "this source until you do.";
+    }
+
+    const hasResult = historicalVolResult !== null;
+    els.hevFields.hidden = !hasResult;
+    els.hevMethodRow.hidden = !hasResult;
+    els.hevTrace.hidden = !hasResult;
+    if (!hasResult) return;
+
+    const result = historicalVolResult;
+    els.hevYieldVolFieldUnit.textContent = `${result.historical_yield_vol_in_field_unit_text} ${result.historical_yield_vol_field_unit}`;
+    els.hevYieldVolDecimal.textContent = result.historical_yield_vol_decimal_annual_text;
+    els.hevDuration.textContent = result.absolute_modified_duration_text;
+    els.hevEquivalentPriceVol.textContent = result.equivalent_price_vol_text;
+    els.hevSource.textContent = result.vol_source;
+    els.hevPriceBasis.textContent = result.price_basis;
+    els.hevDurationType.textContent = result.duration_type;
+    els.hevWindowStatus.textContent = result.historical_yield_vol_window_status;
+    els.hevWindowStatus.classList.toggle(
+      "warn",
+      result.historical_yield_vol_window_status !== "FULL_WINDOW"
+    );
+    renderHistoricalVolTrace(result);
+  }
+
+  // The full provenance, one click away: both parents' own figures, in the
+  // server's own words. Every line is a payload field printed as given.
+  const HISTORICAL_VOL_TRACE_LINES = [
+    ["Vol source", "vol_source"],
+    ["Volatility kind", "volatility_kind"],
+    ["Volatility basis", "volatility_basis"],
+    ["Bond option price basis", "price_basis"],
+    ["Security", "security"],
+    ["Bloomberg Yield field", "yield_field"],
+    ["Yield field unit", "historical_yield_vol_field_unit"],
+    ["Unit normalization factor", "historical_yield_vol_normalization_factor"],
+    ["Observations used", "historical_yield_vol_observation_count"],
+    ["Observations requested", "historical_yield_vol_requested_observation_count"],
+    ["Yield Changes", "historical_yield_vol_change_count"],
+    ["Standard deviation convention", "historical_yield_vol_convention"],
+    ["Annualization trading days", "historical_yield_vol_annualization_trading_days"],
+    ["First observation used", "historical_yield_vol_first_observation_date"],
+    ["Last observation used", "historical_yield_vol_last_observation_date"],
+    ["Historical Yield source system", "historical_yield_vol_source_system"],
+    ["Historical Yield acquired at", "historical_yield_vol_acquired_at"],
+    ["Duration convention profile", "duration_convention_profile"],
+    ["Duration pricing timestamp (t0)", "duration_pricing_timestamp"],
+    ["Duration settlement date (tS)", "duration_settlement_date"],
+    ["Duration clean price per 100", "duration_clean_price_per_100"],
+    ["Duration accrued interest per 100", "duration_accrued_interest_per_100"],
+    ["Duration denominator price per 100", "duration_basis_price_per_100"],
+    ["Duration base yield (percent)", "duration_base_yield_percent"],
+    ["Duration methodology version", "duration_methodology_version"],
+    ["Equivalent Price Vol formula", "equivalent_price_vol_formula"],
+    ["Equivalent Price Vol unit", "equivalent_price_vol_unit"],
+    ["Equivalent Price Vol methodology", "equivalent_price_vol_methodology_version"],
+    ["Derived at", "calculated_at"],
+    ["Disclosure", "disclosure"],
+  ];
+
+  function renderHistoricalVolTrace(result) {
+    const lines = HISTORICAL_VOL_TRACE_LINES.map(([label, key]) => {
+      const value = result[key];
+      return { label, text: value === null || value === undefined ? "—" : String(value) };
+    });
+    (result.warnings || []).forEach((warning) => {
+      lines.push({ label: "Warning", text: String(warning) });
+    });
+    if (result.override_or_fallback_audit) {
+      lines.push({ label: "Audit", text: String(result.override_or_fallback_audit) });
+    }
+    els.hevTraceBody.replaceChildren(
+      ...lines.map(({ label, text }) => {
+        const row = document.createElement("div");
+        row.className = "s490-trace-line";
+        const key = document.createElement("span");
+        key.className = "s490-trace-key";
+        key.textContent = label;
+        row.append(key, document.createTextNode(text));
+        return row;
+      })
+    );
+  }
+
+  // A derivation is always an explicit trader action -- this source is never
+  // reached for because another one is missing, and never selected on the
+  // trader's behalf.
+  async function deriveHistoricalVol() {
+    if (historicalVolPending || currentDraft === null) return;
+    const generation = ++historicalVolGeneration;
+    historicalVolPending = true;
+    historicalVolError = null;
+    historicalVolResult = null;
+    renderHistoricalVolPanel();
+
+    // The case as it stands, told which source and which basis to derive for
+    // -- the same two fields the priced run reads, so the panel cannot ask a
+    // different question than Price will.
+    const reviewCase = {
+      ...currentDraft,
+      bond_option_price_basis: selectedPriceBasis(),
+      historical_yield_vol_request: historicalVolQueryForCase(),
+      volatility_input: {
+        ...currentDraft.volatility_input,
+        source_system: HISTORICAL_VOL_SOURCE,
+      },
+    };
+
+    let response;
+    let payload;
+    try {
+      response = await fetch(HISTORICAL_VOL_ROUTE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ case: reviewCase }),
+      });
+      payload = await response.json();
+    } catch (error) {
+      if (generation !== historicalVolGeneration) return;
+      historicalVolPending = false;
+      historicalVolError = `Shiori could not reach its own derivation: ${error.message || error}`;
+      renderHistoricalVolPanel();
+      return;
+    }
+    if (generation !== historicalVolGeneration) return;
+    historicalVolPending = false;
+    if (!response.ok) {
+      historicalVolError =
+        (payload && payload.error) || `server returned HTTP ${response.status}`;
+      renderHistoricalVolPanel();
+      return;
+    }
+    const problem = historicalVolPayloadProblem(payload);
+    if (problem !== null) {
+      historicalVolError = problem;
+      renderHistoricalVolPanel();
+      return;
+    }
+    historicalVolResult = payload.historical_volatility_source;
+    renderHistoricalVolPanel();
+  }
+
+  // A half-understood answer is refused rather than displayed. Every figure
+  // this panel prints is a string, and adopting one hands that same string to
+  // the pricing draft -- so each has to read back as the number it claims to
+  // be, and each label has to be the one this source always carries.
+  function historicalVolPayloadProblem(payload) {
+    if (!payload || typeof payload !== "object") return "malformed response: not an object";
+    const result = payload.historical_volatility_source;
+    if (!result || typeof result !== "object") {
+      return 'malformed response: no "historical_volatility_source"';
+    }
+    for (const [key, expected] of [
+      ["vol_source", HISTORICAL_VOL_SOURCE],
+      ["volatility_kind", "HISTORICAL_REALIZED"],
+      ["volatility_basis", "EQUIVALENT_PRICE_VOL"],
+      ["equivalent_price_vol_unit", "DECIMAL_ANNUAL"],
+    ]) {
+      if (result[key] !== expected) {
+        return (
+          `malformed response: "${key}" is ${JSON.stringify(result[key])}; ` +
+          `this panel shows only ${expected}`
+        );
+      }
+    }
+    if (result.price_basis !== selectedPriceBasis()) {
+      return (
+        `malformed response: the derivation came back on the ${result.price_basis} ` +
+        `price basis, but ${selectedPriceBasis()} is selected`
+      );
+    }
+    for (const [textKey, numberKey] of [
+      ["equivalent_price_vol_text", "equivalent_price_vol"],
+      ["absolute_modified_duration_text", "absolute_modified_duration"],
+      ["historical_yield_vol_decimal_annual_text", "historical_yield_vol_decimal_annual"],
+      ["historical_yield_vol_in_field_unit_text", "historical_yield_vol_in_field_unit"],
+    ]) {
+      const value = result[numberKey];
+      const rendered = result[textKey];
+      if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+        return `malformed response: "${numberKey}" is not a positive finite number`;
+      }
+      if (typeof rendered !== "string" || rendered.trim() === "") {
+        return `malformed response: "${textKey}" is not a non-blank string`;
+      }
+      // Numeric rather than string equality: Python's repr and JavaScript's
+      // String() spell the same float differently, and it is the value that
+      // has to match, not the spelling.
+      if (Number(rendered) !== value) {
+        return `malformed response: "${textKey}" does not read back as "${numberKey}"`;
+      }
+    }
+    return null;
+  }
+
+  // The explicit adoption. It copies the server's own text for sigma_P into
+  // the volatility field -- the one number a trader would otherwise have had
+  // to read off one view and retype into another -- and nothing else. No
+  // value is computed, rescaled or rounded on the way.
+  function useHistoricalVolForPricing() {
+    if (historicalVolResult === null) return;
+    historicalVolAdoptedText = historicalVolResult.equivalent_price_vol_text;
+    els.volatility.value = historicalVolAdoptedText;
+    els.volatilityBasis.value = "EQUIVALENT_PRICE_VOL";
+    applyManualInputsToDraft();
+  }
+
+  // Switching source is a state change, not an edit of a value: the adopted
+  // number belongs to the Historical source, so leaving it behind under
+  // "Direct price vol" would present a Shiori derivation as a trader entry.
+  function applyVolSourceSelection() {
+    historicalVolAdoptedText = null;
+    historicalVolResult = null;
+    historicalVolError = null;
+    historicalVolGeneration += 1;
+    historicalVolPending = false;
+    els.volatility.value = "";
+    els.volatilityBasis.value = historicalVolSourceSelected()
+      ? "EQUIVALENT_PRICE_VOL"
+      : "PRICE_VOL";
+    // Rendered directly as well as through applyManualInputsToDraft, which
+    // returns early when no bond is loaded: the selector is available before
+    // a Load, and the panel it reveals has to appear either way.
+    renderHistoricalVolPanel();
+    applyManualInputsToDraft();
   }
 
   // Reading the derived Forward into the draft is a *programmatic
@@ -4768,6 +5297,19 @@
     select.addEventListener("change", applyManualInputsToDraft);
   });
   els.volatilityBasis.addEventListener("change", applyManualInputsToDraft);
+  // Issue #214. The source and the basis are state changes rather than value
+  // edits, so each goes through its own handler first: switching source drops
+  // any adopted Historical value (it belongs to the source that derived it),
+  // and both end in applyManualInputsToDraft, whose syncDraftGating call
+  // re-keys the panel.
+  els.volSource.addEventListener("change", applyVolSourceSelection);
+  els.priceBasis.addEventListener("change", applyManualInputsToDraft);
+  [els.hevYieldField, els.hevStart, els.hevEnd, els.hevObservationCount].forEach((input) => {
+    input.addEventListener("input", applyManualInputsToDraft);
+  });
+  els.hevFieldUnit.addEventListener("change", applyManualInputsToDraft);
+  els.hevDeriveBtn.addEventListener("click", deriveHistoricalVol);
+  els.hevUseBtn.addEventListener("click", useHistoricalVolForPricing);
   els.curveAddRowBtn.addEventListener("click", () => {
     addCurveRow("", "");
     applyManualInputsToDraft();
@@ -4880,6 +5422,11 @@
   window.__shioriTestConventionProfileOverridden = () => conventionProfileOverridden;
   // Issue #177 effective-Forward state, read-only.
   window.__shioriTestTraderForwardOverrideActive = () => traderForwardOverrideActive;
+  // Issue #214, read-only: the Historical vol source's own panel state.
+  window.__shioriTestHistoricalVolResult = () => historicalVolResult;
+  window.__shioriTestHistoricalVolError = () => historicalVolError;
+  window.__shioriTestHistoricalVolAdoptedText = () => historicalVolAdoptedText;
+  window.__shioriTestHistoricalVolGeneration = () => historicalVolGeneration;
   window.__shioriTestShioriDerivedForward = () => shioriDerivedForward;
   window.__shioriTestShioriDerivedForwardError = () => shioriDerivedForwardError;
   window.__shioriTestRepriceQueued = () => repriceOnceForwardIsPriceable;

@@ -482,3 +482,91 @@ def test_the_expiry_offset_default_is_declared_once_and_is_taipei() -> None:
     # Written to exactly one control, in exactly one place.
     assert script_text.count("els.expiryOffset.value = DEFAULT_EXPIRY_UTC_OFFSET") == 1
     assert "els.expiryDatetime.value = DEFAULT" not in script_text
+
+
+# --- Historical Yield Vol as a pricing source (Issue #214) --------------------
+
+
+def test_the_historical_vol_panel_never_computes_a_volatility_or_a_duration() -> None:
+    """The browser rule: no Historical-vol arithmetic lives in JavaScript.
+
+    ``script.js``'s Historical section may read, display and adopt the
+    server's own numbers; it may not derive one. So the whole section is
+    scanned for the arithmetic that would mean it had started to -- a
+    multiplication of a duration by a volatility, a division by a price, a
+    square root, an annualization factor, a unit rescale.
+
+    Deliberately scoped to that section rather than the whole file: the page
+    legitimately does arithmetic elsewhere (chart geometry, tick formatting),
+    and a file-wide ban would either be false or have to be riddled with
+    exceptions until it caught nothing.
+    """
+
+    text = (PROTOTYPE_DIR / "script.js").read_text(encoding="utf-8")
+    start = text.index("// --- Historical Yield Vol -> Equivalent Price Vol (Issue #214)")
+    end = text.index("// Reading the derived Forward into the draft", start)
+    section = text[start:end]
+
+    # The conversion itself, in any spelling a reimplementation would take.
+    for forbidden in (
+        "Math.sqrt",
+        "Math.pow",
+        "252",
+        "absolute_modified_duration *",
+        "* historical_yield_vol",
+        "equivalent_price_vol *",
+        "/ 100",
+        "* 100",
+        "* 0.01",
+        "toFixed",
+    ):
+        assert forbidden not in section, (
+            f"{forbidden!r} appears in the Historical vol section of script.js -- this "
+            "page displays the server's derivation and must never compute one"
+        )
+
+    # And the figures it prints are the payload's own strings, not its numbers
+    # formatted by the page.
+    for text_key in (
+        "equivalent_price_vol_text",
+        "absolute_modified_duration_text",
+        "historical_yield_vol_decimal_annual_text",
+        "historical_yield_vol_in_field_unit_text",
+    ):
+        assert text_key in section
+
+
+def test_the_page_offers_both_price_bases_and_defaults_to_dirty() -> None:
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    selector_start = text.index('id="price-basis-select"')
+    selector = text[selector_start : text.index("</select>", selector_start)]
+    # DIRTY first, so it is what an untouched selector holds.
+    assert selector.index('value="DIRTY"') < selector.index('value="CLEAN"')
+    # Named for the price state, never for a vendor or an internal system.
+    for vendor in ("Bloomberg", "Numerix", "OVME", "bank"):
+        assert vendor not in selector
+
+
+def test_the_vol_source_selector_offers_exactly_the_two_live_sources() -> None:
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    selector_start = text.index('id="vol-source-select"')
+    selector = text[selector_start : text.index("</select>", selector_start)]
+    assert 'value="DIRECT_PRICE_VOL"' in selector
+    assert 'value="HISTORICAL_YIELD_VOL_MO"' in selector
+    # The raw yield statistic is not a pricing source and is never offered as
+    # one, and this historical source is never labelled as implied vol.
+    assert 'value="YIELD_VOL"' not in selector
+    assert "VCUB" not in selector
+    assert "implied" not in selector.lower()
+
+
+def test_the_historical_source_is_labelled_as_a_realized_proxy_on_the_page() -> None:
+    # The UI must say plainly what this source is, where the trader selects
+    # it -- not only in an exported run.
+    text = (PROTOTYPE_DIR / "index.html").read_text(encoding="utf-8")
+    start = text.index('id="historical-vol-disclosure"')
+    disclosure = text[start : text.index("</div>", start)]
+    assert "historical / realized proxy" in disclosure
+    assert "internal-model" in disclosure
+    assert "not a current market-implied volatility" in disclosure
+    assert "not VCUB" in disclosure

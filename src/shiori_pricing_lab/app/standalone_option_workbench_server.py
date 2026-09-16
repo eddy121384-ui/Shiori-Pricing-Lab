@@ -526,10 +526,6 @@ _STATIC_FILES = {
         "historical_yield_vol_view.js",
         "application/javascript; charset=utf-8",
     ),
-    "/historical_equivalent_price_vol_view.js": (
-        "historical_equivalent_price_vol_view.js",
-        "application/javascript; charset=utf-8",
-    ),
 }
 
 DEFAULT_HOST = "127.0.0.1"
@@ -758,13 +754,13 @@ DEFAULT_PORT = 8765
 # look available and compute nothing.
 # Bumped to -v29 for Issue #214's Historical Yield Vol -> Equivalent Price Vol
 # pricing source: the server gained POST
-# /api/pricing/historical-equivalent-price-vol, the case envelope gained
-# ``bond_option_price_basis`` and ``historical_yield_vol_request``, and the
-# page gained its own static file historical_equivalent_price_vol_view.js. A
-# stale -v28 process serves this commit's page -- whose Volatility row now
-# offers a Historical vol source and a DIRTY/CLEAN selector -- against a route
-# table that 404s the derivation route and never serves the new file, so the
-# source would look available and derive nothing.
+# /api/pricing/historical-equivalent-price-vol, and the case envelope gained
+# ``bond_option_price_basis`` and ``historical_yield_vol_request``. A stale
+# -v28 process serves this commit's page -- whose Volatility row now offers a
+# Historical vol source and a DIRTY/CLEAN price-basis selector -- against a
+# route table that 404s the derivation route and an envelope contract that
+# rejects both new keys, so the source would look available, derive nothing,
+# and refuse to price.
 API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v29"
 
 
