@@ -145,6 +145,11 @@ from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
+from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
+    HISTORICAL_YIELD_VOL_SOURCE,
+    HistoricalVolSourceUnavailableError,
+    case_declares_historical_vol_source,
+)
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote, BLIBenchmarkQuoteSide
 from shiori_pricing_lab.data.bli_snapshot import (
     BLIBondQuote,
@@ -569,10 +574,94 @@ def prepare_standalone_display(
     }
 
 
+def _require_historical_volatility_derived_for_this_run(
+    case: str | dict, historical_volatility_source: dict | None
+) -> BondOptionPriceBasis:
+    """Refuse to price a Historical-source case that was not derived for this run.
+
+    The ``HISTORICAL_YIELD_VOL_MO`` source's whole contract is that the
+    volatility is re-derived from the case's own inputs on every run, because a
+    number left in an envelope describes the bond, price and basis it was
+    derived from rather than the ones about to be priced. That derivation lives
+    in ``app/standalone_option_historical_vol_source``, which reaches Bloomberg
+    -- so it is the caller's to perform, not this function's.
+
+    Nothing in a case dict distinguishes a freshly derived volatility from a
+    stale one: both carry the same number shape under the same source label.
+    So this function does not try to tell them apart. It requires the caller to
+    hand over the provenance the derivation returned, and then checks that the
+    provenance genuinely describes the value on the case -- same volatility,
+    same price basis, same source. A caller that skipped the derivation has no
+    provenance to hand over and is refused; a caller that derived for a
+    *different* case is refused too, because the two would not agree.
+
+    The default is therefore fail-closed, which is the point (Codex review, PR
+    #215): before this, every caller outside the workbench server's own routes
+    -- the Streamlit UI, both benchmark compositions -- priced whatever number
+    the envelope happened to carry while the result labelled it a Shiori
+    derivation.
+
+    Returns the case's resolved price basis, which it needs for the check and
+    every caller needs next.
+    """
+
+    envelope = _parse_standalone_option_case(case)
+    price_basis = standalone_option_case_price_basis(envelope)
+    if not case_declares_historical_vol_source(envelope):
+        if historical_volatility_source is not None:
+            raise ValueError(
+                "historical_volatility_source was supplied for a case whose "
+                "volatility_input.source_system is not "
+                f"{HISTORICAL_YIELD_VOL_SOURCE} -- a derivation provenance never "
+                "describes a volatility that did not come from that derivation"
+            )
+        return price_basis
+
+    if historical_volatility_source is None:
+        raise HistoricalVolSourceUnavailableError(
+            f"this case declares volatility_input.source_system="
+            f"{HISTORICAL_YIELD_VOL_SOURCE}, so its volatility must be re-derived for "
+            "this run by apply_historical_equivalent_price_vol_to_case and its "
+            "provenance passed to this call. The number the envelope carries was "
+            "derived for the bond, price state and price basis it was derived from, "
+            "which may not be the ones about to be priced, so it is never priced as-is"
+        )
+    if not isinstance(historical_volatility_source, dict):
+        raise ValueError(
+            "historical_volatility_source must be the provenance mapping "
+            "apply_historical_equivalent_price_vol_to_case returned, got "
+            f"{type(historical_volatility_source).__name__}"
+        )
+
+    carried = envelope["volatility_input"].get("volatility")
+    derived = historical_volatility_source.get("equivalent_price_vol")
+    if derived != carried:
+        raise HistoricalVolSourceUnavailableError(
+            f"the supplied derivation produced {derived!r} but this case carries "
+            f"{carried!r} as its volatility -- the provenance describes a different "
+            "run, so it does not establish that this case's number was derived for it"
+        )
+    if historical_volatility_source.get("price_basis") != price_basis.value:
+        raise HistoricalVolSourceUnavailableError(
+            "the supplied derivation is on the "
+            f"{historical_volatility_source.get('price_basis')!r} price basis but this "
+            f"case declares {price_basis.value} -- a volatility is never priced against "
+            "forward/strike on the other basis"
+        )
+    if historical_volatility_source.get("vol_source") != HISTORICAL_YIELD_VOL_SOURCE:
+        raise HistoricalVolSourceUnavailableError(
+            "the supplied derivation names source "
+            f"{historical_volatility_source.get('vol_source')!r}, not "
+            f"{HISTORICAL_YIELD_VOL_SOURCE}"
+        )
+    return price_basis
+
+
 def price_standalone_option_case(
     case: str | dict,
     *,
     retrieved_at: str | None = None,
+    historical_volatility_source: dict | None = None,
 ) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, dict]:
     """Parse, build, price, and prepare display for one standalone option ``case``.
 
@@ -586,12 +675,16 @@ def price_standalone_option_case(
     caller-supplied and flows only into the display context.
     """
 
-    price_basis = standalone_option_case_price_basis(case)
+    price_basis = _require_historical_volatility_derived_for_this_run(
+        case, historical_volatility_source
+    )
     request = build_request_from_standalone_option_case(case)
     result = price_bli_mvp_standalone_option(request, price_basis=price_basis)
     display = prepare_standalone_display(
         result, request, retrieved_at=retrieved_at, price_basis=price_basis
     )
+    if historical_volatility_source is not None:
+        display = {**display, "historical_volatility_source": historical_volatility_source}
     return request, result, display
 
 
@@ -910,7 +1003,7 @@ def price_standalone_option_case_with_bloomberg_quote(
     *,
     bloomberg_security: str,
     quote_side: TreasuryFTPQuoteSide,
-    case_transform: Callable[[dict], dict] | None = None,
+    case_transform: Callable[[dict], tuple[dict, dict | None]] | None = None,
 ) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, BLIBondQuote, dict, dict]:
     """Price ``case`` with its ``bond_quote`` replaced by one live Bloomberg quote.
 
@@ -972,6 +1065,18 @@ def price_standalone_option_case_with_bloomberg_quote(
     is byte-for-byte the pre-#177 behaviour. Whatever the transform raises
     propagates unchanged, before pricing.
 
+    **The seam returns ``(case, historical_volatility_source)`` (Issue #214).**
+    The second Issue-#214 input in the same position -- the Historical
+    volatility, whose duration is a function of the live quote and this run's
+    own ``t0`` -- produces a derivation provenance that is no longer merely
+    display material: pricing a ``HISTORICAL_YIELD_VOL_MO`` case *requires* it,
+    because a case dict cannot show whether its number was derived for this
+    run (see
+    :func:`_require_historical_volatility_derived_for_this_run`). So the
+    transform hands it back rather than the caller collecting it out of a
+    closure, and it travels with the case it describes. A transform with no
+    such derivation returns ``None`` beside its case and nothing changes.
+
     Raises ``ValueError`` for
     envelope/input/date problems, propagates ``BLIBloombergDapiError``
     unchanged on any Bloomberg failure (the original ``bond_quote`` is
@@ -1000,10 +1105,13 @@ def price_standalone_option_case_with_bloomberg_quote(
         "bond_quote": asdict(live_quote),
         "pricing_timestamp": acquired_at,
     }
+    historical_volatility_source = None
     if case_transform is not None:
-        bloomberg_case = case_transform(bloomberg_case)
+        bloomberg_case, historical_volatility_source = case_transform(bloomberg_case)
     request, result, display = price_standalone_option_case(
-        bloomberg_case, retrieved_at=acquired_at
+        bloomberg_case,
+        retrieved_at=acquired_at,
+        historical_volatility_source=historical_volatility_source,
     )
 
     live_quote_display = prepare_live_bloomberg_quote_display(

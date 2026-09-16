@@ -1236,14 +1236,11 @@ def price_uploaded_case(case: dict) -> dict:
     # After the Forward, because the two are independent derivations off the
     # same case and this one must see the case that is about to price.
     case, historical_volatility_source = apply_historical_volatility_source_to_case(case)
-    _, _, display = price_standalone_option_case(case)
+    _, _, display = price_standalone_option_case(
+        case, historical_volatility_source=historical_volatility_source
+    )
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
-    if historical_volatility_source is not None:
-        display = {
-            **display,
-            "historical_volatility_source": historical_volatility_source,
-        }
     return {
         "case": case,
         "overlay": extract_standalone_option_case_overlay(case),
@@ -1817,14 +1814,11 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     overlaid_case, historical_volatility_source = apply_historical_volatility_source_to_case(
         overlaid_case
     )
-    _, _, display = price_standalone_option_case(overlaid_case)
+    _, _, display = price_standalone_option_case(
+        overlaid_case, historical_volatility_source=historical_volatility_source
+    )
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
-    if historical_volatility_source is not None:
-        display = {
-            **display,
-            "historical_volatility_source": historical_volatility_source,
-        }
     return display
 
 
@@ -1896,7 +1890,7 @@ def price_case_with_bloomberg_quote(
     # instead of widening that contract.
     captured: dict = {}
 
-    def _apply_effective_forward(bloomberg_case: dict) -> dict:
+    def _apply_effective_forward(bloomberg_case: dict) -> tuple[dict, dict | None]:
         effective_case, effective_forward = apply_effective_forward_to_case(bloomberg_case)
         captured["effective_forward"] = effective_forward
         # Inside the same transform, and deliberately: the workflow has just
@@ -1910,7 +1904,10 @@ def price_case_with_bloomberg_quote(
             apply_historical_volatility_source_to_case(effective_case)
         )
         captured["historical_volatility_source"] = historical_volatility_source
-        return effective_case
+        # Handed back rather than only captured: pricing a Historical-source
+        # case requires the provenance of the derivation done for *this* run,
+        # so it has to travel with the case it describes.
+        return effective_case, historical_volatility_source
 
     _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case,
@@ -1921,12 +1918,6 @@ def price_case_with_bloomberg_quote(
     effective_forward = captured.get("effective_forward")
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
-    historical_volatility_source = captured.get("historical_volatility_source")
-    if historical_volatility_source is not None:
-        display = {
-            **display,
-            "historical_volatility_source": historical_volatility_source,
-        }
     # The derivation forces its own fresh production Curve #490 acquisition
     # whenever it runs -- including in override mode, where it produces the
     # comparison value beside the priced override (Codex P1 review of PR #178,

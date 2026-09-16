@@ -47,10 +47,12 @@ VCUB, not another window, not a flat vol, not the last successful value and
 not the previous bond's. A trader may explicitly select a different source;
 this module never selects one.
 
-**The two bonds must be the same bond.** The Historical Yield query names a
-bond and so does the ticket. They are compared by exact ISIN before any
-Bloomberg call, because a volatility calculated for one bond and priced onto
-another is a perfectly ordinary number that nothing downstream could catch.
+**Every bond in the chain must be the same bond.** The Historical Yield query
+names one, the ticket names one, and the spot quote the duration is taken at
+names one. All three are compared by exact ISIN -- the query before any
+Bloomberg call -- because a volatility calculated for one bond, or
+differentiated against another bond's price, is a perfectly ordinary number
+that nothing downstream could catch.
 
 **Realized, not implied.** What this source produces is a historical/realized
 proxy approved for internal-model reconciliation, and it is labelled that way
@@ -61,6 +63,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
 from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
     resolve_standalone_bond_reference_by_isin,
@@ -88,6 +91,7 @@ from shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol import (
     historical_equivalent_price_vol_volatility_input,
 )
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import IrregularFirstCoupon
+from shiori_pricing_lab.products.enums import Currency, coerce_enum
 
 #: The ``volatility_input.source_system`` token that selects this source.
 #: Deliberately #197's own canonical name rather than a Workbench alias, so
@@ -288,9 +292,42 @@ def _coupon_schedule(record: BLIStandaloneBondReferenceData) -> IrregularFirstCo
     )
 
 
-def _clean_price_per_100(case: dict) -> float:
-    bond_quote = _require_mapping(case.get("bond_quote"), "bond_quote")
-    clean_price = bond_quote.get("clean_price_per_100")
+def _clean_price_per_100(case: dict, record: BLIStandaloneBondReferenceData) -> float:
+    """Return the spot clean price ``D_B`` is taken at, having checked whose it is.
+
+    The quote is held to its own reviewed ``BLIBondQuote`` contract and to the
+    same two coherence facts the typed pricing request enforces -- exact ISIN
+    against the resolved reference data, and matching currency (Codex review,
+    PR #215). Without them this derivation would take one bond's clean price,
+    differentiate it against another bond's cashflows, and publish the result
+    as this ticket's ``sigma_P`` -- a perfectly ordinary number that the review
+    route would display as priceable while no run built from the same case
+    could ever succeed.
+    """
+
+    raw_quote = _require_mapping(case.get("bond_quote"), "bond_quote")
+    bond_option = _require_mapping(case.get("bond_option"), "bond_option")
+    try:
+        bond_quote = BLIBondQuote(**raw_quote)
+        currency = coerce_enum(bond_option.get("currency"), Currency, "bond_option.currency")
+    except (TypeError, ValueError) as exc:
+        raise HistoricalVolSourceUnavailableError(
+            f"this ticket's own spot quote is not a usable market observation, so no "
+            f"current-time duration can be taken at it: {exc}"
+        ) from exc
+    if bond_quote.isin != record.isin:
+        raise HistoricalVolSourceUnavailableError(
+            f"bond_quote.isin ({bond_quote.isin!r}) does not exactly match this ticket's "
+            f"resolved bond ({record.isin!r}) -- one bond's clean price is never "
+            "differentiated against another bond's cashflows"
+        )
+    if bond_quote.currency is not currency:
+        raise HistoricalVolSourceUnavailableError(
+            f"bond_quote.currency ({bond_quote.currency.value}) does not match "
+            f"bond_option currency ({currency.value})"
+        )
+
+    clean_price = bond_quote.clean_price_per_100
     if not isinstance(clean_price, (int, float)) or isinstance(clean_price, bool):
         raise HistoricalVolSourceUnavailableError(
             "bond_quote.clean_price_per_100 is required by the duration this source "
@@ -322,7 +359,7 @@ def resolve_historical_equivalent_price_vol(
     query = historical_yield_vol_query(case)
     bloomberg_identifier = _require_same_bond(case, query["bond_identifier"])
     record = _resolved_reference_record(case)
-    clean_price = _clean_price_per_100(case)
+    clean_price = _clean_price_per_100(case, record)
 
     pricing_timestamp = case.get("pricing_timestamp")
     convention_profile = case.get("convention_profile")
