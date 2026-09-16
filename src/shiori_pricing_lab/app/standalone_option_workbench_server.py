@@ -365,6 +365,7 @@ from pathlib import Path
 
 from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
     HISTORICAL_YIELD_VOL_SOURCE,
+    BLIHistoricalVolatilityDerivation,
     HistoricalVolSourceUnavailableError,
     apply_historical_equivalent_price_vol_to_case,
     case_declares_historical_vol_source,
@@ -1235,9 +1236,9 @@ def price_uploaded_case(case: dict) -> dict:
     case, effective_forward = apply_effective_forward_to_case(case)
     # After the Forward, because the two are independent derivations off the
     # same case and this one must see the case that is about to price.
-    case, historical_volatility_source = apply_historical_volatility_source_to_case(case)
+    case, historical_volatility_derivation = apply_historical_volatility_source_to_case(case)
     _, _, display = price_standalone_option_case(
-        case, historical_volatility_source=historical_volatility_source
+        case, historical_volatility_derivation=historical_volatility_derivation
     )
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
@@ -1811,11 +1812,11 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     validate_deterministic_forward_inputs(overlaid_case)
     validate_deterministic_historical_vol_inputs(overlaid_case)
     overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
-    overlaid_case, historical_volatility_source = apply_historical_volatility_source_to_case(
-        overlaid_case
+    overlaid_case, historical_volatility_derivation = (
+        apply_historical_volatility_source_to_case(overlaid_case)
     )
     _, _, display = price_standalone_option_case(
-        overlaid_case, historical_volatility_source=historical_volatility_source
+        overlaid_case, historical_volatility_derivation=historical_volatility_derivation
     )
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
@@ -1890,7 +1891,9 @@ def price_case_with_bloomberg_quote(
     # instead of widening that contract.
     captured: dict = {}
 
-    def _apply_effective_forward(bloomberg_case: dict) -> tuple[dict, dict | None]:
+    def _apply_effective_forward(
+        bloomberg_case: dict,
+    ) -> tuple[dict, BLIHistoricalVolatilityDerivation | None]:
         effective_case, effective_forward = apply_effective_forward_to_case(bloomberg_case)
         captured["effective_forward"] = effective_forward
         # Inside the same transform, and deliberately: the workflow has just
@@ -1900,14 +1903,14 @@ def price_case_with_bloomberg_quote(
         # Yield statistic through a duration taken at the previous quote and
         # the previous t0 -- the stale-input failure this whole seam exists
         # to prevent, exactly as it does for the Forward.
-        effective_case, historical_volatility_source = (
+        effective_case, historical_volatility_derivation = (
             apply_historical_volatility_source_to_case(effective_case)
         )
-        captured["historical_volatility_source"] = historical_volatility_source
+        captured["historical_volatility_derivation"] = historical_volatility_derivation
         # Handed back rather than only captured: pricing a Historical-source
-        # case requires the provenance of the derivation done for *this* run,
-        # so it has to travel with the case it describes.
-        return effective_case, historical_volatility_source
+        # case requires the single-use licence for the derivation done for
+        # *this* run, so it has to travel with the case it licenses.
+        return effective_case, historical_volatility_derivation
 
     _, _, _, display, priced_case = price_standalone_option_case_with_bloomberg_quote(
         overlaid_case,
@@ -1916,6 +1919,7 @@ def price_case_with_bloomberg_quote(
         case_transform=_apply_effective_forward,
     )
     effective_forward = captured.get("effective_forward")
+    historical_volatility_derivation = captured.get("historical_volatility_derivation")
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     # The derivation forces its own fresh production Curve #490 acquisition
@@ -1946,6 +1950,11 @@ def price_case_with_bloomberg_quote(
             derived_trace_present
             and effective_forward["forward_source"] != SHIORI_DERIVED_S490_FORWARD_SOURCE
         ),
+        # A Historical-source refresh fetched this bond's Yield series and
+        # re-derived the volatility Black-76 priced with, against the quote it
+        # had just acquired -- so a run claiming BOND_QUOTE_ONLY would be
+        # describing inputs it did not price from (Codex review, PR #215).
+        historical_volatility_derived=historical_volatility_derivation is not None,
     )
     return {"case": priced_case, "display": display}
 
@@ -1963,7 +1972,12 @@ def price_case_with_bloomberg_quote(
 # - the Forward, since Issue #177, whenever the run's source is the Shiori
 #   derived one -- which is now the *default*, so on an ordinary derived-mode
 #   refresh the quote-only claim is false about the single most important
-#   number on the ticket.
+#   number on the ticket;
+# - the bond's Bloomberg Yield series and the volatility derived from it,
+#   since Issue #214, whenever the run's vol source is HISTORICAL_YIELD_VOL_MO
+#   -- that derivation runs inside this route's own transform seam, against
+#   the quote it has just acquired, so it is as much a re-sourced input of
+#   this refresh as the Forward is.
 #
 # Stating otherwise in the display and the exported run would be a provenance
 # claim contradicting the inputs actually priced (AGENTS.md rule 6), so the
@@ -1981,6 +1995,14 @@ _REFRESHED_INPUT_DERIVED_FORWARD = "SHIORI_DERIVED_FORWARD"
 # re-derives it from the refreshed spot as the comparison value on screen, so
 # it is a market input this run re-sourced even though Black-76 did not use it.
 _REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON = "SHIORI_DERIVED_FORWARD_COMPARISON"
+# Issue #214 (Codex review, PR #215): a Historical-source refresh re-sources
+# two more inputs in the same action -- the bond's own Bloomberg Yield series,
+# and the volatility re-derived from it against the freshly acquired quote and
+# this run's own t0. Both are named, because "the Yield history was re-fetched"
+# and "the volatility Black-76 priced with was recomputed" are different facts
+# and a reader should not have to infer the second from the first.
+_REFRESHED_INPUT_HISTORICAL_YIELD_HISTORY = "HISTORICAL_YIELD_SERIES"
+_REFRESHED_INPUT_HISTORICAL_EQUIVALENT_PRICE_VOL = "HISTORICAL_EQUIVALENT_PRICE_VOL"
 _OTHER_MARKET_INPUTS_UNCHANGED = "CASE_JSON_UNCHANGED"
 _OTHER_MARKET_INPUTS_EXCEPT_REFRESHED = "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
 
@@ -1992,6 +2014,7 @@ def _with_accurate_refresh_scope(
     s490_curve_acquired: bool,
     derived_forward_replaced: bool,
     derived_forward_comparison_refreshed: bool,
+    historical_volatility_derived: bool,
 ) -> dict:
     """Return ``display`` with its live-quote refresh scope corrected.
 
@@ -2013,6 +2036,9 @@ def _with_accurate_refresh_scope(
         refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD)
     if derived_forward_comparison_refreshed:
         refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON)
+    if historical_volatility_derived:
+        refreshed.append(_REFRESHED_INPUT_HISTORICAL_YIELD_HISTORY)
+        refreshed.append(_REFRESHED_INPUT_HISTORICAL_EQUIVALENT_PRICE_VOL)
     if refreshed == [_REFRESHED_INPUT_BOND_QUOTE]:
         # Genuinely quote-only: returned completely untouched, so a legacy
         # (manual-curve, explicit-forward) refresh is still byte-for-byte the
@@ -2528,7 +2554,9 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
     return effective_case, provenance
 
 
-def apply_historical_volatility_source_to_case(case: dict) -> tuple[dict, dict | None]:
+def apply_historical_volatility_source_to_case(
+    case: dict,
+) -> tuple[dict, BLIHistoricalVolatilityDerivation | None]:
     """Resolve this run's volatility when the case declares the Historical source.
 
     The volatility counterpart of :func:`apply_effective_forward_to_case`, and

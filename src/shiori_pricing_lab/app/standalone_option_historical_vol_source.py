@@ -61,6 +61,8 @@ end to end -- never as Bloomberg implied vol and never as VCUB.
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from datetime import date
 
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote
@@ -120,6 +122,96 @@ HISTORICAL_VOL_DISCLOSURE = (
 
 class HistoricalVolSourceUnavailableError(ValueError):
     """One fail-closed refusal type for every condition in this module."""
+
+
+#: The case fields the derivation actually reads. A change to any of them
+#: makes a previously derived sigma_P describe a calculation that no longer
+#: matches the case, so the licence below refuses to be spent on it.
+_DERIVATION_INPUT_KEYS: tuple[str, ...] = (
+    "bond_reference_data_universe",
+    "bond_quote",
+    "pricing_timestamp",
+    "convention_profile",
+    HISTORICAL_YIELD_VOL_REQUEST_KEY,
+)
+
+
+def _derivation_fingerprint(case: dict, price_basis: BondOptionPriceBasis) -> str:
+    """Canonical text for everything the derivation read, plus what it produced."""
+
+    bond_option = case.get("bond_option")
+    return json.dumps(
+        {
+            "underlying_isin": (
+                bond_option.get("underlying_isin") if isinstance(bond_option, dict) else None
+            ),
+            "currency": bond_option.get("currency") if isinstance(bond_option, dict) else None,
+            "price_basis": price_basis.value,
+            "volatility_input": case.get("volatility_input"),
+            **{key: case.get(key) for key in _DERIVATION_INPUT_KEYS},
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+@dataclass
+class BLIHistoricalVolatilityDerivation:
+    """A licence to price one run from one derivation (Codex review, PR #215).
+
+    **Why this is an object and not the provenance mapping.** The provenance
+    is JSON and travels into the display and the exported run, so a caller can
+    keep one, re-send the same case and offer it again -- and if Bloomberg has
+    since corrected an observation in the requested window, the stale sigma_P
+    would price while the result claimed it was derived for that run. Comparing
+    the volatility, the basis and the source cannot catch that: all three still
+    agree.
+
+    So the evidence a pricing call requires is deliberately something a caller
+    cannot re-use or reconstruct:
+
+    - it is **not a mapping** and has no JSON form, so nothing that survives an
+      export round trip is accepted in its place;
+    - it is **spent on use**. One derivation licenses exactly one pricing call,
+      so a retained licence from an earlier run has already been consumed;
+    - it is **bound to the inputs it was derived from**. A case edited after
+      the derivation -- a re-quoted bond, a changed window, a switched basis --
+      no longer matches, and the licence refuses rather than covering a
+      calculation that did not happen over those inputs.
+
+    ``provenance`` is the lineage for the display and the export, and it is
+    only reachable through :meth:`consume`.
+    """
+
+    provenance: dict
+    fingerprint: str
+    spent: bool = False
+
+    def consume(self, case: dict, price_basis: BondOptionPriceBasis) -> dict:
+        """Spend this licence for ``case`` and return its provenance.
+
+        Raises :class:`HistoricalVolSourceUnavailableError` if it has already
+        been spent, or if ``case`` is not the case it was derived from.
+        """
+
+        if self.spent:
+            raise HistoricalVolSourceUnavailableError(
+                f"this {HISTORICAL_YIELD_VOL_SOURCE} derivation has already priced a run. "
+                "One derivation licenses exactly one pricing call, because a volatility "
+                "re-offered later describes the Yield observations, bond price and price "
+                "basis of the run it was derived for -- not the one about to be priced. "
+                "Derive again"
+            )
+        if _derivation_fingerprint(case, price_basis) != self.fingerprint:
+            raise HistoricalVolSourceUnavailableError(
+                f"this {HISTORICAL_YIELD_VOL_SOURCE} derivation was produced for different "
+                "inputs than the case now being priced -- the bond, its quote, the pricing "
+                "timestamp, the convention profile, the Historical Yield query, the price "
+                "basis or the derived volatility itself has changed since. A volatility is "
+                "never carried across a change to what it was derived from"
+            )
+        self.spent = True
+        return self.provenance
 
 
 def case_declares_historical_vol_source(case: object) -> bool:
@@ -524,7 +616,7 @@ def _provenance(conversion, published, statistic, query: dict) -> dict:
 
 def apply_historical_equivalent_price_vol_to_case(
     case: dict, price_basis: BondOptionPriceBasis, *, calculated_at: str
-) -> tuple[dict, dict | None]:
+) -> tuple[dict, BLIHistoricalVolatilityDerivation | None]:
     """Return ``(case priced with the derived volatility, provenance payload)``.
 
     A case that does not declare this source is returned **unchanged**, with
@@ -538,6 +630,11 @@ def apply_historical_equivalent_price_vol_to_case(
     :class:`HistoricalVolSourceUnavailableError` and nothing is priced: this
     source has no fallback value, and the envelope's previous number is never
     one.
+
+    The second element is a :class:`BLIHistoricalVolatilityDerivation` -- the
+    single-use licence that lets the returned case be priced, and the only
+    route to its provenance. See that class for why the provenance mapping
+    itself is not sufficient evidence.
     """
 
     if not case_declares_historical_vol_source(case):
@@ -546,28 +643,30 @@ def apply_historical_equivalent_price_vol_to_case(
     _conversion, published, provenance = resolve_historical_equivalent_price_vol(
         case, price_basis, calculated_at=calculated_at
     )
-    return (
-        {
-            **case,
-            "volatility_input": {
-                # The reviewed BLIVolatilityInput contract's own field names,
-                # constructed from the published input rather than merged
-                # field-by-field with whatever the envelope held: a derived
-                # observation replaces its predecessor whole, the same way a
-                # Bloomberg refresh replaces ``bond_quote``.
-                "volatility": published.volatility,
-                "volatility_basis": published.volatility_basis.value,
-                "source_system": published.source_system,
-                "status": published.status.value,
-                "override_or_fallback_audit": published.override_or_fallback_audit,
-            },
+    derived_case = {
+        **case,
+        "volatility_input": {
+            # The reviewed BLIVolatilityInput contract's own field names,
+            # constructed from the published input rather than merged
+            # field-by-field with whatever the envelope held: a derived
+            # observation replaces its predecessor whole, the same way a
+            # Bloomberg refresh replaces ``bond_quote``.
+            "volatility": published.volatility,
+            "volatility_basis": published.volatility_basis.value,
+            "source_system": published.source_system,
+            "status": published.status.value,
+            "override_or_fallback_audit": published.override_or_fallback_audit,
         },
-        provenance,
+    }
+    return derived_case, BLIHistoricalVolatilityDerivation(
+        provenance=provenance,
+        fingerprint=_derivation_fingerprint(derived_case, price_basis),
     )
 
 
 __all__ = [
     "HISTORICAL_VOL_DISCLOSURE",
+    "BLIHistoricalVolatilityDerivation",
     "HISTORICAL_YIELD_VOL_REQUEST_KEY",
     "HISTORICAL_YIELD_VOL_SOURCE",
     "VOLATILITY_KIND",

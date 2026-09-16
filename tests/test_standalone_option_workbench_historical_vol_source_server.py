@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 
 import shiori_pricing_lab.app.standalone_option_historical_vol_source as source_module
+import shiori_pricing_lab.app.standalone_option_workbench as workbench_module
 import shiori_pricing_lab.app.standalone_option_workbench_server as server_module
 from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
     HistoricalVolSourceUnavailableError,
@@ -46,6 +47,9 @@ from shiori_pricing_lab.app.standalone_option_run_export import (
 from shiori_pricing_lab.app.standalone_option_workbench import (
     price_standalone_option_case,
     price_standalone_option_case_with_benchmark,
+)
+from shiori_pricing_lab.app.standalone_option_workbench_overlay import (
+    extract_standalone_option_case_overlay,
 )
 from shiori_pricing_lab.app.standalone_option_workbench_server import create_server
 from shiori_pricing_lab.data.bloomberg_bond_quote import BLIBloombergDapiError
@@ -621,67 +625,118 @@ def test_the_benchmark_composition_refuses_an_underived_historical_case() -> Non
 
 
 @_requires_quantlib
-def test_a_derivation_for_another_run_does_not_license_this_one(monkeypatch) -> None:
-    # The provenance has to describe the number actually on the case. A
-    # derivation carried over from a previous run does not.
+def test_a_derivation_cannot_license_a_case_it_was_not_derived_from(monkeypatch) -> None:
+    # The licence is bound to the inputs it read. A case edited afterwards --
+    # here, its volatility replaced -- is not the case it covers.
     _stub_yield_loader(monkeypatch)
     case = _historical_case()
-    _derived_case, provenance = source_module.apply_historical_equivalent_price_vol_to_case(
+    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
         case, BondOptionPriceBasis.DIRTY, calculated_at="2026-07-01T16:00:05+00:00"
     )
-    stale_case = {
-        **case,
-        "volatility_input": {**case["volatility_input"], "volatility": 0.99},
+    edited = {
+        **derived_case,
+        "volatility_input": {**derived_case["volatility_input"], "volatility": 0.99},
     }
 
     with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
-        price_standalone_option_case(
-            stale_case, historical_volatility_source=provenance
-        )
-    assert "describes a different run" in str(excinfo.value)
+        price_standalone_option_case(edited, historical_volatility_derivation=derivation)
+    assert "produced for different inputs" in str(excinfo.value)
+
+
+@_requires_quantlib
+def test_a_re_quoted_bond_invalidates_the_licence(monkeypatch) -> None:
+    # The case the derivation read included the spot quote D_B was taken at,
+    # so a re-quote between deriving and pricing is not covered either.
+    _stub_yield_loader(monkeypatch)
+    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
+        _historical_case(), BondOptionPriceBasis.DIRTY,
+        calculated_at="2026-07-01T16:00:05+00:00",
+    )
+    re_quoted = {
+        **derived_case,
+        "bond_quote": {**derived_case["bond_quote"], "clean_price_per_100": 97.5},
+    }
+
+    with pytest.raises(HistoricalVolSourceUnavailableError):
+        price_standalone_option_case(re_quoted, historical_volatility_derivation=derivation)
 
 
 @_requires_quantlib
 def test_a_derivation_on_the_other_basis_does_not_license_this_one(monkeypatch) -> None:
     _stub_yield_loader(monkeypatch)
-    case = _historical_case(bond_option_price_basis="CLEAN")
-    derived_case, provenance = source_module.apply_historical_equivalent_price_vol_to_case(
-        case, BondOptionPriceBasis.CLEAN, calculated_at="2026-07-01T16:00:05+00:00"
+    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
+        _historical_case(bond_option_price_basis="CLEAN"),
+        BondOptionPriceBasis.CLEAN,
+        calculated_at="2026-07-01T16:00:05+00:00",
     )
     # The same derived number, now claimed for a DIRTY run.
     mixed_case = {**derived_case, "bond_option_price_basis": "DIRTY"}
 
     with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
-        price_standalone_option_case(mixed_case, historical_volatility_source=provenance)
-    assert "CLEAN" in str(excinfo.value)
-    assert "DIRTY" in str(excinfo.value)
+        price_standalone_option_case(
+            mixed_case, historical_volatility_derivation=derivation
+        )
+    assert "price basis" in str(excinfo.value)
 
 
 @_requires_quantlib
-def test_the_matching_derivation_prices_and_reaches_the_display(monkeypatch) -> None:
+def test_a_licence_prices_exactly_one_run(monkeypatch) -> None:
+    # Codex review, PR #215, round 2: the serializable provenance travels into
+    # the display and the exported run, so a caller could keep one and offer it
+    # again against an unchanged case -- and if Bloomberg has since corrected an
+    # observation in the window, the stale sigma_P would price while the result
+    # claimed it was derived for that run. A licence is spent on use.
     _stub_yield_loader(monkeypatch)
-    case = _historical_case()
-    derived_case, provenance = source_module.apply_historical_equivalent_price_vol_to_case(
-        case, BondOptionPriceBasis.DIRTY, calculated_at="2026-07-01T16:00:05+00:00"
+    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
+        _historical_case(), BondOptionPriceBasis.DIRTY,
+        calculated_at="2026-07-01T16:00:05+00:00",
     )
 
     _request, result, display = price_standalone_option_case(
-        derived_case, historical_volatility_source=provenance
+        derived_case, historical_volatility_derivation=derivation
+    )
+    assert result.status.value == "SUCCESS"
+    assert display["historical_volatility_source"] == derivation.provenance
+    assert display["assumptions"]["price_volatility"] == (
+        derivation.provenance["equivalent_price_vol"]
     )
 
-    assert result.status.value == "SUCCESS"
-    assert display["historical_volatility_source"] == provenance
-    assert display["assumptions"]["price_volatility"] == provenance["equivalent_price_vol"]
+    with pytest.raises(HistoricalVolSourceUnavailableError) as excinfo:
+        price_standalone_option_case(
+            derived_case, historical_volatility_derivation=derivation
+        )
+    assert "already priced a run" in str(excinfo.value)
 
 
-def test_a_derivation_provenance_for_a_non_historical_case_is_refused() -> None:
-    # The other direction: a provenance attached to a case whose volatility
+@_requires_quantlib
+def test_the_serializable_provenance_is_not_itself_a_licence(monkeypatch) -> None:
+    # What survives an export round trip is a record of a derivation, never
+    # permission to price from one.
+    _stub_yield_loader(monkeypatch)
+    derived_case, derivation = source_module.apply_historical_equivalent_price_vol_to_case(
+        _historical_case(), BondOptionPriceBasis.DIRTY,
+        calculated_at="2026-07-01T16:00:05+00:00",
+    )
+    round_tripped = json.loads(json.dumps(derivation.provenance))
+
+    with pytest.raises(ValueError) as excinfo:
+        price_standalone_option_case(
+            derived_case, historical_volatility_derivation=round_tripped
+        )
+    assert "never a licence to price from one" in str(excinfo.value)
+
+
+def test_a_derivation_for_a_non_historical_case_is_refused() -> None:
+    # The other direction: a derivation attached to a case whose volatility
     # did not come from this source would mislabel a trader's own number.
     with pytest.raises(ValueError) as excinfo:
         price_standalone_option_case(
-            _manual_case(), historical_volatility_source={"vol_source": "anything"}
+            _manual_case(),
+            historical_volatility_derivation=source_module.BLIHistoricalVolatilityDerivation(
+                provenance={}, fingerprint=""
+            ),
         )
-    assert "never describes a volatility that did not come from" in str(excinfo.value)
+    assert "never describes a volatility that did not come from it" in str(excinfo.value)
 
 
 # --- The quote the duration is taken at must be this ticket's bond -----------
@@ -717,6 +772,121 @@ def test_a_quote_in_another_currency_is_refused_too(server_url, monkeypatch) -> 
 
     assert status == 400
     assert "EUR" in payload["error"]
+    assert calls == []
+
+
+# --- A refresh says it re-sourced the Yield history and the volatility -------
+
+
+def _stub_bloomberg_quote(monkeypatch, *, clean_price: float = 100.75) -> None:
+    """One live spot quote and one fixed acquisition clock for the refresh route.
+
+    The clock must land on the case's own valuation date, because the route
+    stamps its return as this run's ``pricing_timestamp`` and the reviewed
+    request contract requires the two to agree.
+    """
+
+    from datetime import UTC, datetime
+
+    from shiori_pricing_lab.data.bli_snapshot import (
+        BLIBondQuote,
+        BLIMarketDataStatus,
+        BLIQuoteBasis,
+    )
+    from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
+
+    def _fake_quote(*, security, isin, quote_side):
+        return BLIBondQuote(
+            isin=isin,
+            currency=Currency.USD,
+            price_type=BLIQuoteBasis.PRICE,
+            quote_side=TreasuryFTPQuoteSide(quote_side),
+            source_system="BLOOMBERG_DAPI",
+            status=BLIMarketDataStatus.ACTIVE,
+            clean_price_per_100=clean_price,
+            yield_value=None,
+            accrued_interest_per_100=0.44,
+        )
+
+    monkeypatch.setattr(workbench_module, "load_bloomberg_bond_quote", _fake_quote)
+    monkeypatch.setattr(
+        workbench_module,
+        "_shiori_acquisition_now",
+        lambda: datetime(2026, 7, 1, 16, 0, 0, tzinfo=UTC),
+    )
+
+
+@_requires_quantlib
+def test_a_historical_refresh_reports_the_yield_history_it_re_sourced(
+    server_url, monkeypatch
+) -> None:
+    # Codex review, PR #215, round 2. This case is explicit-forward and
+    # manual-curve, so before the fix the whole refresh reported
+    # BOND_QUOTE_ONLY / CASE_JSON_UNCHANGED -- while it had in fact fetched
+    # this bond's Yield series and recomputed the volatility Black-76 priced
+    # with, against the quote it had just acquired.
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    _stub_bloomberg_quote(monkeypatch)
+    case = _historical_case()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": "/isin/XS0000000001",
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert live_quote["refreshed_inputs"] == [
+        "BOND_QUOTE",
+        "HISTORICAL_YIELD_SERIES",
+        "HISTORICAL_EQUIVALENT_PRICE_VOL",
+    ]
+    assert live_quote["refreshed_scope"] == (
+        "BOND_QUOTE_AND_HISTORICAL_YIELD_SERIES_AND_HISTORICAL_EQUIVALENT_PRICE_VOL"
+    )
+    assert live_quote["other_market_inputs"] == (
+        "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
+    )
+    # And it genuinely did re-derive: one Yield acquisition, against the
+    # freshly acquired quote rather than the case's previous one.
+    assert len(calls) == 1
+    provenance = payload["display"]["historical_volatility_source"]
+    assert provenance["duration_clean_price_per_100"] == 100.75
+    assert payload["case"]["volatility_input"]["volatility"] == (
+        provenance["equivalent_price_vol"]
+    )
+
+
+def test_a_non_historical_refresh_still_reports_quote_only(
+    server_url, monkeypatch
+) -> None:
+    # The pre-#214 wording is unchanged for a refresh that really did
+    # re-source nothing but the quote.
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    _stub_bloomberg_quote(monkeypatch)
+    case = _manual_case()
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": "/isin/XS0000000001",
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    live_quote = payload["display"]["live_bloomberg_quote"]
+    assert live_quote["refreshed_scope"] == "BOND_QUOTE_ONLY"
+    assert "refreshed_inputs" not in live_quote
     assert calls == []
 
 
