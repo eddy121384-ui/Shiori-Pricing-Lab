@@ -125,6 +125,7 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     accrued_interest_per_100,
     clean_price_from_yield,
     first_coupon_schedule_shape,
+    require_two_remaining_coupons,
     yield_from_clean_price,
 )
 from shiori_pricing_lab.products.enums import DayCount, Frequency
@@ -552,6 +553,24 @@ def validate_bond_modified_duration_inputs(
                 f"the irregular first-coupon schedule supplied for {security!r} is not a "
                 f"valid schedule for maturity {maturity.isoformat()}: {exc}"
             ) from exc
+
+    # The last date-only refusal this duration can meet, and the reason this
+    # function exists rather than stopping where the prologue happened to end:
+    # a settlement inside the final coupon period is decided by the dates
+    # alone, but was reached only from inside the repricing legs -- so a
+    # caller asking "could this duration ever be taken" was told yes, and a
+    # readiness route spent a Bloomberg request to find out otherwise (Codex
+    # review, PR #215). The primitive's own guard, called rather than
+    # restated.
+    try:
+        require_two_remaining_coupons(
+            settlement, maturity, coupons_per_year=coupons_per_year, schedule=schedule
+        )
+    except TreasuryFuturesYieldError as exc:
+        raise BLIBondDurationError(
+            f"no duration for {security!r} on the {profile.name} convention at settlement "
+            f"{settlement.isoformat()}: {exc}"
+        ) from exc
 
     clean = _require_finite_number(clean_price_per_100, "clean_price_per_100")
     if not clean > 0:

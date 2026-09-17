@@ -689,6 +689,50 @@ def remaining_coupon_dates(
     )
 
 
+def require_two_remaining_coupons(
+    settlement_date: date,
+    maturity_date: date,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
+) -> None:
+    """Raise unless more than one coupon remains after ``settlement_date``.
+
+    The street convention discounts a single remaining coupon with simple
+    interest, which this module does not implement, so the pricing paths
+    refuse that state rather than reporting a compounded approximation of it.
+
+    The condition is **date-only**: given the dates and the schedule it is
+    decided without a price or a yield. Named so a caller can ask it before
+    acquiring market data -- the Workbench's readiness route does, through
+    the duration producer -- rather than discovering it from inside a
+    priced call (Codex review, PR #215). The two pricing paths below call
+    this, so there is one rule and one wording.
+    """
+
+    frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
+    if frame is not None:
+        if frame.later_coupons:
+            return
+    elif (
+        len(
+            remaining_coupon_dates(
+                settlement_date, maturity_date, coupons_per_year=coupons_per_year
+            )
+        )
+        >= 2
+    ):
+        return
+    raise TreasuryFuturesYieldError(
+            f"settlement {settlement_date.isoformat()} is inside the CTD's final coupon "
+            f"period (maturity {maturity_date.isoformat()}). The "
+            f"{_street_convention_bond_phrase(coupons_per_year)} street "
+            "convention discounts a single remaining coupon with simple interest, which "
+            "this module does not implement, so no yield is reported rather than a "
+            "compounded approximation of one."
+    )
+
+
 def accrued_interest_per_100(
     settlement_date: date,
     maturity_date: date,
@@ -756,15 +800,9 @@ def clean_price_from_yield(
     coupon_dates = remaining_coupon_dates(
         settlement_date, maturity_date, coupons_per_year=coupons_per_year
     )
-    if len(coupon_dates) < 2:
-        raise TreasuryFuturesYieldError(
-            f"settlement {settlement_date.isoformat()} is inside the CTD's final coupon "
-            f"period (maturity {maturity_date.isoformat()}). The "
-            f"{_street_convention_bond_phrase(coupons_per_year)} street "
-            "convention discounts a single remaining coupon with simple interest, which "
-            "this module does not implement, so no yield is reported rather than a "
-            "compounded approximation of one."
-        )
+    require_two_remaining_coupons(
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    )
 
     period_yield = (yield_percent / 100.0) / coupons_per_year
     if period_yield <= -1.0:
@@ -808,15 +846,15 @@ def _clean_price_first_coupon_frame(
     interest it does not implement.
     """
 
-    if not frame.later_coupons:
-        raise TreasuryFuturesYieldError(
-            f"settlement {settlement_date.isoformat()} is inside the CTD's final coupon "
-            f"period (maturity {maturity_date.isoformat()}). The "
-            f"{_street_convention_bond_phrase(coupons_per_year)} street "
-            "convention discounts a single remaining coupon with simple interest, which "
-            "this module does not implement, so no yield is reported rather than a "
-            "compounded approximation of one."
-        )
+    # The frame's own schedule, which is what it was built from: this path is
+    # reached only when `_first_coupon_frame` returned one for exactly these
+    # two dates, so the guard re-derives the same frame it is standing in.
+    require_two_remaining_coupons(
+        settlement_date,
+        maturity_date,
+        coupons_per_year=coupons_per_year,
+        schedule=IrregularFirstCoupon(frame.accrual_start, frame.first_coupon),
+    )
 
     period_yield = (yield_percent / 100.0) / coupons_per_year
     if period_yield <= -1.0:

@@ -1181,8 +1181,19 @@ def test_readiness_refuses_a_query_the_chain_could_never_answer(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("maturity", "last_coupon", "expected"),
+    [
+        # Settlement at or after maturity: a matured bond.
+        ("2026-07-02", "2026-01-02", "maturity"),
+        # Settlement before maturity but inside the final coupon period --
+        # decided by the dates alone, and reached only from inside the
+        # repricing legs before `6f46d8c`'s successor (Codex review, PR #215).
+        ("2026-12-15", "2026-06-15", "final coupon period"),
+    ],
+)
 def test_readiness_refuses_a_bond_whose_duration_has_no_date_window(
-    server_url, monkeypatch
+    server_url, monkeypatch, maturity, last_coupon, expected
 ) -> None:
     """A matured bond is matured before any Yield series is fetched.
 
@@ -1197,16 +1208,16 @@ def test_readiness_refuses_a_bond_whose_duration_has_no_date_window(
     _no_live_curve(monkeypatch)
     case = _historical_case()
     record = case["bond_reference_data_universe"][0]
-    # t0 is 2026-07-01, so the UST spot roll lands on or after this maturity.
-    record["maturity_date"] = "2026-07-02"
-    record["last_coupon_date"] = "2026-01-02"
+    # t0 is 2026-07-01, so the UST spot roll decides both states.
+    record["maturity_date"] = maturity
+    record["last_coupon_date"] = last_coupon
 
     ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
     price_status, _priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
 
     assert ready_status == 200
     assert ready["ready"] is False
-    assert "maturity" in ready["error"]
+    assert expected in ready["error"]
     assert price_status == 400
     # And neither route spent a Bloomberg request on a bond that has no
     # duration to take.
