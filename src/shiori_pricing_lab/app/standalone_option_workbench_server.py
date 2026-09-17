@@ -367,11 +367,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
-    HISTORICAL_YIELD_VOL_SOURCE,
-    HistoricalVolSourceUnavailableError,
     case_declares_historical_vol_source,
-    require_historical_vol_query_names_this_ticket,
     resolve_historical_equivalent_price_vol,
+    validate_historical_source_offline_preconditions,
 )
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_json,
@@ -463,9 +461,6 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     UST_CONVENTION_PROFILE,
     convention_profile_candidates,
     get_convention_profile,
-)
-from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
-    SUPPORTED_DURATION_CONVENTION_PROFILES,
 )
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     EFFECTIVE_FORWARD_SOURCES,
@@ -1542,12 +1537,12 @@ def validate_deterministic_historical_vol_inputs(
 ) -> None:
     """Refuse a Historical-source case whose offline preconditions are missing.
 
-    Runs for a ``HISTORICAL_YIELD_VOL_MO`` case only, and checks only what is
-    knowable without Bloomberg and without a clock: that the case states a
-    Historical Yield query, that the query names this ticket's own bond, and
-    that a convention profile has been selected for the duration. Every
-    outcome that depends on real data -- the window, the unit, the duration
-    itself, the conversion -- stays at Price time, against the real series.
+    Runs for a ``HISTORICAL_YIELD_VOL_MO`` case only, and delegates to the
+    resolver's own offline prefix
+    (:func:`validate_historical_source_offline_preconditions`) rather than
+    keeping a second list of the same questions. Every outcome that depends
+    on real data -- the observations, the window's contents, the statistic,
+    the conversion -- stays at Price time, against the real series.
 
     Called by the readiness route and by every pricing route, before any
     Bloomberg call, so an input this run could never price is refused for its
@@ -1555,62 +1550,24 @@ def validate_deterministic_historical_vol_inputs(
     same ordering :func:`validate_deterministic_forward_inputs` keeps.
     """
 
-    if not case_declares_historical_vol_source(case):
+    if not isinstance(case, dict) or not case_declares_historical_vol_source(case):
         return
-    require_historical_vol_query_names_this_ticket(case)
-    convention_profile = case.get("convention_profile")
-    if not isinstance(convention_profile, str) or not convention_profile.strip():
-        raise HistoricalVolSourceUnavailableError(
-            "select a convention profile before pricing from the "
-            f"{HISTORICAL_YIELD_VOL_SOURCE} source -- the current-time duration it "
-            "converts through is calculated on that market's own conventions, and "
-            "Shiori never falls back to a default one"
-        )
-    # Present is not the same as supported, and there are two gates, not one:
-    # `get_convention_profile` refuses a name outside the profile registry,
-    # and the duration producer then refuses a registered profile that has no
-    # approved duration convention in this slice. `US_CORPORATE` is registered
-    # and not duration-supported, so checking only the first left readiness
-    # enabling a run that fails after the Yield series has been fetched (Codex
-    # review, PR #215). Both are the producers' own rules, called and read
-    # rather than restated.
-    profile = get_convention_profile(convention_profile)
-    if profile.name not in SUPPORTED_DURATION_CONVENTION_PROFILES:
-        raise HistoricalVolSourceUnavailableError(
-            f"convention profile {profile.name!r} has no approved duration convention in "
-            f"this slice (supported: {SUPPORTED_DURATION_CONVENTION_PROFILES!r}), so the "
-            f"{HISTORICAL_YIELD_VOL_SOURCE} source cannot convert through a current-time "
-            "duration for this ticket"
-        )
-    # The third offline precondition, and the one the request builder does not
-    # reach: in Trader-Forward-Override mode nothing else in the case needs the
-    # spot clean price, so a yield-only quote parses and prices -- until this
-    # source's duration asks for the price it differentiates, and refuses.
-    # Exactly the reasoning, and the same check, as
-    # :func:`require_usable_spot_clean_price_for_derived_forward` above (Codex
-    # review, PR #215).
-    #
-    # And, for the same reason that check is skipped on a refresh:
-    # ``replacement_quote_side`` says the carried quote is superseded. The
-    # derivation runs on the quote this route is about to acquire, so a
-    # yield-only one on the way *in* must not block the very refresh that
-    # would supply a usable price. Whether the replacement carries one is not
-    # knowable until Bloomberg answers, and the derivation reports that with
-    # its own reason if it does not.
-    if replacement_quote_side is not None:
-        return
-    bond_quote = case.get("bond_quote")
-    if not isinstance(bond_quote, dict):
-        # The envelope parser and the typed constructors own this.
-        return
-    clean_price = bond_quote.get("clean_price_per_100")
-    if not is_usable_clean_price_per_100(clean_price):
-        raise HistoricalVolSourceUnavailableError(
-            "bond_quote.clean_price_per_100 must be a finite, strictly positive price "
-            f"(got {clean_price!r}) -- the {HISTORICAL_YIELD_VOL_SOURCE} source converts "
-            "through a current-time duration taken at this ticket's own spot price, and "
-            "a yield-only quote states none to differentiate"
-        )
+    # One call, not a list of questions. Every offline precondition this
+    # source has -- the query's own shape and unit, that it names this
+    # ticket's bond, the reference record, the spot price, the convention
+    # profile, and the whole duration prologue behind it -- is established by
+    # the resolver's own prefix, so readiness cannot answer "ready" for
+    # something Price refuses, and inherits whatever is added there later.
+    # Seven findings in this PR were exactly that disagreement, each one a
+    # precondition enumerated by hand and missed (Codex review, PR #215).
+    validate_historical_source_offline_preconditions(
+        case,
+        standalone_option_case_price_basis(case),
+        # `POST /api/case/bloomberg` states the carried quote is superseded,
+        # so its price is not judged -- the same reasoning, and the same
+        # caller-supplied fact, as the Forward preflight above.
+        quote_superseded=replacement_quote_side is not None,
+    )
 
 
 def _require_valid_forward_quote_side(case: object) -> TreasuryFTPQuoteSide | None:

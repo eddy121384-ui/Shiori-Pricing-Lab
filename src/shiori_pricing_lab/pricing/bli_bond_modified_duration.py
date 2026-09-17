@@ -99,6 +99,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from datetime import date, datetime
+from typing import NamedTuple
 
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     _parse_offset_aware_datetime,
@@ -409,7 +410,19 @@ def spot_settlement_date(
     )
 
 
-def calculate_bond_modified_duration(
+class BLIBondDurationInputs(NamedTuple):
+    """The coerced inputs :func:`calculate_bond_modified_duration` computes from."""
+
+    basis: BondOptionPriceBasis
+    profile: BLIConventionProfile
+    coupons_per_year: int
+    settlement: date
+    maturity: date
+    clean: float
+    coupon: float
+
+
+def validate_bond_modified_duration_inputs(
     *,
     security: str,
     convention_profile: str,
@@ -420,63 +433,20 @@ def calculate_bond_modified_duration(
     pricing_timestamp: str,
     calculated_at: str,
     schedule: IrregularFirstCoupon | None = None,
-) -> BLIBondModifiedDuration:
-    """Return ``D_B = -(1 / P_basis) x dP/dY`` for one bond at ``settlement_date``.
+) -> BLIBondDurationInputs:
+    """Coerce this duration's inputs, or raise ``BLIBondDurationError``.
 
-    ``price_basis`` is required and is never defaulted here: ``CLEAN`` divides
-    the shared derivative by ``P_clean``, ``DIRTY`` by ``P_clean + AI(tS)``.
-    Configuration and the later Workbench selector may default to ``DIRTY``,
-    but a default buried inside a pure calculation is how a mixed-basis result
-    gets produced without anyone choosing it.
+    Every refusal :func:`calculate_bond_modified_duration` makes *before* it
+    prices anything -- the price basis, the profile and its duration support,
+    the settlement roll, the settlement-before-maturity rule, the schedule's
+    shape, the price and the coupon -- in one named function, so a caller
+    that needs to know whether a duration could ever be taken can ask without
+    market data, and inherits any refusal added here later.
 
-    ``clean_price_per_100`` is the market state observed at
-    ``pricing_timestamp`` (``t0``).
-
-    **``tS`` is derived, never supplied** (Codex review, PR #212). The bond's
-    current cash-bond spot settlement is ``t0`` rolled forward by the
-    profile's own ``settlement_business_days`` on the profile's own reviewed
-    calendar -- so it is computed here rather than taken as an argument.
-    Accepting it let a caller pass any pre-maturity date while the result and
-    the published audit went on calling it the current spot settlement: the
-    canonical fixture on the previous head passed a **Sunday**, and an
-    incorrect settlement moves the accrued interest, the yield solve, the
-    duration and the published volatility together, plausibly. There is no
-    longer an argument to get wrong. :func:`spot_settlement_date` remains
-    public for a caller that needs to know ``tS`` in advance.
-
-    ``calculated_at`` is a required argument rather than a clock reading. No
-    module under ``shiori_pricing_lab/pricing/`` may read the system clock --
-    ``tests/test_pricing_engine.py`` enforces that directly over the
-    package's source, scanning for the wall-clock call forms -- because a
-    pricing result that silently depends on when it ran is not reproducible.
-    The caller that owns the run supplies its timestamp, the same way
-    ``time_to_expiry`` reaches Black-76 as an already-resolved number.
-
-    ``schedule`` is passed through to the reusable price<->yield primitive
-    unchanged, for a bond still inside an irregular first coupon period. It
-    is not interpreted here, but it *is* applied to **every** leg that
-    depends on it -- the accrued interest as well as the yield solve and both
-    bumped repricings -- and its two dates are recorded on the result, so a
-    stored duration says which cashflows produced it.
-
-    The five steps, each recorded on the result:
-
-    1. ``base_yield = yield_from_clean_price(clean, tS, ...)``
-    2. bump that yield by +/- 1 bp
-    3. reprice clean at both bumped yields
-    4. ``dP/dY`` = central difference, per **unit decimal** yield
-    5. divide by ``P_basis`` -- the price state ``price_basis`` names -- and
-       negate
-
-    Steps 1-4 are identical on both bases; only step 5 differs.
-
-    Raises :class:`BLIBondDurationError` for every refusal: a missing, blank
-    or unknown price basis, an unsupported or unregistered convention
-    profile, a non-finite or non-positive price, a non-positive basis price,
-    a settlement date at or after maturity, a
-    settlement inside the final coupon period (the reusable primitive's own
-    refusal, re-raised on this module's error type), or any intermediate that
-    cannot be represented as a finite number.
+    Extracted for the Workbench's readiness route, which had been
+    enumerating a few of these by hand and answering "ready" for the rest
+    (Codex review, PR #215). Nothing is restated: this *is* the producer's
+    own prologue, and the producer calls it.
     """
 
     if not isinstance(security, str) or not security.strip():
@@ -593,6 +563,100 @@ def calculate_bond_modified_duration(
         raise BLIBondDurationError(
             f"coupon_percent must be non-negative, got {coupon!r} for {security!r}"
         )
+    return BLIBondDurationInputs(
+        basis=basis,
+        profile=profile,
+        coupons_per_year=coupons_per_year,
+        settlement=settlement,
+        maturity=maturity,
+        clean=clean,
+        coupon=coupon,
+    )
+
+
+def calculate_bond_modified_duration(
+    *,
+    security: str,
+    convention_profile: str,
+    price_basis: BondOptionPriceBasis | str,
+    clean_price_per_100: float,
+    maturity_date: date,
+    coupon_percent: float,
+    pricing_timestamp: str,
+    calculated_at: str,
+    schedule: IrregularFirstCoupon | None = None,
+) -> BLIBondModifiedDuration:
+    """Return ``D_B = -(1 / P_basis) x dP/dY`` for one bond at ``settlement_date``.
+
+    ``price_basis`` is required and is never defaulted here: ``CLEAN`` divides
+    the shared derivative by ``P_clean``, ``DIRTY`` by ``P_clean + AI(tS)``.
+    Configuration and the later Workbench selector may default to ``DIRTY``,
+    but a default buried inside a pure calculation is how a mixed-basis result
+    gets produced without anyone choosing it.
+
+    ``clean_price_per_100`` is the market state observed at
+    ``pricing_timestamp`` (``t0``).
+
+    **``tS`` is derived, never supplied** (Codex review, PR #212). The bond's
+    current cash-bond spot settlement is ``t0`` rolled forward by the
+    profile's own ``settlement_business_days`` on the profile's own reviewed
+    calendar -- so it is computed here rather than taken as an argument.
+    Accepting it let a caller pass any pre-maturity date while the result and
+    the published audit went on calling it the current spot settlement: the
+    canonical fixture on the previous head passed a **Sunday**, and an
+    incorrect settlement moves the accrued interest, the yield solve, the
+    duration and the published volatility together, plausibly. There is no
+    longer an argument to get wrong. :func:`spot_settlement_date` remains
+    public for a caller that needs to know ``tS`` in advance.
+
+    ``calculated_at`` is a required argument rather than a clock reading. No
+    module under ``shiori_pricing_lab/pricing/`` may read the system clock --
+    ``tests/test_pricing_engine.py`` enforces that directly over the
+    package's source, scanning for the wall-clock call forms -- because a
+    pricing result that silently depends on when it ran is not reproducible.
+    The caller that owns the run supplies its timestamp, the same way
+    ``time_to_expiry`` reaches Black-76 as an already-resolved number.
+
+    ``schedule`` is passed through to the reusable price<->yield primitive
+    unchanged, for a bond still inside an irregular first coupon period. It
+    is not interpreted here, but it *is* applied to **every** leg that
+    depends on it -- the accrued interest as well as the yield solve and both
+    bumped repricings -- and its two dates are recorded on the result, so a
+    stored duration says which cashflows produced it.
+
+    The five steps, each recorded on the result:
+
+    1. ``base_yield = yield_from_clean_price(clean, tS, ...)``
+    2. bump that yield by +/- 1 bp
+    3. reprice clean at both bumped yields
+    4. ``dP/dY`` = central difference, per **unit decimal** yield
+    5. divide by ``P_basis`` -- the price state ``price_basis`` names -- and
+       negate
+
+    Steps 1-4 are identical on both bases; only step 5 differs.
+
+    Raises :class:`BLIBondDurationError` for every refusal: a missing, blank
+    or unknown price basis, an unsupported or unregistered convention
+    profile, a non-finite or non-positive price, a non-positive basis price,
+    a settlement date at or after maturity, a
+    settlement inside the final coupon period (the reusable primitive's own
+    refusal, re-raised on this module's error type), or any intermediate that
+    cannot be represented as a finite number.
+    """
+
+    basis, profile, coupons_per_year, settlement, maturity, clean, coupon = (
+        validate_bond_modified_duration_inputs(
+            security=security,
+            convention_profile=convention_profile,
+            price_basis=price_basis,
+            clean_price_per_100=clean_price_per_100,
+            maturity_date=maturity_date,
+            coupon_percent=coupon_percent,
+            pricing_timestamp=pricing_timestamp,
+            calculated_at=calculated_at,
+            schedule=schedule,
+        )
+    )
 
     # Every call into the reusable primitive is wrapped once, here: this
     # module promises one error type, and the primitive's own

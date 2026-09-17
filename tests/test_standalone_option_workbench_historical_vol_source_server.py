@@ -1181,6 +1181,38 @@ def test_readiness_refuses_a_query_the_chain_could_never_answer(
     assert calls == []
 
 
+def test_readiness_refuses_a_bond_whose_duration_has_no_date_window(
+    server_url, monkeypatch
+) -> None:
+    """A matured bond is matured before any Yield series is fetched.
+
+    The settlement roll, the settlement-before-maturity rule and the
+    schedule's shape are all knowable offline, and all refused only inside
+    the duration producer -- after the Bloomberg request had been spent.
+    Readiness runs the producer's own prologue now, rather than the two gates
+    I had enumerated by hand (Codex review, PR #215).
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    record = case["bond_reference_data_universe"][0]
+    # t0 is 2026-07-01, so the UST spot roll lands on or after this maturity.
+    record["maturity_date"] = "2026-07-02"
+    record["last_coupon_date"] = "2026-01-02"
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, _priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is False
+    assert "maturity" in ready["error"]
+    assert price_status == 400
+    # And neither route spent a Bloomberg request on a bond that has no
+    # duration to take.
+    assert calls == []
+
+
 def test_readiness_reports_a_historical_cases_own_offline_precondition(
     server_url, monkeypatch
 ) -> None:

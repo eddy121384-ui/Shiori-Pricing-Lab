@@ -70,6 +70,7 @@ end to end -- never as Bloomberg implied vol and never as VCUB.
 from __future__ import annotations
 
 from datetime import date
+from typing import NamedTuple
 
 from shiori_pricing_lab.data.bli_snapshot import BLIBondQuote
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
@@ -93,6 +94,7 @@ from shiori_pricing_lab.data.historical_yield_volatility import (
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
     BLIBondDurationError,
     calculate_bond_modified_duration,
+    validate_bond_modified_duration_inputs,
 )
 from shiori_pricing_lab.pricing.bli_bond_option_price_basis import BondOptionPriceBasis
 from shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol import (
@@ -430,6 +432,105 @@ def _clean_price_per_100(case: dict, record: BLIStandaloneBondReferenceData) -> 
     return float(clean_price)
 
 
+class HistoricalSourceOfflinePreconditions(NamedTuple):
+    """Everything this source establishes before it asks Bloomberg anything."""
+
+    query: dict
+    bloomberg_identifier: str
+    record: BLIStandaloneBondReferenceData
+    clean_price: float
+    pricing_timestamp: object
+    convention_profile: str
+
+
+#: Never priced, never exported, and never able to change an outcome: the
+#: duration producer requires a non-blank ``calculated_at`` string, and the
+#: real one is the statistic's, which does not exist until the series has
+#: been acquired. Only the *shape* is checked against it here.
+_PRECONDITION_ONLY_CALCULATED_AT = "READINESS_PRECONDITION_CHECK_ONLY"
+#: Likewise for a run whose quote this route is about to replace: the
+#: duration's other gates -- the profile, the settlement roll, the
+#: settlement-before-maturity rule, the schedule -- do not depend on the
+#: price, and the replacement's own price is not knowable until Bloomberg
+#: answers.
+_PRECONDITION_ONLY_CLEAN_PRICE = 100.0
+
+
+def validate_historical_source_offline_preconditions(
+    case: dict,
+    price_basis: BondOptionPriceBasis,
+    *,
+    quote_superseded: bool = False,
+) -> HistoricalSourceOfflinePreconditions:
+    """Establish everything this source can know without Bloomberg.
+
+    This is the resolver's own offline prefix, named so the Workbench's
+    readiness route can run *it* rather than a hand-kept list of the same
+    questions. Seven review findings in this PR were readiness answering
+    "ready" for a case Price then refused, each one a precondition I had not
+    enumerated -- so readiness now inherits them instead of copying them, and
+    inherits whatever is added here later (Codex review, PR #215).
+
+    ``quote_superseded`` is what ``POST /api/case/bloomberg`` states: the
+    carried quote is about to be replaced, so its price is not judged and a
+    precondition-only stand-in stands in for the duration's price argument.
+    Every other gate still applies -- a matured bond is matured whichever
+    quote arrives.
+    """
+
+    query = historical_yield_vol_query(case)
+    bloomberg_identifier = _require_same_bond(case, query["bond_identifier"])
+    record = _resolved_reference_record(case)
+    clean_price = (
+        _PRECONDITION_ONLY_CLEAN_PRICE
+        if quote_superseded
+        else _clean_price_per_100(case, record)
+    )
+
+    pricing_timestamp = case.get("pricing_timestamp")
+    convention_profile = case.get("convention_profile")
+    if not isinstance(convention_profile, str) or not convention_profile.strip():
+        raise HistoricalVolSourceUnavailableError(
+            "select a convention profile before pricing from the "
+            f"{HISTORICAL_YIELD_VOL_SOURCE} source -- the current-time duration it "
+            "converts through is calculated on that market's own conventions, and "
+            "Shiori never falls back to a default one"
+        )
+
+    # The duration producer's own prologue, called rather than restated: the
+    # profile's duration support, the settlement roll off t0, the
+    # settlement-before-maturity rule and the schedule's shape are all
+    # knowable here, and all of them refuse deterministically -- but only
+    # after a Yield series has been fetched, if they are left until the
+    # producer runs.
+    try:
+        validate_bond_modified_duration_inputs(
+            security=record.isin,
+            convention_profile=convention_profile,
+            price_basis=price_basis,
+            clean_price_per_100=clean_price,
+            maturity_date=_require_iso_date(record.maturity_date, "maturity_date"),
+            coupon_percent=record.coupon * 100.0,
+            pricing_timestamp=pricing_timestamp,
+            calculated_at=_PRECONDITION_ONLY_CALCULATED_AT,
+            schedule=_coupon_schedule(record),
+        )
+    except BLIBondDurationError as exc:
+        raise HistoricalVolSourceUnavailableError(
+            f"no current-time duration for this ticket, so the {HISTORICAL_YIELD_VOL_SOURCE} "
+            f"source cannot produce a price volatility: {exc}"
+        ) from exc
+
+    return HistoricalSourceOfflinePreconditions(
+        query=query,
+        bloomberg_identifier=bloomberg_identifier,
+        record=record,
+        clean_price=clean_price,
+        pricing_timestamp=pricing_timestamp,
+        convention_profile=convention_profile,
+    )
+
+
 def resolve_historical_equivalent_price_vol(
     case: dict,
     price_basis: BondOptionPriceBasis,
@@ -453,18 +554,13 @@ def resolve_historical_equivalent_price_vol(
     downstream is reused.
     """
 
-    query = historical_yield_vol_query(case)
-    bloomberg_identifier = _require_same_bond(case, query["bond_identifier"])
-    record = _resolved_reference_record(case)
-    clean_price = _clean_price_per_100(case, record)
-
-    pricing_timestamp = case.get("pricing_timestamp")
-    convention_profile = case.get("convention_profile")
-    if not isinstance(convention_profile, str) or not convention_profile.strip():
-        raise HistoricalVolSourceUnavailableError(
-            "convention_profile must be selected before a current-time duration can be "
-            "calculated -- Shiori never falls back to a default market convention"
-        )
+    ready = validate_historical_source_offline_preconditions(case, price_basis)
+    query = ready.query
+    bloomberg_identifier = ready.bloomberg_identifier
+    record = ready.record
+    clean_price = ready.clean_price
+    pricing_timestamp = ready.pricing_timestamp
+    convention_profile = ready.convention_profile
 
     provenance_kwargs = {
         key: query[key] for key in _OPTIONAL_QUERY_KEYS if key in query
@@ -679,6 +775,7 @@ __all__ = [
     "VOLATILITY_KIND",
     "HistoricalVolSourceUnavailableError",
     "apply_historical_equivalent_price_vol_to_case",
+    "validate_historical_source_offline_preconditions",
     "case_declares_historical_vol_source",
     "historical_yield_vol_query",
     "require_historical_vol_query_names_this_ticket",
