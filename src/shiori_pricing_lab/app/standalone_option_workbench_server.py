@@ -464,6 +464,9 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     convention_profile_candidates,
     get_convention_profile,
 )
+from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+    SUPPORTED_DURATION_CONVENTION_PROFILES,
+)
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     EFFECTIVE_FORWARD_SOURCES,
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
@@ -1563,13 +1566,22 @@ def validate_deterministic_historical_vol_inputs(
             "converts through is calculated on that market's own conventions, and "
             "Shiori never falls back to a default one"
         )
-    # Present is not the same as supported: the duration producer resolves this
-    # through `get_convention_profile`, which refuses a name outside the
-    # approved set -- deterministically, and only after the Yield series has
-    # been fetched. Resolving it here with that same reader is what keeps
-    # readiness from spending a Bloomberg request on a run it already knows
-    # fails (Codex review, PR #215).
-    get_convention_profile(convention_profile)
+    # Present is not the same as supported, and there are two gates, not one:
+    # `get_convention_profile` refuses a name outside the profile registry,
+    # and the duration producer then refuses a registered profile that has no
+    # approved duration convention in this slice. `US_CORPORATE` is registered
+    # and not duration-supported, so checking only the first left readiness
+    # enabling a run that fails after the Yield series has been fetched (Codex
+    # review, PR #215). Both are the producers' own rules, called and read
+    # rather than restated.
+    profile = get_convention_profile(convention_profile)
+    if profile.name not in SUPPORTED_DURATION_CONVENTION_PROFILES:
+        raise HistoricalVolSourceUnavailableError(
+            f"convention profile {profile.name!r} has no approved duration convention in "
+            f"this slice (supported: {SUPPORTED_DURATION_CONVENTION_PROFILES!r}), so the "
+            f"{HISTORICAL_YIELD_VOL_SOURCE} source cannot convert through a current-time "
+            "duration for this ticket"
+        )
     # The third offline precondition, and the one the request builder does not
     # reach: in Trader-Forward-Override mode nothing else in the case needs the
     # spot clean price, so a yield-only quote parses and prices -- until this

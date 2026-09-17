@@ -1115,6 +1115,72 @@ def test_readiness_refuses_a_convention_profile_the_duration_cannot_resolve(
     assert calls == []
 
 
+def test_readiness_refuses_a_registered_profile_the_duration_does_not_support(
+    server_url, monkeypatch
+) -> None:
+    """Registered is not the same as duration-supported.
+
+    There are two gates, and readiness checked only the first:
+    ``US_CORPORATE`` resolves through ``get_convention_profile`` and is then
+    refused by the duration producer's own allowlist -- after the Yield
+    series has been fetched (Codex review, PR #215).
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case(convention_profile="US_CORPORATE")
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is False
+    assert "US_CORPORATE" in ready["error"]
+    assert price_status == 400
+    assert "US_CORPORATE" in priced["error"]
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("field_unit", "SYNTHETIC_TEST_NOT_A_UNIT", "SYNTHETIC_TEST_NOT_A_UNIT"),
+        ("field_unit", None, "unit"),
+        ("yield_field", "not a mnemonic!", "mnemonic"),
+        ("start_date", "2026-13-45", "start_date"),
+        ("end_date", "not-a-date", "end_date"),
+    ],
+)
+def test_readiness_refuses_a_query_the_chain_could_never_answer(
+    server_url, monkeypatch, field, value, expected
+) -> None:
+    """Non-blank is not the same as usable, and nothing supplies these later.
+
+    A malformed mnemonic or date range is refused by the #196 loader; an
+    absent or unapproved unit is refused by #197's normalization *after* the
+    Bloomberg request has been spent. Both are deterministic and offline, so
+    readiness answers them (Codex review, PR #215).
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY] = {
+        **case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY],
+        field: value,
+    }
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, _priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is False
+    assert expected in ready["error"]
+    # And Price agrees, without spending a Bloomberg request on it.
+    assert price_status == 400
+    assert calls == []
+
+
 def test_readiness_reports_a_historical_cases_own_offline_precondition(
     server_url, monkeypatch
 ) -> None:

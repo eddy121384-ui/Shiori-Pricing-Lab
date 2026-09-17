@@ -236,6 +236,44 @@ def _coerce_request_date(value: object, field_name: str) -> date:
     return _parse_iso_date(value, field_name)
 
 
+def validate_yield_history_request(
+    *,
+    identifier: object,
+    yield_field: object,
+    start_date: object,
+    end_date: object,
+    field_meaning: object = None,
+    field_unit: object = None,
+) -> tuple[str, str, date, date]:
+    """Coerce this request's caller inputs, or raise ``ValueError``.
+
+    Every refusal :func:`load_bloomberg_bond_yield_history` makes *before*
+    sending anything to Bloomberg, in one named function so a caller that
+    wants to know whether a request could ever succeed can ask without
+    opening a session -- which is what the Workbench's readiness route does,
+    rather than keeping a second copy of these rules that could drift from
+    these (Codex review, PR #215).
+
+    Returns the coerced ``(security, yield_field, start_date, end_date)``
+    this loader would use.
+    """
+
+    _require_non_blank(identifier, "identifier")
+    assert isinstance(identifier, str)
+    security = identifier.strip()
+    field = _validate_yield_field(yield_field)
+    start = _coerce_request_date(start_date, "start_date")
+    end = _coerce_request_date(end_date, "end_date")
+    if start > end:
+        raise ValueError(
+            f"start_date {start.isoformat()} must not be after end_date {end.isoformat()}"
+        )
+    for name, value in (("field_meaning", field_meaning), ("field_unit", field_unit)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{name} must be a non-blank string when supplied, got {value!r}")
+    return security, field, start, end
+
+
 def load_bloomberg_bond_yield_history(
     *,
     identifier: str,
@@ -267,18 +305,14 @@ def load_bloomberg_bond_yield_history(
     list.
     """
 
-    _require_non_blank(identifier, "identifier")
-    security = identifier.strip()
-    field = _validate_yield_field(yield_field)
-    start = _coerce_request_date(start_date, "start_date")
-    end = _coerce_request_date(end_date, "end_date")
-    if start > end:
-        raise ValueError(
-            f"start_date {start.isoformat()} must not be after end_date {end.isoformat()}"
-        )
-    for name, value in (("field_meaning", field_meaning), ("field_unit", field_unit)):
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ValueError(f"{name} must be a non-blank string when supplied, got {value!r}")
+    security, field, start, end = validate_yield_history_request(
+        identifier=identifier,
+        yield_field=yield_field,
+        start_date=start_date,
+        end_date=end_date,
+        field_meaning=field_meaning,
+        field_unit=field_unit,
+    )
 
     try:
         import blpapi

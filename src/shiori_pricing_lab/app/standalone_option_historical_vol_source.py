@@ -79,12 +79,15 @@ from shiori_pricing_lab.data.bli_standalone_option_request_builder import (
 from shiori_pricing_lab.data.bloomberg_bond_quote import parse_bond_identifier
 from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     load_bloomberg_bond_yield_history,
+    validate_yield_history_request,
 )
 from shiori_pricing_lab.data.historical_yield_volatility import (
     HISTORICAL_YIELD_VOL_MO_SOURCE,
     MIDDLE_OFFICE_6M_OBSERVATION_COUNT,
     PUBLISHED_VOLATILITY_UNIT,
+    HistoricalYieldVolUnavailableError,
     calculate_historical_yield_volatility,
+    decimal_annual_normalization_factor,
     validate_requested_observation_count,
 )
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
@@ -205,7 +208,43 @@ def historical_yield_vol_query(case: dict) -> dict:
         if value is not None:
             resolved[key] = value
     _require_window_ends_by_the_valuation_date(case, resolved["end_date"])
+    _require_a_question_the_chain_could_answer(resolved)
     return resolved
+
+
+def _require_a_question_the_chain_could_answer(resolved: dict) -> None:
+    """Refuse a query whose own shape makes the whole chain impossible.
+
+    Non-blank is not the same as usable, and none of this is supplied or
+    corrected by an acquisition: a malformed mnemonic or an inverted date
+    range is refused by the #196 loader, and a unit that is absent or outside
+    the approved vocabulary is refused by #197's normalization after the
+    Bloomberg request has already been spent. Both refusals are deterministic
+    and offline, so they belong here -- the same ordering rule the rest of
+    this module keeps, and the reason readiness could otherwise enable a run
+    guaranteed to fail (Codex review, PR #215).
+
+    Every rule is the producers' own: the loader's request validation and
+    #197's unit vocabulary, called rather than restated.
+    """
+
+    try:
+        validate_yield_history_request(
+            identifier=resolved["bond_identifier"],
+            yield_field=resolved["yield_field"],
+            start_date=resolved["start_date"],
+            end_date=resolved["end_date"],
+            field_unit=resolved.get("field_unit"),
+            field_meaning=resolved.get("field_meaning"),
+        )
+        decimal_annual_normalization_factor(resolved.get("field_unit"))
+    except HistoricalVolSourceUnavailableError:
+        raise
+    except (ValueError, HistoricalYieldVolUnavailableError) as exc:
+        raise HistoricalVolSourceUnavailableError(
+            f"the {HISTORICAL_YIELD_VOL_SOURCE} source cannot run this Historical Yield "
+            f"query: {exc}"
+        ) from exc
 
 
 def _require_window_ends_by_the_valuation_date(case: dict, end_date: str) -> None:
