@@ -30,7 +30,7 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,6 +38,7 @@ import pytest
 import shiori_pricing_lab.app.standalone_option_historical_vol_source as source_module
 import shiori_pricing_lab.app.standalone_option_workbench as workbench_module
 import shiori_pricing_lab.app.standalone_option_workbench_server as server_module
+import shiori_pricing_lab.data.historical_yield_volatility as statistic_module
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
@@ -899,6 +900,43 @@ def test_the_review_route_reports_the_real_reason_for_a_refusal(
     assert payload["error"].strip() != ""
 
 
+def test_the_derivation_is_stamped_after_the_series_it_converted(
+    server_url, monkeypatch
+) -> None:
+    """No exported lineage may claim a conversion older than its own inputs.
+
+    ``calculated_at`` used to be read from the clock by the caller, before the
+    Yield series was requested, so on any DAPI call taking measurable time the
+    duration and the conversion claimed a moment earlier than the acquisition
+    they were computed from. The statistic's own post-calculation timestamp is
+    stamped instead (Codex review, PR #215).
+    """
+
+    _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    # The #197 calculator's own clock, moved far enough from the live one that
+    # a timestamp read before the chain started cannot pass for it -- the two
+    # real reads are otherwise the same second, which is precisely why this
+    # defect survived a round of review.
+    calculated = "2030-01-02T03:04:05+00:00"
+    monkeypatch.setattr(
+        statistic_module,
+        "_calculation_now",
+        lambda: datetime.fromisoformat(calculated),
+    )
+
+    _status, payload = _post_json(
+        f"{server_url}{_REVIEW_ROUTE}", {"case": _historical_case()}
+    )
+    source = payload["historical_volatility_source"]
+
+    assert source["historical_yield_vol_calculated_at"] == calculated
+    # The conversion is stamped with that, not with a moment before the series
+    # it converted was ever requested.
+    assert source["calculated_at"] == calculated
+    assert source["historical_yield_vol_acquired_at"] <= source["calculated_at"]
+
+
 # --- Readiness answers the same question Price will --------------------------
 
 
@@ -914,6 +952,35 @@ def test_readiness_does_not_fail_a_historical_case_for_the_number_it_discards(
 
     assert status == 200
     assert payload == {"ready": True, "error": None}
+
+
+def test_readiness_ignores_a_stale_audit_the_derived_path_discards(
+    server_url, monkeypatch
+) -> None:
+    """A saved case's audit string must not decide whether Price is offered.
+
+    The derived path replaces ``volatility_input`` whole, audit included, so
+    an envelope carrying a blank one prices perfectly well. Readiness judged
+    that same string against the reviewed contract and answered "not ready",
+    leaving the browser with Price disabled for a case Price would handle --
+    the disagreement this stand-in exists to prevent (Codex review, PR #215).
+    """
+
+    _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    case["volatility_input"] = {
+        **case["volatility_input"],
+        "override_or_fallback_audit": "   ",
+    }
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, _priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready == {"ready": True, "error": None}
+    # And readiness agreed with Price, which is the point of the stand-in.
+    assert price_status == 200
 
 
 def test_readiness_reports_a_historical_cases_own_offline_precondition(

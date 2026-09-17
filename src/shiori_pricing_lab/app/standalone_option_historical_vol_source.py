@@ -394,8 +394,6 @@ def _clean_price_per_100(case: dict, record: BLIStandaloneBondReferenceData) -> 
 def resolve_historical_equivalent_price_vol(
     case: dict,
     price_basis: BondOptionPriceBasis,
-    *,
-    calculated_at: str,
 ) -> tuple[object, object, dict]:
     """Derive this case's Equivalent Price Vol and return it with its lineage.
 
@@ -405,9 +403,15 @@ def resolve_historical_equivalent_price_vol(
     flattening of them for the Workbench display, the priced-run display and
     the exported run -- it is read *from* those objects and computes nothing.
 
-    ``calculated_at`` is supplied by the caller rather than read from a
-    clock here, the same contract the duration producer states: it is stamped
-    on the duration and inherited by the conversion.
+    The duration and the conversion are stamped with the statistic's own
+    ``calculated_at`` -- read by the #197 calculator once its arithmetic is
+    finished, and therefore after the Yield series was acquired. A timestamp
+    taken before the chain starts, as this function previously accepted from
+    its callers, is earlier than the acquisition on any DAPI call that takes
+    measurable time, and an exported lineage claiming the conversion happened
+    before the series it converted is a chronology that cannot have occurred
+    (Codex review, PR #215). No clock is read here: the one already read
+    downstream is reused.
     """
 
     query = historical_yield_vol_query(case)
@@ -465,7 +469,7 @@ def resolve_historical_equivalent_price_vol(
             # conversion, at the one boundary between the two contracts.
             coupon_percent=record.coupon * 100.0,
             pricing_timestamp=pricing_timestamp,
-            calculated_at=calculated_at,
+            calculated_at=statistic.calculated_at,
             schedule=_coupon_schedule(record),
         )
     except BLIBondDurationError as exc:
@@ -476,7 +480,10 @@ def resolve_historical_equivalent_price_vol(
 
     try:
         conversion = historical_equivalent_price_vol(
-            statistic, duration, yield_history=history, calculated_at=calculated_at
+            statistic,
+            duration,
+            yield_history=history,
+            calculated_at=statistic.calculated_at,
         )
         published = historical_equivalent_price_vol_volatility_input(
             conversion, pricing_price_basis=price_basis
@@ -577,7 +584,7 @@ def _provenance(conversion, published, statistic, query: dict) -> dict:
 
 
 def apply_historical_equivalent_price_vol_to_case(
-    case: dict, price_basis: BondOptionPriceBasis, *, calculated_at: str
+    case: dict, price_basis: BondOptionPriceBasis
 ) -> tuple[dict, dict | None]:
     """Return ``(case priced with the derived volatility, provenance payload)``.
 
@@ -606,7 +613,7 @@ def apply_historical_equivalent_price_vol_to_case(
         return case, None
 
     _conversion, published, provenance = resolve_historical_equivalent_price_vol(
-        case, price_basis, calculated_at=calculated_at
+        case, price_basis
     )
     derived_case = {
         **case,

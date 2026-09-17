@@ -1470,6 +1470,12 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
 # Never Bloomberg-sourced, never returned to a caller, and never used to
 # price anything -- the same role as the two placeholders above.
 _VALIDATION_ONLY_PLACEHOLDER_VOLATILITY = 0.01
+# Never priced and never exported: the derived path writes its own audit over
+# this, and readiness only needs a value the reviewed contract accepts.
+_VALIDATION_ONLY_PLACEHOLDER_AUDIT = (
+    "Readiness stand-in only. The HISTORICAL_YIELD_VOL_MO derivation writes "
+    "its own audit over this on every priced run."
+)
 
 
 def _validation_only_volatility_input(case: object) -> dict | None:
@@ -1484,12 +1490,21 @@ def _validation_only_volatility_input(case: object) -> dict | None:
     readiness on it would answer "not ready" for a case Price handles
     perfectly well.
 
-    So the three fields the derived path rewrites are substituted -- the
-    number, the ``volatility_basis`` (always ``EQUIVALENT_PRICE_VOL`` for
-    this source) and the ``status`` it always writes ``ACTIVE`` -- and the
-    ``source_system`` that *selects* the mode is preserved untouched. A
-    usable stored number is kept rather than replaced, because validating a
+    So every field the derived path rewrites is substituted -- the number,
+    the ``volatility_basis`` (always ``EQUIVALENT_PRICE_VOL`` for this
+    source), the ``status`` it always writes ``ACTIVE``, and the
+    ``override_or_fallback_audit`` the publication always writes itself --
+    and the ``source_system`` that *selects* the mode is preserved untouched.
+    A usable stored number is kept rather than replaced, because validating a
     real value is better evidence than validating a stand-in.
+
+    The audit was previously preserved from the envelope, which made
+    readiness disagree with Price: a saved or hand-built case carrying a
+    blank audit was refused here by ``BLIVolatilityInput`` and left with
+    Price disabled, while the derived path discards that audit with the rest
+    of the input and prices the same case successfully (Codex review,
+    PR #215). A stand-in is judged on the fields a run actually uses, and
+    this is not one of them.
 
     Returns ``None`` for every other case, leaving a trader-entered
     ``PRICE_VOL`` (or any other source) validated exactly as itself.
@@ -1510,7 +1525,7 @@ def _validation_only_volatility_input(case: object) -> dict | None:
         "volatility_basis": "EQUIVALENT_PRICE_VOL",
         "source_system": volatility_input.get("source_system"),
         "status": "ACTIVE",
-        "override_or_fallback_audit": volatility_input.get("override_or_fallback_audit"),
+        "override_or_fallback_audit": _VALIDATION_ONLY_PLACEHOLDER_AUDIT,
     }
 
 
@@ -2559,9 +2574,7 @@ def historical_equivalent_price_vol_preview(case: dict) -> dict:
         raise ValueError("case must be a JSON object")
     price_basis = standalone_option_case_price_basis(case)
     _conversion, _published, provenance = resolve_historical_equivalent_price_vol(
-        case,
-        price_basis,
-        calculated_at=_shiori_acquisition_now().isoformat(timespec="seconds"),
+        case, price_basis
     )
     return {"historical_volatility_source": provenance}
 

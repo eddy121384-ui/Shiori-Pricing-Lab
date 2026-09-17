@@ -616,18 +616,16 @@ def price_standalone_option_case(
     # the request is built from it, so there is no interval in which a caller
     # holds it (Codex review, PR #215, rounds 1-3).
     #
-    # The branch is explicit rather than left to the transform's own no-op,
-    # because the *clock read* has to be inside it too: manual mode must never
-    # reach the live acquisition clock, which is an existing invariant of this
-    # module (``test_manual_mode_never_calls_bloomberg_or_the_live_clock``) and
-    # is exactly the promise "a case that does not name this source is
-    # untouched" has to keep.
+    # The branch is explicit rather than left to the transform's own no-op, so
+    # that a case outside this source reaches neither Bloomberg nor any clock
+    # -- an existing invariant of this module
+    # (``test_manual_mode_never_calls_bloomberg_or_the_live_clock``) and
+    # exactly the promise "a case that does not name this source is untouched"
+    # has to keep. The derivation no longer takes a timestamp from here at
+    # all: it is stamped with the one the #197 calculator reads after the
+    # series is acquired (Codex review, PR #215).
     priced_case, historical_volatility_source = (
-        apply_historical_equivalent_price_vol_to_case(
-            envelope,
-            price_basis,
-            calculated_at=_format_acquisition_timestamp(_shiori_acquisition_now()),
-        )
+        apply_historical_equivalent_price_vol_to_case(envelope, price_basis)
         if case_declares_historical_vol_source(envelope)
         else (envelope, None)
     )
