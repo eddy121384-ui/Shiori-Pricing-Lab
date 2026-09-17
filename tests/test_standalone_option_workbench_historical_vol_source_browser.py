@@ -280,6 +280,10 @@ def _derive(page) -> None:
     page.wait_for_function("() => window.__shioriTestHistoricalVolResult() !== null")
 
 
+def _override_provenance(page) -> list[dict]:
+    return page.evaluate("() => window.__shioriTestOverrideProvenance()")
+
+
 def _is_actually_hidden(page, element_id: str) -> bool:
     return page.eval_on_selector(f"#{element_id}", "el => getComputedStyle(el).display") == "none"
 
@@ -627,3 +631,66 @@ def test_a_late_answer_for_withdrawn_inputs_never_repaints(server_url, page) -> 
 
     assert page.evaluate("() => window.__shioriTestHistoricalVolResult()") is None
     assert page.evaluate("() => window.__shioriTestHistoricalVolAdoptedText()") is None
+
+
+# --- The provenance line names the source that produced the number -----------
+
+
+def test_an_adopted_historical_vol_is_never_stamped_as_a_trader_entry(
+    server_url, page
+) -> None:
+    # Workstation UAT found the Volatility row's provenance line still reading
+    # MANUAL_TRADER_ENTRY / TRADER_OVERRIDE under an adopted sigma_P. The
+    # number is Shiori's own derivation and the field is not typable in this
+    # mode, so that line described a trader entry that never happened.
+    page.goto(f"{server_url}/")
+    _route_derivation(page)
+    _load_bond(page)
+    _select_historical_source(page)
+    _fill_query(page)
+    _derive(page)
+    page.click("#hev-use-btn")
+    page.wait_for_function("() => window.__shioriTestHistoricalVolAdoptedText() !== null")
+
+    provenance = page.inner_text("#vol-provenance")
+    assert "MANUAL_TRADER_ENTRY" not in provenance
+    assert "TRADER_OVERRIDE" not in provenance
+    # It names the source, the basis it published and the duration it used --
+    # every token the server's own payload carries.
+    assert _HISTORICAL_SOURCE in provenance
+    assert "EQUIVALENT_PRICE_VOL" in provenance
+    assert "MODIFIED_DURATION_DIRTY_PRICE" in provenance
+    assert "DIRTY" in provenance
+
+    # And the same claim is absent from the override log and the exported
+    # records behind it: a derivation is not an override anywhere.
+    logged = {record["path"] for record in _override_provenance(page)}
+    assert "volatility_input.volatility" not in logged
+    assert "volatility_input.volatility_basis" not in logged
+    assert "Price Vol" not in page.inner_text("#override-provenance-log")
+
+
+def test_switching_back_to_the_direct_source_restores_the_manual_entry_provenance(
+    server_url, page
+) -> None:
+    # The fix is scoped to the derived mode: a hand-typed volatility is a
+    # trader entry and still says so.
+    page.goto(f"{server_url}/")
+    _route_derivation(page)
+    _load_bond(page)
+    _select_historical_source(page)
+    _fill_query(page)
+    _derive(page)
+    page.click("#hev-use-btn")
+    page.wait_for_function("() => window.__shioriTestHistoricalVolAdoptedText() !== null")
+
+    page.select_option("#vol-source-select", "DIRECT_PRICE_VOL")
+    page.fill("#volatility-input", "0.2153")
+    page.wait_for_timeout(150)
+
+    provenance = page.inner_text("#vol-provenance")
+    assert "MANUAL_TRADER_ENTRY · TRADER_OVERRIDE" in provenance
+    assert _HISTORICAL_SOURCE not in provenance
+    logged = {record["path"] for record in _override_provenance(page)}
+    assert "volatility_input.volatility" in logged
+    assert "volatility_input.volatility_basis" in logged

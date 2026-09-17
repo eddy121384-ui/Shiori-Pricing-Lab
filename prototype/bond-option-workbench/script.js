@@ -2348,13 +2348,24 @@
       path: "volatility_input.volatility",
       label: "Price Vol (σ)",
       reason: "Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned BAD_FLD.",
-      read: (draft) => draft.volatility_input.volatility,
+      // Issue #214: an adopted Historical sigma_P is Shiori's own derivation,
+      // not a number the trader had to supply -- the field is not even
+      // typable in that mode. Stamping it MANUAL_TRADER_ENTRY /
+      // TRADER_OVERRIDE would describe a derivation as hand-typed, on screen
+      // and in the exported run alike, exactly the reasoning the derived
+      // Forward above already follows.
+      read: (draft) =>
+        historicalVolAdoptedForPricing() ? null : draft.volatility_input.volatility,
     },
     {
       path: "volatility_input.volatility_basis",
       label: "Volatility Basis",
       reason: "Chosen by the trader; no sourced basis exists to confirm it against.",
-      read: (draft) => draft.volatility_input.volatility_basis,
+      // The same derivation, so the same reasoning: in Historical mode the
+      // basis is the server's own EQUIVALENT_PRICE_VOL and the control is
+      // disabled, so it is not the trader's choice either.
+      read: (draft) =>
+        historicalVolAdoptedForPricing() ? null : draft.volatility_input.volatility_basis,
     },
     {
       path: "curve_points",
@@ -2514,7 +2525,14 @@
       : "Provenance: SHIORI_DERIVED_S490 — derived by Shiori from the live Bloomberg " +
         "spot quote and a live Curve #490 / S490 acquisition; see the derivation trace " +
         "in the Shiori Derived Forward section above.";
-    els.volProvenance.textContent = stamp("volatility_input.volatility");
+    // Issue #214, found in workstation UAT: an adopted Historical sigma_P is
+    // Shiori's own derivation, so this line states that source and points at
+    // the section carrying its trace -- exactly as the derived Forward above
+    // -- rather than the manual-entry stamp, which claimed the trader typed a
+    // number this mode does not let them type. DIRECT_PRICE_VOL is unchanged.
+    els.volProvenance.textContent = historicalVolAdoptedForPricing()
+      ? historicalVolProvenanceLine()
+      : stamp("volatility_input.volatility");
     els.discountingProvenance.textContent = stamp("curve_points");
   }
 
@@ -4249,6 +4267,32 @@
 
   function historicalVolSourceSelected() {
     return els.volSource.value === HISTORICAL_VOL_SOURCE;
+  }
+
+  // The one state the provenance line and the override log both ask about:
+  // this run's volatility is a Shiori derivation the trader has adopted. The
+  // three fields move together -- an adoption sets the text beside the result
+  // it came from, and any withdrawal clears both -- so requiring the result
+  // here costs nothing and keeps the line below free of its own fallback.
+  function historicalVolAdoptedForPricing() {
+    return (
+      historicalVolSourceSelected() &&
+      historicalVolAdoptedText !== null &&
+      historicalVolResult !== null
+    );
+  }
+
+  // The derivation's provenance in the server's own words. Every token is a
+  // string the route sent; the page states no source, basis or time of its
+  // own, and computes nothing.
+  function historicalVolProvenanceLine() {
+    const result = historicalVolResult;
+    return (
+      `Provenance: ${result.vol_source} · ${result.volatility_basis} — derived by ` +
+      `Shiori from the Historical Yield Vol and the current-time ${result.duration_type} ` +
+      `on the ${result.price_basis} price basis, calculated ${result.calculated_at}; see ` +
+      "the derivation trace in the Historical Yield Vol section above."
+    );
   }
 
   function selectedPriceBasis() {
