@@ -694,3 +694,63 @@ def test_switching_back_to_the_direct_source_restores_the_manual_entry_provenanc
     logged = {record["path"] for record in _override_provenance(page)}
     assert "volatility_input.volatility" in logged
     assert "volatility_input.volatility_basis" in logged
+
+
+def test_recalculating_withdraws_the_value_adopted_from_the_previous_derivation(
+    server_url, page
+) -> None:
+    # Calculate stays available after an adoption, and pressing it again moves
+    # nothing this panel watches -- so the withdrawal fence does not fire. The
+    # adopted number has to be withdrawn by the recalculation itself, or the
+    # field keeps it while the panel shows a result it did not come from.
+    page.goto(f"{server_url}/")
+    _route_derivation(page)
+    _load_bond(page)
+    _select_historical_source(page)
+    _fill_query(page)
+    _derive(page)
+    page.click("#hev-use-btn")
+    page.wait_for_function("() => window.__shioriTestHistoricalVolAdoptedText() !== null")
+
+    second = 0.0505050505
+    payload = _derivation_payload(
+        equivalent_price_vol=second, equivalent_price_vol_text=repr(second)
+    )
+    page.unroute(_ROUTE)
+    _route_derivation(page, payload=payload)
+    page.click("#hev-derive-btn")
+    page.wait_for_function("() => window.__shioriTestHistoricalVolResult() !== null")
+    page.wait_for_timeout(150)
+
+    # The previous adoption is gone: nothing is priceable until the trader
+    # reviews this derivation and adopts it in its own right.
+    assert page.evaluate("() => window.__shioriTestHistoricalVolAdoptedText()") is None
+    assert page.input_value("#volatility-input") == ""
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["volatility_input"]["volatility"] is None
+    assert _is_actually_hidden(page, "hev-use-btn") is False
+    # And no line narrates the new derivation over the old number.
+    assert "derived by Shiori" not in page.inner_text("#vol-provenance")
+
+    page.click("#hev-use-btn")
+    page.wait_for_function("() => window.__shioriTestHistoricalVolAdoptedText() !== null")
+    assert page.input_value("#volatility-input") == repr(second)
+    assert _HISTORICAL_SOURCE in page.inner_text("#vol-provenance")
+
+
+def test_the_basis_is_not_a_trader_choice_while_the_source_owns_it(server_url, page) -> None:
+    # Selecting the source already sets EQUIVALENT_PRICE_VOL and disables the
+    # control, so the review state before any adoption is no more the trader's
+    # entry than the adopted state is.
+    page.goto(f"{server_url}/")
+    _route_derivation(page)
+    _load_bond(page)
+    _select_historical_source(page)
+    _fill_query(page)
+    _derive(page)
+
+    assert page.input_value("#volatility-basis-select") == "EQUIVALENT_PRICE_VOL"
+    assert page.eval_on_selector("#volatility-basis-select", "el => el.disabled") is True
+    logged = {record["path"] for record in _override_provenance(page)}
+    assert "volatility_input.volatility_basis" not in logged
+    assert "Volatility Basis" not in page.inner_text("#override-provenance-log")

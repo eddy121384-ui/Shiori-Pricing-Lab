@@ -2348,24 +2348,25 @@
       path: "volatility_input.volatility",
       label: "Price Vol (σ)",
       reason: "Bloomberg PRICE_VOL and EQUIVALENT_PRICE_VOL both returned BAD_FLD.",
-      // Issue #214: an adopted Historical sigma_P is Shiori's own derivation,
-      // not a number the trader had to supply -- the field is not even
-      // typable in that mode. Stamping it MANUAL_TRADER_ENTRY /
-      // TRADER_OVERRIDE would describe a derivation as hand-typed, on screen
-      // and in the exported run alike, exactly the reasoning the derived
-      // Forward above already follows.
+      // Issue #214: in Historical mode this number is Shiori's own derivation
+      // and the field is not even typable, so stamping it MANUAL_TRADER_ENTRY
+      // / TRADER_OVERRIDE would describe a derivation as hand-typed, on
+      // screen and in the exported run alike -- exactly the reasoning the
+      // derived Forward above already follows. Selecting the source is what
+      // hands the field over, not adopting a value: the review state in
+      // between is no more the trader's entry than the adopted one is.
       read: (draft) =>
-        historicalVolAdoptedForPricing() ? null : draft.volatility_input.volatility,
+        historicalVolSourceSelected() ? null : draft.volatility_input.volatility,
     },
     {
       path: "volatility_input.volatility_basis",
       label: "Volatility Basis",
       reason: "Chosen by the trader; no sourced basis exists to confirm it against.",
-      // The same derivation, so the same reasoning: in Historical mode the
-      // basis is the server's own EQUIVALENT_PRICE_VOL and the control is
-      // disabled, so it is not the trader's choice either.
+      // The same reasoning, and the same moment: selecting the Historical
+      // source sets this basis to EQUIVALENT_PRICE_VOL and disables the
+      // control, so from then on it is not the trader's choice either.
       read: (draft) =>
-        historicalVolAdoptedForPricing() ? null : draft.volatility_input.volatility_basis,
+        historicalVolSourceSelected() ? null : draft.volatility_input.volatility_basis,
     },
     {
       path: "curve_points",
@@ -4513,6 +4514,18 @@
   // trader's behalf.
   async function deriveHistoricalVol() {
     if (historicalVolPending || currentDraft === null) return;
+    // A recalculation produces a new derivation, so a value adopted from the
+    // previous one stops describing what is on screen the moment this starts.
+    // It is withdrawn here exactly as a moved input withdraws it -- same
+    // reasoning as `syncHistoricalVolPanel`, and the same two steps -- rather
+    // than being left in the field and the draft beside a result it did not
+    // come from, waiting for the next render to narrate the new result over
+    // the old number.
+    if (historicalVolAdoptedText !== null) {
+      historicalVolAdoptedText = null;
+      els.volatility.value = "";
+      applyManualInputsToDraft();
+    }
     const generation = ++historicalVolGeneration;
     historicalVolPending = true;
     historicalVolError = null;
