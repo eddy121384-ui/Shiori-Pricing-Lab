@@ -1561,6 +1561,13 @@ def validate_deterministic_historical_vol_inputs(case: object) -> None:
             "converts through is calculated on that market's own conventions, and "
             "Shiori never falls back to a default one"
         )
+    # Present is not the same as supported: the duration producer resolves this
+    # through `get_convention_profile`, which refuses a name outside the
+    # approved set -- deterministically, and only after the Yield series has
+    # been fetched. Resolving it here with that same reader is what keeps
+    # readiness from spending a Bloomberg request on a run it already knows
+    # fails (Codex review, PR #215).
+    get_convention_profile(convention_profile)
     # The third offline precondition, and the one the request builder does not
     # reach: in Trader-Forward-Override mode nothing else in the case needs the
     # spot clean price, so a yield-only quote parses and prices -- until this

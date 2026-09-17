@@ -1045,6 +1045,34 @@ def test_readiness_refuses_a_price_basis_pricing_would_refuse(
     assert price_status == 400
 
 
+def test_readiness_refuses_a_convention_profile_the_duration_cannot_resolve(
+    server_url, monkeypatch
+) -> None:
+    """Selected is not the same as supported.
+
+    Readiness checked only that a profile name was present, so an unsupported
+    one passed and Price fetched a whole Yield series before
+    ``get_convention_profile`` refused it. Readiness resolves it with that
+    same reader now, and no Bloomberg request is spent (Codex review,
+    PR #215).
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case(convention_profile="NOT_A_PROFILE")
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is False
+    assert "NOT_A_PROFILE" in ready["error"]
+    assert price_status == 400
+    assert "NOT_A_PROFILE" in priced["error"]
+    # Neither route opened a Bloomberg session for a ticket that cannot price.
+    assert calls == []
+
+
 def test_readiness_reports_a_historical_cases_own_offline_precondition(
     server_url, monkeypatch
 ) -> None:
