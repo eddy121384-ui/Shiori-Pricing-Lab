@@ -983,6 +983,68 @@ def test_readiness_ignores_a_stale_audit_the_derived_path_discards(
     assert price_status == 200
 
 
+def test_readiness_refuses_a_yield_only_quote_this_source_cannot_use(
+    server_url, monkeypatch
+) -> None:
+    """Price is not offered for a ticket whose duration has no price to take.
+
+    In Trader-Forward-Override mode nothing else in the case needs the spot
+    clean price, so a yield-only quote parses and the request builds -- and
+    then this source's duration refuses, deterministically, for a price the
+    ticket never carried. Readiness has to say so first (Codex review,
+    PR #215).
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _historical_case()
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "source_system": "TRADER_FORWARD_OVERRIDE",
+    }
+    case["bond_quote"] = {
+        **case["bond_quote"],
+        "clean_price_per_100": None,
+        "yield_value": 4.05,
+        "price_type": "YIELD",
+    }
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is False
+    assert "clean_price_per_100" in ready["error"]
+    # Readiness and Price agree, and neither opened a Bloomberg session for a
+    # ticket that could never price.
+    assert price_status == 400
+    assert "clean_price_per_100" in priced["error"]
+    assert calls == []
+
+
+def test_readiness_refuses_a_price_basis_pricing_would_refuse(
+    server_url, monkeypatch
+) -> None:
+    """``bond_option_price_basis`` is not part of the typed request.
+
+    The builder therefore accepts any value for it, while Price reads it and
+    raises on all but the two members -- so readiness answered "ready" for a
+    run guaranteed to fail (Codex review, PR #215).
+    """
+
+    _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _manual_case(bond_option_price_basis="CLEANISH")
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    price_status, _priced = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is False
+    assert "bond_option_price_basis" in ready["error"]
+    assert price_status == 400
+
+
 def test_readiness_reports_a_historical_cases_own_offline_precondition(
     server_url, monkeypatch
 ) -> None:

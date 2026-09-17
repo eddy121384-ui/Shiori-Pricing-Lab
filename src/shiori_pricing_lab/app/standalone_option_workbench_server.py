@@ -1381,6 +1381,11 @@ def validate_case(case: dict) -> dict:
             case = {**case, "volatility_input": placeholder_volatility}
         validate_deterministic_forward_inputs(case)
         validate_deterministic_historical_vol_inputs(case)
+        # Issue #214's envelope key is not part of the typed request, so the
+        # builder below accepts any value for it while Price refuses all but
+        # the two members. Read here with the reader Price itself uses, or
+        # readiness enables a run guaranteed to raise (Codex review, PR #215).
+        standalone_option_case_price_basis(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -1555,6 +1560,25 @@ def validate_deterministic_historical_vol_inputs(case: object) -> None:
             f"{HISTORICAL_YIELD_VOL_SOURCE} source -- the current-time duration it "
             "converts through is calculated on that market's own conventions, and "
             "Shiori never falls back to a default one"
+        )
+    # The third offline precondition, and the one the request builder does not
+    # reach: in Trader-Forward-Override mode nothing else in the case needs the
+    # spot clean price, so a yield-only quote parses and prices -- until this
+    # source's duration asks for the price it differentiates, and refuses.
+    # Exactly the reasoning, and the same check, as
+    # :func:`require_usable_spot_clean_price_for_derived_forward` above (Codex
+    # review, PR #215).
+    bond_quote = case.get("bond_quote")
+    if not isinstance(bond_quote, dict):
+        # The envelope parser and the typed constructors own this.
+        return
+    clean_price = bond_quote.get("clean_price_per_100")
+    if not is_usable_clean_price_per_100(clean_price):
+        raise HistoricalVolSourceUnavailableError(
+            "bond_quote.clean_price_per_100 must be a finite, strictly positive price "
+            f"(got {clean_price!r}) -- the {HISTORICAL_YIELD_VOL_SOURCE} source converts "
+            "through a current-time duration taken at this ticket's own spot price, and "
+            "a yield-only quote states none to differentiate"
         )
 
 
