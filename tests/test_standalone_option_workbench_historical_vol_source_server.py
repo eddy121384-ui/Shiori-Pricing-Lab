@@ -833,6 +833,48 @@ def test_a_historical_refresh_reports_the_yield_history_it_re_sourced(
     )
 
 
+@_requires_quantlib
+def test_a_refresh_recovers_a_ticket_whose_carried_quote_has_no_price(
+    server_url, monkeypatch
+) -> None:
+    """The refresh is the cure, so the carried quote must not block it.
+
+    The offline clean-price precondition added for `/api/case` would
+    otherwise refuse the one route whose whole purpose is to replace that
+    quote -- the same reasoning that already skips
+    ``require_usable_spot_clean_price_for_derived_forward`` here (Codex
+    review, PR #215).
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    _stub_bloomberg_quote(monkeypatch)
+    case = _historical_case()
+    case["bond_quote"] = {
+        **case["bond_quote"],
+        "clean_price_per_100": None,
+        "yield_value": 4.05,
+        "price_type": "YIELD",
+    }
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/bloomberg",
+        {
+            "case": case,
+            "overlay": extract_standalone_option_case_overlay(case),
+            "bloomberg_security": "/isin/XS0000000001",
+            "quote_side": "MID",
+        },
+    )
+
+    assert status == 200
+    # It derived against the price the refresh supplied, not the one the case
+    # arrived without.
+    assert len(calls) == 1
+    provenance = payload["display"]["historical_volatility_source"]
+    assert provenance["duration_clean_price_per_100"] == 100.75
+
+
 def test_a_non_historical_refresh_still_reports_quote_only(
     server_url, monkeypatch
 ) -> None:

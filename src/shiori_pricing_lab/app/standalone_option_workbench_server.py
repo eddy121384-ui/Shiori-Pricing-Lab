@@ -1534,7 +1534,9 @@ def _validation_only_volatility_input(case: object) -> dict | None:
     }
 
 
-def validate_deterministic_historical_vol_inputs(case: object) -> None:
+def validate_deterministic_historical_vol_inputs(
+    case: object, *, replacement_quote_side: object = None
+) -> None:
     """Refuse a Historical-source case whose offline preconditions are missing.
 
     Runs for a ``HISTORICAL_YIELD_VOL_MO`` case only, and checks only what is
@@ -1575,6 +1577,16 @@ def validate_deterministic_historical_vol_inputs(case: object) -> None:
     # Exactly the reasoning, and the same check, as
     # :func:`require_usable_spot_clean_price_for_derived_forward` above (Codex
     # review, PR #215).
+    #
+    # And, for the same reason that check is skipped on a refresh:
+    # ``replacement_quote_side`` says the carried quote is superseded. The
+    # derivation runs on the quote this route is about to acquire, so a
+    # yield-only one on the way *in* must not block the very refresh that
+    # would supply a usable price. Whether the replacement carries one is not
+    # knowable until Bloomberg answers, and the derivation reports that with
+    # its own reason if it does not.
+    if replacement_quote_side is not None:
+        return
     bond_quote = case.get("bond_quote")
     if not isinstance(bond_quote, dict):
         # The envelope parser and the typed constructors own this.
@@ -1923,7 +1935,9 @@ def price_case_with_bloomberg_quote(
     # Same ordering as POST /api/case: the deterministic checks run before any
     # Bloomberg call, curve or quote.
     validate_deterministic_forward_inputs(overlaid_case, replacement_quote_side=quote_side)
-    validate_deterministic_historical_vol_inputs(overlaid_case)
+    validate_deterministic_historical_vol_inputs(
+        overlaid_case, replacement_quote_side=quote_side
+    )
     curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection
