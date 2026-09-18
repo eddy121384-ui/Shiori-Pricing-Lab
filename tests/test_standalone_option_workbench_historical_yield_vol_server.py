@@ -553,11 +553,15 @@ def test_the_route_never_touches_the_196_route_or_any_pricing_route(
     assert priced == []
 
 
-def test_the_api_contract_id_names_this_route(server_url) -> None:
+def test_the_api_contract_id_is_the_one_this_commit_serves(server_url) -> None:
+    # The page refuses to run against a stale server process by comparing this
+    # id, so it moves whenever a route or a static file is added -- v28 added
+    # this file's own #197 route; v29 added Issue #214's
+    # /api/pricing/historical-equivalent-price-vol and its static view.
     with urllib.request.urlopen(f"{server_url}/api/health") as response:
         health = json.loads(response.read())
 
-    assert health["api_contract"].endswith("-v28")
+    assert health["api_contract"].endswith("-v29")
 
 
 def test_this_files_fixture_builder_also_produces_a_possible_series() -> None:

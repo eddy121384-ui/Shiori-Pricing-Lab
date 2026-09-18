@@ -358,12 +358,41 @@
               </div>
             </div>
 
+            <div class="review-row" id="price-basis-row">
+              <div class="review-head">
+                <span class="review-name">Bond Option Price Basis</span>
+                <span class="review-status is-reviewed" id="price-basis-status">DIRTY</span>
+              </div>
+              <div class="review-control">
+                <label for="price-basis-select">Price state F, K, the duration denominator and &sigma;<sub>P</sub> are all expressed in</label>
+                <select class="control" id="price-basis-select">
+                  <option value="DIRTY">DIRTY &mdash; forward and strike include accrued interest (default)</option>
+                  <option value="CLEAN">CLEAN &mdash; forward and strike exclude accrued interest</option>
+                </select>
+              </div>
+              <div class="review-note">
+                Neither basis is &ldquo;correct&rdquo;: they are two approved ways of writing the
+                same model. DIRTY is the default and is the already-validated OVME-aligned
+                composition; CLEAN is a first-class alternate basis for internal-model
+                reconciliation and is only ever used when you select it here. Whichever you
+                choose, the server uses it for <em>every</em> leg of the run &mdash; F, K, the
+                duration denominator and the derived &sigma;<sub>P</sub> &mdash; and refuses to
+                price a volatility derived under the other one. Changing it withdraws any
+                Historical volatility derived under the previous basis.
+              </div>
+            </div>
+
             <div class="review-row" data-workflow-group="vol-review">
               <div class="review-head">
                 <span class="review-name">Volatility</span>
                 <span class="review-status" id="vol-review-status">&mdash;</span>
               </div>
               <div class="review-control">
+                <label for="vol-source-select">Vol source</label>
+                <select class="control" id="vol-source-select">
+                  <option value="DIRECT_PRICE_VOL">Direct price vol &mdash; entered by the trader</option>
+                  <option value="HISTORICAL_YIELD_VOL_MO">Historical Yield Vol (Middle Office parity) &mdash; derived by Shiori</option>
+                </select>
                 <label for="volatility-input">Price Vol (&sigma;, decimal)</label>
                 <input class="control" id="volatility-input" type="text" inputmode="decimal" placeholder="Not entered">
                 <select class="control vol-basis" id="volatility-basis-select">
@@ -371,6 +400,63 @@
                   <option value="EQUIVALENT_PRICE_VOL">EQUIVALENT_PRICE_VOL</option>
                 </select>
               </div>
+
+              <div class="derived-block" id="historical-vol-panel" hidden>
+                <div class="derived-title">Historical Yield Vol &rarr; Equivalent Price Vol</div>
+                <div class="review-note" id="historical-vol-disclosure">
+                  <strong>This source is a historical / realized proxy for internal-model
+                  reconciliation, not a current market-implied volatility.</strong> It is this
+                  bond&rsquo;s own past Bloomberg Yield observations, turned into a price
+                  volatility by its current-time duration:
+                  &sigma;<sub>P</sub> = |D<sub>B</sub>| &times; &sigma;<sub>hist</sub>. It is
+                  not Bloomberg implied vol and it is not VCUB. Every figure below is computed
+                  by the server; this page calculates nothing and you never retype
+                  &sigma;<sub>P</sub>.
+                </div>
+
+                <div class="review-control">
+                  <label for="hev-security">Bond</label>
+                  <input class="control" id="hev-security" type="text" readonly placeholder="Bloomberg Load a bond first">
+                  <label for="hev-yield-field">Bloomberg Yield field</label>
+                  <input class="control" id="hev-yield-field" type="text" value="YLD_YTM_MID" placeholder="Confirmed on the workstation">
+                  <label for="hev-field-unit">Yield field unit</label>
+                  <select class="control" id="hev-field-unit">
+                    <option value="PERCENT">PERCENT</option>
+                    <option value="BASIS_POINTS">BASIS_POINTS</option>
+                    <option value="DECIMAL">DECIMAL</option>
+                  </select>
+                </div>
+                <div class="review-control">
+                  <label for="hev-start">History start</label>
+                  <input class="control" id="hev-start" type="date">
+                  <label for="hev-end">History end</label>
+                  <input class="control" id="hev-end" type="date">
+                  <label for="hev-observation-count">Observations</label>
+                  <input class="control" id="hev-observation-count" type="text" inputmode="numeric" value="181">
+                </div>
+
+                <span class="btn ghost btn-small" id="hev-derive-btn">Calculate Historical Yield Vol</span>
+                <span class="btn ghost btn-small" id="hev-use-btn" hidden>Use for Pricing</span>
+                <div class="derived-source" id="hev-status">Enter the Bloomberg Yield field and the history window, then calculate.</div>
+
+                <div class="pr-row r1" id="hev-fields" hidden>
+                  <div class="pr-cell"><div class="p-lbl">Historical Yield Vol (field unit)</div><div class="p-val" id="hev-yield-vol-field-unit">&mdash;</div></div>
+                  <div class="pr-cell"><div class="p-lbl">Historical Yield Vol (decimal annual)</div><div class="p-val" id="hev-yield-vol-decimal">&mdash;</div></div>
+                  <div class="pr-cell"><div class="p-lbl">Bond Duration |D<sub>B</sub>|</div><div class="p-val" id="hev-duration">&mdash;</div></div>
+                  <div class="pr-cell"><div class="p-lbl">Equivalent Price Vol (&sigma;<sub>P</sub>)</div><div class="p-val teal" id="hev-equivalent-price-vol">&mdash;</div></div>
+                </div>
+                <div class="pr-row r2" id="hev-method-row" hidden>
+                  <div class="pr-cell"><div class="p-lbl">Vol source</div><div class="p-val" id="hev-source">&mdash;</div></div>
+                  <div class="pr-cell"><div class="p-lbl">Price basis</div><div class="p-val" id="hev-price-basis">&mdash;</div></div>
+                  <div class="pr-cell"><div class="p-lbl">Duration type</div><div class="p-val" id="hev-duration-type">&mdash;</div></div>
+                  <div class="pr-cell"><div class="p-lbl">Window status</div><div class="p-val" id="hev-window-status">&mdash;</div></div>
+                </div>
+                <details class="s490-trace" id="hev-trace" hidden>
+                  <summary>Derivation trace &amp; provenance</summary>
+                  <div class="s490-trace-body" id="hev-trace-body"></div>
+                </details>
+              </div>
+
               <div class="review-note" id="vol-sourcing-note">&mdash;</div>
               <div class="review-provenance" id="vol-provenance">&mdash;</div>
             </div>

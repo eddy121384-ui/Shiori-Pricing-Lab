@@ -317,6 +317,38 @@ this issue does not change that. Nothing about VCUB capture/store/resolution,
 the Forward, the Option Discount Curve, the DCF conventions or Black-76 is
 touched by this route.
 
+**Issue #214: Historical Yield Vol as a pricing source.** The raw Yield Vol
+above still reaches no pricing route. What does is its **converted**
+``EQUIVALENT_PRICE_VOL``, and only through the server. A case declares the
+source on the field that already names where a volatility came from,
+``volatility_input.source_system = HISTORICAL_YIELD_VOL_MO``, exactly as
+Issue #177's two Forward modes are declared on
+``forward_clean_price_input.source_system``. The whole chain -- #196 series,
+#197 statistic, current-time ``D_B`` on the selected basis, the
+``sigma_P = |D_B| x sigma_hist_abs`` conversion, the one publication step --
+is then re-run by ``price_standalone_option_case`` itself, immediately before
+the request is built, and ``volatility_input`` is replaced wholesale. No route
+here derives it and hands it on: that is where the two earlier designs failed
+review (PR #215, rounds 1-3), because any value a caller holds between
+deriving and pricing is a value that can be held again. Nothing is kept
+between runs, so no previous bond's, basis's or price state's volatility can
+survive into a later ticket, and a case that does not declare the source is
+untouched -- every existing vol-source behaviour is unchanged.
+
+``POST /api/pricing/historical-equivalent-price-vol`` is the trader's review
+step before committing to it: the same derivation, the same function, no
+pricing and nothing written -- so the Historical Yield Vol, ``D_B``, the
+selected price basis and the derived ``sigma_P`` a trader reviews are by
+construction the ones a Price would use.
+
+**Issue #214: the price basis, end to end.** The case carries
+``bond_option_price_basis`` (``DIRTY`` default, ``CLEAN`` by explicit trader
+selection) as an optional envelope key beside ``spot_settlement_date`` and
+``convention_profile``. One value, read by the duration producer, the
+Equivalent-Price-Vol publication gate and the pricing call alike, so ``F``,
+``K``, the duration denominator, ``sigma_P`` and the Black-76 representation
+cannot disagree about which price state this run is in.
+
 No route mutates the on-disk base case file. No caching, session, or
 persistence of any kind: every request re-reads the base case from disk and
 reprices from it, so results are always reproducible from
@@ -328,11 +360,17 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
+    case_declares_historical_vol_source,
+    resolve_historical_equivalent_price_vol,
+    validate_historical_source_offline_preconditions,
+)
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_json,
     render_standalone_run_as_markdown,
@@ -341,6 +379,7 @@ from shiori_pricing_lab.app.standalone_option_workbench import (
     build_request_from_standalone_option_case,
     price_standalone_option_case,
     price_standalone_option_case_with_bloomberg_quote,
+    standalone_option_case_price_basis,
 )
 from shiori_pricing_lab.app.standalone_option_workbench_context import (
     extract_standalone_option_case_context,
@@ -713,7 +752,16 @@ DEFAULT_PORT = 8765
 # Historical Yield Vol card with its own Calculate button -- against a route
 # table that 404s that route and never serves the new file, so the card would
 # look available and compute nothing.
-API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v28"
+# Bumped to -v29 for Issue #214's Historical Yield Vol -> Equivalent Price Vol
+# pricing source: the server gained POST
+# /api/pricing/historical-equivalent-price-vol, and the case envelope gained
+# ``bond_option_price_basis`` and ``historical_yield_vol_request``. A stale
+# -v28 process serves this commit's page -- whose Volatility row now offers a
+# Historical vol source and a DIRTY/CLEAN price-basis selector -- against a
+# route table that 404s the derivation route and an envelope contract that
+# rejects both new keys, so the source would look available, derive nothing,
+# and refuse to price.
+API_CONTRACT_ID = "shiori-standalone-workbench-api/case-json-export-bloomberg-v29"
 
 
 def load_base_case() -> dict:
@@ -736,7 +784,7 @@ def price_base_case() -> dict:
     """
 
     base_case = load_base_case()
-    _, _, display = price_standalone_option_case(base_case)
+    _, _, display, _priced_case = price_standalone_option_case(base_case)
     return {
         "case": base_case,
         "overlay": extract_standalone_option_case_overlay(base_case),
@@ -756,7 +804,7 @@ def price_overlay_case(overlay: dict) -> dict:
 
     base_case = load_base_case()
     overlaid_case = apply_standalone_option_case_overlay(base_case, overlay)
-    _, _, display = price_standalone_option_case(overlaid_case)
+    _, _, display, _priced_case = price_standalone_option_case(overlaid_case)
     return display
 
 
@@ -1182,9 +1230,15 @@ def price_uploaded_case(case: dict) -> dict:
     # refused for its own deterministic reason rather than behind a Bloomberg
     # failure -- see the two validators' own docstrings.
     validate_deterministic_forward_inputs(case)
+    validate_deterministic_historical_vol_inputs(case)
     case = inject_live_option_discount_curve_if_absent(case)
     case, effective_forward = apply_effective_forward_to_case(case)
-    _, _, display = price_standalone_option_case(case)
+    # After the Forward, because the two are independent derivations off the
+    # same case and this one must see the case that is about to price.
+    # The Historical volatility is resolved by the pricing entry point itself,
+    # which returns the envelope it priced -- so the case echoed back below is
+    # still the one behind the result, derived volatility included.
+    _, _, display, case = price_standalone_option_case(case)
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     return {
@@ -1289,6 +1343,17 @@ def validate_case(case: dict) -> dict:
     :func:`_validation_only_forward_clean_price_input`, which preserves every
     field the derived path actually reuses).
 
+    **Issue #214: the Historical volatility source, judged the same way.** A
+    case whose ``volatility_input.source_system`` is ``HISTORICAL_YIELD_VOL_MO``
+    has its volatility replaced wholesale at Price time, so readiness must not
+    fail it for the number it is about to discard -- exactly the derived-Forward
+    reasoning above, applied to the other derived input. Its own purely
+    offline preconditions *are* checked here (a stated Historical Yield query
+    naming this ticket's own bond, and a selected convention profile), for the
+    same reason ``spot_settlement_date`` is: without them the run is a
+    guaranteed failure at Price time, and Price should be disabled rather than
+    enabled onto one.
+
     **Issue #177: the derived-Forward mode's own offline precondition.** A
     case in Shiori-derived Forward mode prices from a Forward this route
     cannot compute (that needs a live Bloomberg acquisition, which this route
@@ -1309,7 +1374,16 @@ def validate_case(case: dict) -> dict:
         placeholder_forward = _validation_only_forward_clean_price_input(case)
         if placeholder_forward is not None:
             case = {**case, "forward_clean_price_input": placeholder_forward}
+        placeholder_volatility = _validation_only_volatility_input(case)
+        if placeholder_volatility is not None:
+            case = {**case, "volatility_input": placeholder_volatility}
         validate_deterministic_forward_inputs(case)
+        validate_deterministic_historical_vol_inputs(case)
+        # Issue #214's envelope key is not part of the typed request, so the
+        # builder below accepts any value for it while Price refuses all but
+        # the two members. Read here with the reader Price itself uses, or
+        # readiness enables a run guaranteed to raise (Codex review, PR #215).
+        standalone_option_case_price_basis(case)
         build_request_from_standalone_option_case(case)
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -1394,6 +1468,106 @@ def _validation_only_forward_clean_price_input(case: object) -> dict | None:
         "source_system": forward_input.get("source_system"),
         "status": "ACTIVE",
     }
+
+
+# Never Bloomberg-sourced, never returned to a caller, and never used to
+# price anything -- the same role as the two placeholders above.
+_VALIDATION_ONLY_PLACEHOLDER_VOLATILITY = 0.01
+# Never priced and never exported: the derived path writes its own audit over
+# this, and readiness only needs a value the reviewed contract accepts.
+_VALIDATION_ONLY_PLACEHOLDER_AUDIT = (
+    "Readiness stand-in only. The HISTORICAL_YIELD_VOL_MO derivation writes "
+    "its own audit over this on every priced run."
+)
+
+
+def _validation_only_volatility_input(case: object) -> dict | None:
+    """Return a stand-in volatility input for a Historical-source case, or ``None``.
+
+    The volatility twin of :func:`_validation_only_forward_clean_price_input`,
+    and for the identical reason. In ``HISTORICAL_YIELD_VOL_MO`` mode
+    :func:`apply_historical_volatility_source_to_case` replaces
+    ``volatility_input`` wholesale on every run, so the number the case
+    arrives carrying -- ``null`` on a fresh ticket, the previous derivation
+    on a re-sent one -- is discarded before anything is priced. Judging
+    readiness on it would answer "not ready" for a case Price handles
+    perfectly well.
+
+    So every field the derived path rewrites is substituted -- the number,
+    the ``volatility_basis`` (always ``EQUIVALENT_PRICE_VOL`` for this
+    source), the ``status`` it always writes ``ACTIVE``, and the
+    ``override_or_fallback_audit`` the publication always writes itself --
+    and the ``source_system`` that *selects* the mode is preserved untouched.
+    A usable stored number is kept rather than replaced, because validating a
+    real value is better evidence than validating a stand-in.
+
+    The audit was previously preserved from the envelope, which made
+    readiness disagree with Price: a saved or hand-built case carrying a
+    blank audit was refused here by ``BLIVolatilityInput`` and left with
+    Price disabled, while the derived path discards that audit with the rest
+    of the input and prices the same case successfully (Codex review,
+    PR #215). A stand-in is judged on the fields a run actually uses, and
+    this is not one of them.
+
+    Returns ``None`` for every other case, leaving a trader-entered
+    ``PRICE_VOL`` (or any other source) validated exactly as itself.
+    """
+
+    if not case_declares_historical_vol_source(case):
+        return None
+    volatility_input = case["volatility_input"]
+    stored = volatility_input.get("volatility")
+    usable = (
+        isinstance(stored, (int, float))
+        and not isinstance(stored, bool)
+        and math.isfinite(stored)
+        and stored > 0
+    )
+    return {
+        "volatility": stored if usable else _VALIDATION_ONLY_PLACEHOLDER_VOLATILITY,
+        "volatility_basis": "EQUIVALENT_PRICE_VOL",
+        "source_system": volatility_input.get("source_system"),
+        "status": "ACTIVE",
+        "override_or_fallback_audit": _VALIDATION_ONLY_PLACEHOLDER_AUDIT,
+    }
+
+
+def validate_deterministic_historical_vol_inputs(
+    case: object, *, replacement_quote_side: object = None
+) -> None:
+    """Refuse a Historical-source case whose offline preconditions are missing.
+
+    Runs for a ``HISTORICAL_YIELD_VOL_MO`` case only, and delegates to the
+    resolver's own offline prefix
+    (:func:`validate_historical_source_offline_preconditions`) rather than
+    keeping a second list of the same questions. Every outcome that depends
+    on real data -- the observations, the window's contents, the statistic,
+    the conversion -- stays at Price time, against the real series.
+
+    Called by the readiness route and by every pricing route, before any
+    Bloomberg call, so an input this run could never price is refused for its
+    own deterministic reason rather than from behind a DAPI failure -- the
+    same ordering :func:`validate_deterministic_forward_inputs` keeps.
+    """
+
+    if not isinstance(case, dict) or not case_declares_historical_vol_source(case):
+        return
+    # One call, not a list of questions. Every offline precondition this
+    # source has -- the query's own shape and unit, that it names this
+    # ticket's bond, the reference record, the spot price, the convention
+    # profile, and the whole duration prologue behind it -- is established by
+    # the resolver's own prefix, so readiness cannot answer "ready" for
+    # something Price refuses, and inherits whatever is added there later.
+    # Seven findings in this PR were exactly that disagreement, each one a
+    # precondition enumerated by hand and missed (Codex review, PR #215).
+    validate_historical_source_offline_preconditions(
+        case,
+        standalone_option_case_price_basis(case),
+        # `POST /api/case/bloomberg` states the carried quote is superseded,
+        # so its price is not judged -- the same reasoning, and the same
+        # caller-supplied fact, as the Forward preflight above.
+        quote_superseded=replacement_quote_side is not None,
+    )
 
 
 def _require_valid_forward_quote_side(case: object) -> TreasuryFTPQuoteSide | None:
@@ -1642,6 +1816,15 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     result labelled that number ``SHIORI_DERIVED_S490``. A run must not claim
     a source that did not produce its F.
 
+    **Issue #214** wires the Historical volatility source through here for the
+    identical reason, and it is the stronger case of the two: a case declaring
+    ``HISTORICAL_YIELD_VOL_MO`` would otherwise be priced from whatever number
+    its envelope carried -- a previous run's derivation, for a possibly
+    different bond, price state or price basis -- while the result labelled
+    that number a Shiori derivation. The source's whole contract is that the
+    volatility is re-derived on every run, so every route that prices must
+    re-derive it.
+
     Deliberately *not* changed: this route still does not inject the live
     Option Discount Curve. That is Issue #171's own decision for the
     explicit-case path, unrelated to which Forward is priced, and outside
@@ -1655,8 +1838,9 @@ def price_explicit_case_with_overlay(case: dict, overlay: dict) -> dict:
     # Same order as every other pricing route: the deterministic, entirely
     # local refusals run before anything can reach Bloomberg.
     validate_deterministic_forward_inputs(overlaid_case)
+    validate_deterministic_historical_vol_inputs(overlaid_case)
     overlaid_case, effective_forward = apply_effective_forward_to_case(overlaid_case)
-    _, _, display = price_standalone_option_case(overlaid_case)
+    _, _, display, _priced_case = price_standalone_option_case(overlaid_case)
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     return display
@@ -1720,6 +1904,9 @@ def price_case_with_bloomberg_quote(
     # Same ordering as POST /api/case: the deterministic checks run before any
     # Bloomberg call, curve or quote.
     validate_deterministic_forward_inputs(overlaid_case, replacement_quote_side=quote_side)
+    validate_deterministic_historical_vol_inputs(
+        overlaid_case, replacement_quote_side=quote_side
+    )
     curve_points_before_injection = overlaid_case.get("curve_points")
     overlaid_case = inject_live_option_discount_curve_if_absent(overlaid_case)
     live_curve_acquired = overlaid_case.get("curve_points") is not curve_points_before_injection
@@ -1741,6 +1928,10 @@ def price_case_with_bloomberg_quote(
         case_transform=_apply_effective_forward,
     )
     effective_forward = captured.get("effective_forward")
+    # Resolved by the pricing entry point, after this transform and after the
+    # fresh quote and this run's own t0 were substituted, so it is reported
+    # from the priced run's own display rather than captured out of a closure.
+    historical_volatility_source = display.get("historical_volatility_source")
     if effective_forward is not None:
         display = {**display, "effective_forward": effective_forward}
     # The derivation forces its own fresh production Curve #490 acquisition
@@ -1771,6 +1962,11 @@ def price_case_with_bloomberg_quote(
             derived_trace_present
             and effective_forward["forward_source"] != SHIORI_DERIVED_S490_FORWARD_SOURCE
         ),
+        # A Historical-source refresh fetched this bond's Yield series and
+        # re-derived the volatility Black-76 priced with, against the quote it
+        # had just acquired -- so a run claiming BOND_QUOTE_ONLY would be
+        # describing inputs it did not price from (Codex review, PR #215).
+        historical_volatility_derived=historical_volatility_source is not None,
     )
     return {"case": priced_case, "display": display}
 
@@ -1788,7 +1984,12 @@ def price_case_with_bloomberg_quote(
 # - the Forward, since Issue #177, whenever the run's source is the Shiori
 #   derived one -- which is now the *default*, so on an ordinary derived-mode
 #   refresh the quote-only claim is false about the single most important
-#   number on the ticket.
+#   number on the ticket;
+# - the bond's Bloomberg Yield series and the volatility derived from it,
+#   since Issue #214, whenever the run's vol source is HISTORICAL_YIELD_VOL_MO
+#   -- that derivation runs inside this route's own transform seam, against
+#   the quote it has just acquired, so it is as much a re-sourced input of
+#   this refresh as the Forward is.
 #
 # Stating otherwise in the display and the exported run would be a provenance
 # claim contradicting the inputs actually priced (AGENTS.md rule 6), so the
@@ -1806,6 +2007,14 @@ _REFRESHED_INPUT_DERIVED_FORWARD = "SHIORI_DERIVED_FORWARD"
 # re-derives it from the refreshed spot as the comparison value on screen, so
 # it is a market input this run re-sourced even though Black-76 did not use it.
 _REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON = "SHIORI_DERIVED_FORWARD_COMPARISON"
+# Issue #214 (Codex review, PR #215): a Historical-source refresh re-sources
+# two more inputs in the same action -- the bond's own Bloomberg Yield series,
+# and the volatility re-derived from it against the freshly acquired quote and
+# this run's own t0. Both are named, because "the Yield history was re-fetched"
+# and "the volatility Black-76 priced with was recomputed" are different facts
+# and a reader should not have to infer the second from the first.
+_REFRESHED_INPUT_HISTORICAL_YIELD_HISTORY = "HISTORICAL_YIELD_SERIES"
+_REFRESHED_INPUT_HISTORICAL_EQUIVALENT_PRICE_VOL = "HISTORICAL_EQUIVALENT_PRICE_VOL"
 _OTHER_MARKET_INPUTS_UNCHANGED = "CASE_JSON_UNCHANGED"
 _OTHER_MARKET_INPUTS_EXCEPT_REFRESHED = "CASE_JSON_UNCHANGED_EXCEPT_THE_REFRESHED_INPUTS"
 
@@ -1817,6 +2026,7 @@ def _with_accurate_refresh_scope(
     s490_curve_acquired: bool,
     derived_forward_replaced: bool,
     derived_forward_comparison_refreshed: bool,
+    historical_volatility_derived: bool,
 ) -> dict:
     """Return ``display`` with its live-quote refresh scope corrected.
 
@@ -1838,6 +2048,9 @@ def _with_accurate_refresh_scope(
         refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD)
     if derived_forward_comparison_refreshed:
         refreshed.append(_REFRESHED_INPUT_DERIVED_FORWARD_COMPARISON)
+    if historical_volatility_derived:
+        refreshed.append(_REFRESHED_INPUT_HISTORICAL_YIELD_HISTORY)
+        refreshed.append(_REFRESHED_INPUT_HISTORICAL_EQUIVALENT_PRICE_VOL)
     if refreshed == [_REFRESHED_INPUT_BOND_QUOTE]:
         # Genuinely quote-only: returned completely untouched, so a legacy
         # (manual-curve, explicit-forward) refresh is still byte-for-byte the
@@ -2351,6 +2564,33 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         "shiori_derived_forward": derived_trace,
     }
     return effective_case, provenance
+
+
+def historical_equivalent_price_vol_preview(case: dict) -> dict:
+    """Derive the Historical Equivalent Price Vol for ``case`` without pricing it.
+
+    The Workbench's review step: the trader sees the Historical Yield Vol,
+    the current-time ``D_B``, the selected price basis and the derived
+    ``sigma_P`` before deciding to price with them. It runs
+    :func:`resolve_historical_equivalent_price_vol` -- the *same* function
+    :func:`apply_historical_volatility_source_to_case` runs -- so the panel
+    and the priced run are structurally incapable of showing different
+    numbers for the same inputs, and the browser is never asked to compute
+    one.
+
+    No pricing happens and nothing is written: this returns the provenance
+    payload only. ``bond_option_price_basis`` is read off the case, so a
+    trader reviewing under ``CLEAN`` sees a ``CLEAN``-denominator ``D_B`` and
+    the ``CLEAN`` ``sigma_P`` that would price.
+    """
+
+    if not isinstance(case, dict):
+        raise ValueError("case must be a JSON object")
+    price_basis = standalone_option_case_price_basis(case)
+    _conversion, _published, provenance = resolve_historical_equivalent_price_vol(
+        case, price_basis
+    )
+    return {"historical_volatility_source": provenance}
 
 
 def _shiori_acquisition_now() -> datetime:
@@ -3856,6 +4096,39 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(200, payload)
 
+    def _handle_api_historical_equivalent_price_vol(self, raw_body: bytes) -> None:
+        """Derive this case's Historical Equivalent Price Vol. Prices nothing.
+
+        The Workbench's review step before ``Use for Pricing``: it returns the
+        Historical Yield Vol, the current-time ``D_B`` on the case's own
+        selected ``BOND_OPTION_PRICE_BASIS``, the derived ``sigma_P`` and the
+        full provenance of both parents -- all computed by the same function
+        the priced run uses, so the panel cannot show a number the run would
+        not price.
+
+        A malformed body or case, a bond mismatch between the Historical
+        Yield query and the ticket, an unusable Historical result, a duration
+        refusal or a basis-lineage refusal is HTTP 400 carrying the real
+        reason. A Bloomberg-side failure is HTTP 502. Nothing is substituted
+        for a refusal.
+        """
+
+        body = self._decoded_object(raw_body, ("case",))
+        if body is None:
+            return
+        try:
+            payload = historical_equivalent_price_vol_preview(body["case"])
+        except BLIBloombergDapiError as exc:
+            self._write_json(502, {"error": str(exc)})
+            return
+        except (ValueError, TypeError) as exc:
+            self._write_json(400, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._write_json(200, payload)
+
     def _handle_api_export_json(self, raw_body: bytes) -> None:
         self._handle_export(raw_body, export_current_run_as_json)
 
@@ -3875,6 +4148,9 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
         "/api/bloomberg/option-discount-curve": _handle_api_bloomberg_option_discount_curve,
         "/api/bloomberg/bond-yield-history": _handle_api_bloomberg_bond_yield_history,
         "/api/bloomberg/historical-yield-vol": _handle_api_historical_yield_vol,
+        "/api/pricing/historical-equivalent-price-vol": (
+            _handle_api_historical_equivalent_price_vol
+        ),
         "/api/vcub/atm/parse": _handle_api_vcub_atm_parse,
         "/api/vcub/atm/confirm": _handle_api_vcub_atm_confirm,
         "/api/vcub/atm/reject": _handle_api_vcub_atm_reject,

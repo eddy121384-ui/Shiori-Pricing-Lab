@@ -721,7 +721,7 @@ def render_standalone_option_workbench_page() -> None:
                 retrieved_at=retrieved_at,
             )
         else:
-            _request, _result, display = price_standalone_option_case(
+            _request, _result, display, _priced_case = price_standalone_option_case(
                 case_text, retrieved_at=retrieved_at
             )
     except (

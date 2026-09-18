@@ -159,6 +159,15 @@ _CONTEXT_FIELDS = (
 _PRICING_FIELDS = (
     ("Model fair premium per 100", "model_fair_premium_per_100"),
     ("Total notional model fair premium", "total_notional_model_fair_premium"),
+    # Issue #214: the basis the run was asked for, and the one the engine
+    # reports having priced. Both, because the first is present even on a
+    # FAILED result (which carries no assumptions at all) and the second is
+    # the engine's own echo of what F, K and the Black-76 wrapper actually
+    # were -- a reader should never have to infer either from a premium.
+    ("Bond option price basis (selected)", "bond_option_price_basis"),
+    ("Bond option price basis (priced)", "priced_bond_option_price_basis"),
+    ("Model forward price per 100", "model_forward_price_per_100"),
+    ("Model strike price per 100", "model_strike_price_per_100"),
     ("Forward clean price per 100", "forward_clean_price_per_100"),
     # Issue #177: which source produced the Forward this run priced from.
     ("Forward source", "forward_source"),
@@ -344,6 +353,75 @@ _EFFECTIVE_FORWARD_DISCLAIMER = (
     "at all."
 )
 
+# Issue #214. Labels carry the unit and the basis explicitly, because the
+# three volatilities in this section are three different quantities: the
+# Historical Yield Vol in the Bloomberg field's own unit, the same statistic
+# normalized to DECIMAL_ANNUAL, and the *price* volatility they converted
+# into through D_B. Printing any of them as a bare "volatility" is exactly
+# how one gets read as another.
+_HISTORICAL_VOLATILITY_SOURCE_FIELDS = (
+    ("Vol source", "vol_source"),
+    ("Volatility kind", "volatility_kind"),
+    ("Volatility basis", "volatility_basis"),
+    ("Bond option price basis", "price_basis"),
+    ("Security", "security"),
+    ("Requested identifier", "requested_identifier"),
+    ("Bloomberg Yield field", "yield_field"),
+    ("Yield field meaning", "field_meaning"),
+    ("Yield field unit", "historical_yield_vol_field_unit"),
+    (
+        "Historical Yield Vol (annualized, Yield field unit)",
+        "historical_yield_vol_in_field_unit",
+    ),
+    (
+        "Historical Yield Vol (annualized, decimal)",
+        "historical_yield_vol_decimal_annual",
+    ),
+    ("Unit normalization factor applied", "historical_yield_vol_normalization_factor"),
+    ("Historical window status", "historical_yield_vol_window_status"),
+    ("Observations used", "historical_yield_vol_observation_count"),
+    ("Observations requested", "historical_yield_vol_requested_observation_count"),
+    ("Yield Changes", "historical_yield_vol_change_count"),
+    ("Standard deviation convention", "historical_yield_vol_convention"),
+    ("Annualization trading days", "historical_yield_vol_annualization_trading_days"),
+    ("Requested range start", "historical_yield_vol_requested_start_date"),
+    ("Requested range end", "historical_yield_vol_requested_end_date"),
+    ("First observation used", "historical_yield_vol_first_observation_date"),
+    ("Last observation used", "historical_yield_vol_last_observation_date"),
+    ("Historical Yield source system", "historical_yield_vol_source_system"),
+    ("Historical Yield acquired at", "historical_yield_vol_acquired_at"),
+    ("Historical Yield Vol calculated at", "historical_yield_vol_calculated_at"),
+    ("Duration convention profile", "duration_convention_profile"),
+    ("Duration pricing timestamp (t0)", "duration_pricing_timestamp"),
+    ("Duration settlement date (tS)", "duration_settlement_date"),
+    ("Duration maturity date", "duration_maturity_date"),
+    ("Duration coupon (percent)", "duration_coupon_percent"),
+    ("Duration coupons per year", "duration_coupons_per_year"),
+    ("Duration day count", "duration_day_count"),
+    ("Duration clean price per 100", "duration_clean_price_per_100"),
+    ("Duration accrued interest per 100", "duration_accrued_interest_per_100"),
+    ("Duration dirty price per 100", "duration_dirty_price_per_100"),
+    ("Duration denominator price per 100", "duration_basis_price_per_100"),
+    ("Duration base yield (percent)", "duration_base_yield_percent"),
+    ("dP/dY per unit decimal yield", "duration_price_derivative_per_unit_yield"),
+    ("Modified duration (signed)", "modified_duration"),
+    ("Modified duration |D_B|", "absolute_modified_duration"),
+    ("Duration type", "duration_type"),
+    ("Duration source", "duration_source"),
+    ("Duration methodology version", "duration_methodology_version"),
+    ("Equivalent Price Vol (sigma_P)", "equivalent_price_vol"),
+    ("Equivalent Price Vol unit", "equivalent_price_vol_unit"),
+    ("Equivalent Price Vol formula", "equivalent_price_vol_formula"),
+    (
+        "Equivalent Price Vol methodology version",
+        "equivalent_price_vol_methodology_version",
+    ),
+    ("Derived at", "calculated_at"),
+    ("Warnings", "warnings"),
+    ("Volatility source audit", "override_or_fallback_audit"),
+)
+
+
 _TRADER_OVERRIDE_PROVENANCE_FIELDS = (
     ("Field", "field"),
     ("Case path", "path"),
@@ -359,6 +437,16 @@ _TRADER_OVERRIDE_PROVENANCE_DISCLAIMER = (
     "source for it. Each entry records the reason it could not be sourced and the "
     "Bloomberg acquisition event this run is anchored to. These are trader "
     "overrides, never observed market data."
+)
+
+_HISTORICAL_VOLATILITY_SOURCE_DISCLAIMER = (
+    "The volatility Black-76 priced with was derived by Shiori on this run from this "
+    "bond's own past Bloomberg Yield observations: sigma_P = |D_B| x sigma_hist_abs, on "
+    "the bond option price basis named below. It is a historical / realized proxy for "
+    "internal-model reconciliation -- not a current market-implied volatility, not "
+    "Bloomberg implied vol and not VCUB. It was not typed by the trader, and no value "
+    "from a previous run, a previous bond or the other price basis was reused: the whole "
+    "chain is re-derived on every priced run."
 )
 
 _SOLVER_DIAGNOSTICS_FIELDS = (
@@ -607,6 +695,18 @@ def render_standalone_run_as_markdown(display: dict) -> str:
         lines.append("")
         for label, key in _EFFECTIVE_FORWARD_FIELDS:
             lines.append(f"- **{label}:** {_fmt(effective_forward.get(key))}")
+        lines.append("")
+
+    historical_volatility_source = display.get("historical_volatility_source")
+    if historical_volatility_source is not None:
+        lines.append("## Historical Volatility Source")
+        lines.append("")
+        lines.append(f"> {_HISTORICAL_VOLATILITY_SOURCE_DISCLAIMER}")
+        lines.append("")
+        for label, key in _HISTORICAL_VOLATILITY_SOURCE_FIELDS:
+            lines.extend(
+                _render_field_lines(label, historical_volatility_source.get(key))
+            )
         lines.append("")
 
     if "live_bloomberg_quote" in display:

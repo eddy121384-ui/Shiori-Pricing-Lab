@@ -114,9 +114,8 @@ workflow accepts no caller-supplied ``source_as_of`` or live ``retrieved_at``.
 The expected ISIN comes from the case's own ``bond_option.underlying_isin``;
 Bloomberg's ``ID_ISIN`` is verified against it by the loader itself
 (``data/bloomberg_bond_quote.py``, PR #130). Immediately after a successful
-loader return, :func:`_shiori_acquisition_now` -- the only clock read
-anywhere in this module -- captures one offset-aware system-local **Shiori
-acquisition timestamp**. This is never labeled a Bloomberg update time,
+loader return, :func:`_shiori_acquisition_now` captures one offset-aware
+system-local **Shiori acquisition timestamp**. This is never labeled a Bloomberg update time,
 exchange time, or quote-observation time. Its local calendar date must
 equal the case's ``valuation_date`` exactly; a mismatch is caught by the
 existing, unmodified ``pricing_timestamp.date() != valuation_date`` builder
@@ -145,6 +144,10 @@ from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
+from shiori_pricing_lab.app.standalone_option_historical_vol_source import (
+    apply_historical_equivalent_price_vol_to_case,
+    case_declares_historical_vol_source,
+)
 from shiori_pricing_lab.data.bli_benchmark_quote import BLIBenchmarkQuote, BLIBenchmarkQuoteSide
 from shiori_pricing_lab.data.bli_snapshot import (
     BLIBondQuote,
@@ -168,6 +171,11 @@ from shiori_pricing_lab.data.bloomberg_bond_quote import load_bloomberg_bond_quo
 from shiori_pricing_lab.pricing.bli_benchmark_comparison import (
     BLIBenchmarkComparisonResult,
     compare_bli_benchmark,
+)
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    DEFAULT_BOND_OPTION_PRICE_BASIS,
+    BondOptionPriceBasis,
+    require_bond_option_price_basis,
 )
 from shiori_pricing_lab.pricing.bli_implied_price_vol_calibration import (
     BLIImpliedPriceVolCalibrationResult,
@@ -211,12 +219,25 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
 # reproduces its own Forward from the case alone, instead of depending on live
 # browser state; the wiring that reads them is
 # ``app/standalone_option_workbench_server.apply_effective_forward_to_case``.
+# ``bond_option_price_basis`` and ``historical_yield_vol_request`` (Issue
+# #214) join the same category for the same reason. The first selects which
+# already-approved Black-76 representation the run prices; the second is the
+# Historical Yield query the ``HISTORICAL_YIELD_VOL_MO`` source re-derives its
+# volatility from -- an input to *producing* a ``volatility_input``, exactly
+# as ``spot_settlement_date`` is an input to producing a
+# ``forward_clean_price_input``. Both therefore belong to the envelope a saved
+# or re-sent case reproduces itself from, not to the typed request contract,
+# which is unchanged by #214. An absent basis means DIRTY, which is what every
+# pre-#214 case, fixture and saved envelope already priced, and an absent
+# Historical query is simply a case not using that source.
 _OPTIONAL_TOP_LEVEL_KEYS = frozenset(
     {
         "deposit_rate_observation",
         "bond_reference_source_name",
         "spot_settlement_date",
         "convention_profile",
+        "bond_option_price_basis",
+        "historical_yield_vol_request",
     }
 )
 _ALLOWED_TOP_LEVEL_KEYS = _REQUIRED_TOP_LEVEL_KEYS | _OPTIONAL_TOP_LEVEL_KEYS
@@ -414,10 +435,30 @@ def build_request_from_standalone_option_case(
     )
 
 
+def standalone_option_case_price_basis(case: str | dict) -> BondOptionPriceBasis:
+    """Return the ``BOND_OPTION_PRICE_BASIS`` ``case`` declares.
+
+    One reader for the one envelope key, so the Historical Equivalent Price
+    Vol derivation, the pricing call and the Workbench display cannot each
+    resolve the basis their own way. An absent or ``None`` key means
+    ``DIRTY`` -- the default that preserves every pre-#214 case's behaviour
+    -- and anything else goes through ``require_bond_option_price_basis``,
+    which refuses an unknown or blank value rather than falling back.
+    """
+
+    envelope = _parse_standalone_option_case(case)
+    declared = envelope.get("bond_option_price_basis")
+    if declared is None:
+        return DEFAULT_BOND_OPTION_PRICE_BASIS
+    return require_bond_option_price_basis(declared, "bond_option_price_basis")
+
+
 def prepare_standalone_display(
     result: PricingResult,
     request: BLIStandaloneBondOptionRequest,
     retrieved_at: str | None = None,
+    *,
+    price_basis: BondOptionPriceBasis | None = None,
 ) -> dict:
     """Return a bounded display context read **verbatim** from ``result``/``request``.
 
@@ -454,6 +495,14 @@ def prepare_standalone_display(
         "product_type": result.product_type,
         "valuation_date": result.valuation_date,
         "result_currency": result.result_currency,
+        # Issue #214. Caller-supplied, exactly like ``retrieved_at``: the
+        # basis the run was *asked* for, so a FAILED result -- which carries
+        # no assumptions at all -- still says which representation was
+        # refused. The engine's own echo below is what it actually priced.
+        "bond_option_price_basis": None if price_basis is None else price_basis.value,
+        "priced_bond_option_price_basis": assumptions.get("bond_option_price_basis"),
+        "model_forward_price_per_100": assumptions.get("model_forward_price_per_100"),
+        "model_strike_price_per_100": assumptions.get("model_strike_price_per_100"),
         # Premium: per-100 and total notional exposed as separate fields.
         "model_fair_premium_per_100": assumptions.get("black76_pv_per_100"),
         "total_notional_model_fair_premium": result.pv,
@@ -527,7 +576,7 @@ def price_standalone_option_case(
     case: str | dict,
     *,
     retrieved_at: str | None = None,
-) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, dict]:
+) -> tuple[BLIStandaloneBondOptionRequest, PricingResult, dict, dict]:
     """Parse, build, price, and prepare display for one standalone option ``case``.
 
     Convenience over :func:`build_request_from_standalone_option_case`,
@@ -535,15 +584,59 @@ def price_standalone_option_case(
     :func:`prepare_standalone_display`. Returns the existing
     ``BLIStandaloneBondOptionRequest``, the existing ``PricingResult`` (a
     ``FAILED`` result is returned as-is, never converted to a fabricated
-    success), and the bounded display context. Envelope / schema / builder
-    failures propagate from the build step unremapped; ``retrieved_at`` is
-    caller-supplied and flows only into the display context.
+    success), the bounded display context, and **the envelope that was
+    actually priced**. Envelope / schema / builder failures propagate from the
+    build step unremapped; ``retrieved_at`` is caller-supplied and flows only
+    into the display context.
+
+    **A case that names a derived volatility source has it derived here**
+    (Issue #214; Codex review, PR #215, rounds 1-3). ``HISTORICAL_YIELD_VOL_MO``
+    means "compute this run's sigma_P from these inputs", so the number an
+    envelope arrives carrying was computed for the bond, price state and price
+    basis it was computed *from* -- which may not be the ones about to be
+    priced. Two earlier designs let a caller derive and then present evidence
+    of having done so, and both had the same hole in a different place: any
+    value a caller holds is a value a caller can hold again, or rebuild.
+    Resolving the volatility immediately before the request is built from it
+    removes the question instead of answering it, and is why this function
+    returns the priced envelope -- the derived volatility is on it, so a caller
+    echoing a case back to a client still echoes the one that priced.
+
+    The cost is that this function now reaches Bloomberg **for such a case
+    only**: the Yield series the statistic is measured over, plus one clock
+    read for the timestamp the duration producer requires and may not read
+    itself. Every other case -- every pre-#214 envelope, every fixture, the
+    bundled example -- takes a branch that makes no call and reads no clock, so
+    their behaviour is unchanged.
     """
 
-    request = build_request_from_standalone_option_case(case)
-    result = price_bli_mvp_standalone_option(request)
-    display = prepare_standalone_display(result, request, retrieved_at=retrieved_at)
-    return request, result, display
+    envelope = _parse_standalone_option_case(case)
+    price_basis = standalone_option_case_price_basis(envelope)
+    # The volatility this run prices from is resolved here, immediately before
+    # the request is built from it, so there is no interval in which a caller
+    # holds it (Codex review, PR #215, rounds 1-3).
+    #
+    # The branch is explicit rather than left to the transform's own no-op, so
+    # that a case outside this source reaches neither Bloomberg nor any clock
+    # -- an existing invariant of this module
+    # (``test_manual_mode_never_calls_bloomberg_or_the_live_clock``) and
+    # exactly the promise "a case that does not name this source is untouched"
+    # has to keep. The derivation no longer takes a timestamp from here at
+    # all: it is stamped with the one the #197 calculator reads after the
+    # series is acquired (Codex review, PR #215).
+    priced_case, historical_volatility_source = (
+        apply_historical_equivalent_price_vol_to_case(envelope, price_basis)
+        if case_declares_historical_vol_source(envelope)
+        else (envelope, None)
+    )
+    request = build_request_from_standalone_option_case(priced_case)
+    result = price_bli_mvp_standalone_option(request, price_basis=price_basis)
+    display = prepare_standalone_display(
+        result, request, retrieved_at=retrieved_at, price_basis=price_basis
+    )
+    if historical_volatility_source is not None:
+        display = {**display, "historical_volatility_source": historical_volatility_source}
+    return request, result, display, priced_case
 
 
 # --- Issue #125: benchmark comparison / implied PRICE_VOL orchestration ----------
@@ -716,6 +809,34 @@ def prepare_standalone_benchmark_display(
     }
 
 
+def _require_dirty_basis_for_calibration(case: str | dict) -> None:
+    """Refuse to pair a non-``DIRTY`` priced run with the #125 calibration.
+
+    The implied-vol calibration is the unmodified Issue #125 solver, and it
+    prices dirty forward/strike. Running it beside a ``CLEAN`` priced result
+    would report a ``DIRTY`` implied sigma_P as that run's, and nothing in
+    either number would show it -- the mixed-basis state
+    ``BOND_OPTION_PRICE_BASIS`` exists to prevent, in the one place a
+    volatility is produced rather than consumed.
+
+    Basis-aware calibration is out of Issue #214's scope, so the combination
+    is refused rather than quietly produced. Pricing alone is unaffected on
+    either basis, and the live Workbench reaches no calibration path at all.
+    """
+
+    price_basis = standalone_option_case_price_basis(case)
+    if price_basis is BondOptionPriceBasis.DIRTY:
+        return
+    raise ValueError(
+        "benchmark comparison and implied-vol calibration are available on "
+        f"{BondOptionPriceBasis.DIRTY.value} only; this case declares "
+        f"bond_option_price_basis={price_basis.value}. The calibration solver prices "
+        f"dirty forward/strike, so pairing it with a {price_basis.value} priced result "
+        "would report an implied volatility on a different price basis than the premium "
+        "beside it"
+    )
+
+
 def price_standalone_option_case_with_benchmark(
     case: str | dict,
     benchmark_case: str | dict,
@@ -751,7 +872,11 @@ def price_standalone_option_case_with_benchmark(
     result object.
     """
 
-    request, result, display = price_standalone_option_case(case, retrieved_at=retrieved_at)
+    _require_dirty_basis_for_calibration(case)
+
+    request, result, display, _priced_case = price_standalone_option_case(
+        case, retrieved_at=retrieved_at
+    )
     benchmark = build_benchmark_from_standalone_option_benchmark_case(benchmark_case)
     comparison = compare_bli_benchmark(
         result, request, benchmark, active_quote_side=active_quote_side
@@ -770,14 +895,23 @@ def price_standalone_option_case_with_benchmark(
 def _shiori_acquisition_now() -> datetime:
     """Return one offset-aware Shiori acquisition timestamp via the platform clock.
 
-    The only clock read anywhere in this module -- called exactly once, by
-    :func:`price_standalone_option_case_with_bloomberg_quote`, immediately
-    after a successful ``load_bloomberg_bond_quote`` return. Uses the
-    platform-native local-clock-then-attach-offset call below (never a
-    fixed or naive time, never a UTC-now/today-only reading). This is the
-    Shiori acquisition time only -- never a Bloomberg quote-observation
-    time, ``source_as_of``, or exchange time. Tests monkeypatch this exact
-    function directly so no real clock is read in CI.
+    The one clock read in this module, reached from exactly two places, each
+    stamping a different fact about the same run:
+
+    - :func:`price_standalone_option_case_with_bloomberg_quote`, immediately
+      after a successful ``load_bloomberg_bond_quote`` return -- when the spot
+      quote was **acquired**, which becomes that run's ``pricing_timestamp``;
+    - :func:`price_standalone_option_case`, for a case naming a derived
+      volatility source -- when that volatility was **calculated** (Issue
+      #214). The duration producer requires this as an argument rather than
+      reading a clock itself, because no module under ``pricing/`` may, so the
+      caller that owns the run supplies it.
+
+    Uses the platform-native local-clock-then-attach-offset call below (never a
+    fixed or naive time, never a UTC-now/today-only reading). This is Shiori's
+    own time only -- never a Bloomberg quote-observation time,
+    ``source_as_of``, or exchange time. Tests monkeypatch this exact function
+    directly so no real clock is read in CI.
     """
 
     return datetime.now().astimezone()
@@ -893,6 +1027,13 @@ def price_standalone_option_case_with_bloomberg_quote(
     is byte-for-byte the pre-#177 behaviour. Whatever the transform raises
     propagates unchanged, before pricing.
 
+    **The Historical volatility needs no seam of its own (Issue #214).** It is
+    the other input that is a function of the live quote and this run's own
+    ``t0``, but :func:`price_standalone_option_case` resolves it itself, after
+    the substitution and after this transform -- so it is already derived from
+    the quote just acquired, and the returned case is still the case that was
+    priced.
+
     Raises ``ValueError`` for
     envelope/input/date problems, propagates ``BLIBloombergDapiError``
     unchanged on any Bloomberg failure (the original ``bond_quote`` is
@@ -923,7 +1064,7 @@ def price_standalone_option_case_with_bloomberg_quote(
     }
     if case_transform is not None:
         bloomberg_case = case_transform(bloomberg_case)
-    request, result, display = price_standalone_option_case(
+    request, result, display, bloomberg_case = price_standalone_option_case(
         bloomberg_case, retrieved_at=acquired_at
     )
 
@@ -964,6 +1105,12 @@ def price_standalone_option_case_with_bloomberg_quote_and_benchmark(
     orchestration shape exactly, with the live quote inserted as an
     additional returned value.
     """
+
+    # Issue #214: the same refusal as the non-live benchmark path above, and
+    # for the same reason -- checked before the Bloomberg call, so a
+    # combination this composition will not produce never costs a DAPI
+    # request.
+    _require_dirty_basis_for_calibration(case)
 
     (
         request,

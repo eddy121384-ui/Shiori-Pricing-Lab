@@ -44,6 +44,34 @@ from shiori_pricing_lab.pricing.bli_historical_equivalent_price_vol import (
     historical_equivalent_price_vol_volatility_input,
 )
 
+# --- Publication into a pricing composition ----------------------------------
+
+_SAME_BASIS_AS_THE_VALUE = object()
+
+
+def _publish(converted, *, pricing_price_basis=_SAME_BASIS_AS_THE_VALUE):
+    """Publish ``converted`` into a composition on its own price basis.
+
+    Issue #214 made the *composition's* basis a required argument of the
+    publication helper -- it is the gate that stops a CLEAN sigma_P entering a
+    DIRTY-F/K run, and there is deliberately no default in production code.
+    Defaulting it here to the value's own basis keeps every test below aimed
+    at what it was written to check; the gate itself is pinned by the lineage
+    tests, which state both bases explicitly.
+    """
+
+    if pricing_price_basis is _SAME_BASIS_AS_THE_VALUE:
+        declared = getattr(converted, "price_basis", None)
+        pricing_price_basis = (
+            declared
+            if isinstance(declared, BondOptionPriceBasis)
+            else BondOptionPriceBasis.DIRTY
+        )
+    return historical_equivalent_price_vol_volatility_input(
+        converted, pricing_price_basis=pricing_price_basis
+    )
+
+
 _SECURITY = "/isin/US0000000000"
 _START = date(2026, 1, 1)
 
@@ -298,7 +326,7 @@ def test_the_source_is_never_presented_as_implied_or_as_vcub():
     assert converted.bond_vol_source_mode == HISTORICAL_YIELD_VOL_MO_SOURCE
     assert "VCUB" not in converted.bond_vol_source_mode
 
-    published = historical_equivalent_price_vol_volatility_input(converted)
+    published = _publish(converted)
     assert "not Bloomberg implied vol" in published.override_or_fallback_audit
     assert "no VCUB DCF adjustment" in published.override_or_fallback_audit
 
@@ -354,7 +382,7 @@ def test_the_two_bases_agree_when_there_is_no_accrued_interest():
 def test_the_basis_survives_into_the_published_input_audit():
     basis = BondOptionPriceBasis.DIRTY
     converted = _convert(_vol_result(), _duration(price_basis=basis))
-    published = historical_equivalent_price_vol_volatility_input(converted)
+    published = _publish(converted)
 
     audit = published.override_or_fallback_audit
     assert f"{basis.value} price basis" in audit
@@ -364,32 +392,60 @@ def test_the_basis_survives_into_the_published_input_audit():
 # --- CLEAN publication safety (Codex review, PR #212) ------------------------
 
 
-def test_dirty_publication_into_the_pricing_contract_still_succeeds():
-    converted = _convert(
-        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_publication_into_a_composition_on_the_same_basis_succeeds(basis):
+    # Issue #214: both bases are publishable now that the standalone engine
+    # takes an explicit BOND_OPTION_PRICE_BASIS and selects its F/K and its
+    # Black-76 wrapper from it. PR #212's DIRTY-only allowlist was the honest
+    # answer while the engine could only price dirty F/K.
+    converted = _convert(_vol_result(), _duration(price_basis=basis))
+    published = historical_equivalent_price_vol_volatility_input(
+        converted, pricing_price_basis=basis
     )
-    published = historical_equivalent_price_vol_volatility_input(converted)
 
     assert published.volatility == converted.equivalent_price_vol
     assert published.volatility_basis is BLIVolatilityBasis.EQUIVALENT_PRICE_VOL
-    assert PUBLISHABLE_PRICE_BASES == frozenset({BondOptionPriceBasis.DIRTY})
+    assert PUBLISHABLE_PRICE_BASES == frozenset(BondOptionPriceBasis)
 
 
-def test_clean_publication_into_the_pricing_contract_is_explicitly_refused():
-    # BLIVolatilityInput carries no price basis, and the standalone engine
-    # applies whatever volatility it receives to dirty F/K. Publishing a
-    # CLEAN vol there would silently build the forbidden mixed state.
-    converted = _convert(
-        _vol_result(), _duration(price_basis=BondOptionPriceBasis.CLEAN)
-    )
+@pytest.mark.parametrize(
+    ("value_basis", "composition_basis"),
+    [
+        (BondOptionPriceBasis.CLEAN, BondOptionPriceBasis.DIRTY),
+        (BondOptionPriceBasis.DIRTY, BondOptionPriceBasis.CLEAN),
+    ],
+)
+def test_publication_into_a_composition_on_the_other_basis_is_refused(
+    value_basis, composition_basis
+):
+    # The gate that replaced the DIRTY-only allowlist. BLIVolatilityInput
+    # carries no price basis, so once one exists nothing downstream can tell
+    # a CLEAN sigma_P from a DIRTY one -- both are ordinary numbers a few
+    # percent apart. The caller therefore names the basis of the run it is
+    # publishing into, and a mismatch is exactly the forbidden mixed
+    # clean-vol / dirty-F/K state.
+    converted = _convert(_vol_result(), _duration(price_basis=value_basis))
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(converted)
+        historical_equivalent_price_vol_volatility_input(
+            converted, pricing_price_basis=composition_basis
+        )
 
     message = str(excinfo.value)
-    assert "CLEAN" in message
-    assert "dirty forward" in message
-    assert "Phase 4/5" in message
+    assert f"{value_basis.value}-basis Equivalent Price Vol" in message
+    assert f"{composition_basis.value}-basis pricing composition" in message
+
+
+def test_the_composition_basis_is_required_and_never_defaulted():
+    # No default on purpose: a basis chosen inside the publication step
+    # rather than by the composition is how a mixed-basis run gets produced
+    # without anyone selecting one.
+    converted = _convert(
+        _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
+    )
+
+    with pytest.raises(TypeError):
+        historical_equivalent_price_vol_volatility_input(converted)
 
 
 def test_a_clean_conversion_relabelled_dirty_cannot_be_published():
@@ -406,7 +462,7 @@ def test_a_clean_conversion_relabelled_dirty_cannot_be_published():
     assert relabelled.equivalent_price_vol == clean.equivalent_price_vol
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(relabelled)
+        _publish(relabelled)
     message = str(excinfo.value)
     assert "labelled DIRTY" in message
     assert "CLEAN" in message
@@ -419,7 +475,7 @@ def test_a_dirty_conversion_relabelled_clean_cannot_be_published_either():
     relabelled = dataclasses.replace(dirty, price_basis=BondOptionPriceBasis.CLEAN)
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(relabelled)
+        _publish(relabelled)
 
 
 def test_a_tampered_published_volatility_value_is_refused():
@@ -433,7 +489,7 @@ def test_a_tampered_published_volatility_value_is_refused():
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(tampered)
+        _publish(tampered)
     assert "not the one its own recorded parents produce" in str(excinfo.value)
 
 
@@ -458,7 +514,7 @@ def test_scaling_the_normalized_yield_vol_and_the_volatility_together_is_refused
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(doubled)
+        _publish(doubled)
     assert "not the one #197 produces" in str(excinfo.value)
 
 
@@ -480,7 +536,7 @@ def test_a_clean_volatility_copied_onto_a_dirty_conversion_is_refused():
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(forged)
+        _publish(forged)
 
 
 @pytest.mark.parametrize(
@@ -506,7 +562,7 @@ def test_a_flattened_historical_field_that_contradicts_its_parent_is_refused(
     tampered = dataclasses.replace(dirty, **{field_name: value})
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(tampered)
+        _publish(tampered)
 
 
 def test_a_conversion_retaining_another_bonds_yield_vol_is_refused():
@@ -518,7 +574,7 @@ def test_a_conversion_retaining_another_bonds_yield_vol_is_refused():
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(swapped)
+        _publish(swapped)
     assert "DE0000000000" in str(excinfo.value)
 
 
@@ -547,7 +603,7 @@ def test_a_duration_for_another_bond_cannot_be_swapped_in_at_publication():
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(swapped)
+        _publish(swapped)
     message = str(excinfo.value)
     assert "DE0000000000" in message
     assert "another bond's yield volatility" in message
@@ -559,7 +615,7 @@ def test_a_conversion_naming_no_security_cannot_be_published(blank):
         _vol_result(), _duration(price_basis=BondOptionPriceBasis.DIRTY)
     )
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(dirty, security=blank)
         )
 
@@ -587,7 +643,7 @@ def test_a_relabelled_conversion_cannot_be_published(field_name, value):
     relabelled = dataclasses.replace(dirty, **{field_name: value})
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(relabelled)
+        _publish(relabelled)
     assert field_name in str(excinfo.value)
 
 
@@ -672,7 +728,7 @@ def test_the_look_ahead_refusal_also_guards_the_publication_boundary():
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(tampered)
+        _publish(tampered)
 
 
 def test_an_observation_dated_on_the_pricing_day_itself_is_allowed():
@@ -740,7 +796,7 @@ def test_the_published_audit_states_an_irregular_coupon_schedule():
         schedule=schedule,
     )
     converted = _convert(_vol_result(), duration)
-    audit = historical_equivalent_price_vol_volatility_input(
+    audit = _publish(
         converted
     ).override_or_fallback_audit
 
@@ -754,7 +810,7 @@ def test_the_published_audit_says_so_when_the_coupon_grid_is_regular():
     # The absence of a schedule must be stated, not left to inference from a
     # missing phrase.
     converted = _convert(_vol_result(), _duration())
-    audit = historical_equivalent_price_vol_volatility_input(
+    audit = _publish(
         converted
     ).override_or_fallback_audit
 
@@ -794,7 +850,7 @@ def _boundary_duration(pricing_timestamp, *, schedule=True):
 
 
 def _published_audit(duration):
-    return historical_equivalent_price_vol_volatility_input(
+    return _publish(
         _convert(_vol_result(), duration)
     ).override_or_fallback_audit
 
@@ -937,7 +993,7 @@ def test_a_full_window_publication_states_its_status_and_no_short_window_warning
     result, history = _vol_result_with_history()
     assert result.window_status.value == "FULL_WINDOW"
 
-    published = historical_equivalent_price_vol_volatility_input(
+    published = _publish(
         _convert(result, _duration(), history=history)
     )
     audit = published.override_or_fallback_audit
@@ -952,7 +1008,7 @@ def test_a_short_window_publication_carries_its_status_and_warning_verbatim():
     assert result.warnings
 
     converted = _convert(result, _duration(), history=history)
-    published = historical_equivalent_price_vol_volatility_input(converted)
+    published = _publish(converted)
     audit = published.override_or_fallback_audit
 
     # Not forced to FULL_WINDOW anywhere on the way out.
@@ -982,7 +1038,7 @@ def test_a_short_window_cannot_be_republished_as_full_window_by_editing_echoes(e
     converted = _convert(result, _duration(), history=history)
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(converted, **edits)
         )
     assert "retained parents say" in str(excinfo.value)
@@ -994,7 +1050,7 @@ def test_a_duration_carrying_warnings_its_producer_never_emits_is_refused():
     tampered_duration = dataclasses.replace(converted.duration, warnings=("injected",))
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(
                 converted,
                 duration=tampered_duration,
@@ -1008,7 +1064,7 @@ def test_the_published_audit_states_the_observation_window():
     # BLIVolatilityInput carries no dates, so the window has to reach a
     # reader through the audit or not at all.
     converted = _convert(_vol_result(), _duration())
-    audit = historical_equivalent_price_vol_volatility_input(
+    audit = _publish(
         converted
     ).override_or_fallback_audit
 
@@ -1144,7 +1200,7 @@ def test_the_series_is_retained_and_revalidated_at_publication():
         converted, yield_history=_history([4.00, 4.50, 3.10, 4.90])
     )
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(swapped)
+        _publish(swapped)
 
 
 def test_both_parents_are_retained_whole_on_the_conversion():
@@ -1170,7 +1226,7 @@ def test_publication_also_revalidates_the_nested_duration():
     )
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError) as excinfo:
-        historical_equivalent_price_vol_volatility_input(tampered)
+        _publish(tampered)
     assert "not reproducible" in str(excinfo.value)
 
 
@@ -1212,7 +1268,13 @@ def test_the_refusal_happens_before_any_volatility_input_is_constructed():
     converter.BLIVolatilityInput = _Tripwire
     try:
         with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-            historical_equivalent_price_vol_volatility_input(converted)
+            # Issue #214: the refusal this pins is now the basis-lineage one
+            # -- a CLEAN value offered to a DIRTY-F/K composition -- which is
+            # the same failure PR #212 refused wholesale, and it must still
+            # happen before any BLIVolatilityInput exists.
+            historical_equivalent_price_vol_volatility_input(
+                converted, pricing_price_basis=BondOptionPriceBasis.DIRTY
+            )
     finally:
         converter.BLIVolatilityInput = original
 
@@ -1375,7 +1437,7 @@ def test_an_irregular_duration_reproduces_and_converts():
 
     assert duration.schedule_accrual_start == schedule.accrual_start
     assert converted.equivalent_price_vol > 0
-    assert historical_equivalent_price_vol_volatility_input(converted).volatility == (
+    assert _publish(converted).volatility == (
         converted.equivalent_price_vol
     )
 
@@ -1410,7 +1472,7 @@ def test_the_converted_input_is_on_a_basis_the_guard_already_accepts():
     )
 
     converted = _convert(_vol_result(), _duration())
-    published = historical_equivalent_price_vol_volatility_input(converted)
+    published = _publish(converted)
 
     assert published.volatility_basis in _SUPPORTED_VOLATILITY_BASES
     # ...while #197's own raw publication is still on the refused basis.
@@ -1465,7 +1527,7 @@ def test_both_lineages_survive_the_conversion():
 
 def test_the_published_audit_carries_both_parents_and_the_conversion():
     converted = _convert(_vol_result(), _duration())
-    published = historical_equivalent_price_vol_volatility_input(converted)
+    published = _publish(converted)
 
     audit = published.override_or_fallback_audit
     assert published.volatility == converted.equivalent_price_vol
@@ -1514,7 +1576,7 @@ def test_a_blank_supplied_calculated_at_is_refused(bad):
 
 def test_the_published_value_crosses_the_boundary_unrescaled():
     converted = _convert(_vol_result(), _duration())
-    published = historical_equivalent_price_vol_volatility_input(converted)
+    published = _publish(converted)
 
     assert published.volatility == converted.equivalent_price_vol
 
@@ -1624,7 +1686,7 @@ def test_a_non_result_input_is_refused(bad):
 
 def test_publishing_a_non_converted_object_is_refused():
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input("not a conversion")
+        _publish("not a conversion")
 
 
 # --- Retained Yield series must be Bloomberg's own evidence (Codex review) ---
@@ -1671,7 +1733,7 @@ def test_publication_refuses_a_retained_series_altered_after_conversion():
         genuine, historical_yield_vol=altered_result, yield_history=altered_history
     )
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(tampered)
+        _publish(tampered)
 
 
 @pytest.mark.parametrize("observations", [None, (None,)])
@@ -1719,7 +1781,7 @@ def test_a_malformed_conversion_field_is_refused_on_the_documented_type(
     tampered = dataclasses.replace(genuine, **{field_name: value})
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(tampered)
+        _publish(tampered)
 
 
 @pytest.mark.parametrize("replacement_kind", ["none", "wrong_type"])
@@ -1741,7 +1803,7 @@ def test_a_malformed_nested_duration_field_is_refused_on_the_documented_type(
 
     # Both entry points: publication of a reconstructed record, and conversion.
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(genuine, duration=tampered_duration)
         )
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
@@ -1757,7 +1819,7 @@ def test_a_malformed_nested_result_field_is_refused_on_the_documented_type(field
     tampered_result = dataclasses.replace(genuine.historical_yield_vol, **{field_name: object()})
 
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(genuine, historical_yield_vol=tampered_result)
         )
 
@@ -1766,7 +1828,7 @@ def test_a_malformed_nested_result_field_is_refused_on_the_documented_type(field
 def test_a_missing_nested_parent_is_refused_not_dereferenced(parent):
     # Codex's exact case: a nested parent that is None after deserialization.
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(_genuine_conversion(), **{parent: None})
         )
 
@@ -1776,7 +1838,7 @@ def test_a_plain_string_basis_is_refused_even_though_it_equals_the_enum():
     # instance check stops it before a later `.value`.
     genuine = _genuine_conversion()
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(genuine, price_basis="DIRTY")
         )
 
@@ -1798,7 +1860,7 @@ def test_an_oversized_integer_duration_is_refused_not_raised_as_overflow(field_n
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
         _convert(_vol_result(), tampered_duration)
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(genuine, duration=tampered_duration)
         )
 
@@ -1806,7 +1868,7 @@ def test_an_oversized_integer_duration_is_refused_not_raised_as_overflow(field_n
 def test_an_oversized_integer_in_a_conversion_float_field_is_refused():
     genuine = _genuine_conversion()
     with pytest.raises(BLIHistoricalEquivalentPriceVolError):
-        historical_equivalent_price_vol_volatility_input(
+        _publish(
             dataclasses.replace(genuine, equivalent_price_vol=10**400)
         )
 

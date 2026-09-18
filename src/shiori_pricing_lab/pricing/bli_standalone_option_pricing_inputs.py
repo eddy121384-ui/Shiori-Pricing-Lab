@@ -32,6 +32,16 @@ composes only already-reviewed helpers -- ``accrued_interest_per_100``
 interpolation, bootstrap, extrapolation, repo/financing derivation, or
 business-day/calendar rule of its own.
 
+**The price basis selects which already-computed pair is the model's F/K
+(Issue #214).** Steps 1-4 above are unchanged and always produce both the
+clean and the dirty pair; ``price_basis`` then names which of the two
+``model_forward_price_per_100`` / ``model_strike_price_per_100`` are, using
+the one shared ``basis_price_per_100`` rule the duration producer's own
+denominator goes through. It defaults to ``DIRTY``, so the OVME-aligned
+behaviour ratified in Issue #94 is what every existing caller still gets.
+Nothing else here varies with it: the accrued interest, the option time and
+all three discount factors are basis-independent.
+
 **Explicit dates and market inputs are authoritative.** ``reporting_date``,
 ``forward_settlement_date``, and ``option_settlement_date`` are taken exactly
 as supplied on the request; none is derived from ``settlement_lag_days``,
@@ -61,6 +71,12 @@ from shiori_pricing_lab.data.bli_snapshot import BLICurvePurpose
 from shiori_pricing_lab.data.bli_standalone_option_request import (
     BLIStandaloneBondOptionRequest,
 )
+from shiori_pricing_lab.pricing.bli_bond_option_price_basis import (
+    DEFAULT_BOND_OPTION_PRICE_BASIS,
+    BondOptionPriceBasis,
+    basis_price_per_100,
+    require_bond_option_price_basis,
+)
 from shiori_pricing_lab.pricing.bli_curve_discount_factor import (
     discount_factor_from_continuous_zero_curve,
 )
@@ -77,7 +93,8 @@ class StandaloneOptionPricingInputs:
     Every field is either read verbatim from the request or computed by an
     already-reviewed helper -- no value here is a fabricated fallback. The
     dirty values are the clean values plus the same
-    ``accrued_interest_at_forward_settlement_per_100``.
+    ``accrued_interest_at_forward_settlement_per_100``, and the ``model_*``
+    pair is whichever of the two ``price_basis`` names.
     """
 
     forward_clean_price_per_100: float
@@ -85,6 +102,20 @@ class StandaloneOptionPricingInputs:
     accrued_interest_at_forward_settlement_per_100: float
     forward_dirty_price_per_100: float
     strike_dirty_price_per_100: float
+    #: Which price state this composition's Black-76 model is expressed in
+    #: (Issue #214). ``DIRTY`` is the default and preserves the OVME-aligned
+    #: behaviour ratified in Issue #94; ``CLEAN`` is the approved alternate
+    #: basis. It is carried on the result so ``F``, ``K`` and the volatility
+    #: that priced them can be checked against one stated basis rather than
+    #: inferred from which number happens to be larger.
+    price_basis: BondOptionPriceBasis
+    #: The ``F`` and ``K`` Black-76 actually receives on ``price_basis``.
+    #: Both are selected from the clean/dirty pairs above by the one shared
+    #: :func:`basis_price_per_100` rule -- no second clean/dirty arithmetic
+    #: exists here, and the four basis-specific figures remain available so a
+    #: reviewer can see what the other basis would have priced.
+    model_forward_price_per_100: float
+    model_strike_price_per_100: float
     time_to_expiry_year_fraction: float
     pricing_to_reporting_discount_factor: float
     pricing_to_option_settlement_discount_factor: float
@@ -148,8 +179,18 @@ def _option_discount_factor_to_date(
 
 def resolve_standalone_option_pricing_inputs(
     request: BLIStandaloneBondOptionRequest,
+    *,
+    price_basis: BondOptionPriceBasis | str = DEFAULT_BOND_OPTION_PRICE_BASIS,
 ) -> StandaloneOptionPricingInputs:
     """Resolve the OVME-aligned Black-76 inputs for ``request``.
+
+    ``price_basis`` (Issue #214) selects which already-computed price state
+    the model's ``F`` and ``K`` are taken from. It defaults to
+    ``DIRTY``, so every existing caller resolves exactly the numbers it
+    always has; ``CLEAN`` returns the clean pair instead. Nothing else in
+    this resolver depends on it -- the accrued interest, the option time and
+    all three discount factors are basis-independent and are computed once,
+    the same way, on either basis.
 
     Composition order (Issue #94):
 
@@ -198,12 +239,20 @@ def resolve_standalone_option_pricing_inputs(
         bond_option.strike_price, "strike_clean_price_per_100"
     )
 
+    basis = require_bond_option_price_basis(price_basis)
+
     accrued_interest = accrued_interest_per_100(
         request.resolved_bond_reference_data,
         as_of_date=request.forward_settlement_date,
     )
     forward_dirty_price = forward_clean_price + accrued_interest
     strike_dirty_price = strike_clean_price + accrued_interest
+    # The one place a basis selects a price, reused rather than re-derived:
+    # ``basis_price_per_100`` is the same rule the duration producer's own
+    # denominator goes through, so a composition's F/K and its D_B cannot
+    # drift apart by each implementing "clean plus accrued" separately.
+    model_forward_price = basis_price_per_100(forward_clean_price, accrued_interest, basis)
+    model_strike_price = basis_price_per_100(strike_clean_price, accrued_interest, basis)
 
     pricing_timestamp = datetime.fromisoformat(request.pricing_timestamp)
     expiry_timestamp = datetime.fromisoformat(request.expiry_timestamp)
@@ -232,6 +281,9 @@ def resolve_standalone_option_pricing_inputs(
         accrued_interest_at_forward_settlement_per_100=accrued_interest,
         forward_dirty_price_per_100=forward_dirty_price,
         strike_dirty_price_per_100=strike_dirty_price,
+        price_basis=basis,
+        model_forward_price_per_100=model_forward_price,
+        model_strike_price_per_100=model_strike_price,
         time_to_expiry_year_fraction=time_to_expiry,
         pricing_to_reporting_discount_factor=pricing_to_reporting_df,
         pricing_to_option_settlement_discount_factor=pricing_to_option_settlement_df,

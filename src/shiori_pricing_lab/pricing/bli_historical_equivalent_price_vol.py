@@ -84,6 +84,14 @@ source *eligible* for the existing Black-76 path -- that basis is already in
 ``bli_mvp_required_input_guard``'s supported set and always has been. The raw
 ``YIELD_VOL`` basis stays refused by that guard, unchanged: this module
 converts rather than making the guard permissive.
+
+**Publication names the composition it enters (Issue #214).**
+:func:`historical_equivalent_price_vol_volatility_input` requires the
+caller to state the ``BOND_OPTION_PRICE_BASIS`` of the run the value is
+being published into, and refuses a value on the other basis. Both bases are
+publishable now -- the standalone engine selects its ``F``/``K`` and its
+Black-76 wrapper from that same basis -- but neither is publishable into the
+wrong run.
 """
 
 from __future__ import annotations
@@ -149,9 +157,6 @@ VOLATILITY_KIND = "HISTORICAL_REALIZED"
 # apart, some twelve orders of magnitude outside it.
 _DURATION_REL_TOL = 1e-12
 
-# Which price bases may currently be published into the shared
-# ``BLIVolatilityInput`` pricing contract. DIRTY only, and deliberately so:
-# see :func:`historical_equivalent_price_vol_volatility_input`.
 #: Classes a reconstructed conversion's class- and enum-typed fields must be
 #: real instances of (see :func:`record_field_type_problem`).
 _CONVERSION_FIELD_CLASSES: dict[str, type] = {
@@ -162,9 +167,14 @@ _CONVERSION_FIELD_CLASSES: dict[str, type] = {
     "BLIBondModifiedDuration": BLIBondModifiedDuration,
 }
 
-PUBLISHABLE_PRICE_BASES: frozenset[BondOptionPriceBasis] = frozenset(
-    {BondOptionPriceBasis.DIRTY}
-)
+# Which price bases may be published into the shared ``BLIVolatilityInput``
+# pricing contract. Both, since Issue #214 -- the one-line widening PR #212
+# named, now that the standalone engine takes an explicit
+# ``BOND_OPTION_PRICE_BASIS`` and selects its F/K and its Black-76 wrapper
+# from it. Publication is no longer gated on *which* basis a value has but on
+# the caller naming the basis of the composition it is being published into:
+# see :func:`historical_equivalent_price_vol_volatility_input`.
+PUBLISHABLE_PRICE_BASES: frozenset[BondOptionPriceBasis] = frozenset(BondOptionPriceBasis)
 
 
 class BLIHistoricalEquivalentPriceVolError(ValueError):
@@ -952,6 +962,8 @@ def historical_equivalent_price_vol(
 
 def historical_equivalent_price_vol_volatility_input(
     converted: BLIHistoricalEquivalentPriceVol,
+    *,
+    pricing_price_basis: BondOptionPriceBasis | str,
 ) -> BLIVolatilityInput:
     """Publish ``converted`` as an ``EQUIVALENT_PRICE_VOL`` pricing input.
 
@@ -960,24 +972,31 @@ def historical_equivalent_price_vol_volatility_input(
     than adding a second schema beside it -- the same shape #197's own
     publication helper and ``pricing/bli_effective_forward.py`` established.
 
-    **CLEAN publication is refused until the basis-aware pricing wiring
-    exists** (Codex review, PR #212). ``BLIVolatilityInput`` carries a
-    volatility and a ``volatility_basis``, but no *price* basis -- and the
-    current standalone engine takes ``snapshot.volatility_input.volatility``
-    and applies it unconditionally to a dirty forward and a dirty strike
-    (``bli_pricing_engine.black76_dirty_price_option_pv_per_100``). So a
-    ``CLEAN`` volatility published into this contract would be consumed as
-    though it were ``DIRTY``, silently constructing exactly the mixed
-    clean-vol / dirty-F/K state the convention forbids -- and it would not
-    raise anywhere, because both numbers are ordinary.
+    **``pricing_price_basis`` is required, and is the basis of the
+    composition this value is being published into** (Issue #214).
+    ``BLIVolatilityInput`` still carries a volatility and a
+    ``volatility_basis`` but no *price* basis, so once one exists nothing
+    downstream can tell a ``CLEAN`` sigma_P from a ``DIRTY`` one -- they are
+    ordinary numbers a few percent apart. PR #212 answered that by refusing
+    ``CLEAN`` outright, because the standalone engine applied whatever
+    volatility it received to a dirty forward and a dirty strike. Issue #214
+    gives that engine an explicit ``BOND_OPTION_PRICE_BASIS`` and selects its
+    ``F``/``K`` and its Black-76 wrapper from it, so the honest gate is no
+    longer "which basis is this value on" but "does it match the basis the
+    run will actually price on". The caller states that basis here and a
+    mismatch is refused, which is the mixed clean-vol / dirty-F/K state the
+    convention forbids, caught at the one boundary where it is still
+    detectable.
 
-    Refusing here, at the boundary where the value would enter the shared
-    pricing contract, is the smallest safe answer: the ``CLEAN`` conversion
-    result itself remains fully computable, inspectable and auditable, and it
-    simply cannot be handed to a runtime that has no way to honour its basis.
-    ``PUBLISHABLE_PRICE_BASES`` becomes a one-line change when Phase 4/5
-    carries the price basis structurally to the pricing boundary; nothing
-    here coerces ``CLEAN`` to ``DIRTY``, and no basis is dropped to prose.
+    It is a keyword argument with no default on purpose. A default would be
+    a basis chosen inside a publication step rather than by the composition,
+    which is exactly how a mixed-basis run gets produced without anyone
+    selecting one.
+
+    Nothing here coerces one basis to the other, and no basis is dropped to
+    prose: the refused value stays fully computable, inspectable and
+    auditable, and the accepted one carries its basis in the audit beside the
+    stated requirement that it be composed only with F/K on that same basis.
 
     No rescaling happens here either: ``equivalent_price_vol`` is already
     ``DECIMAL_ANNUAL``, which is the unit ``BLIVolatilityInput`` states
@@ -1012,6 +1031,9 @@ def historical_equivalent_price_vol_volatility_input(
     _require_publishable_identity(converted)
 
     basis = require_bond_option_price_basis(converted.price_basis, "converted.price_basis")
+    composition_basis = require_bond_option_price_basis(
+        pricing_price_basis, "pricing_price_basis"
+    )
 
     # The top-level basis is a *label*; the volatility's actual basis is
     # whatever the nested duration divided by (Codex review, PR #212).
@@ -1071,14 +1093,26 @@ def historical_equivalent_price_vol_volatility_input(
         raise BLIHistoricalEquivalentPriceVolError(
             f"the {basis.value}-basis Equivalent Price Vol of {converted.security!r} "
             f"({converted.equivalent_price_vol!r} {converted.unit}) cannot be published "
-            f"into BLIVolatilityInput: that contract carries no price basis, and the "
-            "current standalone pricing path applies whatever volatility it receives to a "
-            "dirty forward and a dirty strike -- publishing this value would silently "
-            f"create the forbidden {basis.value}-vol / DIRTY-F/K state. Only "
-            f"{sorted(member.value for member in PUBLISHABLE_PRICE_BASES)!r} is publishable "
-            "until the basis-aware pricing wiring of Issue #211 Phase 4/5 exists. The "
-            f"{basis.value} conversion result itself remains available for inspection and "
-            "audit; it is not coerced to DIRTY and no substitute is published in its place"
+            f"into BLIVolatilityInput: only "
+            f"{sorted(member.value for member in PUBLISHABLE_PRICE_BASES)!r} is publishable"
+        )
+
+    # The lineage gate (Issue #214). Everything above establishes what this
+    # value *is*; this establishes that it may enter *this* composition. The
+    # published BLIVolatilityInput carries no price basis, so after this point
+    # nothing can tell the two apart -- a CLEAN sigma_P handed to a run pricing
+    # DIRTY F/K, or the reverse, would simply produce a wrong premium that
+    # raises nowhere.
+    if composition_basis is not basis:
+        raise BLIHistoricalEquivalentPriceVolError(
+            f"the {basis.value}-basis Equivalent Price Vol of {converted.security!r} "
+            f"({converted.equivalent_price_vol!r} {converted.unit}) cannot be published "
+            f"into a {composition_basis.value}-basis pricing composition: its |D_B| "
+            f"divided by the {basis.value} price, so composing it with "
+            f"{composition_basis.value} forward/strike is exactly the mixed-basis state "
+            "BOND_OPTION_PRICE_BASIS forbids. Re-derive the duration and the conversion "
+            f"on the {composition_basis.value} basis -- this value is not relabelled, "
+            "rescaled or substituted"
         )
 
     duration = converted.duration

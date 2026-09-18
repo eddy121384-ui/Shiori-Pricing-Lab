@@ -343,6 +343,34 @@ html, body {
 .s490-trace-body { margin-top: 8px; display: grid; row-gap: 5px; }
 .s490-trace-line { font-size: 12.5px; color: var(--muted-2); }
 .s490-trace-line .s490-trace-key { color: var(--muted); margin-right: 8px; }
+/* ---------- Historical Yield Vol -> Equivalent Price Vol (Issue #214) ---------- */
+/* Reuses the S490 panel's own row/trace styling above rather than restating
+   it: the two panels do the same job -- show a Shiori-derived number with its
+   full provenance one click away -- and a second, drifting copy of those
+   rules is exactly what this block avoids. Only the container and the same
+   `[hidden]` override the grid rows need are new. */
+.derived-block {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #e6e9ef;
+  border-radius: 10px;
+  background: #fbfcfe;
+}
+.derived-block .derived-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: 8px;
+}
+.derived-block .derived-source { margin-top: 6px; margin-bottom: 4px; }
+/* Same UA-stylesheet override the S490 rows need: `.pr-row`'s own explicit
+   `display: grid` would otherwise beat `[hidden]`. */
+#historical-vol-panel[hidden],
+#hev-fields[hidden],
+#hev-method-row[hidden],
+#hev-trace[hidden] {
+  display: none;
+}
 /* ---------- Bloomberg Bond Master (Advanced, read-only) ---------- */
 .collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
 /* auto-fit rather than a fixed column count: this grid holds five blocks

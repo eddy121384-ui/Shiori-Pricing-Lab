@@ -63,6 +63,15 @@ The d1/d2/Phi formula and its input validation exist in exactly one
 place; no dirty value is ever passed through an argument whose name
 claims it is clean.
 
+The Greeks are paired the same way (Issue #214): the clean-basis
+``black76_clean_price_option_greeks_per_100`` and the dirty-basis
+``black76_dirty_price_option_greeks_per_100`` (unchanged
+signature/behavior) both delegate to the single private
+``_black76_option_greeks_per_100_core``. Adding the clean wrapper added no
+formula: selecting a ``BOND_OPTION_PRICE_BASIS`` selects which ``F``/``K``
+pair is handed to that one core, and on identical numbers the two wrappers
+return identical results.
+
 **Zero composition, by design (unlike `bli_forward_clean_price.py`):**
 this module does not import `bli_forward_clean_price`,
 `bli_curve_discount_factor`, `bli_curve_selector`, `bli_valuation_time`,
@@ -423,44 +432,32 @@ class Black76EuropeanGreeksPer100:
     theta_effective_continuous_rate: float
 
 
-def black76_dirty_price_option_greeks_per_100(
+def _black76_option_greeks_per_100_core(
     *,
-    forward_dirty_price: float,
-    strike_dirty_price: float,
+    forward_price: float,
+    strike_price: float,
+    forward_field_name: str,
+    strike_field_name: str,
     price_volatility: float,
     time_to_expiry: float,
     discount_factor: float,
     option_type: OptionType | str,
 ) -> Black76EuropeanGreeksPer100:
-    """Return the Annex A §A.2.5 European Greeks per 100 for the dirty-price basis.
+    """Price-basis-neutral Annex A §A.2.5 European Greeks per 100.
 
-    Takes **exactly** the same five already-resolved inputs as
-    :func:`black76_dirty_price_option_pv_per_100` -- dirty forward, dirty
-    strike, sigma, T, and the effective reporting-date DF -- and shares its
-    validation and d1/d2 computation with the premium via
-    :func:`_validated_black76_inputs`, so a Greek can never be computed
-    from a different d1 than the premium it accompanies. The same Annex A
-    §A.2.4 boundaries apply; each violation raises :class:`ValueError`
-    rather than returning a fabricated number.
-
-    Delta and Gamma are sensitivities to the **explicit forward clean price
-    input**, not to the dirty forward as a separate quantity: the accrued
-    interest added to reach ``forward_dirty_price`` does not depend on the
-    clean forward, so ``d(F_dirty)/d(F_clean) = 1`` and the dirty-basis
-    derivatives below need no extra chain-rule factor. Vega is scaled to
-    ``+0.01`` absolute volatility and Theta to one calendar day; see
-    :class:`Black76EuropeanGreeksPer100` for every unit and sign.
-
-    Notional and BUY/SELL ``Position`` are neither accepted nor applied:
-    these are instrument analytics, and the engine derives position risk
-    from them under ``position_``-prefixed names.
+    The single analytic core shared by both public Greeks wrappers, exactly
+    as :func:`_black76_option_pv_per_100_core` is shared by both public
+    premium wrappers. Delta, Gamma, Vega and Theta are functions of the five
+    already-resolved model inputs alone, so selecting a price basis selects
+    which ``F``/``K`` pair is handed in -- it never selects a different
+    formula, and the closed forms below exist in exactly one place.
     """
 
     inputs = _validated_black76_inputs(
-        forward_price=forward_dirty_price,
-        strike_price=strike_dirty_price,
-        forward_field_name="forward_dirty_price",
-        strike_field_name="strike_dirty_price",
+        forward_price=forward_price,
+        strike_price=strike_price,
+        forward_field_name=forward_field_name,
+        strike_field_name=strike_field_name,
         price_volatility=price_volatility,
         time_to_expiry=time_to_expiry,
         discount_factor=discount_factor,
@@ -494,4 +491,99 @@ def black76_dirty_price_option_greeks_per_100(
         theta_per_calendar_day_per_100=theta_per_year / CALENDAR_DAYS_PER_YEAR,
         theta_per_year_per_100=theta_per_year,
         theta_effective_continuous_rate=effective_rate,
+    )
+
+
+def black76_dirty_price_option_greeks_per_100(
+    *,
+    forward_dirty_price: float,
+    strike_dirty_price: float,
+    price_volatility: float,
+    time_to_expiry: float,
+    discount_factor: float,
+    option_type: OptionType | str,
+) -> Black76EuropeanGreeksPer100:
+    """Return the Annex A §A.2.5 European Greeks per 100 for the dirty-price basis.
+
+    Takes **exactly** the same five already-resolved inputs as
+    :func:`black76_dirty_price_option_pv_per_100` -- dirty forward, dirty
+    strike, sigma, T, and the effective reporting-date DF -- and shares its
+    validation and d1/d2 computation with the premium via
+    :func:`_validated_black76_inputs`, so a Greek can never be computed
+    from a different d1 than the premium it accompanies. The same Annex A
+    §A.2.4 boundaries apply; each violation raises :class:`ValueError`
+    rather than returning a fabricated number.
+
+    Delta and Gamma are sensitivities to the **explicit forward clean price
+    input**, not to the dirty forward as a separate quantity: the accrued
+    interest added to reach ``forward_dirty_price`` does not depend on the
+    clean forward, so ``d(F_dirty)/d(F_clean) = 1`` and the dirty-basis
+    derivatives below need no extra chain-rule factor. Vega is scaled to
+    ``+0.01`` absolute volatility and Theta to one calendar day; see
+    :class:`Black76EuropeanGreeksPer100` for every unit and sign.
+
+    Notional and BUY/SELL ``Position`` are neither accepted nor applied:
+    these are instrument analytics, and the engine derives position risk
+    from them under ``position_``-prefixed names.
+
+    Unchanged public signature and behavior (Issue #214): this wrapper now
+    delegates to the shared :func:`_black76_option_greeks_per_100_core`,
+    which carries the one copy of the four closed forms.
+    """
+
+    return _black76_option_greeks_per_100_core(
+        forward_price=forward_dirty_price,
+        strike_price=strike_dirty_price,
+        forward_field_name="forward_dirty_price",
+        strike_field_name="strike_dirty_price",
+        price_volatility=price_volatility,
+        time_to_expiry=time_to_expiry,
+        discount_factor=discount_factor,
+        option_type=option_type,
+    )
+
+
+def black76_clean_price_option_greeks_per_100(
+    *,
+    forward_clean_price: float,
+    strike_clean_price: float,
+    price_volatility: float,
+    time_to_expiry: float,
+    discount_factor: float,
+    option_type: OptionType | str,
+) -> Black76EuropeanGreeksPer100:
+    """Return the same European Greeks per 100 for the clean-price basis.
+
+    The clean-basis counterpart of
+    :func:`black76_dirty_price_option_greeks_per_100`, standing to it exactly
+    as :func:`black76_price_option_pv_per_100` stands to
+    :func:`black76_dirty_price_option_pv_per_100`: it takes **exactly** the
+    same five already-resolved inputs as the clean premium wrapper and
+    delegates to the one shared :func:`_black76_option_greeks_per_100_core`.
+
+    Added by Issue #214 so a ``CLEAN`` ``BOND_OPTION_PRICE_BASIS``
+    composition can report Greeks without passing a clean forward through an
+    argument whose name claims it is dirty. **No formula is added, changed or
+    duplicated** -- the closed forms, the validation and the d1/d2 used are
+    byte-for-byte the ones the dirty wrapper already reaches, and on
+    identical numbers both wrappers return identical results. Selecting a
+    basis selects which ``F``/``K`` pair is passed in, never a second
+    Black-76.
+
+    Delta and Gamma are sensitivities to the forward clean price directly on
+    this basis (``F_model = F_clean``), so -- exactly as on the dirty basis,
+    where the accrued interest added to reach ``F_dirty`` is
+    yield-independent and contributes ``d(F_dirty)/d(F_clean) = 1`` -- no
+    chain-rule factor is applied here either.
+    """
+
+    return _black76_option_greeks_per_100_core(
+        forward_price=forward_clean_price,
+        strike_price=strike_clean_price,
+        forward_field_name="forward_clean_price",
+        strike_field_name="strike_clean_price",
+        price_volatility=price_volatility,
+        time_to_expiry=time_to_expiry,
+        discount_factor=discount_factor,
+        option_type=option_type,
     )

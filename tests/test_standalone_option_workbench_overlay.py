@@ -170,7 +170,7 @@ def test_overlaid_case_prices_through_unmodified_entry_point() -> None:
     overlay = _identity_overlay(base_case)
 
     overlaid_case = apply_standalone_option_case_overlay(base_case, overlay)
-    _, result, display = price_standalone_option_case(overlaid_case)
+    _, result, display, _priced_case = price_standalone_option_case(overlaid_case)
 
     assert result.status is PricingStatus.SUCCESS
     assert display["model_fair_premium_per_100"] == pytest.approx(4.551011126839255)
