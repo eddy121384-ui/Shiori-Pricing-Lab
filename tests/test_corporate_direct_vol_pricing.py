@@ -195,6 +195,81 @@ def test_both_audited_s490_horizons_are_refused_by_the_same_rule(
     assert "RepoCarryInterimCouponConventionError" not in str(excinfo.value)
 
 
+def test_readiness_refuses_the_same_case_pricing_would(monkeypatch):
+    """Readiness and pricing must not disagree about the same case.
+
+    The eligibility rule is local, deterministic and free, while the routes
+    that would otherwise reach it first fetch a live Option Discount Curve
+    and, on a refresh, a fresh quote. Checking it only inside the derivation
+    meant readiness answered "ready" for a case pricing was always going to
+    refuse, and meant a Bloomberg outage got reported in place of the real
+    reason. Same rule, same answer, before either."""
+
+    case = _corporate_case(
+        forward_clean_price_input={
+            "forward_clean_price_per_100": None,
+            "quote_side": "MID",
+            "source_system": _DERIVED_FORWARD_SOURCE,
+            "status": "ACTIVE",
+        },
+        spot_settlement_date="2026-09-22",
+    )
+
+    def _never(*args, **kwargs):
+        raise AssertionError("no curve may be acquired before this refusal")
+
+    monkeypatch.setattr(
+        server_module, "load_bloomberg_usd_sofr_option_discount_curve", _never
+    )
+
+    with pytest.raises(S490ForwardConventionProfileError):
+        server_module.validate_deterministic_forward_inputs(case)
+
+
+def test_readiness_leaves_an_approved_market_and_an_explicit_corporate_alone():
+    """The same pre-flight is a no-op for every case it does not govern."""
+
+    # An explicit corporate Forward: nothing about the S490 model applies.
+    server_module.validate_deterministic_forward_inputs(_corporate_case())
+    # A UST case in derived mode reaches its own model's other checks, not
+    # this one -- proven by it raising something else, or nothing at all.
+    ust = _corporate_case(
+        convention_profile="UST",
+        forward_clean_price_input={
+            "forward_clean_price_per_100": None,
+            "quote_side": "MID",
+            "source_system": _DERIVED_FORWARD_SOURCE,
+            "status": "ACTIVE",
+        },
+        spot_settlement_date="2026-09-22",
+    )
+    try:
+        server_module.validate_deterministic_forward_inputs(ust)
+    except S490ForwardConventionProfileError:  # pragma: no cover - the regression
+        pytest.fail("UST must not be refused by the S490 eligibility rule")
+    except ValueError:
+        pass  # any other pre-flight refusal is this test's business to ignore
+
+
+def test_the_eligibility_rule_is_published_for_clients_rather_than_copied(monkeypatch):
+    """The browser reads this rule; it must not keep its own copy of it.
+
+    The same reasoning as ``supported_convention_profiles``: a second copy of
+    a rule goes stale exactly the way a second copy of the registry does, and
+    the repository already forbids the latter in ``script.js``."""
+
+    payload = server_module.resolve_bond_convention_profile_candidates(
+        {"currency": "USD", "bond_master": {"coupon_frequency": "SEMI_ANNUAL"}}
+    )
+
+    assert payload["s490_derived_forward_convention_profiles"] == list(
+        S490_DERIVED_FORWARD_CONVENTION_PROFILES
+    )
+    # Published, never a claim that every candidate may use it.
+    assert "US_CORPORATE" in payload["candidates"]
+    assert "US_CORPORATE" not in payload["s490_derived_forward_convention_profiles"]
+
+
 def test_a_corporate_override_run_attaches_no_s490_derivation_trace():
     """An override on this market prices, and carries no S490 anything.
 

@@ -464,6 +464,7 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
 )
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     EFFECTIVE_FORWARD_SOURCES,
+    S490_DERIVED_FORWARD_CONVENTION_PROFILES,
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     forward_clean_price_input_dict,
@@ -1732,10 +1733,36 @@ def validate_deterministic_forward_inputs(
     """
 
     validate_declared_trader_forward_override(case)
+    require_s490_derived_forward_convention_profile_for_case(case)
     require_usable_spot_settlement_date_for_derived_forward(case)
     if replacement_quote_side is None:
         require_usable_spot_clean_price_for_derived_forward(case)
     require_coherent_forward_quote_side(case, spot_quote_side=replacement_quote_side)
+
+
+def require_s490_derived_forward_convention_profile_for_case(case: object) -> None:
+    """Refuse a case declaring the derived Forward on an unapproved market.
+
+    A no-op for every case outside ``SHIORI_DERIVED_S490`` mode. In that
+    mode it is the same rule :func:`resolve_s490_repo_carry_parity` enforces
+    at its own first line, run here as well and for the same reason the
+    override validator is (Codex P2 review of PR #178, round 4): this
+    refusal is local, deterministic and free, while the routes that would
+    otherwise reach it first fetch a live Option Discount Curve and, on
+    ``POST /api/case/bloomberg``, a fresh quote. Checking only inside the
+    derivation meant readiness answered "ready" for a case pricing was
+    always going to refuse, and meant a Bloomberg outage was reported in
+    place of the real, entirely local reason.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return
+    require_s490_derived_forward_convention_profile(case.get("convention_profile"))
 
 
 def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
@@ -3034,6 +3061,15 @@ def resolve_bond_convention_profile_candidates(body: dict) -> dict:
         "candidates": list(result.candidates),
         "reasons": list(result.reasons),
         "supported_convention_profiles": list(SUPPORTED_CONVENTION_PROFILE_NAMES),
+        # Issue #217: which of those profiles may use the Shiori Derived S490
+        # Forward. Published for the same reason `supported_convention_profiles`
+        # is -- so the browser reads the rule instead of keeping a second copy
+        # of it, which `test_the_profile_selector_options_are_never_a_second_copy_
+        # of_the_registry` already forbids for the registry itself. The server
+        # enforces the rule regardless of what any client does with this list.
+        "s490_derived_forward_convention_profiles": list(
+            S490_DERIVED_FORWARD_CONVENTION_PROFILES
+        ),
     }
 
 

@@ -1345,7 +1345,10 @@ def test_selecting_a_corporate_requires_an_explicit_forward_and_offers_no_deriva
 
     source_line = page.text_content("#forward-source-line")
     assert "Explicit Forward required" in source_line
-    assert "Corporate automatic Forward model not yet supported" in source_line
+    # The market is named from the trader's own selection rather than from a
+    # profile name this file hardcodes -- `script.js` must not carry a second
+    # copy of the registry (see the static-content guard).
+    assert "US_CORPORATE automatic Forward model not yet supported" in source_line
     assert "Pending" not in source_line
     assert "SHIORI_DERIVED_S490" not in source_line
     assert str(round(derived_forward, 6)) not in source_line
@@ -1353,6 +1356,34 @@ def test_selecting_a_corporate_requires_an_explicit_forward_and_offers_no_deriva
     # No derivation is asked for while this market is selected.
     page.wait_for_timeout(400)
     assert len(s490_requests) == requests_while_ust
+
+    # Nothing anywhere on the ticket claims a derivation ran for this market.
+    assert "SHIORI_DERIVED_S490" not in page.text_content("#forward-provenance")
+    assert page.eval_on_selector("#forward-price-input", "el => el.placeholder") == (
+        "Enter this ticket's Forward Clean Price"
+    )
+    # The Forward is recorded as the trader's own supplied value -- and the
+    # reason does not say it took over from a derivation that never ran.
+    page.fill("#forward-price-input", "98.75")
+    _wait_until(
+        lambda: any(
+            record["path"] == "forward_clean_price_input.forward_clean_price_per_100"
+            for record in page.evaluate("() => window.__shioriTestOverrideProvenance()")
+        )
+    )
+    (forward_record,) = [
+        record
+        for record in page.evaluate("() => window.__shioriTestOverrideProvenance()")
+        if record["path"] == "forward_clean_price_input.forward_clean_price_per_100"
+    ]
+    assert "no automatic Forward model" in forward_record["reason_not_sourced"]
+    assert "taking over" not in forward_record["reason_not_sourced"]
+
+    # A corporate run's own refusal note is not adopted as a failed
+    # derivation: the S490 panel does not repaint itself red for a market it
+    # never derives for.
+    assert page.eval_on_selector("#s490-parity-retry-btn", "el => el.hidden") is True
+    assert "not yet supported" in page.text_content("#s490-parity-status")
 
     # And back: the previous market's mode is not stuck either way.
     page.select_option("#convention-profile-select", "UST")

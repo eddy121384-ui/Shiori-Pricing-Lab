@@ -427,33 +427,49 @@
   // against the server's own values by the route tests.
   const SHIORI_DERIVED_FORWARD_SOURCE = "SHIORI_DERIVED_S490";
   const TRADER_FORWARD_OVERRIDE_SOURCE = "TRADER_FORWARD_OVERRIDE";
+  const FORWARD_PLACEHOLDER_DERIVED = "Filled automatically from the Shiori Derived Forward";
+
   // Issue #217: which convention profiles may use the Shiori Derived S490
-  // Forward at all. Mirrors the server's own
-  // `pricing/bli_effective_forward.S490_DERIVED_FORWARD_CONVENTION_PROFILES`,
-  // and mirrors it only for the trader's benefit: the server enforces the
-  // same rule on every case it is sent, so nothing here -- including this
-  // list going stale -- can push an unapproved market through.
+  // Forward. Read from the server's own answer
+  // (`s490_derived_forward_convention_profiles` on the candidates payload),
+  // never kept as a list here -- naming a profile in this file would be the
+  // second copy of the registry the static-content guard already forbids,
+  // and a copy of a *rule* goes stale in exactly the same way.
   //
-  // Fail-closed by construction: `indexOf` on a null, blank or unknown
-  // selection is -1, so a missing or malformed profile never inherits UST's
-  // behaviour.
-  const S490_DERIVED_FORWARD_PROFILES = ["UST"];
+  // Fail-closed while the answer is outstanding or absent: an empty list
+  // matches nothing, so a ticket with no server answer yet is treated as
+  // having no automatic Forward model rather than inheriting UST's.
+  function s490DerivedForwardProfiles() {
+    return (
+      (conventionProfileCandidates &&
+        conventionProfileCandidates.s490_derived_forward_convention_profiles) ||
+      []
+    );
+  }
 
   function s490DerivedForwardSupported() {
-    return S490_DERIVED_FORWARD_PROFILES.indexOf(selectedConventionProfile) !== -1;
+    return (
+      typeof selectedConventionProfile === "string" &&
+      s490DerivedForwardProfiles().indexOf(selectedConventionProfile) !== -1
+    );
   }
 
   // What the trader is told when this ticket's market has no automatic
   // Forward model. Deliberately never says "pending", "coming", or anything
   // else implying a corporate repo model exists and is merely switched off.
+  // The market is named from the trader's own selection rather than matched
+  // against a name this file knows.
   function noAutomaticForwardModelText() {
-    return selectedConventionProfile === "US_CORPORATE"
-      ? "Explicit Forward required — Corporate automatic Forward model not yet supported."
-      : selectedConventionProfile
-        ? `Explicit Forward required — no automatic Forward model is supported for ` +
-          `${selectedConventionProfile}.`
-        : "Explicit Forward required — select this bond's convention profile; no " +
-          "automatic Forward model is applied until one is selected.";
+    if (!selectedConventionProfile) {
+      return (
+        "Explicit Forward required — select this bond's convention profile; no " +
+        "automatic Forward model is applied until one is selected."
+      );
+    }
+    return (
+      `Explicit Forward required — ${selectedConventionProfile} automatic Forward ` +
+      "model not yet supported."
+    );
   }
 
   // True from the moment the trader edits the Forward field until Reset / Use
@@ -943,7 +959,9 @@
       // section's own Spot Settlement Date -- pointing them at the read-only
       // Forward field instead would be pointing at the symptom.
       locator: () =>
-        traderForwardOverrideActive || inputNormalization.forward.error !== null
+        traderForwardOverrideActive ||
+        !s490DerivedForwardSupported() ||
+        inputNormalization.forward.error !== null
           ? "#forward-price-input"
           : "#s490-spot-settlement-date-input",
       unresolved: () =>
@@ -958,8 +976,24 @@
                 "formats as the strike and normalizes to decimal per 100; Shiori will " +
                 "not guess at a quote it cannot read.",
             }
-          : shioriDerivedForwardError !== null
+          : !s490DerivedForwardSupported()
             ? {
+                // Issue #217: not "not available yet" and not a failed
+                // derivation -- this market has no automatic Forward model
+                // at all, so the only thing outstanding is the trader's own
+                // number.
+                title: "This market's Forward is yours to supply",
+                missing: "The forward clean price, per 100, at forward settlement.",
+                why: noAutomaticForwardModelText(),
+                evidence: EVIDENCE_FORWARD,
+                next:
+                  "Enter the Forward Clean Price in this field. Shiori substitutes " +
+                  "nothing for it — not the spot clean price, not a previous Forward, " +
+                  "and not the S490 repo-carry Forward, which is a U.S. Treasury model " +
+                  "this market is not admitted to.",
+              }
+            : shioriDerivedForwardError !== null
+              ? {
                 title: "Shiori's derived Forward could not be resolved",
                 missing: "The forward clean price, per 100, at forward settlement.",
                 why: shioriDerivedForwardError,
@@ -2359,16 +2393,26 @@
     {
       path: "forward_clean_price_input.forward_clean_price_per_100",
       label: "Forward Clean Price (per 100)",
-      reason:
-        "Entered by the trader as a Trader Forward Override, taking over from Shiori's " +
-        "own S490 repo-carry derived Forward.",
+      // Issue #217: on a market with no automatic Forward model there is no
+      // derivation to take over from, and saying there was would put a claim
+      // about a refused derivation into the run's own audit log. The Forward
+      // is still the trader's own supplied value there -- more plainly so
+      // than in an override -- so it is still recorded, under the reason that
+      // is actually true of it.
+      reason: () =>
+        s490DerivedForwardSupported()
+          ? "Entered by the trader as a Trader Forward Override, taking over from " +
+            "Shiori's own S490 repo-carry derived Forward."
+          : "Supplied by the trader as this ticket's explicit Forward Clean Price: " +
+            "Shiori has no automatic Forward model for the selected convention " +
+            "profile and derives nothing for it.",
       // Issue #177: the Forward is no longer a trader entry by construction --
       // by default it is Shiori's own derived value, which is verified,
       // traceable data and must not be logged as something the trader had to
       // supply (exactly the reasoning the live curve rows below already
       // follow). Only a genuine Trader Forward Override is recorded here.
       read: (draft) =>
-        traderForwardOverrideActive
+        traderForwardOverrideActive || !s490DerivedForwardSupported()
           ? draft.forward_clean_price_input.forward_clean_price_per_100
           : null,
     },
@@ -2491,6 +2535,9 @@
     OVERRIDE_FIELDS.forEach((field) => {
       const value = field.read(currentDraft);
       if (!present(value)) return;
+      // `reason` may be a string or, where it depends on the selected market,
+      // a function of the current state (Issue #217).
+      const reason = typeof field.reason === "function" ? field.reason() : field.reason;
       const basis = PROFILE_FIELD_BY_PATH.has(field.path)
         ? fieldProvenance.get(field.path) || TRADER_OVERRIDE_BASIS
         : TRADER_OVERRIDE_BASIS;
@@ -2505,8 +2552,8 @@
         basis: basis,
         reason_not_sourced:
           basis === TRADER_OVERRIDE_BASIS
-            ? field.reason
-            : `${field.reason} ${provenanceDescription(basis)}`.trim(),
+            ? reason
+            : `${reason} ${provenanceDescription(basis)}`.trim(),
         run_acquired_at: anchor,
       });
     });
@@ -2549,11 +2596,17 @@
     // misdescribe a Forward Shiori derived and priced -- the derivation's own
     // provenance is the S490 section's trace and the run's `effective_forward`
     // section, not this log.
-    els.forwardProvenance.textContent = traderForwardOverrideActive
-      ? stamp("forward_clean_price_input.forward_clean_price_per_100")
-      : "Provenance: SHIORI_DERIVED_S490 — derived by Shiori from the live Bloomberg " +
-        "spot quote and a live Curve #490 / S490 acquisition; see the derivation trace " +
-        "in the Shiori Derived Forward section above.";
+    // Issue #217: on a market with no approved automatic Forward model the
+    // number in this field is always the trader's own, whether or not they
+    // reached it by overriding a derivation -- there is none to override.
+    // Claiming a Curve #490 / S490 acquisition here would describe a
+    // derivation that was refused and never ran.
+    els.forwardProvenance.textContent =
+      traderForwardOverrideActive || !s490DerivedForwardSupported()
+        ? stamp("forward_clean_price_input.forward_clean_price_per_100")
+        : "Provenance: SHIORI_DERIVED_S490 — derived by Shiori from the live Bloomberg " +
+          "spot quote and a live Curve #490 / S490 acquisition; see the derivation trace " +
+          "in the Shiori Derived Forward section above.";
     // Issue #214, found in workstation UAT: an adopted Historical sigma_P is
     // Shiori's own derivation, so this line states that source and points at
     // the section carrying its trace -- exactly as the derived Forward above
@@ -4163,6 +4216,12 @@
     // A run outside the two Issue #177 Forward modes carries no such section
     // and had no derivation to adopt; the panel keeps whatever it had.
     if (!effective) return;
+    // Issue #217: on a market with no approved automatic Forward model the
+    // run's `shiori_derived_forward_error` says no derivation was attempted,
+    // which is not a derivation failure and must not be adopted as one --
+    // doing so painted a successful corporate Price as a red S490 panel with
+    // a Retry button, and latched the panel's key so it never re-rendered.
+    if (!s490DerivedForwardSupported()) return;
     s490ParityGeneration++;
     s490ParityPending = false;
     s490ParityResult = effective.shiori_derived_forward || null;
@@ -4784,6 +4843,9 @@
     // required, never that something is pending.
     if (!s490DerivedForwardSupported()) {
       els.forwardUseDerivedBtn.hidden = true;
+      // The static placeholder describes the derived workflow, which this
+      // market does not have (Issue #217).
+      els.forwardPrice.placeholder = "Enter this ticket's Forward Clean Price";
       const supplied = currentDraft.forward_clean_price_input.forward_clean_price_per_100;
       const hasForward = typeof supplied === "number" && isFinite(supplied) && supplied > 0;
       els.forwardSourceLine.textContent =
@@ -4795,6 +4857,7 @@
       els.forwardSourceLine.classList.toggle("is-invalid", !hasForward);
       return;
     }
+    els.forwardPrice.placeholder = FORWARD_PLACEHOLDER_DERIVED;
     const derivedText =
       shioriDerivedForward !== null
         ? shioriDerivedForward.toFixed(6)
