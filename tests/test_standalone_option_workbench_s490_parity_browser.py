@@ -61,6 +61,7 @@ if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
 from test_standalone_option_workbench_prototype_browser import (  # noqa: E402
+    _TREASURY_BOND_MASTER,
     _complete_draft,
     _fill_advanced_overrides,
     _fill_trade_group,
@@ -1395,3 +1396,88 @@ def test_selecting_a_corporate_requires_an_explicit_forward_and_offers_no_deriva
         == "SHIORI_DERIVED_S490"
     )
     assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+
+
+def test_a_corporate_owns_its_timing_terms_in_the_trade_section_not_in_advanced(
+    server_url, page
+) -> None:
+    """Issue #217 follow-up: one authoritative control per field, and the
+    option's timing terms sit with the trade.
+
+    On `UST` the two settlement dates stay where they have always been --
+    derived, in Advanced. On a market with no approved derivation they move
+    to the Trade section as explicit inputs alongside the recorded Delivery
+    Delay, and the Advanced duplicates disappear at the same moment: two
+    visible inputs bound to one path is how a trader's entry silently loses
+    to a stale one.
+    """
+
+    # The same UST-shaped bond, loaded carrying the structural evidence
+    # `US_CORPORATE` requires -- otherwise switching the profile refuses the
+    # product outright and disables every Advanced control, which is correct
+    # behaviour and not what this test is about.
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={
+                **_TREASURY_BOND_MASTER,
+                "coupon_type": "FIXED",
+                "inflation_linked_flag": False,
+                "convertible_flag": False,
+                "maturity_refund_type": "AT MATURITY",
+            },
+            acquired_at="2026-08-12T20:00:00+08:00",
+        ),
+    )
+    _fill_trade_group(page)
+    page.fill("#volatility-input", "0.03395")
+    _fill_advanced_overrides(page, settlement_dates=False)
+
+    # UST: derived in Advanced, and the Trade-section block is not there.
+    assert page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True
+    assert page.eval_on_selector("#adv-forward-settlement-row", "el => el.hidden") is False
+    assert page.eval_on_selector("#adv-option-settlement-row", "el => el.hidden") is False
+    ust_forward_settlement = page.input_value("#forward-settlement-date-input")
+    assert ust_forward_settlement != ""
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: page.eval_on_selector("#trade-timing-block", "el => el.hidden") is False)
+
+    # Corporate: the Trade section owns them, Advanced shows no duplicate.
+    assert page.eval_on_selector("#adv-forward-settlement-row", "el => el.hidden") is True
+    assert page.eval_on_selector("#adv-option-settlement-row", "el => el.hidden") is True
+    assert page.input_value("#trade-forward-settlement-date-input") == ""
+    assert page.input_value("#trade-option-settlement-date-input") == ""
+    assert page.input_value("#delivery-delay-input") == ""
+
+    # The two dates are separate inputs and may differ; the Delivery Delay is
+    # recorded beside them and derives neither.
+    page.fill("#trade-forward-settlement-date-input", "2026-10-22")
+    page.fill("#trade-option-settlement-date-input", "2026-10-23")
+    page.fill("#delivery-delay-input", "1")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "option_settlement_date"
+        ]
+        == "2026-10-23"
+    )
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] == "2026-10-22"
+    assert draft["option_settlement_date"] == "2026-10-23"
+    assert draft["bond_option"]["settlement_lag_days"] == 1
+
+    note = page.text_content("#trade-timing-note")
+    assert "no approved rule" in note
+    assert "not used to derive either date" in note
+
+    # Back to UST: the derivation takes over again and the trade controls go.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True)
+    assert page.eval_on_selector("#adv-forward-settlement-row", "el => el.hidden") is False
+    # The corporate ticket's hand-entered terms did not survive the switch.
+    assert page.input_value("#delivery-delay-input") == ""
+    assert page.input_value("#trade-forward-settlement-date-input") == ""

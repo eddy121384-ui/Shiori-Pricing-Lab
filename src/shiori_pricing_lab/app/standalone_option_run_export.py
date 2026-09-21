@@ -154,6 +154,14 @@ _CONTEXT_FIELDS = (
     ("Snapshot ID", "snapshot_id"),
     ("Engine name", "engine_name"),
     ("Engine version", "engine_version"),
+    # Issue #217 follow-up: the recorded OVME Delivery Delay. Named for what
+    # it is and where it stops -- the two settlement dates it does *not*
+    # derive are exported from the run's own assumptions, as they always have
+    # been.
+    (
+        "OVME Delivery Delay (recorded, derives no date)",
+        "option_delivery_delay_days_recorded",
+    ),
 )
 
 _PRICING_FIELDS = (

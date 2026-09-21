@@ -495,6 +495,13 @@ def prepare_standalone_display(
         "product_type": result.product_type,
         "valuation_date": result.valuation_date,
         "result_currency": result.result_currency,
+        # Issue #217 follow-up: OVME's Delivery Delay, read verbatim off the
+        # request's own option terms. A *recorded* term, deliberately not an
+        # assumption: the engine used it for nothing, and filing it among the
+        # assumptions would say it did. It derives neither settlement date and
+        # reaches no pricing arithmetic; ``None`` is a ticket that recorded no
+        # Delivery Delay, which prices identically.
+        "option_delivery_delay_days_recorded": request.bond_option.settlement_lag_days,
         # Issue #214. Caller-supplied, exactly like ``retrieved_at``: the
         # basis the run was *asked* for, so a FAILED result -- which carries
         # no assumptions at all -- still says which representation was

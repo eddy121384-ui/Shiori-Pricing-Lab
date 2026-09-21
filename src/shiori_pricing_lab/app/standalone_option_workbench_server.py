@@ -457,6 +457,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+    APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
     SUPPORTED_CONVENTION_PROFILE_NAMES,
     UST_CONVENTION_PROFILE,
     convention_profile_candidates,
@@ -3069,6 +3070,16 @@ def resolve_bond_convention_profile_candidates(body: dict) -> dict:
         # enforces the rule regardless of what any client does with this list.
         "s490_derived_forward_convention_profiles": list(
             S490_DERIVED_FORWARD_CONVENTION_PROFILES
+        ),
+        # Issue #217 follow-up: the profiles for which Shiori has separately
+        # approved evidence to auto-derive a bond option's own settlement
+        # dates from its expiry. Published for the same reason as the two
+        # lists above -- the browser must read a rule, never keep a copy of
+        # one -- and it is *not* a market settlement lag: a profile missing
+        # from it simply has no option-side approval, and both of its
+        # settlement dates are explicit trade inputs.
+        "approved_expiry_to_settlement_profiles": list(
+            APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS
         ),
     }
 

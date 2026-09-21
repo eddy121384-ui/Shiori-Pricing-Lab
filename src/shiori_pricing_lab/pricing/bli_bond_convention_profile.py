@@ -564,9 +564,20 @@ SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
 
 # --- Approved expiry -> option settlement derivations (Issue #217 follow-up) --
 #
-# Which markets have an approved rule for deriving a bond option's two
-# settlement dates from its expiry, and the business-day count that rule
-# states. Deliberately a separate approval record rather than a field on
+# **What this is, exactly:** the profiles for which Shiori has separately
+# approved evidence to auto-derive a bond option's own settlement dates from
+# its expiry -- and, for each, the business-day count that approval states.
+# Today that is ``UST`` and nothing else.
+#
+# **What it is not, and must never be described or reused as:** a market
+# settlement lag. It is not a generalisation of one, not a replacement for
+# one, and not a place to record one. A market's settlement lag lives on its
+# profile record as ``settlement_business_days`` and means the cash bond's
+# spot settlement; a market missing from this mapping has no *option-side*
+# approval, which says nothing about its cash-bond convention and must never
+# be read as saying anything about it.
+#
+# Deliberately a separate approval record rather than a field on
 # :class:`BLIConventionProfile`, because it is not a convention of the market
 # at all:
 #

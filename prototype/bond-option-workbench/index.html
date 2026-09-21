@@ -241,6 +241,42 @@
             </div>
           </div>
 
+          <!-- Issue #217 follow-up: for a market with no approved rule for
+               deriving an option's settlement dates from its expiry, those
+               dates are trade terms and belong here, with the trade, not
+               behind Advanced. Hidden entirely for a market that does have
+               one (UST), where Advanced keeps the derived values it has
+               always shown. -->
+          <div id="trade-timing-block" hidden>
+            <div class="form-row"><label>Delivery Delay</label>
+              <div>
+                <input class="control" id="delivery-delay-input" type="text" inputmode="numeric" placeholder="OVME Delivery Delay, optional">
+                <div class="field-provenance" id="prov-delivery-delay">&mdash;</div>
+              </div>
+            </div>
+            <div class="form-row"><label>Forward Settlement Date</label>
+              <div>
+                <input class="control" id="trade-forward-settlement-date-input" type="date">
+                <div class="field-provenance" id="prov-trade-forward-settlement-date">&mdash;</div>
+              </div>
+            </div>
+            <div class="form-row"><label>Option Settlement Date</label>
+              <div>
+                <input class="control" id="trade-option-settlement-date-input" type="date">
+                <div class="field-provenance" id="prov-trade-option-settlement-date">&mdash;</div>
+              </div>
+            </div>
+            <div class="fixed-route-note" id="trade-timing-note">
+              Shiori has no approved rule for deriving this market&rsquo;s option settlement
+              dates from the expiry, so both are yours to enter from the traded terms.
+              The two are separate dates and may differ. <strong>Delivery Delay</strong> is
+              OVME&rsquo;s own contract term, recorded for the audit trail and the run
+              export &mdash; it is not used to derive either date, because nothing here
+              establishes what it counts or on which calendar, and a ticket without it
+              prices exactly the same.
+            </div>
+          </div>
+
           <div class="fixed-route-note">
             Fixed for this route: payoff <strong>PRICE</strong> &middot;
             <strong>EUROPEAN</strong> exercise &middot; <strong>CASH</strong> settlement &middot;
@@ -602,13 +638,13 @@
                     <div class="field-provenance" id="prov-reporting-date">&mdash;</div>
                   </div>
                 </div>
-                <div class="form-row"><label>Forward Settlement Date</label>
+                <div class="form-row" id="adv-forward-settlement-row"><label>Forward Settlement Date</label>
                   <div>
                     <input class="control" id="forward-settlement-date-input" type="date">
                     <div class="field-provenance" id="prov-forward-settlement-date">&mdash;</div>
                   </div>
                 </div>
-                <div class="form-row"><label>Option Settlement Date</label>
+                <div class="form-row" id="adv-option-settlement-row"><label>Option Settlement Date</label>
                   <div>
                     <input class="control" id="option-settlement-date-input" type="date">
                     <div class="field-provenance" id="prov-option-settlement-date">&mdash;</div>

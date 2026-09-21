@@ -42,6 +42,9 @@ from shiori_pricing_lab.app.standalone_option_workbench_server import (
     apply_effective_forward_to_case,
     historical_equivalent_price_vol_preview,
 )
+from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+    US_CORPORATE_CONVENTION_PROFILE,
+)
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     S490_DERIVED_FORWARD_CONVENTION_PROFILES,
     S490ForwardConventionProfileError,
@@ -483,3 +486,148 @@ def test_a_callable_corporate_is_still_refused_by_the_pricing_eligibility_gate()
         price_standalone_option_case(case)
 
     assert "callable" in str(excinfo.value).lower()
+
+
+# --- Issue #217 follow-up: the option's timing is not the cash bond's --------
+
+
+def _priced(case: dict) -> dict:
+    _, _, display, _priced_case = price_standalone_option_case(case)
+    return display
+
+
+@_QUANTLIB_SKIP
+def test_the_corporate_cash_bond_t_plus_2_never_reaches_the_option_dates():
+    """The workstation finding, on the pricing path.
+
+    `US_CORPORATE.settlement_business_days` is the cash bond's T+2 spot
+    settlement convention. The option's own settlement dates are explicit
+    trade inputs, and the run prices from exactly what the ticket states --
+    no lag is applied to them on the way in, so a date two business days
+    after expiry appears only if the trader put it there."""
+
+    assert US_CORPORATE_CONVENTION_PROFILE.settlement_business_days == 2
+
+    case = _corporate_case(
+        forward_settlement_date="2026-10-01",
+        option_settlement_date="2026-10-01",
+    )
+    display = _priced(case)
+
+    assert display["status"] == "SUCCESS"
+    assumptions = display["assumptions"]
+    assert assumptions["forward_settlement_date"] == "2026-10-01"
+    assert assumptions["option_settlement_date"] == "2026-10-01"
+
+
+@_QUANTLIB_SKIP
+@pytest.mark.parametrize("delivery_delay", [None, 0, 1, 2])
+def test_a_recorded_delivery_delay_derives_neither_date_and_blocks_nothing(delivery_delay):
+    """Issue #217 follow-up: Delivery Delay is recorded, and inert.
+
+    The same ticket prices identically with no Delivery Delay, with the 1
+    OVME showed for this bond, and with any other value: it derives neither
+    settlement date, reaches no pricing arithmetic, and its absence blocks
+    nothing. The calendar semantics that would be needed to turn it into
+    either date -- what the integer counts, on which calendar, from which
+    date -- are established nowhere in this repository, which is exactly why
+    it counts nothing here."""
+
+    case = _corporate_case(
+        forward_settlement_date="2026-10-01",
+        option_settlement_date="2026-10-01",
+    )
+    case["bond_option"] = {**case["bond_option"], "settlement_lag_days": delivery_delay}
+
+    display = _priced(case)
+
+    assert display["status"] == "SUCCESS"
+    assert display["option_delivery_delay_days_recorded"] == delivery_delay
+    # Neither date moved with it, and the premium did not either.
+    assert display["assumptions"]["forward_settlement_date"] == "2026-10-01"
+    assert display["assumptions"]["option_settlement_date"] == "2026-10-01"
+    assert display["model_fair_premium_per_100"] == pytest.approx(
+        _priced(
+            _corporate_case(
+                forward_settlement_date="2026-10-01",
+                option_settlement_date="2026-10-01",
+            )
+        )["model_fair_premium_per_100"]
+    )
+
+
+@_QUANTLIB_SKIP
+def test_the_two_explicit_settlement_dates_may_differ():
+    """They are separate authoritative inputs, and the contract says so:
+    "deliberately kept distinct ... never requires them to be equal".
+
+    A run with a bond delivery on one date and the option's own cash
+    settlement on another prices, and each date reaches the leg that uses
+    it -- the accrued interest sits on the forward settlement date, the
+    discount factor on the option settlement date."""
+
+    same = _priced(
+        _corporate_case(
+            forward_settlement_date="2026-10-01",
+            option_settlement_date="2026-10-01",
+        )
+    )
+    differing = _priced(
+        _corporate_case(
+            forward_settlement_date="2026-10-01",
+            option_settlement_date="2026-10-05",
+        )
+    )
+
+    assert differing["status"] == "SUCCESS"
+    assert differing["assumptions"]["forward_settlement_date"] == "2026-10-01"
+    assert differing["assumptions"]["option_settlement_date"] == "2026-10-05"
+    # The forward leg is untouched by the option's own settlement date...
+    assert (
+        differing["assumptions"]["accrued_interest_at_forward_settlement_per_100"]
+        == same["assumptions"]["accrued_interest_at_forward_settlement_per_100"]
+    )
+    # ...and the discounting leg genuinely moved with it.
+    assert (
+        differing["assumptions"]["pricing_to_option_settlement_discount_factor"]
+        != same["assumptions"]["pricing_to_option_settlement_discount_factor"]
+    )
+
+
+@_QUANTLIB_SKIP
+def test_the_recorded_delivery_delay_is_exported_as_a_recorded_term():
+    """It reaches the audit trail, named for what it is and where it stops."""
+
+    case = _corporate_case(
+        forward_settlement_date="2026-10-01",
+        option_settlement_date="2026-10-01",
+    )
+    case["bond_option"] = {**case["bond_option"], "settlement_lag_days": 1}
+
+    display = _priced(case)
+    markdown = render_standalone_run_as_markdown(display)
+    exported = json.loads(render_standalone_run_as_json(display))
+
+    assert "OVME Delivery Delay (recorded, derives no date)" in markdown
+    assert exported["option_delivery_delay_days_recorded"] == 1
+    # The dates it does not derive are exported too, from the run's own
+    # assumptions, as they always have been.
+    assert exported["assumptions"]["forward_settlement_date"] == "2026-10-01"
+    assert exported["assumptions"]["option_settlement_date"] == "2026-10-01"
+
+
+@_QUANTLIB_SKIP
+@pytest.mark.parametrize("bad", [-1, 1.5, "1", True])
+def test_a_malformed_delivery_delay_is_refused_on_shape_alone(bad):
+    """Validated as the contract shape it claims to be, and nothing more."""
+
+    case = _corporate_case(
+        forward_settlement_date="2026-10-01",
+        option_settlement_date="2026-10-01",
+    )
+    case["bond_option"] = {**case["bond_option"], "settlement_lag_days": bad}
+
+    with pytest.raises(ValueError) as excinfo:
+        price_standalone_option_case(case)
+
+    assert "settlement_lag_days" in str(excinfo.value)

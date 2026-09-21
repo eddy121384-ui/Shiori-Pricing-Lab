@@ -196,6 +196,17 @@
     reportingDate: document.getElementById("reporting-date-input"),
     forwardSettlementDate: document.getElementById("forward-settlement-date-input"),
     optionSettlementDate: document.getElementById("option-settlement-date-input"),
+    // Issue #217 follow-up: the Trade-section copies, authoritative for a
+    // market with no approved expiry -> settlement derivation.
+    tradeTimingBlock: document.getElementById("trade-timing-block"),
+    deliveryDelay: document.getElementById("delivery-delay-input"),
+    provDeliveryDelay: document.getElementById("prov-delivery-delay"),
+    tradeForwardSettlementDate: document.getElementById("trade-forward-settlement-date-input"),
+    tradeOptionSettlementDate: document.getElementById("trade-option-settlement-date-input"),
+    provTradeForwardSettlementDate: document.getElementById(
+      "prov-trade-forward-settlement-date"
+    ),
+    provTradeOptionSettlementDate: document.getElementById("prov-trade-option-settlement-date"),
     advancedProfileStatus: document.getElementById("advanced-profile-status"),
     provDayCount: document.getElementById("prov-day-count"),
     provBondType: document.getElementById("prov-bond-type"),
@@ -443,6 +454,26 @@
   // Fail-closed while the answer is outstanding or absent: an empty list
   // matches nothing, so a ticket with no server answer yet is treated as
   // having no automatic Forward model rather than inheriting UST's.
+  // Issue #217 follow-up: which profiles have an approved rule for deriving
+  // an option's two settlement dates from its expiry. Read from the server's
+  // own answer for the same reason the S490 list is -- the browser reads
+  // rules, it does not keep copies of them -- and fail-closed while that
+  // answer is outstanding, so a ticket with no answer yet treats both dates
+  // as its own to supply rather than waiting for a derivation that is not
+  // coming.
+  //
+  // This is not a market settlement lag and must never be used as one.
+  function autoDerivedOptionTimingSupported() {
+    const approved =
+      (conventionProfileCandidates &&
+        conventionProfileCandidates.approved_expiry_to_settlement_profiles) ||
+      [];
+    return (
+      typeof selectedConventionProfile === "string" &&
+      approved.indexOf(selectedConventionProfile) !== -1
+    );
+  }
+
   function s490DerivedForwardProfiles() {
     return (
       (conventionProfileCandidates &&
@@ -567,15 +598,39 @@
       control: () => els.reportingDate,
       provenanceEl: () => els.provReportingDate,
     },
+    // Issue #217 follow-up: exactly one authoritative control per field at
+    // any moment. A market with an approved derivation keeps the Advanced
+    // control it has always had; a market without one owns the Trade-section
+    // control instead, and the other is hidden -- never two live inputs
+    // writing the same path.
     {
       path: "forward_settlement_date",
-      control: () => els.forwardSettlementDate,
-      provenanceEl: () => els.provForwardSettlementDate,
+      control: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.forwardSettlementDate
+          : els.tradeForwardSettlementDate,
+      provenanceEl: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.provForwardSettlementDate
+          : els.provTradeForwardSettlementDate,
+      // Both candidate controls, for one-time listener registration. Which
+      // one is authoritative changes with the selected market; which ones
+      // exist does not, and a listener registered against a snapshot of the
+      // former would miss whichever control was not authoritative at page
+      // load -- exactly the edit the trader makes after selecting a profile.
+      allControls: () => [els.forwardSettlementDate, els.tradeForwardSettlementDate],
     },
     {
       path: "option_settlement_date",
-      control: () => els.optionSettlementDate,
-      provenanceEl: () => els.provOptionSettlementDate,
+      control: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.optionSettlementDate
+          : els.tradeOptionSettlementDate,
+      provenanceEl: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.provOptionSettlementDate
+          : els.provTradeOptionSettlementDate,
+      allControls: () => [els.optionSettlementDate, els.tradeOptionSettlementDate],
     },
   ];
 
@@ -1372,6 +1427,15 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  // A recorded whole-number term, or nothing. Deliberately strict: anything
+  // that is not a non-negative integer stays null rather than being rounded
+  // or half-read, and the typed contract refuses it server-side either way.
+  function integerOrNull(raw) {
+    const trimmed = (raw || "").trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    return Number(trimmed);
+  }
+
   function textOrNull(raw) {
     const trimmed = (raw || "").trim();
     return trimmed === "" ? null : trimmed;
@@ -2117,6 +2181,9 @@
 
     conventionProfileTransportError = null;
     conventionProfileCandidates = payload;
+    // The approval this render reads arrives with this payload (Issue #217
+    // follow-up), so the controls settle the moment the answer does.
+    renderTradeTimingOwnership();
     renderConventionProfilePicker();
     renderAdvancedProfileStatus();
     syncDraftGating();
@@ -2189,7 +2256,15 @@
       // away); an untouched one is disabled rather than left looking like a
       // real route.
       const noRepairRoute = !isOverride && gaps.has(field.path);
-      field.control().disabled = disabled || noRepairRoute;
+      // Every candidate control, not only the authoritative one (Issue #217
+      // follow-up). A hidden-but-enabled duplicate is a fake exit waiting to
+      // be shown: Issue #161's rule is that an unsupported product offers no
+      // input route anywhere, and "anywhere" has to include the control this
+      // market does not currently own.
+      const controls = field.allControls ? field.allControls() : [field.control()];
+      controls.forEach((control) => {
+        control.disabled = disabled || noRepairRoute;
+      });
       const blockedReason = tier === null ? blocked.get(field.path) : undefined;
       target.classList.toggle("is-auto", tier !== null && !isOverride);
       target.classList.toggle("is-override", isOverride);
@@ -2634,6 +2709,9 @@
     els.reportingDate,
     els.forwardSettlementDate,
     els.optionSettlementDate,
+    els.tradeForwardSettlementDate,
+    els.tradeOptionSettlementDate,
+    els.deliveryDelay,
     els.exDividendDays,
     els.lastCouponDate,
   ];
@@ -2862,8 +2940,15 @@
     // DOM: their source is the recorded Bloomberg event, and editing any
     // unrelated trader control must never overwrite that provenance.
     currentDraft.reporting_date = textOrNull(els.reportingDate.value);
-    currentDraft.forward_settlement_date = textOrNull(els.forwardSettlementDate.value);
-    currentDraft.option_settlement_date = textOrNull(els.optionSettlementDate.value);
+    // Read through the same getter that decides which control is
+    // authoritative for these two paths (Issue #217 follow-up), so the draft
+    // can never be filled from the hidden duplicate. One rule, one reader.
+    currentDraft.forward_settlement_date = textOrNull(
+      PROFILE_FIELD_BY_PATH.get("forward_settlement_date").control().value
+    );
+    currentDraft.option_settlement_date = textOrNull(
+      PROFILE_FIELD_BY_PATH.get("option_settlement_date").control().value
+    );
 
     currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
     currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
@@ -2899,6 +2984,11 @@
     // Spot Settlement Date is a real pricing input now that the derived
     // Forward is the Black-76 default, so it is read into the draft here with
     // every other trader-entered value -- not left as panel-local state.
+    // Issue #217 follow-up: OVME's Delivery Delay, recorded on the ticket for
+    // the audit trail and the run export. Nothing derives from it -- not
+    // either settlement date, not any pricing input -- and leaving it blank
+    // blocks nothing, so it is carried as null rather than defaulted.
+    currentDraft.bond_option.settlement_lag_days = integerOrNull(els.deliveryDelay.value);
     currentDraft.spot_settlement_date = textOrNull(els.s490SpotSettlementDate.value);
     currentDraft.convention_profile = selectedConventionProfile;
 
@@ -2911,6 +3001,7 @@
     renderOverrideProvenance();
     renderFieldProvenance();
     renderAdvancedProfileStatus();
+    renderTradeTimingOwnership();
     invalidateBuilderValidation();
     syncDraftGating();
     // Cheap unless the expiry (or the loaded bond) actually changed: the
@@ -2956,6 +3047,9 @@
         strike_price: null,
         strike_yield: null,
         exercise_start_date: null,
+        // Issue #217 follow-up: OVME's Delivery Delay. Optional, recorded,
+        // and inert -- see the Trade section's own note.
+        settlement_lag_days: null,
       },
       bond_reference_data_universe: [
         {
@@ -4833,6 +4927,20 @@
     }
   }
 
+  // Issue #217 follow-up: the Trade-section timing controls appear exactly
+  // when this market has no approved derivation, and the Advanced duplicates
+  // disappear at the same moment. Never both: two visible inputs bound to one
+  // path is how a trader's entry silently loses to a stale one.
+  function renderTradeTimingOwnership() {
+    const autoDerived = autoDerivedOptionTimingSupported();
+    const showTradeControls = currentDraft !== null && !autoDerived;
+    els.tradeTimingBlock.hidden = !showTradeControls;
+    const advancedForwardRow = document.getElementById("adv-forward-settlement-row");
+    const advancedOptionRow = document.getElementById("adv-option-settlement-row");
+    if (advancedForwardRow) advancedForwardRow.hidden = showTradeControls;
+    if (advancedOptionRow) advancedOptionRow.hidden = showTradeControls;
+  }
+
   function renderForwardSource() {
     els.forwardUseDerivedBtn.hidden = !traderForwardOverrideActive;
     if (currentDraft === null) {
@@ -4918,6 +5026,15 @@
     shioriDerivedForwardError = null;
     repriceOnceForwardIsPriceable = false;
     renderForwardSource();
+
+    // Issue #217 follow-up: the Trade-section timing terms are this ticket's,
+    // not the page's. A Clear, a failed refresh or a different security must
+    // not leave the next ticket carrying the previous one's Delivery Delay or
+    // its hand-entered settlement dates.
+    els.deliveryDelay.value = "";
+    els.tradeForwardSettlementDate.value = "";
+    els.tradeOptionSettlementDate.value = "";
+    renderTradeTimingOwnership();
 
     // The whole profile lifecycle goes with the draft. Bumping the generation
     // and releasing the key permanently voids any answer still outstanding, so
@@ -5483,10 +5600,12 @@
   // listened for because these eight controls are a mix of selects, date
   // inputs and a text input.
   PROFILE_FIELDS.forEach((field) => {
-    const control = field.control();
     const mark = () => markTraderOverride(field.path);
-    control.addEventListener("input", mark);
-    control.addEventListener("change", mark);
+    const controls = field.allControls ? field.allControls() : [field.control()];
+    controls.forEach((control) => {
+      control.addEventListener("input", mark);
+      control.addEventListener("change", mark);
+    });
   });
   // Issue #177: registered before the generic handler below, so the override
   // flag is already set by the time applyManualInputsToDraft stamps the
@@ -5617,11 +5736,19 @@
     s490ParityError = null;
     s490ParityPending = false;
     els.forwardPrice.value = "";
+    // Issue #217 follow-up: and so do the timing terms. A date entered under
+    // a market whose approval status differs must not survive into the next
+    // one -- on UST it would be overwritten by the derivation anyway, and on
+    // a market without one it would be a stale hand-entry nobody re-checked.
+    els.deliveryDelay.value = "";
+    els.tradeForwardSettlementDate.value = "";
+    els.tradeOptionSettlementDate.value = "";
 
     applyManualInputsToDraft();
     renderConventionProfilePicker();
     renderFieldProvenance();
     renderAdvancedProfileStatus();
+    renderTradeTimingOwnership();
     renderForwardSource();
     renderS490Parity();
     syncDraftGating();
