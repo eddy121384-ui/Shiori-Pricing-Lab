@@ -349,6 +349,7 @@ from datetime import date
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     PLAIN_FIXED_COUPON_EVIDENCE_FIELDS,
     BLIConventionProfile,
+    approved_expiry_to_settlement_business_days,
     confirms_plain_fixed_coupon_evidence,
     get_convention_profile,
 )
@@ -890,12 +891,28 @@ def resolve_bond_advanced_field_profile(
         _resolve_field(PATH_REPORTING_DATE, valuation.isoformat(), PROVENANCE_SHIORI_DERIVED)
 
     expiry = _optional_iso_date(expiry_date, "expiry_date")
+    approved_settlement_business_days = approved_expiry_to_settlement_business_days(profile)
     pending: list[str] = []
-    if expiry is None:
+    if approved_settlement_business_days is None:
+        # No approved expiry -> settlement rule for this market. Both dates
+        # are the trader's to supply, and both are BLOCKED rather than
+        # pending: nothing further about this ticket makes them derivable,
+        # and a trader entry genuinely is the route past it.
+        for path in EXPIRY_DEPENDENT_FIELD_PATHS:
+            _block(
+                path,
+                f"the {profile.name} convention profile has no approved rule for deriving "
+                "this date from the expiry. Its settlement_business_days is the cash "
+                "bond's own spot settlement lag (Annex A A.7.3) and is not this option's "
+                "delivery or cash-settlement lag -- the two are different contract terms "
+                "and Shiori will not substitute one for the other. Supply this date from "
+                "the traded terms",
+            )
+    elif expiry is None:
         pending.extend(EXPIRY_DEPENDENT_FIELD_PATHS)
     else:
         settlement = advance_settlement_business_days(
-            expiry, profile.settlement_business_days, profile
+            expiry, approved_settlement_business_days, profile
         ).isoformat()
         _resolve_field(PATH_FORWARD_SETTLEMENT_DATE, settlement, PROVENANCE_SHIORI_DERIVED)
         _resolve_field(PATH_OPTION_SETTLEMENT_DATE, settlement, PROVENANCE_SHIORI_DERIVED)

@@ -562,6 +562,53 @@ CONVENTION_PROFILES: dict[str, BLIConventionProfile] = {
 
 SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
 
+# --- Approved expiry -> option settlement derivations (Issue #217 follow-up) --
+#
+# Which markets have an approved rule for deriving a bond option's two
+# settlement dates from its expiry, and the business-day count that rule
+# states. Deliberately a separate approval record rather than a field on
+# :class:`BLIConventionProfile`, because it is not a convention of the market
+# at all:
+#
+# - ``settlement_business_days`` above is the **cash bond's** spot settlement
+#   lag (Annex A A.7.3, whose table sits in the Invoice / Deliverable Face
+#   Amount section). ``bli_bond_modified_duration.spot_settlement_date`` uses
+#   it for exactly that, correctly.
+# - An option's delivery / cash-settlement lag is a **trade term** -- OVME's
+#   own "Delivery Delay", which ``docs/bloomberg_ovme_source_mapping.md`` maps
+#   to ``BondOption.settlement_lag_days``. Eddy's Issue #217 decision states
+#   it belongs on the ticket, not in a market profile, and this record must
+#   not become a back door for putting it in one.
+#
+# What is recorded here is therefore an **approval**, per market: Issue #157
+# approved, for supported USTs only, settlement one U.S. government-bond
+# business day after expiry on that profile's own reviewed calendar. That
+# approval predates and is independent of the cash-bond lag it happens to
+# equal -- the two being the same number on ``UST`` is exactly what hid the
+# conflation until a ``US_CORPORATE`` ticket, carrying the cash-bond T+2 from
+# the same Annex A table, derived an option settlement date nobody approved.
+#
+# A market absent from this mapping derives neither date. Both come back
+# BLOCKED for the trader to supply from the traded terms, which is what the
+# pricing contract already calls authoritative
+# (``data/bli_standalone_option_request.py``: "explicit forward and option
+# settlement dates are authoritative", and the two are "deliberately kept
+# distinct").
+APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS: dict[str, int] = {
+    UST_CONVENTION_PROFILE.name: 1,
+}
+
+
+def approved_expiry_to_settlement_business_days(profile: BLIConventionProfile) -> int | None:
+    """Return the approved expiry -> settlement business-day count, or ``None``.
+
+    ``None`` means this market has no approved rule for deriving either
+    option-side settlement date from the expiry -- not "zero days", and never
+    a cue to reach for the cash bond's own settlement lag instead.
+    """
+
+    return APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS.get(profile.name)
+
 
 def get_convention_profile(convention_profile: object) -> BLIConventionProfile:
     """Return the registered profile named by caller-supplied browser state.
