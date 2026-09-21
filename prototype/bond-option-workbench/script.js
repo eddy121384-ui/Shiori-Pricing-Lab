@@ -636,6 +636,10 @@
 
   const PROFILE_FIELD_BY_PATH = new Map(PROFILE_FIELDS.map((field) => [field.path, field]));
 
+  // The two paths whose owning control changes with the selected market
+  // (Issue #217 follow-up).
+  const EXPIRY_DEPENDENT_PROFILE_PATHS = ["forward_settlement_date", "option_settlement_date"];
+
   // The two fields the resolver recomputes on every expiry change (mirrors
   // the server's own EXPIRY_DEPENDENT_FIELD_PATHS). Used to withdraw a stale
   // settlement date the instant expiry (or any other profile-key input)
@@ -1293,8 +1297,16 @@
         present(draft.reporting_date) &&
         present(draft.forward_settlement_date) &&
         present(draft.option_settlement_date),
-      locator: "#reporting-date-input",
-      revealAdvanced: true,
+      // Issue #217 follow-up: on a market with no approved derivation the two
+      // settlement dates live in the Trade section, so sending the trader to
+      // Advanced would point at rows that are not there. The reporting date
+      // is always in Advanced, so it stays the destination only while it is
+      // the outstanding one.
+      locator: () =>
+        autoDerivedOptionTimingSupported() || !present(currentDraft && currentDraft.reporting_date)
+          ? "#reporting-date-input"
+          : "#trade-forward-settlement-date-input",
+      revealAdvanced: () => autoDerivedOptionTimingSupported(),
       unresolved: () => {
         const blocked = blockedReasonsForPaths(TIMING_PROFILE_PATHS);
         return {
@@ -1425,15 +1437,6 @@
     if (trimmed === "") return null;
     const value = Number(trimmed);
     return Number.isFinite(value) ? value : null;
-  }
-
-  // A recorded whole-number term, or nothing. Deliberately strict: anything
-  // that is not a non-negative integer stays null rather than being rounded
-  // or half-read, and the typed contract refuses it server-side either way.
-  function integerOrNull(raw) {
-    const trimmed = (raw || "").trim();
-    if (!/^\d+$/.test(trimmed)) return null;
-    return Number(trimmed);
   }
 
   function textOrNull(raw) {
@@ -2175,6 +2178,12 @@
       conventionProfileTransportError = String((error && error.message) || error);
       renderConventionProfilePicker();
       renderAdvancedProfileStatus();
+      // The answer this ownership reads is now gone, so it must settle again
+      // rather than keep whatever the previous payload implied (Issue #217
+      // follow-up). Without this the Advanced rows stayed visible while the
+      // hidden Trade controls were authoritative, and the trader's first
+      // entry went into a control nothing reads.
+      renderTradeTimingOwnership();
       return;
     }
     if (generation !== conventionProfileGeneration) return;
@@ -2988,7 +2997,16 @@
     // the audit trail and the run export. Nothing derives from it -- not
     // either settlement date, not any pricing input -- and leaving it blank
     // blocks nothing, so it is carried as null rather than defaulted.
-    currentDraft.bond_option.settlement_lag_days = integerOrNull(els.deliveryDelay.value);
+    // The existing integer parser, plus this term's own non-negativity: a
+    // Delivery Delay is a number of days forward, and the typed contract
+    // refuses a negative one. Reading it as null keeps a mistyped "-3" from
+    // travelling to the server and failing the whole case on a field that is
+    // meant to be optional and inert.
+    const recordedDeliveryDelay = integerOrNull(els.deliveryDelay.value);
+    currentDraft.bond_option.settlement_lag_days =
+      recordedDeliveryDelay !== null && recordedDeliveryDelay >= 0
+        ? recordedDeliveryDelay
+        : null;
     currentDraft.spot_settlement_date = textOrNull(els.s490SpotSettlementDate.value);
     currentDraft.convention_profile = selectedConventionProfile;
 
@@ -3576,7 +3594,15 @@
   function revealUnresolvedFocus() {
     const group = unresolvedFocusGroup;
     if (!group) return;
-    if (group.revealAdvanced) setAdvancedCollapsed(false);
+    // `revealAdvanced` may be a function of current state for the same reason
+    // `locator` may (Issue #217 follow-up: whether a group's controls are in
+    // Advanced at all depends on the selected market). A bare function is
+    // always truthy, so it has to be resolved rather than tested.
+    const revealAdvanced =
+      typeof group.revealAdvanced === "function"
+        ? group.revealAdvanced()
+        : group.revealAdvanced;
+    if (revealAdvanced) setAdvancedCollapsed(false);
     // A locator may be a function of current state (Issue #177: which control
     // a trader can actually act on for the Forward depends on whether the
     // derivation or an override owns it), exactly as `unresolved` already may.
@@ -5743,6 +5769,16 @@
     els.deliveryDelay.value = "";
     els.tradeForwardSettlementDate.value = "";
     els.tradeOptionSettlementDate.value = "";
+    els.forwardSettlementDate.value = "";
+    els.optionSettlementDate.value = "";
+    // ...and the override marks go with the values. Clearing the inputs while
+    // the paths stayed TRADER_OVERRIDE left the incoming market's derivation
+    // with nothing to refill -- on UST both settlement dates ended up
+    // permanently blank and the ticket could not price at all.
+    EXPIRY_DEPENDENT_PROFILE_PATHS.forEach((path) => {
+      traderOverriddenPaths.delete(path);
+      fieldProvenance.delete(path);
+    });
 
     applyManualInputsToDraft();
     renderConventionProfilePicker();

@@ -1473,6 +1473,24 @@ def test_a_corporate_owns_its_timing_terms_in_the_trade_section_not_in_advanced(
     assert "no approved rule" in note
     assert "not used to derive either date" in note
 
+    # A Delivery Delay is a number of days forward. A mistyped negative one is
+    # read as nothing rather than travelling to the server and failing the
+    # whole case on a field that is meant to be optional and inert.
+    page.fill("#delivery-delay-input", "-3")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        is None
+    )
+    page.fill("#delivery-delay-input", "1")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        == 1
+    )
+
     # Back to UST: the derivation takes over again and the trade controls go.
     page.select_option("#convention-profile-select", "UST")
     _wait_until(lambda: _draft_convention_profile(page) == "UST")
@@ -1481,3 +1499,15 @@ def test_a_corporate_owns_its_timing_terms_in_the_trade_section_not_in_advanced(
     # The corporate ticket's hand-entered terms did not survive the switch.
     assert page.input_value("#delivery-delay-input") == ""
     assert page.input_value("#trade-forward-settlement-date-input") == ""
+
+    # And the incoming market's derivation genuinely refills both dates.
+    # Clearing the inputs while their paths stayed marked as the trader's own
+    # left UST with nothing to re-derive into, and the ticket could not price.
+    _wait_until(lambda: page.input_value("#forward-settlement-date-input") != "")
+    _wait_until(lambda: page.input_value("#option-settlement-date-input") != "")
+    draft_on_ust = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft_on_ust["forward_settlement_date"] != ""
+    assert draft_on_ust["option_settlement_date"] != ""
+    assert "forward_settlement_date" not in page.evaluate(
+        "() => window.__shioriTestTraderOverriddenPaths()"
+    )

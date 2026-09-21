@@ -169,7 +169,18 @@ def test_standalone_typed_contract_omits_only_the_four_irrelevant_fields():
         field.name for field in fields(BLIStandaloneBondReferenceData)
     }
 
-    assert "settlement_lag_days" not in option_fields
+    # Issue #217 follow-up: `settlement_lag_days` is present after all, as
+    # OVME's recorded Delivery Delay -- optional, shape-validated, and inert.
+    # What must stay true is the reason it was originally omitted: it derives
+    # neither settlement date and reaches no pricing arithmetic, so a ticket
+    # without it prices identically (see
+    # `test_corporate_direct_vol_pricing.py`). The three reference-data fields
+    # below are still genuinely absent.
+    assert "settlement_lag_days" in option_fields
+    assert (
+        BLIStandaloneBondOptionTerms.__dataclass_fields__["settlement_lag_days"].default
+        is None
+    )
     assert {
         "business_day_convention",
         "redemption_amount",

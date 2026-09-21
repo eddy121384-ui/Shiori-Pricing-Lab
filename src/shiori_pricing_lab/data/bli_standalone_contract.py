@@ -168,7 +168,14 @@ class BLIStandaloneBondOptionTerms:
 
     @classmethod
     def from_bond_option(cls, bond_option: BondOption) -> BLIStandaloneBondOptionTerms:
-        """Drop the legacy lag field without reading or deriving from it."""
+        """Carry the option's terms across, without reading or deriving from
+        the Delivery Delay.
+
+        Issue #217 follow-up: the lag is no longer dropped here. It is
+        recorded on this contract now, and a conversion that silently lost it
+        would lose an audit term the run export names. Carried verbatim and
+        still read by nothing.
+        """
 
         if not isinstance(bond_option, BondOption):
             raise TypeError("bond_option must be a BondOption")
@@ -185,6 +192,7 @@ class BLIStandaloneBondOptionTerms:
             position=bond_option.position,
             strike_price=bond_option.strike_price,
             strike_yield=bond_option.strike_yield,
+            settlement_lag_days=bond_option.settlement_lag_days,
             exercise_start_date=bond_option.exercise_start_date,
         )
 

@@ -586,8 +586,11 @@ SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
 #   Amount section). ``bli_bond_modified_duration.spot_settlement_date`` uses
 #   it for exactly that, correctly.
 # - An option's delivery / cash-settlement lag is a **trade term** -- OVME's
-#   own "Delivery Delay", which ``docs/bloomberg_ovme_source_mapping.md`` maps
-#   to ``BondOption.settlement_lag_days``. Eddy's Issue #217 decision states
+#   own "Delivery Delay", which the OVME source-mapping document under
+#   ``docs/`` maps to ``BondOption.settlement_lag_days`` (named indirectly:
+#   the guard in ``test_irs_reference_engine`` forbids this package naming a
+#   market-data provider at all, comments included, and it is right to).
+#   Eddy's Issue #217 decision states
 #   it belongs on the ticket, not in a market profile, and this record must
 #   not become a back door for putting it in one.
 #
