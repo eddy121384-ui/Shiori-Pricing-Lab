@@ -29,8 +29,9 @@
 //     side), and the NOT_REQUIRED credit-spread policy -- never asked for.
 //   - The eight non-market Advanced technical fields (day count, bond type,
 //     ex-dividend days, last coupon date, status, reporting date, and the two
-//     settlement dates) are, since Issue #157, pre-filled for a supported UST
-//     fixed-coupon bullet by the server-side resolver, each stamped with the
+//     settlement dates) are, since Issue #157, pre-filled for a bond the
+//     selected convention profile covers, by the server-side resolver, each
+//     stamped with the
 //     tier it came from -- BLOOMBERG_AUTO, SHIORI_DERIVED, UST_PROFILE_DEFAULT
 //     or TRADER_OVERRIDE. Since Issue #161 they resolve *per field*: one
 //     field the resolver cannot fill comes back BLOCKED for the trader and
@@ -325,7 +326,10 @@
     "#157 approves, for supported USTs only, Reporting Date = Valuation Date and " +
     "settlement one U.S. government-bond business day after expiry on the " +
     "existing QuantLib U.S. government-bond calendar. Shiori still writes no " +
-    "holiday table of its own and rolls nothing outside that profile.";
+    "holiday table of its own and rolls nothing outside that profile. On any " +
+    "other profile the same derivation reuses that market's cash-bond settlement " +
+    "lag, which no evidence here establishes is also its option delivery lag -- " +
+    "check both dates against the traded terms and override them where they differ.";
   // "At least one", not "the fields above": the loader permits independent
   // partial misses, so an unknown CPN_FREQ leaves coupon_frequency null while
   // coupon, the dates and the flags all came back populated. Calling those

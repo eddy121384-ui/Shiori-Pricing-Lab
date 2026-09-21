@@ -498,16 +498,17 @@
             <div class="adv-block" id="adv-bond-reference">
               <div class="adv-title">Bond reference &mdash; profile-filled, trader-editable</div>
               <div class="fixed-route-note">
-                For a supported UST fixed-coupon bullet, Shiori fills these from the
-                approved narrow UST profile and its own deterministic derivations, and
-                shows the source of every value. Each field is resolved on its own: one
+                For a bond the selected convention profile covers, Shiori fills these
+                from that profile&rsquo;s own approved constants and its own deterministic
+                derivations, and shows the source of every value. Each field is resolved on its own: one
                 field Shiori cannot resolve is marked <strong>BLOCKED</strong> for you to
                 set and never blanks the others. Bloomberg&rsquo;s
                 <code>DAY_CNT_DES</code>, <code>MTY_TYP</code> and
                 <code>CALC_TYP_DES</code> remain <em>display-only evidence</em> and are
                 still never coerced into a Shiori enum &mdash; <code>MTY_TYP</code> and
                 <code>CALC_TYP_DES</code> decide nothing at all (a real UST returns
-                <code>NORMAL</code>), and a contradicting <code>DAY_CNT_DES</code> can
+                <code>NORMAL</code>; the confirmed plain corporate returns
+                <code>AT MATURITY</code>), and a contradicting <code>DAY_CNT_DES</code> can
                 only withhold the day count itself. A bond whose product or coupon
                 schedule this pricing path cannot carry gets no fields and these controls
                 are disabled, because editing them could not make it price. Otherwise
@@ -579,12 +580,19 @@
                 Still no Bloomberg field describes an OTC option&rsquo;s own cash settlement
                 date, and <code>SETTLE_DT</code> / <code>DAYS_TO_SETTLE</code> describe the
                 cash bond&rsquo;s standard settlement &mdash; a different role that must not
-                be conflated. For a supported UST, Shiori derives these itself instead:
-                Reporting Date is the run&rsquo;s own Valuation Date, and both settlement
-                dates are the expiry rolled forward one U.S. government-bond business day on
-                the existing QuantLib U.S. government-bond calendar &mdash; no hand-written
-                holiday table anywhere. Change the expiry and the settlement dates you have
-                not overridden are re-derived; change one yourself and Shiori leaves it
+                be conflated. Reporting Date is the run&rsquo;s own Valuation Date.
+                Both settlement dates are currently the expiry rolled forward by the
+                selected profile&rsquo;s settlement lag on that profile&rsquo;s own
+                reviewed QuantLib calendar &mdash; one U.S. government-bond business day
+                for <code>UST</code>, which is what Issue #157 approved, and no
+                hand-written holiday table anywhere. That approval was granted for
+                <code>UST</code> only: the lag it reuses is the <em>cash bond&rsquo;s</em>
+                standard settlement convention, and no evidence in this repository
+                establishes that an option&rsquo;s own delivery or cash-settlement lag is
+                the same number in any other market. Check both dates against the traded
+                terms before pricing a non-<code>UST</code> ticket, and override them where
+                they differ. Change the expiry and the settlement dates you have not
+                overridden are re-derived; change one yourself and Shiori leaves it
                 alone.
               </div>
               <div class="entry-grid">
