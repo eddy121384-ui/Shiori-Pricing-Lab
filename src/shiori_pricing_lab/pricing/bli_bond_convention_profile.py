@@ -174,10 +174,12 @@ def _confirms_plain_bullet_redemption_structure(value: object) -> bool:
     return isinstance(value, str) and value in _REDEMPTION_STRUCTURE_ALLOWED_VALUES
 
 
-# --- Bloomberg workstation evidence log (Issue #161 follow-up) ---------------
+# --- Bloomberg workstation evidence log (Issue #161 follow-up, Issue #216) ---
 #
 # Real evidence Eddy captured on his own Bloomberg Terminal, against
-# ``US91282CMC28`` (UST, already admitted), ``US023135EC69`` (a USD
+# ``US91282CMC28`` (UST, already admitted), ``US61760QRP18`` (Issue #216's
+# confirmed plain USD corporate bullet -- the positive ``US_CORPORATE`` UAT
+# security), ``US023135EC69`` (a USD
 # fixed-rate corporate bond candidate), ``DE000BU2Z072`` (a EUR fixed-rate
 # German government bond candidate), ``GB00BFX0ZL78`` (a UK Gilt -- evidence
 # only, this market is not registered, see the "Deliberately not registered:
@@ -192,15 +194,19 @@ def _confirms_plain_bullet_redemption_structure(value: object) -> bool:
 # must carry to count as positive confirmation):
 #
 # - ``CPN_TYP`` -> ``coupon_type``: ``US91282CMC28``/``US023135EC69``/
-#   ``DE000BU2Z072`` all returned ``"FIXED"``.
-# - ``INFLATION_LINKED_INDICATOR`` -> ``inflation_linked_flag``: all three
+#   ``DE000BU2Z072``/``US61760QRP18`` all returned ``"FIXED"``.
+# - ``INFLATION_LINKED_INDICATOR`` -> ``inflation_linked_flag``: all four
 #   returned ``"N"``.
-# - ``CONVERTIBLE`` -> ``convertible_flag``: all three returned ``"N"``.
+# - ``CONVERTIBLE`` -> ``convertible_flag``: all four returned ``"N"``.
 # - ``MTY_TYP`` (DS092) -> ``maturity_refund_type`` (Issue #161 follow-up:
 #   redemption-structure gate). ``US91282CMC28`` returned ``"NORMAL"``;
 #   ``GB00BFX0ZL78`` (evidence only -- Gilt is not a registered profile)
 #   returned ``"AT MATURITY"``; both are the allowlist's positive evidence.
-#   AMZN, a real USD corporate bond, returned ``"CALLABLE"`` -- confirmed
+#   ``US61760QRP18`` also returned ``"AT MATURITY"`` (Issue #216) -- the
+#   first allowlisted value confirmed on a registered non-UST market's own
+#   UAT security, which is what finally proves this gate *admits* and not
+#   merely refuses. AMZN, a real USD corporate bond, returned ``"CALLABLE"``
+#   -- confirmed
 #   negative evidence that the allowlist correctly refuses a real callable
 #   bond, **not** a candidate USD-corporate UAT security (it must never be
 #   promoted to one; a callable bond is exactly what this gate exists to
@@ -232,14 +238,28 @@ def _confirms_plain_bullet_redemption_structure(value: object) -> bool:
 # resolving it: Bloomberg's own maturity/redemption-type classification, not
 # an amortization-specific field.
 #
-# **Still needed:** a real, confirmed non-callable USD corporate bond and a
-# real, confirmed German government bond -- i.e. an ``MTY_TYP`` of
-# ``"NORMAL"`` or ``"AT MATURITY"`` on an actual ``US_CORPORATE``/
+# **Resolved for ``US_CORPORATE`` (Issue #216).** ``US61760QRP18`` is the
+# real, confirmed non-callable USD corporate bullet this log used to ask
+# for: ``MTY_TYP`` ``"AT MATURITY"``, ``CPN_TYP`` ``"FIXED"``,
+# ``INFLATION_LINKED_INDICATOR``/``CONVERTIBLE``/``CALLABLE``/``SINKABLE``
+# all ``"N"``, ``CPN`` ``5.150000``, ``CPN_FREQ`` ``2``, ``CRNCY`` ``USD``,
+# ``DAY_CNT_DES`` ``"30/360"``, ``ISSUE_DT`` ``2025-02-10``,
+# ``FIRST_CPN_DT`` ``2025-08-10``, ``MATURITY`` ``2040-02-10`` -- a regular
+# semi-annual grid (first coupon exactly +6M from issue; issue to maturity
+# is 180 months, an exact multiple of the 6-month period). It was admitted
+# through the workbench on a trader-selected ``US_CORPORATE`` with no
+# Advanced field hand-entered, and is pinned as a deterministic regression
+# in ``tests/test_bli_bond_advanced_field_resolver.py``'s Issue #216
+# section. AMZN proved the gate rejects correctly and never could prove it
+# admits correctly, being deliberately a rejected security; this bond is
+# what proves the other half.
+#
+# **Still needed:** a real, confirmed German government bond -- i.e. an
+# ``MTY_TYP`` of ``"NORMAL"`` or ``"AT MATURITY"`` on an actual
 # ``GERMAN_GOVT`` candidate security, alongside the three other confirmed
-# structural-evidence fields -- for a genuine end-to-end pricing UAT on
-# either market. AMZN proved the gate rejects correctly; it does not, and
-# cannot, prove the gate admits correctly, since it is deliberately a
-# rejected security.
+# structural-evidence fields. ``GERMAN_GOVT`` has no positive UAT security
+# yet, and ``US61760QRP18`` is not one for it: the evidence is per security,
+# and a USD corporate says nothing about a EUR government bond.
 
 
 # Field -> the predicate its Bloomberg-sourced value must satisfy to count as
@@ -462,7 +482,8 @@ UST_CONVENTION_PROFILE = BLIConventionProfile(
 # field does not model and this PR does not implement.
 # `day_count_evidence="30/360"` is the Bloomberg workstation evidence log's
 # own DAY_CNT_DES observation for US023135EC69 (a real USD fixed-rate
-# corporate bond candidate) -- it agrees with the confirmed Annex A day
+# corporate bond candidate), confirmed again on US61760QRP18 (Issue #216's
+# positive UAT security) -- it agrees with the confirmed Annex A day
 # count, so it is wired the same way UST's is: DAY_CNT_DES reading anything
 # else contradicts this profile and withholds day_count alone for the trader
 # to set.

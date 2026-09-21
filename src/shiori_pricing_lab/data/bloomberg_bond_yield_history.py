@@ -31,6 +31,36 @@ bounded historical-availability check. This module only validates the
 *shape* of the mnemonic (uppercase ``A-Z``/``0-9``/``_``), which is a
 request-hygiene check, never a claim about what the field means.
 
+**Workstation-confirmed field: ``YLD_YTM_MID`` (Issue #216).** Eddy
+confirmed this mnemonic's semantics on his own Bloomberg Terminal, which is
+what the paragraph above means by workstation evidence:
+
+- Bloomberg ``FieldInfo`` description: ``Mid Yield To Maturity``;
+- Bloomberg documentation: the fixed-income yield that solves for the mid
+  price when valuing the security to maturity;
+- datatype: ``Double``;
+- unit: ``PERCENT`` -- confirmed by Eddy on the Terminal for this field, and
+  specifically **not** read off a value's magnitude. Annex A §A.8.1 requires
+  an explicitly declared unit, and ``data/historical_yield_volatility.py``
+  fails closed on an undeclared one rather than assuming percent;
+- historical availability: confirmed on ``US61760QRP18`` (Issue #216's plain
+  USD corporate bullet) for 2025-09-18 through 2026-09-18 -- 252 valued
+  observations, 0 missing values, 0 unusable values, 0 duplicate dates.
+
+That record is evidence about one field on one security, and it is
+deliberately **not** wired as a default. ``yield_field`` is still required
+with no default and no candidate list; ``field_meaning``/``field_unit`` are
+still optional caller-supplied provenance defaulting to ``None``; nothing in
+this module reads a constant from the note above. The workbench's pre-filled
+``YLD_YTM_MID`` box (Issue #208) is a UI convenience on the other side of the
+wire and stays one -- a caller still states the mnemonic and its unit
+explicitly on every request. Whether the same semantics hold for another
+instrument class is a separate workstation observation, not an inference from
+this one.
+
+No daily Bloomberg value is recorded here or anywhere in this repository --
+only the field's confirmed semantics and the shape of what it returned.
+
 ``field_meaning``/``field_unit`` are likewise optional, caller-supplied
 passthrough provenance -- carried verbatim onto the result and never
 inferred, defaulted, or derived from the mnemonic. ``None`` means "not

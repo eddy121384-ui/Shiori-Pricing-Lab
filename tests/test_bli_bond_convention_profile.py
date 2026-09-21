@@ -492,7 +492,9 @@ def test_maturity_refund_type_replaces_amortizing_flag_in_the_gates_field_list()
 def test_maturity_refund_type_confirms_exactly_the_two_bullet_values(value):
     """Eddy's confirmed positive evidence: UST (`US91282CMC28`) returned
     `"NORMAL"`; a UK Gilt (`GB00BFX0ZL78`, evidence only -- Gilt is not a
-    registered profile) returned `"AT MATURITY"`. Both describe a plain,
+    registered profile) and Issue #216's plain USD corporate bullet
+    (`US61760QRP18`, the positive `US_CORPORATE` UAT security) both returned
+    `"AT MATURITY"`. Both values describe a plain,
     unconditional bullet redemption at maturity and are the entire
     allowlist."""
 

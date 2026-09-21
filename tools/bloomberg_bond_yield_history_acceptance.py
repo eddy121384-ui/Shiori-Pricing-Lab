@@ -9,7 +9,10 @@ writes the acceptance record Issue #196 §E asks for:
 - security requested, and the security Bloomberg itself resolved;
 - the confirmed Yield field (whatever ``--field`` you pass; this tool has no
   default and never guesses one -- see
-  ``tools/bloomberg_bond_yield_field_probe.py``, which produces it);
+  ``tools/bloomberg_bond_yield_field_probe.py``, which produces it, and
+  ``data/bloomberg_bond_yield_history.py``'s own module docstring for the
+  one mnemonic whose semantics are workstation-confirmed so far,
+  ``YLD_YTM_MID``);
 - request date range;
 - number of observations returned;
 - first/last observation dates, and how many returned rows carried no value;

@@ -153,7 +153,9 @@ Bloomberg workstation evidence confirmed five of the six:
   gating admission on it added friction with no safety benefit.
 - ``MTY_TYP`` (DS092) -> ``maturity_refund_type`` (Issue #161 follow-up:
   redemption-structure gate): passed through verbatim -- confirmed
-  ``"NORMAL"`` on ``US91282CMC28`` (UST) and ``"CALLABLE"`` on AMZN, a real
+  ``"NORMAL"`` on ``US91282CMC28`` (UST), ``"AT MATURITY"`` on
+  ``US61760QRP18`` (Issue #216's positive ``US_CORPORATE`` UAT security) and
+  ``"CALLABLE"`` on AMZN, a real
   USD corporate bond. This is a *second*, typed wiring of the same MTY_TYP
   mnemonic already read into ``bond_master_raw["maturity_type"]`` above
   (display-only, never interpreted there); this one is interpreted, by the
