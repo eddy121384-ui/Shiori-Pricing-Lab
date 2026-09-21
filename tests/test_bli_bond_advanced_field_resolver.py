@@ -1318,11 +1318,14 @@ def test_only_maturity_refund_type_blocks_a_real_registered_non_ust_profile_when
     not `GATED_SYNTHETIC_TEST` -- now that both carry a confirmed
     `ex_dividend_days=0` (Issue #161 follow-up: ex-dividend convention
     convergence). With every other structural-evidence field confirmed and
-    only `maturity_refund_type` missing (no confirmed non-callable UAT
-    security exists for either market yet), the sole refusal reason is
+    only `maturity_refund_type` missing -- the state every bond was in for
+    `US_CORPORATE` before Issue #216's workstation evidence, and the state
+    `GERMAN_GOVT` is still in -- the sole refusal reason is
     `maturity_refund_type`: not `ex_dividend_days`/"ex-dividend" (that field
     is no longer unconfirmed for either market) and not `security_type`
-    (never part of the gate at all)."""
+    (never part of the gate at all). The confirmed-present case is
+    `test_a_real_confirmed_plain_corporate_is_admitted_on_the_real_us_corporate_profile`
+    at the end of this file."""
 
     profile = resolve_bond_advanced_field_profile(
         convention_profile=convention_profile,
@@ -1609,3 +1612,225 @@ def test_a_profile_without_a_confirmed_description_string_ignores_day_cnt_des(
     assert PATH_DAY_COUNT not in blocked
     assert _values(profile)[PATH_DAY_COUNT] == DayCount.THIRTY_360.value
     assert _provenance(profile)[PATH_DAY_COUNT] == "NO_EX_DIV_TEST_PROFILE_DEFAULT"
+
+
+# =============================================================================
+# Issue #216: the first real plain U.S. corporate bullet, admitted end to end
+# =============================================================================
+
+# Eddy's Bloomberg workstation evidence for `US61760QRP18`, posted to Issue
+# #216: the first real USD corporate bond confirmed to be a plain fixed-rate
+# bullet, and therefore the first security that can prove the `US_CORPORATE`
+# gate *admits* correctly. AMZN, above, is deliberately a rejection fixture
+# and can never do that job -- a refused bond proves only that the allowlist
+# discriminates.
+#
+# Unlike every other bond-master constant in this file, these are real
+# confirmed Bloomberg values rather than synthetic test numbers, each through
+# the loader's own value transform: CPN "5.150000" -> 0.0515, CPN_FREQ "2" ->
+# SEMI_ANNUAL, ISSUE_DT 2025-02-10, FIRST_CPN_DT 2025-08-10, MATURITY
+# 2040-02-10, CALLABLE/SINKABLE "N" -> False, CPN_TYP "FIXED",
+# INFLATION_LINKED_INDICATOR/CONVERTIBLE "N" -> False, and -- the one field
+# that was missing for this market until Issue #216 -- MTY_TYP "AT MATURITY",
+# the allowlist's second positive value.
+#
+# The grid is regular for the current adapter: the first coupon is exactly
+# +6M from issue, and issue -> maturity spans 180 months, an exact multiple
+# of the 6-month coupon period.
+#
+# Only the admission facts Issue #216 §B asks to be recorded for
+# reproducibility are here. No Bloomberg price, accrued interest, yield, or
+# daily series is committed anywhere in this repository.
+_CONFIRMED_US_CORPORATE_BOND_MASTER = {
+    "coupon": 0.0515,
+    "coupon_frequency": "SEMI_ANNUAL",
+    "issue_date": "2025-02-10",
+    "maturity_date": "2040-02-10",
+    "first_coupon_date": "2025-08-10",
+    "callable_flag": False,
+    "sinkable_flag": False,
+    "coupon_type": "FIXED",
+    "inflation_linked_flag": False,
+    "convertible_flag": False,
+    "maturity_refund_type": "AT MATURITY",
+}
+
+# DAY_CNT_DES read "30/360" on the same security -- exactly the string
+# `US_CORPORATE_CONVENTION_PROFILE` carries as its `day_count_evidence`, so it
+# agrees with the profile and withholds nothing. CALC_TYP_DES is deliberately
+# absent: it was not part of this evidence set, and
+# `test_calc_type_evidence_decides_nothing` already pins that it decides
+# nothing either way.
+_CONFIRMED_US_CORPORATE_BOND_MASTER_RAW = {
+    "day_count": "30/360",
+    "maturity_type": "AT MATURITY",
+}
+
+_US_CORPORATE_ISIN = "US61760QRP18"
+
+
+def _resolve_confirmed_us_corporate(**overrides):
+    """Resolve the confirmed corporate against the *real* registered profile.
+
+    No `monkeypatch`, no `dataclasses.replace`, no synthetic registry: this
+    goes through `CONVENTION_PROFILES["US_CORPORATE"]` itself, with
+    `plain_fixed_coupon_evidence_required` left on.
+    """
+
+    kwargs = {
+        "convention_profile": US_CORPORATE_CONVENTION_PROFILE.name,
+        "isin": _US_CORPORATE_ISIN,
+        "currency": "USD",
+        "bond_master": dict(_CONFIRMED_US_CORPORATE_BOND_MASTER),
+        "bond_master_raw": dict(_CONFIRMED_US_CORPORATE_BOND_MASTER_RAW),
+        "valuation_date": _VALUATION_DATE,
+        "expiry_date": _EXPIRY_DATE,
+    }
+    kwargs.update(overrides)
+    return resolve_bond_advanced_field_profile(**kwargs)
+
+
+def test_the_confirmed_corporate_evidence_satisfies_the_gate_field_by_field():
+    """The gate is still armed, and every one of its four fields is confirmed
+    by this bond's own Bloomberg values.
+
+    Asserted separately from the integration test below so that a future
+    change loosening the gate cannot make that test pass for the wrong
+    reason: an admission that happens because the evidence requirement was
+    switched off is not the admission Issue #216 evidenced."""
+
+    assert US_CORPORATE_CONVENTION_PROFILE.plain_fixed_coupon_evidence_required is True
+    for field in PLAIN_FIXED_COUPON_EVIDENCE_FIELDS:
+        assert confirms_plain_fixed_coupon_evidence(
+            field, _CONFIRMED_US_CORPORATE_BOND_MASTER[field]
+        ), field
+
+
+def test_a_real_confirmed_plain_corporate_is_admitted_on_the_real_us_corporate_profile():
+    """Issue #216's positive regression: the gate admits a genuinely plain
+    corporate bullet, on the actual registered `US_CORPORATE` profile, with
+    nothing bypassed and no Advanced field hand-entered."""
+
+    profile = _resolve_confirmed_us_corporate()
+
+    assert profile.supported is True
+    assert profile.convention_profile == "US_CORPORATE"
+    assert profile.rejection_reasons == ()
+    assert profile.unresolved_fields == ()
+    assert profile.pending_field_paths == ()
+    assert tuple(field.path for field in profile.fields) == ADVANCED_FIELD_PATHS
+
+
+def test_the_confirmed_corporates_values_come_from_its_own_profile():
+    """Every value is the `US_CORPORATE` profile's own or derived from this
+    bond's own confirmed terms -- never borrowed from `UST`.
+
+    Two assertions discriminate against a resolver quietly reading a UST
+    constant, and both are load-bearing: the day count (THIRTY_360, where
+    UST is ACT_ACT_BOND) and the settlement dates (`US_CORPORATE` is T+2
+    where UST is T+1, so the same expiry that resolves to 2026-10-21 for a
+    Treasury -- see
+    `test_supported_ust_field_values_come_from_the_approved_profile` --
+    resolves to 2026-10-22 here)."""
+
+    values = _values(_resolve_confirmed_us_corporate())
+
+    assert values[PATH_DAY_COUNT] == DayCount.THIRTY_360.value
+    assert values[PATH_BOND_TYPE] == BondType.FIXED_COUPON_BULLET.value
+    assert values[PATH_EX_DIVIDEND_DAYS] == 0
+    assert values[PATH_STATUS] == BondStatus.ACTIVE.value
+    # The final scheduled coupon before maturity: 2040-02-10 less one 6-month
+    # period, off this bond's own confirmed grid.
+    assert values[PATH_LAST_COUPON_DATE] == "2039-08-10"
+    assert values[PATH_REPORTING_DATE] == _VALUATION_DATE
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == "2026-10-22"
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == "2026-10-22"
+
+
+def test_the_confirmed_corporates_derived_last_coupon_date_is_accepted_by_the_adapter():
+    """The round-trip
+    `test_derived_last_coupon_date_is_accepted_by_the_reviewed_coupon_adapter`
+    runs for UST, on the corporate profile: the derived `last_coupon_date` is
+    fed back into the real typed reference record and through the reviewed
+    accrued-interest path, which raises `BLIBondScheduleError` for a value
+    off the grid.
+
+    Not covered by the UST round-trip: this record carries THIRTY_360 rather
+    than ACT_ACT_BOND, so the accrual runs under a different day count, on a
+    different grid. `issuer` is filler -- Shiori never establishes who issued
+    a bond, and nothing here does either."""
+
+    values = _values(_resolve_confirmed_us_corporate())
+    bond = BLIStandaloneBondReferenceData(
+        isin=_US_CORPORATE_ISIN,
+        issuer="Issue #216 UAT security (issuer not asserted)",
+        currency="USD",
+        coupon=_CONFIRMED_US_CORPORATE_BOND_MASTER["coupon"],
+        coupon_frequency=_CONFIRMED_US_CORPORATE_BOND_MASTER["coupon_frequency"],
+        maturity_date=_CONFIRMED_US_CORPORATE_BOND_MASTER["maturity_date"],
+        issue_date=_CONFIRMED_US_CORPORATE_BOND_MASTER["issue_date"],
+        day_count=values[PATH_DAY_COUNT],
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type=values[PATH_BOND_TYPE],
+        ex_dividend_days=values[PATH_EX_DIVIDEND_DAYS],
+        first_coupon_date=_CONFIRMED_US_CORPORATE_BOND_MASTER["first_coupon_date"],
+        last_coupon_date=values[PATH_LAST_COUPON_DATE],
+        status=values[PATH_STATUS],
+    )
+
+    accrued = accrued_interest_per_100(bond, as_of_date=_VALUATION_DATE)
+    assert accrued > 0
+
+
+def test_the_confirmed_corporate_declares_every_fields_provenance():
+    """The four profile constants carry `US_CORPORATE_PROFILE_DEFAULT`, the
+    four derived values carry `SHIORI_DERIVED`, and nothing comes back
+    unlabelled -- the same four-tier contract UST already keeps, on a second
+    market."""
+
+    profile = _resolve_confirmed_us_corporate()
+    provenance = _provenance(profile)
+    expected_default = US_CORPORATE_CONVENTION_PROFILE.default_provenance
+
+    assert provenance[PATH_DAY_COUNT] == expected_default
+    assert provenance[PATH_BOND_TYPE] == expected_default
+    assert provenance[PATH_EX_DIVIDEND_DAYS] == expected_default
+    assert provenance[PATH_STATUS] == expected_default
+    assert provenance[PATH_LAST_COUPON_DATE] == PROVENANCE_SHIORI_DERIVED
+    assert provenance[PATH_REPORTING_DATE] == PROVENANCE_SHIORI_DERIVED
+    assert provenance[PATH_FORWARD_SETTLEMENT_DATE] == PROVENANCE_SHIORI_DERIVED
+    assert provenance[PATH_OPTION_SETTLEMENT_DATE] == PROVENANCE_SHIORI_DERIVED
+    # No value is ever emitted without one.
+    assert all(field.provenance for field in profile.fields)
+
+
+def test_a_contradicting_day_count_description_blocks_only_day_count_on_us_corporate():
+    """The field-level half of Issue #216 §C, on the corporate profile: a
+    `DAY_CNT_DES` that does not read "30/360" contradicts this profile's day
+    count and withholds *that one field* for the trader to set. It is not a
+    product refusal -- the bond stays admitted and the other seven Advanced
+    fields keep their resolved values.
+
+    `"ISMA-30/360"` is used rather than an unrelated convention on purpose:
+    the comparison is exact-string, never a normalization, so a description
+    that merely looks like the profile's own still withholds."""
+
+    profile = _resolve_confirmed_us_corporate(
+        bond_master_raw={**_CONFIRMED_US_CORPORATE_BOND_MASTER_RAW, "day_count": "ISMA-30/360"}
+    )
+
+    assert profile.supported is True
+    assert profile.rejection_reasons == ()
+    assert [item.path for item in profile.unresolved_fields] == [PATH_DAY_COUNT]
+    # Repr-quoted, so the second assertion is not satisfied by the first's
+    # own substring: `'30/360'` does not occur inside `'ISMA-30/360'`. The
+    # message has to name both what Bloomberg said and what this profile
+    # expected, or the trader cannot see why the field was withheld.
+    reason = profile.unresolved_fields[0].reason
+    assert "'ISMA-30/360'" in reason
+    assert "'30/360'" in reason
+
+    resolved = _values(profile)
+    assert PATH_DAY_COUNT not in resolved
+    assert set(resolved) == set(ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT}

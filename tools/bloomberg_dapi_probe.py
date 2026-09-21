@@ -82,8 +82,10 @@ his own Bloomberg Terminal:
   and wired as *admission* evidence via an exact-value allowlist, per
   Bloomberg's own MTY_TYP Full Definition / Enumerations:
   ``US91282CMC28`` (UST) returned ``"NORMAL"``; ``GB00BFX0ZL78`` (evidence
-  only) returned ``"AT MATURITY"`` -- both are the allowlist's positive
-  evidence. AMZN returned ``"CALLABLE"`` -- confirmed *negative* evidence
+  only) returned ``"AT MATURITY"``; ``US61760QRP18`` (Issue #216's positive
+  ``US_CORPORATE`` UAT security) returned ``"AT MATURITY"`` -- all three are
+  the allowlist's positive evidence. AMZN returned ``"CALLABLE"`` --
+  confirmed *negative* evidence
   that the allowlist correctly refuses a real callable bond; AMZN is a
   rejection fixture, never a candidate positive UAT security for
   ``US_CORPORATE``.
@@ -106,23 +108,33 @@ amortization schedule exists -- never approved as evidence). ``MTY_TYP``
 replaces this whole line of investigation as the gate's redemption-structure
 evidence rather than resolving it.
 
-Also confirmed against ``US91282CMC28``, ``US023135EC69`` and
-``DE000BU2Z072`` (not a new field, but new observations of an
-already-confirmed one): ``DAY_CNT_DES`` reads ``"30/360"`` for the corporate
-candidate and ``"ACT/ACT"`` for the German government candidate, both
-matching Annex A's confirmed day count for that market -- see
+Also confirmed against ``US91282CMC28``, ``US023135EC69``,
+``DE000BU2Z072`` and ``US61760QRP18`` (not a new field, but new observations
+of an
+already-confirmed one): ``DAY_CNT_DES`` reads ``"30/360"`` for both USD
+corporate securities and ``"ACT/ACT"`` for the German government candidate,
+all matching Annex A's confirmed day count for that market -- see
 ``bli_bond_convention_profile.US_CORPORATE_CONVENTION_PROFILE``/
 ``GERMAN_GOVT_CONVENTION_PROFILE``'s own ``day_count_evidence``.
 
-**Still needed: a real, confirmed non-callable USD corporate bond and German
-government bond.** The redemption-structure gate itself is now resolved
-(``MTY_TYP``, above) -- what remains is a genuine end-to-end pricing UAT
-candidate for each of ``US_CORPORATE``/``GERMAN_GOVT``: a real security
-whose confirmed ``MTY_TYP`` reads ``"NORMAL"`` or ``"AT MATURITY"``,
-alongside the three other confirmed structural-evidence fields, priced
-through this path start to finish. AMZN proved the gate rejects a real
-callable bond correctly; it does not, and cannot, prove the gate admits
-correctly, since it is deliberately a rejected security. The next step is
+**Resolved for ``US_CORPORATE`` (Issue #216): ``US61760QRP18``.** A real
+USD corporate bond whose confirmed ``MTY_TYP`` reads ``"AT MATURITY"``
+alongside the three other structural-evidence fields (``CPN_TYP``
+``"FIXED"``; ``INFLATION_LINKED_INDICATOR``/``CONVERTIBLE`` ``"N"``), with
+``CALLABLE``/``SINKABLE`` ``"N"``, ``CRNCY`` ``USD``, ``CPN`` ``5.150000``,
+``CPN_FREQ`` ``2``, ``DAY_CNT_DES`` ``"30/360"`` and a regular semi-annual
+grid (``ISSUE_DT`` ``2025-02-10``, ``FIRST_CPN_DT`` ``2025-08-10``,
+``MATURITY`` ``2040-02-10``). It was admitted end to end through the
+workbench on a trader-selected ``US_CORPORATE``. AMZN proved the gate
+rejects a real callable bond correctly and never could prove it admits
+correctly, being deliberately a rejected security; this security proves the
+other half.
+
+**Still needed: a real, confirmed German government bond.** ``GERMAN_GOVT``
+has no positive UAT security yet -- a real security whose confirmed
+``MTY_TYP`` reads ``"NORMAL"`` or ``"AT MATURITY"`` alongside the three
+other confirmed structural-evidence fields. ``US61760QRP18`` does not serve
+for it: the evidence is per security and per market. The next step is
 probing a new candidate security (via ``--identifier``/``--fields``, exactly
 like the securities above) on Eddy's own Bloomberg Terminal, not a new
 field mnemonic.
@@ -181,8 +193,8 @@ _REQUEST_TIMEOUT_MS = 10_000
 # return a value but has no approved use. Add a new entry here
 # only for a genuinely new, not-yet-probed candidate mnemonic -- see the
 # "still needed" section above for what Eddy should look for next (a real,
-# confirmed non-callable USD corporate/German government UAT security) and
-# where.
+# confirmed GERMAN_GOVT UAT security; US_CORPORATE's was resolved by Issue
+# #216) and where.
 _CANDIDATE_BOND_MASTER_FIELDS: dict[str, str] = {}
 # business_day_convention, bond_type, yield_convention, ex_dividend_days,
 # status, amortizing_flag: deliberately no candidate here at all -- pass

@@ -191,7 +191,10 @@ redemption and are the entire allowlist (see
 carrying one of those as a substring, and anything absent or
 field-exceptioned are all outside it and fail closed the same way -- **not**
 a denylist, so a value Bloomberg adds later fails closed too. ``UST``
-(``US91282CMC28``) confirmed ``"NORMAL"``; a real USD corporate bond, AMZN,
+(``US91282CMC28``) confirmed ``"NORMAL"`` and a real plain USD corporate
+bullet (``US61760QRP18``, Issue #216's positive ``US_CORPORATE`` UAT
+security) confirmed ``"AT MATURITY"``, both admitted; a real USD corporate
+bond, AMZN,
 confirmed ``"CALLABLE"`` and is correctly refused -- proof the allowlist
 discriminates, not a candidate positive UAT security. See ``MTY_TYP``'s own
 note below for why this is a *different* use of the same mnemonic from the

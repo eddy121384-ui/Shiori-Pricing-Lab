@@ -75,6 +75,13 @@ a count. That reading comes from Bloomberg's own documentation text in pass
 2 and from Eddy's Terminal, and is then passed into the loader explicitly
 as ``field_meaning``/``field_unit``.
 
+One field has been through that reading already: ``YLD_YTM_MID`` (Issue
+#216). Its confirmed description, datatype, unit and observed historical
+availability are recorded in
+``data/bloomberg_bond_yield_history.py``'s own module docstring. That record
+does not retire this probe -- a different field, or the same field on an
+instrument class it has not been observed on, still needs its own run.
+
 **Live values never reach a file.** The written reports carry only shape
 evidence: counts, dates, datatypes, statuses. A small sample of dated values
 is printed to the console for Eddy's own Terminal/Excel comparison and is
