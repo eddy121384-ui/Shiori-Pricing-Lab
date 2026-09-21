@@ -468,7 +468,9 @@ from shiori_pricing_lab.pricing.bli_effective_forward import (
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
     forward_clean_price_input_dict,
     is_usable_clean_price_per_100,
+    require_s490_derived_forward_convention_profile,
     select_effective_forward,
+    supports_s490_derived_forward,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import repo_carry_forward_clean_price
 from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
@@ -2214,6 +2216,17 @@ def resolve_s490_repo_carry_parity(
     HTTP 400 exactly like every other route in this module.
     """
 
+    # Issue #217: the S490 repo-carry Forward is a U.S. Treasury model, and
+    # this is the one door both its callers come through -- the pricing path
+    # (`apply_effective_forward_to_case`) and POST /api/case/s490-repo-carry.
+    # Checked here, first, so a case whose market is not approved for it never
+    # reaches the live Curve #490 acquisition on the next line, let alone the
+    # funding resolver or the repo-carry primitive. A direct API payload
+    # cannot route around it, and a missing or malformed `convention_profile`
+    # is refused rather than inheriting UST's behaviour by default -- see
+    # `bli_effective_forward.supports_s490_derived_forward`.
+    require_s490_derived_forward_convention_profile(convention_profile)
+
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
     # Signalled the instant the acquisition succeeds, before any of the
     # derivation steps that can still fail after it (Codex P2 review of PR
@@ -2493,7 +2506,27 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         nonlocal derived_curve_acquired
         derived_curve_acquired = True
 
-    if isinstance(spot_settlement_date, str) and spot_settlement_date.strip():
+    # Issue #217: whether this run's market may use the S490 Forward model at
+    # all, decided before anything is attempted. In derived mode this is a
+    # refusal; in override mode it is the reason there is no derived
+    # comparison value, and the derivation is not run -- not as an
+    # optimisation, but because computing one would acquire a live Curve #490
+    # and attach an S490 repo-carry trace to a corporate run's provenance,
+    # which is exactly the impression Issue #217 exists to prevent: that
+    # Shiori has an automatic Forward model for this market. It does not.
+    s490_eligible = supports_s490_derived_forward(convention_profile)
+    if not s490_eligible and not is_trader_override:
+        require_s490_derived_forward_convention_profile(convention_profile)
+
+    if not s490_eligible:
+        derived_error = (
+            f"no Shiori Derived Forward is produced for convention_profile "
+            f"{convention_profile!r}: the {SHIORI_DERIVED_S490_FORWARD_SOURCE} model is "
+            "approved for U.S. Treasuries only, and Shiori has no automatic Forward "
+            "model for this market. This run prices from its explicit Trader Forward "
+            "Override; no S490 derivation was attempted and no S490 trace exists"
+        )
+    elif isinstance(spot_settlement_date, str) and spot_settlement_date.strip():
         try:
             derived_trace = resolve_s490_repo_carry_parity(
                 case,

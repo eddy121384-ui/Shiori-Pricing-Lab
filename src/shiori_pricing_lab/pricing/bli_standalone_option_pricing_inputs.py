@@ -168,6 +168,14 @@ def _option_discount_factor_to_date(
             f"({request.valuation_date!r})"
         )
     coordinate = days / 365.0
+    # The discount curve is selected by ``(currency, curve_purpose)`` and by
+    # nothing else -- no issuer, no convention profile, no bond attribute
+    # reaches this call. Issue #217 audited that boundary before pricing its
+    # first U.S. corporate bond option through it and left it exactly as it
+    # was: for Shiori's currently supported European price-based
+    # cash-settled USD bond-option contract, the existing USD option discount
+    # curve is reused. That is a statement about this contract, not a general
+    # claim about how any corporate bond option must be discounted.
     return discount_factor_from_continuous_zero_curve(
         request.market_data_snapshot.curve_points,
         currency=request.bond_option.currency,

@@ -1297,3 +1297,70 @@ def test_a_successful_refresh_satisfies_a_queued_reset_reprice(server_url, page)
     assert priced == []
     assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
     page.unroute("**/api/case")
+
+
+# --- Issue #217: a corporate ticket has no automatic Forward -------------------
+
+
+def test_selecting_a_corporate_requires_an_explicit_forward_and_offers_no_derivation(
+    server_url, page
+) -> None:
+    """Issue #217, through the real controls.
+
+    Switching a completed UST ticket to ``US_CORPORATE`` must leave no trace
+    of the Forward model that does not apply to it: the declared source
+    becomes the explicit one, the previous market's derived number leaves the
+    field rather than being submitted as the corporate run's own Forward, the
+    "Use Shiori Derived Forward" action disappears, the panel stops asking
+    the server for a derivation, and the wording says what is required
+    without implying a corporate model exists and is merely pending.
+    """
+
+    s490_requests: list = []
+    page.on(
+        "request",
+        lambda request: s490_requests.append(request.url)
+        if "/api/case/s490-repo-carry" in request.url
+        else None,
+    )
+
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    derived_forward = _derived_forward_in_field(page)
+    assert derived_forward > 0
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    requests_while_ust = len(s490_requests)
+    assert requests_while_ust > 0
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["source_system"] == "TRADER_FORWARD_OVERRIDE"
+    # The UST-derived number does not become the corporate ticket's Forward.
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] is None
+    assert page.input_value("#forward-price-input") == ""
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+
+    assert page.eval_on_selector("#forward-use-derived-btn", "el => el.hidden") is True
+
+    source_line = page.text_content("#forward-source-line")
+    assert "Explicit Forward required" in source_line
+    assert "Corporate automatic Forward model not yet supported" in source_line
+    assert "Pending" not in source_line
+    assert "SHIORI_DERIVED_S490" not in source_line
+    assert str(round(derived_forward, 6)) not in source_line
+
+    # No derivation is asked for while this market is selected.
+    page.wait_for_timeout(400)
+    assert len(s490_requests) == requests_while_ust
+
+    # And back: the previous market's mode is not stuck either way.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["source_system"]
+        == "SHIORI_DERIVED_S490"
+    )
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False

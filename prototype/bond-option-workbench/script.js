@@ -427,6 +427,34 @@
   // against the server's own values by the route tests.
   const SHIORI_DERIVED_FORWARD_SOURCE = "SHIORI_DERIVED_S490";
   const TRADER_FORWARD_OVERRIDE_SOURCE = "TRADER_FORWARD_OVERRIDE";
+  // Issue #217: which convention profiles may use the Shiori Derived S490
+  // Forward at all. Mirrors the server's own
+  // `pricing/bli_effective_forward.S490_DERIVED_FORWARD_CONVENTION_PROFILES`,
+  // and mirrors it only for the trader's benefit: the server enforces the
+  // same rule on every case it is sent, so nothing here -- including this
+  // list going stale -- can push an unapproved market through.
+  //
+  // Fail-closed by construction: `indexOf` on a null, blank or unknown
+  // selection is -1, so a missing or malformed profile never inherits UST's
+  // behaviour.
+  const S490_DERIVED_FORWARD_PROFILES = ["UST"];
+
+  function s490DerivedForwardSupported() {
+    return S490_DERIVED_FORWARD_PROFILES.indexOf(selectedConventionProfile) !== -1;
+  }
+
+  // What the trader is told when this ticket's market has no automatic
+  // Forward model. Deliberately never says "pending", "coming", or anything
+  // else implying a corporate repo model exists and is merely switched off.
+  function noAutomaticForwardModelText() {
+    return selectedConventionProfile === "US_CORPORATE"
+      ? "Explicit Forward required — Corporate automatic Forward model not yet supported."
+      : selectedConventionProfile
+        ? `Explicit Forward required — no automatic Forward model is supported for ` +
+          `${selectedConventionProfile}.`
+        : "Explicit Forward required — select this bond's convention profile; no " +
+          "automatic Forward model is applied until one is selected.";
+  }
 
   // True from the moment the trader edits the Forward field until Reset / Use
   // Shiori Derived, a Clear, or a new bond load. Only the trader's own typing
@@ -2801,9 +2829,15 @@
     // field rather than a second override model. The server re-resolves the
     // effective Forward from this same field on every priced run, so this is
     // the one place the browser states the mode.
-    currentDraft.forward_clean_price_input.source_system = traderForwardOverrideActive
-      ? TRADER_FORWARD_OVERRIDE_SOURCE
-      : SHIORI_DERIVED_FORWARD_SOURCE;
+    // Issue #217: a market with no approved automatic Forward model always
+    // declares the explicit source, whether or not the trader has typed yet.
+    // Declaring SHIORI_DERIVED_S490 there would be refused server-side, and
+    // the refusal is not the message this ticket needs -- the trader needs to
+    // be told, before pricing, that the Forward is theirs to supply.
+    currentDraft.forward_clean_price_input.source_system =
+      traderForwardOverrideActive || !s490DerivedForwardSupported()
+        ? TRADER_FORWARD_OVERRIDE_SOURCE
+        : SHIORI_DERIVED_FORWARD_SOURCE;
     // The two derivation inputs the case carries for the server (Issue #177).
     // Spot Settlement Date is a real pricing input now that the derived
     // Forward is the Black-76 default, so it is read into the draft here with
@@ -3742,6 +3776,11 @@
 
   function s490ReadinessGate() {
     if (currentDraft === null) return "no-draft";
+    // Issue #217, checked before every other readiness reason: an unapproved
+    // market is not "waiting on Expiry" or "waiting on a Spot Settlement
+    // Date". No amount of further input makes this panel apply to it, and no
+    // request is sent for it.
+    if (!s490DerivedForwardSupported()) return "profile-unsupported";
     if (!INSTRUMENT_WORKFLOW_GROUP.resolved(currentDraft)) {
       return sourcedQuoteInvalidated || sourcedQuoteSideMismatch()
         ? "quote-invalidated"
@@ -3779,6 +3818,7 @@
   const S490_PARITY_KEY_NO_EXPIRY = "__S490_NO_EXPIRY__";
   const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
   const S490_PARITY_KEY_QUOTE_INVALIDATED = "__S490_QUOTE_INVALIDATED__";
+  const S490_PARITY_KEY_PROFILE_UNSUPPORTED = "__S490_PROFILE_UNSUPPORTED__";
 
   // Codex P2 review of PR #174, round 7: POST /api/case/s490-repo-carry
   // reads exactly bond_option.underlying_isin/currency/expiry_date,
@@ -3822,6 +3862,7 @@
   function s490ParityKey() {
     const gate = s490ReadinessGate();
     if (gate === "no-draft") return S490_PARITY_KEY_NOT_READY;
+    if (gate === "profile-unsupported") return S490_PARITY_KEY_PROFILE_UNSUPPORTED;
     if (gate === "quote-invalidated") return S490_PARITY_KEY_QUOTE_INVALIDATED;
     if (gate === "no-expiry") return S490_PARITY_KEY_NO_EXPIRY;
     const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
@@ -3868,15 +3909,21 @@
         ? "Resolving S490 funding and Forward…"
         : gate === "no-draft"
           ? "Bloomberg Load a supported bond to see the S490 repo-carry Forward."
-          : gate === "quote-invalidated"
-            ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
-              "before the S490 repo-carry Forward can be resolved."
-            : gate === "no-expiry"
-              ? "Enter Expiry to see the S490 repo-carry Forward for this bond — it sets " +
-                "this ticket's Forward Settlement Date, which is the date the Forward is " +
-                "carried to."
-              : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
-                "ticket's Forward Settlement Date.";
+          : gate === "profile-unsupported"
+            ? noAutomaticForwardModelText() +
+              " The S490 repo-carry Forward is a U.S. Treasury model: its funding leg " +
+              "reads Curve #490 as a repo proxy and its interim-coupon leg applies the " +
+              "Federal Reserve payment-date convention, neither of which is approved " +
+              "for this market. Enter the Forward Clean Price yourself."
+            : gate === "quote-invalidated"
+              ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
+                "before the S490 repo-carry Forward can be resolved."
+              : gate === "no-expiry"
+                ? "Enter Expiry to see the S490 repo-carry Forward for this bond — it sets " +
+                  "this ticket's Forward Settlement Date, which is the date the Forward is " +
+                  "carried to."
+                : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+                  "ticket's Forward Settlement Date.";
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
@@ -4006,7 +4053,12 @@
       key === S490_PARITY_KEY_NOT_READY ||
       key === S490_PARITY_KEY_NO_EXPIRY ||
       key === S490_PARITY_KEY_NO_SPOT_DATE ||
-      key === S490_PARITY_KEY_QUOTE_INVALIDATED
+      key === S490_PARITY_KEY_QUOTE_INVALIDATED ||
+      // Issue #217: not a "not yet" state like the four above -- this market
+      // never derives, so the request is not merely deferred, it is never
+      // sent. Listed here so that is true of the request path too, not only
+      // of what the panel says.
+      key === S490_PARITY_KEY_PROFILE_UNSUPPORTED
     ) {
       s490ParityGeneration++; // invalidate any outstanding answer
       s490ParityResult = null;
@@ -4196,6 +4248,16 @@
     // derivation) still blanks the field, because in those the inputs
     // genuinely do not define a Forward.
     if (s490ReadinessGate() === "quote-invalidated") {
+      renderForwardSource();
+      return;
+    }
+
+    // Issue #217: on a market with no approved automatic Forward model there
+    // is no derivation to sync from, and the Forward field is the trader's
+    // own input. This function must not write to it, blank it, or stamp a
+    // derived source on the draft for such a ticket -- it owns the *derived*
+    // workflow only.
+    if (!s490DerivedForwardSupported()) {
       renderForwardSource();
       return;
     }
@@ -4713,6 +4775,24 @@
     if (currentDraft === null) {
       els.forwardSourceLine.textContent = "—";
       els.forwardSourceLine.classList.remove("is-invalid");
+      return;
+    }
+    // Issue #217: a market with no approved automatic Forward model has no
+    // derived Forward to compare against and nothing to hand the field back
+    // to, so the "Use Shiori Derived Forward" action is hidden outright
+    // rather than offered and then refused. The trader is told what is
+    // required, never that something is pending.
+    if (!s490DerivedForwardSupported()) {
+      els.forwardUseDerivedBtn.hidden = true;
+      const supplied = currentDraft.forward_clean_price_input.forward_clean_price_per_100;
+      const hasForward = typeof supplied === "number" && isFinite(supplied) && supplied > 0;
+      els.forwardSourceLine.textContent =
+        `Forward source: ${TRADER_FORWARD_OVERRIDE_SOURCE} — ` +
+        noAutomaticForwardModelText() +
+        (hasForward
+          ? " Black-76 prices from the value in this field."
+          : " Pricing is blocked until you enter one; nothing is substituted.");
+      els.forwardSourceLine.classList.toggle("is-invalid", !hasForward);
       return;
     }
     const derivedText =
@@ -5454,10 +5534,29 @@
     // selection change also invalidates any in-flight Price/Refresh -- their
     // responses describe a case priced under a methodology the trader has
     // moved away from.
+    // Issue #217: the Forward mode belongs to the market that was selected,
+    // not to the page. Switching UST -> US_CORPORATE (or back) must not carry
+    // the previous market's Forward mode, its derived Forward, its derivation
+    // error, or the number that derivation wrote into the field -- a
+    // UST-derived Forward left in the box would otherwise be submitted as the
+    // corporate run's own explicit Forward, which is exactly the silent
+    // cross-market reuse this issue exists to stop. The trader re-enters the
+    // Forward under the market they just selected.
+    traderForwardOverrideActive = false;
+    shioriDerivedForward = null;
+    shioriDerivedForwardError = null;
+    s490ParityGeneration++;
+    s490ParityResult = null;
+    s490ParityError = null;
+    s490ParityPending = false;
+    els.forwardPrice.value = "";
+
     applyManualInputsToDraft();
     renderConventionProfilePicker();
     renderFieldProvenance();
     renderAdvancedProfileStatus();
+    renderForwardSource();
+    renderS490Parity();
     syncDraftGating();
     refreshAdvancedProfile();
   });
