@@ -247,13 +247,18 @@
                behind Advanced. Hidden entirely for a market that does have
                one (UST), where Advanced keeps the derived values it has
                always shown. -->
-          <div id="trade-timing-block" hidden>
-            <div class="form-row"><label>Delivery Delay</label>
-              <div>
-                <input class="control" id="delivery-delay-input" type="text" inputmode="numeric" placeholder="OVME Delivery Delay, optional">
-                <div class="field-provenance" id="prov-delivery-delay">&mdash;</div>
-              </div>
+          <!-- Issue #217: OVME's Delivery Delay is a ticket term, not a market
+               convention, so it is shown on every ticket regardless of which
+               profile is selected. Recorded for the audit trail and the run
+               export; it derives no date and enters no pricing arithmetic. -->
+          <div class="form-row" id="delivery-delay-row" hidden><label>Delivery Delay</label>
+            <div>
+              <input class="control" id="delivery-delay-input" type="text" inputmode="numeric" placeholder="OVME Delivery Delay, optional">
+              <div class="field-provenance" id="prov-delivery-delay">&mdash;</div>
             </div>
+          </div>
+
+          <div id="trade-timing-block" hidden>
             <div class="form-row"><label>Forward Settlement Date</label>
               <div>
                 <input class="control" id="trade-forward-settlement-date-input" type="date">
@@ -269,11 +274,8 @@
             <div class="fixed-route-note" id="trade-timing-note">
               Shiori has no approved rule for deriving this market&rsquo;s option settlement
               dates from the expiry, so both are yours to enter from the traded terms.
-              The two are separate dates and may differ. <strong>Delivery Delay</strong> is
-              OVME&rsquo;s own contract term, recorded for the audit trail and the run
-              export &mdash; it is not used to derive either date, because nothing here
-              establishes what it counts or on which calendar, and a ticket without it
-              prices exactly the same.
+              The two are separate dates and may differ. The Delivery Delay above is not
+              used to derive either of them.
             </div>
           </div>
 
@@ -616,18 +618,17 @@
                 Still no Bloomberg field describes an OTC option&rsquo;s own cash settlement
                 date, and <code>SETTLE_DT</code> / <code>DAYS_TO_SETTLE</code> describe the
                 cash bond&rsquo;s standard settlement &mdash; a different role that must not
-                be conflated. Reporting Date is the run&rsquo;s own Valuation Date.
-                Both settlement dates are currently the expiry rolled forward by the
-                selected profile&rsquo;s settlement lag on that profile&rsquo;s own
-                reviewed QuantLib calendar &mdash; one U.S. government-bond business day
-                for <code>UST</code>, which is what Issue #157 approved, and no
-                hand-written holiday table anywhere. That approval was granted for
-                <code>UST</code> only: the lag it reuses is the <em>cash bond&rsquo;s</em>
-                standard settlement convention, and no evidence in this repository
-                establishes that an option&rsquo;s own delivery or cash-settlement lag is
-                the same number in any other market. Check both dates against the traded
-                terms before pricing a non-<code>UST</code> ticket, and override them where
-                they differ. Change the expiry and the settlement dates you have not
+                be conflated. Reporting Date is the run&rsquo;s own Valuation Date. Both
+                settlement dates are the expiry rolled forward <strong>one U.S.
+                bond-market business day</strong> on the selected profile&rsquo;s own
+                reviewed QuantLib calendar, with the option settling on the same day as
+                the bond forward &mdash; an owner-approved policy for <code>UST</code>
+                (Issue #157) and <code>US_CORPORATE</code> (Issue #217), not a Bloomberg
+                field, and no hand-written holiday table anywhere. It is deliberately
+                <em>not</em> the cash bond&rsquo;s own settlement lag (T+2 for
+                <code>US_CORPORATE</code>), and it does not read the ticket&rsquo;s Delivery
+                Delay. A market with no such approval shows both dates as trade inputs
+                instead. Change the expiry and the settlement dates you have not
                 overridden are re-derived; change one yourself and Shiori leaves it
                 alone.
               </div>

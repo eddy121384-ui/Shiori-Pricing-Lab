@@ -333,14 +333,14 @@
   const EVIDENCE_TIMING =
     "Issue #149: no Bloomberg reference field describes an OTC option's own cash " +
     "settlement date. SETTLE_DT and DAYS_TO_SETTLE describe the cash bond's " +
-    "standard settlement -- a different role that must not be conflated. Issue " +
-    "#157 approves, for supported USTs only, Reporting Date = Valuation Date and " +
-    "settlement one U.S. government-bond business day after expiry on the " +
-    "existing QuantLib U.S. government-bond calendar. Shiori still writes no " +
-    "holiday table of its own and rolls nothing outside that profile. On any " +
-    "other profile the same derivation reuses that market's cash-bond settlement " +
-    "lag, which no evidence here establishes is also its option delivery lag -- " +
-    "check both dates against the traded terms and override them where they differ.";
+    "standard settlement -- a different role that must not be conflated. Owner " +
+    "policy (Issue #157 for UST, Issue #217 for US_CORPORATE): Reporting Date = " +
+    "Valuation Date, Forward Settlement = Expiry + 1 U.S. bond-market business day " +
+    "on the profile's own reviewed calendar, and Option Settlement = Forward " +
+    "Settlement. This is an approved policy, not a Bloomberg field, and it is not " +
+    "the cash bond's own settlement lag (T+2 for US_CORPORATE). It does not read the " +
+    "ticket's Delivery Delay. Shiori writes no holiday table of its own, and a " +
+    "market with no approved policy shows both dates as trade inputs instead.";
   // "At least one", not "the fields above": the loader permits independent
   // partial misses, so an unknown CPN_FREQ leaves coupon_frequency null while
   // coupon, the dates and the flags all came back populated. Calling those
@@ -2503,6 +2503,17 @@
         traderForwardOverrideActive || !s490DerivedForwardSupported()
           ? draft.forward_clean_price_input.forward_clean_price_per_100
           : null,
+    },
+    {
+      // Issue #217: no market-data route supplies it, so it is the trader's own
+      // value, and it is stamped as one -- with the reason that is true of it.
+      path: "bond_option.settlement_lag_days",
+      label: "Delivery Delay (OVME)",
+      reason:
+        "Entered by the trader from OVME as this ticket's Delivery Delay. Recorded " +
+        "for the audit trail and the run export only: it derives neither settlement " +
+        "date and enters no pricing arithmetic.",
+      read: (draft) => draft.bond_option.settlement_lag_days,
     },
     {
       path: "volatility_input.volatility",
@@ -4961,10 +4972,33 @@
     const autoDerived = autoDerivedOptionTimingSupported();
     const showTradeControls = currentDraft !== null && !autoDerived;
     els.tradeTimingBlock.hidden = !showTradeControls;
+    // Delivery Delay is a ticket term, not a market convention (Issue #217),
+    // so it is on every ticket whatever the approval status of its market --
+    // including the approved ones, where it would otherwise have vanished with
+    // the block above just as the dates began filling themselves.
+    const deliveryDelayRow = document.getElementById("delivery-delay-row");
+    if (deliveryDelayRow) deliveryDelayRow.hidden = currentDraft === null;
+    renderDeliveryDelayProvenance();
     const advancedForwardRow = document.getElementById("adv-forward-settlement-row");
     const advancedOptionRow = document.getElementById("adv-option-settlement-row");
     if (advancedForwardRow) advancedForwardRow.hidden = showTradeControls;
     if (advancedOptionRow) advancedOptionRow.hidden = showTradeControls;
+  }
+
+  // Registered since the Delivery Delay first appeared, and never written
+  // until now -- so the line read "—" whatever the trader entered. It states
+  // the one thing a reader must not assume about this term.
+  function renderDeliveryDelayProvenance() {
+    const recorded =
+      currentDraft && currentDraft.bond_option
+        ? currentDraft.bond_option.settlement_lag_days
+        : null;
+    els.provDeliveryDelay.textContent =
+      recorded === null || recorded === undefined
+        ? "Not recorded — optional. Nothing is derived from it either way."
+        : `MANUAL_TRADER_ENTRY — ${recorded} recorded from OVME for the audit trail and ` +
+          "the run export. It derives neither settlement date and enters no pricing " +
+          "arithmetic.";
   }
 
   function renderForwardSource() {

@@ -1741,16 +1741,10 @@ def test_a_real_confirmed_plain_corporate_is_admitted_on_the_real_us_corporate_p
     assert profile.convention_profile == "US_CORPORATE"
     assert profile.rejection_reasons == ()
     assert profile.pending_field_paths == ()
-    # Six of the eight resolve. The two option-side settlement dates do not:
-    # this market has no approved rule for deriving them from the expiry, and
-    # the cash bond's own settlement lag is not that rule (Issue #217
-    # follow-up). They are BLOCKED, which is repairable by the trader, and
-    # they take nothing else down with them.
-    resolved = tuple(field.path for field in profile.fields)
-    assert resolved == tuple(
-        path for path in ADVANCED_FIELD_PATHS if path not in EXPIRY_DEPENDENT_FIELD_PATHS
-    )
-    assert tuple(item.path for item in profile.unresolved_fields) == EXPIRY_DEPENDENT_FIELD_PATHS
+    # All eight resolve, the two settlement dates included -- under Eddy's
+    # Issue #217 owner policy, not the cash bond's settlement lag.
+    assert profile.unresolved_fields == ()
+    assert tuple(field.path for field in profile.fields) == ADVANCED_FIELD_PATHS
 
 
 def test_the_confirmed_corporates_values_come_from_its_own_profile():
@@ -1770,10 +1764,11 @@ def test_the_confirmed_corporates_values_come_from_its_own_profile():
     # period, off this bond's own confirmed grid.
     assert values[PATH_LAST_COUPON_DATE] == "2039-08-10"
     assert values[PATH_REPORTING_DATE] == _VALUATION_DATE
-    # No settlement date is produced for this market at all -- see
+    # Expiry 2026-10-20 (a Tuesday) + 1 U.S. bond-market business day, and the
+    # option settles with the bond forward -- see
     # `test_a_corporate_cash_bond_lag_never_becomes_an_option_delivery_lag`.
-    assert PATH_FORWARD_SETTLEMENT_DATE not in values
-    assert PATH_OPTION_SETTLEMENT_DATE not in values
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == "2026-10-21"
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == "2026-10-21"
 
 
 def test_the_confirmed_corporates_derived_last_coupon_date_is_accepted_by_the_adapter():
@@ -1828,6 +1823,8 @@ def test_the_confirmed_corporate_declares_every_fields_provenance():
     assert provenance[PATH_STATUS] == expected_default
     assert provenance[PATH_LAST_COUPON_DATE] == PROVENANCE_SHIORI_DERIVED
     assert provenance[PATH_REPORTING_DATE] == PROVENANCE_SHIORI_DERIVED
+    assert provenance[PATH_FORWARD_SETTLEMENT_DATE] == PROVENANCE_SHIORI_DERIVED
+    assert provenance[PATH_OPTION_SETTLEMENT_DATE] == PROVENANCE_SHIORI_DERIVED
     # No value is ever emitted without one.
     assert all(field.provenance for field in profile.fields)
 
@@ -1858,51 +1855,48 @@ def test_a_contradicting_day_count_description_blocks_only_day_count_on_us_corpo
     assert "'ISMA-30/360'" in blocked[PATH_DAY_COUNT]
     assert "'30/360'" in blocked[PATH_DAY_COUNT]
 
+    assert list(blocked) == [PATH_DAY_COUNT]
+
     resolved = _values(profile)
     assert PATH_DAY_COUNT not in resolved
-    # The day count blocks itself and nothing else: the two settlement dates
-    # are blocked for their own, unrelated reason (Issue #217 follow-up), and
-    # the remaining five still resolve.
-    assert set(resolved) == set(ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT} - set(
-        EXPIRY_DEPENDENT_FIELD_PATHS
-    )
+    # The day count blocks itself and nothing else.
+    assert set(resolved) == set(ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT}
 
 
 def test_a_corporate_cash_bond_lag_never_becomes_an_option_delivery_lag():
-    """Issue #217 follow-up, the regression Eddy asked for by name.
+    """Issue #217, the regression Eddy asked for by name -- now with the two
+    numbers genuinely different on the same profile.
 
-    `US_CORPORATE.settlement_business_days` is 2 -- the cash bond's own T+2
-    spot settlement convention from Annex A A.7.3, which
+    `US_CORPORATE.settlement_business_days` is 2: the cash bond's own T+2 spot
+    settlement convention from Annex A A.7.3, which
     `bli_bond_modified_duration.spot_settlement_date` reads for exactly that
-    role. It is **not** this option's Delivery Delay, and the workstation UAT
-    that found this had OVME showing a delivery delay of 1 against Shiori's
-    derived T+2.
+    role. The count Eddy approved for deriving this option's settlement dates
+    from its expiry is 1 (Issue #217 owner policy): Forward Settlement = Expiry
+    + 1 U.S. bond-market business day, Option Settlement = Forward Settlement.
 
-    So the rule is not "use 1 instead of 2": no option-side date is derived
-    for this market at all, because no rule for deriving one has been
-    approved for it. Both dates are the trader's to supply from the traded
-    terms, and the refusal says why."""
+    The workstation UAT that found this derived T+2 off the cash lag. With the
+    roles separated, the same expiry lands on T+1, and the T+2 date the old
+    coupling produced is not produced at all."""
 
     assert US_CORPORATE_CONVENTION_PROFILE.settlement_business_days == 2
-    assert approved_expiry_to_settlement_business_days(US_CORPORATE_CONVENTION_PROFILE) is None
+    assert approved_expiry_to_settlement_business_days(US_CORPORATE_CONVENTION_PROFILE) == 1
 
-    profile = _resolve_confirmed_us_corporate()
-    values = _values(profile)
-    blocked = {item.path: item.reason for item in profile.unresolved_fields}
+    values = _values(_resolve_confirmed_us_corporate())
+    expiry = date(2026, 10, 20)
 
-    for path in EXPIRY_DEPENDENT_FIELD_PATHS:
-        assert path not in values
-        assert path in blocked
-        assert "cash" in blocked[path]
-        assert "settlement_business_days" in blocked[path]
-
-    # Specifically: not the T+2 date the cash-bond lag would have produced.
+    approved_policy_date = advance_settlement_business_days(
+        expiry, 1, US_CORPORATE_CONVENTION_PROFILE
+    ).isoformat()
     cash_bond_lag_date = advance_settlement_business_days(
-        date(2026, 10, 20),
+        expiry,
         US_CORPORATE_CONVENTION_PROFILE.settlement_business_days,
         US_CORPORATE_CONVENTION_PROFILE,
     ).isoformat()
-    assert cash_bond_lag_date == "2026-10-22"
+    assert (approved_policy_date, cash_bond_lag_date) == ("2026-10-21", "2026-10-22")
+
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == approved_policy_date
+    # Option settles with the bond forward -- the policy's second line.
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == values[PATH_FORWARD_SETTLEMENT_DATE]
     assert cash_bond_lag_date not in values.values()
 
     # UST's own Issue #157 approval is untouched by any of this.

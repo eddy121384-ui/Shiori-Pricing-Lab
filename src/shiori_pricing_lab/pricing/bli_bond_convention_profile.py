@@ -564,10 +564,11 @@ SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
 
 # --- Approved expiry -> option settlement derivations (Issue #217 follow-up) --
 #
-# **What this is, exactly:** the profiles for which Shiori has separately
-# approved evidence to auto-derive a bond option's own settlement dates from
-# its expiry -- and, for each, the business-day count that approval states.
-# Today that is ``UST`` and nothing else.
+# **What this is, exactly:** the profiles for which Shiori has a separate,
+# explicit owner approval to auto-derive a bond option's own settlement dates
+# from its expiry -- and, for each, the business-day count that approval
+# states. Today that is ``UST`` (Issue #157) and ``US_CORPORATE`` (Issue #217,
+# Eddy's owner policy of 2026-09-23), and nothing else.
 #
 # **What it is not, and must never be described or reused as:** a market
 # settlement lag. It is not a generalisation of one, not a replacement for
@@ -602,6 +603,42 @@ SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
 # conflation until a ``US_CORPORATE`` ticket, carrying the cash-bond T+2 from
 # the same Annex A table, derived an option settlement date nobody approved.
 #
+# **``US_CORPORATE`` (Issue #217).** The bounded evidence audit found no
+# market-data route for either date -- no direct field for the forward
+# settlement date (``SETTLE_DT``/``DAYS_TO_SETTLE`` are the cash bond's), none
+# at all for the option settlement date, and no documented rule turning OVME's
+# Delivery Delay into either. The repository's own sourcing record named the
+# only exit: explicit dates stay authoritative "unless an approved
+# calendar/settlement policy replaces manual entry". Eddy approved one, on the
+# same footing #157 approved UST's:
+#
+#     Forward Settlement Date = Expiry + 1 U.S. bond-market business day
+#     Option Settlement Date  = Forward Settlement Date
+#
+# "U.S. bond-market business day" is ``CALENDAR_US_SIFMA``, the profile's own
+# reviewed calendar -- Annex A's confirmation for this profile names it "the
+# SIFMA-recommended U.S. bond-market calendar" -- so the policy introduces no
+# calendar semantics of its own.
+#
+# Three things it deliberately is not:
+#
+# - **Not market evidence.** It is an owner policy, recorded as one, exactly
+#   like #157's. Nothing here claims Bloomberg or OVME computes these dates
+#   this way.
+# - **Not the cash bond's lag.** ``US_CORPORATE.settlement_business_days`` is
+#   2 and stays 2 -- its T+2 spot settlement, still read by
+#   ``bli_bond_modified_duration.spot_settlement_date`` for exactly that role.
+#   The option-side count approved here is 1. The two numbers now differ on
+#   the same profile, which is the role separation made visible rather than
+#   merely asserted.
+# - **Not a Delivery Delay derivation.** The count is the fixed ``1`` the
+#   policy states. A ticket's recorded OVME Delivery Delay is still read by
+#   nothing: it does not feed this count, does not override it, and a ticket
+#   recording a Delivery Delay of 2 still derives from the approved 1. If the
+#   two ever disagree on a real ticket, that is for the trader to see and
+#   override in Advanced -- not for Shiori to reconcile by guessing what OVME's
+#   integer counts.
+#
 # A market absent from this mapping derives neither date. Both come back
 # BLOCKED for the trader to supply from the traded terms, which is what the
 # pricing contract already calls authoritative
@@ -610,6 +647,7 @@ SUPPORTED_CONVENTION_PROFILE_NAMES = tuple(CONVENTION_PROFILES)
 # distinct").
 APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS: dict[str, int] = {
     UST_CONVENTION_PROFILE.name: 1,
+    US_CORPORATE_CONVENTION_PROFILE.name: 1,
 }
 
 
