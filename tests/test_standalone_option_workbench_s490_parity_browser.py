@@ -1401,6 +1401,92 @@ def test_selecting_a_corporate_requires_an_explicit_forward_and_offers_no_deriva
     assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
 
 
+_FORWARD_PANEL = '[data-workflow-group="forward-review"]'
+
+# Rendered text that describes the S490 derived-Forward workflow. None of it
+# may be on screen for a market with no approved automatic Forward model.
+_DERIVED_FORWARD_ONLY_STRINGS = (
+    "Reset / Use Shiori Derived",
+    "By default it holds Shiori's own S490-derived Forward",
+    "S490-derived Forward",
+    "defaults to Shiori's own S490 repo-carry derivation",
+    "SHIORI_DERIVED_S490",
+)
+
+
+def test_a_corporate_forward_panel_renders_only_the_explicit_forward_contract(
+    server_url, page
+) -> None:
+    """Issue #217, found in workstation UAT: the panel said "Explicit Forward
+    required" and yet still *rendered* the Reset / Use Shiori Derived action
+    and the note describing an S490-derived default.
+
+    The action's ``hidden`` property was already true -- which is all the
+    earlier assertion read -- but ``.btn``'s own ``display`` beat the UA
+    ``[hidden]`` rule, so it stayed on screen. Everything here is asserted on
+    what is actually rendered (``inner_text`` / ``is_visible``), not on the
+    property. UST's own behaviour is pinned alongside, unchanged.
+    """
+
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+
+    # UST, derived mode: the derived-Forward description, no explicit-only note,
+    # and no Reset action while there is nothing to reset.
+    ust_text = page.inner_text(_FORWARD_PANEL)
+    assert "By default it holds Shiori's own S490-derived Forward" in ust_text
+    assert "defaults to Shiori's own S490 repo-carry derivation" in ust_text
+    assert "Explicit Forward contract." not in ust_text
+    assert page.is_visible("#forward-use-derived-btn") is False
+    assert page.is_visible("#forward-explicit-mode-note") is False
+
+    # UST, override mode: Reset / Use Shiori Derived is on screen, as before.
+    page.fill("#forward-price-input", "97.75")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()"))
+    assert page.is_visible("#forward-use-derived-btn") is True
+    assert "Reset / Use Shiori Derived" in page.inner_text(_FORWARD_PANEL)
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+
+    def assert_explicit_contract_only() -> None:
+        rendered = page.inner_text(_FORWARD_PANEL)
+        for text in _DERIVED_FORWARD_ONLY_STRINGS:
+            assert text not in rendered, text
+        assert page.is_visible("#forward-use-derived-btn") is False
+        assert page.is_visible("#forward-derived-mode-note") is False
+        assert page.is_visible("#forward-explicit-mode-note") is True
+        assert (
+            "Explicit Forward required — US_CORPORATE automatic Forward model not yet "
+            "supported." in rendered
+        )
+        assert "Explicit Forward contract." in rendered
+        assert "Not sourced, not derived." in rendered
+        assert page.text_content("#forward-provenance").startswith("Provenance:")
+
+    # Empty Forward, and then with the trader's own Forward typed in -- the
+    # moment the Reset action used to appear on UST.
+    _wait_until(lambda: page.is_visible("#forward-explicit-mode-note"))
+    assert_explicit_contract_only()
+    page.fill("#forward-price-input", "98.75")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["forward_clean_price_per_100"]
+        == 98.75
+    )
+    assert_explicit_contract_only()
+
+    # And back to UST: the derived-mode panel returns exactly as it was.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: page.is_visible("#forward-derived-mode-note"))
+    back_on_ust = page.inner_text(_FORWARD_PANEL)
+    assert "By default it holds Shiori's own S490-derived Forward" in back_on_ust
+    assert "defaults to Shiori's own S490 repo-carry derivation" in back_on_ust
+    assert page.is_visible("#forward-explicit-mode-note") is False
+    assert page.is_visible("#forward-use-derived-btn") is False
+
+
 def _load_corporate_admissible_bond(page, server_url: str) -> None:
     """The UST-shaped fixture bond, carrying the structural evidence
     `US_CORPORATE` requires -- otherwise selecting that profile refuses the

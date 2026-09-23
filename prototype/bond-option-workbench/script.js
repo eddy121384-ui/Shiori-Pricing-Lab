@@ -116,6 +116,8 @@
     // that hands it back to the derivation.
     forwardSourceLine: document.getElementById("forward-source-line"),
     forwardUseDerivedBtn: document.getElementById("forward-use-derived-btn"),
+    forwardDerivedModeNote: document.getElementById("forward-derived-mode-note"),
+    forwardExplicitModeNote: document.getElementById("forward-explicit-mode-note"),
     volatility: document.getElementById("volatility-input"),
     // Issue #214: the vol source and the bond option price basis.
     volSource: document.getElementById("vol-source-select"),
@@ -487,6 +489,14 @@
       typeof selectedConventionProfile === "string" &&
       s490DerivedForwardProfiles().indexOf(selectedConventionProfile) !== -1
     );
+  }
+
+  // A market is selected and it has no approved automatic Forward model: the
+  // Forward panel then describes only the explicit-Forward contract. Before
+  // any market is selected the panel keeps its default description, exactly
+  // as it read before Issue #217.
+  function explicitForwardContractOnly() {
+    return typeof selectedConventionProfile === "string" && !s490DerivedForwardSupported();
   }
 
   // What the trader is told when this ticket's market has no automatic
@@ -3465,14 +3475,22 @@
     // spot quote and the live S490 repo/carry curve (Issues #173/#175), which
     // is a derivation with a full trace rather than a reconstruction from
     // FTP, MMkt or a par rate.
-    forward:
-      "Derived, not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a " +
-      "cash bond on this DAPI route (BAD_FLD for both the UST and the Gilt test " +
-      "securities, with the confirmed OP046 / OP188 overrides applied), so the " +
-      "Forward defaults to Shiori's own S490 repo-carry derivation from the live " +
-      "spot quote — traced in full in the Shiori Derived Forward section above — " +
-      "and a value you type here overrides it. Shiori still never reconstructs a " +
-      "forward from FTP, MMkt or a par rate.",
+    // Issue #217, found in workstation UAT: evaluated per render like `vol`
+    // below, because a market with no approved automatic Forward model has no
+    // S490 default for this note to describe.
+    forward: () =>
+      explicitForwardContractOnly()
+        ? "Not sourced, not derived. Bloomberg OPT_UNDL_FORWARD_PX is not applicable " +
+          "to a cash bond on this DAPI route, and this market has no approved automatic " +
+          "Forward model, so the Forward is the explicit value you enter here. Shiori " +
+          "never reconstructs a forward from FTP, MMkt or a par rate."
+        : "Derived, not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a " +
+          "cash bond on this DAPI route (BAD_FLD for both the UST and the Gilt test " +
+          "securities, with the confirmed OP046 / OP188 overrides applied), so the " +
+          "Forward defaults to Shiori's own S490 repo-carry derivation from the live " +
+          "spot quote — traced in full in the Shiori Derived Forward section above — " +
+          "and a value you type here overrides it. Shiori still never reconstructs a " +
+          "forward from FTP, MMkt or a par rate.",
     // Issue #214: two sources now, and the honest note differs between them.
     // Evaluated per render (see renderMarketReview) rather than fixed, so the
     // row never describes the source the ticket is not using.
@@ -5017,7 +5035,9 @@
   }
 
   function renderForwardSource() {
-    els.forwardUseDerivedBtn.hidden = !traderForwardOverrideActive;
+    els.forwardUseDerivedBtn.hidden = !traderForwardOverrideActive || explicitForwardContractOnly();
+    els.forwardDerivedModeNote.hidden = explicitForwardContractOnly();
+    els.forwardExplicitModeNote.hidden = !explicitForwardContractOnly();
     if (currentDraft === null) {
       els.forwardSourceLine.textContent = "—";
       els.forwardSourceLine.classList.remove("is-invalid");

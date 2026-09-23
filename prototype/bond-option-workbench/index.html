@@ -383,7 +383,7 @@
               <span class="btn ghost btn-small" id="forward-use-derived-btn" hidden>Reset / Use Shiori Derived</span>
               <div class="review-note" id="forward-sourcing-note">&mdash;</div>
               <div class="review-provenance" id="forward-provenance">&mdash;</div>
-              <div class="review-note">
+              <div class="review-note" id="forward-derived-mode-note">
                 One Forward field, two sources. By default it holds Shiori's own
                 S490-derived Forward (from the Bloomberg-loaded bond, its live spot quote,
                 Expiry and Spot Settlement Date above) and Black-76 prices from that. Type
@@ -393,6 +393,14 @@
                 field back to the derivation and reprices. If the derivation fails while it is
                 the active source, pricing is blocked and the real reason is shown &mdash; no
                 spot price, previous Forward, zero repo or flat carry is ever substituted.
+              </div>
+              <div class="review-note" id="forward-explicit-mode-note" hidden>
+                Explicit Forward contract. This market has no approved automatic Forward
+                model, so the Forward is a term of this ticket: Black-76 prices from exactly
+                the number you enter here, recorded as a <strong>Trader Forward Override</strong>
+                with provenance. Nothing is derived for it. While the field is empty, pricing
+                is blocked &mdash; no spot price, previous Forward, zero repo or flat carry is
+                ever substituted.
               </div>
             </div>
 

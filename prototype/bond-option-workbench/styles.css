@@ -635,6 +635,15 @@ select.control:focus { border-color: var(--blue); }
 .curve-row-remove:hover { color: #b3401f; }
 .curve-actions { margin-bottom: 8px; }
 .btn.btn-small { height: 30px; padding: 0 14px; font-size: 13px; }
+/* Issue #217, found in workstation UAT: `.btn`'s explicit `display:
+   inline-flex` wins over the UA `[hidden] { display: none }` rule (the same
+   class of bug the overrides near the top of this file fix), so the Forward
+   panel's "Reset / Use Shiori Derived" action stayed on screen while its
+   `hidden` property read true -- including on a market with no derived
+   Forward to hand the field back to. */
+#forward-use-derived-btn[hidden] {
+  display: none;
+}
 
 /* Exact, blocking curve-coverage state -- never a soft warning that still
    lets a fabricated discount factor through. */
