@@ -1477,7 +1477,8 @@ def test_a_corporate_ticket_fills_both_settlement_dates_itself(server_url, page)
     assert "derives neither settlement date" in record["reason_not_sourced"]
 
     # A mistyped negative Delivery Delay is read as nothing, not sent on to
-    # fail the whole case on a field meant to be optional and inert.
+    # fail the whole case on a field meant to be optional and inert -- but
+    # not in silence: the trader is told the entry was not recorded, and why.
     page.fill("#delivery-delay-input", "-3")
     _wait_until(
         lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
@@ -1485,6 +1486,47 @@ def test_a_corporate_ticket_fills_both_settlement_dates_itself(server_url, page)
         ]
         is None
     )
+    assert "not a whole, non-negative number" in page.text_content("#prov-delivery-delay")
+    assert page.get_attribute("#delivery-delay-input", "aria-invalid") == "true"
+
+    # The Delivery Delay is a term of this ticket, not of the market: a
+    # market switch clears the settlement dates, but keeps what was recorded.
+    page.fill("#delivery-delay-input", "1")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        == 1
+    )
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    assert page.input_value("#delivery-delay-input") == "1"
+    assert (
+        page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        == 1
+    )
+    assert "MANUAL_TRADER_ENTRY" in page.text_content("#prov-delivery-delay")
+
+
+def test_the_trade_section_dates_wait_for_a_market_to_be_selected(server_url, page) -> None:
+    """Issue #217 review: "no market selected yet" is not "a market without
+    an approved rule". Until the trader picks one, the Trade-section copies of
+    the two settlement dates are not offered -- anything typed there would be
+    cleared by the selection, under a note that would not be true of it."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.evaluate(
+        """() => {
+            const select = document.getElementById("convention-profile-select");
+            select.value = "";
+            select.dispatchEvent(new Event("change"));
+        }"""
+    )
+    _wait_until(lambda: _draft_convention_profile(page) is None)
+    assert page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True
+    assert page.eval_on_selector("#delivery-delay-row", "el => el.hidden") is False
 
 
 def test_a_market_without_an_approved_policy_owns_its_dates_in_the_trade_section(

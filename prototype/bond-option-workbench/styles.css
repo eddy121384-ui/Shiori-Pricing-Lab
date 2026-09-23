@@ -714,6 +714,7 @@ select.control:focus { border-color: var(--blue); }
 .expiry-controls { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
 .expiry-offset { text-align: center; }
 .derived-source.is-invalid { color: #b3401f; }
+.field-provenance.is-invalid { color: #b3401f; }
 
 /* ---------- Market inputs review ---------- */
 /* Forward, Vol and Discounting each get one review row stating its real

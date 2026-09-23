@@ -1,17 +1,19 @@
 """Standalone-route deal and resolved-bond contracts (Issue #146).
 
 These frozen types contain exactly the fields the standalone browser pricing
-route validates or consumes. They deliberately omit four legacy fields that
-are not inputs to this route:
+route validates or consumes. They deliberately omit three legacy fields
+that are not inputs to this route (listed below).
 
-- ``BondOption.settlement_lag_days`` -- explicit forward and option
-  settlement dates are authoritative. Issue #217 follow-up: the field is
-  carried here after all, as an **optional** term, and the reason it was
-  omitted is exactly the reason it stays inert. It is OVME's Delivery Delay
-  (``docs/bloomberg_ovme_source_mapping.md``), recorded for audit,
-  provenance and export; it derives neither settlement date, enters no
-  pricing arithmetic, and its absence blocks nothing. Only its shape is
-  validated;
+``BondOption.settlement_lag_days`` was the fourth omission until Issue #217:
+explicit forward and option settlement dates are authoritative. It is now
+carried as an **optional** term, and the reason it was omitted is exactly
+the reason it stays inert. It is OVME's Delivery Delay
+(``docs/bloomberg_ovme_source_mapping.md``), recorded for audit, provenance
+and export; it derives neither settlement date, enters no pricing
+arithmetic, and its absence blocks nothing. Only its shape is validated.
+
+The three fields still omitted:
+
 - ``BondReferenceData.business_day_convention`` -- the reviewed coupon
   adapter uses unadjusted dates and a ``NullCalendar``;
 - ``BondReferenceData.redemption_amount`` -- principal/redemption is not

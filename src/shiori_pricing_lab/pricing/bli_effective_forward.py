@@ -77,6 +77,7 @@ from dataclasses import asdict, dataclass
 from math import isfinite
 
 from shiori_pricing_lab.data.bli_snapshot import BLIForwardCleanPriceInput
+from shiori_pricing_lab.pricing.bli_bond_convention_profile import UST_CONVENTION_PROFILE
 
 # The two canonical Forward sources. Written verbatim onto every
 # BLIForwardCleanPriceInput this module produces, and therefore onto every
@@ -113,7 +114,7 @@ EFFECTIVE_FORWARD_SOURCES: frozenset[str] = frozenset(
 # way through and produced a UST repo-carry Forward stamped
 # `SHIORI_DERIVED_S490`, silently. The membership test below is that missing
 # gate, and it is checked before any funding acquisition runs.
-S490_DERIVED_FORWARD_CONVENTION_PROFILES: tuple[str, ...] = ("UST",)
+S490_DERIVED_FORWARD_CONVENTION_PROFILES: tuple[str, ...] = (UST_CONVENTION_PROFILE.name,)
 
 
 class S490ForwardConventionProfileError(ValueError):

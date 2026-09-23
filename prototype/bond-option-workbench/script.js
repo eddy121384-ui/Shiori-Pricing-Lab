@@ -1319,15 +1319,18 @@
               ? "Shiori filled every one of these it could and stopped at the rest, " +
                 "which are yours to set: " +
                 blocked.join(" · ")
-              : "No Bloomberg field carries an OTC option's own cash settlement date, " +
-                "and the only approved calendar rule is the narrow UST fixed-coupon " +
-                "bullet profile's one-business-day roll on the U.S. government-bond " +
-                "calendar.",
+              : "No Bloomberg field carries an OTC option's own cash settlement date. " +
+                "Shiori fills the two option settlement dates only for a market with an " +
+                "approved owner policy (Expiry + 1 U.S. bond-market business day), " +
+                "and only once the expiry is entered.",
           evidence: EVIDENCE_TIMING,
-          next:
-            "Enter the expiry, or open Advanced → Timing & settlement and set the " +
-            "outstanding dates yourself. Each is recorded as a trader override with " +
-            "provenance.",
+          next: autoDerivedOptionTimingSupported()
+            ? "Enter the expiry, or open Advanced → Timing & settlement and set the " +
+              "outstanding dates yourself. Each is recorded as a trader override with " +
+              "provenance."
+            : "Set the reporting date in Advanced → Timing & settlement, and both " +
+              "settlement dates in the Trade section from the traded terms. Each is " +
+              "recorded as a trader entry with provenance.",
         };
       },
     },
@@ -4970,7 +4973,11 @@
   // path is how a trader's entry silently loses to a stale one.
   function renderTradeTimingOwnership() {
     const autoDerived = autoDerivedOptionTimingSupported();
-    const showTradeControls = currentDraft !== null && !autoDerived;
+    // No market selected yet is not "a market without an approved rule":
+    // until one is, nobody can say who owns these dates, and anything typed
+    // here would be cleared by the selection anyway.
+    const showTradeControls =
+      currentDraft !== null && typeof selectedConventionProfile === "string" && !autoDerived;
     els.tradeTimingBlock.hidden = !showTradeControls;
     // Delivery Delay is a ticket term, not a market convention (Issue #217),
     // so it is on every ticket whatever the approval status of its market --
@@ -4993,8 +5000,16 @@
       currentDraft && currentDraft.bond_option
         ? currentDraft.bond_option.settlement_lag_days
         : null;
-    els.provDeliveryDelay.textContent =
-      recorded === null || recorded === undefined
+    const typed = els.deliveryDelay.value.trim();
+    // A malformed entry never becomes null-in-silence: the term stays
+    // unrecorded (it is optional and inert), and the trader is told why.
+    const malformed = (recorded === null || recorded === undefined) && typed !== "";
+    els.deliveryDelay.setAttribute("aria-invalid", malformed ? "true" : "false");
+    els.provDeliveryDelay.classList.toggle("is-invalid", malformed);
+    els.provDeliveryDelay.textContent = malformed
+      ? `Not recorded — "${typed}" is not a whole, non-negative number of days. ` +
+        "Correct it to record the term; nothing is derived from it either way."
+      : recorded === null || recorded === undefined
         ? "Not recorded — optional. Nothing is derived from it either way."
         : `MANUAL_TRADER_ENTRY — ${recorded} recorded from OVME for the audit trail and ` +
           "the run export. It derives neither settlement date and enters no pricing " +
@@ -5796,11 +5811,13 @@
     s490ParityError = null;
     s490ParityPending = false;
     els.forwardPrice.value = "";
-    // Issue #217 follow-up: and so do the timing terms. A date entered under
-    // a market whose approval status differs must not survive into the next
-    // one -- on UST it would be overwritten by the derivation anyway, and on
-    // a market without one it would be a stale hand-entry nobody re-checked.
-    els.deliveryDelay.value = "";
+    // Issue #217 follow-up: and so do the settlement dates. A date entered
+    // under a market whose approval status differs must not survive into the
+    // next one -- on an approved market it would be overwritten by the
+    // derivation anyway, and on a market without one it would be a stale
+    // hand-entry nobody re-checked. The Delivery Delay is deliberately kept:
+    // it is a term of this ticket, not of the market, and it derives nothing
+    // a market switch could make stale.
     els.tradeForwardSettlementDate.value = "";
     els.tradeOptionSettlementDate.value = "";
     els.forwardSettlementDate.value = "";

@@ -49,6 +49,7 @@ import pytest
 
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
 from shiori_pricing_lab.pricing import bli_bond_advanced_field_resolver as profile_module
+from shiori_pricing_lab.pricing import bli_bond_convention_profile as convention_profile_module
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     ADVANCED_FIELD_PATHS,
     EXPIRY_DEPENDENT_FIELD_PATHS,
@@ -1901,3 +1902,24 @@ def test_a_corporate_cash_bond_lag_never_becomes_an_option_delivery_lag():
 
     # UST's own Issue #157 approval is untouched by any of this.
     assert approved_expiry_to_settlement_business_days(UST_CONVENTION_PROFILE) == 1
+
+
+def test_the_derived_dates_follow_the_approved_count_not_a_hardcoded_one(monkeypatch):
+    """Issue #217 review: every approved count is 1 today, so a resolver that
+    ignored the approval record and hardcoded one day would pass every other
+    test here. Moving the record moves the dates -- and to neither the old
+    one-day date nor the cash bond's own T+2."""
+
+    monkeypatch.setitem(
+        convention_profile_module.APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
+        US_CORPORATE_CONVENTION_PROFILE.name,
+        3,
+    )
+
+    values = _values(_resolve_confirmed_us_corporate())
+    expected = advance_settlement_business_days(
+        date(2026, 10, 20), 3, US_CORPORATE_CONVENTION_PROFILE
+    ).isoformat()
+    assert expected == "2026-10-23"
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == expected
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == expected

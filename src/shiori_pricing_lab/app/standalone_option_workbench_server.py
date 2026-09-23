@@ -2334,8 +2334,11 @@ def resolve_s490_repo_carry_parity(
     # required *browser state*, exactly as POST /api/bond/advanced-profile
     # already treats it: the trader's own selection, never defaulted or
     # guessed here. Only the UST selection asserts the UST payment
-    # convention; anything else leaves it unset and the primitive fails
-    # closed on any interim coupon while Case A is unaffected.
+    # convention. Issue #217: the S490 eligibility gate at the top of this
+    # function already refuses every other profile, so today the ``else``
+    # is not reached; it is kept so that adding a profile to the S490 list
+    # never silently hands it the UST payment convention -- that market's
+    # run would then fail closed on any interim coupon instead.
     interim_coupon_payment_convention = (
         UST_COUPON_PAYMENT_ROLL_CONVENTION
         if convention_profile == UST_CONVENTION_PROFILE.name
@@ -2543,10 +2546,9 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
     # which is exactly the impression Issue #217 exists to prevent: that
     # Shiori has an automatic Forward model for this market. It does not.
     s490_eligible = supports_s490_derived_forward(convention_profile)
-    if not s490_eligible and not is_trader_override:
-        require_s490_derived_forward_convention_profile(convention_profile)
-
     if not s490_eligible:
+        if not is_trader_override:
+            require_s490_derived_forward_convention_profile(convention_profile)
         derived_error = (
             f"no Shiori Derived Forward is produced for convention_profile "
             f"{convention_profile!r}: the {SHIORI_DERIVED_S490_FORWARD_SOURCE} model is "
