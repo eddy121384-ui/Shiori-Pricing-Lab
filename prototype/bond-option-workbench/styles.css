@@ -640,8 +640,11 @@ select.control:focus { border-color: var(--blue); }
    class of bug the overrides near the top of this file fix), so the Forward
    panel's "Reset / Use Shiori Derived" action stayed on screen while its
    `hidden` property read true -- including on a market with no derived
-   Forward to hand the field back to. */
-#forward-use-derived-btn[hidden] {
+   Forward to hand the field back to. The S490 panel's Retry had the same
+   defect, and was on screen even for a market the panel says S490 does not
+   apply to. */
+#forward-use-derived-btn[hidden],
+#s490-parity-retry-btn[hidden] {
   display: none;
 }
 

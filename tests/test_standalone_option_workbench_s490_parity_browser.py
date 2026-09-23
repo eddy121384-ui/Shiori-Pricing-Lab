@@ -1527,6 +1527,59 @@ def test_loading_a_different_bond_leaves_no_corporate_forward_copy_behind(
     assert page.is_visible("#forward-use-derived-btn") is False
 
 
+def test_the_s490_retry_action_is_never_rendered_for_a_corporate_ticket(
+    server_url, page
+) -> None:
+    """Issue #217, found in workstation UAT: under ``US_CORPORATE`` the S490
+    panel said the Treasury model is not approved for this market and still
+    rendered Retry. Same cause as the Forward panel's Reset action -- ``.btn``
+    beat ``[hidden]`` -- so asserted on rendering (``is_visible``), not on the
+    property. UST's Retry is pinned before and after, unchanged."""
+
+    _load_corporate_admissible_bond(page, server_url)
+
+    attempts = {"n": 0}
+
+    def route_s490(route):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            route.fulfill(
+                status=400,
+                content_type="application/json",
+                body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+            )
+        else:
+            route.continue_()
+
+    page.route("**/api/case/s490-repo-carry", route_s490)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+
+    # UST, failed derivation: Retry is on screen, as before.
+    _wait_until(
+        lambda: "Bloomberg DAPI session failed to start"
+        in page.text_content("#s490-parity-status")
+    )
+    assert page.is_visible("#s490-parity-retry-btn") is True
+
+    # US_CORPORATE: no Retry, and the explanation stays.
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: "not yet supported" in page.text_content("#s490-parity-status"))
+    assert page.is_visible("#s490-parity-retry-btn") is False
+    status = page.inner_text("#s490-parity-status")
+    assert "US_CORPORATE automatic Forward model not yet supported" in status
+    assert "The S490 repo-carry Forward is a U.S. Treasury model" in status
+    assert "neither of which is approved for this market" in status
+
+    # Back to UST: the derivation runs again, succeeds, and Retry is not shown.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: page.is_visible("#s490-parity-fields"))
+    assert attempts["n"] >= 2
+    assert page.is_visible("#s490-parity-retry-btn") is False
+    page.unroute("**/api/case/s490-repo-carry")
+
+
 def _load_corporate_admissible_bond(page, server_url: str) -> None:
     """The UST-shaped fixture bond, carrying the structural evidence
     `US_CORPORATE` requires -- otherwise selecting that profile refuses the

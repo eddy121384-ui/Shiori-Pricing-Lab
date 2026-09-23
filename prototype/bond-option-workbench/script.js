@@ -4090,7 +4090,10 @@
   }
 
   function renderS490ParityPanel() {
-    if (s490ParityError !== null) {
+    // Issue #217: on a market the S490 model is not approved for, the panel
+    // only ever explains that -- a failed derivation (and its Retry) belongs
+    // to a market that has one.
+    if (s490ParityError !== null && s490ReadinessGate() !== "profile-unsupported") {
       els.s490ParityStatus.textContent = s490ParityError;
       els.s490ParityStatus.classList.add("is-invalid");
       // Codex P2 review of PR #174, round 7: a failed request (a transient
