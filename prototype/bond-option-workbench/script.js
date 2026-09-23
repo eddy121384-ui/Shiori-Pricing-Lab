@@ -5120,7 +5120,9 @@
     shioriDerivedForward = null;
     shioriDerivedForwardError = null;
     repriceOnceForwardIsPriceable = false;
-    renderForwardSource();
+    // Rendered below, once the convention profile is cleared too: the panel's
+    // mode and copy follow the selected market (Issue #217), and rendering it
+    // here would paint the previous bond's market onto the next ticket.
 
     // Issue #217 follow-up: the Trade-section timing terms are this ticket's,
     // not the page's. A Clear, a failed refresh or a different security must
@@ -5152,6 +5154,7 @@
     conventionProfileTransportError = null;
     selectedConventionProfile = null;
     renderConventionProfilePicker();
+    renderForwardSource();
 
     renderResolvedBondPanel();
     clearBondMaster();

@@ -1487,6 +1487,46 @@ def test_a_corporate_forward_panel_renders_only_the_explicit_forward_contract(
     assert page.is_visible("#forward-use-derived-btn") is False
 
 
+def test_loading_a_different_bond_leaves_no_corporate_forward_copy_behind(
+    server_url, page
+) -> None:
+    """Issue #217, Codex P2 on ``4c9dd07``: ``resetRunState`` rendered the
+    Forward panel before it cleared the convention profile, so a newly loaded
+    ticket kept the previous bond's ``US_CORPORATE`` explicit-Forward copy
+    until a profile was selected. Asserted on what is rendered."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: page.is_visible("#forward-explicit-mode-note"))
+    corporate_text = page.inner_text(_FORWARD_PANEL)
+    assert "US_CORPORATE automatic Forward model not yet supported" in corporate_text
+    assert "Explicit Forward contract." in corporate_text
+
+    # A different bond, with no profile selected yet.
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMB44",
+        response=_treasury_lookup_response(
+            isin="US91282CMB44", acquired_at="2026-08-12T20:05:00+08:00"
+        ),
+        profile=None,
+    )
+    page.wait_for_function("() => window.__shioriTestConventionProfileCandidates()")
+    assert _draft_convention_profile(page) is None
+
+    rendered = page.inner_text(_FORWARD_PANEL)
+    for stale in (
+        "US_CORPORATE",
+        "Explicit Forward contract.",
+        "Not sourced, not derived.",
+    ):
+        assert stale not in rendered, stale
+    assert page.is_visible("#forward-explicit-mode-note") is False
+    assert page.is_visible("#forward-derived-mode-note") is True
+    assert page.is_visible("#forward-use-derived-btn") is False
+
+
 def _load_corporate_admissible_bond(page, server_url: str) -> None:
     """The UST-shaped fixture bond, carrying the structural evidence
     `US_CORPORATE` requires -- otherwise selecting that profile refuses the
