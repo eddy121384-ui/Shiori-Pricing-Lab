@@ -1315,8 +1315,13 @@ def _s490_request_body(case: dict, **overrides) -> dict:
     at all, and a missing one is refused rather than defaulting to UST. These
     tests are about what the derivation does once it is reached, so they all
     state the same approved selection through here instead of repeating it.
+
+    The case carries the same selection as its own ``convention_profile``
+    (Codex P1 review of PR #220): the route derives only for the market the
+    case itself is priced under, so the two copies must agree.
     """
 
+    case.setdefault("convention_profile", _S490_CONVENTION_PROFILE)
     body = {
         "case": case,
         "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
@@ -1638,6 +1643,9 @@ def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every
     case["expiry_timestamp"] = "2026-12-20T16:00:00Z"
     case["forward_settlement_date"] = "2026-12-21"
     case["option_settlement_date"] = "2026-12-21"
+    # The route derives only for the market the case itself is priced under
+    # (Codex P1 review of PR #220), so the case carries the same selection.
+    case["convention_profile"] = "UST"
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
@@ -1717,6 +1725,38 @@ def test_api_s490_repo_carry_refuses_an_unapproved_selection_before_it_acquires_
 
 
 @_QUANTLIB_SKIP
+@pytest.mark.parametrize("case_profile", ["US_CORPORATE", None, "ust"])
+def test_api_s490_repo_carry_refuses_a_case_whose_own_profile_is_not_the_approved_selection(
+    server_url: str, monkeypatch, case_profile
+) -> None:
+    """Codex P1 review of PR #220: the route receives the selection twice,
+    as its own ``convention_profile`` and inside the case. Checking only the
+    first let a case whose own market is ``US_CORPORATE`` name ``UST`` beside
+    it and be handed a Treasury S490 Forward. Both copies are now checked, and
+    must agree, before anything is acquired -- a case with no profile of its
+    own is refused too, exactly as the pricing path already refuses it."""
+
+    curve_calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["convention_profile"] = case_profile
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {
+            "case": case,
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+            "convention_profile": _S490_CONVENTION_PROFILE,
+        },
+    )
+    assert status == 400
+    assert "not approved for the SHIORI_DERIVED_S490 Forward" in payload["error"]
+    assert repr(case_profile) in payload["error"]
+    assert "s490_repo_carry" not in payload
+    assert curve_calls == []
+
+
+@_QUANTLIB_SKIP
 @pytest.mark.parametrize("selected", [None, "US_CORPORATE"])
 def test_api_s490_repo_carry_refuses_a_case_a_horizon_on_an_unapproved_selection(
     server_url: str, monkeypatch, selected
@@ -1760,11 +1800,7 @@ def test_api_s490_repo_carry_prices_a_case_a_horizon_on_the_approved_selection(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {
-            "case": _case_with_empty_curve_points(),
-            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
-            "convention_profile": _S490_CONVENTION_PROFILE,
-        },
+        _s490_request_body(_case_with_empty_curve_points()),
     )
     assert status == 200
     assert payload["s490_repo_carry"]["forward"]["interim_coupons"] == []
@@ -1782,11 +1818,7 @@ def test_api_s490_repo_carry_reports_no_interim_coupon_for_a_case_a_horizon(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {
-            "case": _case_with_empty_curve_points(),
-            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
-            "convention_profile": _S490_CONVENTION_PROFILE,
-        },
+        _s490_request_body(_case_with_empty_curve_points()),
     )
     assert status == 200
     forward = payload["s490_repo_carry"]["forward"]
@@ -1884,6 +1916,7 @@ def test_resolve_s490_repo_carry_parity_carries_to_the_cases_forward_settlement_
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
+    case["convention_profile"] = _S490_CONVENTION_PROFILE
 
     result = server_module.resolve_s490_repo_carry_parity(
         case, _S490_SPOT_SETTLEMENT_DATE, _S490_CONVENTION_PROFILE
@@ -1904,6 +1937,7 @@ def test_resolve_s490_repo_carry_parity_never_reads_the_explicit_forward_overrid
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
     case["forward_clean_price_input"]["forward_clean_price_per_100"] = 12345.0
+    case["convention_profile"] = _S490_CONVENTION_PROFILE
 
     result = server_module.resolve_s490_repo_carry_parity(
         case, _S490_SPOT_SETTLEMENT_DATE, _S490_CONVENTION_PROFILE
@@ -1919,6 +1953,7 @@ def test_resolve_s490_repo_carry_parity_raises_for_a_yield_only_quote(monkeypatc
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
     case["bond_quote"] = {**case["bond_quote"], "clean_price_per_100": None}
+    case["convention_profile"] = _S490_CONVENTION_PROFILE
 
     with pytest.raises(ValueError, match="clean_price_per_100"):
         server_module.resolve_s490_repo_carry_parity(

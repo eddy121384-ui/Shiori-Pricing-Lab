@@ -468,6 +468,7 @@ from shiori_pricing_lab.pricing.bli_effective_forward import (
     S490_DERIVED_FORWARD_CONVENTION_PROFILES,
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
+    S490ForwardConventionProfileError,
     forward_clean_price_input_dict,
     is_usable_clean_price_per_100,
     require_s490_derived_forward_convention_profile,
@@ -2254,6 +2255,19 @@ def resolve_s490_repo_carry_parity(
     # is refused rather than inheriting UST's behaviour by default -- see
     # `bli_effective_forward.supports_s490_derived_forward`.
     require_s490_derived_forward_convention_profile(convention_profile)
+    # Codex P1 review of PR #220: the route receives the selection twice, as
+    # its own `convention_profile` and inside the case it derives for. Only
+    # the first was checked, so a case whose own market is US_CORPORATE could
+    # still name UST beside it and be handed a Treasury S490 Forward. The
+    # case's copy must be approved too, and must be the same selection.
+    case_convention_profile = case.get("convention_profile") if isinstance(case, dict) else None
+    require_s490_derived_forward_convention_profile(case_convention_profile)
+    if case_convention_profile != convention_profile:
+        raise S490ForwardConventionProfileError(
+            f"convention_profile {convention_profile!r} does not match the case's own "
+            f"convention_profile {case_convention_profile!r}; the S490 repo-carry Forward "
+            "is derived only for the market the case itself is priced under"
+        )
 
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
     # Signalled the instant the acquisition succeeds, before any of the
