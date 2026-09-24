@@ -22,7 +22,9 @@ from datetime import date, timedelta
 
 import pytest
 
+from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
 from shiori_pricing_lab.data.treasury_futures_ctd import treasury_futures_ctd_from_manual_entry
+from shiori_pricing_lab.pricing import bli_quantlib_bond_adapter as adapter
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
     TreasuryFuturesContractError,
     minimum_tick,
@@ -30,6 +32,7 @@ from shiori_pricing_lab.pricing.treasury_futures_contract import (
 from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     _YIELD_SOLVE_LOWER,
     _YIELD_SOLVE_UPPER,
+    IrregularFirstCoupon,
     TreasuryFuturesYieldError,
     _resolve_pricing_policy,
     accrued_interest_per_100,
@@ -42,6 +45,7 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     remaining_coupon_dates,
     yield_from_clean_price,
 )
+from shiori_pricing_lab.products.enums import DayCount
 
 HALF_BASIS_POINT_IN_PERCENT = 0.005
 
@@ -619,3 +623,134 @@ def test_too_negative_yield_domain_error_keeps_original_message_not_relabeled() 
     error_msg = str(exc.value)
     assert "too negative to discount semiannually" in error_msg
     assert "numerical overflow" not in error_msg.lower()
+
+# --- 30/360 BondBasis leg (Issue #218) -----------------------------------------
+#
+# Pinned against Eddy's Bloomberg workstation reconciliation on US61760QRP18
+# (MS 5.15 02/10/40, semiannual, regular grid on the 10th). The two accrued
+# dates are where the 30/360 variants disagree; the price->yield date is where
+# the ACT/ACT, European and days-to-next-coupon candidates all miss. The
+# convention is pinned by this reconciliation, never by CALC_TYP_DES.
+
+_MS_2040_MATURITY = date(2040, 2, 10)
+_MS_2040_COUPON = 5.15
+_MS_2040_HALF_COUPON = _MS_2040_COUPON / 2.0
+
+
+def _thirty_360():
+    pytest.importorskip("QuantLib")
+    return DayCount.THIRTY_360
+
+
+@pytest.mark.parametrize(
+    ("settlement", "accrued_days"),
+    [(date(2026, 12, 31), 141), (date(2028, 2, 29), 19)],
+)
+def test_thirty_360_accrues_the_workstation_confirmed_days(settlement, accrued_days) -> None:
+    accrued = accrued_interest_per_100(
+        settlement, _MS_2040_MATURITY, _MS_2040_COUPON, day_count=_thirty_360()
+    )
+
+    assert accrued == pytest.approx(_MS_2040_HALF_COUPON * accrued_days / 180, abs=1e-12)
+
+
+def test_thirty_360_price_to_yield_matches_the_workstation_to_six_decimals() -> None:
+    settlement = date(2027, 3, 31)
+    yield_percent = yield_from_clean_price(
+        86.390000, settlement, _MS_2040_MATURITY, _MS_2040_COUPON, day_count=_thirty_360()
+    )
+
+    assert round(yield_percent, 6) == 6.749022
+    # And the same price on the ACT/ACT leg is not that yield -- the day count
+    # is what the match rests on, not a coincidence of magnitude.
+    assert round(
+        yield_from_clean_price(86.390000, settlement, _MS_2040_MATURITY, _MS_2040_COUPON), 6
+    ) != 6.749022
+
+
+def test_thirty_360_first_exponent_is_the_complement_of_the_accrued_fraction() -> None:
+    # w = (P - e) / P, not 30/360 days from settlement to the next coupon: at
+    # 2027-03-31 those differ (129/180 vs 130/180) and only the first gives
+    # 6.749022. Reprice by hand from the pinned formula.
+    day_count = _thirty_360()
+    settlement = date(2027, 3, 31)
+    yield_percent = 6.749022
+    period_yield = yield_percent / 100.0 / 2
+    coupons = remaining_coupon_dates(settlement, _MS_2040_MATURITY)
+    first_exponent = (180 - 51) / 180
+    dirty = sum(
+        (_MS_2040_HALF_COUPON + (100.0 if coupon == _MS_2040_MATURITY else 0.0))
+        / (1.0 + period_yield) ** (first_exponent + index)
+        for index, coupon in enumerate(coupons)
+    )
+
+    assert clean_price_from_yield(
+        yield_percent, settlement, _MS_2040_MATURITY, _MS_2040_COUPON, day_count=day_count
+    ) == pytest.approx(dirty - _MS_2040_HALF_COUPON * 51 / 180, abs=1e-10)
+
+
+@pytest.mark.parametrize("settlement", [date(2026, 12, 31), date(2027, 3, 31), date(2028, 2, 29)])
+def test_thirty_360_accrued_is_the_issue_217_adapters_accrued(settlement) -> None:
+    # Issue #217's corporate accrued interest (the QuantLib adapter, used for
+    # the Forward/strike price basis) and this leg must count the same days,
+    # or a DIRTY D_B and a DIRTY F/K would sit on two accrual rules.
+    day_count = _thirty_360()
+    bond = BLIStandaloneBondReferenceData(
+        isin="US61760QRP18",
+        issuer="Issue #218 UAT security (issuer not asserted)",
+        currency="USD",
+        coupon=_MS_2040_COUPON / 100.0,
+        coupon_frequency="SEMI_ANNUAL",
+        maturity_date="2040-02-10",
+        issue_date="2025-02-10",
+        day_count=day_count,
+        callable_flag=False,
+        sinkable_flag=False,
+        bond_type="FIXED_COUPON_BULLET",
+        ex_dividend_days=0,
+        first_coupon_date="2025-08-10",
+        last_coupon_date="2039-08-10",
+        status="ACTIVE",
+    )
+
+    assert accrued_interest_per_100(
+        settlement, _MS_2040_MATURITY, _MS_2040_COUPON, day_count=day_count
+    ) == pytest.approx(
+        adapter.accrued_interest_per_100(bond, as_of_date=settlement.isoformat()), abs=1e-12
+    )
+
+
+def test_a_thirty_360_period_of_another_length_is_refused_not_extrapolated() -> None:
+    # A month-end grid: 31 Aug -> 28 Feb is 178 days on 30/360 BondBasis. The
+    # reconciliation covers 180-day periods only.
+    with pytest.raises(TreasuryFuturesYieldError, match="178 days"):
+        accrued_interest_per_100(
+            date(2027, 1, 15), date(2035, 8, 31), 5.0, day_count=_thirty_360()
+        )
+
+
+def test_a_later_thirty_360_period_of_another_length_is_refused_too() -> None:
+    # Grid anchored on the 29th: the current period 2027-08-29 -> 2028-02-29
+    # is exactly 180 days, but 2028-08-29 -> 2029-02-28 is 179. Every later
+    # period is discounted as one whole exponent, so it is checked as well.
+    with pytest.raises(TreasuryFuturesYieldError, match="179 days"):
+        accrued_interest_per_100(
+            date(2027, 11, 15), date(2035, 8, 29), 5.0, day_count=_thirty_360()
+        )
+
+
+def test_an_irregular_first_coupon_is_refused_on_thirty_360() -> None:
+    schedule = IrregularFirstCoupon(date(2026, 11, 20), date(2027, 8, 10))
+    with pytest.raises(TreasuryFuturesYieldError, match="ACT/ACT ICMA"):
+        clean_price_from_yield(
+            6.0, date(2027, 1, 8), _MS_2040_MATURITY, _MS_2040_COUPON,
+            schedule=schedule, day_count=_thirty_360(),
+        )
+
+
+def test_a_day_count_the_engine_does_not_implement_is_refused() -> None:
+    with pytest.raises(TreasuryFuturesYieldError, match="not implemented"):
+        accrued_interest_per_100(
+            date(2027, 3, 31), _MS_2040_MATURITY, _MS_2040_COUPON,
+            day_count=DayCount.ACT_ACT_ISDA,
+        )

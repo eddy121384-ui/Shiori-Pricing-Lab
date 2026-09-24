@@ -62,6 +62,10 @@ untouched, but it cannot answer this question:
    utility whose answer disappears unless an optional dependency is installed
    is not a desk utility.
 
+(The one exception is the 30/360 leg below, which borrows only the adapter's
+day counter so its day counting cannot drift from the adapter's; the ACT/ACT
+legs, and so the futures utility, never touch QuantLib.)
+
 What *is* reused is the convention itself and its vocabulary
 (``Frequency.SEMI_ANNUAL``, ``DayCount.ACT_ACT_BOND``), recorded on every
 result so no consumer can show a yield without the convention that produced
@@ -99,6 +103,38 @@ stamp on every answer names the market, the ``GERMAN_GOVT`` profile and the
 Shiori-owned basis so no consumer can mistake one leg's convention for the
 other's -- the complete German calculation is Shiori's, reconciled against
 Bloomberg/Eurex analytics as UAT, not Eurex's own methodology.
+
+**30/360 BondBasis leg (Issue #218).** The same price<->yield engine takes an
+explicit ``day_count``: ``ACT_ACT_BOND`` (the default, every existing caller)
+or ``THIRTY_360``, which is the ``US_CORPORATE`` profile's day count and is
+counted by the one 30/360 mapping this repository already uses for accrued
+interest -- ``bli_quantlib_bond_adapter``'s ``Thirty360(BondBasis)``, the
+same day counter Issue #217's corporate accrued interest runs on. With
+``e`` = convention days from the previous coupon to settlement and ``P`` =
+convention days in that coupon period::
+
+    accrued = c * e / P
+    w       = (P - e) / P          first discount exponent
+    dirty   = sum_i  cf_i / (1 + y)^(w + i)
+
+On ACT/ACT, ``P - e`` *is* the actual days to the next coupon, so this is
+the formula above, integer for integer. On 30/360 it is not the same as
+counting 30/360 days from settlement to the next coupon, and the difference
+is not cosmetic (0.2 bp on the reconciliation date below).
+
+The mapping is **workstation-reconciled, not inferred from a description
+string**. ``DAY_CNT_DES = 30/360`` does not say which 30/360, and
+``CALC_TYP_DES = (1) STREET CONVENTION`` is still never mapped to anything
+(#145). What pins it is Eddy's Bloomberg reconciliation on ``US61760QRP18``
+(MS 5.15 02/10/40): settlement 2026-12-31 accrues 141 days and 2028-02-29
+accrues 19 days -- boundary dates on which the 30/360 variants disagree --
+and settlement 2027-03-31 at clean 86.390000 yields exactly 6.749022, which
+this construction reproduces and the ACT/ACT, European and
+days-to-next-coupon candidates do not. The evidence covers a regular coupon
+grid whose every 30/360 period is exactly ``360 / coupons_per_year`` days, so
+that is all this leg accepts: a 30/360 period of any other length, and an
+irregular first coupon on 30/360 (the ICMA frame counts actual days), fail
+closed rather than extrapolate.
 """
 
 from __future__ import annotations
@@ -110,6 +146,11 @@ from datetime import date
 
 from shiori_pricing_lab.data.treasury_futures_ctd import TreasuryFuturesCTD
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import get_convention_profile
+from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
+    _day_counter,
+    _to_ql_date,
+    is_quantlib_available,
+)
 from shiori_pricing_lab.pricing.treasury_futures_contract import (
     MARKET_EUREX_GERMAN,
     TreasuryFuturesQuote,
@@ -733,6 +774,95 @@ def require_two_remaining_coupons(
     )
 
 
+def _convention_days(start: date, end: date, day_count: DayCount) -> int:
+    """Days from ``start`` to ``end`` on ``day_count``'s own counting rule."""
+
+    if day_count is DayCount.ACT_ACT_BOND:
+        return (end - start).days
+    if day_count is DayCount.THIRTY_360:
+        # The adapter's own mapping, reused rather than restated, so this leg
+        # and Issue #217's corporate accrued interest count the same days.
+        if not is_quantlib_available():
+            raise TreasuryFuturesYieldError(
+                "30/360 day counting uses QuantLib's Thirty360(BondBasis), and QuantLib "
+                "is not installed"
+            )
+        return _day_counter(day_count).dayCount(_to_ql_date(start), _to_ql_date(end))
+    raise TreasuryFuturesYieldError(
+        f"day count {day_count!r} is not implemented by the bond yield engine "
+        f"(implemented: {DayCount.ACT_ACT_BOND.value}, {DayCount.THIRTY_360.value})"
+    )
+
+
+def _regular_period_days(
+    settlement_date: date,
+    maturity_date: date,
+    coupons_per_year: int,
+    day_count: DayCount,
+) -> tuple[int, int]:
+    """``(e, P)``: convention days elapsed in, and the length of, the regular
+    coupon period bracketing ``settlement_date``.
+
+    On 30/360 every period from this one to maturity must be exactly
+    ``360 / coupons_per_year`` days: each later period is discounted as one
+    whole exponent, which is what the reconciliation covers and nothing more.
+    """
+
+    previous_coupon, next_coupon = coupon_period_bounds(
+        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    )
+    if day_count is DayCount.THIRTY_360:
+        grid = [
+            previous_coupon,
+            *remaining_coupon_dates(
+                settlement_date, maturity_date, coupons_per_year=coupons_per_year
+            ),
+        ]
+        for start, end in zip(grid, grid[1:], strict=False):
+            days = _convention_days(start, end, day_count)
+            if days != 360 // coupons_per_year:
+                raise TreasuryFuturesYieldError(
+                    f"the 30/360 coupon period {start.isoformat()} -> {end.isoformat()} is "
+                    f"{days} days, not {360 // coupons_per_year}; the reconciled 30/360 "
+                    "convention covers full-length periods only, so it is refused rather "
+                    "than extrapolated"
+                )
+    period_days = _convention_days(previous_coupon, next_coupon, day_count)
+    return _convention_days(previous_coupon, settlement_date, day_count), period_days
+
+
+def _require_first_coupon_frame_day_count(day_count: DayCount) -> None:
+    """The ICMA first-coupon frame counts actual days; refuse any other count."""
+
+    if day_count is not DayCount.ACT_ACT_BOND:
+        raise TreasuryFuturesYieldError(
+            f"an irregular first coupon period is implemented on "
+            f"{DayCount.ACT_ACT_BOND.value} (ACT/ACT ICMA) only, not {day_count!r}"
+        )
+
+
+def require_supported_day_count(
+    settlement_date: date,
+    maturity_date: date,
+    *,
+    coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
+    schedule: IrregularFirstCoupon | None = None,
+    day_count: DayCount = DayCount.ACT_ACT_BOND,
+) -> None:
+    """Raise unless ``day_count`` can price this settlement's coupon period.
+
+    Date-only, like :func:`require_two_remaining_coupons`, so a caller can
+    ask before acquiring market data. It is the same check the pricing legs
+    below make, not a second one.
+    """
+
+    frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
+    if frame is not None:
+        _require_first_coupon_frame_day_count(day_count)
+        return
+    _regular_period_days(settlement_date, maturity_date, coupons_per_year, day_count)
+
+
 def accrued_interest_per_100(
     settlement_date: date,
     maturity_date: date,
@@ -740,27 +870,27 @@ def accrued_interest_per_100(
     *,
     coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
     schedule: IrregularFirstCoupon | None = None,
+    day_count: DayCount = DayCount.ACT_ACT_BOND,
 ) -> float:
-    """Actual/actual accrued interest per 100 par for ``coupons_per_year``.
+    """Accrued interest per 100 par for ``coupons_per_year`` on ``day_count``.
 
-    UST semiannual ISMA/Bond and German government annual ACT/ACT share this
-    shape: one coupon amount prorated by actual elapsed days over the actual
-    period length. The period the proration uses is the same one the
-    discounting below uses. Inside an irregular first coupon period the
-    elapsed days run from the real accrual start over the nominal period
-    (ACT/ACT ICMA), which is exactly the plain formula when the first
-    coupon is regular.
+    UST semiannual ISMA/Bond, German government annual ACT/ACT and the
+    reconciled 30/360 BondBasis leg share this shape: one coupon amount
+    prorated by elapsed convention days over the period's convention length.
+    The period the proration uses is the same one the discounting below uses.
+    Inside an irregular first coupon period the elapsed days run from the
+    real accrual start over the nominal period (ACT/ACT ICMA), which is
+    exactly the plain formula when the first coupon is regular.
     """
 
     frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
     coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
     if frame is not None:
+        _require_first_coupon_frame_day_count(day_count)
         return coupon_amount * frame.elapsed_fraction(settlement_date)
-    previous_coupon, next_coupon = coupon_period_bounds(
-        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    elapsed_days, period_days = _regular_period_days(
+        settlement_date, maturity_date, coupons_per_year, day_count
     )
-    period_days = (next_coupon - previous_coupon).days
-    elapsed_days = (settlement_date - previous_coupon).days
     return coupon_amount * elapsed_days / period_days
 
 
@@ -777,25 +907,28 @@ def clean_price_from_yield(
     *,
     coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
     schedule: IrregularFirstCoupon | None = None,
+    day_count: DayCount = DayCount.ACT_ACT_BOND,
 ) -> float:
     """Clean price per 100 from a compounded YTM in percent.
 
     ``coupons_per_year`` selects semiannual (UST) or annual (Eurex German)
-    compounding with the matching coupon amount and period grid. The UST
-    two-argument behavior is unchanged. With ``schedule`` and settlement
-    inside the first coupon period, the first cashflow is the genuine long
-    first coupon discounted on the nominal grid (ACT/ACT ICMA).
+    compounding with the matching coupon amount and period grid, and
+    ``day_count`` the day counting of the accrual and the first discount
+    exponent. The UST two-argument behavior is unchanged. With ``schedule``
+    and settlement inside the first coupon period, the first cashflow is the
+    genuine long first coupon discounted on the nominal grid (ACT/ACT ICMA).
     """
 
     frame = _first_coupon_frame(settlement_date, maturity_date, coupons_per_year, schedule)
     if frame is not None:
+        _require_first_coupon_frame_day_count(day_count)
         return _clean_price_first_coupon_frame(
             yield_percent, settlement_date, maturity_date, coupon_percent,
             coupons_per_year, frame,
         )
 
-    previous_coupon, next_coupon = coupon_period_bounds(
-        settlement_date, maturity_date, coupons_per_year=coupons_per_year
+    elapsed_days, period_days = _regular_period_days(
+        settlement_date, maturity_date, coupons_per_year, day_count
     )
     coupon_dates = remaining_coupon_dates(
         settlement_date, maturity_date, coupons_per_year=coupons_per_year
@@ -811,8 +944,10 @@ def clean_price_from_yield(
             f"{_compounding_adverb(coupons_per_year)}"
         )
 
-    period_days = (next_coupon - previous_coupon).days
-    first_exponent = (next_coupon - settlement_date).days / period_days
+    # The complement of the accrued fraction (see the module docstring): on
+    # ACT/ACT `P - e` is the actual days to the next coupon, integer for
+    # integer, so the UST and German answers are unchanged.
+    first_exponent = (period_days - elapsed_days) / period_days
     coupon_amount = TREASURY_PAR * (coupon_percent / 100.0) / coupons_per_year
 
     dirty_price = 0.0
@@ -823,7 +958,8 @@ def clean_price_from_yield(
         dirty_price += cashflow / (1.0 + period_yield) ** (first_exponent + index)
 
     return dirty_price - accrued_interest_per_100(
-        settlement_date, maturity_date, coupon_percent, coupons_per_year=coupons_per_year
+        settlement_date, maturity_date, coupon_percent,
+        coupons_per_year=coupons_per_year, day_count=day_count,
     )
 
 
@@ -883,6 +1019,7 @@ def yield_from_clean_price(
     *,
     coupons_per_year: int = TREASURY_COUPONS_PER_YEAR,
     schedule: IrregularFirstCoupon | None = None,
+    day_count: DayCount = DayCount.ACT_ACT_BOND,
 ) -> float:
     """Compounded YTM in percent from a clean price per 100.
 
@@ -890,8 +1027,8 @@ def yield_from_clean_price(
     bracket: it cannot diverge, needs no derivative, and converges to full
     double precision in a fixed, deterministic number of steps.
     ``coupons_per_year`` must match the one the price was computed with, and
-    ``schedule`` must match too -- bisection inverts whichever pricing leg
-    ``clean_price_from_yield`` uses.
+    ``schedule`` and ``day_count`` must match too -- bisection inverts
+    whichever pricing leg ``clean_price_from_yield`` uses.
     """
 
     if clean_price <= 0:
@@ -906,6 +1043,7 @@ def yield_from_clean_price(
                 coupon_percent,
                 coupons_per_year=coupons_per_year,
                 schedule=schedule,
+                day_count=day_count,
             )
             - clean_price
         )

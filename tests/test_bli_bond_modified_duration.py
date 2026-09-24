@@ -14,10 +14,12 @@ the two durations are a few percent apart and both look entirely ordinary.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import date, datetime
 
 import pytest
 
+import shiori_pricing_lab.pricing.bli_bond_convention_profile as profiles
 import shiori_pricing_lab.pricing.bli_bond_modified_duration as module
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import get_convention_profile
 from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
@@ -37,7 +39,9 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     IrregularFirstCoupon,
     accrued_interest_per_100,
     clean_price_from_yield,
+    yield_from_clean_price,
 )
+from shiori_pricing_lab.products.enums import DayCount
 
 # One supported-profile UST, seasoned and well clear of both its first and
 # its final coupon period. Settlement sits deep inside a coupon period on
@@ -464,22 +468,164 @@ def test_spot_settlement_rolls_on_the_profiles_own_calendar():
 # --- Supported universe, fail-closed -----------------------------------------
 
 
-def test_us_corporate_fails_closed_because_its_day_count_is_not_supported():
-    # The scope trap from the Phase-1 audit: US_CORPORATE is 30/360 and the
-    # reusable primitive is hard-wired ACT/ACT ISMA with no day-count
-    # argument, so accepting it would price a corporate on the wrong
-    # convention and report a duration of entirely ordinary magnitude.
+def test_the_supported_profiles_are_ust_german_govt_and_us_corporate():
+    assert SUPPORTED_DURATION_CONVENTION_PROFILES == ("UST", "GERMAN_GOVT", "US_CORPORATE")
+
+
+@pytest.mark.parametrize(
+    ("profile", "wrong_day_count"),
+    [("US_CORPORATE", "ACT_ACT_BOND"), ("UST", "THIRTY_360")],
+)
+def test_a_profile_edited_onto_another_day_count_is_refused(
+    monkeypatch, profile, wrong_day_count
+):
+    # The gate is per profile: the name alone is not enough. A registered
+    # profile whose day count changed would otherwise price on a convention
+    # nobody reconciled, with an entirely ordinary-looking duration.
+    edited = dataclasses.replace(
+        get_convention_profile(profile), day_count=DayCount(wrong_day_count)
+    )
+    monkeypatch.setitem(profiles.CONVENTION_PROFILES, profile, edited)
+
     with pytest.raises(BLIBondDurationError) as excinfo:
-        _duration(convention_profile="US_CORPORATE")
+        _duration(convention_profile=profile)
 
     message = str(excinfo.value)
-    assert "US_CORPORATE" in message
-    assert "US_CORPORATE" not in SUPPORTED_DURATION_CONVENTION_PROFILES
-    assert "ACT/ACT" in message or "ACT_ACT" in message
+    assert profile in message
+    assert wrong_day_count in message
 
 
-def test_only_ust_and_german_govt_are_supported():
-    assert SUPPORTED_DURATION_CONVENTION_PROFILES == ("UST", "GERMAN_GOVT")
+# --- US_CORPORATE, 30/360 BondBasis (Issue #218) ------------------------------
+#
+# US61760QRP18, MS 5.15 02/10/40. t0 = Monday 2027-03-29, so US_CORPORATE's
+# T+2 on its SIFMA calendar settles Wednesday 2027-03-31 -- the date of Eddy's
+# Bloomberg workstation reconciliation (clean 86.390000 -> 6.749022, which the
+# primitive's own tests pin). The duration is taken at exactly that point.
+_CORPORATE_SECURITY = "US61760QRP18"
+_CORPORATE_MATURITY = date(2040, 2, 10)
+_CORPORATE_COUPON = 5.15
+_CORPORATE_CLEAN = 86.39
+_CORPORATE_T0 = "2027-03-29T16:00:00-04:00"
+_CORPORATE_SETTLEMENT = date(2027, 3, 31)
+_CORPORATE_SCHEDULE = IrregularFirstCoupon(date(2025, 2, 10), date(2025, 8, 10))
+
+
+def _corporate_duration(**overrides):
+    kwargs = {
+        "security": _CORPORATE_SECURITY,
+        "convention_profile": "US_CORPORATE",
+        "clean_price_per_100": _CORPORATE_CLEAN,
+        "maturity_date": _CORPORATE_MATURITY,
+        "coupon_percent": _CORPORATE_COUPON,
+        "pricing_timestamp": _CORPORATE_T0,
+        "schedule": _CORPORATE_SCHEDULE,
+    }
+    kwargs.update(overrides)
+    return _duration(**kwargs)
+
+
+def test_a_us_corporate_duration_runs_on_its_reconciled_convention():
+    pytest.importorskip("QuantLib")
+    result = _corporate_duration()
+
+    assert result.convention_profile == "US_CORPORATE"
+    assert result.day_count == "THIRTY_360"
+    assert result.coupons_per_year == 2
+    assert result.settlement_date == _CORPORATE_SETTLEMENT
+    # The reconciled price -> yield point, reached through the duration's own
+    # base-yield solve rather than restated.
+    assert round(result.base_yield_percent, 6) == 6.749022
+    # 51 days of 30/360 BondBasis accrual (10 Feb -> 31 Mar) over 180.
+    assert result.accrued_interest_per_100 == pytest.approx(
+        _CORPORATE_COUPON / 2 * 51 / 180, abs=1e-12
+    )
+    # A regular first period (issue +6M) is recorded but prices on the grid.
+    assert result.schedule_accrual_start == date(2025, 2, 10)
+
+
+@pytest.mark.parametrize("basis", list(BondOptionPriceBasis))
+def test_a_us_corporate_duration_keeps_the_declared_basis_quotient(basis):
+    pytest.importorskip("QuantLib")
+    clean = _corporate_duration(price_basis=BondOptionPriceBasis.CLEAN)
+    result = _corporate_duration(price_basis=basis)
+
+    # One derivative, the selected denominator -- the #211 contract unchanged.
+    assert result.price_derivative_per_unit_yield == clean.price_derivative_per_unit_yield
+    assert result.yield_bump_basis_points == YIELD_BUMP_BASIS_POINTS == 1.0
+    assert result.dirty_price_per_100 == (
+        result.clean_price_per_100 + result.accrued_interest_per_100
+    )
+    assert result.modified_duration == (
+        -result.price_derivative_per_unit_yield / result.basis_price_per_100
+    )
+    assert result.duration_type == duration_type_for_basis(basis)
+
+
+def test_a_us_corporate_duration_matches_quantlibs_analytic_thirty_360_duration():
+    # An independent implementation on the same convention: QuantLib's
+    # FixedRateBond on Thirty360(BondBasis), semiannual compounding, whose
+    # clean price at 6.749022 is the workstation's 86.390000. Its analytic
+    # modified duration divides by the dirty price.
+    ql = pytest.importorskip("QuantLib")
+    result = _corporate_duration(price_basis=BondOptionPriceBasis.DIRTY)
+
+    settle = ql.Date(31, 3, 2027)
+    ql.Settings.instance().evaluationDate = settle
+    schedule = ql.Schedule(
+        ql.Date(10, 2, 2025),
+        ql.Date(10, 2, 2040),
+        ql.Period(ql.Semiannual),
+        ql.NullCalendar(),
+        ql.Unadjusted,
+        ql.Unadjusted,
+        ql.DateGeneration.Backward,
+        False,
+    )
+    day_count = ql.Thirty360(ql.Thirty360.BondBasis)
+    bond = ql.FixedRateBond(0, 100.0, schedule, [_CORPORATE_COUPON / 100.0], day_count)
+    rate = ql.InterestRate(
+        result.base_yield_percent / 100.0, day_count, ql.Compounded, ql.Semiannual
+    )
+
+    assert ql.BondFunctions.cleanPrice(bond, rate, settle) == pytest.approx(
+        _CORPORATE_CLEAN, abs=1e-8
+    )
+    assert result.modified_duration == pytest.approx(
+        ql.BondFunctions.duration(bond, rate, ql.Duration.Modified, settle), abs=1e-5
+    )
+
+
+def test_a_us_corporate_duration_is_not_the_act_act_number():
+    # The same bond and price on the ACT/ACT leg gives a different, equally
+    # ordinary-looking duration -- which is why the day count is gated.
+    pytest.importorskip("QuantLib")
+    result = _corporate_duration()
+    act_act_yield = yield_from_clean_price(
+        _CORPORATE_CLEAN, _CORPORATE_SETTLEMENT, _CORPORATE_MATURITY, _CORPORATE_COUPON
+    )
+
+    assert result.base_yield_percent != act_act_yield
+    assert result.accrued_interest_per_100 != accrued_interest_per_100(
+        _CORPORATE_SETTLEMENT, _CORPORATE_MATURITY, _CORPORATE_COUPON
+    )
+
+
+def test_a_us_corporate_month_end_grid_is_refused_before_any_price():
+    # 31 Aug / 28 Feb coupons: a 178-day 30/360 period, outside the reconciled
+    # evidence. Refused by the date-only prologue -- the same function the
+    # Workbench's readiness route runs -- so no Yield series is fetched first.
+    pytest.importorskip("QuantLib")
+    with pytest.raises(BLIBondDurationError, match="178 days"):
+        module.validate_bond_modified_duration_inputs(
+            security=_CORPORATE_SECURITY,
+            convention_profile="US_CORPORATE",
+            price_basis=BondOptionPriceBasis.DIRTY,
+            clean_price_per_100=_CORPORATE_CLEAN,
+            maturity_date=date(2035, 8, 31),
+            coupon_percent=5.0,
+            pricing_timestamp="2027-01-13T16:00:00-05:00",
+            calculated_at=_CALCULATED_AT,
+        )
 
 
 def test_the_german_annual_coupon_grid_is_used_for_the_german_profile():
@@ -659,11 +805,16 @@ def test_the_settlement_date_is_derived_from_t0_and_cannot_be_supplied():
 
 @pytest.mark.parametrize(
     ("profile", "expected"),
-    [("UST", date(2026, 9, 11)), ("GERMAN_GOVT", date(2026, 9, 14))],
+    [
+        ("UST", date(2026, 9, 11)),
+        ("GERMAN_GOVT", date(2026, 9, 14)),
+        ("US_CORPORATE", date(2026, 9, 14)),
+    ],
 )
 def test_each_profile_rolls_settlement_by_its_own_convention(profile, expected):
-    # UST is T+1, German T+2 -- taken from the profile, and the German roll
-    # crosses the weekend from the same Thursday.
+    # UST is T+1, German and US corporate T+2 -- taken from the profile (for
+    # US_CORPORATE the cash bond's spot lag, never the option-side 1), and
+    # the T+2 rolls cross the weekend from the same Thursday.
     result = _duration(
         convention_profile=profile, pricing_timestamp="2026-09-10T16:00:00+00:00"
     )

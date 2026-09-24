@@ -9,7 +9,9 @@ duration Annex A v1.4 §A.8.6 consumes::
 It is the *only* duration in this repository. It builds no cashflow engine of
 its own: every price and yield comes from the already-reviewed price<->yield
 primitive in :mod:`shiori_pricing_lab.pricing.treasury_futures_implied_yield`
-(Issue #190's RED contract, ACT/ACT ISMA/Bond), and the settlement roll comes
+(Issue #190's RED contract, ACT/ACT ISMA/Bond, plus its Issue #218 30/360
+BondBasis leg), told the profile's day count explicitly, and the settlement
+roll comes
 from the already-reviewed
 :func:`~shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver.advance_settlement_business_days`
 on the convention profile's own calendar.
@@ -62,19 +64,23 @@ the basis price actually used, and both bumped prices, so a reviewer can redo
 either division without rerunning anything.
 
 **Supported universe, fail-closed.** Only convention profiles whose stated
-conventions the reusable price<->yield primitive *exactly* implements:
+conventions the reusable price<->yield primitive *exactly* implements, each
+approved on one day count:
 
 - ``UST`` -- SEMI_ANNUAL, ``ACT_ACT_BOND``, T+1. Exact match.
 - ``GERMAN_GOVT`` -- ANNUAL, ``ACT_ACT_BOND``, T+2. Exact match via the
   Issue #204 ``coupons_per_year=1`` leg.
+- ``US_CORPORATE`` -- SEMI_ANNUAL, ``THIRTY_360``, T+2 (Issue #218). The
+  primitive's 30/360 BondBasis leg, whose price<->yield behaviour Eddy
+  reconciled against Bloomberg on ``US61760QRP18`` -- boundary-date accrued
+  days and an exact price->yield match. That reconciliation, not the
+  ``CALC_TYP_DES`` description string, is what pins the convention; see the
+  primitive's module docstring.
 
-``US_CORPORATE`` is refused, and the refusal is not cosmetic: that profile is
-``THIRTY_360``, the reusable primitive has no day-count parameter at all and
-is hard-wired to ACT/ACT ISMA, so accepting it would silently price a
-corporate on the wrong day count and report a duration nobody could tell was
-wrong from its magnitude. The gate checks the profile's *day count* as well
-as its name, so a future edit to a registered profile cannot slip a
-non-ACT/ACT bond through an allowlist that still spells the same name.
+The gate checks the profile's *day count* against the one approved for that
+name, so a future edit to a registered profile cannot slip a bond onto a day
+count nobody reconciled through an allowlist that still spells the same
+name.
 
 **What this module deliberately is not.**
 
@@ -125,6 +131,7 @@ from shiori_pricing_lab.pricing.treasury_futures_implied_yield import (
     accrued_interest_per_100,
     clean_price_from_yield,
     first_coupon_schedule_shape,
+    require_supported_day_count,
     require_two_remaining_coupons,
     yield_from_clean_price,
 )
@@ -160,13 +167,16 @@ def duration_type_for_basis(price_basis: object) -> str:
 YIELD_BUMP_BASIS_POINTS = 1.0
 _BASIS_POINTS_PER_PERCENT = 100.0
 
-# Only profiles the reusable ACT/ACT ISMA price<->yield primitive exactly
-# implements. See the module docstring on why US_CORPORATE is absent.
-SUPPORTED_DURATION_CONVENTION_PROFILES: tuple[str, ...] = ("UST", "GERMAN_GOVT")
-
-# The one day count that primitive implements. Checked alongside the name so
-# a profile edit cannot widen the gate silently.
-_SUPPORTED_DURATION_DAY_COUNT = DayCount.ACT_ACT_BOND
+# Each supported profile and the one day count it is approved on. Checked
+# together so a profile edit cannot widen the gate silently.
+_APPROVED_DURATION_DAY_COUNT_BY_PROFILE: dict[str, DayCount] = {
+    "UST": DayCount.ACT_ACT_BOND,
+    "GERMAN_GOVT": DayCount.ACT_ACT_BOND,
+    "US_CORPORATE": DayCount.THIRTY_360,
+}
+SUPPORTED_DURATION_CONVENTION_PROFILES: tuple[str, ...] = tuple(
+    _APPROVED_DURATION_DAY_COUNT_BY_PROFILE
+)
 
 _COUPONS_PER_YEAR_BY_FREQUENCY: dict[Frequency, int] = {
     Frequency.SEMI_ANNUAL: TREASURY_COUPONS_PER_YEAR,
@@ -354,25 +364,24 @@ def _require_supported_profile(profile: BLIConventionProfile) -> int:
 
     Three independent checks, because each one catches a different way a
     wrong bond reaches a duration: the profile must be on the allowlist, its
-    day count must be the one the reusable primitive actually implements, and
-    it must state exactly one coupon frequency that maps to a coupon count.
+    day count must be the one approved for it, and it must state exactly one
+    coupon frequency that maps to a coupon count.
     """
 
-    if profile.name not in SUPPORTED_DURATION_CONVENTION_PROFILES:
+    approved_day_count = _APPROVED_DURATION_DAY_COUNT_BY_PROFILE.get(profile.name)
+    if approved_day_count is None:
         raise BLIBondDurationError(
             f"convention profile {profile.name!r} has no approved duration convention in "
-            f"this slice (supported: {SUPPORTED_DURATION_CONVENTION_PROFILES!r}). The "
-            "reusable price<->yield primitive implements ACT/ACT ISMA only and takes no "
-            "day-count argument, so a profile on another day count would be priced on the "
-            "wrong convention and report a duration whose magnitude looks ordinary"
+            f"this slice (supported: {SUPPORTED_DURATION_CONVENTION_PROFILES!r}), so a "
+            "duration on it would be priced on an unreconciled convention and report a "
+            "magnitude that looks ordinary"
         )
-    if profile.day_count is not _SUPPORTED_DURATION_DAY_COUNT:
+    if profile.day_count is not approved_day_count:
         raise BLIBondDurationError(
             f"convention profile {profile.name!r} states day count "
-            f"{profile.day_count.value}, but the reusable price<->yield primitive "
-            f"implements {_SUPPORTED_DURATION_DAY_COUNT.value} only -- this profile cannot "
-            "produce a duration without a second cashflow engine, which this slice does "
-            "not build"
+            f"{profile.day_count.value}, but its duration is approved on "
+            f"{approved_day_count.value} only -- a different day count is a different, "
+            "unreconciled price<->yield convention"
         )
 
     frequencies = tuple(dict.fromkeys(profile.coupon_frequencies))
@@ -562,9 +571,16 @@ def validate_bond_modified_duration_inputs(
     # readiness route spent a Bloomberg request to find out otherwise (Codex
     # review, PR #215). The primitive's own guard, called rather than
     # restated.
+    # The day count's own date-only refusals (a 30/360 period outside the
+    # reconciled length, an irregular first coupon off ACT/ACT) belong here
+    # for the same reason.
     try:
         require_two_remaining_coupons(
             settlement, maturity, coupons_per_year=coupons_per_year, schedule=schedule
+        )
+        require_supported_day_count(
+            settlement, maturity, coupons_per_year=coupons_per_year, schedule=schedule,
+            day_count=profile.day_count,
         )
     except TreasuryFuturesYieldError as exc:
         raise BLIBondDurationError(
@@ -693,10 +709,12 @@ def calculate_bond_modified_duration(
         accrued = accrued_interest_per_100(
             settlement, maturity, coupon,
             coupons_per_year=coupons_per_year, schedule=schedule,
+            day_count=profile.day_count,
         )
         base_yield = yield_from_clean_price(
             clean, settlement, maturity, coupon,
             coupons_per_year=coupons_per_year, schedule=schedule,
+            day_count=profile.day_count,
         )
         bump_percent = YIELD_BUMP_BASIS_POINTS / _BASIS_POINTS_PER_PERCENT
         yield_up = base_yield + bump_percent
@@ -704,10 +722,12 @@ def calculate_bond_modified_duration(
         price_up = clean_price_from_yield(
             yield_up, settlement, maturity, coupon,
             coupons_per_year=coupons_per_year, schedule=schedule,
+            day_count=profile.day_count,
         )
         price_down = clean_price_from_yield(
             yield_down, settlement, maturity, coupon,
             coupons_per_year=coupons_per_year, schedule=schedule,
+            day_count=profile.day_count,
         )
     except TreasuryFuturesYieldError as exc:
         raise BLIBondDurationError(
