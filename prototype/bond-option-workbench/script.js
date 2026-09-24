@@ -168,6 +168,9 @@
 
     // S490 repo-carry Forward parity (Issue #173/#174 prototype)
     s490SpotSettlementDate: document.getElementById("s490-spot-settlement-date-input"),
+    s490ParityTitle: document.getElementById("s490-parity-title"),
+    s490SpotSettlementRow: document.getElementById("s490-spot-settlement-row"),
+    s490ParityMechanicsNote: document.getElementById("s490-parity-mechanics-note"),
     s490ParityStatus: document.getElementById("s490-parity-status"),
     s490ParityRetryBtn: document.getElementById("s490-parity-retry-btn"),
     s490ParityFields: document.getElementById("s490-parity-fields"),
@@ -4089,7 +4092,27 @@
     syncEffectiveForwardFromDerivation();
   }
 
+  // The panel's two titles. The derived one is the page's own static text,
+  // kept verbatim so a market the S490 model applies to reads exactly as
+  // before Issue #217.
+  const S490_PANEL_TITLE_DERIVED =
+    "Shiori Derived Forward — S490 repo-carry (Black-76 default)";
+  const S490_PANEL_TITLE_NOT_AVAILABLE =
+    "Shiori Derived Forward — not available for this market";
+
   function renderS490ParityPanel() {
+    // Issue #217, found in workstation UAT: on a market the S490 model is not
+    // approved for, this panel is not a default Forward workflow. Its title
+    // says so, and the derivation's own mechanics -- the Spot Settlement Date
+    // it starts from and the note describing it as the Forward Black-76
+    // prices from by default -- are not shown. The status line below keeps
+    // the short explanation of why.
+    const notAvailable = explicitForwardContractOnly();
+    els.s490ParityTitle.textContent = notAvailable
+      ? S490_PANEL_TITLE_NOT_AVAILABLE
+      : S490_PANEL_TITLE_DERIVED;
+    els.s490SpotSettlementRow.hidden = notAvailable;
+    els.s490ParityMechanicsNote.hidden = notAvailable;
     // Issue #217: on a market the S490 model is not approved for, the panel
     // only ever explains that -- a failed derivation (and its Retry) belongs
     // to a market that has one.
@@ -5157,7 +5180,10 @@
     conventionProfileTransportError = null;
     selectedConventionProfile = null;
     renderConventionProfilePicker();
+    // Both panels' modes follow the selected market (Issue #217), so they are
+    // rendered once it is cleared -- never with the previous bond's market.
     renderForwardSource();
+    renderS490ParityPanel();
 
     renderResolvedBondPanel();
     clearBondMaster();

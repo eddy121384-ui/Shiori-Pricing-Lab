@@ -329,7 +329,8 @@ html, body {
    so they need the same explicit override. */
 #s490-parity-fields[hidden],
 #s490-parity-method-row[hidden],
-#s490-parity-trace[hidden] {
+#s490-parity-trace[hidden],
+#s490-spot-settlement-row[hidden] {
   display: none;
 }
 .s490-parity .derived-source { margin-top: 4px; margin-bottom: 4px; }

@@ -1580,6 +1580,87 @@ def test_the_s490_retry_action_is_never_rendered_for_a_corporate_ticket(
     page.unroute("**/api/case/s490-repo-carry")
 
 
+_S490_PANEL = ".card.s490-parity"
+_S490_TITLE_DERIVED = "SHIORI DERIVED FORWARD — S490 REPO-CARRY (BLACK-76 DEFAULT)"
+_S490_TITLE_NOT_AVAILABLE = "SHIORI DERIVED FORWARD — NOT AVAILABLE FOR THIS MARKET"
+
+
+def _s490_title(page) -> str:
+    # The title is uppercased by CSS; compare what is rendered, case-folded.
+    return page.inner_text("#s490-parity-title").strip().upper()
+
+
+def test_a_corporate_s490_panel_is_not_rendered_as_a_default_forward_workflow(
+    server_url, page
+) -> None:
+    """Issue #217, found in workstation UAT: under ``US_CORPORATE`` the S490
+    panel still read as the default Forward workflow -- "(Black-76 default)"
+    in its title and "This is the Forward Black-76 prices from by default"
+    in its note. On an S490-ineligible market the panel is titled as not
+    available, shows none of the derivation mechanics and no action, and
+    keeps only the short explanation. UST is pinned before and after, and a
+    newly loaded bond does not inherit the corporate state. Asserted on
+    rendered text and visibility."""
+
+    _load_corporate_admissible_bond(page, server_url)
+
+    def assert_derived_panel() -> None:
+        assert _s490_title(page) == _S490_TITLE_DERIVED
+        assert page.is_visible("#s490-spot-settlement-row") is True
+        assert page.is_visible("#s490-parity-mechanics-note") is True
+        assert "This is the Forward Black-76 prices from by default" in page.inner_text(
+            "#s490-parity-mechanics-note"
+        )
+
+    # UST: exactly as before.
+    assert_derived_panel()
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_NOT_AVAILABLE)
+
+    rendered = page.inner_text(_S490_PANEL).lower()
+    for forbidden in (
+        "black-76 default",
+        "this is the forward black-76 prices from by default",
+        "retry",
+        "use shiori derived",
+    ):
+        assert forbidden not in rendered, forbidden
+    assert page.is_visible("#s490-spot-settlement-row") is False
+    assert page.is_visible("#s490-parity-mechanics-note") is False
+    assert page.is_visible("#s490-parity-retry-btn") is False
+    assert page.is_visible("#s490-parity-fields") is False
+    assert page.is_visible("#s490-parity-trace") is False
+    # The short explanation stays.
+    status = page.inner_text("#s490-parity-status")
+    assert "The S490 repo-carry Forward is a U.S. Treasury model" in status
+    assert "neither of which is approved for this market" in status
+
+    # Back to UST: the derived panel returns unchanged.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_DERIVED)
+    assert_derived_panel()
+
+    # And after a corporate ticket, a newly loaded bond with no profile yet
+    # does not inherit the corporate panel.
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_NOT_AVAILABLE)
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMB44",
+        response=_treasury_lookup_response(
+            isin="US91282CMB44", acquired_at="2026-08-12T20:05:00+08:00"
+        ),
+        profile=None,
+    )
+    assert _draft_convention_profile(page) is None
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_DERIVED)
+    assert page.is_visible("#s490-spot-settlement-row") is True
+    assert page.is_visible("#s490-parity-mechanics-note") is True
+
+
 def _load_corporate_admissible_bond(page, server_url: str) -> None:
     """The UST-shaped fixture bond, carrying the structural evidence
     `US_CORPORATE` requires -- otherwise selecting that profile refuses the

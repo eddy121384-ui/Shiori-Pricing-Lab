@@ -314,15 +314,15 @@
         <!-- ---- Shiori Derived Forward: S490 repo-carry, the Black-76 default (Issue #173/#175/#177) ---- -->
         <div class="card s490-parity">
           <div class="card-head">
-            <div class="card-title">Shiori Derived Forward &mdash; S490 repo-carry (Black-76 default)</div>
+            <div class="card-title" id="s490-parity-title">Shiori Derived Forward &mdash; S490 repo-carry (Black-76 default)</div>
           </div>
           <div class="card-body" id="s490-parity-body">
-          <div class="form-row"><label>Spot Settlement Date</label>
+          <div class="form-row" id="s490-spot-settlement-row"><label>Spot Settlement Date</label>
             <div>
               <input class="control" id="s490-spot-settlement-date-input" type="date">
             </div>
           </div>
-          <div class="fixed-route-note">
+          <div class="fixed-route-note" id="s490-parity-mechanics-note">
             Forward settlement (tF) is this ticket's own <strong>Forward Settlement Date</strong>
             &mdash; the date the bond forward settles, and the date Black-76 pairs this clean
             price with its accrued interest. Change <strong>Expiry</strong> above and the
