@@ -29,8 +29,9 @@
 //     side), and the NOT_REQUIRED credit-spread policy -- never asked for.
 //   - The eight non-market Advanced technical fields (day count, bond type,
 //     ex-dividend days, last coupon date, status, reporting date, and the two
-//     settlement dates) are, since Issue #157, pre-filled for a supported UST
-//     fixed-coupon bullet by the server-side resolver, each stamped with the
+//     settlement dates) are, since Issue #157, pre-filled for a bond the
+//     selected convention profile covers, by the server-side resolver, each
+//     stamped with the
 //     tier it came from -- BLOOMBERG_AUTO, SHIORI_DERIVED, UST_PROFILE_DEFAULT
 //     or TRADER_OVERRIDE. Since Issue #161 they resolve *per field*: one
 //     field the resolver cannot fill comes back BLOCKED for the trader and
@@ -115,6 +116,8 @@
     // that hands it back to the derivation.
     forwardSourceLine: document.getElementById("forward-source-line"),
     forwardUseDerivedBtn: document.getElementById("forward-use-derived-btn"),
+    forwardDerivedModeNote: document.getElementById("forward-derived-mode-note"),
+    forwardExplicitModeNote: document.getElementById("forward-explicit-mode-note"),
     volatility: document.getElementById("volatility-input"),
     // Issue #214: the vol source and the bond option price basis.
     volSource: document.getElementById("vol-source-select"),
@@ -165,6 +168,9 @@
 
     // S490 repo-carry Forward parity (Issue #173/#174 prototype)
     s490SpotSettlementDate: document.getElementById("s490-spot-settlement-date-input"),
+    s490ParityTitle: document.getElementById("s490-parity-title"),
+    s490SpotSettlementRow: document.getElementById("s490-spot-settlement-row"),
+    s490ParityMechanicsNote: document.getElementById("s490-parity-mechanics-note"),
     s490ParityStatus: document.getElementById("s490-parity-status"),
     s490ParityRetryBtn: document.getElementById("s490-parity-retry-btn"),
     s490ParityFields: document.getElementById("s490-parity-fields"),
@@ -195,6 +201,17 @@
     reportingDate: document.getElementById("reporting-date-input"),
     forwardSettlementDate: document.getElementById("forward-settlement-date-input"),
     optionSettlementDate: document.getElementById("option-settlement-date-input"),
+    // Issue #217 follow-up: the Trade-section copies, authoritative for a
+    // market with no approved expiry -> settlement derivation.
+    tradeTimingBlock: document.getElementById("trade-timing-block"),
+    deliveryDelay: document.getElementById("delivery-delay-input"),
+    provDeliveryDelay: document.getElementById("prov-delivery-delay"),
+    tradeForwardSettlementDate: document.getElementById("trade-forward-settlement-date-input"),
+    tradeOptionSettlementDate: document.getElementById("trade-option-settlement-date-input"),
+    provTradeForwardSettlementDate: document.getElementById(
+      "prov-trade-forward-settlement-date"
+    ),
+    provTradeOptionSettlementDate: document.getElementById("prov-trade-option-settlement-date"),
     advancedProfileStatus: document.getElementById("advanced-profile-status"),
     provDayCount: document.getElementById("prov-day-count"),
     provBondType: document.getElementById("prov-bond-type"),
@@ -321,11 +338,14 @@
   const EVIDENCE_TIMING =
     "Issue #149: no Bloomberg reference field describes an OTC option's own cash " +
     "settlement date. SETTLE_DT and DAYS_TO_SETTLE describe the cash bond's " +
-    "standard settlement -- a different role that must not be conflated. Issue " +
-    "#157 approves, for supported USTs only, Reporting Date = Valuation Date and " +
-    "settlement one U.S. government-bond business day after expiry on the " +
-    "existing QuantLib U.S. government-bond calendar. Shiori still writes no " +
-    "holiday table of its own and rolls nothing outside that profile.";
+    "standard settlement -- a different role that must not be conflated. Owner " +
+    "policy (Issue #157 for UST, Issue #217 for US_CORPORATE): Reporting Date = " +
+    "Valuation Date, Forward Settlement = Expiry + 1 U.S. bond-market business day " +
+    "on the profile's own reviewed calendar, and Option Settlement = Forward " +
+    "Settlement. This is an approved policy, not a Bloomberg field, and it is not " +
+    "the cash bond's own settlement lag (T+2 for US_CORPORATE). It does not read the " +
+    "ticket's Delivery Delay. Shiori writes no holiday table of its own, and a " +
+    "market with no approved policy shows both dates as trade inputs instead.";
   // "At least one", not "the fields above": the loader permits independent
   // partial misses, so an unknown CPN_FREQ leaves coupon_frequency null while
   // coupon, the dates and the flags all came back populated. Calling those
@@ -427,6 +447,78 @@
   // against the server's own values by the route tests.
   const SHIORI_DERIVED_FORWARD_SOURCE = "SHIORI_DERIVED_S490";
   const TRADER_FORWARD_OVERRIDE_SOURCE = "TRADER_FORWARD_OVERRIDE";
+  const FORWARD_PLACEHOLDER_DERIVED = "Filled automatically from the Shiori Derived Forward";
+
+  // Issue #217: which convention profiles may use the Shiori Derived S490
+  // Forward. Read from the server's own answer
+  // (`s490_derived_forward_convention_profiles` on the candidates payload),
+  // never kept as a list here -- naming a profile in this file would be the
+  // second copy of the registry the static-content guard already forbids,
+  // and a copy of a *rule* goes stale in exactly the same way.
+  //
+  // Fail-closed while the answer is outstanding or absent: an empty list
+  // matches nothing, so a ticket with no server answer yet is treated as
+  // having no automatic Forward model rather than inheriting UST's.
+  // Issue #217 follow-up: which profiles have an approved rule for deriving
+  // an option's two settlement dates from its expiry. Read from the server's
+  // own answer for the same reason the S490 list is -- the browser reads
+  // rules, it does not keep copies of them -- and fail-closed while that
+  // answer is outstanding, so a ticket with no answer yet treats both dates
+  // as its own to supply rather than waiting for a derivation that is not
+  // coming.
+  //
+  // This is not a market settlement lag and must never be used as one.
+  function autoDerivedOptionTimingSupported() {
+    const approved =
+      (conventionProfileCandidates &&
+        conventionProfileCandidates.approved_expiry_to_settlement_profiles) ||
+      [];
+    return (
+      typeof selectedConventionProfile === "string" &&
+      approved.indexOf(selectedConventionProfile) !== -1
+    );
+  }
+
+  function s490DerivedForwardProfiles() {
+    return (
+      (conventionProfileCandidates &&
+        conventionProfileCandidates.s490_derived_forward_convention_profiles) ||
+      []
+    );
+  }
+
+  function s490DerivedForwardSupported() {
+    return (
+      typeof selectedConventionProfile === "string" &&
+      s490DerivedForwardProfiles().indexOf(selectedConventionProfile) !== -1
+    );
+  }
+
+  // A market is selected and it has no approved automatic Forward model: the
+  // Forward panel then describes only the explicit-Forward contract. Before
+  // any market is selected the panel keeps its default description, exactly
+  // as it read before Issue #217.
+  function explicitForwardContractOnly() {
+    return typeof selectedConventionProfile === "string" && !s490DerivedForwardSupported();
+  }
+
+  // What the trader is told when this ticket's market has no automatic
+  // Forward model. Deliberately never says "pending", "coming", or anything
+  // else implying a corporate repo model exists and is merely switched off.
+  // The market is named from the trader's own selection rather than matched
+  // against a name this file knows.
+  function noAutomaticForwardModelText() {
+    if (!selectedConventionProfile) {
+      return (
+        "Explicit Forward required — select this bond's convention profile; no " +
+        "automatic Forward model is applied until one is selected."
+      );
+    }
+    return (
+      `Explicit Forward required — ${selectedConventionProfile} automatic Forward ` +
+      "model not yet supported."
+    );
+  }
 
   // True from the moment the trader edits the Forward field until Reset / Use
   // Shiori Derived, a Clear, or a new bond load. Only the trader's own typing
@@ -519,19 +611,47 @@
       control: () => els.reportingDate,
       provenanceEl: () => els.provReportingDate,
     },
+    // Issue #217 follow-up: exactly one authoritative control per field at
+    // any moment. A market with an approved derivation keeps the Advanced
+    // control it has always had; a market without one owns the Trade-section
+    // control instead, and the other is hidden -- never two live inputs
+    // writing the same path.
     {
       path: "forward_settlement_date",
-      control: () => els.forwardSettlementDate,
-      provenanceEl: () => els.provForwardSettlementDate,
+      control: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.forwardSettlementDate
+          : els.tradeForwardSettlementDate,
+      provenanceEl: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.provForwardSettlementDate
+          : els.provTradeForwardSettlementDate,
+      // Both candidate controls, for one-time listener registration. Which
+      // one is authoritative changes with the selected market; which ones
+      // exist does not, and a listener registered against a snapshot of the
+      // former would miss whichever control was not authoritative at page
+      // load -- exactly the edit the trader makes after selecting a profile.
+      allControls: () => [els.forwardSettlementDate, els.tradeForwardSettlementDate],
     },
     {
       path: "option_settlement_date",
-      control: () => els.optionSettlementDate,
-      provenanceEl: () => els.provOptionSettlementDate,
+      control: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.optionSettlementDate
+          : els.tradeOptionSettlementDate,
+      provenanceEl: () =>
+        autoDerivedOptionTimingSupported()
+          ? els.provOptionSettlementDate
+          : els.provTradeOptionSettlementDate,
+      allControls: () => [els.optionSettlementDate, els.tradeOptionSettlementDate],
     },
   ];
 
   const PROFILE_FIELD_BY_PATH = new Map(PROFILE_FIELDS.map((field) => [field.path, field]));
+
+  // The two paths whose owning control changes with the selected market
+  // (Issue #217 follow-up).
+  const EXPIRY_DEPENDENT_PROFILE_PATHS = ["forward_settlement_date", "option_settlement_date"];
 
   // The two fields the resolver recomputes on every expiry change (mirrors
   // the server's own EXPIRY_DEPENDENT_FIELD_PATHS). Used to withdraw a stale
@@ -915,7 +1035,9 @@
       // section's own Spot Settlement Date -- pointing them at the read-only
       // Forward field instead would be pointing at the symptom.
       locator: () =>
-        traderForwardOverrideActive || inputNormalization.forward.error !== null
+        traderForwardOverrideActive ||
+        !s490DerivedForwardSupported() ||
+        inputNormalization.forward.error !== null
           ? "#forward-price-input"
           : "#s490-spot-settlement-date-input",
       unresolved: () =>
@@ -930,8 +1052,24 @@
                 "formats as the strike and normalizes to decimal per 100; Shiori will " +
                 "not guess at a quote it cannot read.",
             }
-          : shioriDerivedForwardError !== null
+          : !s490DerivedForwardSupported()
             ? {
+                // Issue #217: not "not available yet" and not a failed
+                // derivation -- this market has no automatic Forward model
+                // at all, so the only thing outstanding is the trader's own
+                // number.
+                title: "This market's Forward is yours to supply",
+                missing: "The forward clean price, per 100, at forward settlement.",
+                why: noAutomaticForwardModelText(),
+                evidence: EVIDENCE_FORWARD,
+                next:
+                  "Enter the Forward Clean Price in this field. Shiori substitutes " +
+                  "nothing for it — not the spot clean price, not a previous Forward, " +
+                  "and not the S490 repo-carry Forward, which is a U.S. Treasury model " +
+                  "this market is not admitted to.",
+              }
+            : shioriDerivedForwardError !== null
+              ? {
                 title: "Shiori's derived Forward could not be resolved",
                 missing: "The forward clean price, per 100, at forward settlement.",
                 why: shioriDerivedForwardError,
@@ -1172,8 +1310,16 @@
         present(draft.reporting_date) &&
         present(draft.forward_settlement_date) &&
         present(draft.option_settlement_date),
-      locator: "#reporting-date-input",
-      revealAdvanced: true,
+      // Issue #217 follow-up: on a market with no approved derivation the two
+      // settlement dates live in the Trade section, so sending the trader to
+      // Advanced would point at rows that are not there. The reporting date
+      // is always in Advanced, so it stays the destination only while it is
+      // the outstanding one.
+      locator: () =>
+        autoDerivedOptionTimingSupported() || !present(currentDraft && currentDraft.reporting_date)
+          ? "#reporting-date-input"
+          : "#trade-forward-settlement-date-input",
+      revealAdvanced: () => autoDerivedOptionTimingSupported(),
       unresolved: () => {
         const blocked = blockedReasonsForPaths(TIMING_PROFILE_PATHS);
         return {
@@ -1186,15 +1332,18 @@
               ? "Shiori filled every one of these it could and stopped at the rest, " +
                 "which are yours to set: " +
                 blocked.join(" · ")
-              : "No Bloomberg field carries an OTC option's own cash settlement date, " +
-                "and the only approved calendar rule is the narrow UST fixed-coupon " +
-                "bullet profile's one-business-day roll on the U.S. government-bond " +
-                "calendar.",
+              : "No Bloomberg field carries an OTC option's own cash settlement date. " +
+                "Shiori fills the two option settlement dates only for a market with an " +
+                "approved owner policy (Expiry + 1 U.S. bond-market business day), " +
+                "and only once the expiry is entered.",
           evidence: EVIDENCE_TIMING,
-          next:
-            "Enter the expiry, or open Advanced → Timing & settlement and set the " +
-            "outstanding dates yourself. Each is recorded as a trader override with " +
-            "provenance.",
+          next: autoDerivedOptionTimingSupported()
+            ? "Enter the expiry, or open Advanced → Timing & settlement and set the " +
+              "outstanding dates yourself. Each is recorded as a trader override with " +
+              "provenance."
+            : "Set the reporting date in Advanced → Timing & settlement, and both " +
+              "settlement dates in the Trade section from the traded terms. Each is " +
+              "recorded as a trader entry with provenance.",
         };
       },
     },
@@ -2045,12 +2194,21 @@
       conventionProfileTransportError = String((error && error.message) || error);
       renderConventionProfilePicker();
       renderAdvancedProfileStatus();
+      // The answer this ownership reads is now gone, so it must settle again
+      // rather than keep whatever the previous payload implied (Issue #217
+      // follow-up). Without this the Advanced rows stayed visible while the
+      // hidden Trade controls were authoritative, and the trader's first
+      // entry went into a control nothing reads.
+      renderTradeTimingOwnership();
       return;
     }
     if (generation !== conventionProfileGeneration) return;
 
     conventionProfileTransportError = null;
     conventionProfileCandidates = payload;
+    // The approval this render reads arrives with this payload (Issue #217
+    // follow-up), so the controls settle the moment the answer does.
+    renderTradeTimingOwnership();
     renderConventionProfilePicker();
     renderAdvancedProfileStatus();
     syncDraftGating();
@@ -2123,7 +2281,15 @@
       // away); an untouched one is disabled rather than left looking like a
       // real route.
       const noRepairRoute = !isOverride && gaps.has(field.path);
-      field.control().disabled = disabled || noRepairRoute;
+      // Every candidate control, not only the authoritative one (Issue #217
+      // follow-up). A hidden-but-enabled duplicate is a fake exit waiting to
+      // be shown: Issue #161's rule is that an unsupported product offers no
+      // input route anywhere, and "anywhere" has to include the control this
+      // market does not currently own.
+      const controls = field.allControls ? field.allControls() : [field.control()];
+      controls.forEach((control) => {
+        control.disabled = disabled || noRepairRoute;
+      });
       const blockedReason = tier === null ? blocked.get(field.path) : undefined;
       target.classList.toggle("is-auto", tier !== null && !isOverride);
       target.classList.toggle("is-override", isOverride);
@@ -2331,18 +2497,39 @@
     {
       path: "forward_clean_price_input.forward_clean_price_per_100",
       label: "Forward Clean Price (per 100)",
-      reason:
-        "Entered by the trader as a Trader Forward Override, taking over from Shiori's " +
-        "own S490 repo-carry derived Forward.",
+      // Issue #217: on a market with no automatic Forward model there is no
+      // derivation to take over from, and saying there was would put a claim
+      // about a refused derivation into the run's own audit log. The Forward
+      // is still the trader's own supplied value there -- more plainly so
+      // than in an override -- so it is still recorded, under the reason that
+      // is actually true of it.
+      reason: () =>
+        s490DerivedForwardSupported()
+          ? "Entered by the trader as a Trader Forward Override, taking over from " +
+            "Shiori's own S490 repo-carry derived Forward."
+          : "Supplied by the trader as this ticket's explicit Forward Clean Price: " +
+            "Shiori has no automatic Forward model for the selected convention " +
+            "profile and derives nothing for it.",
       // Issue #177: the Forward is no longer a trader entry by construction --
       // by default it is Shiori's own derived value, which is verified,
       // traceable data and must not be logged as something the trader had to
       // supply (exactly the reasoning the live curve rows below already
       // follow). Only a genuine Trader Forward Override is recorded here.
       read: (draft) =>
-        traderForwardOverrideActive
+        traderForwardOverrideActive || !s490DerivedForwardSupported()
           ? draft.forward_clean_price_input.forward_clean_price_per_100
           : null,
+    },
+    {
+      // Issue #217: no market-data route supplies it, so it is the trader's own
+      // value, and it is stamped as one -- with the reason that is true of it.
+      path: "bond_option.settlement_lag_days",
+      label: "Delivery Delay (OVME)",
+      reason:
+        "Entered by the trader from OVME as this ticket's Delivery Delay. Recorded " +
+        "for the audit trail and the run export only: it derives neither settlement " +
+        "date and enters no pricing arithmetic.",
+      read: (draft) => draft.bond_option.settlement_lag_days,
     },
     {
       path: "volatility_input.volatility",
@@ -2463,6 +2650,9 @@
     OVERRIDE_FIELDS.forEach((field) => {
       const value = field.read(currentDraft);
       if (!present(value)) return;
+      // `reason` may be a string or, where it depends on the selected market,
+      // a function of the current state (Issue #217).
+      const reason = typeof field.reason === "function" ? field.reason() : field.reason;
       const basis = PROFILE_FIELD_BY_PATH.has(field.path)
         ? fieldProvenance.get(field.path) || TRADER_OVERRIDE_BASIS
         : TRADER_OVERRIDE_BASIS;
@@ -2477,8 +2667,8 @@
         basis: basis,
         reason_not_sourced:
           basis === TRADER_OVERRIDE_BASIS
-            ? field.reason
-            : `${field.reason} ${provenanceDescription(basis)}`.trim(),
+            ? reason
+            : `${reason} ${provenanceDescription(basis)}`.trim(),
         run_acquired_at: anchor,
       });
     });
@@ -2521,11 +2711,17 @@
     // misdescribe a Forward Shiori derived and priced -- the derivation's own
     // provenance is the S490 section's trace and the run's `effective_forward`
     // section, not this log.
-    els.forwardProvenance.textContent = traderForwardOverrideActive
-      ? stamp("forward_clean_price_input.forward_clean_price_per_100")
-      : "Provenance: SHIORI_DERIVED_S490 — derived by Shiori from the live Bloomberg " +
-        "spot quote and a live Curve #490 / S490 acquisition; see the derivation trace " +
-        "in the Shiori Derived Forward section above.";
+    // Issue #217: on a market with no approved automatic Forward model the
+    // number in this field is always the trader's own, whether or not they
+    // reached it by overriding a derivation -- there is none to override.
+    // Claiming a Curve #490 / S490 acquisition here would describe a
+    // derivation that was refused and never ran.
+    els.forwardProvenance.textContent =
+      traderForwardOverrideActive || !s490DerivedForwardSupported()
+        ? stamp("forward_clean_price_input.forward_clean_price_per_100")
+        : "Provenance: SHIORI_DERIVED_S490 — derived by Shiori from the live Bloomberg " +
+          "spot quote and a live Curve #490 / S490 acquisition; see the derivation trace " +
+          "in the Shiori Derived Forward section above.";
     // Issue #214, found in workstation UAT: an adopted Historical sigma_P is
     // Shiori's own derivation, so this line states that source and points at
     // the section carrying its trace -- exactly as the derived Forward above
@@ -2549,6 +2745,9 @@
     els.reportingDate,
     els.forwardSettlementDate,
     els.optionSettlementDate,
+    els.tradeForwardSettlementDate,
+    els.tradeOptionSettlementDate,
+    els.deliveryDelay,
     els.exDividendDays,
     els.lastCouponDate,
   ];
@@ -2777,8 +2976,15 @@
     // DOM: their source is the recorded Bloomberg event, and editing any
     // unrelated trader control must never overwrite that provenance.
     currentDraft.reporting_date = textOrNull(els.reportingDate.value);
-    currentDraft.forward_settlement_date = textOrNull(els.forwardSettlementDate.value);
-    currentDraft.option_settlement_date = textOrNull(els.optionSettlementDate.value);
+    // Read through the same getter that decides which control is
+    // authoritative for these two paths (Issue #217 follow-up), so the draft
+    // can never be filled from the hidden duplicate. One rule, one reader.
+    currentDraft.forward_settlement_date = textOrNull(
+      PROFILE_FIELD_BY_PATH.get("forward_settlement_date").control().value
+    );
+    currentDraft.option_settlement_date = textOrNull(
+      PROFILE_FIELD_BY_PATH.get("option_settlement_date").control().value
+    );
 
     currentDraft.volatility_input.volatility = numberOrNull(els.volatility.value);
     currentDraft.volatility_input.volatility_basis = selectValueOrNull(els.volatilityBasis);
@@ -2801,13 +3007,33 @@
     // field rather than a second override model. The server re-resolves the
     // effective Forward from this same field on every priced run, so this is
     // the one place the browser states the mode.
-    currentDraft.forward_clean_price_input.source_system = traderForwardOverrideActive
-      ? TRADER_FORWARD_OVERRIDE_SOURCE
-      : SHIORI_DERIVED_FORWARD_SOURCE;
+    // Issue #217: a market with no approved automatic Forward model always
+    // declares the explicit source, whether or not the trader has typed yet.
+    // Declaring SHIORI_DERIVED_S490 there would be refused server-side, and
+    // the refusal is not the message this ticket needs -- the trader needs to
+    // be told, before pricing, that the Forward is theirs to supply.
+    currentDraft.forward_clean_price_input.source_system =
+      traderForwardOverrideActive || !s490DerivedForwardSupported()
+        ? TRADER_FORWARD_OVERRIDE_SOURCE
+        : SHIORI_DERIVED_FORWARD_SOURCE;
     // The two derivation inputs the case carries for the server (Issue #177).
     // Spot Settlement Date is a real pricing input now that the derived
     // Forward is the Black-76 default, so it is read into the draft here with
     // every other trader-entered value -- not left as panel-local state.
+    // Issue #217 follow-up: OVME's Delivery Delay, recorded on the ticket for
+    // the audit trail and the run export. Nothing derives from it -- not
+    // either settlement date, not any pricing input -- and leaving it blank
+    // blocks nothing, so it is carried as null rather than defaulted.
+    // The existing integer parser, plus this term's own non-negativity: a
+    // Delivery Delay is a number of days forward, and the typed contract
+    // refuses a negative one. Reading it as null keeps a mistyped "-3" from
+    // travelling to the server and failing the whole case on a field that is
+    // meant to be optional and inert.
+    const recordedDeliveryDelay = integerOrNull(els.deliveryDelay.value);
+    currentDraft.bond_option.settlement_lag_days =
+      recordedDeliveryDelay !== null && recordedDeliveryDelay >= 0
+        ? recordedDeliveryDelay
+        : null;
     currentDraft.spot_settlement_date = textOrNull(els.s490SpotSettlementDate.value);
     currentDraft.convention_profile = selectedConventionProfile;
 
@@ -2820,6 +3046,7 @@
     renderOverrideProvenance();
     renderFieldProvenance();
     renderAdvancedProfileStatus();
+    renderTradeTimingOwnership();
     invalidateBuilderValidation();
     syncDraftGating();
     // Cheap unless the expiry (or the loaded bond) actually changed: the
@@ -2865,6 +3092,9 @@
         strike_price: null,
         strike_yield: null,
         exercise_start_date: null,
+        // Issue #217 follow-up: OVME's Delivery Delay. Optional, recorded,
+        // and inert -- see the Trade section's own note.
+        settlement_lag_days: null,
       },
       bond_reference_data_universe: [
         {
@@ -3248,14 +3478,22 @@
     // spot quote and the live S490 repo/carry curve (Issues #173/#175), which
     // is a derivation with a full trace rather than a reconstruction from
     // FTP, MMkt or a par rate.
-    forward:
-      "Derived, not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a " +
-      "cash bond on this DAPI route (BAD_FLD for both the UST and the Gilt test " +
-      "securities, with the confirmed OP046 / OP188 overrides applied), so the " +
-      "Forward defaults to Shiori's own S490 repo-carry derivation from the live " +
-      "spot quote — traced in full in the Shiori Derived Forward section above — " +
-      "and a value you type here overrides it. Shiori still never reconstructs a " +
-      "forward from FTP, MMkt or a par rate.",
+    // Issue #217, found in workstation UAT: evaluated per render like `vol`
+    // below, because a market with no approved automatic Forward model has no
+    // S490 default for this note to describe.
+    forward: () =>
+      explicitForwardContractOnly()
+        ? "Not sourced, not derived. Bloomberg OPT_UNDL_FORWARD_PX is not applicable " +
+          "to a cash bond on this DAPI route, and this market has no approved automatic " +
+          "Forward model, so the Forward is the explicit value you enter here. Shiori " +
+          "never reconstructs a forward from FTP, MMkt or a par rate."
+        : "Derived, not sourced. Bloomberg OPT_UNDL_FORWARD_PX is not applicable to a " +
+          "cash bond on this DAPI route (BAD_FLD for both the UST and the Gilt test " +
+          "securities, with the confirmed OP046 / OP188 overrides applied), so the " +
+          "Forward defaults to Shiori's own S490 repo-carry derivation from the live " +
+          "spot quote — traced in full in the Shiori Derived Forward section above — " +
+          "and a value you type here overrides it. Shiori still never reconstructs a " +
+          "forward from FTP, MMkt or a par rate.",
     // Issue #214: two sources now, and the honest note differs between them.
     // Evaluated per render (see renderMarketReview) rather than fixed, so the
     // row never describes the source the ticket is not using.
@@ -3391,7 +3629,15 @@
   function revealUnresolvedFocus() {
     const group = unresolvedFocusGroup;
     if (!group) return;
-    if (group.revealAdvanced) setAdvancedCollapsed(false);
+    // `revealAdvanced` may be a function of current state for the same reason
+    // `locator` may (Issue #217 follow-up: whether a group's controls are in
+    // Advanced at all depends on the selected market). A bare function is
+    // always truthy, so it has to be resolved rather than tested.
+    const revealAdvanced =
+      typeof group.revealAdvanced === "function"
+        ? group.revealAdvanced()
+        : group.revealAdvanced;
+    if (revealAdvanced) setAdvancedCollapsed(false);
     // A locator may be a function of current state (Issue #177: which control
     // a trader can actually act on for the Forward depends on whether the
     // derivation or an override owns it), exactly as `unresolved` already may.
@@ -3742,6 +3988,11 @@
 
   function s490ReadinessGate() {
     if (currentDraft === null) return "no-draft";
+    // Issue #217, checked before every other readiness reason: an unapproved
+    // market is not "waiting on Expiry" or "waiting on a Spot Settlement
+    // Date". No amount of further input makes this panel apply to it, and no
+    // request is sent for it.
+    if (!s490DerivedForwardSupported()) return "profile-unsupported";
     if (!INSTRUMENT_WORKFLOW_GROUP.resolved(currentDraft)) {
       return sourcedQuoteInvalidated || sourcedQuoteSideMismatch()
         ? "quote-invalidated"
@@ -3779,6 +4030,7 @@
   const S490_PARITY_KEY_NO_EXPIRY = "__S490_NO_EXPIRY__";
   const S490_PARITY_KEY_NO_SPOT_DATE = "__S490_NO_SPOT_DATE__";
   const S490_PARITY_KEY_QUOTE_INVALIDATED = "__S490_QUOTE_INVALIDATED__";
+  const S490_PARITY_KEY_PROFILE_UNSUPPORTED = "__S490_PROFILE_UNSUPPORTED__";
 
   // Codex P2 review of PR #174, round 7: POST /api/case/s490-repo-carry
   // reads exactly bond_option.underlying_isin/currency/expiry_date,
@@ -3822,6 +4074,7 @@
   function s490ParityKey() {
     const gate = s490ReadinessGate();
     if (gate === "no-draft") return S490_PARITY_KEY_NOT_READY;
+    if (gate === "profile-unsupported") return S490_PARITY_KEY_PROFILE_UNSUPPORTED;
     if (gate === "quote-invalidated") return S490_PARITY_KEY_QUOTE_INVALIDATED;
     if (gate === "no-expiry") return S490_PARITY_KEY_NO_EXPIRY;
     const spotSettlementDate = (els.s490SpotSettlementDate.value || "").trim();
@@ -3839,8 +4092,31 @@
     syncEffectiveForwardFromDerivation();
   }
 
+  // The panel's two titles. The derived one is the page's own static text,
+  // kept verbatim so a market the S490 model applies to reads exactly as
+  // before Issue #217.
+  const S490_PANEL_TITLE_DERIVED =
+    "Shiori Derived Forward — S490 repo-carry (Black-76 default)";
+  const S490_PANEL_TITLE_NOT_AVAILABLE =
+    "Shiori Derived Forward — not available for this market";
+
   function renderS490ParityPanel() {
-    if (s490ParityError !== null) {
+    // Issue #217, found in workstation UAT: on a market the S490 model is not
+    // approved for, this panel is not a default Forward workflow. Its title
+    // says so, and the derivation's own mechanics -- the Spot Settlement Date
+    // it starts from and the note describing it as the Forward Black-76
+    // prices from by default -- are not shown. The status line below keeps
+    // the short explanation of why.
+    const notAvailable = explicitForwardContractOnly();
+    els.s490ParityTitle.textContent = notAvailable
+      ? S490_PANEL_TITLE_NOT_AVAILABLE
+      : S490_PANEL_TITLE_DERIVED;
+    els.s490SpotSettlementRow.hidden = notAvailable;
+    els.s490ParityMechanicsNote.hidden = notAvailable;
+    // Issue #217: on a market the S490 model is not approved for, the panel
+    // only ever explains that -- a failed derivation (and its Retry) belongs
+    // to a market that has one.
+    if (s490ParityError !== null && s490ReadinessGate() !== "profile-unsupported") {
       els.s490ParityStatus.textContent = s490ParityError;
       els.s490ParityStatus.classList.add("is-invalid");
       // Codex P2 review of PR #174, round 7: a failed request (a transient
@@ -3868,15 +4144,21 @@
         ? "Resolving S490 funding and Forward…"
         : gate === "no-draft"
           ? "Bloomberg Load a supported bond to see the S490 repo-carry Forward."
-          : gate === "quote-invalidated"
-            ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
-              "before the S490 repo-carry Forward can be resolved."
-            : gate === "no-expiry"
-              ? "Enter Expiry to see the S490 repo-carry Forward for this bond — it sets " +
-                "this ticket's Forward Settlement Date, which is the date the Forward is " +
-                "carried to."
-              : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
-                "ticket's Forward Settlement Date.";
+          : gate === "profile-unsupported"
+            ? noAutomaticForwardModelText() +
+              " The S490 repo-carry Forward is a U.S. Treasury model: its funding leg " +
+              "reads Curve #490 as a repo proxy and its interim-coupon leg applies the " +
+              "Federal Reserve payment-date convention, neither of which is approved " +
+              "for this market. Enter the Forward Clean Price yourself."
+            : gate === "quote-invalidated"
+              ? "The sourced Bloomberg quote is no longer live -- click Refresh Bloomberg " +
+                "before the S490 repo-carry Forward can be resolved."
+              : gate === "no-expiry"
+                ? "Enter Expiry to see the S490 repo-carry Forward for this bond — it sets " +
+                  "this ticket's Forward Settlement Date, which is the date the Forward is " +
+                  "carried to."
+                : "Enter a Spot Settlement Date to see the S490 repo-carry Forward for this " +
+                  "ticket's Forward Settlement Date.";
       els.s490ParityStatus.classList.remove("is-invalid");
       els.s490ParityFields.hidden = true;
       els.s490ParityMethodRow.hidden = true;
@@ -4006,7 +4288,12 @@
       key === S490_PARITY_KEY_NOT_READY ||
       key === S490_PARITY_KEY_NO_EXPIRY ||
       key === S490_PARITY_KEY_NO_SPOT_DATE ||
-      key === S490_PARITY_KEY_QUOTE_INVALIDATED
+      key === S490_PARITY_KEY_QUOTE_INVALIDATED ||
+      // Issue #217: not a "not yet" state like the four above -- this market
+      // never derives, so the request is not merely deferred, it is never
+      // sent. Listed here so that is true of the request path too, not only
+      // of what the panel says.
+      key === S490_PARITY_KEY_PROFILE_UNSUPPORTED
     ) {
       s490ParityGeneration++; // invalidate any outstanding answer
       s490ParityResult = null;
@@ -4111,6 +4398,12 @@
     // A run outside the two Issue #177 Forward modes carries no such section
     // and had no derivation to adopt; the panel keeps whatever it had.
     if (!effective) return;
+    // Issue #217: on a market with no approved automatic Forward model the
+    // run's `shiori_derived_forward_error` says no derivation was attempted,
+    // which is not a derivation failure and must not be adopted as one --
+    // doing so painted a successful corporate Price as a red S490 panel with
+    // a Retry button, and latched the panel's key so it never re-rendered.
+    if (!s490DerivedForwardSupported()) return;
     s490ParityGeneration++;
     s490ParityPending = false;
     s490ParityResult = effective.shiori_derived_forward || null;
@@ -4196,6 +4489,16 @@
     // derivation) still blanks the field, because in those the inputs
     // genuinely do not define a Forward.
     if (s490ReadinessGate() === "quote-invalidated") {
+      renderForwardSource();
+      return;
+    }
+
+    // Issue #217: on a market with no approved automatic Forward model there
+    // is no derivation to sync from, and the Forward field is the trader's
+    // own input. This function must not write to it, blank it, or stamp a
+    // derived source on the draft for such a ticket -- it owns the *derived*
+    // workflow only.
+    if (!s490DerivedForwardSupported()) {
       renderForwardSource();
       return;
     }
@@ -4708,13 +5011,86 @@
     }
   }
 
+  // Issue #217 follow-up: the Trade-section timing controls appear exactly
+  // when this market has no approved derivation, and the Advanced duplicates
+  // disappear at the same moment. Never both: two visible inputs bound to one
+  // path is how a trader's entry silently loses to a stale one.
+  function renderTradeTimingOwnership() {
+    const autoDerived = autoDerivedOptionTimingSupported();
+    // No market selected yet is not "a market without an approved rule":
+    // until one is, nobody can say who owns these dates, and anything typed
+    // here would be cleared by the selection anyway.
+    const showTradeControls =
+      currentDraft !== null && typeof selectedConventionProfile === "string" && !autoDerived;
+    els.tradeTimingBlock.hidden = !showTradeControls;
+    // Delivery Delay is a ticket term, not a market convention (Issue #217),
+    // so it is on every ticket whatever the approval status of its market --
+    // including the approved ones, where it would otherwise have vanished with
+    // the block above just as the dates began filling themselves.
+    const deliveryDelayRow = document.getElementById("delivery-delay-row");
+    if (deliveryDelayRow) deliveryDelayRow.hidden = currentDraft === null;
+    renderDeliveryDelayProvenance();
+    const advancedForwardRow = document.getElementById("adv-forward-settlement-row");
+    const advancedOptionRow = document.getElementById("adv-option-settlement-row");
+    if (advancedForwardRow) advancedForwardRow.hidden = showTradeControls;
+    if (advancedOptionRow) advancedOptionRow.hidden = showTradeControls;
+  }
+
+  // Registered since the Delivery Delay first appeared, and never written
+  // until now -- so the line read "—" whatever the trader entered. It states
+  // the one thing a reader must not assume about this term.
+  function renderDeliveryDelayProvenance() {
+    const recorded =
+      currentDraft && currentDraft.bond_option
+        ? currentDraft.bond_option.settlement_lag_days
+        : null;
+    const typed = els.deliveryDelay.value.trim();
+    // A malformed entry never becomes null-in-silence: the term stays
+    // unrecorded (it is optional and inert), and the trader is told why.
+    const malformed = (recorded === null || recorded === undefined) && typed !== "";
+    els.deliveryDelay.setAttribute("aria-invalid", malformed ? "true" : "false");
+    els.provDeliveryDelay.classList.toggle("is-invalid", malformed);
+    els.provDeliveryDelay.textContent = malformed
+      ? `Not recorded — "${typed}" is not a whole, non-negative number of days. ` +
+        "Correct it to record the term; nothing is derived from it either way."
+      : recorded === null || recorded === undefined
+        ? "Not recorded — optional. Nothing is derived from it either way."
+        : `MANUAL_TRADER_ENTRY — ${recorded} recorded from OVME for the audit trail and ` +
+          "the run export. It derives neither settlement date and enters no pricing " +
+          "arithmetic.";
+  }
+
   function renderForwardSource() {
-    els.forwardUseDerivedBtn.hidden = !traderForwardOverrideActive;
+    els.forwardUseDerivedBtn.hidden = !traderForwardOverrideActive || explicitForwardContractOnly();
+    els.forwardDerivedModeNote.hidden = explicitForwardContractOnly();
+    els.forwardExplicitModeNote.hidden = !explicitForwardContractOnly();
     if (currentDraft === null) {
       els.forwardSourceLine.textContent = "—";
       els.forwardSourceLine.classList.remove("is-invalid");
       return;
     }
+    // Issue #217: a market with no approved automatic Forward model has no
+    // derived Forward to compare against and nothing to hand the field back
+    // to, so the "Use Shiori Derived Forward" action is hidden outright
+    // rather than offered and then refused. The trader is told what is
+    // required, never that something is pending.
+    if (!s490DerivedForwardSupported()) {
+      els.forwardUseDerivedBtn.hidden = true;
+      // The static placeholder describes the derived workflow, which this
+      // market does not have (Issue #217).
+      els.forwardPrice.placeholder = "Enter this ticket's Forward Clean Price";
+      const supplied = currentDraft.forward_clean_price_input.forward_clean_price_per_100;
+      const hasForward = typeof supplied === "number" && isFinite(supplied) && supplied > 0;
+      els.forwardSourceLine.textContent =
+        `Forward source: ${TRADER_FORWARD_OVERRIDE_SOURCE} — ` +
+        noAutomaticForwardModelText() +
+        (hasForward
+          ? " Black-76 prices from the value in this field."
+          : " Pricing is blocked until you enter one; nothing is substituted.");
+      els.forwardSourceLine.classList.toggle("is-invalid", !hasForward);
+      return;
+    }
+    els.forwardPrice.placeholder = FORWARD_PLACEHOLDER_DERIVED;
     const derivedText =
       shioriDerivedForward !== null
         ? shioriDerivedForward.toFixed(6)
@@ -4770,7 +5146,18 @@
     shioriDerivedForward = null;
     shioriDerivedForwardError = null;
     repriceOnceForwardIsPriceable = false;
-    renderForwardSource();
+    // Rendered below, once the convention profile is cleared too: the panel's
+    // mode and copy follow the selected market (Issue #217), and rendering it
+    // here would paint the previous bond's market onto the next ticket.
+
+    // Issue #217 follow-up: the Trade-section timing terms are this ticket's,
+    // not the page's. A Clear, a failed refresh or a different security must
+    // not leave the next ticket carrying the previous one's Delivery Delay or
+    // its hand-entered settlement dates.
+    els.deliveryDelay.value = "";
+    els.tradeForwardSettlementDate.value = "";
+    els.tradeOptionSettlementDate.value = "";
+    renderTradeTimingOwnership();
 
     // The whole profile lifecycle goes with the draft. Bumping the generation
     // and releasing the key permanently voids any answer still outstanding, so
@@ -4793,6 +5180,10 @@
     conventionProfileTransportError = null;
     selectedConventionProfile = null;
     renderConventionProfilePicker();
+    // Both panels' modes follow the selected market (Issue #217), so they are
+    // rendered once it is cleared -- never with the previous bond's market.
+    renderForwardSource();
+    renderS490ParityPanel();
 
     renderResolvedBondPanel();
     clearBondMaster();
@@ -5336,10 +5727,12 @@
   // listened for because these eight controls are a mix of selects, date
   // inputs and a text input.
   PROFILE_FIELDS.forEach((field) => {
-    const control = field.control();
     const mark = () => markTraderOverride(field.path);
-    control.addEventListener("input", mark);
-    control.addEventListener("change", mark);
+    const controls = field.allControls ? field.allControls() : [field.control()];
+    controls.forEach((control) => {
+      control.addEventListener("input", mark);
+      control.addEventListener("change", mark);
+    });
   });
   // Issue #177: registered before the generic handler below, so the override
   // flag is already set by the time applyManualInputsToDraft stamps the
@@ -5454,10 +5847,58 @@
     // selection change also invalidates any in-flight Price/Refresh -- their
     // responses describe a case priced under a methodology the trader has
     // moved away from.
+    // Issue #217: the Forward mode belongs to the market that was selected,
+    // not to the page. Switching UST -> US_CORPORATE (or back) must not carry
+    // the previous market's Forward mode, its derived Forward, its derivation
+    // error, or the number that derivation wrote into the field -- a
+    // UST-derived Forward left in the box would otherwise be submitted as the
+    // corporate run's own explicit Forward, which is exactly the silent
+    // cross-market reuse this issue exists to stop. The trader re-enters the
+    // Forward under the market they just selected.
+    traderForwardOverrideActive = false;
+    shioriDerivedForward = null;
+    shioriDerivedForwardError = null;
+    s490ParityGeneration++;
+    s490ParityResult = null;
+    s490ParityError = null;
+    s490ParityPending = false;
+    els.forwardPrice.value = "";
+    // Issue #217 follow-up: and so do the settlement dates. A date entered
+    // under a market whose approval status differs must not survive into the
+    // next one -- on an approved market it would be overwritten by the
+    // derivation anyway, and on a market without one it would be a stale
+    // hand-entry nobody re-checked. The Delivery Delay is deliberately kept:
+    // it is a term of this ticket, not of the market, and it derives nothing
+    // a market switch could make stale.
+    els.tradeForwardSettlementDate.value = "";
+    els.tradeOptionSettlementDate.value = "";
+    els.forwardSettlementDate.value = "";
+    els.optionSettlementDate.value = "";
+    // Issue #217: the Spot Settlement Date is an input of the S490 derivation
+    // only. On a market that has none it is not part of the active Forward
+    // contract, so it leaves the case here rather than riding along hidden
+    // into the corporate run and its export. Nothing keeps a copy: switching
+    // back to a market that derives asks for it again, exactly as a fresh
+    // ticket does.
+    if (explicitForwardContractOnly()) {
+      els.s490SpotSettlementDate.value = "";
+    }
+    // ...and the override marks go with the values. Clearing the inputs while
+    // the paths stayed TRADER_OVERRIDE left the incoming market's derivation
+    // with nothing to refill -- on UST both settlement dates ended up
+    // permanently blank and the ticket could not price at all.
+    EXPIRY_DEPENDENT_PROFILE_PATHS.forEach((path) => {
+      traderOverriddenPaths.delete(path);
+      fieldProvenance.delete(path);
+    });
+
     applyManualInputsToDraft();
     renderConventionProfilePicker();
     renderFieldProvenance();
     renderAdvancedProfileStatus();
+    renderTradeTimingOwnership();
+    renderForwardSource();
+    renderS490Parity();
     syncDraftGating();
     refreshAdvancedProfile();
   });

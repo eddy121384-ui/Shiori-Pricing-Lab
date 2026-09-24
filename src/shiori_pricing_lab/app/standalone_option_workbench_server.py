@@ -457,6 +457,7 @@ from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     resolve_bond_advanced_field_profile,
 )
 from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
+    APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
     SUPPORTED_CONVENTION_PROFILE_NAMES,
     UST_CONVENTION_PROFILE,
     convention_profile_candidates,
@@ -464,11 +465,15 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
 )
 from shiori_pricing_lab.pricing.bli_effective_forward import (
     EFFECTIVE_FORWARD_SOURCES,
+    S490_DERIVED_FORWARD_CONVENTION_PROFILES,
     SHIORI_DERIVED_S490_FORWARD_SOURCE,
     TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE,
+    S490ForwardConventionProfileError,
     forward_clean_price_input_dict,
     is_usable_clean_price_per_100,
+    require_s490_derived_forward_convention_profile,
     select_effective_forward,
+    supports_s490_derived_forward,
 )
 from shiori_pricing_lab.pricing.bli_repo_carry_forward import repo_carry_forward_clean_price
 from shiori_pricing_lab.pricing.bli_s490_funding_resolver import (
@@ -1730,10 +1735,36 @@ def validate_deterministic_forward_inputs(
     """
 
     validate_declared_trader_forward_override(case)
+    require_s490_derived_forward_convention_profile_for_case(case)
     require_usable_spot_settlement_date_for_derived_forward(case)
     if replacement_quote_side is None:
         require_usable_spot_clean_price_for_derived_forward(case)
     require_coherent_forward_quote_side(case, spot_quote_side=replacement_quote_side)
+
+
+def require_s490_derived_forward_convention_profile_for_case(case: object) -> None:
+    """Refuse a case declaring the derived Forward on an unapproved market.
+
+    A no-op for every case outside ``SHIORI_DERIVED_S490`` mode. In that
+    mode it is the same rule :func:`resolve_s490_repo_carry_parity` enforces
+    at its own first line, run here as well and for the same reason the
+    override validator is (Codex P2 review of PR #178, round 4): this
+    refusal is local, deterministic and free, while the routes that would
+    otherwise reach it first fetch a live Option Discount Curve and, on
+    ``POST /api/case/bloomberg``, a fresh quote. Checking only inside the
+    derivation meant readiness answered "ready" for a case pricing was
+    always going to refuse, and meant a Bloomberg outage was reported in
+    place of the real, entirely local reason.
+    """
+
+    if not isinstance(case, dict):
+        return
+    forward_input = case.get("forward_clean_price_input")
+    if not isinstance(forward_input, dict):
+        return
+    if forward_input.get("source_system") != SHIORI_DERIVED_S490_FORWARD_SOURCE:
+        return
+    require_s490_derived_forward_convention_profile(case.get("convention_profile"))
 
 
 def require_usable_spot_settlement_date_for_derived_forward(case: object) -> None:
@@ -2214,6 +2245,30 @@ def resolve_s490_repo_carry_parity(
     HTTP 400 exactly like every other route in this module.
     """
 
+    # Issue #217: the S490 repo-carry Forward is a U.S. Treasury model, and
+    # this is the one door both its callers come through -- the pricing path
+    # (`apply_effective_forward_to_case`) and POST /api/case/s490-repo-carry.
+    # Checked here, first, so a case whose market is not approved for it never
+    # reaches the live Curve #490 acquisition on the next line, let alone the
+    # funding resolver or the repo-carry primitive. A direct API payload
+    # cannot route around it, and a missing or malformed `convention_profile`
+    # is refused rather than inheriting UST's behaviour by default -- see
+    # `bli_effective_forward.supports_s490_derived_forward`.
+    require_s490_derived_forward_convention_profile(convention_profile)
+    # Codex P1 review of PR #220: the route receives the selection twice, as
+    # its own `convention_profile` and inside the case it derives for. Only
+    # the first was checked, so a case whose own market is US_CORPORATE could
+    # still name UST beside it and be handed a Treasury S490 Forward. The
+    # case's copy must be approved too, and must be the same selection.
+    case_convention_profile = case.get("convention_profile") if isinstance(case, dict) else None
+    require_s490_derived_forward_convention_profile(case_convention_profile)
+    if case_convention_profile != convention_profile:
+        raise S490ForwardConventionProfileError(
+            f"convention_profile {convention_profile!r} does not match the case's own "
+            f"convention_profile {case_convention_profile!r}; the S490 repo-carry Forward "
+            "is derived only for the market the case itself is priced under"
+        )
+
     priced_case, discarded_curve_point_count = acquire_production_curve_490_for_s490_parity(case)
     # Signalled the instant the acquisition succeeds, before any of the
     # derivation steps that can still fail after it (Codex P2 review of PR
@@ -2293,8 +2348,11 @@ def resolve_s490_repo_carry_parity(
     # required *browser state*, exactly as POST /api/bond/advanced-profile
     # already treats it: the trader's own selection, never defaulted or
     # guessed here. Only the UST selection asserts the UST payment
-    # convention; anything else leaves it unset and the primitive fails
-    # closed on any interim coupon while Case A is unaffected.
+    # convention. Issue #217: the S490 eligibility gate at the top of this
+    # function already refuses every other profile, so today the ``else``
+    # is not reached; it is kept so that adding a profile to the S490 list
+    # never silently hands it the UST payment convention -- that market's
+    # run would then fail closed on any interim coupon instead.
     interim_coupon_payment_convention = (
         UST_COUPON_PAYMENT_ROLL_CONVENTION
         if convention_profile == UST_CONVENTION_PROFILE.name
@@ -2493,7 +2551,26 @@ def apply_effective_forward_to_case(case: dict) -> tuple[dict, dict | None]:
         nonlocal derived_curve_acquired
         derived_curve_acquired = True
 
-    if isinstance(spot_settlement_date, str) and spot_settlement_date.strip():
+    # Issue #217: whether this run's market may use the S490 Forward model at
+    # all, decided before anything is attempted. In derived mode this is a
+    # refusal; in override mode it is the reason there is no derived
+    # comparison value, and the derivation is not run -- not as an
+    # optimisation, but because computing one would acquire a live Curve #490
+    # and attach an S490 repo-carry trace to a corporate run's provenance,
+    # which is exactly the impression Issue #217 exists to prevent: that
+    # Shiori has an automatic Forward model for this market. It does not.
+    s490_eligible = supports_s490_derived_forward(convention_profile)
+    if not s490_eligible:
+        if not is_trader_override:
+            require_s490_derived_forward_convention_profile(convention_profile)
+        derived_error = (
+            f"no Shiori Derived Forward is produced for convention_profile "
+            f"{convention_profile!r}: the {SHIORI_DERIVED_S490_FORWARD_SOURCE} model is "
+            "approved for U.S. Treasuries only, and Shiori has no automatic Forward "
+            "model for this market. This run prices from its explicit Trader Forward "
+            "Override; no S490 derivation was attempted and no S490 trace exists"
+        )
+    elif isinstance(spot_settlement_date, str) and spot_settlement_date.strip():
         try:
             derived_trace = resolve_s490_repo_carry_parity(
                 case,
@@ -3001,6 +3078,25 @@ def resolve_bond_convention_profile_candidates(body: dict) -> dict:
         "candidates": list(result.candidates),
         "reasons": list(result.reasons),
         "supported_convention_profiles": list(SUPPORTED_CONVENTION_PROFILE_NAMES),
+        # Issue #217: which of those profiles may use the Shiori Derived S490
+        # Forward. Published for the same reason `supported_convention_profiles`
+        # is -- so the browser reads the rule instead of keeping a second copy
+        # of it, which `test_the_profile_selector_options_are_never_a_second_copy_
+        # of_the_registry` already forbids for the registry itself. The server
+        # enforces the rule regardless of what any client does with this list.
+        "s490_derived_forward_convention_profiles": list(
+            S490_DERIVED_FORWARD_CONVENTION_PROFILES
+        ),
+        # Issue #217 follow-up: the profiles for which Shiori has separately
+        # approved evidence to auto-derive a bond option's own settlement
+        # dates from its expiry. Published for the same reason as the two
+        # lists above -- the browser must read a rule, never keep a copy of
+        # one -- and it is *not* a market settlement lag: a profile missing
+        # from it simply has no option-side approval, and both of its
+        # settlement dates are explicit trade inputs.
+        "approved_expiry_to_settlement_profiles": list(
+            APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS
+        ),
     }
 
 

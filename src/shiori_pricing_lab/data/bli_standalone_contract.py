@@ -1,11 +1,19 @@
 """Standalone-route deal and resolved-bond contracts (Issue #146).
 
 These frozen types contain exactly the fields the standalone browser pricing
-route validates or consumes. They deliberately omit four legacy fields that
-are not inputs to this route:
+route validates or consumes. They deliberately omit three legacy fields
+that are not inputs to this route (listed below).
 
-- ``BondOption.settlement_lag_days`` -- explicit forward and option
-  settlement dates are authoritative;
+``BondOption.settlement_lag_days`` was the fourth omission until Issue #217:
+explicit forward and option settlement dates are authoritative. It is now
+carried as an **optional** term, and the reason it was omitted is exactly
+the reason it stays inert. It is OVME's Delivery Delay
+(``docs/bloomberg_ovme_source_mapping.md``), recorded for audit, provenance
+and export; it derives neither settlement date, enters no pricing
+arithmetic, and its absence blocks nothing. Only its shape is validated.
+
+The three fields still omitted:
+
 - ``BondReferenceData.business_day_convention`` -- the reviewed coupon
   adapter uses unadjusted dates and a ``NullCalendar``;
 - ``BondReferenceData.redemption_amount`` -- principal/redemption is not
@@ -51,7 +59,19 @@ from shiori_pricing_lab.reference_data.enums import BondStatus, BondType
 
 @dataclass(frozen=True)
 class BLIStandaloneBondOptionTerms:
-    """General bond-option terms needed by the standalone route, without lag."""
+    """General bond-option terms needed by the standalone route.
+
+    ``settlement_lag_days`` is OVME's **Delivery Delay**, carried as an
+    optional recorded trade term (Issue #217 follow-up). Nothing in this
+    route reads it: it does not derive ``forward_settlement_date``, it does
+    not derive ``option_settlement_date``, it reaches no pricing arithmetic,
+    and a ticket without it prices exactly as one with it. Both settlement
+    dates remain separate authoritative inputs, and the calendar semantics
+    that would be needed to turn a delivery delay into either of them --
+    what the integer counts, on which calendar, from which date -- are not
+    established by any evidence in this repository, which is why it counts
+    nothing here.
+    """
 
     product_id: str
     underlying_isin: str
@@ -66,6 +86,8 @@ class BLIStandaloneBondOptionTerms:
     strike_price: float | None = None
     strike_yield: float | None = None
     exercise_start_date: str | None = None
+    #: OVME Delivery Delay, recorded only. See this class's own docstring.
+    settlement_lag_days: int | None = None
     product_type: str = field(init=False, default="BOND_OPTION")
 
     def __post_init__(self) -> None:
@@ -93,6 +115,24 @@ class BLIStandaloneBondOptionTerms:
         _require_finite_number(self.notional, "notional")
         if not self.notional > 0:
             raise ValueError(f"notional must be positive, got {self.notional}")
+
+        # Shape only, and only when supplied: the same non-negative integer
+        # the general `BondOption` contract already requires. `None` is a
+        # ticket that has not recorded a Delivery Delay, which is a valid
+        # ticket -- this term is evidence, never an input.
+        if self.settlement_lag_days is not None:
+            if isinstance(self.settlement_lag_days, bool) or not isinstance(
+                self.settlement_lag_days, int
+            ):
+                raise ValueError(
+                    "settlement_lag_days must be an integer or None (the recorded OVME "
+                    f"Delivery Delay), got {self.settlement_lag_days!r}"
+                )
+            if self.settlement_lag_days < 0:
+                raise ValueError(
+                    "settlement_lag_days must be non-negative, got "
+                    f"{self.settlement_lag_days}"
+                )
 
         expiry = _parse_iso_date(self.expiry_date, "expiry_date")
         if self.exercise_style is ExerciseStyle.EUROPEAN:
@@ -130,7 +170,14 @@ class BLIStandaloneBondOptionTerms:
 
     @classmethod
     def from_bond_option(cls, bond_option: BondOption) -> BLIStandaloneBondOptionTerms:
-        """Drop the legacy lag field without reading or deriving from it."""
+        """Carry the option's terms across, without reading or deriving from
+        the Delivery Delay.
+
+        Issue #217 follow-up: the lag is no longer dropped here. It is
+        recorded on this contract now, and a conversion that silently lost it
+        would lose an audit term the run export names. Carried verbatim and
+        still read by nothing.
+        """
 
         if not isinstance(bond_option, BondOption):
             raise TypeError("bond_option must be a BondOption")
@@ -147,6 +194,7 @@ class BLIStandaloneBondOptionTerms:
             position=bond_option.position,
             strike_price=bond_option.strike_price,
             strike_yield=bond_option.strike_yield,
+            settlement_lag_days=bond_option.settlement_lag_days,
             exercise_start_date=bond_option.exercise_start_date,
         )
 

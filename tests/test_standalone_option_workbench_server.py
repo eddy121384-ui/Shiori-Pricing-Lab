@@ -1299,6 +1299,37 @@ def test_api_case_bloomberg_live_curve_failure_never_calls_the_bond_quote_loader
 
 _S490_SPOT_SETTLEMENT_DATE = "2026-07-02"
 
+# Issue #217: the S490 repo-carry Forward is approved for UST only, and the
+# route now refuses every other selection -- including a missing one --
+# before it acquires anything. These route tests are about what the
+# derivation itself does, so they state the one selection that reaches it;
+# the eligibility rule has its own tests further down this file.
+_S490_CONVENTION_PROFILE = "UST"
+
+
+def _s490_request_body(case: dict, **overrides) -> dict:
+    """POST /api/case/s490-repo-carry's body, carrying the one approved selection.
+
+    Issue #217 made ``convention_profile`` load-bearing on this route: only a
+    profile the S490 repo-carry model is approved for reaches the derivation
+    at all, and a missing one is refused rather than defaulting to UST. These
+    tests are about what the derivation does once it is reached, so they all
+    state the same approved selection through here instead of repeating it.
+
+    The case carries the same selection as its own ``convention_profile``
+    (Codex P1 review of PR #220): the route derives only for the market the
+    case itself is priced under, so the two copies must agree.
+    """
+
+    case.setdefault("convention_profile", _S490_CONVENTION_PROFILE)
+    body = {
+        "case": case,
+        "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+        "convention_profile": _S490_CONVENTION_PROFILE,
+    }
+    body.update(overrides)
+    return body
+
 
 def _case_with_only_s490_inputs() -> dict:
     """A case shaped like the browser's own ``currentDraft`` immediately
@@ -1339,7 +1370,7 @@ def test_api_s490_repo_carry_resolves_with_trade_and_market_inputs_still_blank(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 200
@@ -1362,7 +1393,7 @@ def test_api_s490_repo_carry_rejects_a_missing_forward_settlement_date(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 400
@@ -1385,7 +1416,7 @@ def test_api_s490_repo_carry_rejects_a_bond_quote_isin_mismatch(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 400
@@ -1402,7 +1433,7 @@ def test_api_s490_repo_carry_rejects_a_bond_quote_currency_mismatch(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 400
@@ -1419,7 +1450,7 @@ def test_api_s490_repo_carry_rejects_a_bond_option_currency_mismatch_with_the_re
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 400
@@ -1436,11 +1467,13 @@ def test_api_s490_repo_carry_matches_a_direct_call_to_the_resolver(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 200
-    expected = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+    expected = server_module.resolve_s490_repo_carry_parity(
+        case, _S490_SPOT_SETTLEMENT_DATE, _S490_CONVENTION_PROFILE
+    )
     # JSON has no tuple type -- round-trip the direct-call result exactly
     # like the HTTP response was, so a dataclass field that is a tuple
     # (curve_ids, curve_evaluations, ...) compares as the list it becomes on
@@ -1459,7 +1492,7 @@ def test_api_s490_repo_carry_injects_the_live_curve_when_curve_points_is_empty(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 200
@@ -1490,7 +1523,7 @@ def test_api_s490_repo_carry_always_calls_the_live_curve_loader_even_when_curve_
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
 
     assert status == 200
@@ -1513,7 +1546,7 @@ def test_api_s490_repo_carry_live_curve_failure_returns_400_with_no_fallback(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
     assert status == 400
     assert "Bloomberg terminal not logged in" in payload["error"]
@@ -1528,7 +1561,7 @@ def test_api_s490_repo_carry_same_as_of_mismatch_returns_400_and_never_calls_the
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
     assert status == 400
     assert "today" in payload["error"]
@@ -1567,7 +1600,7 @@ def test_api_s490_repo_carry_rejects_a_malformed_spot_settlement_date(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": "13/11/2026"},
+        _s490_request_body(case, spot_settlement_date="13/11/2026"),
     )
     assert status == 400
     assert "spot_settlement_date" in payload["error"]
@@ -1588,7 +1621,7 @@ def test_api_s490_repo_carry_rejects_a_yield_only_quote_with_no_fabricated_spot_
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
     assert status == 400
     assert "clean_price_per_100" in payload["error"]
@@ -1610,6 +1643,9 @@ def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every
     case["expiry_timestamp"] = "2026-12-20T16:00:00Z"
     case["forward_settlement_date"] = "2026-12-21"
     case["option_settlement_date"] = "2026-12-21"
+    # The route derives only for the market the case itself is priced under
+    # (Codex P1 review of PR #220), so the case carries the same selection.
+    case["convention_profile"] = "UST"
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
@@ -1645,15 +1681,29 @@ def test_api_s490_repo_carry_carries_an_interim_coupon_horizon_and_reports_every
 
 @_QUANTLIB_SKIP
 @pytest.mark.parametrize("selected", [None, "US_CORPORATE"])
-def test_api_s490_repo_carry_refuses_an_interim_coupon_without_the_ust_selection(
+def test_api_s490_repo_carry_refuses_an_unapproved_selection_before_it_acquires_anything(
     server_url: str, monkeypatch, selected
 ) -> None:
-    # Codex P1 review of PR #176: the Federal Reserve coupon-payment
-    # convention is approved for US Treasuries only, and neither this route
-    # nor the primitive can tell a Treasury from a USD corporate bullet on
-    # reference data alone. Without the trader's UST selection the interim
-    # coupon fails closed rather than borrowing a UST convention.
-    _install_fake_live_curve_loader(monkeypatch)
+    """Issue #217: the refusal is the profile eligibility rule, not a coupon.
+
+    This horizon does contain an interim coupon (2026-12-15), and before
+    Issue #217 that coupon was the only thing standing between a non-UST
+    selection and a UST repo-carry Forward -- the route ran, acquired a live
+    Curve #490, and refused only once ``RepoCarryInterimCouponConventionError``
+    fired deep inside the primitive.
+
+    Both selections are now refused by the same rule, in the same place, for
+    the same reason: the S490 repo-carry model is not approved for this
+    market. Proven by what the message does *not* say -- no coupon date,
+    because the derivation never got near one -- and by the curve loader
+    never being called.
+
+    That error is unreachable through this route now (only UST reaches the
+    primitive, and UST asserts the convention). Its own coverage stays in
+    ``tests/test_bli_repo_carry_forward.py``, where it belongs.
+    """
+
+    curve_calls = _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
     case["bond_option"]["expiry_date"] = "2026-12-20"
@@ -1667,26 +1717,90 @@ def test_api_s490_repo_carry_refuses_an_interim_coupon_without_the_ust_selection
 
     status, payload = _post_json(f"{server_url}/api/case/s490-repo-carry", body)
     assert status == 400
-    assert "US Treasuries" in payload["error"]
-    assert "2026-12-15" in payload["error"]
+    assert "not approved for the SHIORI_DERIVED_S490 Forward" in payload["error"]
+    assert repr(selected) in payload["error"]
+    assert "2026-12-15" not in payload["error"]
+    assert "RepoCarryInterimCouponConventionError" not in payload["error"]
+    assert curve_calls == []
 
 
 @_QUANTLIB_SKIP
-def test_api_s490_repo_carry_prices_a_case_a_horizon_without_any_selection(
+@pytest.mark.parametrize("case_profile", ["US_CORPORATE", None, "ust"])
+def test_api_s490_repo_carry_refuses_a_case_whose_own_profile_is_not_the_approved_selection(
+    server_url: str, monkeypatch, case_profile
+) -> None:
+    """Codex P1 review of PR #220: the route receives the selection twice,
+    as its own ``convention_profile`` and inside the case. Checking only the
+    first let a case whose own market is ``US_CORPORATE`` name ``UST`` beside
+    it and be handed a Treasury S490 Forward. Both copies are now checked, and
+    must agree, before anything is acquired -- a case with no profile of its
+    own is refused too, exactly as the pricing path already refuses it."""
+
+    curve_calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+    case = _case_with_empty_curve_points()
+    case["convention_profile"] = case_profile
+
+    status, payload = _post_json(
+        f"{server_url}/api/case/s490-repo-carry",
+        {
+            "case": case,
+            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+            "convention_profile": _S490_CONVENTION_PROFILE,
+        },
+    )
+    assert status == 400
+    assert "not approved for the SHIORI_DERIVED_S490 Forward" in payload["error"]
+    assert repr(case_profile) in payload["error"]
+    assert "s490_repo_carry" not in payload
+    assert curve_calls == []
+
+
+@_QUANTLIB_SKIP
+@pytest.mark.parametrize("selected", [None, "US_CORPORATE"])
+def test_api_s490_repo_carry_refuses_a_case_a_horizon_on_an_unapproved_selection(
+    server_url: str, monkeypatch, selected
+) -> None:
+    """Issue #217's audit finding, pinned: Case A used to resolve silently.
+
+    The coupon-payment gate is consulted only when a coupon falls in
+    ``(tS, tF]``, so before Issue #217 a coupon-free horizon on a corporate
+    -- or on no selection at all -- ran the whole UST repo-carry model and
+    returned a Forward stamped ``SHIORI_DERIVED_S490``, with nothing refused
+    and nothing warned. That is the quiet half of the same defect the noisy
+    interim-coupon case above made visible, and the half a trader could not
+    have noticed.
+
+    Same rule, same refusal, no coupon required."""
+
+    curve_calls = _install_fake_live_curve_loader(monkeypatch)
+    _install_fixed_curve_clock(monkeypatch)
+
+    body = {
+        "case": _case_with_empty_curve_points(),
+        "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
+    }
+    if selected is not None:
+        body["convention_profile"] = selected
+
+    status, payload = _post_json(f"{server_url}/api/case/s490-repo-carry", body)
+    assert status == 400
+    assert "not approved for the SHIORI_DERIVED_S490 Forward" in payload["error"]
+    assert curve_calls == []
+
+
+@_QUANTLIB_SKIP
+def test_api_s490_repo_carry_prices_a_case_a_horizon_on_the_approved_selection(
     server_url: str, monkeypatch
 ) -> None:
-    # The gate is only ever consulted when a coupon is in the window, so a
-    # coupon-free horizon still resolves with no convention_profile at all --
-    # Case A is untouched by it.
+    # The UST half of what the test above replaces: a coupon-free horizon on
+    # the approved selection still resolves exactly as it always has.
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {
-            "case": _case_with_empty_curve_points(),
-            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
-        },
+        _s490_request_body(_case_with_empty_curve_points()),
     )
     assert status == 200
     assert payload["s490_repo_carry"]["forward"]["interim_coupons"] == []
@@ -1704,10 +1818,7 @@ def test_api_s490_repo_carry_reports_no_interim_coupon_for_a_case_a_horizon(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {
-            "case": _case_with_empty_curve_points(),
-            "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE,
-        },
+        _s490_request_body(_case_with_empty_curve_points()),
     )
     assert status == 200
     forward = payload["s490_repo_carry"]["forward"]
@@ -1732,7 +1843,7 @@ def test_api_s490_repo_carry_recomputes_when_expiry_changes(
     case_a = _case_with_empty_curve_points()
     status_a, payload_a = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case_a, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case_a),
     )
     assert status_a == 200
 
@@ -1749,7 +1860,7 @@ def test_api_s490_repo_carry_recomputes_when_expiry_changes(
 
     status_b, payload_b = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case_b, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case_b),
     )
     assert status_b == 200
 
@@ -1771,7 +1882,7 @@ def test_api_s490_repo_carry_response_carries_every_required_display_field(
 
     status, payload = _post_json(
         f"{server_url}/api/case/s490-repo-carry",
-        {"case": case, "spot_settlement_date": _S490_SPOT_SETTLEMENT_DATE},
+        _s490_request_body(case),
     )
     assert status == 200
     result = payload["s490_repo_carry"]
@@ -1805,8 +1916,11 @@ def test_resolve_s490_repo_carry_parity_carries_to_the_cases_forward_settlement_
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
+    case["convention_profile"] = _S490_CONVENTION_PROFILE
 
-    result = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+    result = server_module.resolve_s490_repo_carry_parity(
+        case, _S490_SPOT_SETTLEMENT_DATE, _S490_CONVENTION_PROFILE
+    )
 
     # The two dates genuinely differ on this case, so this is a real check.
     assert case["bond_option"]["expiry_date"] == "2026-09-29"
@@ -1823,8 +1937,11 @@ def test_resolve_s490_repo_carry_parity_never_reads_the_explicit_forward_overrid
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
     case["forward_clean_price_input"]["forward_clean_price_per_100"] = 12345.0
+    case["convention_profile"] = _S490_CONVENTION_PROFILE
 
-    result = server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+    result = server_module.resolve_s490_repo_carry_parity(
+        case, _S490_SPOT_SETTLEMENT_DATE, _S490_CONVENTION_PROFILE
+    )
 
     forward = result["s490_repo_carry"]["forward_clean_price_per_100"]
     assert forward != 12345.0
@@ -1836,9 +1953,12 @@ def test_resolve_s490_repo_carry_parity_raises_for_a_yield_only_quote(monkeypatc
     _install_fixed_curve_clock(monkeypatch)
     case = _case_with_empty_curve_points()
     case["bond_quote"] = {**case["bond_quote"], "clean_price_per_100": None}
+    case["convention_profile"] = _S490_CONVENTION_PROFILE
 
     with pytest.raises(ValueError, match="clean_price_per_100"):
-        server_module.resolve_s490_repo_carry_parity(case, _S490_SPOT_SETTLEMENT_DATE)
+        server_module.resolve_s490_repo_carry_parity(
+        case, _S490_SPOT_SETTLEMENT_DATE, _S490_CONVENTION_PROFILE
+    )
 
 
 # --- Instrument-first Bloomberg lookup: /api/bloomberg/bond ----------------------
@@ -3062,24 +3182,42 @@ def test_api_case_prices_case_b_from_the_shiori_derived_forward_by_default(
 
 
 @_QUANTLIB_SKIP
-def test_api_case_fails_closed_for_case_b_on_a_non_ust_convention_selection(
+def test_api_case_fails_closed_for_a_corporate_declaring_the_derived_forward(
     server_url: str, monkeypatch
 ) -> None:
-    # The UST Federal Reserve payment convention is asserted by the trader's
-    # own profile selection and never inferred (Issue #175 / Codex P1 review
-    # of PR #176). Promoting the derivation to the pricing path must not
-    # quietly widen that: an interim coupon on any other selection blocks
-    # the run instead of pricing a differently-carried Forward.
+    """Issue #217, the pricing path's own half of the eligibility rule.
+
+    A direct ``POST /api/case`` payload is not the browser, and this is the
+    bypass that matters: a corporate case declaring ``SHIORI_DERIVED_S490``
+    is refused on the pricing route itself, before any S490 funding or
+    repo-carry acquisition runs. The horizon here is Case B, so before Issue
+    #217 the run reached the primitive and died on a Treasury coupon
+    convention it had no business being offered in the first place.
+    """
+
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
+
+    # The S490 derivation is never entered -- asserted on the derivation
+    # itself rather than on the curve loader, because this route legitimately
+    # fetches the live Option Discount Curve for *discounting* before the
+    # Forward is selected at all, through the same loader. Counting loader
+    # calls here would conflate two different uses of one curve; counting
+    # entries into the derivation cannot.
+    def _never(*args, **kwargs):
+        raise AssertionError("the S490 derivation must not be entered for this case")
+
+    monkeypatch.setattr(server_module, "resolve_s490_repo_carry_parity", _never)
+
     case = _case_b_derived_forward_case()
     case["convention_profile"] = "US_CORPORATE"
 
     status, payload = _post_json(f"{server_url}/api/case", case)
 
     assert status == 400
-    assert "RepoCarryInterimCouponConventionError" in payload["error"]
-    assert "no effective Forward is available" in payload["error"]
+    assert "not approved for the SHIORI_DERIVED_S490 Forward" in payload["error"]
+    assert "US_CORPORATE" in payload["error"]
+    assert "RepoCarryInterimCouponConventionError" not in payload["error"]
 
 
 # --- Fail closed --------------------------------------------------------------
@@ -4489,10 +4627,18 @@ def test_an_override_refresh_records_the_s490_acquisition_even_when_the_carry_fa
     _install_fixed_clock(monkeypatch)
     _install_fake_live_curve_loader(monkeypatch)
     _install_fixed_curve_clock(monkeypatch)
-    # Case B window with a non-UST convention selection: the acquisition
-    # succeeds, then the interim-coupon convention assertion refuses.
+    # A post-acquisition failure on the one selection the derivation is
+    # approved for. Issue #217 changed how this state is reached, not what it
+    # proves: a non-UST selection used to serve as the convenient way to fail
+    # late, and is now refused before the acquisition it was relied on to
+    # perform -- so the carry itself is what fails here instead.
     case = _case_b_derived_forward_case()
-    case["convention_profile"] = "US_CORPORATE"
+    case["convention_profile"] = "UST"
+
+    def _carry_refuses(**kwargs):
+        raise ValueError("repo carry refused after the curve was acquired")
+
+    monkeypatch.setattr(server_module, "repo_carry_forward_clean_price", _carry_refuses)
     case["forward_clean_price_input"] = {
         **case["forward_clean_price_input"],
         "forward_clean_price_per_100": 97.75,
@@ -4513,7 +4659,9 @@ def test_an_override_refresh_records_the_s490_acquisition_even_when_the_carry_fa
     effective = payload["display"]["effective_forward"]
     # The derivation genuinely failed, so there is no comparison value...
     assert effective["shiori_derived_forward"] is None
-    assert "RepoCarryInterimCouponConventionError" in effective["shiori_derived_forward_error"]
+    assert "repo carry refused after the curve was acquired" in (
+        effective["shiori_derived_forward_error"]
+    )
     # ...but the curve it fetched on the way there is reported.
     assert effective["shiori_derived_forward_curve_acquired"] is True
     live_quote = payload["display"]["live_bloomberg_quote"]

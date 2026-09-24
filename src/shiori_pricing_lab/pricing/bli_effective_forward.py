@@ -77,6 +77,7 @@ from dataclasses import asdict, dataclass
 from math import isfinite
 
 from shiori_pricing_lab.data.bli_snapshot import BLIForwardCleanPriceInput
+from shiori_pricing_lab.pricing.bli_bond_convention_profile import UST_CONVENTION_PROFILE
 
 # The two canonical Forward sources. Written verbatim onto every
 # BLIForwardCleanPriceInput this module produces, and therefore onto every
@@ -91,6 +92,80 @@ TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE = "TRADER_FORWARD_OVERRIDE"
 EFFECTIVE_FORWARD_SOURCES: frozenset[str] = frozenset(
     {SHIORI_DERIVED_S490_FORWARD_SOURCE, TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE}
 )
+
+
+# Which convention profiles may use the Shiori Derived S490 Forward at all
+# (Issue #217). Mirrors the shape `bli_bond_modified_duration`'s own
+# `SUPPORTED_DURATION_CONVENTION_PROFILES` already uses: the consumer of a
+# model names the profiles that model is approved for, rather than the
+# profile record carrying a flag per consumer.
+#
+# The S490 repo-carry Forward is a *U.S. Treasury* model. Its funding leg
+# reads Curve #490 as a repo proxy (a labelled prototype assumption --
+# `bli_s490_funding_resolver`), and its interim-coupon leg applies Eddy's
+# Issue #175 Federal Reserve payment-date decision, which is UST-scoped by
+# his own words. Neither is approved for a USD corporate bullet, and Issue
+# #217's owner decision is explicit that no corporate repo / specialness /
+# automatic-Forward model exists yet.
+#
+# Before Issue #217 nothing enforced that. `bli_repo_carry_forward` refuses a
+# non-UST convention only when a coupon actually falls in `(tS, tF]`; a
+# corporate whose forward window happens to contain no coupon went all the
+# way through and produced a UST repo-carry Forward stamped
+# `SHIORI_DERIVED_S490`, silently. The membership test below is that missing
+# gate, and it is checked before any funding acquisition runs.
+S490_DERIVED_FORWARD_CONVENTION_PROFILES: tuple[str, ...] = (UST_CONVENTION_PROFILE.name,)
+
+
+class S490ForwardConventionProfileError(ValueError):
+    """This run's convention profile is not approved for the S490 Forward.
+
+    A distinct failure from :class:`ForwardSourceUnavailableError`: nothing
+    was attempted and then found unavailable. The S490 repo-carry model
+    simply does not apply to the market the trader selected, so no
+    derivation, no funding resolution and no curve acquisition may happen
+    for it at all.
+    """
+
+
+def supports_s490_derived_forward(convention_profile: object) -> bool:
+    """Whether ``convention_profile`` may use the Shiori Derived S490 Forward.
+
+    Exact membership in :data:`S490_DERIVED_FORWARD_CONVENTION_PROFILES`,
+    and fail-closed for everything else: ``None``, a blank string, a
+    non-string, an unregistered name and a name differing only in case or
+    surrounding whitespace all return ``False``. A missing or malformed
+    selection must never inherit UST's behaviour by default (Issue #217),
+    which is exactly what a normalizing or truthiness-based test would let
+    it do.
+    """
+
+    return (
+        isinstance(convention_profile, str)
+        and convention_profile in S490_DERIVED_FORWARD_CONVENTION_PROFILES
+    )
+
+
+def require_s490_derived_forward_convention_profile(convention_profile: object) -> None:
+    """Raise :class:`S490ForwardConventionProfileError` unless approved.
+
+    Called before anything the S490 derivation would acquire or compute, so
+    a case that is not entitled to this Forward model never reaches a
+    funding resolver, a curve acquisition, or a repo-carry primitive.
+    """
+
+    if supports_s490_derived_forward(convention_profile):
+        return
+    raise S490ForwardConventionProfileError(
+        f"convention_profile {convention_profile!r} is not approved for the "
+        f"{SHIORI_DERIVED_S490_FORWARD_SOURCE} Forward (approved: "
+        f"{S490_DERIVED_FORWARD_CONVENTION_PROFILES!r}). The S490 repo-carry Forward "
+        "is a U.S. Treasury model -- its funding leg reads Curve #490 as a repo proxy "
+        "and its interim-coupon leg applies the Federal Reserve payment-date "
+        "convention, neither of which is approved for this market. Shiori has no "
+        "automatic Forward model for it: supply an explicit Forward Clean Price and "
+        f"declare {TRADER_FORWARD_OVERRIDE_FORWARD_SOURCE} instead"
+    )
 
 
 class ForwardSourceUnavailableError(ValueError):

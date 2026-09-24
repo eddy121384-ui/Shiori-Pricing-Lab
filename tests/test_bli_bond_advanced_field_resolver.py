@@ -49,6 +49,7 @@ import pytest
 
 from shiori_pricing_lab.data.bli_standalone_contract import BLIStandaloneBondReferenceData
 from shiori_pricing_lab.pricing import bli_bond_advanced_field_resolver as profile_module
+from shiori_pricing_lab.pricing import bli_bond_convention_profile as convention_profile_module
 from shiori_pricing_lab.pricing.bli_bond_advanced_field_resolver import (
     ADVANCED_FIELD_PATHS,
     EXPIRY_DEPENDENT_FIELD_PATHS,
@@ -73,6 +74,7 @@ from shiori_pricing_lab.pricing.bli_bond_convention_profile import (
     US_CORPORATE_CONVENTION_PROFILE,
     UST_CONVENTION_PROFILE,
     BLIConventionProfile,
+    approved_expiry_to_settlement_business_days,
     confirms_plain_fixed_coupon_evidence,
 )
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import (
@@ -855,11 +857,23 @@ _ANNUAL_BOND_MASTER = {
 }
 
 
+# Issue #217 follow-up: every synthetic profile in this file was written when
+# the two option-side settlement dates were derived unconditionally, from the
+# profile's own cash-bond `settlement_business_days`. They now need an
+# explicit approval, exactly as a real market does -- so registering a test
+# profile grants it one, and grants it a count *different* from that profile's
+# cash-bond lag. Any test that still passes while reading the cash lag for an
+# option date fails here, which is the whole point of the separation.
+_APPROVED_SYNTHETIC_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS = 1
+
+
 def _register_profile(monkeypatch, profile: BLIConventionProfile) -> BLIConventionProfile:
+    globals_ = profile_module.__dict__["get_convention_profile"].__globals__
+    monkeypatch.setitem(globals_["CONVENTION_PROFILES"], profile.name, profile)
     monkeypatch.setitem(
-        profile_module.__dict__["get_convention_profile"].__globals__["CONVENTION_PROFILES"],
+        globals_["APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS"],
         profile.name,
-        profile,
+        _APPROVED_SYNTHETIC_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
     )
     return profile
 
@@ -905,20 +919,33 @@ def test_every_profile_owned_value_comes_from_the_selected_profile(synthetic_reg
         assert provenance[path] != UST_CONVENTION_PROFILE.default_provenance
 
 
-def test_the_settlement_lag_is_the_selected_profiles_own(synthetic_registry):
-    """UST's lag is one business day; this profile's is two. A hardcoded 1
-    anywhere in the resolver fails here."""
+def test_the_option_settlement_dates_never_read_the_cash_bond_settlement_lag(
+    synthetic_registry,
+):
+    """Issue #217 follow-up: the two roles are separate numbers.
 
+    This profile's `settlement_business_days` is 2 -- its **cash bond's**
+    spot settlement lag -- while the count approved for deriving an option's
+    settlement dates from its expiry is 1. Before the roles were separated
+    the resolver read the former for the latter, so both dates landed two
+    business days after expiry; they must now land one. A resolver that
+    reaches for the cash lag again fails here whatever its arithmetic."""
+
+    assert _SYNTHETIC_PROFILE.settlement_business_days == 2
     values = _values(_resolve_synthetic())
-    expected = advance_settlement_business_days(
-        date(2026, 10, 20), 2, _SYNTHETIC_PROFILE
+
+    approved = advance_settlement_business_days(
+        date(2026, 10, 20), _APPROVED_SYNTHETIC_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
+        _SYNTHETIC_PROFILE,
     ).isoformat()
-    assert values[PATH_FORWARD_SETTLEMENT_DATE] == expected
-    assert values[PATH_OPTION_SETTLEMENT_DATE] == expected
-    ust_settlement = advance_settlement_business_days(
-        date(2026, 10, 20), 1, UST_CONVENTION_PROFILE
+    cash_bond_lag = advance_settlement_business_days(
+        date(2026, 10, 20), _SYNTHETIC_PROFILE.settlement_business_days, _SYNTHETIC_PROFILE
     ).isoformat()
-    assert values[PATH_FORWARD_SETTLEMENT_DATE] != ust_settlement
+    assert approved != cash_bond_lag
+
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == approved
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == approved
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] != cash_bond_lag
 
 
 def test_the_coupon_grid_uses_bloombergs_confirmed_frequency_not_a_constant(synthetic_registry):
@@ -1469,13 +1496,11 @@ def _no_ex_dividend_profile() -> BLIConventionProfile:
 
 @pytest.fixture()
 def no_ex_dividend_registry(monkeypatch):
-    profile = _no_ex_dividend_profile()
-    monkeypatch.setitem(
-        profile_module.__dict__["get_convention_profile"].__globals__["CONVENTION_PROFILES"],
-        profile.name,
-        profile,
-    )
-    return profile
+    # Registered through the shared helper so this profile also carries the
+    # approved expiry -> settlement rule every other synthetic one does; these
+    # tests are about the ex-dividend field, not about Issue #217's role
+    # separation.
+    return _register_profile(monkeypatch, _no_ex_dividend_profile())
 
 
 def test_a_profile_with_no_ex_dividend_default_blocks_only_that_field(
@@ -1716,8 +1741,10 @@ def test_a_real_confirmed_plain_corporate_is_admitted_on_the_real_us_corporate_p
     assert profile.supported is True
     assert profile.convention_profile == "US_CORPORATE"
     assert profile.rejection_reasons == ()
-    assert profile.unresolved_fields == ()
     assert profile.pending_field_paths == ()
+    # All eight resolve, the two settlement dates included -- under Eddy's
+    # Issue #217 owner policy, not the cash bond's settlement lag.
+    assert profile.unresolved_fields == ()
     assert tuple(field.path for field in profile.fields) == ADVANCED_FIELD_PATHS
 
 
@@ -1725,13 +1752,8 @@ def test_the_confirmed_corporates_values_come_from_its_own_profile():
     """Every value is the `US_CORPORATE` profile's own or derived from this
     bond's own confirmed terms -- never borrowed from `UST`.
 
-    Two assertions discriminate against a resolver quietly reading a UST
-    constant, and both are load-bearing: the day count (THIRTY_360, where
-    UST is ACT_ACT_BOND) and the settlement dates (`US_CORPORATE` is T+2
-    where UST is T+1, so the same expiry that resolves to 2026-10-21 for a
-    Treasury -- see
-    `test_supported_ust_field_values_come_from_the_approved_profile` --
-    resolves to 2026-10-22 here)."""
+    The day count discriminates against a resolver quietly reading a UST
+    constant: THIRTY_360 here, where UST is ACT_ACT_BOND."""
 
     values = _values(_resolve_confirmed_us_corporate())
 
@@ -1743,8 +1765,11 @@ def test_the_confirmed_corporates_values_come_from_its_own_profile():
     # period, off this bond's own confirmed grid.
     assert values[PATH_LAST_COUPON_DATE] == "2039-08-10"
     assert values[PATH_REPORTING_DATE] == _VALUATION_DATE
-    assert values[PATH_FORWARD_SETTLEMENT_DATE] == "2026-10-22"
-    assert values[PATH_OPTION_SETTLEMENT_DATE] == "2026-10-22"
+    # Expiry 2026-10-20 (a Tuesday) + 1 U.S. bond-market business day, and the
+    # option settles with the bond forward -- see
+    # `test_a_corporate_cash_bond_lag_never_becomes_an_option_delivery_lag`.
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == "2026-10-21"
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == "2026-10-21"
 
 
 def test_the_confirmed_corporates_derived_last_coupon_date_is_accepted_by_the_adapter():
@@ -1822,15 +1847,79 @@ def test_a_contradicting_day_count_description_blocks_only_day_count_on_us_corpo
 
     assert profile.supported is True
     assert profile.rejection_reasons == ()
-    assert [item.path for item in profile.unresolved_fields] == [PATH_DAY_COUNT]
+    blocked = {item.path: item.reason for item in profile.unresolved_fields}
+    assert PATH_DAY_COUNT in blocked
     # Repr-quoted, so the second assertion is not satisfied by the first's
     # own substring: `'30/360'` does not occur inside `'ISMA-30/360'`. The
     # message has to name both what Bloomberg said and what this profile
     # expected, or the trader cannot see why the field was withheld.
-    reason = profile.unresolved_fields[0].reason
-    assert "'ISMA-30/360'" in reason
-    assert "'30/360'" in reason
+    assert "'ISMA-30/360'" in blocked[PATH_DAY_COUNT]
+    assert "'30/360'" in blocked[PATH_DAY_COUNT]
+
+    assert list(blocked) == [PATH_DAY_COUNT]
 
     resolved = _values(profile)
     assert PATH_DAY_COUNT not in resolved
+    # The day count blocks itself and nothing else.
     assert set(resolved) == set(ADVANCED_FIELD_PATHS) - {PATH_DAY_COUNT}
+
+
+def test_a_corporate_cash_bond_lag_never_becomes_an_option_delivery_lag():
+    """Issue #217, the regression Eddy asked for by name -- now with the two
+    numbers genuinely different on the same profile.
+
+    `US_CORPORATE.settlement_business_days` is 2: the cash bond's own T+2 spot
+    settlement convention from Annex A A.7.3, which
+    `bli_bond_modified_duration.spot_settlement_date` reads for exactly that
+    role. The count Eddy approved for deriving this option's settlement dates
+    from its expiry is 1 (Issue #217 owner policy): Forward Settlement = Expiry
+    + 1 U.S. bond-market business day, Option Settlement = Forward Settlement.
+
+    The workstation UAT that found this derived T+2 off the cash lag. With the
+    roles separated, the same expiry lands on T+1, and the T+2 date the old
+    coupling produced is not produced at all."""
+
+    assert US_CORPORATE_CONVENTION_PROFILE.settlement_business_days == 2
+    assert approved_expiry_to_settlement_business_days(US_CORPORATE_CONVENTION_PROFILE) == 1
+
+    values = _values(_resolve_confirmed_us_corporate())
+    expiry = date(2026, 10, 20)
+
+    approved_policy_date = advance_settlement_business_days(
+        expiry, 1, US_CORPORATE_CONVENTION_PROFILE
+    ).isoformat()
+    cash_bond_lag_date = advance_settlement_business_days(
+        expiry,
+        US_CORPORATE_CONVENTION_PROFILE.settlement_business_days,
+        US_CORPORATE_CONVENTION_PROFILE,
+    ).isoformat()
+    assert (approved_policy_date, cash_bond_lag_date) == ("2026-10-21", "2026-10-22")
+
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == approved_policy_date
+    # Option settles with the bond forward -- the policy's second line.
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == values[PATH_FORWARD_SETTLEMENT_DATE]
+    assert cash_bond_lag_date not in values.values()
+
+    # UST's own Issue #157 approval is untouched by any of this.
+    assert approved_expiry_to_settlement_business_days(UST_CONVENTION_PROFILE) == 1
+
+
+def test_the_derived_dates_follow_the_approved_count_not_a_hardcoded_one(monkeypatch):
+    """Issue #217 review: every approved count is 1 today, so a resolver that
+    ignored the approval record and hardcoded one day would pass every other
+    test here. Moving the record moves the dates -- and to neither the old
+    one-day date nor the cash bond's own T+2."""
+
+    monkeypatch.setitem(
+        convention_profile_module.APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
+        US_CORPORATE_CONVENTION_PROFILE.name,
+        3,
+    )
+
+    values = _values(_resolve_confirmed_us_corporate())
+    expected = advance_settlement_business_days(
+        date(2026, 10, 20), 3, US_CORPORATE_CONVENTION_PROFILE
+    ).isoformat()
+    assert expected == "2026-10-23"
+    assert values[PATH_FORWARD_SETTLEMENT_DATE] == expected
+    assert values[PATH_OPTION_SETTLEMENT_DATE] == expected

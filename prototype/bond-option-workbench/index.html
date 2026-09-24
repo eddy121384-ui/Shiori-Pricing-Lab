@@ -241,6 +241,44 @@
             </div>
           </div>
 
+          <!-- Issue #217 follow-up: for a market with no approved rule for
+               deriving an option's settlement dates from its expiry, those
+               dates are trade terms and belong here, with the trade, not
+               behind Advanced. Hidden entirely for a market that does have
+               one (UST), where Advanced keeps the derived values it has
+               always shown. -->
+          <!-- Issue #217: OVME's Delivery Delay is a ticket term, not a market
+               convention, so it is shown on every ticket regardless of which
+               profile is selected. Recorded for the audit trail and the run
+               export; it derives no date and enters no pricing arithmetic. -->
+          <div class="form-row" id="delivery-delay-row" hidden><label>Delivery Delay</label>
+            <div>
+              <input class="control" id="delivery-delay-input" type="text" inputmode="numeric" placeholder="OVME Delivery Delay, optional">
+              <div class="field-provenance" id="prov-delivery-delay">&mdash;</div>
+            </div>
+          </div>
+
+          <div id="trade-timing-block" hidden>
+            <div class="form-row"><label>Forward Settlement Date</label>
+              <div>
+                <input class="control" id="trade-forward-settlement-date-input" type="date">
+                <div class="field-provenance" id="prov-trade-forward-settlement-date">&mdash;</div>
+              </div>
+            </div>
+            <div class="form-row"><label>Option Settlement Date</label>
+              <div>
+                <input class="control" id="trade-option-settlement-date-input" type="date">
+                <div class="field-provenance" id="prov-trade-option-settlement-date">&mdash;</div>
+              </div>
+            </div>
+            <div class="fixed-route-note" id="trade-timing-note">
+              Shiori has no approved rule for deriving this market&rsquo;s option settlement
+              dates from the expiry, so both are yours to enter from the traded terms.
+              The two are separate dates and may differ. The Delivery Delay above is not
+              used to derive either of them.
+            </div>
+          </div>
+
           <div class="fixed-route-note">
             Fixed for this route: payoff <strong>PRICE</strong> &middot;
             <strong>EUROPEAN</strong> exercise &middot; <strong>CASH</strong> settlement &middot;
@@ -276,15 +314,15 @@
         <!-- ---- Shiori Derived Forward: S490 repo-carry, the Black-76 default (Issue #173/#175/#177) ---- -->
         <div class="card s490-parity">
           <div class="card-head">
-            <div class="card-title">Shiori Derived Forward &mdash; S490 repo-carry (Black-76 default)</div>
+            <div class="card-title" id="s490-parity-title">Shiori Derived Forward &mdash; S490 repo-carry (Black-76 default)</div>
           </div>
           <div class="card-body" id="s490-parity-body">
-          <div class="form-row"><label>Spot Settlement Date</label>
+          <div class="form-row" id="s490-spot-settlement-row"><label>Spot Settlement Date</label>
             <div>
               <input class="control" id="s490-spot-settlement-date-input" type="date">
             </div>
           </div>
-          <div class="fixed-route-note">
+          <div class="fixed-route-note" id="s490-parity-mechanics-note">
             Forward settlement (tF) is this ticket's own <strong>Forward Settlement Date</strong>
             &mdash; the date the bond forward settles, and the date Black-76 pairs this clean
             price with its accrued interest. Change <strong>Expiry</strong> above and the
@@ -345,7 +383,7 @@
               <span class="btn ghost btn-small" id="forward-use-derived-btn" hidden>Reset / Use Shiori Derived</span>
               <div class="review-note" id="forward-sourcing-note">&mdash;</div>
               <div class="review-provenance" id="forward-provenance">&mdash;</div>
-              <div class="review-note">
+              <div class="review-note" id="forward-derived-mode-note">
                 One Forward field, two sources. By default it holds Shiori's own
                 S490-derived Forward (from the Bloomberg-loaded bond, its live spot quote,
                 Expiry and Spot Settlement Date above) and Black-76 prices from that. Type
@@ -355,6 +393,14 @@
                 field back to the derivation and reprices. If the derivation fails while it is
                 the active source, pricing is blocked and the real reason is shown &mdash; no
                 spot price, previous Forward, zero repo or flat carry is ever substituted.
+              </div>
+              <div class="review-note" id="forward-explicit-mode-note" hidden>
+                Explicit Forward contract. This market has no approved automatic Forward
+                model, so the Forward is a term of this ticket: Black-76 prices from exactly
+                the number you enter here, recorded as a <strong>Trader Forward Override</strong>
+                with provenance. Nothing is derived for it. While the field is empty, pricing
+                is blocked &mdash; no spot price, previous Forward, zero repo or flat carry is
+                ever substituted.
               </div>
             </div>
 
@@ -498,16 +544,17 @@
             <div class="adv-block" id="adv-bond-reference">
               <div class="adv-title">Bond reference &mdash; profile-filled, trader-editable</div>
               <div class="fixed-route-note">
-                For a supported UST fixed-coupon bullet, Shiori fills these from the
-                approved narrow UST profile and its own deterministic derivations, and
-                shows the source of every value. Each field is resolved on its own: one
+                For a bond the selected convention profile covers, Shiori fills these
+                from that profile&rsquo;s own approved constants and its own deterministic
+                derivations, and shows the source of every value. Each field is resolved on its own: one
                 field Shiori cannot resolve is marked <strong>BLOCKED</strong> for you to
                 set and never blanks the others. Bloomberg&rsquo;s
                 <code>DAY_CNT_DES</code>, <code>MTY_TYP</code> and
                 <code>CALC_TYP_DES</code> remain <em>display-only evidence</em> and are
                 still never coerced into a Shiori enum &mdash; <code>MTY_TYP</code> and
                 <code>CALC_TYP_DES</code> decide nothing at all (a real UST returns
-                <code>NORMAL</code>), and a contradicting <code>DAY_CNT_DES</code> can
+                <code>NORMAL</code>; the confirmed plain corporate returns
+                <code>AT MATURITY</code>), and a contradicting <code>DAY_CNT_DES</code> can
                 only withhold the day count itself. A bond whose product or coupon
                 schedule this pricing path cannot carry gets no fields and these controls
                 are disabled, because editing them could not make it price. Otherwise
@@ -579,12 +626,18 @@
                 Still no Bloomberg field describes an OTC option&rsquo;s own cash settlement
                 date, and <code>SETTLE_DT</code> / <code>DAYS_TO_SETTLE</code> describe the
                 cash bond&rsquo;s standard settlement &mdash; a different role that must not
-                be conflated. For a supported UST, Shiori derives these itself instead:
-                Reporting Date is the run&rsquo;s own Valuation Date, and both settlement
-                dates are the expiry rolled forward one U.S. government-bond business day on
-                the existing QuantLib U.S. government-bond calendar &mdash; no hand-written
-                holiday table anywhere. Change the expiry and the settlement dates you have
-                not overridden are re-derived; change one yourself and Shiori leaves it
+                be conflated. Reporting Date is the run&rsquo;s own Valuation Date. Both
+                settlement dates are the expiry rolled forward <strong>one U.S.
+                bond-market business day</strong> on the selected profile&rsquo;s own
+                reviewed QuantLib calendar, with the option settling on the same day as
+                the bond forward &mdash; an owner-approved policy for <code>UST</code>
+                (Issue #157) and <code>US_CORPORATE</code> (Issue #217), not a Bloomberg
+                field, and no hand-written holiday table anywhere. It is deliberately
+                <em>not</em> the cash bond&rsquo;s own settlement lag (T+2 for
+                <code>US_CORPORATE</code>), and it does not read the ticket&rsquo;s Delivery
+                Delay. A market with no such approval shows both dates as trade inputs
+                instead. Change the expiry and the settlement dates you have not
+                overridden are re-derived; change one yourself and Shiori leaves it
                 alone.
               </div>
               <div class="entry-grid">
@@ -594,13 +647,13 @@
                     <div class="field-provenance" id="prov-reporting-date">&mdash;</div>
                   </div>
                 </div>
-                <div class="form-row"><label>Forward Settlement Date</label>
+                <div class="form-row" id="adv-forward-settlement-row"><label>Forward Settlement Date</label>
                   <div>
                     <input class="control" id="forward-settlement-date-input" type="date">
                     <div class="field-provenance" id="prov-forward-settlement-date">&mdash;</div>
                   </div>
                 </div>
-                <div class="form-row"><label>Option Settlement Date</label>
+                <div class="form-row" id="adv-option-settlement-row"><label>Option Settlement Date</label>
                   <div>
                     <input class="control" id="option-settlement-date-input" type="date">
                     <div class="field-provenance" id="prov-option-settlement-date">&mdash;</div>

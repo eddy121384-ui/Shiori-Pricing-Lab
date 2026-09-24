@@ -46,6 +46,9 @@ from shiori_pricing_lab.data.bli_snapshot import (
 from shiori_pricing_lab.data.bloomberg_option_discount_curve import (
     BloombergUsdSofrOptionDiscountCurveResult,
 )
+from shiori_pricing_lab.pricing import (
+    bli_bond_convention_profile as convention_profile_module,
+)
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
 from shiori_pricing_lab.products.enums import Currency, TreasuryFTPQuoteSide
 
@@ -61,6 +64,7 @@ if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
 from test_standalone_option_workbench_prototype_browser import (  # noqa: E402
+    _TREASURY_BOND_MASTER,
     _complete_draft,
     _fill_advanced_overrides,
     _fill_trade_group,
@@ -1297,3 +1301,645 @@ def test_a_successful_refresh_satisfies_a_queued_reset_reprice(server_url, page)
     assert priced == []
     assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
     page.unroute("**/api/case")
+
+
+# --- Issue #217: a corporate ticket has no automatic Forward -------------------
+
+
+def test_selecting_a_corporate_requires_an_explicit_forward_and_offers_no_derivation(
+    server_url, page
+) -> None:
+    """Issue #217, through the real controls.
+
+    Switching a completed UST ticket to ``US_CORPORATE`` must leave no trace
+    of the Forward model that does not apply to it: the declared source
+    becomes the explicit one, the previous market's derived number leaves the
+    field rather than being submitted as the corporate run's own Forward, the
+    "Use Shiori Derived Forward" action disappears, the panel stops asking
+    the server for a derivation, and the wording says what is required
+    without implying a corporate model exists and is merely pending.
+    """
+
+    s490_requests: list = []
+    page.on(
+        "request",
+        lambda request: s490_requests.append(request.url)
+        if "/api/case/s490-repo-carry" in request.url
+        else None,
+    )
+
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+    derived_forward = _derived_forward_in_field(page)
+    assert derived_forward > 0
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+    requests_while_ust = len(s490_requests)
+    assert requests_while_ust > 0
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_clean_price_input"]["source_system"] == "TRADER_FORWARD_OVERRIDE"
+    # The UST-derived number does not become the corporate ticket's Forward.
+    assert draft["forward_clean_price_input"]["forward_clean_price_per_100"] is None
+    assert page.input_value("#forward-price-input") == ""
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+
+    assert page.eval_on_selector("#forward-use-derived-btn", "el => el.hidden") is True
+
+    source_line = page.text_content("#forward-source-line")
+    assert "Explicit Forward required" in source_line
+    # The market is named from the trader's own selection rather than from a
+    # profile name this file hardcodes -- `script.js` must not carry a second
+    # copy of the registry (see the static-content guard).
+    assert "US_CORPORATE automatic Forward model not yet supported" in source_line
+    assert "Pending" not in source_line
+    assert "SHIORI_DERIVED_S490" not in source_line
+    assert str(round(derived_forward, 6)) not in source_line
+
+    # No derivation is asked for while this market is selected.
+    page.wait_for_timeout(400)
+    assert len(s490_requests) == requests_while_ust
+
+    # Nothing anywhere on the ticket claims a derivation ran for this market.
+    assert "SHIORI_DERIVED_S490" not in page.text_content("#forward-provenance")
+    assert page.eval_on_selector("#forward-price-input", "el => el.placeholder") == (
+        "Enter this ticket's Forward Clean Price"
+    )
+    # The Forward is recorded as the trader's own supplied value -- and the
+    # reason does not say it took over from a derivation that never ran.
+    page.fill("#forward-price-input", "98.75")
+    _wait_until(
+        lambda: any(
+            record["path"] == "forward_clean_price_input.forward_clean_price_per_100"
+            for record in page.evaluate("() => window.__shioriTestOverrideProvenance()")
+        )
+    )
+    (forward_record,) = [
+        record
+        for record in page.evaluate("() => window.__shioriTestOverrideProvenance()")
+        if record["path"] == "forward_clean_price_input.forward_clean_price_per_100"
+    ]
+    assert "no automatic Forward model" in forward_record["reason_not_sourced"]
+    assert "taking over" not in forward_record["reason_not_sourced"]
+
+    # A corporate run's own refusal note is not adopted as a failed
+    # derivation: the S490 panel does not repaint itself red for a market it
+    # never derives for.
+    assert page.eval_on_selector("#s490-parity-retry-btn", "el => el.hidden") is True
+    assert "not yet supported" in page.text_content("#s490-parity-status")
+
+    # And back: the previous market's mode is not stuck either way.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["source_system"]
+        == "SHIORI_DERIVED_S490"
+    )
+    assert page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()") is False
+
+
+_FORWARD_PANEL = '[data-workflow-group="forward-review"]'
+
+# Rendered text that describes the S490 derived-Forward workflow. None of it
+# may be on screen for a market with no approved automatic Forward model.
+_DERIVED_FORWARD_ONLY_STRINGS = (
+    "Reset / Use Shiori Derived",
+    "By default it holds Shiori's own S490-derived Forward",
+    "S490-derived Forward",
+    "defaults to Shiori's own S490 repo-carry derivation",
+    "SHIORI_DERIVED_S490",
+)
+
+
+def test_a_corporate_forward_panel_renders_only_the_explicit_forward_contract(
+    server_url, page
+) -> None:
+    """Issue #217, found in workstation UAT: the panel said "Explicit Forward
+    required" and yet still *rendered* the Reset / Use Shiori Derived action
+    and the note describing an S490-derived default.
+
+    The action's ``hidden`` property was already true -- which is all the
+    earlier assertion read -- but ``.btn``'s own ``display`` beat the UA
+    ``[hidden]`` rule, so it stayed on screen. Everything here is asserted on
+    what is actually rendered (``inner_text`` / ``is_visible``), not on the
+    property. UST's own behaviour is pinned alongside, unchanged.
+    """
+
+    _load_and_complete_ust_without_typing_a_forward(page, server_url)
+
+    # UST, derived mode: the derived-Forward description, no explicit-only note,
+    # and no Reset action while there is nothing to reset.
+    ust_text = page.inner_text(_FORWARD_PANEL)
+    assert "By default it holds Shiori's own S490-derived Forward" in ust_text
+    assert "defaults to Shiori's own S490 repo-carry derivation" in ust_text
+    assert "Explicit Forward contract." not in ust_text
+    assert page.is_visible("#forward-use-derived-btn") is False
+    assert page.is_visible("#forward-explicit-mode-note") is False
+
+    # UST, override mode: Reset / Use Shiori Derived is on screen, as before.
+    page.fill("#forward-price-input", "97.75")
+    _wait_until(lambda: page.evaluate("() => window.__shioriTestTraderForwardOverrideActive()"))
+    assert page.is_visible("#forward-use-derived-btn") is True
+    assert "Reset / Use Shiori Derived" in page.inner_text(_FORWARD_PANEL)
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+
+    def assert_explicit_contract_only() -> None:
+        rendered = page.inner_text(_FORWARD_PANEL)
+        for text in _DERIVED_FORWARD_ONLY_STRINGS:
+            assert text not in rendered, text
+        assert page.is_visible("#forward-use-derived-btn") is False
+        assert page.is_visible("#forward-derived-mode-note") is False
+        assert page.is_visible("#forward-explicit-mode-note") is True
+        assert (
+            "Explicit Forward required — US_CORPORATE automatic Forward model not yet "
+            "supported." in rendered
+        )
+        assert "Explicit Forward contract." in rendered
+        assert "Not sourced, not derived." in rendered
+        assert page.text_content("#forward-provenance").startswith("Provenance:")
+
+    # Empty Forward, and then with the trader's own Forward typed in -- the
+    # moment the Reset action used to appear on UST.
+    _wait_until(lambda: page.is_visible("#forward-explicit-mode-note"))
+    assert_explicit_contract_only()
+    page.fill("#forward-price-input", "98.75")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "forward_clean_price_input"
+        ]["forward_clean_price_per_100"]
+        == 98.75
+    )
+    assert_explicit_contract_only()
+
+    # And back to UST: the derived-mode panel returns exactly as it was.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: page.is_visible("#forward-derived-mode-note"))
+    back_on_ust = page.inner_text(_FORWARD_PANEL)
+    assert "By default it holds Shiori's own S490-derived Forward" in back_on_ust
+    assert "defaults to Shiori's own S490 repo-carry derivation" in back_on_ust
+    assert page.is_visible("#forward-explicit-mode-note") is False
+    assert page.is_visible("#forward-use-derived-btn") is False
+
+
+def test_loading_a_different_bond_leaves_no_corporate_forward_copy_behind(
+    server_url, page
+) -> None:
+    """Issue #217, Codex P2 on ``4c9dd07``: ``resetRunState`` rendered the
+    Forward panel before it cleared the convention profile, so a newly loaded
+    ticket kept the previous bond's ``US_CORPORATE`` explicit-Forward copy
+    until a profile was selected. Asserted on what is rendered."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: page.is_visible("#forward-explicit-mode-note"))
+    corporate_text = page.inner_text(_FORWARD_PANEL)
+    assert "US_CORPORATE automatic Forward model not yet supported" in corporate_text
+    assert "Explicit Forward contract." in corporate_text
+
+    # A different bond, with no profile selected yet.
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMB44",
+        response=_treasury_lookup_response(
+            isin="US91282CMB44", acquired_at="2026-08-12T20:05:00+08:00"
+        ),
+        profile=None,
+    )
+    page.wait_for_function("() => window.__shioriTestConventionProfileCandidates()")
+    assert _draft_convention_profile(page) is None
+
+    rendered = page.inner_text(_FORWARD_PANEL)
+    for stale in (
+        "US_CORPORATE",
+        "Explicit Forward contract.",
+        "Not sourced, not derived.",
+    ):
+        assert stale not in rendered, stale
+    assert page.is_visible("#forward-explicit-mode-note") is False
+    assert page.is_visible("#forward-derived-mode-note") is True
+    assert page.is_visible("#forward-use-derived-btn") is False
+
+
+def test_the_s490_retry_action_is_never_rendered_for_a_corporate_ticket(
+    server_url, page
+) -> None:
+    """Issue #217, found in workstation UAT: under ``US_CORPORATE`` the S490
+    panel said the Treasury model is not approved for this market and still
+    rendered Retry. Same cause as the Forward panel's Reset action -- ``.btn``
+    beat ``[hidden]`` -- so asserted on rendering (``is_visible``), not on the
+    property. UST's Retry is pinned before and after, unchanged."""
+
+    _load_corporate_admissible_bond(page, server_url)
+
+    attempts = {"n": 0}
+
+    def route_s490(route):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            route.fulfill(
+                status=400,
+                content_type="application/json",
+                body=json.dumps({"error": "Bloomberg DAPI session failed to start"}),
+            )
+        else:
+            route.continue_()
+
+    page.route("**/api/case/s490-repo-carry", route_s490)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+
+    # UST, failed derivation: Retry is on screen, as before.
+    _wait_until(
+        lambda: "Bloomberg DAPI session failed to start"
+        in page.text_content("#s490-parity-status")
+    )
+    assert page.is_visible("#s490-parity-retry-btn") is True
+
+    # US_CORPORATE: no Retry, and the explanation stays.
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: "not yet supported" in page.text_content("#s490-parity-status"))
+    assert page.is_visible("#s490-parity-retry-btn") is False
+    status = page.inner_text("#s490-parity-status")
+    assert "US_CORPORATE automatic Forward model not yet supported" in status
+    assert "The S490 repo-carry Forward is a U.S. Treasury model" in status
+    assert "neither of which is approved for this market" in status
+
+    # Back to UST: the Spot Settlement Date left the case on the way to
+    # US_CORPORATE, so UST asks for it again; entered, the derivation runs,
+    # succeeds, and Retry is not shown.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: page.is_visible("#s490-parity-fields"))
+    assert attempts["n"] >= 2
+    assert page.is_visible("#s490-parity-retry-btn") is False
+    page.unroute("**/api/case/s490-repo-carry")
+
+
+_S490_PANEL = ".card.s490-parity"
+_S490_TITLE_DERIVED = "SHIORI DERIVED FORWARD — S490 REPO-CARRY (BLACK-76 DEFAULT)"
+_S490_TITLE_NOT_AVAILABLE = "SHIORI DERIVED FORWARD — NOT AVAILABLE FOR THIS MARKET"
+
+
+def _s490_title(page) -> str:
+    # The title is uppercased by CSS; compare what is rendered, case-folded.
+    return page.inner_text("#s490-parity-title").strip().upper()
+
+
+def test_a_corporate_s490_panel_is_not_rendered_as_a_default_forward_workflow(
+    server_url, page
+) -> None:
+    """Issue #217, found in workstation UAT: under ``US_CORPORATE`` the S490
+    panel still read as the default Forward workflow -- "(Black-76 default)"
+    in its title and "This is the Forward Black-76 prices from by default"
+    in its note. On an S490-ineligible market the panel is titled as not
+    available, shows none of the derivation mechanics and no action, and
+    keeps only the short explanation. UST is pinned before and after, and a
+    newly loaded bond does not inherit the corporate state. Asserted on
+    rendered text and visibility."""
+
+    _load_corporate_admissible_bond(page, server_url)
+
+    def assert_derived_panel() -> None:
+        assert _s490_title(page) == _S490_TITLE_DERIVED
+        assert page.is_visible("#s490-spot-settlement-row") is True
+        assert page.is_visible("#s490-parity-mechanics-note") is True
+        assert "This is the Forward Black-76 prices from by default" in page.inner_text(
+            "#s490-parity-mechanics-note"
+        )
+
+    # UST: exactly as before.
+    assert_derived_panel()
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_NOT_AVAILABLE)
+
+    rendered = page.inner_text(_S490_PANEL).lower()
+    for forbidden in (
+        "black-76 default",
+        "this is the forward black-76 prices from by default",
+        "retry",
+        "use shiori derived",
+    ):
+        assert forbidden not in rendered, forbidden
+    assert page.is_visible("#s490-spot-settlement-row") is False
+    assert page.is_visible("#s490-parity-mechanics-note") is False
+    assert page.is_visible("#s490-parity-retry-btn") is False
+    assert page.is_visible("#s490-parity-fields") is False
+    assert page.is_visible("#s490-parity-trace") is False
+    # The short explanation stays.
+    status = page.inner_text("#s490-parity-status")
+    assert "The S490 repo-carry Forward is a U.S. Treasury model" in status
+    assert "neither of which is approved for this market" in status
+
+    # Back to UST: the derived panel returns unchanged.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_DERIVED)
+    assert_derived_panel()
+
+    # And after a corporate ticket, a newly loaded bond with no profile yet
+    # does not inherit the corporate panel.
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_NOT_AVAILABLE)
+    _load_bloomberg_bond(
+        page,
+        identifier="US91282CMB44",
+        response=_treasury_lookup_response(
+            isin="US91282CMB44", acquired_at="2026-08-12T20:05:00+08:00"
+        ),
+        profile=None,
+    )
+    assert _draft_convention_profile(page) is None
+    _wait_until(lambda: _s490_title(page) == _S490_TITLE_DERIVED)
+    assert page.is_visible("#s490-spot-settlement-row") is True
+    assert page.is_visible("#s490-parity-mechanics-note") is True
+
+
+def _find_key(value, key: str) -> list:
+    """Every value stored under ``key`` anywhere in a JSON document."""
+
+    found = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == key:
+                found.append(v)
+            found.extend(_find_key(v, key))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_key(item, key))
+    return found
+
+
+def test_a_corporate_run_carries_and_exports_no_stale_ust_spot_settlement_date(
+    server_url, page
+) -> None:
+    """Issue #217 lifecycle cleanup: the Spot Settlement Date is an input of the
+    S490 derivation only, so it is not part of a US_CORPORATE ticket's Forward
+    contract. Switching UST -> US_CORPORATE takes it out of the case, and the
+    corporate run's export carries no stale UST tS."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "spot_settlement_date"
+        ]
+        == _SPOT_SETTLEMENT_DATE
+    )
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+        "spot_settlement_date"
+    ] is None
+    assert page.input_value("#s490-spot-settlement-date-input") == ""
+
+    # Price the corporate ticket from its explicit Forward, then export it.
+    page.fill("#forward-price-input", "98.75")
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    with page.expect_download() as json_download:
+        page.click("#download-json-btn")
+    exported = json.loads(open(json_download.value.path(), encoding="utf-8").read())
+    assert exported["forward_source"] == "TRADER_FORWARD_OVERRIDE"
+    spot_values = _find_key(exported, "spot_settlement_date")
+    assert spot_values, "the export no longer reports tS at all -- update this test"
+    assert all(value is None for value in spot_values), spot_values
+
+    with page.expect_download() as md_download:
+        page.click("#download-markdown-btn")
+    markdown = open(md_download.value.path(), encoding="utf-8").read()
+    (ts_line,) = [line for line in markdown.splitlines() if "Spot settlement date (tS)" in line]
+    assert _SPOT_SETTLEMENT_DATE not in ts_line
+
+
+def test_switching_back_to_ust_asks_for_the_spot_settlement_date_again(
+    server_url, page
+) -> None:
+    """Issue #217 lifecycle cleanup, the other direction: the value cleared on
+    the way to US_CORPORATE is not restored on the way back. UST's own
+    workflow asks for the Spot Settlement Date exactly as a fresh ticket does,
+    and derives once it is entered."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: page.is_visible("#s490-parity-fields"))
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+
+    # Nothing restored: the field is empty and UST asks for it, as today.
+    assert page.input_value("#s490-spot-settlement-date-input") == ""
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+        "spot_settlement_date"
+    ] is None
+    assert page.is_visible("#s490-spot-settlement-row") is True
+    _wait_until(
+        lambda: "Enter a Spot Settlement Date" in page.text_content("#s490-parity-status")
+    )
+
+    # Entered again, the normal UST derivation runs and fills the Forward.
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: page.is_visible("#s490-parity-fields"))
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["spot_settlement_date"] == _SPOT_SETTLEMENT_DATE
+    assert draft["forward_clean_price_input"]["source_system"] == "SHIORI_DERIVED_S490"
+    _wait_until(lambda: page.input_value("#forward-price-input") != "")
+
+
+def _load_corporate_admissible_bond(page, server_url: str) -> None:
+    """The UST-shaped fixture bond, carrying the structural evidence
+    `US_CORPORATE` requires -- otherwise selecting that profile refuses the
+    product outright and disables every Advanced control, which is correct
+    behaviour and not what these tests are about."""
+
+    page.goto(f"{server_url}/")
+    _load_bloomberg_bond(
+        page,
+        response=_treasury_lookup_response(
+            bond_master={
+                **_TREASURY_BOND_MASTER,
+                "coupon_type": "FIXED",
+                "inflation_linked_flag": False,
+                "convertible_flag": False,
+                "maturity_refund_type": "AT MATURITY",
+            },
+            acquired_at="2026-08-12T20:00:00+08:00",
+        ),
+    )
+    _fill_trade_group(page)
+    page.fill("#volatility-input", "0.03395")
+    _fill_advanced_overrides(page, settlement_dates=False)
+
+
+def test_a_corporate_ticket_fills_both_settlement_dates_itself(server_url, page) -> None:
+    """Issue #217, the workflow Eddy asked for: Expiry, Delivery Delay, and
+    Shiori fills the two settlement dates -- the trader types neither.
+
+    Under the owner policy for `US_CORPORATE`: Forward Settlement = Expiry + 1
+    U.S. bond-market business day, Option Settlement = Forward Settlement.
+    Not the cash bond's T+2, and not read off the Delivery Delay either --
+    recording a Delivery Delay of 2 moves neither date.
+    """
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+
+    # Both dates fill themselves, in Advanced, from the approved policy.
+    _wait_until(lambda: page.input_value("#forward-settlement-date-input") != "")
+    forward_settlement = page.input_value("#forward-settlement-date-input")
+    option_settlement = page.input_value("#option-settlement-date-input")
+    assert option_settlement == forward_settlement
+    # _set_expiry's default local expiry is 2026-10-20 (a Tuesday): T+1, not T+2.
+    assert forward_settlement == "2026-10-21"
+
+    # The trade-input copies of the two dates are not offered: nothing for
+    # the trader to type, and no second control bound to the same path.
+    assert page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True
+    assert page.eval_on_selector("#adv-forward-settlement-row", "el => el.hidden") is False
+
+    # Delivery Delay is on the ticket, with provenance, and derives nothing.
+    assert page.eval_on_selector("#delivery-delay-row", "el => el.hidden") is False
+    assert "Not recorded" in page.text_content("#prov-delivery-delay")
+    page.fill("#delivery-delay-input", "2")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        == 2
+    )
+    assert "MANUAL_TRADER_ENTRY" in page.text_content("#prov-delivery-delay")
+    assert page.input_value("#forward-settlement-date-input") == "2026-10-21"
+    assert page.input_value("#option-settlement-date-input") == "2026-10-21"
+
+    # Recorded in the audit log as the trader's own value, with its real reason.
+    (record,) = [
+        entry
+        for entry in page.evaluate("() => window.__shioriTestOverrideProvenance()")
+        if entry["path"] == "bond_option.settlement_lag_days"
+    ]
+    assert record["value"] == "2"
+    assert "derives neither settlement date" in record["reason_not_sourced"]
+
+    # A mistyped negative Delivery Delay is read as nothing, not sent on to
+    # fail the whole case on a field meant to be optional and inert -- but
+    # not in silence: the trader is told the entry was not recorded, and why.
+    page.fill("#delivery-delay-input", "-3")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        is None
+    )
+    assert "not a whole, non-negative number" in page.text_content("#prov-delivery-delay")
+    assert page.get_attribute("#delivery-delay-input", "aria-invalid") == "true"
+
+    # The Delivery Delay is a term of this ticket, not of the market: a
+    # market switch clears the settlement dates, but keeps what was recorded.
+    page.fill("#delivery-delay-input", "1")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        == 1
+    )
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    assert page.input_value("#delivery-delay-input") == "1"
+    assert (
+        page.evaluate("() => window.__shioriTestGetCurrentDraft()")["bond_option"][
+            "settlement_lag_days"
+        ]
+        == 1
+    )
+    assert "MANUAL_TRADER_ENTRY" in page.text_content("#prov-delivery-delay")
+
+
+def test_the_trade_section_dates_wait_for_a_market_to_be_selected(server_url, page) -> None:
+    """Issue #217 review: "no market selected yet" is not "a market without
+    an approved rule". Until the trader picks one, the Trade-section copies of
+    the two settlement dates are not offered -- anything typed there would be
+    cleared by the selection, under a note that would not be true of it."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.evaluate(
+        """() => {
+            const select = document.getElementById("convention-profile-select");
+            select.value = "";
+            select.dispatchEvent(new Event("change"));
+        }"""
+    )
+    _wait_until(lambda: _draft_convention_profile(page) is None)
+    assert page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True
+    assert page.eval_on_selector("#delivery-delay-row", "el => el.hidden") is False
+
+
+def test_a_market_without_an_approved_policy_owns_its_dates_in_the_trade_section(
+    server_url, page, monkeypatch
+) -> None:
+    """The fail-closed path, kept covered after `US_CORPORATE` got its policy.
+
+    Withdrawing the approval stands in for any market that has none (today
+    `GERMAN_GOVT`). The record is one shared object, so the resolver and the
+    server's published list both see the withdrawal. Then the two dates are
+    trade inputs, shown in the Trade section, with no Advanced duplicate --
+    and a market switch hands them back to a market that does derive.
+    """
+
+    monkeypatch.delitem(
+        convention_profile_module.APPROVED_EXPIRY_TO_SETTLEMENT_BUSINESS_DAYS,
+        "US_CORPORATE",
+    )
+
+    _load_corporate_admissible_bond(page, server_url)
+    # UST: derived in Advanced, and the trade-input copies are not there.
+    assert page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    _wait_until(lambda: page.eval_on_selector("#trade-timing-block", "el => el.hidden") is False)
+
+    assert page.eval_on_selector("#adv-forward-settlement-row", "el => el.hidden") is True
+    assert page.eval_on_selector("#adv-option-settlement-row", "el => el.hidden") is True
+    assert page.input_value("#trade-forward-settlement-date-input") == ""
+    assert page.input_value("#trade-option-settlement-date-input") == ""
+    assert "no approved rule" in page.text_content("#trade-timing-note")
+
+    # The two dates are separate inputs and may differ.
+    page.fill("#trade-forward-settlement-date-input", "2026-10-22")
+    page.fill("#trade-option-settlement-date-input", "2026-10-23")
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "option_settlement_date"
+        ]
+        == "2026-10-23"
+    )
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["forward_settlement_date"] == "2026-10-22"
+
+    # Back to UST: the derivation takes over again and genuinely refills both
+    # dates -- clearing the inputs while their paths stayed marked as the
+    # trader's own once left UST with nothing to re-derive into.
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    _wait_until(lambda: page.eval_on_selector("#trade-timing-block", "el => el.hidden") is True)
+    _wait_until(lambda: page.input_value("#forward-settlement-date-input") != "")
+    _wait_until(lambda: page.input_value("#option-settlement-date-input") != "")
+    assert page.input_value("#trade-forward-settlement-date-input") == ""
+    assert "forward_settlement_date" not in page.evaluate(
+        "() => window.__shioriTestTraderOverriddenPaths()"
+    )

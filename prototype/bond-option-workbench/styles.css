@@ -329,7 +329,8 @@ html, body {
    so they need the same explicit override. */
 #s490-parity-fields[hidden],
 #s490-parity-method-row[hidden],
-#s490-parity-trace[hidden] {
+#s490-parity-trace[hidden],
+#s490-spot-settlement-row[hidden] {
   display: none;
 }
 .s490-parity .derived-source { margin-top: 4px; margin-bottom: 4px; }
@@ -635,6 +636,18 @@ select.control:focus { border-color: var(--blue); }
 .curve-row-remove:hover { color: #b3401f; }
 .curve-actions { margin-bottom: 8px; }
 .btn.btn-small { height: 30px; padding: 0 14px; font-size: 13px; }
+/* Issue #217, found in workstation UAT: `.btn`'s explicit `display:
+   inline-flex` wins over the UA `[hidden] { display: none }` rule (the same
+   class of bug the overrides near the top of this file fix), so the Forward
+   panel's "Reset / Use Shiori Derived" action stayed on screen while its
+   `hidden` property read true -- including on a market with no derived
+   Forward to hand the field back to. The S490 panel's Retry had the same
+   defect, and was on screen even for a market the panel says S490 does not
+   apply to. */
+#forward-use-derived-btn[hidden],
+#s490-parity-retry-btn[hidden] {
+  display: none;
+}
 
 /* Exact, blocking curve-coverage state -- never a soft warning that still
    lets a fabricated discount factor through. */
@@ -714,6 +727,7 @@ select.control:focus { border-color: var(--blue); }
 .expiry-controls { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
 .expiry-offset { text-align: center; }
 .derived-source.is-invalid { color: #b3401f; }
+.field-provenance.is-invalid { color: #b3401f; }
 
 /* ---------- Market inputs review ---------- */
 /* Forward, Vol and Discounting each get one review row stating its real
