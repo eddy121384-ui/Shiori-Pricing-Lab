@@ -5874,6 +5874,15 @@
     els.tradeOptionSettlementDate.value = "";
     els.forwardSettlementDate.value = "";
     els.optionSettlementDate.value = "";
+    // Issue #217: the Spot Settlement Date is an input of the S490 derivation
+    // only. On a market that has none it is not part of the active Forward
+    // contract, so it leaves the case here rather than riding along hidden
+    // into the corporate run and its export. Nothing keeps a copy: switching
+    // back to a market that derives asks for it again, exactly as a fresh
+    // ticket does.
+    if (explicitForwardContractOnly()) {
+      els.s490SpotSettlementDate.value = "";
+    }
     // ...and the override marks go with the values. Clearing the inputs while
     // the paths stayed TRADER_OVERRIDE left the incoming market's derivation
     // with nothing to refill -- on UST both settlement dates ended up

@@ -1571,9 +1571,12 @@ def test_the_s490_retry_action_is_never_rendered_for_a_corporate_ticket(
     assert "The S490 repo-carry Forward is a U.S. Treasury model" in status
     assert "neither of which is approved for this market" in status
 
-    # Back to UST: the derivation runs again, succeeds, and Retry is not shown.
+    # Back to UST: the Spot Settlement Date left the case on the way to
+    # US_CORPORATE, so UST asks for it again; entered, the derivation runs,
+    # succeeds, and Retry is not shown.
     page.select_option("#convention-profile-select", "UST")
     _wait_until(lambda: _draft_convention_profile(page) == "UST")
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
     _wait_until(lambda: page.is_visible("#s490-parity-fields"))
     assert attempts["n"] >= 2
     assert page.is_visible("#s490-parity-retry-btn") is False
@@ -1659,6 +1662,102 @@ def test_a_corporate_s490_panel_is_not_rendered_as_a_default_forward_workflow(
     _wait_until(lambda: _s490_title(page) == _S490_TITLE_DERIVED)
     assert page.is_visible("#s490-spot-settlement-row") is True
     assert page.is_visible("#s490-parity-mechanics-note") is True
+
+
+def _find_key(value, key: str) -> list:
+    """Every value stored under ``key`` anywhere in a JSON document."""
+
+    found = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == key:
+                found.append(v)
+            found.extend(_find_key(v, key))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_key(item, key))
+    return found
+
+
+def test_a_corporate_run_carries_and_exports_no_stale_ust_spot_settlement_date(
+    server_url, page
+) -> None:
+    """Issue #217 lifecycle cleanup: the Spot Settlement Date is an input of the
+    S490 derivation only, so it is not part of a US_CORPORATE ticket's Forward
+    contract. Switching UST -> US_CORPORATE takes it out of the case, and the
+    corporate run's export carries no stale UST tS."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(
+        lambda: page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+            "spot_settlement_date"
+        ]
+        == _SPOT_SETTLEMENT_DATE
+    )
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+        "spot_settlement_date"
+    ] is None
+    assert page.input_value("#s490-spot-settlement-date-input") == ""
+
+    # Price the corporate ticket from its explicit Forward, then export it.
+    page.fill("#forward-price-input", "98.75")
+    _wait_for_price_enabled(page)
+    page.click("#price-btn")
+    _wait_until(lambda: page.inner_text("#status-text") == "Draft priced")
+
+    with page.expect_download() as json_download:
+        page.click("#download-json-btn")
+    exported = json.loads(open(json_download.value.path(), encoding="utf-8").read())
+    assert exported["forward_source"] == "TRADER_FORWARD_OVERRIDE"
+    spot_values = _find_key(exported, "spot_settlement_date")
+    assert spot_values, "the export no longer reports tS at all -- update this test"
+    assert all(value is None for value in spot_values), spot_values
+
+    with page.expect_download() as md_download:
+        page.click("#download-markdown-btn")
+    markdown = open(md_download.value.path(), encoding="utf-8").read()
+    (ts_line,) = [line for line in markdown.splitlines() if "Spot settlement date (tS)" in line]
+    assert _SPOT_SETTLEMENT_DATE not in ts_line
+
+
+def test_switching_back_to_ust_asks_for_the_spot_settlement_date_again(
+    server_url, page
+) -> None:
+    """Issue #217 lifecycle cleanup, the other direction: the value cleared on
+    the way to US_CORPORATE is not restored on the way back. UST's own
+    workflow asks for the Spot Settlement Date exactly as a fresh ticket does,
+    and derives once it is entered."""
+
+    _load_corporate_admissible_bond(page, server_url)
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: page.is_visible("#s490-parity-fields"))
+
+    page.select_option("#convention-profile-select", "US_CORPORATE")
+    _wait_until(lambda: _draft_convention_profile(page) == "US_CORPORATE")
+    page.select_option("#convention-profile-select", "UST")
+    _wait_until(lambda: _draft_convention_profile(page) == "UST")
+
+    # Nothing restored: the field is empty and UST asks for it, as today.
+    assert page.input_value("#s490-spot-settlement-date-input") == ""
+    assert page.evaluate("() => window.__shioriTestGetCurrentDraft()")[
+        "spot_settlement_date"
+    ] is None
+    assert page.is_visible("#s490-spot-settlement-row") is True
+    _wait_until(
+        lambda: "Enter a Spot Settlement Date" in page.text_content("#s490-parity-status")
+    )
+
+    # Entered again, the normal UST derivation runs and fills the Forward.
+    page.fill("#s490-spot-settlement-date-input", _SPOT_SETTLEMENT_DATE)
+    _wait_until(lambda: page.is_visible("#s490-parity-fields"))
+    draft = page.evaluate("() => window.__shioriTestGetCurrentDraft()")
+    assert draft["spot_settlement_date"] == _SPOT_SETTLEMENT_DATE
+    assert draft["forward_clean_price_input"]["source_system"] == "SHIORI_DERIVED_S490"
+    _wait_until(lambda: page.input_value("#forward-price-input") != "")
 
 
 def _load_corporate_admissible_bond(page, server_url: str) -> None:
