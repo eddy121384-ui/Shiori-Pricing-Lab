@@ -22,9 +22,9 @@ Rules for AI coding agents working in this repository:
 `@codex review`
 If the agent lacks permission to post the comment, report that the Codex review request remains pending.
 
-13. Codex is an independent reviewer. Implementation agents may address valid Codex BLOCKER or MATERIAL findings on the same branch and PR, then validate, push, post a new round summary, and request Codex review again. Do not perform unrelated cleanup while addressing review findings.
+13. Codex review priorities map to repository handling categories as follows: P0/P1 = BLOCKER, P2 = MATERIAL, P3 = MINOR. Implementation agents must address valid BLOCKER or MATERIAL findings on the same branch and PR, then validate, push, post a new round summary, and request Codex review again. Do not perform unrelated cleanup while addressing review findings.
 
-14. MINOR-only review findings do not require automatic churn unless they affect correctness or Eddy explicitly requests the change.
+14. MINOR-only (P3) review findings do not require automatic churn unless they affect correctness or Eddy explicitly requests the change.
 
 15. A RED methodology, pricing, schema, validation, or fallback decision must stop the review loop and return control to Eddy/Sophira. Agents must not guess the decision.
 
