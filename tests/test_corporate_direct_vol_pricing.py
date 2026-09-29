@@ -7,8 +7,10 @@ One narrow slice, and the tests here exist to pin its two halves:
   export that UST already uses, from an explicit trader Forward Clean Price
   and a direct PRICE_VOL;
 - what it may *not* do -- reach the S490 repo-carry Forward (a U.S. Treasury
-  model), or the Historical-Yield-derived volatility path, by any route
-  including a direct API payload that never went near the browser.
+  model) by any route, including a direct API payload that never went near
+  the browser. (The Historical-Yield-derived volatility path this slice kept
+  closed was opened by Issue #218 on the reconciled 30/360 BondBasis
+  convention; see the one test below that records the handover.)
 
 The bond is `US61760QRP18`, the plain USD corporate bullet Issue #216
 admitted on real Bloomberg workstation evidence: fixed 5.15 semi-annual,
@@ -32,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from shiori_pricing_lab.app import standalone_option_historical_vol_source as source_module
 from shiori_pricing_lab.app import standalone_option_workbench_server as server_module
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_json,
@@ -429,28 +432,36 @@ def test_a_corporate_without_an_explicit_forward_is_blocked_and_nothing_is_subst
     assert "forward_clean_price_per_100" in str(excinfo.value)
 
 
-def test_the_historical_yield_vol_source_stays_closed_for_a_corporate(monkeypatch):
-    """Issue #217 volatility scope, enforced where a direct payload meets it.
+def test_the_historical_yield_vol_source_admits_a_corporate_before_acquisition(monkeypatch):
+    """Issue #218 opened what Issue #217 kept closed, and nothing else.
 
-    The accepted source for this slice is the direct PRICE_VOL the tests
-    above price from. `HISTORICAL_YIELD_VOL_MO` is Issue #218's, and a case
-    asking for it here is refused at the workbench composition boundary --
-    by the duration producer's own profile allowlist, which this issue does
-    not touch and the generic Black-76 engine knows nothing about.
+    Issue #217 refused ``HISTORICAL_YIELD_VOL_MO`` for this market at the
+    duration producer's profile allowlist, before any Yield series was
+    acquired. Issue #218 approved ``US_CORPORATE`` on its reconciled 30/360
+    BondBasis convention, so every date-only gate now admits the case and the
+    first thing it meets is the #196 loader -- stubbed here to stop there,
+    so no Bloomberg session is opened and the call itself is the evidence.
+    The full corporate chain is priced end to end in the historical-source
+    server tests."""
 
-    Proven to happen *before* acquisition, not after: the #196 Yield loader
-    is never called. Hiding the option in the browser would not have shown
-    that, which is the point."""
+    class _ReachedTheLoader(Exception):
+        pass
 
     calls: list = []
 
-    def _never_loaded(**kwargs):
+    def _stop_at_the_loader(**kwargs):
         calls.append(kwargs)
-        raise AssertionError("the Yield series must not be acquired for this case")
+        raise _ReachedTheLoader
 
-    monkeypatch.setattr(server_module, "load_bloomberg_bond_yield_history", _never_loaded)
+    monkeypatch.setattr(source_module, "load_bloomberg_bond_yield_history", _stop_at_the_loader)
 
     case = _corporate_case()
+    case["volatility_input"] = {
+        **case["volatility_input"],
+        "volatility": None,
+        "volatility_basis": "EQUIVALENT_PRICE_VOL",
+        "source_system": "HISTORICAL_YIELD_VOL_MO",
+    }
     case["historical_yield_vol_request"] = {
         "bond_identifier": _CORPORATE_ISIN,
         "yield_field": "YLD_YTM_MID",
@@ -459,13 +470,11 @@ def test_the_historical_yield_vol_source_stays_closed_for_a_corporate(monkeypatc
         "field_unit": "PERCENT",
     }
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(_ReachedTheLoader):
         historical_equivalent_price_vol_preview(case)
 
-    message = str(excinfo.value)
-    assert "US_CORPORATE" in message
-    assert "HISTORICAL_YIELD_VOL_MO" in message
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0]["identifier"] == f"/isin/{_CORPORATE_ISIN}"
 
 
 # --- Everything outside the slice stays closed --------------------------------

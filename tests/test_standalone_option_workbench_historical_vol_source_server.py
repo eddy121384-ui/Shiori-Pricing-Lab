@@ -39,6 +39,7 @@ import shiori_pricing_lab.app.standalone_option_historical_vol_source as source_
 import shiori_pricing_lab.app.standalone_option_workbench as workbench_module
 import shiori_pricing_lab.app.standalone_option_workbench_server as server_module
 import shiori_pricing_lab.data.historical_yield_volatility as statistic_module
+import shiori_pricing_lab.pricing.bli_bond_modified_duration as duration_module
 from shiori_pricing_lab.app.standalone_option_run_export import (
     render_standalone_run_as_markdown,
 )
@@ -55,7 +56,11 @@ from shiori_pricing_lab.data.bloomberg_bond_yield_history import (
     BloombergBondYieldHistory,
     BondYieldObservation,
 )
+from shiori_pricing_lab.pricing.bli_bond_modified_duration import (
+    calculate_bond_modified_duration,
+)
 from shiori_pricing_lab.pricing.bli_quantlib_bond_adapter import is_quantlib_available
+from shiori_pricing_lab.pricing.treasury_futures_implied_yield import IrregularFirstCoupon
 
 _requires_quantlib = pytest.mark.skipif(
     not is_quantlib_available(), reason="QuantLib is not installed in this environment"
@@ -1120,12 +1125,17 @@ def test_readiness_refuses_a_registered_profile_the_duration_does_not_support(
 ) -> None:
     """Registered is not the same as duration-supported.
 
-    There are two gates, and readiness checked only the first:
-    ``US_CORPORATE`` resolves through ``get_convention_profile`` and is then
-    refused by the duration producer's own allowlist -- after the Yield
-    series has been fetched (Codex review, PR #215).
+    There are two gates, and readiness checked only the first: a registered
+    profile resolves through ``get_convention_profile`` and is then refused
+    by the duration producer's own allowlist -- after the Yield series has
+    been fetched (Codex review, PR #215). Every registered profile has an
+    approved duration convention since Issue #218, so the allowlist is
+    narrowed here to keep the gate itself covered.
     """
 
+    monkeypatch.delitem(
+        duration_module._APPROVED_DURATION_DAY_COUNT_BY_PROFILE, "US_CORPORATE"
+    )
     calls = _stub_yield_loader(monkeypatch)
     _no_live_curve(monkeypatch)
     case = _historical_case(convention_profile="US_CORPORATE")
@@ -1139,6 +1149,111 @@ def test_readiness_refuses_a_registered_profile_the_duration_does_not_support(
     assert price_status == 400
     assert "US_CORPORATE" in priced["error"]
     assert calls == []
+
+
+_CORPORATE_ISIN = "US61760QRP18"
+
+# Issue #216's confirmed Bloomberg terms for the plain USD corporate bullet,
+# as the typed reference record the Advanced-field resolver produces from
+# them -- the same record Issue #217's corporate pricing tests use.
+_CORPORATE_BOND = {
+    "isin": _CORPORATE_ISIN,
+    "issuer": "Issue #218 UAT security (issuer not asserted)",
+    "currency": "USD",
+    "coupon": 0.0515,
+    "coupon_frequency": "SEMI_ANNUAL",
+    "maturity_date": "2040-02-10",
+    "issue_date": "2025-02-10",
+    "day_count": "THIRTY_360",
+    "callable_flag": False,
+    "sinkable_flag": False,
+    "bond_type": "FIXED_COUPON_BULLET",
+    "ex_dividend_days": 0,
+    "first_coupon_date": "2025-08-10",
+    "last_coupon_date": "2039-08-10",
+    "status": "ACTIVE",
+}
+
+
+def _corporate_historical_case(**overrides) -> dict:
+    """The historical case, re-pointed at the corporate bullet (Issue #218).
+
+    The quote, curve and option terms stay the synthetic case's own; the
+    Forward is the explicit one, which is the only Forward source Issue #217
+    opens for this market.
+    """
+
+    case = _historical_case(convention_profile="US_CORPORATE")
+    case["bond_reference_data_universe"] = [dict(_CORPORATE_BOND)]
+    case["bond_option"] = {**case["bond_option"], "underlying_isin": _CORPORATE_ISIN}
+    case["bond_quote"] = {**case["bond_quote"], "isin": _CORPORATE_ISIN}
+    case["forward_clean_price_input"] = {
+        **case["forward_clean_price_input"],
+        "source_system": "TRADER_FORWARD_OVERRIDE",
+    }
+    case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY] = {
+        **case[source_module.HISTORICAL_YIELD_VOL_REQUEST_KEY],
+        "bond_identifier": _CORPORATE_ISIN,
+    }
+    case.update(overrides)
+    return case
+
+
+@_requires_quantlib
+@pytest.mark.parametrize("basis", ["DIRTY", "CLEAN"])
+def test_a_us_corporate_ticket_prices_from_the_historical_source(
+    server_url, monkeypatch, basis
+) -> None:
+    """Issue #218: the corporate bullet reaches Black-76 through the one chain.
+
+    Same loader, same statistic, same duration producer on the profile's
+    30/360 BondBasis leg, same ``sigma_P = |D_B| x sigma_hist_abs``.
+    """
+
+    calls = _stub_yield_loader(monkeypatch)
+    _no_live_curve(monkeypatch)
+    case = _corporate_historical_case(bond_option_price_basis=basis)
+
+    ready_status, ready = _post_json(f"{server_url}{_VALIDATE_ROUTE}", case)
+    status, payload = _post_json(f"{server_url}{_PRICE_ROUTE}", case)
+
+    assert ready_status == 200
+    assert ready["ready"] is True, ready
+    assert status == 200, payload
+    assert calls[-1]["identifier"] == f"/isin/{_CORPORATE_ISIN}"
+    display = payload["display"]
+    provenance = display["historical_volatility_source"]
+    assert display["status"] == "SUCCESS", display.get("errors")
+    assert provenance["price_basis"] == basis
+    assert provenance["duration_convention_profile"] == "US_CORPORATE"
+    assert provenance["duration_day_count"] == "THIRTY_360"
+    # tS is the cash bond's T+2 (Thursday 2026-07-02 -> Monday 2026-07-06
+    # over the Independence Day holiday), not the option-side lag of 1.
+    assert provenance["duration_settlement_date"] == "2026-07-06"
+
+    # The duration is the producer's own number, reproduced independently.
+    expected = calculate_bond_modified_duration(
+        security=provenance["security"],
+        convention_profile="US_CORPORATE",
+        price_basis=basis,
+        clean_price_per_100=case["bond_quote"]["clean_price_per_100"],
+        maturity_date=date(2040, 2, 10),
+        # The source's own one decimal -> percent conversion, not a retyped 5.15.
+        coupon_percent=_CORPORATE_BOND["coupon"] * 100.0,
+        pricing_timestamp=case["pricing_timestamp"],
+        calculated_at="2026-07-01T00:00:00+00:00",
+        schedule=IrregularFirstCoupon(date(2025, 2, 10), date(2025, 8, 10)),
+    )
+    assert provenance["modified_duration"] == expected.modified_duration
+    assert provenance["duration_accrued_interest_per_100"] == (
+        expected.accrued_interest_per_100
+    )
+    # And the conversion is the approved one, unchanged.
+    assert provenance["equivalent_price_vol"] == pytest.approx(
+        provenance["absolute_modified_duration"]
+        * provenance["historical_yield_vol_decimal_annual"]
+    )
+    assert display["assumptions"]["price_volatility"] == provenance["equivalent_price_vol"]
 
 
 @pytest.mark.parametrize(
