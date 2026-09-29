@@ -132,9 +132,13 @@ and settlement 2027-03-31 at clean 86.390000 yields exactly 6.749022, which
 this construction reproduces and the ACT/ACT, European and
 days-to-next-coupon candidates do not. The evidence covers a regular coupon
 grid whose every 30/360 period is exactly ``360 / coupons_per_year`` days, so
-that is all this leg accepts: a 30/360 period of any other length, and an
-irregular first coupon on 30/360 (the ICMA frame counts actual days), fail
-closed rather than extrapolate.
+that is all this leg accepts: a 30/360 period of any other length fails
+closed rather than extrapolate. So does an irregular first coupon *while it
+still prices* -- settlement before the first coupon, where the ICMA frame
+counts actual days. Once settlement is past the first coupon that period
+carries no cashflow, accrual or exponent, so the supplied schedule is
+provenance only and the maturity-anchored grid prices the bond, exactly as
+on ACT/ACT (every remaining period is still held to 360 / coupons_per_year).
 """
 
 from __future__ import annotations
@@ -832,7 +836,12 @@ def _regular_period_days(
 
 
 def _require_first_coupon_frame_day_count(day_count: DayCount) -> None:
-    """The ICMA first-coupon frame counts actual days; refuse any other count."""
+    """The ICMA first-coupon frame counts actual days; refuse any other count.
+
+    Called only when a frame exists, i.e. settlement is before the first
+    coupon of an irregular schedule. A seasoned bond never reaches it: its
+    first period prices nothing.
+    """
 
     if day_count is not DayCount.ACT_ACT_BOND:
         raise TreasuryFuturesYieldError(

@@ -572,8 +572,8 @@ def validate_bond_modified_duration_inputs(
     # review, PR #215). The primitive's own guard, called rather than
     # restated.
     # The day count's own date-only refusals (a 30/360 period outside the
-    # reconciled length, an irregular first coupon off ACT/ACT) belong here
-    # for the same reason.
+    # reconciled length, or settlement inside an irregular first coupon period
+    # off ACT/ACT) belong here for the same reason.
     try:
         require_two_remaining_coupons(
             settlement, maturity, coupons_per_year=coupons_per_year, schedule=schedule

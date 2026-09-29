@@ -610,6 +610,40 @@ def test_a_us_corporate_duration_is_not_the_act_act_number():
     )
 
 
+@pytest.mark.parametrize(
+    "accrual_start", [date(2024, 11, 20), date(2025, 3, 20), date(2025, 2, 10)]
+)
+def test_a_seasoned_us_corporate_with_an_irregular_first_coupon_prices_on_the_regular_grid(
+    accrual_start,
+):
+    # Once settlement is past the first coupon, that period carries no
+    # cashflow, accrual or exponent: a long (2024-11-20) or short (2025-03-20)
+    # first coupon changes nothing, and the schedule is provenance only --
+    # the same rule ACT/ACT already applies to a seasoned bond.
+    pytest.importorskip("QuantLib")
+    schedule = IrregularFirstCoupon(accrual_start, date(2025, 8, 10))
+    seasoned = _corporate_duration(schedule=schedule)
+    regular = _corporate_duration(schedule=None)
+
+    assert seasoned.schedule_accrual_start == accrual_start
+    assert seasoned.modified_duration == regular.modified_duration
+    assert seasoned.base_yield_percent == regular.base_yield_percent
+    assert seasoned.accrued_interest_per_100 == regular.accrued_interest_per_100
+    assert round(seasoned.base_yield_percent, 6) == 6.749022
+
+
+def test_an_irregular_first_coupon_still_pricing_is_refused_on_us_corporate():
+    # The other side of the same rule: settlement (t0 2025-05-08 -> T+2
+    # 2025-05-12) is *before* the 2025-08-10 first coupon, so the irregular
+    # period prices, and the ICMA frame counts actual days.
+    pytest.importorskip("QuantLib")
+    with pytest.raises(BLIBondDurationError, match="ACT/ACT ICMA"):
+        _corporate_duration(
+            pricing_timestamp="2025-05-08T16:00:00-04:00",
+            schedule=IrregularFirstCoupon(date(2025, 3, 20), date(2025, 8, 10)),
+        )
+
+
 def test_a_us_corporate_month_end_grid_is_refused_before_any_price():
     # 31 Aug / 28 Feb coupons: a 178-day 30/360 period, outside the reconciled
     # evidence. Refused by the date-only prologue -- the same function the
