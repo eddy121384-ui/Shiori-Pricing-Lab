@@ -13,7 +13,7 @@ This issue: #223 — ARCHITECTURE / REPOSITORY RESEARCH ONLY.
 | Non-goals | No production C++ pricing, no C++ skeleton, no Bloomberg plumbing rewrite, no methodology changes |
 
 Methodology authority: Sophira (architecture/methodology scope, RED decisions, review interpretation).
-Final merge authority: Eddy. Merge gate: `READY TO MERGE — 等待 Eddy 明確批准`.
+Final merge authority: Eddy. Current status: `PENDING SOPHIRA / CODEX REVIEW — DO NOT MERGE`. The final gate `READY TO MERGE — 等待 Eddy 明確批准` applies only after scope, latest HEAD, validation, PR body, and Codex review are all accepted.
 Independent reviewer: Codex.
 Existing bond-option product line: STABLE — do not refactor, rename, migrate, or rewrite validated behavior in this slice.
 
@@ -64,7 +64,7 @@ No interpolation, bootstrap, DF-from-zero, pricing, or persistence in either loa
 | `data/vol_surface_grid.py` | Issue #194 reshape stored ATM surface → `Expiry x Swap Tenor` grid for Markets view | Pure permutation, stored order, `None` preserved; refuses non-ATM/spread/holes |
 | `data/vcub_normal_vol_resolver.py` (`resolve_vcub_normal_vol`) | Issue #188: one confirmed surface → in-grid normal vol `sigma_vcub`. **Stops at `sigma_vcub`**; imports nothing from `pricing`/`products` by construction | Inputs: surface + `VCUBVolQuery` + caller-supplied `VCUBGridCoordinates`; unit from stated `volatility_unit` (`1bp=1e-4`), space from stated `vol_type`, smile model stated (`PWL` implemented, `SABR`/`None` refused), `ATM+spread` reconstruction, PWL smile + bilinear, `FAIL_CLOSED` extrapolation, unresolved-column block |
 
-### 2.3 Vanilla IRS reference core (P, deterministic — the port boundary)
+### 2.3 Vanilla IRS reference core (P, deterministic — REFERENCE / ADAPTER SOURCE, not canonical)
 
 | Module | What it does | Key contract |
 |---|---|---|
@@ -76,7 +76,7 @@ No interpolation, bootstrap, DF-from-zero, pricing, or persistence in either loa
 | `products/swaps.py` (`InterestRateSwap`, `OvernightIndexedSwap`), `products/legs.py` (`FixedLeg`, `FloatingLeg`), `products/deposit_leg.py` (`DepositLeg` future BLI wrapper) | Product schemas only; no curves/fixings/PV | IRS requires `reset_frequency`; OIS requires daily-compounded/averaged + `None`/`DAILY` reset |
 | `data/snapshot.py` (`MarketDataSnapshot`), `valuation/context.py` (`ValuationContext`) | Legacy vanilla snapshot (DataFrame-of-rates) + the one allowed data↔pricing bridge (`build_curve`) | Structurally unrelated to `BLIMarketDataSnapshot` — must not be conflated |
 
-### 2.4 BLI shared curve chain (P, pure — reuse, do not duplicate)
+### 2.4 BLI shared curve chain (P, pure — LEAVE UNTOUCHED / COMPATIBILITY BOUNDARY, not canonical for new Rates)
 
 `pricing/bli_curve_selector.py::select_curve_points_by_purpose` (structural `(currency, purpose)` filter, never reads rates) → `pricing/bli_zero_curve_nodes.py::build_continuous_zero_curve_nodes` (`CONTINUOUS_ZERO_RATE` gate, per-row date-vs-tenor coordinate, no-fallback without `as_of_date`) → `pricing/bli_zero_rate_interpolation.py::interpolate_continuous_zero_rate` (piecewise-linear, in-range only) → `pricing/bli_discount_factor.py::continuous_discount_factor` (`exp(−r·T)`) → composed by `pricing/bli_curve_discount_factor.py::discount_factor_from_continuous_zero_curve`. Tenor parsing only via `pricing/bli_curve_tenor.py::tenor_to_year_fraction`; valuation-time only via `pricing/bli_valuation_time.py::year_fraction_to_expiry`. Only the two `OPTION_DISCOUNT_CURVE` paths pass `as_of_date=valuation_date`; `bli_forward_clean_price.py` (`BOND_REFERENCE_CURVE`) is deliberately not wired.
 
@@ -107,13 +107,22 @@ Non-Rates tools present but out of scope: `bloomberg_bond_yield_*`, `bloomberg_t
 
 ## 4. Reuse map — what the C++ engine reuses vs owns
 
-Principle (from #222 + `docs/08`): Python owns UI, orchestration, Bloomberg acquisition, normalization, persistence, research, validation/UAT tooling. C++ owns deterministic pricing math on resolved explicit inputs. No live Bloomberg fetch inside pricing.
+Principle (from #222 + `docs/08`): Python owns UI, orchestration, Bloomberg acquisition, normalization, persistence, research, validation/UAT tooling. The C++ Rates MODULE owns deterministic trade/convention resolution plus pricing math. The C++ PRICING KERNEL consumes fully resolved inputs. No live Bloomberg fetch inside pricing.
+
+The C++ Rates module contains two logically separate layers:
+
+1. Convention / Trade Resolution (`SwapTrade + ConventionSet -> ResolvedSwap`)
+2. Pricing Kernel (`ResolvedSwap + MarketSnapshot + ModelConfig -> results`)
+
+Python must not become the authoritative schedule-generation implementation for new Rates products. Python may serialize, persist, display, replay, and orchestrate `ResolvedSwap` objects. #224 owns the methodology contract for `SwapTrade -> ResolvedSwap`; #228 later implements the approved deterministic schedule/fixing/calendar primitives. No USD SOFR convention values are decided in this issue; RED-02 remains open.
 
 | Category | Decision | Items |
 |---|---|---|
-| REUSE AS-IS (Python, no C++ equivalent) | Bloomberg acquisition, transcription, canonical models, persistence, UI | Both curve loaders (§2.1) incl. shared DAPI helpers + 32-tenor universe; entire VCUB capture/template/OCR/screen-reader chain; `vcub_vol_surface_adapter`; `vol_surface` canonical model; `vol_surface_store` (SQLite); `vol_surface_grid`; acceptance/probe tools; `BLIMarketDataSnapshot` / legacy `MarketDataSnapshot` schemas; `ValuationContext`; product schemas (`swaps`, `legs`, `deposit_leg`); `engine.py` front-door protocol concept; `result.py` value-type concept |
-| REUSE VIA ADAPTER (existing Python output → versioned DTO → C++) | Curve/vol outputs cross the boundary as data, never as code | #490 `BLICurvePoint` rows (with verbatim `maturity_date`) → resolved zero/DF nodes; par-rate points → display only, never a pricing input; `CanonicalVolSurface` + `resolve_vcub_normal_vol` outputs (`sigma_vcub` + audit record) → vol DTO; IRS reference fixtures (`1506.79…` golden value, error table) → C++ regression gates |
-| OWN IN C++ (new, isolated, deterministic) | Pricing kernels + their pure math helpers, ported — not copy-pasted — against the anchors in §3.1 | Schedule generation (regular, no calendar/BDC first; stub/month-end fail-closed); day-count fractions; discount/forward math (compounding decided explicitly per §6); leg PV / NPV / par rate / annuity-PVBP / DV01; Black-76 / shifted-Black / Bachelier kernels (Phase 2+); Hull-White 1F calibration + Bermudan exercise (Phase 3+); range-accrual observation/barrier/fixing-probability kernels (Phase 4+). Pure helpers with no I/O are the only port candidates (`tenor_to_year_fraction` semantics, node build, interpolation, DF, year fractions) — each pinned by its Python test before porting |
+| LEAVE UNTOUCHED / COMPATIBILITY BOUNDARY (validated BLI contracts — not canonical for new Rates) | Expose data through adapters where appropriate; never modify or lock new Rates DTOs to these | `BLIMarketDataSnapshot` / `BLICurvePoint` semantics, bond-option product/request contracts (`BondOption`, `BLIStandaloneBondOptionRequest`), BLI curve-chain behavior (`bli_curve_selector`, `bli_zero_curve_nodes`, `bli_zero_rate_interpolation`, `bli_discount_factor`, `bli_curve_discount_factor`). See §7 |
+| REFERENCE / ADAPTER SOURCE (legacy IRS schemas — not canonical unless proven suitable unchanged) | Read and adapt; do not lock new Rates DTOs to these in #223 | Legacy `MarketDataSnapshot`, `RateCurve`, `InterestRateSwap` / `OvernightIndexedSwap`, `FixedLeg` / `FloatingLeg`, `DepositLeg`, `ValuationContext`, `pricing/schedule.py`, `pricing/engine.py` front-door concept, `pricing/result.py` value-type concept. Authoritative new Rates contracts remain owned by #224 (`SwapTrade` / `ConventionSet` / `ResolvedSwap`) and #225 (market/model/result contracts) |
+| REUSE AS-IS (Python, no C++ equivalent) | Bloomberg acquisition, transcription, canonical models, persistence, UI | Both curve loaders (§2.1) incl. shared DAPI helpers + 32-tenor universe; entire VCUB capture/template/OCR/screen-reader chain; `vcub_vol_surface_adapter`; `vol_surface` canonical model; `vol_surface_store` (SQLite); `vol_surface_grid`; acceptance/probe tools |
+| REUSE VIA ADAPTER (existing Python output → versioned DTO → C++) | Curve/vol outputs cross the boundary as data, never as code | #490 `BLICurvePoint` rows (with verbatim `maturity_date`) → resolved zero/DF nodes via adapter (not as the canonical new Rates curve contract); par-rate points → display only, never a pricing input; `CanonicalVolSurface` + `resolve_vcub_normal_vol` outputs (`sigma_vcub` + audit record) → vol DTO via adapter; IRS reference fixtures (`1506.79…` golden value, error table) → C++ regression gates |
+| OWN IN C++ (new, isolated, deterministic) | Resolution layer + pricing kernels, implemented after Gate A against approved contracts | C++ Convention / Trade Resolution: `SwapTrade + ConventionSet -> ResolvedSwap` per the #224 contract (implemented in #228). C++ Pricing Kernel on `ResolvedSwap`: discount/forward math (compounding decided explicitly per §6); leg PV / NPV / par rate / annuity-PVBP / DV01; Black-76 / shifted-Black / Bachelier kernels (Phase 2+); Hull-White 1F calibration + Bermudan exercise (Phase 3+); range-accrual observation/barrier/fixing-probability kernels (Phase 4+). Pure helpers with no I/O are the only port candidates — each pinned by its Python test before porting |
 | KEEP PYTHON-ONLY (must not move to C++) | Anything touching network, pixels, files, UI, or live credentials | `import blpapi` session/request/event handling; OCR/pixel geometry; SQLite open/read/write; Streamlit/workbench server; `//blp/*` discovery; DAPI host/port/service constants as live config |
 
 Anti-duplication rule: any proposal to duplicate an existing validated data contract (ticker grammar, field set, unit conversion, `BLICurvePoint` semantics, surface identity/fingerprint, store conflict semantics, resolver fail-closed rules) that is not strictly necessary **stops for review** per this issue's stop condition. This document proposes no such duplication.
@@ -125,26 +134,34 @@ Anti-duplication rule: any proposal to duplicate an existing validated data cont
 Authoritative detail (field-level schemas, curve/vol/trade/model/result representations) is deferred to #224 (conventions/resolved swap) and #225 (market/model/result contracts) and #226 (build/concurrency/caching/benchmarks). This issue locks only the boundary shape:
 
 ```text
-Existing Bloomberg / Shiori data layer (Python)
+Python acquisition / normalization / orchestration
         |
         v
-stable versioned DTO / JSON contract (explicit, fully resolved inputs)
+versioned Trade + Convention + Market DTO
+(SwapTrade + ConventionSet + MarketSnapshot + ModelConfig)
         |
         v
-C++ Rates Engine (no live Bloomberg fetch during a calculation)
+C++ Convention / Trade Resolution
+SwapTrade + ConventionSet -> ResolvedSwap  (contract owned by #224, implemented in #228)
+        |
+        v
+C++ Pricing Kernel
+ResolvedSwap + MarketSnapshot + ModelConfig
+(no live Bloomberg fetch during a calculation)
         |
         v
 PricingResult / RiskResult / CalibrationResult (typed, auditable)
         |
         v
-existing Shiori UI / workflow (Python)
+Python workflow / persistence / UI
+(serialize, persist, display, replay, orchestrate ResolvedSwap objects)
 ```
 
 Boundary rules:
 
-1. **Resolved explicit inputs.** The engine receives a market snapshot that is already acquired, validated, and normalized: dated zero/DF nodes (or a resolved curve object with stated basis), explicit schedules, stated forwards/fixings, stated vol numbers with stated unit/space/model, explicit exercise/settlement terms. No ticker, no field name, no `blpapi`, no pixel, no SQLite path crosses the boundary.
-2. **Versioned contract.** Every DTO carries a `contract_version` (and engine reports `engine_name`/`engine_version`/`method`). Additive changes only; renames/removals require a version bump and Sophira/owner review. Fingerprint/provenance fields (`curve_id`, `surface_id`, `content_fingerprint`, `capture_id`, `source_system`, `as_of`) travel with the data for audit.
-3. **Ownership split.** Acquisition + normalization + persistence stay in Python (§4). Curve representation choice, schedule/convention resolution, and model calibration interfaces are methodology — they are named here as deferred decisions (§6), not decided here.
+1. **Resolved-input discipline with a two-layer C++ module.** The C++ PRICING KERNEL consumes fully resolved inputs: a `ResolvedSwap` (explicit schedules, stated fixings/observations), a market snapshot of dated zero/DF nodes (or a resolved curve object with stated basis), stated vol numbers with stated unit/space/model, and explicit exercise/settlement terms. The wider C++ Rates MODULE may own deterministic Convention / Trade Resolution (`SwapTrade + ConventionSet -> ResolvedSwap`) per the #224 contract. No ticker, no field name, no `blpapi`, no pixel, no SQLite path crosses the boundary. No USD SOFR convention values are decided here.
+2. **Versioned contract.** Every DTO carries a `contract_version` (and engine reports `engine_name`/`engine_version`/`method`). Additive changes only; renames/removals require a version bump and Sophira/owner review. Fingerprint/provenance fields (`curve_id`, `surface_id`, `content_fingerprint`, `capture_id`, `source_system`, `as_of`) travel with the data for audit. New Rates DTOs are owned by #224/#225 — they are not locked to legacy schemas in this issue.
+3. **Ownership split.** Acquisition + normalization + persistence stay in Python (§4). Trade/convention resolution methodology (`SwapTrade -> ResolvedSwap`) is owned by #224 and implemented in #228 — Python must not become its authoritative implementation. Curve representation choice and model calibration interfaces are methodology — they are named here as deferred decisions (§6), not decided here.
 4. **Result discipline.** C++ returns values + assumptions + diagnostics + warnings/errors in the existing `PricingResult` spirit (status codes, no invented data, fail-closed on out-of-range/unresolved/missing). `docs/08` rule applies: every accelerated backend matches its Python reference within documented tolerance before acceptance.
 5. **No QuantLib leakage across the boundary.** QuantLib (C++ side, future) is a computational library behind the engine's internal interface, as it is on the Python side (`bli_quantlib_bond_adapter` precedent: schedule/accrual only, no raw `ql.*` in schemas). QuantLib defaults must never silently become Shiori methodology (#222 core principle).
 6. **Performance posture.** Caching (curve/DF/schedule/fixing reuse), concurrency (thread-safety contract), and benchmark methodology are #226's scope; this boundary already requires batch-friendly, cache-keyable DTOs (stable IDs + fingerprints) so #226 has something to key on.
@@ -157,19 +174,19 @@ Boundary rules:
 |---|---|---|
 | Acquisition (Bloomberg DAPI, tickers, fields, pixels/OCR) | Python (`data/bloomberg_*`, `tools/*`) | Lazy `blpapi`, session lifecycle, fail-closed validation. C++ never acquires |
 | Normalization (tenor validation, percent→decimal, `MATURITY`-verbatim dates, capture→canonical, store) | Python (`data/*`, `pricing/bli_*` pure chain for node prep) | Pure node-prep helpers are port candidates for C++ kernels, but the authoritative normalization stays Python |
-| Trade definition + convention/trade resolution (schedules, day counts, calendars, stubs, fixings) | Python resolves → C++ consumes | Explicit resolved schedules cross the DTO. Convention authority is RED-gated (see below); #224 owns the contract |
+| Trade definition + convention/trade resolution (schedules, day counts, calendars, stubs, fixings, `SwapTrade -> ResolvedSwap`) | C++ Rates module (resolution layer) per the #224 contract, implemented in #228; Python serializes/persists/displays/replays/orchestrates `ResolvedSwap` | Python must not become the authoritative schedule-generation implementation for new Rates products. No convention values decided here; RED-02 open |
 | Model assumptions (vol space/model, smile, calibration objective) | Stated inputs; methodology owned by Sophira/Eddy | Resolver precedent applies: unstated unit/space/model fails closed. #225 owns the contracts |
 | Pricing (PV/NPV/par/annuity/Greeks/calibration/exercise) | C++ (future), validated against Python references | Deterministic only (AGENTS.md rule 6). No system clock, no I/O in kernels |
 | Persistence (SQLite store, run exports, snapshots) | Python | Store conflict/idempotency semantics (§2.2) are preserved, not reimplemented |
 | UI / orchestration / research / UAT | Python | `docs/08` cockpit rule; C++ behind stable interfaces |
 
-RED boundary (no decisions taken in this issue): #222 RED-01 (curve authority for first UAT: resolved zero/DF curve vs bootstrap-from-instruments; working recommendation is resolved-curve-first) and RED-02 (`USD_SOFR_OIS_V1` workstation convention authority: spot lag, frequencies, day counts, lags, calendars, BDC, stubs, compounding) remain **open and owned by Sophira/Eddy**. This document's "resolved inputs first" posture is compatible with either RED outcome and does not pre-decide them. Any real new pricing/schema/validation/fallback methodology decision encountered downstream = STOP and ask Eddy.
+RED boundary (no decisions taken in this issue): #222 RED-01 (curve authority for first UAT: resolved zero/DF curve vs bootstrap-from-instruments; working recommendation is resolved-curve-first) and RED-02 (`USD_SOFR_OIS_V1` workstation convention authority: spot lag, frequencies, day counts, lags, calendars, BDC, stubs, compounding) remain **open and owned by Sophira/Eddy**. No actual USD SOFR convention values are decided in this issue. This document's two-layer posture (resolution layer per #224 contract, kernel on resolved inputs) is compatible with either RED outcome and does not pre-decide them. Any real new pricing/schema/validation/fallback methodology decision encountered downstream = STOP and ask Eddy.
 
 ---
 
 ## 7. Compatibility boundary protecting the bond-option line
 
-The validated bond-option line is stable. Rates work must not regress it. Frozen (read-only for Rates):
+The validated bond-option line is stable. Rates work must not regress it. Frozen (read-only for Rates) — classified LEAVE UNTOUCHED / COMPATIBILITY BOUNDARY, not canonical for new Rates:
 
 - Product contract: `products/bond_option.py` (`BondOption` frozen fields, PRICE/YIELD mutual exclusion, EUROPEAN/AMERICAN exercise rules).
 - Engine entry points + result contract: `pricing/bli_pricing_engine.py` (`price_bli_mvp`, `price_bli_mvp_standalone_option`, engine names/versions, `method` tokens, `pv=per_100×notional/100`, position never flips `pv`, Greeks-on-standalone-success only), `pricing/engine.py`, `pricing/result.py`.
@@ -179,7 +196,7 @@ The validated bond-option line is stable. Rates work must not regress it. Frozen
 - Data schemas: `data/bli_snapshot.py` (`BLICurvePoint`, purposes, bases, ACTIVE-only construction, node-level dedupe/ambiguity), `data/bli_standalone_option_request.py` (frozen refs, ISIN/currency/date/no-look-ahead gates).
 - Build: core never requires QuantLib (`pyproject.toml`: QuantLib in `quant` extra only; CI installs `[quant]`, local minimal installs may not — the missing-QuantLib error must propagate, never be caught into `FAILED`).
 
-Shared-module rule for Rates: the BLI curve chain and QuantLib adapter may be **read** (and their pure math ported with pinned tests), never **modified** in a way that changes bond-option behavior. Any change with observable bond-option impact requires its own issue, deterministic tests, and Eddy's approval (AGENTS.md rules 6–7).
+Shared-module rule for Rates: the BLI curve chain and QuantLib adapter may be **read** (and their pure math ported with pinned tests), never **modified** in a way that changes bond-option behavior. Existing BLI contracts may expose data through adapters where appropriate, but they are not the canonical new Rates contract — that contract is owned by #224 (`SwapTrade` / `ConventionSet` / `ResolvedSwap`) and #225 (market/model/result contracts). Legacy IRS schemas are REFERENCE / ADAPTER SOURCE unless repository evidence proves them suitable unchanged. Any change with observable bond-option impact requires its own issue, deterministic tests, and Eddy's approval (AGENTS.md rules 6–7).
 
 ---
 
@@ -193,8 +210,8 @@ Shiori-Pricing-Lab/
 ├── tests/                         # existing Python tests (anchors in §3.1 stay green)
 ├── cpp/
 │   └── rates_engine/              # NEW (first slice in #227, after Gate A)
-│       ├── include/shiori_rates/  # public DTO + engine interfaces
-│       ├── src/                   # kernels (schedule, curves, legs, swaption, HW1F, accrual)
+│       ├── include/shiori_rates/  # public DTO + engine interfaces (contracts owned by #224/#225)
+│       ├── src/                   # resolution/ (SwapTrade->ResolvedSwap per #224, impl #228) + kernels/ (swaps, curves, legs, swaption, HW1F, accrual)
 │       ├── tests/                 # GoogleTest/Catch2 ports of §3.1 anchors
 │       ├── benchmarks/            # Google Benchmark baselines (#226 methodology)
 │       └── CMakeLists.txt         # C++20, pinned deps (QuantLib, nlohmann::json, gtest/catch2)
@@ -216,19 +233,26 @@ Target stack (from #222, unchanged): C++20, CMake, QuantLib, `nlohmann::json`, G
 
 ---
 
-## 10. Next actions (out of scope for this issue, for sequencing only)
+## 10. Next actions and execution recommendation (out of scope for this issue, for sequencing only)
 
-- #224 — USD SOFR OIS convention contract + resolved swap representation (owns RED-02-adjacent convention content).
-- #225 — Rates market/model/result contracts (owns DTO field-level schemas sketched in §5).
+- #224 — USD SOFR OIS convention contract + resolved swap representation (owns RED-02-adjacent convention content and the `SwapTrade` / `ConventionSet` / `ResolvedSwap` contract).
+- #225 — Rates market/model/result contracts (owns DTO field-level schemas sketched in §5: MarketSnapshot / CurveSet / FixingStore / Vol / Exercise / Settlement / Result contracts).
 - #226 — C++ build / QuantLib isolation / concurrency / caching / benchmark methodology.
 - Gate A exit: #222 architecture accepted; RED-01/RED-02 resolved or explicitly deferred with owner/evidence requirement.
 - First implementation slice after Gate A: M1 C++ vanilla-swap foundation (#227+) reusing this boundary.
+
+Execution recommendation after #223 is accepted:
+
+- #224 and #226 MAY PROCEED IN PARALLEL.
+- #225 SHOULD WAIT FOR #224.
+
+Reason: #224 owns USD SOFR convention, fixing/observation, schedule, and `ResolvedSwap` semantics. #225 includes FixingStore and historical-vs-forecast behavior, so opening it before #224 finishes risks overlapping the same convention contract. #226 is largely orthogonal (C++20/CMake, QuantLib isolation, test framework, thread-safety, caching architecture, benchmark methodology, CI) and may proceed in parallel with #224 provided it does not invent DTO field semantics that belong to #225. Do not split #225 into a partial issue merely to increase parallelism.
 
 ---
 
 ## 11. RED findings
 
-No new RED methodology decisions are taken in this issue. Known open REDs carried from #222 (RED-01 curve authority, RED-02 SOFR convention authority) are restated in §6 as explicitly deferred. No stop-condition trigger occurred: this document duplicates no validated data contract and changes no methodology.
+No new RED methodology decisions are taken in this issue. No actual USD SOFR convention values are decided here. Known open REDs carried from #222 (RED-01 curve authority, RED-02 SOFR convention authority) are restated in §6 as explicitly deferred; RED-02 remains open. No stop-condition trigger occurred: this document duplicates no validated data contract and changes no methodology.
 
 ---
 
