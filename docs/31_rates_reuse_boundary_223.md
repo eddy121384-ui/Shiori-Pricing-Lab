@@ -107,14 +107,17 @@ Non-Rates tools present but out of scope: `bloomberg_bond_yield_*`, `bloomberg_t
 
 ## 4. Reuse map — what the C++ engine reuses vs owns
 
-Principle (from #222 + `docs/08`): Python owns UI, orchestration, Bloomberg acquisition, normalization, persistence, research, validation/UAT tooling. The C++ Rates MODULE owns deterministic trade/convention resolution plus pricing math. The C++ PRICING KERNEL consumes fully resolved inputs. No live Bloomberg fetch inside pricing.
+Principle (from #222 + `docs/08`): Python owns UI, orchestration, Bloomberg acquisition, normalization, persistence, research, validation/UAT tooling. The C++ Rates MODULE owns deterministic trade/convention resolution, optional future market/curve resolution, and pricing math. The C++ PRICING KERNEL consumes fully resolved inputs only. No live Bloomberg fetch inside pricing.
 
-The C++ Rates module contains two logically separate layers:
+The C++ Rates module contains three logically separate layers:
 
 1. Convention / Trade Resolution (`SwapTrade + ConventionSet -> ResolvedSwap`)
-2. Pricing Kernel (`ResolvedSwap + MarketSnapshot + ModelConfig -> results`)
+2. Market / Curve Resolution (`-> ResolvedCurve`, via either RED-01 path below)
+3. Pricing Kernel (`ResolvedSwap + ResolvedCurve + Fixings + Model Inputs -> Results`)
 
 Python must not become the authoritative schedule-generation implementation for new Rates products. Python may serialize, persist, display, replay, and orchestrate `ResolvedSwap` objects. #224 owns the methodology contract for `SwapTrade -> ResolvedSwap`; #228 later implements the approved deterministic schedule/fixing/calendar primitives. No USD SOFR convention values are decided in this issue; RED-02 remains open.
+
+RED-01 curve-resolution paths (both explicitly permitted, neither chosen): the C++ Rates MODULE boundary accepts EITHER Path A (Python supplies an already-resolved curve) OR Path B (Python supplies normalized market/instrument inputs plus an approved curve-construction contract, and a deterministic C++ curve-resolution layer produces the resolved curve). The C++ PRICING KERNEL boundary itself consumes only resolved curves in both paths. No bootstrap instruments, construction helpers, interpolation, curve conventions, or QuantLib defaults are defined in this issue; RED-01 remains open. The working recommendation for the first UAT (consume an already-resolved curve first) remains a recommendation only, not methodology.
 
 | Category | Decision | Items |
 |---|---|---|
@@ -122,7 +125,7 @@ Python must not become the authoritative schedule-generation implementation for 
 | REFERENCE / ADAPTER SOURCE (legacy IRS schemas — not canonical unless proven suitable unchanged) | Read and adapt; do not lock new Rates DTOs to these in #223 | Legacy `MarketDataSnapshot`, `RateCurve`, `InterestRateSwap` / `OvernightIndexedSwap`, `FixedLeg` / `FloatingLeg`, `DepositLeg`, `ValuationContext`, `pricing/schedule.py`, `pricing/engine.py` front-door concept, `pricing/result.py` value-type concept. Authoritative new Rates contracts remain owned by #224 (`SwapTrade` / `ConventionSet` / `ResolvedSwap`) and #225 (market/model/result contracts) |
 | REUSE AS-IS (Python, no C++ equivalent) | Bloomberg acquisition, transcription, canonical models, persistence, UI | Both curve loaders (§2.1) incl. shared DAPI helpers + 32-tenor universe; entire VCUB capture/template/OCR/screen-reader chain; `vcub_vol_surface_adapter`; `vol_surface` canonical model; `vol_surface_store` (SQLite); `vol_surface_grid`; acceptance/probe tools |
 | REUSE VIA ADAPTER (existing Python output → versioned DTO → C++) | Curve/vol outputs cross the boundary as data, never as code | #490 `BLICurvePoint` rows (with verbatim `maturity_date`) → resolved zero/DF nodes via adapter (not as the canonical new Rates curve contract); par-rate points → display only, never a pricing input; `CanonicalVolSurface` + `resolve_vcub_normal_vol` outputs (`sigma_vcub` + audit record) → vol DTO via adapter; IRS reference fixtures (`1506.79…` golden value, error table) → C++ regression gates |
-| OWN IN C++ (new, isolated, deterministic) | Resolution layer + pricing kernels, implemented after Gate A against approved contracts | C++ Convention / Trade Resolution: `SwapTrade + ConventionSet -> ResolvedSwap` per the #224 contract (implemented in #228). C++ Pricing Kernel on `ResolvedSwap`: discount/forward math (compounding decided explicitly per §6); leg PV / NPV / par rate / annuity-PVBP / DV01; Black-76 / shifted-Black / Bachelier kernels (Phase 2+); Hull-White 1F calibration + Bermudan exercise (Phase 3+); range-accrual observation/barrier/fixing-probability kernels (Phase 4+). Pure helpers with no I/O are the only port candidates — each pinned by its Python test before porting |
+| OWN IN C++ (new, isolated, deterministic) | Resolution layers + pricing kernels, implemented after Gate A against approved contracts | C++ Convention / Trade Resolution: `SwapTrade + ConventionSet -> ResolvedSwap` per the #224 contract (implemented in #228). C++ Market / Curve Resolution: `-> ResolvedCurve` via either RED-01 path (resolved-curve input from Python, or normalized construction inputs + approved construction contract resolved deterministically in C++); curve contracts owned by #225, RED-01 open. C++ Pricing Kernel on resolved inputs only: discount/forward math (compounding decided explicitly per §6); leg PV / NPV / par rate / annuity-PVBP / DV01; Black-76 / shifted-Black / Bachelier kernels (Phase 2+); Hull-White 1F calibration + Bermudan exercise (Phase 3+); range-accrual observation/barrier/fixing-probability kernels (Phase 4+). Pure helpers with no I/O are the only port candidates — each pinned by its Python test before porting |
 | KEEP PYTHON-ONLY (must not move to C++) | Anything touching network, pixels, files, UI, or live credentials | `import blpapi` session/request/event handling; OCR/pixel geometry; SQLite open/read/write; Streamlit/workbench server; `//blp/*` discovery; DAPI host/port/service constants as live config |
 
 Anti-duplication rule: any proposal to duplicate an existing validated data contract (ticker grammar, field set, unit conversion, `BLICurvePoint` semantics, surface identity/fingerprint, store conflict semantics, resolver fail-closed rules) that is not strictly necessary **stops for review** per this issue's stop condition. This document proposes no such duplication.
@@ -137,34 +140,46 @@ Authoritative detail (field-level schemas, curve/vol/trade/model/result represen
 Python acquisition / normalization / orchestration
         |
         v
-versioned Trade + Convention + Market DTO
-(SwapTrade + ConventionSet + MarketSnapshot + ModelConfig)
+explicit versioned integration boundary
+(Trade + Convention + Market DTOs; field detail owned by #224/#225)
         |
         v
-C++ Convention / Trade Resolution
-SwapTrade + ConventionSet -> ResolvedSwap  (contract owned by #224, implemented in #228)
+C++ Rates Module
         |
-        v
-C++ Pricing Kernel
-ResolvedSwap + MarketSnapshot + ModelConfig
-(no live Bloomberg fetch during a calculation)
+        +-- Convention / Trade Resolution
+        |      SwapTrade + ConventionSet -> ResolvedSwap
+        |      (contract owned by #224, implemented in #228)
+        |
+        +-- Market / Curve Resolution
+        |      EITHER resolved curve input (Path A)
+        |      OR approved construction inputs + contract (Path B)
+        |      -> ResolvedCurve
+        |      (curve contracts owned by #225; RED-01 open, neither path chosen)
+        |
+        +-- Pricing Kernel
+               ResolvedSwap
+               + ResolvedCurve
+               + Fixings
+               + Model Inputs
+               -> Results
+               (kernel consumes resolved curves only; no live Bloomberg fetch)
         |
         v
 PricingResult / RiskResult / CalibrationResult (typed, auditable)
         |
         v
 Python workflow / persistence / UI
-(serialize, persist, display, replay, orchestrate ResolvedSwap objects)
+(serialize, persist, display, replay, orchestrate resolved objects)
 ```
 
 Boundary rules:
 
-1. **Resolved-input discipline with a two-layer C++ module.** The C++ PRICING KERNEL consumes fully resolved inputs: a `ResolvedSwap` (explicit schedules, stated fixings/observations), a market snapshot of dated zero/DF nodes (or a resolved curve object with stated basis), stated vol numbers with stated unit/space/model, and explicit exercise/settlement terms. The wider C++ Rates MODULE may own deterministic Convention / Trade Resolution (`SwapTrade + ConventionSet -> ResolvedSwap`) per the #224 contract. No ticker, no field name, no `blpapi`, no pixel, no SQLite path crosses the boundary. No USD SOFR convention values are decided here.
-2. **Versioned contract.** Every DTO carries a `contract_version` (and engine reports `engine_name`/`engine_version`/`method`). Additive changes only; renames/removals require a version bump and Sophira/owner review. Fingerprint/provenance fields (`curve_id`, `surface_id`, `content_fingerprint`, `capture_id`, `source_system`, `as_of`) travel with the data for audit. New Rates DTOs are owned by #224/#225 — they are not locked to legacy schemas in this issue.
+1. **Module vs kernel boundary (RED-01 open).** The C++ Rates MODULE boundary accepts either RED-01 outcome — Path A: Python supplies an already-resolved curve; Path B: Python supplies normalized market/instrument inputs plus an approved curve-construction contract, and a deterministic C++ curve-resolution layer produces the resolved curve. The C++ PRICING KERNEL boundary itself consumes only resolved curves (`ResolvedSwap + ResolvedCurve + Fixings + Model Inputs`): explicit schedules, stated fixings/observations, resolved curve objects with stated basis, stated vol numbers with stated unit/space/model, and explicit exercise/settlement terms. No ticker, no field name, no `blpapi`, no pixel, no SQLite path crosses the boundary. No bootstrap instruments, construction helpers, interpolation, curve conventions, QuantLib defaults, or USD SOFR convention values are decided here.
+2. **Explicit, stable, auditable, versioned boundary.** Per parent #222, the Python/C++ integration boundary must be explicit, stable, auditable, and versioned (DTO/JSON). Field-level canonical contract decisions are NOT taken in this issue: which DTO contains which version field, whether every DTO has a version field, exact version-field names, exact schema-evolution policy, exact provenance field placement, exact fingerprint fields, and cache-key field composition remain with their owning issues (#224 for trade/convention/resolved-swap contracts, #225 for market/curve/fixing/vol/exercise/settlement/result contracts, #226 for caching implementation concerns).
 3. **Ownership split.** Acquisition + normalization + persistence stay in Python (§4). Trade/convention resolution methodology (`SwapTrade -> ResolvedSwap`) is owned by #224 and implemented in #228 — Python must not become its authoritative implementation. Curve representation choice and model calibration interfaces are methodology — they are named here as deferred decisions (§6), not decided here.
 4. **Result discipline.** C++ returns values + assumptions + diagnostics + warnings/errors in the existing `PricingResult` spirit (status codes, no invented data, fail-closed on out-of-range/unresolved/missing). `docs/08` rule applies: every accelerated backend matches its Python reference within documented tolerance before acceptance.
 5. **No QuantLib leakage across the boundary.** QuantLib (C++ side, future) is a computational library behind the engine's internal interface, as it is on the Python side (`bli_quantlib_bond_adapter` precedent: schedule/accrual only, no raw `ql.*` in schemas). QuantLib defaults must never silently become Shiori methodology (#222 core principle).
-6. **Performance posture.** Caching (curve/DF/schedule/fixing reuse), concurrency (thread-safety contract), and benchmark methodology are #226's scope; this boundary already requires batch-friendly, cache-keyable DTOs (stable IDs + fingerprints) so #226 has something to key on.
+6. **Performance posture.** Caching (curve/DF/schedule/fixing reuse), concurrency (thread-safety contract), and benchmark methodology are #226's scope; this boundary requires DTOs that support batching and caching, with exact cache-key composition owned by #226.
 
 ---
 
@@ -175,12 +190,13 @@ Boundary rules:
 | Acquisition (Bloomberg DAPI, tickers, fields, pixels/OCR) | Python (`data/bloomberg_*`, `tools/*`) | Lazy `blpapi`, session lifecycle, fail-closed validation. C++ never acquires |
 | Normalization (tenor validation, percent→decimal, `MATURITY`-verbatim dates, capture→canonical, store) | Python (`data/*`, `pricing/bli_*` pure chain for node prep) | Pure node-prep helpers are port candidates for C++ kernels, but the authoritative normalization stays Python |
 | Trade definition + convention/trade resolution (schedules, day counts, calendars, stubs, fixings, `SwapTrade -> ResolvedSwap`) | C++ Rates module (resolution layer) per the #224 contract, implemented in #228; Python serializes/persists/displays/replays/orchestrates `ResolvedSwap` | Python must not become the authoritative schedule-generation implementation for new Rates products. No convention values decided here; RED-02 open |
+| Market / curve resolution (`-> ResolvedCurve`; RED-01 open, neither path chosen) | C++ Rates module (resolution layer) under an approved construction contract; curve contracts owned by #225 | Module accepts either Path A (resolved curve from Python) or Path B (normalized construction inputs + approved contract resolved deterministically in C++). Kernel consumes resolved curves only. No instruments, helpers, interpolation, conventions, or QuantLib defaults defined here |
 | Model assumptions (vol space/model, smile, calibration objective) | Stated inputs; methodology owned by Sophira/Eddy | Resolver precedent applies: unstated unit/space/model fails closed. #225 owns the contracts |
 | Pricing (PV/NPV/par/annuity/Greeks/calibration/exercise) | C++ (future), validated against Python references | Deterministic only (AGENTS.md rule 6). No system clock, no I/O in kernels |
 | Persistence (SQLite store, run exports, snapshots) | Python | Store conflict/idempotency semantics (§2.2) are preserved, not reimplemented |
 | UI / orchestration / research / UAT | Python | `docs/08` cockpit rule; C++ behind stable interfaces |
 
-RED boundary (no decisions taken in this issue): #222 RED-01 (curve authority for first UAT: resolved zero/DF curve vs bootstrap-from-instruments; working recommendation is resolved-curve-first) and RED-02 (`USD_SOFR_OIS_V1` workstation convention authority: spot lag, frequencies, day counts, lags, calendars, BDC, stubs, compounding) remain **open and owned by Sophira/Eddy**. No actual USD SOFR convention values are decided in this issue. This document's two-layer posture (resolution layer per #224 contract, kernel on resolved inputs) is compatible with either RED outcome and does not pre-decide them. Any real new pricing/schema/validation/fallback methodology decision encountered downstream = STOP and ask Eddy.
+RED boundary (no decisions taken in this issue): #222 RED-01 (curve authority for first UAT: resolved zero/DF curve vs bootstrap-from-instruments) and RED-02 (`USD_SOFR_OIS_V1` workstation convention authority: spot lag, frequencies, day counts, lags, calendars, BDC, stubs, compounding) remain **open and undecided, owned by Sophira/Eddy**. Neither resolved-curve-first nor internal bootstrap is chosen as final methodology in this issue; the working recommendation for the first UAT (consume an already-resolved curve first) remains a recommendation only. No actual USD SOFR convention values are decided in this issue. This document's three-layer posture (trade resolution per #224 contract, curve resolution via either RED-01 path, kernel on resolved inputs only) is compatible with either RED-01 outcome and does not pre-decide it. Any real new pricing/schema/validation/fallback methodology decision encountered downstream = STOP and ask Eddy.
 
 ---
 
@@ -236,7 +252,7 @@ Target stack (from #222, unchanged): C++20, CMake, QuantLib, `nlohmann::json`, G
 ## 10. Next actions and execution recommendation (out of scope for this issue, for sequencing only)
 
 - #224 — USD SOFR OIS convention contract + resolved swap representation (owns RED-02-adjacent convention content and the `SwapTrade` / `ConventionSet` / `ResolvedSwap` contract).
-- #225 — Rates market/model/result contracts (owns DTO field-level schemas sketched in §5: MarketSnapshot / CurveSet / FixingStore / Vol / Exercise / Settlement / Result contracts).
+- #225 — Rates market/model/result contracts (owns MarketSnapshot / CurveSet / DiscountCurve / ForwardCurve / FixingStore / vol / exercise / settlement / result contracts; waits for #224 per the recommendation below).
 - #226 — C++ build / QuantLib isolation / concurrency / caching / benchmark methodology.
 - Gate A exit: #222 architecture accepted; RED-01/RED-02 resolved or explicitly deferred with owner/evidence requirement.
 - First implementation slice after Gate A: M1 C++ vanilla-swap foundation (#227+) reusing this boundary.
@@ -252,7 +268,7 @@ Reason: #224 owns USD SOFR convention, fixing/observation, schedule, and `Resolv
 
 ## 11. RED findings
 
-No new RED methodology decisions are taken in this issue. No actual USD SOFR convention values are decided here. Known open REDs carried from #222 (RED-01 curve authority, RED-02 SOFR convention authority) are restated in §6 as explicitly deferred; RED-02 remains open. No stop-condition trigger occurred: this document duplicates no validated data contract and changes no methodology.
+No new RED methodology decisions are taken in this issue. No actual USD SOFR convention values are decided here. Neither RED-01 path (resolved-curve-first vs internal bootstrap) is chosen. Known open REDs carried from #222 (RED-01 curve authority, RED-02 SOFR convention authority) remain explicitly open and undecided. No stop-condition trigger occurred: this document duplicates no validated data contract and changes no methodology.
 
 ---
 
