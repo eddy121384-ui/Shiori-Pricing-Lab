@@ -1,0 +1,126 @@
+name: Codex to OpenCode relay
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: codex-opencode-relay-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    if: startsWith(github.event.review.user.login, 'chatgpt-codex-connector')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Collect current-HEAD material findings
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          MAX_AUTO_CORRECTIONS: "3"
+        run: |
+          set -euo pipefail
+
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID" > review.json
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID/comments" --slurp > review-comments.json
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --slurp > pr-comments.json
+
+          review_commit="$(jq -r '.commit_id // ""' review.json)"
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+
+          if [ "$current_head" != "$EVENT_HEAD_SHA" ] || { [ -n "$review_commit" ] && [ "$review_commit" != "$EVENT_HEAD_SHA" ]; }; then
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping stale Codex review: review/event/current HEAD do not match."
+            exit 0
+          fi
+
+          marker="<!-- codex-opencode-relay:review=$REVIEW_ID"
+          duplicate="$(jq --arg marker "$marker" '[.[][]? | select((.body // "") | contains($marker))] | length' pr-comments.json)"
+          if [ "$duplicate" -gt 0 ]; then
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+            echo "Review $REVIEW_ID was already handled."
+            exit 0
+          fi
+
+          python - <<'PY'
+          import json
+          import pathlib
+          import re
+
+          pages = json.loads(pathlib.Path("review-comments.json").read_text())
+          comments = [item for page in pages for item in page]
+          findings = []
+          for comment in comments:
+              body = (comment.get("body") or "").strip()
+              if re.search(r"(?<![A-Za-z0-9])P[012](?![A-Za-z0-9])", body):
+                  findings.append(body)
+
+          pathlib.Path("findings.txt").write_text(
+              "\n\n---\n\n".join(findings),
+              encoding="utf-8",
+          )
+          PY
+
+          if [ ! -s findings.txt ]; then
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+            echo "No P0/P1/P2 findings in submitted Codex review."
+            exit 0
+          fi
+
+          prior_rounds="$(jq '[.[][]? | select((.body // "") | contains("<!-- codex-opencode-relay:") and contains("status=dispatched"))] | length' pr-comments.json)"
+          if [ "$prior_rounds" -ge "$MAX_AUTO_CORRECTIONS" ]; then
+            stop_marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=stopped -->"
+            body="$stop_marker
+          Automatic correction limit reached ($MAX_AUTO_CORRECTIONS rounds). STOP — Eddy/Sophira review required."
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "dispatch=true" >> "$GITHUB_OUTPUT"
+          echo "round=$((prior_rounds + 1))" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$EVENT_HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch OpenCode with the review batch
+        if: steps.collect.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          HEAD_REF: ${{ steps.collect.outputs.head_ref }}
+          HEAD_SHA: ${{ steps.collect.outputs.head_sha }}
+          ROUND: ${{ steps.collect.outputs.round }}
+        run: |
+          set -euo pipefail
+          findings="$(cat findings.txt)"
+
+          prompt="$(cat <<EOF
+          Automated Codex correction round for existing PR #$PR_NUMBER at expected HEAD $HEAD_SHA.
+
+          Follow AGENTS.md and stay on the existing PR/branch. Address the valid P0/P1/P2 findings below as one batch. Do not expand scope or stop for ordinary engineering choices. If any finding requires a new RED methodology/pricing/canonical-schema/validation/fallback decision, or if the PR HEAD changed, STOP and report instead of guessing.
+
+          After a reviewable fix, follow the repository validation/push/summary/re-review protocol. Do not merge.
+
+          Codex findings:
+          $findings
+          EOF
+          )"
+
+          jq -n             --arg ref "main"             --arg prompt "$prompt"             --arg pr "$PR_NUMBER"             --arg head_ref "$HEAD_REF"             --arg head_sha "$HEAD_SHA"             --arg review_id "$REVIEW_ID"             '{ref:$ref, inputs:{prompt:$prompt, pr_number:$pr, head_ref:$head_ref, head_sha:$head_sha, review_id:$review_id}}'             | gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" --input -
+
+          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=dispatched -->"
+          body="$marker
+          Codex P0-P2 batch relayed to OpenCode for PR #$PR_NUMBER (automatic correction round $ROUND/3)."
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
