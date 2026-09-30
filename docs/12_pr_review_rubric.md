@@ -72,7 +72,8 @@ Check:
 - new calculation/contract logic has focused deterministic tests;
 - data, pricing, UI, persistence, and AI responsibilities stay separated where the repo requires it;
 - the diff is no larger than the issue needs;
-- avoid speculative wrappers/factories/frameworks and repeated parsing/copying/work inside hot loops.
+- avoid speculative wrappers/factories/frameworks and repeated parsing/copying/work inside hot loops;
+- for automation/workflow changes, verify authorization and concurrency, secret/write-token separation, immutable handoff between model/validation/publisher, stale-HEAD checks, exact publication provenance, and fail-closed handling of self-modifying control-plane changes.
 
 ### Trader / audit workflow
 

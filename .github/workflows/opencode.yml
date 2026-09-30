@@ -6,17 +6,20 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.event.issue.pull_request != null && github.event.comment.author_association == 'OWNER' && (github.event.comment.body == '/oc' || startsWith(github.event.comment.body, '/oc ') || github.event.comment.body == '/opencode' || startsWith(github.event.comment.body, '/opencode ')) && format('shiori-opencode-pr-{0}', github.event.issue.number) || format('shiori-opencode-noop-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 jobs:
   authorize:
     if: github.event.issue.pull_request != null
     runs-on: ubuntu-latest
-
     outputs:
       run: ${{ steps.command.outputs.run }}
       prompt_b64: ${{ steps.command.outputs.prompt_b64 }}
 
     steps:
-      - name: Authorize exact slash command
+      - name: Authorize exact owner slash command
         id: command
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -27,10 +30,9 @@ jobs:
           import os
           import re
 
-          body = os.environ["COMMENT_BODY"].strip()
+          body = os.environ["COMMENT_BODY"]
           allowed = os.environ["AUTHOR_ASSOCIATION"] == "OWNER"
-          match = re.fullmatch(r"/(?:oc|opencode)(?:\s+([\s\S]*))?", body, re.IGNORECASE)
-
+          match = re.fullmatch(r"/(?:oc|opencode)(?: +([\s\S]*))?", body)
           run = bool(allowed and match)
           prompt = ""
           if run:
@@ -41,25 +43,66 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"run={'true' if run else 'false'}\n")
               if run:
-                  encoded = base64.b64encode(prompt.encode()).decode()
-                  out.write(f"prompt_b64={encoded}\n")
+                  out.write("prompt_b64=" + base64.b64encode(prompt.encode()).decode() + "\n")
           PY
 
-  writer:
+  agent:
     needs: authorize
     if: needs.authorize.outputs.run == 'true'
     runs-on: ubuntu-latest
-
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-
-    concurrency:
-      group: shiori-opencode-pr-${{ github.event.issue.number }}
-      cancel-in-progress: false
+      contents: read
+      pull-requests: read
+    outputs:
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      patch_sha: ${{ steps.patch.outputs.patch_sha }}
+      changed: ${{ steps.patch.outputs.changed }}
 
     steps:
+      - name: Resolve same-repository PR head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.head.repo.full_name' <<<"$meta")" = "$GITHUB_REPOSITORY"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --slurp > "$RUNNER_TEMP/pr-files.json"
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          pages = json.loads((pathlib.Path(os.environ["RUNNER_TEMP"]) / "pr-files.json").read_text())
+          files = [item["filename"] for page in pages for item in page]
+          protected_exact = {
+              "AGENTS.md", "CLAUDE.md", "docs/12_pr_review_rubric.md",
+              "opencode.json", "opencode.jsonc", "requirements.txt", "pyproject.toml",
+          }
+          protected = [
+              path for path in files
+              if path in protected_exact or path.startswith((".github/", ".claude/", ".opencode/"))
+          ]
+          if protected:
+              raise SystemExit("Automation is disabled for PRs that modify control-plane files: " + repr(protected))
+          PY
+          resolved_ref="$(jq -r '.head.ref' <<<"$meta")"
+          resolved_sha="$(jq -r '.head.sha' <<<"$meta")"
+          fresh="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.head.ref' <<<"$fresh")" = "$resolved_ref"
+          test "$(jq -r '.head.sha' <<<"$fresh")" = "$resolved_sha"
+          echo "head_ref=$resolved_ref" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$resolved_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact PR head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Restore authorized prompt
         env:
           PROMPT_B64: ${{ needs.authorize.outputs.prompt_b64 }}
@@ -70,59 +113,16 @@ jobs:
           import pathlib
 
           prompt = base64.b64decode(os.environ["PROMPT_B64"]).decode()
-          path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "opencode-prompt.txt"
-          path.write_text(
-              prompt
-              + "\n\n"
-              + "Security boundary: read/search/edit repository files only. "
-                "Do not run validation, shell commands, network tools, subagents, "
-                "formatters, LSP, or external-directory tools; those capabilities "
-                "are hard-disabled. The workflow owns commit/push. Validation runs "
-                "separately without model credentials.\n",
-              encoding="utf-8",
+          text = prompt + "\n\n" + (
+              "Security boundary: read/search/edit repository files only. "
+              "Do not run validation, shell commands, network tools, subagents, "
+              "formatters, LSP, or external-directory tools. The workflow owns "
+              "commit/push and validation. Do not edit .git metadata or repository control-plane files "
+              "(.github/**, AGENTS.md, CLAUDE.md, docs/12_pr_review_rubric.md, .claude/**, "
+              "opencode.json/jsonc, .opencode/**, requirements.txt, or pyproject.toml)."
           )
+          (pathlib.Path(os.environ["RUNNER_TEMP"]) / "opencode-prompt.txt").write_text(text, encoding="utf-8")
           PY
-
-      - name: Resolve current PR head
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          set -euo pipefail
-          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
-          head_repo="$(jq -r '.head.repo.full_name' <<<"$meta")"
-          test "$head_repo" = "$GITHUB_REPOSITORY" || {
-            echo "Refusing write automation on a fork PR."
-            exit 1
-          }
-          echo "head_ref=$(jq -r '.head.ref' <<<"$meta")" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$(jq -r '.head.sha' <<<"$meta")" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout exact PR head
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          ref: ${{ steps.pr.outputs.head_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Prepare verified PR branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
-          test "$current_sha" = "$HEAD_SHA"
-          test "$current_ref" = "$HEAD_REF"
-          git fetch origin "$HEAD_REF:refs/remotes/origin/$HEAD_REF"
-          test "$(git rev-parse "refs/remotes/origin/$HEAD_REF")" = "$HEAD_SHA"
-          git switch -C "$HEAD_REF" "$HEAD_SHA"
-          git branch --set-upstream-to="origin/$HEAD_REF" "$HEAD_REF"
-          git remote set-url --push origin DISABLED_BY_SHIORI_WORKFLOW
 
       - name: Install pinned OpenCode CLI
         env:
@@ -139,159 +139,272 @@ jobs:
           test -x "$bindir/opencode"
           echo "$bindir" >> "$GITHUB_PATH"
 
-      - name: Run OpenCode
+      - name: Quarantine PR-controlled OpenCode config
+        run: |
+          set -euo pipefail
+          q="$RUNNER_TEMP/opencode-quarantine"
+          mkdir -p "$q"
+          for path in opencode.json opencode.jsonc .opencode; do
+            if [ -e "$path" ]; then
+              mv "$path" "$q/$path"
+            fi
+          done
+
+      - name: Run read-edit-only OpenCode
         env:
           OPENCODE_MODEL: ${{ vars.OPENCODE_AUTOMATION_MODEL }}
           OPENCODE_VARIANT: ${{ vars.OPENCODE_AUTOMATION_VARIANT }}
           OPENROUTER_API_KEY: ${{ secrets.OPENCODE_AUTOMATION_API_KEY }}
-          OPENCODE_CONFIG_CONTENT: '{"formatter":false,"permission":{"*":"deny","read":"allow","edit":"allow","glob":"allow","grep":"allow"},"provider":{"openrouter":{"options":{"apiKey":"{env:OPENROUTER_API_KEY}"}}}}'
+          OPENCODE_CONFIG_CONTENT: '{"formatter":false,"lsp":false,"plugin":[],"permission":{"*":"deny","read":{"*":"allow",".git/*":"deny","*.env":"deny","*.env.*":"deny"},"edit":{"*":"allow",".git/*":"deny"},"glob":"allow","grep":"allow"},"agent":{"build":{"permission":{"*":"deny","read":{"*":"allow",".git/*":"deny","*.env":"deny","*.env.*":"deny"},"edit":{"*":"allow",".git/*":"deny"},"glob":"allow","grep":"allow"}}}}'
           OPENCODE_DISABLE_AUTOUPDATE: "true"
           OPENCODE_DISABLE_DEFAULT_PLUGINS: "true"
+          OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
+          OPENCODE_DISABLE_CLAUDE_CODE: "1"
           EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
-          test -n "$OPENCODE_MODEL" || {
-            echo "Set repository Actions variable OPENCODE_AUTOMATION_MODEL."
-            exit 1
-          }
-          test -n "$OPENROUTER_API_KEY" || {
-            echo "Set dedicated repository secret OPENCODE_AUTOMATION_API_KEY."
-            exit 1
-          }
+          test -n "$OPENCODE_MODEL"
+          test -n "$OPENROUTER_API_KEY"
           case "$OPENCODE_MODEL" in
             openrouter/*) ;;
-            *) echo "OPENCODE_AUTOMATION_MODEL must use the openrouter/* provider."; exit 1 ;;
+            *) echo "OPENCODE_AUTOMATION_MODEL must use openrouter/*."; exit 1 ;;
           esac
-
-          args=(run --auto --model "$OPENCODE_MODEL")
+          args=(run --auto --agent build --model "$OPENCODE_MODEL")
           if [ -n "${OPENCODE_VARIANT:-}" ]; then
             args+=(--variant "$OPENCODE_VARIANT")
           fi
-
           opencode --pure "${args[@]}" < "$RUNNER_TEMP/opencode-prompt.txt"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 
-          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || {
-            echo "OpenCode committed locally even though the workflow owns commit/push. STOP."
-            exit 1
-          }
-
-      - name: Validate correction before publication
-        env:
-          EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
-          ACTIONLINT_VERSION: v1.7.12
-          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      - name: Restore quarantined OpenCode config
+        if: always()
         run: |
           set -euo pipefail
-
-          changed="$(
-            {
-              git diff --name-only "$EXPECTED_HEAD" --
-              git ls-files --others --exclude-standard
-            } | sed '/^$/d' | sort -u
-          )"
-
-          if [ -z "$changed" ]; then
-            echo "No repository changes to validate."
-            exit 0
-          fi
-
-          printf '%s\n' "$changed"
-
-          needs_python=false
-          needs_actionlint=false
-          unsupported=""
-
-          while IFS= read -r path; do
-            case "$path" in
-              *.md|docs/*)
-                ;;
-              .github/workflows/*.yml|.github/workflows/*.yaml)
-                needs_actionlint=true
-                ;;
-              *.py|*.html|*.css|*.js|*.ts|*.tsx|*.json|*.toml|requirements.txt|pyproject.toml|src/*|tests/*)
-                needs_python=true
-                ;;
-              *)
-                unsupported="${unsupported}${unsupported:+$'\n'}$path"
-                ;;
-            esac
-          done <<< "$changed"
-
-          if [ -n "$unsupported" ]; then
-            echo "No trusted pre-publication validator is configured for:"
-            printf '%s\n' "$unsupported"
-            echo "STOP — Eddy/Sophira review required before publication."
+          q="$RUNNER_TEMP/opencode-quarantine"
+          collision=false
+          for path in opencode.json opencode.jsonc .opencode; do
+            if [ -e "$q/$path" ]; then
+              if [ -e "$path" ]; then
+                rm -rf "$path"
+                collision=true
+              fi
+              mv "$q/$path" "$path"
+            fi
+          done
+          if [ "$collision" = true ]; then
+            echo 'OpenCode attempted to create project-level OpenCode config while trusted config was quarantined.'
             exit 1
           fi
 
-          if [ "$needs_actionlint" = true ]; then
-            archive="$RUNNER_TEMP/actionlint.tar.gz"
-            bindir="$RUNNER_TEMP/actionlint-bin"
-            mkdir -p "$bindir"
-            curl -fsSL "https://github.com/rhysd/actionlint/releases/download/$ACTIONLINT_VERSION/actionlint_1.7.12_linux_amd64.tar.gz" -o "$archive"
-            echo "$ACTIONLINT_SHA256  $archive" | sha256sum -c -
-            tar -xzf "$archive" -C "$bindir"
-            find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
-              | xargs -0 -r "$bindir/actionlint"
-          fi
-
-          if [ "$needs_python" = true ]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-            pip install -e ".[quant]"
-            playwright install --with-deps chromium
-            pytest
-          fi
-
-      - name: Commit and push verified changes
-        id: publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-          EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
+      - name: Build immutable patch
+        id: patch
         run: |
           set -euo pipefail
-
-          if [ -z "$(git status --porcelain)" ]; then
+          git add -A
+          patch="$RUNNER_TEMP/change.patch"
+          git diff --cached --binary --full-index --no-ext-diff > "$patch"
+          if [ ! -s "$patch" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
-          test "$current_sha" = "$EXPECTED_HEAD"
-          test "$current_ref" = "$HEAD_REF"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "OpenCode: amend PR #$PR_NUMBER"
-          new_head="$(git rev-parse HEAD)"
-
-          git remote set-url --push origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
-          git push origin "HEAD:$HEAD_REF"
-
-          remote_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          test "$remote_head" = "$new_head"
-
+          sha="$(sha256sum "$patch" | awk '{print $1}')"
           echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "new_head=$new_head" >> "$GITHUB_OUTPUT"
+          echo "patch_sha=$sha" >> "$GITHUB_OUTPUT"
 
-      - name: Report result
+      - name: Upload immutable patch
+        if: steps.patch.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opencode-patch-${{ github.run_id }}
+          path: ${{ runner.temp }}/change.patch
+          if-no-files-found: error
+          retention-days: 1
+
+  report-agent-failure:
+    needs: [authorize, agent]
+    if: always() && needs.authorize.outputs.run == 'true' && needs.agent.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Report agent failure
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
-          CHANGED: ${{ steps.publish.outputs.changed }}
-          NEW_HEAD: ${{ steps.publish.outputs.new_head }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body='OpenCode manual automation failed before a validated patch was produced. STOP — inspect the workflow run and return to Eddy/Sophira.' >/dev/null
+
+  report-no-change:
+    needs: [authorize, agent]
+    if: always() && needs.authorize.outputs.run == 'true' && needs.agent.result == 'success' && needs.agent.outputs.changed != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Report no-change stop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body='OpenCode manual command produced no repository changes. STOP — Eddy/Sophira review required.' >/dev/null
+
+  validate:
+    needs: agent
+    if: needs.agent.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout exact source head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.agent.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download exact patch artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: opencode-patch-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch
+
+      - name: Verify and apply patch
+        env:
+          PATCH_SHA: ${{ needs.agent.outputs.patch_sha }}
         run: |
           set -euo pipefail
-          if [ "$CHANGED" = "true" ]; then
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="OpenCode manual command completed. New HEAD: $NEW_HEAD." >/dev/null
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="@codex review" >/dev/null
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="OpenCode manual command completed with no repository changes." >/dev/null
-          fi
+          patch="$RUNNER_TEMP/patch/change.patch"
+          echo "$PATCH_SHA  $patch" | sha256sum -c -
+          git apply --check "$patch"
+          git apply --index "$patch"
+          git diff --cached --check
+
+      - name: Classify validation requirements
+        id: classify
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+
+          raw = subprocess.check_output(["git", "diff", "--cached", "--name-only", "-z"])
+          paths = [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
+          needs_python = False
+          unsupported = []
+          protected = {
+              "AGENTS.md", "CLAUDE.md", "docs/12_pr_review_rubric.md",
+              "opencode.json", "opencode.jsonc", "requirements.txt", "pyproject.toml",
+          }
+          for path in paths:
+              if any(ord(ch) < 32 for ch in path):
+                  unsupported.append(path)
+              elif path in protected or path.startswith((".github/", ".claude/", ".opencode/")):
+                  unsupported.append(path)
+              elif path.endswith(".md"):
+                  pass
+              elif path.startswith("docs/") and path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".json", ".csv", ".txt")):
+                  pass
+              elif path.startswith("docs/"):
+                  unsupported.append(path)
+              elif path.endswith((".py", ".json", ".toml")):
+                  needs_python = True
+              else:
+                  unsupported.append(path)
+          if unsupported:
+              raise SystemExit("No trusted validator for: " + repr(unsupported))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"needs_python={'true' if needs_python else 'false'}\n")
+          PY
+
+      - name: Set up Python 3.11
+        if: steps.classify.outputs.needs_python == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Install Python test dependencies
+        if: steps.classify.outputs.needs_python == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e ".[quant]"
+          playwright install --with-deps chromium
+
+      - name: Run Python regression suite
+        if: steps.classify.outputs.needs_python == 'true'
+        run: pytest
+
+  report-validation-failure:
+    needs: [authorize, agent, validate]
+    if: always() && needs.authorize.outputs.run == 'true' && needs.agent.outputs.changed == 'true' && needs.validate.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Report validation failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body='OpenCode changes failed trusted pre-publication validation. STOP — Eddy/Sophira review required.' >/dev/null
+
+  publish:
+    needs: [agent, validate]
+    if: needs.agent.outputs.changed == 'true' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout exact source head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.agent.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download validated patch artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: opencode-patch-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch
+
+      - name: Publish exact validated patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_TOKEN: ${{ secrets.OPENCODE_PUBLISH_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          HEAD_REF: ${{ needs.agent.outputs.head_ref }}
+          EXPECTED_HEAD: ${{ needs.agent.outputs.head_sha }}
+          PATCH_SHA: ${{ needs.agent.outputs.patch_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$PUBLISH_TOKEN" || { echo 'Set dedicated OPENCODE_PUBLISH_TOKEN.'; exit 1; }
+          patch="$RUNNER_TEMP/patch/change.patch"
+          echo "$PATCH_SHA  $patch" | sha256sum -c -
+
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.head.ref' <<<"$meta")" = "$HEAD_REF"
+          test "$(jq -r '.head.sha' <<<"$meta")" = "$EXPECTED_HEAD"
+          test "$(jq -r '.head.repo.full_name' <<<"$meta")" = "$GITHUB_REPOSITORY"
+
+          git config core.hooksPath /dev/null
+          git apply --cached --check "$patch"
+          git apply --cached "$patch"
+          git diff --cached --check
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config commit.gpgSign false
+          git commit --no-verify -m "OpenCode: amend PR #$PR_NUMBER"
+          new_head="$(git rev-parse HEAD)"
+
+          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')" = "$EXPECTED_HEAD"
+          git remote set-url --push origin "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          git push --force-with-lease="refs/heads/$HEAD_REF:$EXPECTED_HEAD" origin "HEAD:refs/heads/$HEAD_REF"
+          remote_head="$(git ls-remote "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "refs/heads/$HEAD_REF" | awk '{print $1}')"
+          test "$remote_head" = "$new_head"
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="OpenCode manual command completed. New HEAD: $new_head. Awaiting configured automatic Codex review for the new push." >/dev/null
