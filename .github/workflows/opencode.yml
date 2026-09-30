@@ -4,19 +4,16 @@ on:
   issue_comment:
     types: [created]
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-
-concurrency:
-  group: shiori-opencode-pr-${{ github.event.issue.number }}
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  opencode:
+  authorize:
     if: github.event.issue.pull_request != null
     runs-on: ubuntu-latest
+
+    outputs:
+      run: ${{ steps.command.outputs.run }}
+      prompt_b64: ${{ steps.command.outputs.prompt_b64 }}
 
     steps:
       - name: Authorize exact slash command
@@ -24,11 +21,10 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
           AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
-          RUNNER_TEMP_DIR: ${{ runner.temp }}
         run: |
           python - <<'PY'
+          import base64
           import os
-          import pathlib
           import re
 
           body = os.environ["COMMENT_BODY"].strip()
@@ -36,30 +32,59 @@ jobs:
           match = re.fullmatch(r"/(?:oc|opencode)(?:\s+([\s\S]*))?", body, re.IGNORECASE)
 
           run = bool(allowed and match)
+          prompt = ""
+          if run:
+              prompt = (match.group(1) or "").strip()
+              if not prompt:
+                  prompt = "Inspect this PR and address the latest unresolved material review findings. Follow AGENTS.md."
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"run={'true' if run else 'false'}\n")
-
-          if not run:
-              raise SystemExit(0)
-
-          prompt = (match.group(1) or "").strip()
-          if not prompt:
-              prompt = "Inspect this PR and address the latest unresolved material review findings. Follow AGENTS.md."
-
-          pathlib.Path(os.environ["RUNNER_TEMP_DIR"], "opencode-prompt.txt").write_text(prompt, encoding="utf-8")
+              if run:
+                  encoded = base64.b64encode(prompt.encode()).decode()
+                  out.write(f"prompt_b64={encoded}\n")
           PY
 
-      - name: Add automation security boundary
-        if: steps.command.outputs.run == 'true'
-        run: |
-          cat >> "$RUNNER_TEMP/opencode-prompt.txt" <<'EOF'
+  writer:
+    needs: authorize
+    if: needs.authorize.outputs.run == 'true'
+    runs-on: ubuntu-latest
 
-          Security boundary: read/search/edit repository files only. Do not run validation, shell commands, network tools, subagents, formatters, LSP, or external-directory tools; those capabilities are hard-disabled. The workflow owns commit/push. Validation runs separately without model credentials.
-          EOF
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    concurrency:
+      group: shiori-opencode-pr-${{ github.event.issue.number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Restore authorized prompt
+        env:
+          PROMPT_B64: ${{ needs.authorize.outputs.prompt_b64 }}
+        run: |
+          python - <<'PY'
+          import base64
+          import os
+          import pathlib
+
+          prompt = base64.b64decode(os.environ["PROMPT_B64"]).decode()
+          path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "opencode-prompt.txt"
+          path.write_text(
+              prompt
+              + "\n\n"
+              + "Security boundary: read/search/edit repository files only. "
+                "Do not run validation, shell commands, network tools, subagents, "
+                "formatters, LSP, or external-directory tools; those capabilities "
+                "are hard-disabled. The workflow owns commit/push. Validation runs "
+                "separately without model credentials.\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Resolve current PR head
         id: pr
-        if: steps.command.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
@@ -75,7 +100,6 @@ jobs:
           echo "head_sha=$(jq -r '.head.sha' <<<"$meta")" >> "$GITHUB_OUTPUT"
 
       - name: Checkout exact PR head
-        if: steps.command.outputs.run == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
@@ -83,7 +107,6 @@ jobs:
           persist-credentials: false
 
       - name: Prepare verified PR branch
-        if: steps.command.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
@@ -102,7 +125,6 @@ jobs:
           git remote set-url --push origin DISABLED_BY_SHIORI_WORKFLOW
 
       - name: Install pinned OpenCode CLI
-        if: steps.command.outputs.run == 'true'
         env:
           OPENCODE_VERSION: v1.18.33
           OPENCODE_SHA256: e546123213ae47909a4268692aa4b94950d011afe9cac9938753a2194f1c16d5
@@ -118,7 +140,6 @@ jobs:
           echo "$bindir" >> "$GITHUB_PATH"
 
       - name: Run OpenCode
-        if: steps.command.outputs.run == 'true'
         env:
           OPENCODE_MODEL: ${{ vars.OPENCODE_AUTOMATION_MODEL }}
           OPENCODE_VARIANT: ${{ vars.OPENCODE_AUTOMATION_VARIANT }}
@@ -155,7 +176,6 @@ jobs:
           }
 
       - name: Validate correction before publication
-        if: steps.command.outputs.run == 'true'
         env:
           EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
           ACTIONLINT_VERSION: v1.7.12
@@ -225,7 +245,6 @@ jobs:
 
       - name: Commit and push verified changes
         id: publish
-        if: steps.command.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
@@ -260,7 +279,6 @@ jobs:
           echo "new_head=$new_head" >> "$GITHUB_OUTPUT"
 
       - name: Report result
-        if: steps.command.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
