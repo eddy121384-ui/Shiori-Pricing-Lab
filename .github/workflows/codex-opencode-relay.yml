@@ -17,6 +17,7 @@ jobs:
   relay:
     if: >-
       github.event.review.user.id == 199175422 &&
+      github.event.pull_request.author_association == 'OWNER' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
@@ -33,11 +34,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID" > review.json
-          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID/comments" --slurp > review-comments.json
-          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --slurp > pr-comments.json
+          state_dir="$RUNNER_TEMP/codex-relay"
+          mkdir -p "$state_dir"
 
-          review_commit="$(jq -r '.commit_id // ""' review.json)"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID" > "$state_dir/review.json"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID/comments" --slurp > "$state_dir/review-comments.json"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --slurp > "$state_dir/pr-comments.json"
+
+          review_commit="$(jq -r '.commit_id // ""' "$state_dir/review.json")"
           current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
           if [ "$current_head" != "$EVENT_HEAD_SHA" ] || { [ -n "$review_commit" ] && [ "$review_commit" != "$EVENT_HEAD_SHA" ]; }; then
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -51,9 +55,10 @@ jobs:
           import pathlib
           import re
 
-          review = json.loads(pathlib.Path("review.json").read_text())
-          review_pages = json.loads(pathlib.Path("review-comments.json").read_text())
-          pr_pages = json.loads(pathlib.Path("pr-comments.json").read_text())
+          state_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "codex-relay"
+          review = json.loads((state_dir / "review.json").read_text())
+          review_pages = json.loads((state_dir / "review-comments.json").read_text())
+          pr_pages = json.loads((state_dir / "pr-comments.json").read_text())
 
           review_comments = [item for page in review_pages for item in page]
           pr_comments = [item for page in pr_pages for item in page]
@@ -81,11 +86,11 @@ jobs:
               and "status=completed" in (c.get("body") or "")
           )
 
-          pathlib.Path("findings.txt").write_text(
+          (state_dir / "findings.txt").write_text(
               "\n\n---\n\n".join(findings),
               encoding="utf-8",
           )
-          pathlib.Path("relay.env").write_text(
+          (state_dir / "relay.env").write_text(
               "\n".join(
                   [
                       f"duplicate={int(duplicate)}",
@@ -98,7 +103,7 @@ jobs:
           )
           PY
 
-          . ./relay.env
+          . "$RUNNER_TEMP/codex-relay/relay.env"
 
           if [ "$duplicate" -gt 0 ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -115,7 +120,7 @@ jobs:
             exit 0
           fi
 
-          if [ ! -s findings.txt ]; then
+          if [ ! -s "$RUNNER_TEMP/codex-relay/findings.txt" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "No P0/P1/P2 findings in submitted Codex review."
             exit 0
@@ -181,27 +186,35 @@ jobs:
       - name: Run OpenCode correction
         if: steps.collect.outputs.run == 'true'
         env:
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
-          OPENCODE_VARIANT: ${{ vars.OPENCODE_VARIANT }}
-          OPENCODE_CONFIG_CONTENT: ${{ secrets.OPENCODE_CONFIG_CONTENT }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENCODE_PROVIDER_API_KEY: ${{ secrets.OPENCODE_PROVIDER_API_KEY }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_AUTOMATION_MODEL }}
+          OPENCODE_VARIANT: ${{ vars.OPENCODE_AUTOMATION_VARIANT }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENCODE_AUTOMATION_API_KEY }}
+          OPENCODE_CONFIG_CONTENT: '{"formatter":false,"permission":{"*":"deny","read":"allow","edit":"allow","glob":"allow","grep":"allow"},"provider":{"openrouter":{"options":{"apiKey":"{env:OPENROUTER_API_KEY}"}}}}'
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          OPENCODE_DISABLE_DEFAULT_PLUGINS: "true"
           EXPECTED_HEAD: ${{ steps.collect.outputs.head_sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           test -n "$OPENCODE_MODEL" || {
-            echo "Set repository Actions variable OPENCODE_MODEL to provider/model."
+            echo "Set repository Actions variable OPENCODE_AUTOMATION_MODEL."
             exit 1
           }
+          test -n "$OPENROUTER_API_KEY" || {
+            echo "Set dedicated repository secret OPENCODE_AUTOMATION_API_KEY."
+            exit 1
+          }
+          case "$OPENCODE_MODEL" in
+            openrouter/*) ;;
+            *) echo "OPENCODE_AUTOMATION_MODEL must use the openrouter/* provider."; exit 1 ;;
+          esac
 
           cat > "$RUNNER_TEMP/opencode-prompt.txt" <<EOF
           Automated Codex correction for existing PR #$PR_NUMBER at expected HEAD $EXPECTED_HEAD.
 
-          Follow AGENTS.md. Address all valid P0/P1/P2 findings below as one batch. Continue autonomously through ordinary engineering choices. Do not expand scope. Run the relevant validation.
+          Follow AGENTS.md. Address all valid P0/P1/P2 findings below as one batch. Continue autonomously through ordinary engineering choices. Do not expand scope.
+
+          Security boundary: you may read/search/edit repository files only. Do not run validation, shell commands, network tools, subagents, formatters, or external-directory tools; those capabilities are hard-disabled by the workflow. Validation occurs separately without model credentials.
 
           The workflow owns commit and push. Modify the working tree only; do NOT commit or push.
 
@@ -209,18 +222,25 @@ jobs:
 
           Codex findings:
           EOF
-          cat findings.txt >> "$RUNNER_TEMP/opencode-prompt.txt"
+          cat "$RUNNER_TEMP/codex-relay/findings.txt" >> "$RUNNER_TEMP/opencode-prompt.txt"
 
           args=(run --auto --model "$OPENCODE_MODEL")
           if [ -n "${OPENCODE_VARIANT:-}" ]; then
             args+=(--variant "$OPENCODE_VARIANT")
           fi
-          opencode "${args[@]}" < "$RUNNER_TEMP/opencode-prompt.txt"
+          opencode --pure "${args[@]}" < "$RUNNER_TEMP/opencode-prompt.txt"
 
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || {
             echo "OpenCode committed locally even though the workflow owns commit/push. STOP."
             exit 1
           }
+
+      - name: Validate without model credentials
+        if: steps.collect.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests
+          python -m pytest -q --collect-only
 
       - name: Publish exact correction commit
         id: publish
@@ -264,7 +284,7 @@ jobs:
           marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=completed from=$EXPECTED_HEAD to=$new_head -->"
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
             -f body="$marker
-          Automatic OpenCode correction round $ROUND/3 completed. HEAD advanced from `$EXPECTED_HEAD` to `$new_head`." >/dev/null
+          Automatic OpenCode correction round $ROUND/3 completed. HEAD advanced from $EXPECTED_HEAD to $new_head." >/dev/null
 
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "new_head=$new_head" >> "$GITHUB_OUTPUT"
