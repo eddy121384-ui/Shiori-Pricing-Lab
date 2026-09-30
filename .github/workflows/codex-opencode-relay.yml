@@ -68,16 +68,23 @@ jobs:
           bodies = [review.get("body") or ""] + [c.get("body") or "" for c in review_comments]
           findings = [body.strip() for body in bodies if body.strip() and material.search(body)]
 
-          def fingerprint(body: str) -> str:
-              line = next((x for x in body.splitlines() if re.search(r"P[012]", x, re.I)), body[:240])
+          def normalize_heading(line: str) -> str:
               line = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", line)
               line = re.sub(r"<[^>]+>", " ", line)
               line = re.sub(r"https?://\S+", " ", line)
               line = re.sub(r"[*_#\[\]()]", " ", line)
-              line = re.sub(r"\s+", " ", line).strip().lower()
-              return hashlib.sha256(line.encode()).hexdigest()[:12]
+              return re.sub(r"\s+", " ", line).strip().lower()
 
-          fingerprints = [fingerprint(body) for body in findings]
+          heading_lines = []
+          for body in findings:
+              for line in body.splitlines():
+                  if material.search(line):
+                      heading_lines.append(normalize_heading(line))
+
+          fingerprints = [
+              hashlib.sha256(line.encode()).hexdigest()[:12]
+              for line in heading_lines
+          ]
           marker = f"<!-- codex-opencode-relay:review={os.environ['REVIEW_ID']}"
 
           trusted_state_comments = [
