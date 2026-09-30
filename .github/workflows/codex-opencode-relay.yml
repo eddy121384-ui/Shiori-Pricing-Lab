@@ -93,15 +93,15 @@ jobs:
           ]
 
           duplicate = any(marker in (c.get("body") or "") for c in trusted_state_comments)
-          dispatch_markers = [
+          completed_markers = [
               c.get("body") or ""
               for c in trusted_state_comments
               if "<!-- codex-opencode-relay:" in (c.get("body") or "")
-              and "status=dispatched" in (c.get("body") or "")
+              and "status=completed" in (c.get("body") or "")
           ]
 
           prior_counts = {}
-          for body in dispatch_markers:
+          for body in completed_markers:
               match = re.search(r"fingerprints=([0-9a-f,]+)", body)
               if not match:
                   continue
@@ -118,7 +118,7 @@ jobs:
               "\n".join(
                   [
                       f"duplicate={int(duplicate)}",
-                      f"prior_rounds={len(dispatch_markers)}",
+                      f"prior_rounds={len(completed_markers)}",
                       f"repeated_twice={int(repeated_twice)}",
                       f"fingerprints={','.join(fingerprints)}",
                   ]
@@ -199,10 +199,11 @@ jobs:
             --arg head_ref "$HEAD_REF" \
             --arg head_sha "$HEAD_SHA" \
             --arg review_id "$REVIEW_ID" \
-            '{ref:$ref, inputs:{prompt:$prompt, pr_number:$pr, head_ref:$head_ref, head_sha:$head_sha, review_id:$review_id}}' \
+            --arg fingerprints "$FINGERPRINTS" \
+            '{ref:$ref, inputs:{prompt:$prompt, pr_number:$pr, head_ref:$head_ref, head_sha:$head_sha, review_id:$review_id, fingerprints:$fingerprints}}' \
             | gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" --input -
 
           marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=dispatched fingerprints=$FINGERPRINTS -->"
           body="$marker
-          Codex P0-P2 batch relayed to OpenCode for PR #$PR_NUMBER (automatic correction round $ROUND/3)."
+          Codex P0-P2 batch dispatched to OpenCode for PR #$PR_NUMBER. This does not count as a completed correction round until the PR HEAD advances successfully."
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
