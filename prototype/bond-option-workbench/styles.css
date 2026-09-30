@@ -334,6 +334,14 @@ body::after {
     radial-gradient(50% 40% at 100% 100%, rgba(255, 232, 206, 0.18), transparent 70%);
 }
 .card > * { position: relative; z-index: 1; }
+/* Markets chart tooltips intentionally overflow above the plot and card
+   (e.g. a top-edge node). Keep the rounded card and its contained wash --
+   the wash (::before) is already inset:0 with its own border-radius, so it
+   needs no overflow clipping -- but let interactive content escape on the
+   cards that host HTML tooltips. Every other card keeps overflow hidden,
+   notably .pricing-results whose decorative ::after blob must stay clipped. */
+.markets-chart-card,
+.vol-surface-chart-card { overflow: visible; }
 
 .card-title {
   font-family: var(--serif);
@@ -556,15 +564,13 @@ input[readonly].control:not(.derived-control) {
   font-family: var(--sans);
 }
 .toggle .opt.on { background: var(--indigo-soft); color: var(--indigo-deep); font-weight: 600; }
-#option-type-toggle .opt.on[data-value="CALL"],
-#position-toggle .opt.on[data-value="BUY"],
-#bond-quote-side-toggle .opt.on[data-value="BID"] {
+/* BUY/SELL carry directional meaning (the position sign); CALL/PUT and
+   BID/MID/OFFER do not, so they keep the neutral selected styling above. */
+#position-toggle .opt.on[data-value="BUY"] {
   background: var(--sage-soft);
   color: var(--sage-strong);
 }
-#option-type-toggle .opt.on[data-value="PUT"],
-#position-toggle .opt.on[data-value="SELL"],
-#bond-quote-side-toggle .opt.on[data-value="OFFER"] {
+#position-toggle .opt.on[data-value="SELL"] {
   background: var(--terra-soft);
   color: var(--terra-strong);
 }
@@ -712,13 +718,13 @@ input[readonly].control:not(.derived-control) {
 .btn.ghost { background: #fff; border-color: var(--border-strong); color: #3d4658; }
 .btn.outline { background: #fff; border-color: #bcd3f7; color: var(--indigo-deep); }
 .btn.primary {
-  background: linear-gradient(135deg, #6fa6d6, #62b59a);
+  background: linear-gradient(135deg, #3f6f9f, #3d7a5f);
   border-color: transparent;
   color: #fff;
   padding: 8px 26px;
   box-shadow: 0 8px 18px -10px rgba(79, 127, 179, 0.8);
 }
-.btn.primary:hover { background: linear-gradient(135deg, #5f98cc, #52a78b); }
+.btn.primary:hover { background: linear-gradient(135deg, #38648f, #356b53); }
 .btn.ghost:hover, .btn.outline:hover { border-color: var(--ink3); transform: translateY(-1px); }
 .btn.ghost, .btn.outline, .btn.primary { cursor: pointer; }
 /* Draft-gated state: visual companion to the JS-level draft/missing-fields
