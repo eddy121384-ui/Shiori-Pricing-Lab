@@ -27,10 +27,6 @@ on:
         description: Source review ID for relay/audit
         required: false
         type: string
-      fingerprints:
-        description: Material finding fingerprints for completed-round accounting
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -147,14 +143,13 @@ jobs:
           share: false
 
       - name: Record completed correction
-        if: github.event_name == 'workflow_dispatch' && success() && steps.guard.outputs.run == 'true' && inputs.review_id != '' && inputs.fingerprints != ''
+        if: github.event_name == 'workflow_dispatch' && success() && steps.guard.outputs.run == 'true' && inputs.review_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REVIEW_ID: ${{ inputs.review_id }}
           EXPECTED_HEAD: ${{ inputs.head_sha }}
           EXPECTED_REF: ${{ inputs.head_ref }}
-          FINGERPRINTS: ${{ inputs.fingerprints }}
         run: |
           set -euo pipefail
           current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
@@ -165,7 +160,7 @@ jobs:
             exit 0
           fi
 
-          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=completed from=$EXPECTED_HEAD to=$current_sha fingerprints=$FINGERPRINTS -->"
+          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=completed from=$EXPECTED_HEAD to=$current_sha -->"
           body="$marker
           OpenCode correction completed for PR #$PR_NUMBER: HEAD advanced from $EXPECTED_HEAD to $current_sha."
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
