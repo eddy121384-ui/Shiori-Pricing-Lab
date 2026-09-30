@@ -259,6 +259,23 @@ jobs:
             fi
           done
 
+      - name: Reconfirm head and reject symlink or gitlink before model
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ needs.collect.outputs.head_sha }}
+          EXPECTED_REF: ${{ needs.collect.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.head.sha' <<<"$meta")" = "$EXPECTED_HEAD"
+          test "$(jq -r '.head.ref' <<<"$meta")" = "$EXPECTED_REF"
+          test "$(jq -r '.head.repo.full_name' <<<"$meta")" = "$GITHUB_REPOSITORY"
+          if git ls-files -s | awk '$1 == "120000" || $1 == "160000" { bad=1 } END { exit bad ? 0 : 1 }'; then
+            echo 'Tracked symlink/gitlink present; automation fails closed.'
+            exit 1
+          fi
+
       - name: Run read-edit-only OpenCode
         env:
           OPENCODE_MODEL: ${{ vars.OPENCODE_AUTOMATION_MODEL }}
@@ -267,8 +284,10 @@ jobs:
           OPENCODE_CONFIG_CONTENT: '{"formatter":false,"lsp":false,"plugin":[],"permission":{"*":"deny","read":{"*":"allow",".git/*":"deny","*.env":"deny","*.env.*":"deny"},"edit":{"*":"allow",".git/*":"deny"},"glob":"allow","grep":"allow"},"agent":{"build":{"permission":{"*":"deny","read":{"*":"allow",".git/*":"deny","*.env":"deny","*.env.*":"deny"},"edit":{"*":"allow",".git/*":"deny"},"glob":"allow","grep":"allow"}}}}'
           OPENCODE_DISABLE_AUTOUPDATE: 'true'
           OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true'
+          OPENCODE_DISABLE_EXTERNAL_SKILLS: '1'
           OPENCODE_DISABLE_LSP_DOWNLOAD: 'true'
           OPENCODE_DISABLE_CLAUDE_CODE: '1'
+          OPENCODE_PURE: '1'
           EXPECTED_HEAD: ${{ needs.collect.outputs.head_sha }}
         run: |
           set -euo pipefail
@@ -392,13 +411,26 @@ jobs:
           git apply --index "$patch"
           git diff --cached --check
 
+      - name: Reject control-plane changes and special file modes
+        run: |
+          set -euo pipefail
+          if ! git diff --cached --quiet --             .github AGENTS.md CLAUDE.md docs/12_pr_review_rubric.md             .claude .opencode opencode.json opencode.jsonc requirements.txt pyproject.toml
+          then
+            echo 'Automated patch modifies protected control-plane/dependency files.'
+            exit 1
+          fi
+          if git ls-files -s | awk '$1 == "120000" || $1 == "160000" { bad=1 } END { exit bad ? 0 : 1 }'; then
+            echo 'Tracked symlink/gitlink present after patch; no trusted validator is configured.'
+            exit 1
+          fi
+
       - name: Classify validation requirements
         id: classify
         run: |
           python - <<'PY'
           import os
           import subprocess
-          raw = subprocess.check_output(['git','diff','--cached','--name-only','-z'])
+          raw = subprocess.check_output(['git','diff','--cached','--name-only','--no-renames','-z'])
           paths = [p.decode('utf-8','surrogateescape') for p in raw.split(b'\0') if p]
           py = False
           bad = []
