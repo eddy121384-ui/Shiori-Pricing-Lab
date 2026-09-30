@@ -9,7 +9,7 @@ Rules for AI coding agents working in this repository:
 5. A new financial methodology, pricing, canonical-schema, validation, or fallback decision not already fixed by the issue or approved docs is **RED**: stop and return the decision to Eddy/Sophira. Do not guess.
 6. Run the smallest relevant checks that prove the changed behavior. Pricing-method changes require deterministic tests and Eddy's approval.
 7. Work attached to an existing PR stays on that issue branch and PR unless Eddy explicitly says otherwise.
-8. End each implementation/amendment round by validating, committing, pushing, confirming the remote PR HEAD, and posting a short PR summary: issue, branch, HEAD, files changed, validation, RED status, and next action.
+8. End each implementation/amendment round by validating and ensuring the change is committed, pushed, remote-HEAD confirmed, and summarized in the PR. When a trusted workflow explicitly owns commit/push, the implementation agent leaves a validated uncommitted working tree and the workflow performs those final steps.
 9. After a reviewable push, request independent Codex review on the new HEAD with a separate PR comment containing exactly `@codex review`. Reviewers follow `docs/12_pr_review_rubric.md`.
 10. Handle current-HEAD findings as a batch: P0/P1 = BLOCKER, P2 = MATERIAL, P3 = MINOR. Address valid P0-P2 on the same branch/PR, then validate, push, summarize, and re-review. Do not churn on P3 unless it affects correctness or Eddy asks.
 11. Automation may relay a submitted current-HEAD Codex P0-P2 batch to the implementation agent. It must not act on stale reviews, make RED decisions, run concurrent writers on one PR, continue after Codex emits `ESCALATE`, or exceed three completed correction rounds.
