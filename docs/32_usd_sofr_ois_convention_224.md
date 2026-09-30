@@ -37,13 +37,14 @@ These are methodology contracts owned by #224 (this issue). Field-level schemas 
 `SwapTrade` records raw trade economics as dealt, before any convention resolution:
 
 - identifiers (`product_id`), direction (pay/receive fixed), currency (`USD` for V1), notional.
-- `effective_date` / `maturity_date` as stated deal terms (ISO dates, order-validated only).
-- leg terms as stated: fixed rate, floating index (`USD_SOFR`), spread, payment frequencies, day-count labels, compounding-method label, reset label, BDC label.
-- Explicitly NOT included: any derived schedule, any adjusted date, any accrued fraction, any fixing, any forward, any curve, any valuation date.
+- raw `trade_date` (ISO date) — the anchor for spot-start resolution (owner decision R1, RESOLVED).
+- `maturity_date` as a stated deal term (ISO date, order-validated only).
+- leg economics as stated: fixed rate, floating index (`USD_SOFR`), spread.
+- Explicitly NOT included: `effective_date` (resolved output for V1 — see below), any derived schedule, any adjusted date, any accrued fraction, any fixing, any forward, any curve, any valuation date.
 
-`SwapTrade` never contains a date that was computed from a lag, a calendar, or a convention. If a date was derived, it belongs in `ResolvedSwap` with its derivation recorded, not in `SwapTrade`.
+`SwapTrade` never contains a date that was computed from a lag, a calendar, or a convention. If a date was derived, it belongs in `ResolvedSwap` with its derivation recorded, not in `SwapTrade`. `SwapTrade` contains actual trade economics, not duplicated convention defaults: convention-like labels (payment frequencies, day-count labels, compounding-method label, reset label, BDC label) are NOT V1 trade inputs — `ConventionSet` is authoritative for standard production convention terms (owner decision R2, RESOLVED).
 
-Two contract gaps are recorded here as RED-02 and are NOT decided by this issue — until Eddy/Sophira decide both, `SwapTrade + ConventionSet -> ResolvedSwap` is not yet a deterministic contract and #228 must not implement it. First, `SwapTrade` carries no raw `trade_date`: the `ConventionSet` spot-lag rule (trade date → effective date) therefore cannot be evaluated or audited from the stated inputs, and this issue does not choose between adding a `trade_date` input, redefining spot lag as validation-only / out of scope, assigning effective-date authority to the stated `effective_date`, or any forward-start semantics. Second, convention-like trade terms (payment frequencies, day-count labels, compounding-method label, reset label, BDC label) overlap `ConventionSet` authority: this issue does not choose whether the trade overrides the convention, the convention supplies defaults, or a mismatch is rejected.
+Owner decisions R1/R2 (Eddy/Sophira, RESOLVED for V1 — AGENTS.md rule 15 no longer blocks these two): R1 — V1 supports standard spot-starting USD SOFR OIS only; `trade_date + approved ConventionSet -> resolved effective date`, so the effective date is produced by convention resolution and belongs in `ResolvedSwap`; forward-starting swaps are explicitly OUT OF SCOPE for V1, must fail closed, and their final semantics are not designed in this issue. R2 — `ConventionSet` is authoritative for standard production convention terms (frequency, day count, calendar, business-day convention, spot lag, payment lag, SOFR compounding/observation rules, stub policy); V1 does NOT support arbitrary per-trade convention overrides; incoming or legacy-adapted trade data containing convention-like values that conflict with the approved `ConventionSet` must fail closed; trade data must never silently override `ConventionSet`. With R1/R2 decided, `SwapTrade + ConventionSet -> ResolvedSwap` is deterministic for the V1 scope (all remaining UNRESOLVED items are convention VALUES in §3/§6, not contract-shape decisions).
 
 ### 2.2 ConventionSet (`USD_SOFR_OIS_V1`) — "under which approved rules is the trade resolved?"
 
@@ -51,10 +52,13 @@ Two contract gaps are recorded here as RED-02 and are NOT decided by this issue 
 
 `ConventionSet` owns: spot-lag rule (trade date → effective date), fixed-leg frequency/day-count authority, floating-leg compounding mechanics + formula, fixing/observation semantics (lookback/shift/lockout/cutoff), payment-lag rule, calendar authority, BDC resolution rule, stub rule, overnight compounding convention. It owns NO market data, NO curves, NO fixings, NO model.
 
+Authority (owner decision R2, RESOLVED for V1): `ConventionSet` is authoritative for all standard production convention terms above. V1 does NOT support arbitrary per-trade convention overrides. If incoming or legacy-adapted trade data contains convention-like values that conflict with the approved `ConventionSet`, the resolver must fail closed. Trade data must never silently override `ConventionSet`.
+
 ### 2.3 ResolvedSwap — "what exactly will the kernel price?"
 
 `ResolvedSwap` is the fully deterministic output of `SwapTrade + ConventionSet` resolution:
 
+- resolved `effective_date` produced from raw `trade_date` + the approved spot-lag rule, with the rule recorded (owner decision R1, RESOLVED for V1).
 - explicit period schedules per leg (start/end dates, all calendar/BDC adjustments applied and recorded).
 - per-period accrual fractions with the day-count rule recorded.
 - compounding / observation / fixing calendar per period (observation dates, weights, lockout/cutoff application) with the rule recorded.
@@ -62,7 +66,7 @@ Two contract gaps are recorded here as RED-02 and are NOT decided by this issue 
 - stub periods, if the approved stub rule permits them, with the rule recorded.
 - full provenance: which `ConventionSet` version resolved it, and which rule produced each derived date/number.
 
-Resolution is total and fail-closed: anything the approved `ConventionSet` cannot resolve (e.g. a non-clean schedule under a no-stub rule) is refused with a named reason, never silently filled. `ResolvedSwap` carries no market snapshot, no curve, no fixing values, no model config — those arrive separately at the kernel boundary per #223 (`ResolvedSwap + resolved curve input(s) + Fixings + Model Inputs -> Results`).
+Resolution is total and fail-closed: anything the approved `ConventionSet` cannot resolve (e.g. a non-clean schedule under a no-stub rule) is refused with a named reason, never silently filled. Forward-starting swaps are OUT OF SCOPE for V1 and any forward-starting input must fail closed (owner decision R1; final forward-start semantics are not designed here). Conflicting convention-like trade input must fail closed and never silently override `ConventionSet` (owner decision R2). `ResolvedSwap` carries no market snapshot, no curve, no fixing values, no model config — those arrive separately at the kernel boundary per #223 (`ResolvedSwap + resolved curve input(s) + Fixings + Model Inputs -> Results`).
 
 ### 2.4 Authority rule (from #223, restated, not changed)
 
@@ -76,7 +80,7 @@ Status vocabulary: CONFIRMED = value fixed by repository/workstation evidence ci
 
 | # | Dimension | Status | Evidence |
 |---|---|---|---|
-| D1 | Effective date / spot lag (e.g. T+2 from trade date) | UNRESOLVED — RED-02 | No `spot_lag` / `trade_date` field on `products/swaps.py` (`InterestRateSwap` / `OvernightIndexedSwap`: `product_id, effective_date, maturity_date, currency, notional, fixed_leg, floating_leg, business_day_convention`; `swaps.py:82-168`); `effective_date` is a raw ISO string with order-only validation (`_validate_common`, `swaps.py:53-79`). `pricing/irs_engine.py:124-134` accepts spot or forward-starting (`valuation_date <= effective`) but encodes no lag. Only mention of spot lag is the RED-02 open list itself (`docs/31`). |
+| D1 | Effective date / spot lag (e.g. T+2 from trade date) | VALUE UNRESOLVED — RED-02; mechanism RESOLVED (R1) | Mechanism: V1 is standard spot-starting OIS only; raw `trade_date` is the anchor and the effective date is resolved output; forward-starting is out of scope and fails closed (owner decision R1). Note: existing `products/swaps.py` carries `effective_date` with no `trade_date` — the V1 methodology contract differs from the legacy schema, which remains REFERENCE ONLY. Value: no `spot_lag` length evidenced anywhere; `pricing/irs_engine.py:124-134` accepts spot or forward-starting (`valuation_date <= effective`) but encodes no lag. Only other mention of spot lag is the RED-02 open list itself (`docs/31`). |
 | D2 | Fixed-leg frequency (annual vs semi-annual) | UNRESOLVED — RED-02 | Vocabulary `Frequency` (`enums.py:98-109`) is CONFIRMED as a label set; no V1 value selected. Fixture frequencies (`SEMI_ANNUAL` in `tests/test_irs_reference_engine.py`, `ANNUAL` in `tests/test_products.py` OIS example) are synthetic examples, not workstation evidence. |
 | D3 | Fixed-leg day count | UNRESOLVED — RED-02 | Vocabulary `DayCount` (`enums.py:112-133`) CONFIRMED as labels. `irs_engine` safe subset (`ACT_360` / `ACT_365_FIXED`, `irs_engine.py:136-152`) is legacy term-IRS behavior — REFERENCE ONLY, not an OIS fixed-leg decision. `REPO_DAY_COUNT=ACT/360` (`bli_repo_carry_forward`) is repo-accrual prototype scope only; the VCUB DCF experiment's `ACT/360` candidate is vol-annualization scope only — neither is swap evidence (both modules say so explicitly). |
 | D4 | Floating-leg compounding mechanics + formula (compounded in arrears; `DAILY_COMPOUNDED` vs `AVERAGED` semantics; exact formula) | UNRESOLVED — RED-02 | Labels `DAILY_COMPOUNDED` / `AVERAGED` (`enums.py:172-182`: "the two standard ways an OIS floating leg turns a series of overnight fixings into one coupon") are CONFIRMED vocabulary with NO formula. `OvernightIndexedSwap` enforces compounding ≠ `NONE` and reset ∈ {`None`, `DAILY`} (`swaps.py:160-168`) — structural shape only. `irs_engine` REJECTS compounding and prices one simple forward per period (`(df_start/df_end − 1)/accrual`, simple DF `1/(1+r·T)`, `irs_engine.py:78-109,230-240,325-327`) — REFERENCE ONLY term-IRS behavior; must not be read as an OIS formula (`docs/31 §4` forbids unifying with BLI `exp(−r·T)` either). |
@@ -135,7 +139,7 @@ Notes: E1–E4 prefer DAPI fields where Bloomberg exposes them (units/values aud
 
 ## 6. Proposed USD_SOFR_OIS_V1 contract (shape only — all values UNRESOLVED)
 
-`USD_SOFR_OIS_V1` is a PROPOSED version identifier for the `ConventionSet` rulebook. Its dimension list is fixed by this issue; every value is UNRESOLVED — RED-02 until workstation evidence (§5) plus Sophira methodology acceptance fills it. A future revision fills values one dimension at a time with evidence citations; no value becomes production methodology without both.
+`USD_SOFR_OIS_V1` is a PROPOSED version identifier for the `ConventionSet` rulebook. Its dimension list is fixed by this issue; every convention VALUE is UNRESOLVED — RED-02 until workstation evidence (§5) plus Sophira methodology acceptance fills it. Contract-shape decisions R1 (trade-date anchor, effective-date output, forward-start exclusion) and R2 (ConventionSet authority, no per-trade overrides, conflicts fail closed) are RESOLVED per Eddy/Sophira owner decisions recorded in §2. A future revision fills values one dimension at a time with evidence citations; no value becomes production methodology without both.
 
 ```yaml
 convention_set_id: USD_SOFR_OIS_V1
@@ -143,8 +147,8 @@ status: PROPOSED — UNRESOLVED (RED-02)
 currency: USD  # CONFIRMED (V1 scope; enum products/enums.py)
 floating_index: USD_SOFR  # CONFIRMED (V1 scope; overnight index label)
 effective_date_rule:
-  spot_lag: UNRESOLVED  # D1
-  trade_date_anchor: UNRESOLVED  # RED-02 contract gap: SwapTrade carries no raw trade_date, so the spot-lag rule is unevaluable until Eddy/Sophira add the input, redefine spot lag as validation-only/out-of-scope, or assign effective-date authority (forward-start semantics likewise undecided)
+  spot_lag: UNRESOLVED  # D1 value (lag length needs E3 evidence)
+  trade_date_anchor: RESOLVED  # R1: raw trade_date is the V1 input; effective date is resolved output; forward-starting out of scope and fails closed
 fixed_leg:
   frequency: UNRESOLVED  # D2
   day_count: UNRESOLVED  # D3
@@ -160,7 +164,7 @@ stub_rule: UNRESOLVED  # D9 (or owner-policy no-stub scope per E5)
 resolution_rules:
   schedule_generation: C++ Rates module per approved contract, implemented in #228
   fail_closed: Refuse anything the approved set cannot resolve; never silent-fill
-  term_precedence: UNRESOLVED  # RED-02 contract gap: where convention-like SwapTrade terms overlap ConventionSet authority, Eddy/Sophira must choose trade-overrides-convention, convention-supplies-defaults, or mismatch-rejected before #228 can resolve deterministically
+  term_precedence: RESOLVED  # R2: ConventionSet authoritative; V1 supports no per-trade convention overrides; conflicting convention-like trade input fails closed, never silently overrides
 ```
 
 Out of contract scope (owned elsewhere): market snapshots, curve construction/representation (#225, RED-01 open); fixing values/history (#225 `FixingStore`); vol/exercise/settlement/model (#225); build/concurrency/caching/benchmarks (#226).
@@ -179,7 +183,7 @@ Out of contract scope (owned elsewhere): market snapshots, curve construction/re
 
 ## 8. RED-02 unresolved item list (owner: Sophira/Eddy)
 
-RED-02 is OPEN. Unresolved production items: D1 spot lag; D2 fixed frequency; D3 fixed day count; D4 compounding mechanics + formula; D5 observation semantics; D6 payment lag; D7 calendar; D8 BDC selection; D9 stub rule; D10 overnight compounding convention; plus two contract-shape decisions — (R1) the missing raw `trade_date` anchor for the spot-lag rule (add the input, validation-only/out-of-scope, or effective-date authority with forward-start semantics) and (R2) override precedence where convention-like `SwapTrade` terms overlap `ConventionSet` authority (trade-overrides, convention-defaults, or mismatch-rejected). Evidence required: E1–E6 in §5. RED-01 (curve authority) is separately open and untouched by this issue. Any workstation mismatch or inferred value = STOP and ask Eddy.
+RED-02 is OPEN on convention VALUES. Unresolved production values: D1 spot-lag length; D2 fixed frequency; D3 fixed day count; D4 compounding mechanics + formula; D5 observation semantics; D6 payment lag; D7 calendar; D8 BDC selection; D9 stub rule; D10 overnight compounding convention. RESOLVED contract-shape decisions (Eddy/Sophira, no longer blocking): (R1) raw `trade_date` anchor with effective date as resolved output, V1 standard spot-starting only, forward-starting out of scope and fail-closed; (R2) `ConventionSet` authority over standard terms, no V1 per-trade overrides, conflicting trade input fails closed. Evidence required for the open values: E1–E6 in §5. RED-01 (curve authority) is separately open and untouched by this issue. Any workstation mismatch or inferred value = STOP and ask Eddy.
 
 ---
 
