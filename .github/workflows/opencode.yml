@@ -13,15 +13,15 @@ on:
         type: string
       pr_number:
         description: Existing PR number when modifying a PR
-        required: false
+        required: true
         type: string
       head_ref:
         description: Expected PR head branch
-        required: false
+        required: true
         type: string
       head_sha:
         description: Expected PR head SHA
-        required: false
+        required: true
         type: string
       review_id:
         description: Source review ID for relay/audit
@@ -109,7 +109,7 @@ jobs:
 
       - name: Run OpenCode from comment
         if: github.event_name != 'workflow_dispatch'
-        uses: anomalyco/opencode/github@latest
+        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -126,7 +126,7 @@ jobs:
 
       - name: Run OpenCode from dispatched prompt
         if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
-        uses: anomalyco/opencode/github@latest
+        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
