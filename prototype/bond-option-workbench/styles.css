@@ -126,7 +126,11 @@ body::after {
   width: 100%;
   max-width: 1560px;
   margin: 0 auto;
-  min-height: 100vh;
+  /* App shell: viewport-height owner so the action footer stays available
+     while the workbench content scrolls inside .main (which owns its own
+     scroll). Narrow screens revert to document scroll further below. */
+  height: 100vh;
+  height: 100dvh;
   background: transparent;
   display: flex;
   flex-direction: column;
@@ -259,6 +263,8 @@ body::after {
   flex-direction: column;
   padding: 16px 12px;
   flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .nav-item {
   display: flex; align-items: center; gap: 12px;
@@ -283,6 +289,10 @@ body::after {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+  /* Scroll owner inside the app shell: tall workbench content scrolls
+     here while the topnav/sidebar/footer stay put. */
+  min-height: 0;
+  overflow-y: auto;
 }
 /* .main's own explicit `display: flex` ties the UA stylesheet's
    `[hidden] { display: none }` rule in specificity and (as the later, author
@@ -1448,6 +1458,9 @@ input[readonly].control:not(.derived-control) {
   .vol-surface-provenance { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 900px) {
+  /* Narrow screens revert to document scroll (no nested scroll areas);
+     the sticky footer below still keeps actions available while scrolling. */
+  .app { height: auto; min-height: 100vh; min-height: 100dvh; }
   .body { flex-direction: column; }
   .sidebar {
     width: 100%;
@@ -1461,6 +1474,11 @@ input[readonly].control:not(.derived-control) {
   .nav-item { height: 36px; font-size: 13px; }
   .sidebar-foot { margin-top: 0; margin-left: auto; padding: 6px 12px; }
   .main { padding: 14px 14px 20px; }
+  /* Capture / OTM-SABR headers: let title and actions wrap onto multiple
+     lines instead of clipping in one row at mobile widths. */
+  .capture-header-top { flex-wrap: wrap; }
+  .capture-title-block { min-width: 0; }
+  .capture-header-actions { flex-wrap: wrap; }
   .instr-header { padding: 14px 16px; gap: 16px; }
   .stats { margin-left: 0; gap: 18px; }
   .form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: start; }
