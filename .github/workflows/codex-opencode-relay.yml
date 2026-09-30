@@ -81,13 +81,28 @@ jobs:
 
           protected_basenames = {
               'AGENTS.md', 'CLAUDE.md', 'opencode.json', 'opencode.jsonc',
-              'requirements.txt', 'pyproject.toml',
+              'requirements.txt', 'pyproject.toml', 'setup.py', 'setup.cfg',
+              'package.json', 'package-lock.json', 'npm-shrinkwrap.json',
+              'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
+              'Pipfile', 'Pipfile.lock', 'poetry.lock', 'uv.lock', 'tox.ini',
+              'environment.yml', 'environment.yaml', 'CMakeLists.txt', 'vcpkg.json',
+              'conanfile.py', 'conanfile.txt', 'meson.build', 'meson_options.txt',
+              'Cargo.toml', 'Cargo.lock', 'go.mod', 'go.sum', 'pom.xml',
+              'build.gradle', 'build.gradle.kts', 'gradle.properties',
+              'composer.json', 'composer.lock', 'Gemfile', 'Gemfile.lock',
           }
+          protected_lower = {name.lower() for name in protected_basenames}
           def is_protected(path: str) -> bool:
               parts = path.split('/')
+              name = parts[-1].lower()
               return (
                   path == 'docs/12_pr_review_rubric.md'
-                  or parts[-1] in protected_basenames
+                  or name in protected_lower
+                  or (
+                      name.startswith(('requirements', 'constraints'))
+                      and name.endswith(('.txt', '.in'))
+                  )
+                  or name.endswith('.lock')
                   or '.github' in parts
                   or '.claude' in parts
                   or '.opencode' in parts
@@ -128,7 +143,7 @@ jobs:
               "Make ordinary engineering decisions autonomously. Do not expand scope. "
               "Read/search/edit repository files only; do not run validation or commit/push. "
               "Do not edit repository control-plane files: .github/**, docs/12_pr_review_rubric.md, "
-              "or any-depth AGENTS.md, CLAUDE.md, opencode.json/jsonc, requirements.txt, pyproject.toml, "
+              "or any-depth AGENTS.md, CLAUDE.md, OpenCode config, dependency/build manifests or lockfiles, "
               ".claude/**, or .opencode/**. "
               "If a new RED methodology/pricing/canonical-schema/validation/fallback decision is required, make no changes.\n\n"
               "Codex findings:\n" + "\n\n---\n\n".join(findings)
@@ -438,7 +453,11 @@ jobs:
           fi
 
           if git diff --cached --summary | grep -q 'mode change'; then
-            echo 'Automated patch changes executable/file mode; no trusted validator is configured.'
+            echo 'Automated patch changes file mode; no trusted validator is configured.'
+            exit 1
+          fi
+          if git diff --cached --raw --no-renames | awk '$1 == ":100755" || $2 == "100755" { bad=1 } END { exit bad ? 0 : 1 }'; then
+            echo 'Automated patch touches an executable file mode; no trusted validator is configured.'
             exit 1
           fi
 
@@ -454,13 +473,28 @@ jobs:
           bad = []
           protected_basenames = {
               'AGENTS.md', 'CLAUDE.md', 'opencode.json', 'opencode.jsonc',
-              'requirements.txt', 'pyproject.toml',
+              'requirements.txt', 'pyproject.toml', 'setup.py', 'setup.cfg',
+              'package.json', 'package-lock.json', 'npm-shrinkwrap.json',
+              'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
+              'Pipfile', 'Pipfile.lock', 'poetry.lock', 'uv.lock', 'tox.ini',
+              'environment.yml', 'environment.yaml', 'CMakeLists.txt', 'vcpkg.json',
+              'conanfile.py', 'conanfile.txt', 'meson.build', 'meson_options.txt',
+              'Cargo.toml', 'Cargo.lock', 'go.mod', 'go.sum', 'pom.xml',
+              'build.gradle', 'build.gradle.kts', 'gradle.properties',
+              'composer.json', 'composer.lock', 'Gemfile', 'Gemfile.lock',
           }
+          protected_lower = {name.lower() for name in protected_basenames}
           def is_protected(path: str) -> bool:
               parts = path.split('/')
+              name = parts[-1].lower()
               return (
                   path == 'docs/12_pr_review_rubric.md'
-                  or parts[-1] in protected_basenames
+                  or name in protected_lower
+                  or (
+                      name.startswith(('requirements', 'constraints'))
+                      and name.endswith(('.txt', '.in'))
+                  )
+                  or name.endswith('.lock')
                   or '.github' in parts
                   or '.claude' in parts
                   or '.opencode' in parts
@@ -471,7 +505,7 @@ jobs:
               elif p.endswith('.md'): pass
               elif p.startswith('docs/') and p.lower().endswith(('.png','.jpg','.jpeg','.webp','.json','.csv','.txt')): pass
               elif p.startswith('docs/'): bad.append(p)
-              elif p.endswith(('.py','.json','.toml')): py = True
+              elif p.endswith('.py'): py = True
               else: bad.append(p)
           if bad: raise SystemExit('No trusted validator for: ' + repr(bad))
           with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as out:

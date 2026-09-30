@@ -7,7 +7,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: ${{ github.event.issue.pull_request != null && github.event.comment.author_association == 'OWNER' && (github.event.comment.body == '/oc' || startsWith(github.event.comment.body, '/oc ') || github.event.comment.body == '/opencode' || startsWith(github.event.comment.body, '/opencode ')) && format('shiori-opencode-pr-{0}', github.event.issue.number) || format('shiori-opencode-noop-{0}', github.run_id) }}
+  group: ${{ github.event.issue.pull_request != null && github.event.comment.author_association == 'OWNER' && ((startsWith(github.event.comment.body, '/oc ') && github.event.comment.body != '/oc ') || (startsWith(github.event.comment.body, '/opencode ') && github.event.comment.body != '/opencode ')) && format('shiori-opencode-pr-{0}', github.event.issue.number) || format('shiori-opencode-noop-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -32,9 +32,11 @@ jobs:
 
           body = os.environ["COMMENT_BODY"]
           allowed = os.environ["AUTHOR_ASSOCIATION"] == "OWNER"
-          match = re.fullmatch(r"/(?:oc|opencode)(?:\s+([\s\S]+))?", body)
+          match = re.fullmatch(r"/(?:oc|opencode) ([\s\S]+)", body)
           prompt = ((match.group(1) or "").strip() if match else "")
-          run = bool(allowed and match and prompt)
+          run = bool(allowed and match)
+          if run and not prompt:
+              prompt = "No-op owner command: make no repository changes; the supplied prompt contained only whitespace."
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"run={'true' if run else 'false'}\n")
@@ -80,13 +82,28 @@ jobs:
                       files.append(item["previous_filename"])
           protected_basenames = {
               "AGENTS.md", "CLAUDE.md", "opencode.json", "opencode.jsonc",
-              "requirements.txt", "pyproject.toml",
+              "requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+              "package.json", "package-lock.json", "npm-shrinkwrap.json",
+              "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+              "Pipfile", "Pipfile.lock", "poetry.lock", "uv.lock", "tox.ini",
+              "environment.yml", "environment.yaml", "CMakeLists.txt", "vcpkg.json",
+              "conanfile.py", "conanfile.txt", "meson.build", "meson_options.txt",
+              "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "pom.xml",
+              "build.gradle", "build.gradle.kts", "gradle.properties",
+              "composer.json", "composer.lock", "Gemfile", "Gemfile.lock",
           }
+          protected_lower = {name.lower() for name in protected_basenames}
           def is_protected(path: str) -> bool:
               parts = path.split("/")
+              name = parts[-1].lower()
               return (
                   path == "docs/12_pr_review_rubric.md"
-                  or parts[-1] in protected_basenames
+                  or name in protected_lower
+                  or (
+                      name.startswith(("requirements", "constraints"))
+                      and name.endswith((".txt", ".in"))
+                  )
+                  or name.endswith(".lock")
                   or ".github" in parts
                   or ".claude" in parts
                   or ".opencode" in parts
@@ -126,7 +143,7 @@ jobs:
               "formatters, LSP, or external-directory tools. The workflow owns "
               "commit/push and validation. Do not edit .git metadata or repository control-plane files: "
               ".github/**, docs/12_pr_review_rubric.md, or any-depth AGENTS.md, CLAUDE.md, "
-              "opencode.json/jsonc, requirements.txt, pyproject.toml, .claude/**, or .opencode/**."
+              "OpenCode config, dependency/build manifests or lockfiles, .claude/**, or .opencode/**."
           )
           (pathlib.Path(os.environ["RUNNER_TEMP"]) / "opencode-prompt.txt").write_text(text, encoding="utf-8")
           PY
@@ -322,7 +339,11 @@ jobs:
           fi
 
           if git diff --cached --summary | grep -q 'mode change'; then
-            echo 'Automated patch changes executable/file mode; no trusted validator is configured.'
+            echo 'Automated patch changes file mode; no trusted validator is configured.'
+            exit 1
+          fi
+          if git diff --cached --raw --no-renames | awk '$1 == ":100755" || $2 == "100755" { bad=1 } END { exit bad ? 0 : 1 }'; then
+            echo 'Automated patch touches an executable file mode; no trusted validator is configured.'
             exit 1
           fi
 
@@ -339,13 +360,28 @@ jobs:
           unsupported = []
           protected_basenames = {
               "AGENTS.md", "CLAUDE.md", "opencode.json", "opencode.jsonc",
-              "requirements.txt", "pyproject.toml",
+              "requirements.txt", "pyproject.toml", "setup.py", "setup.cfg",
+              "package.json", "package-lock.json", "npm-shrinkwrap.json",
+              "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+              "Pipfile", "Pipfile.lock", "poetry.lock", "uv.lock", "tox.ini",
+              "environment.yml", "environment.yaml", "CMakeLists.txt", "vcpkg.json",
+              "conanfile.py", "conanfile.txt", "meson.build", "meson_options.txt",
+              "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "pom.xml",
+              "build.gradle", "build.gradle.kts", "gradle.properties",
+              "composer.json", "composer.lock", "Gemfile", "Gemfile.lock",
           }
+          protected_lower = {name.lower() for name in protected_basenames}
           def is_protected(path: str) -> bool:
               parts = path.split("/")
+              name = parts[-1].lower()
               return (
                   path == "docs/12_pr_review_rubric.md"
-                  or parts[-1] in protected_basenames
+                  or name in protected_lower
+                  or (
+                      name.startswith(("requirements", "constraints"))
+                      and name.endswith((".txt", ".in"))
+                  )
+                  or name.endswith(".lock")
                   or ".github" in parts
                   or ".claude" in parts
                   or ".opencode" in parts
@@ -361,7 +397,7 @@ jobs:
                   pass
               elif path.startswith("docs/"):
                   unsupported.append(path)
-              elif path.endswith((".py", ".json", ".toml")):
+              elif path.endswith(".py"):
                   needs_python = True
               else:
                   unsupported.append(path)
