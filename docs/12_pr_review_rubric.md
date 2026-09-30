@@ -24,6 +24,12 @@ A follow-up review should primarily:
 
 Do not intentionally drip-feed material findings that were reasonably discoverable in the previous review.
 
+If the **same substantive P0/P1/P2 defect** is still present after two completed correction attempts, do not request another automated fix. Include a separate line containing exactly:
+
+`ESCALATE`
+
+That signal means human/Sophira review is required. Judge substantive sameness semantically; do not rely on wording or title identity.
+
 ## 2. Severity
 
 | Priority | Meaning |
@@ -92,5 +98,7 @@ For each material finding use:
 `P0|P1|P2 — file:line — problem; concrete consequence; bounded fix direction if useful.`
 
 List the most severe first. Keep optional P3 items clearly separate.
+
+If escalation is required, put `ESCALATE` on its own line.
 
 If there are no P0/P1/P2 findings, say so concisely. Do not pad a clean review.
