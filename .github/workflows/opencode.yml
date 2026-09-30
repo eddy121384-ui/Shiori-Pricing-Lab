@@ -32,7 +32,7 @@ jobs:
           import re
 
           body = os.environ["COMMENT_BODY"].strip()
-          allowed = os.environ["AUTHOR_ASSOCIATION"] in {"OWNER", "MEMBER", "COLLABORATOR"}
+          allowed = os.environ["AUTHOR_ASSOCIATION"] == "OWNER"
           match = re.fullmatch(r"/(?:oc|opencode)(?:\s+([\s\S]*))?", body, re.IGNORECASE)
 
           run = bool(allowed and match)
@@ -48,6 +48,14 @@ jobs:
 
           pathlib.Path(os.environ["RUNNER_TEMP_DIR"], "opencode-prompt.txt").write_text(prompt, encoding="utf-8")
           PY
+
+      - name: Add automation security boundary
+        if: steps.command.outputs.run == 'true'
+        run: |
+          cat >> "$RUNNER_TEMP/opencode-prompt.txt" <<'EOF'
+
+          Security boundary: read/search/edit repository files only. Do not run validation, shell commands, network tools, subagents, formatters, LSP, or external-directory tools; those capabilities are hard-disabled. The workflow owns commit/push. Validation runs separately without model credentials.
+          EOF
 
       - name: Resolve current PR head
         id: pr
@@ -112,33 +120,45 @@ jobs:
       - name: Run OpenCode
         if: steps.command.outputs.run == 'true'
         env:
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
-          OPENCODE_VARIANT: ${{ vars.OPENCODE_VARIANT }}
-          OPENCODE_CONFIG_CONTENT: ${{ secrets.OPENCODE_CONFIG_CONTENT }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENCODE_PROVIDER_API_KEY: ${{ secrets.OPENCODE_PROVIDER_API_KEY }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_AUTOMATION_MODEL }}
+          OPENCODE_VARIANT: ${{ vars.OPENCODE_AUTOMATION_VARIANT }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENCODE_AUTOMATION_API_KEY }}
+          OPENCODE_CONFIG_CONTENT: '{"formatter":false,"permission":{"*":"deny","read":"allow","edit":"allow","glob":"allow","grep":"allow"},"provider":{"openrouter":{"options":{"apiKey":"{env:OPENROUTER_API_KEY}"}}}}'
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          OPENCODE_DISABLE_DEFAULT_PLUGINS: "true"
           EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
           test -n "$OPENCODE_MODEL" || {
-            echo "Set repository Actions variable OPENCODE_MODEL to provider/model."
+            echo "Set repository Actions variable OPENCODE_AUTOMATION_MODEL."
             exit 1
           }
+          test -n "$OPENROUTER_API_KEY" || {
+            echo "Set dedicated repository secret OPENCODE_AUTOMATION_API_KEY."
+            exit 1
+          }
+          case "$OPENCODE_MODEL" in
+            openrouter/*) ;;
+            *) echo "OPENCODE_AUTOMATION_MODEL must use the openrouter/* provider."; exit 1 ;;
+          esac
 
           args=(run --auto --model "$OPENCODE_MODEL")
           if [ -n "${OPENCODE_VARIANT:-}" ]; then
             args+=(--variant "$OPENCODE_VARIANT")
           fi
 
-          opencode "${args[@]}" < "$RUNNER_TEMP/opencode-prompt.txt"
+          opencode --pure "${args[@]}" < "$RUNNER_TEMP/opencode-prompt.txt"
 
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || {
             echo "OpenCode committed locally even though the workflow owns commit/push. STOP."
             exit 1
           }
+
+      - name: Validate without model credentials
+        if: steps.command.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests
 
       - name: Commit and push verified changes
         id: publish
@@ -187,7 +207,7 @@ jobs:
           set -euo pipefail
           if [ "$CHANGED" = "true" ]; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="OpenCode manual command completed. New HEAD: `$NEW_HEAD`." >/dev/null
+              -f body="OpenCode manual command completed. New HEAD: $NEW_HEAD." >/dev/null
             gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               -f body="@codex review" >/dev/null
           else
