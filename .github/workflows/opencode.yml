@@ -27,6 +27,10 @@ on:
         description: Source review ID for relay/audit
         required: false
         type: string
+      fingerprints:
+        description: Material finding fingerprints for completed-round accounting
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -141,3 +145,27 @@ jobs:
           prompt: ${{ inputs.prompt }}
           use_github_token: true
           share: false
+
+      - name: Record completed correction
+        if: github.event_name == 'workflow_dispatch' && success() && steps.guard.outputs.run == 'true' && inputs.review_id != '' && inputs.fingerprints != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEW_ID: ${{ inputs.review_id }}
+          EXPECTED_HEAD: ${{ inputs.head_sha }}
+          EXPECTED_REF: ${{ inputs.head_ref }}
+          FINGERPRINTS: ${{ inputs.fingerprints }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
+
+          if [ "$current_ref" != "$EXPECTED_REF" ] || [ "$current_sha" = "$EXPECTED_HEAD" ]; then
+            echo "No verified new PR HEAD; correction round is not counted."
+            exit 0
+          fi
+
+          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=completed from=$EXPECTED_HEAD to=$current_sha fingerprints=$FINGERPRINTS -->"
+          body="$marker
+          OpenCode correction completed for PR #$PR_NUMBER: HEAD advanced from $EXPECTED_HEAD to $current_sha."
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
