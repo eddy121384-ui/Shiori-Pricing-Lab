@@ -164,8 +164,18 @@ floating_leg:
   observation: UNRESOLVED  # D5 (shift/lag/lookback/lockout/cutoff)
   day_count: UNRESOLVED  # D10
 payment_lag: UNRESOLVED  # D6
-calendar: UNRESOLVED  # D7 values per role (spot, fixed_schedule, floating_schedule, payment, observation); shape supports role-specific rules with no equality assumed; values need E4 evidence
-business_day_convention: UNRESOLVED  # D8 selections per role, same roles as calendar; values need E4 evidence
+calendar_by_role:  # D7 shape: per-role rules with no equality assumed; every value UNRESOLVED — RED-02, needs E4 evidence
+  spot_effective_date: UNRESOLVED
+  fixed_leg_schedule: UNRESOLVED
+  floating_leg_schedule: UNRESOLVED
+  payment_date: UNRESOLVED
+  observation_fixing_date: UNRESOLVED
+business_day_convention_by_role:  # D8 shape: same roles; every selection UNRESOLVED — RED-02, needs E4 evidence
+  spot_effective_date: UNRESOLVED
+  fixed_leg_schedule: UNRESOLVED
+  floating_leg_schedule: UNRESOLVED
+  payment_date: UNRESOLVED
+  observation_fixing_date: UNRESOLVED
 stub_rule: UNRESOLVED  # D9 (or owner-policy no-stub scope per E5)
 resolution_rules:
   schedule_generation: C++ Rates module per approved contract, implemented in #228
