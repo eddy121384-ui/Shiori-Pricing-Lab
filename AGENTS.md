@@ -12,7 +12,7 @@ Rules for AI coding agents working in this repository:
 8. End each implementation/amendment round by validating, committing, pushing, confirming the remote PR HEAD, and posting a short PR summary: issue, branch, HEAD, files changed, validation, RED status, and next action.
 9. After a reviewable push, request independent Codex review on the new HEAD with a separate PR comment containing exactly `@codex review`. Reviewers follow `docs/12_pr_review_rubric.md`.
 10. Handle current-HEAD findings as a batch: P0/P1 = BLOCKER, P2 = MATERIAL, P3 = MINOR. Address valid P0-P2 on the same branch/PR, then validate, push, summarize, and re-review. Do not churn on P3 unless it affects correctness or Eddy asks.
-11. Automation may relay a submitted current-HEAD Codex P0-P2 batch to the implementation agent. It must not act on stale reviews, make RED decisions, run concurrent writers on one PR, or continue after the same substantive finding survives two fixes or three correction rounds.
+11. Automation may relay a submitted current-HEAD Codex P0-P2 batch to the implementation agent. It must not act on stale reviews, make RED decisions, run concurrent writers on one PR, continue after Codex emits `ESCALATE`, or exceed three completed correction rounds.
 12. No agent or automation may merge. Codex-clear means no unresolved current-HEAD P0/P1/P2; that is necessary, not sufficient. The final gate is:
 `READY TO MERGE — 等待 Eddy 明確批准`
 Merge still requires Eddy's explicit approval.
