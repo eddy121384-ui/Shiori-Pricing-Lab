@@ -62,22 +62,43 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_HEAD: ${{ inputs.head_sha }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_REF: ${{ inputs.head_ref }}
         run: |
-          current="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          if [ "$current" = "$EXPECTED_HEAD" ]; then
+          set -euo pipefail
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
+          if [ "$current_sha" = "$EXPECTED_HEAD" ] && { [ -z "$EXPECTED_REF" ] || [ "$current_ref" = "$EXPECTED_REF" ]; }; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Stale dispatch: expected $EXPECTED_HEAD, current PR HEAD is $current."
+            echo "Stale dispatch: expected $EXPECTED_REF@$EXPECTED_HEAD, current PR head is $current_ref@$current_sha."
           fi
 
-      - name: Checkout dispatched PR head
-        if: github.event_name == 'workflow_dispatch' && (steps.guard.outputs.run == 'true' || inputs.head_sha == '') && inputs.head_ref != ''
+      - name: Checkout verified dispatched SHA
+        if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.head_ref }}
+          ref: ${{ inputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Prepare verified PR branch
+        if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
+          test "$current_sha" = "$HEAD_SHA"
+          test "$current_ref" = "$HEAD_REF"
+          git fetch origin "$HEAD_REF:refs/remotes/origin/$HEAD_REF"
+          test "$(git rev-parse "refs/remotes/origin/$HEAD_REF")" = "$HEAD_SHA"
+          git switch -C "$HEAD_REF" "$HEAD_SHA"
+          git branch --set-upstream-to="origin/$HEAD_REF" "$HEAD_REF"
 
       - name: Checkout event context
         if: github.event_name != 'workflow_dispatch' || inputs.head_ref == ''
@@ -104,7 +125,7 @@ jobs:
           share: false
 
       - name: Run OpenCode from dispatched prompt
-        if: github.event_name == 'workflow_dispatch' && (steps.guard.outputs.run == 'true' || inputs.head_sha == '')
+        if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
         uses: anomalyco/opencode/github@latest
         env:
           GITHUB_TOKEN: ${{ github.token }}
