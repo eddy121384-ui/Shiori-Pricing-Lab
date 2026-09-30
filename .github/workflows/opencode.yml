@@ -1,32 +1,8 @@
-name: OpenCode
+name: OpenCode PR command
 
 on:
   issue_comment:
     types: [created]
-  pull_request_review_comment:
-    types: [created]
-  workflow_dispatch:
-    inputs:
-      prompt:
-        description: Task prompt
-        required: true
-        type: string
-      pr_number:
-        description: Existing PR number when modifying a PR
-        required: true
-        type: string
-      head_ref:
-        description: Expected PR head branch
-        required: true
-        type: string
-      head_sha:
-        description: Expected PR head SHA
-        required: true
-        type: string
-      review_id:
-        description: Source review ID for relay/audit
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -34,61 +10,77 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: opencode-${{ github.repository }}-${{ inputs.pr_number || github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  group: shiori-opencode-pr-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   opencode:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, '/opencode')
+    if: github.event.issue.pull_request != null
     runs-on: ubuntu-latest
 
     steps:
-      - name: Require configured model
+      - name: Authorize exact slash command
+        id: command
         env:
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
+          RUNNER_TEMP_DIR: ${{ runner.temp }}
         run: |
-          test -n "$OPENCODE_MODEL" || {
-            echo "Set repository Actions variable OPENCODE_MODEL to provider/model."
-            exit 1
-          }
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
 
-      - name: Verify dispatched PR HEAD
-        id: guard
-        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != '' && inputs.head_sha != ''
+          body = os.environ["COMMENT_BODY"].strip()
+          allowed = os.environ["AUTHOR_ASSOCIATION"] in {"OWNER", "MEMBER", "COLLABORATOR"}
+          match = re.fullmatch(r"/(?:oc|opencode)(?:[ \t]+([\s\S]*))?", body, re.IGNORECASE)
+
+          run = bool(allowed and match)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"run={'true' if run else 'false'}\n")
+
+          if not run:
+              raise SystemExit(0)
+
+          prompt = (match.group(1) or "").strip()
+          if not prompt:
+              prompt = "Inspect this PR and address the latest unresolved material review findings. Follow AGENTS.md."
+
+          pathlib.Path(os.environ["RUNNER_TEMP_DIR"], "opencode-prompt.txt").write_text(prompt, encoding="utf-8")
+          PY
+
+      - name: Resolve current PR head
+        id: pr
+        if: steps.command.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_HEAD: ${{ inputs.head_sha }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          EXPECTED_REF: ${{ inputs.head_ref }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
-          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
-          if [ "$current_sha" = "$EXPECTED_HEAD" ] && { [ -z "$EXPECTED_REF" ] || [ "$current_ref" = "$EXPECTED_REF" ]; }; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Stale dispatch: expected $EXPECTED_REF@$EXPECTED_HEAD, current PR head is $current_ref@$current_sha."
-          fi
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          head_repo="$(jq -r '.head.repo.full_name' <<<"$meta")"
+          test "$head_repo" = "$GITHUB_REPOSITORY" || {
+            echo "Refusing write automation on a fork PR."
+            exit 1
+          }
+          echo "head_ref=$(jq -r '.head.ref' <<<"$meta")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r '.head.sha' <<<"$meta")" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout verified dispatched SHA
-        if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
+      - name: Checkout exact PR head
+        if: steps.command.outputs.run == 'true'
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.head_sha }}
+          ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Prepare verified PR branch
-        if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
+        if: steps.command.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_REF: ${{ inputs.head_ref }}
-          HEAD_SHA: ${{ inputs.head_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
           current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
@@ -99,68 +91,106 @@ jobs:
           test "$(git rev-parse "refs/remotes/origin/$HEAD_REF")" = "$HEAD_SHA"
           git switch -C "$HEAD_REF" "$HEAD_SHA"
           git branch --set-upstream-to="origin/$HEAD_REF" "$HEAD_REF"
+          git remote set-url --push origin DISABLED_BY_SHIORI_WORKFLOW
 
-      - name: Checkout event context
-        if: github.event_name != 'workflow_dispatch' || inputs.head_ref == ''
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Run OpenCode from comment
-        if: github.event_name != 'workflow_dispatch'
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
+      - name: Install pinned OpenCode CLI
+        if: steps.command.outputs.run == 'true'
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENCODE_PROVIDER_API_KEY: ${{ secrets.OPENCODE_PROVIDER_API_KEY }}
-          OPENCODE_CONFIG_CONTENT: ${{ secrets.OPENCODE_CONFIG_CONTENT }}
-        with:
-          model: ${{ vars.OPENCODE_MODEL }}
-          variant: ${{ vars.OPENCODE_VARIANT }}
-          use_github_token: true
-          share: false
-
-      - name: Run OpenCode from dispatched prompt
-        if: github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true' && inputs.head_ref != ''
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENCODE_PROVIDER_API_KEY: ${{ secrets.OPENCODE_PROVIDER_API_KEY }}
-          OPENCODE_CONFIG_CONTENT: ${{ secrets.OPENCODE_CONFIG_CONTENT }}
-        with:
-          model: ${{ vars.OPENCODE_MODEL }}
-          variant: ${{ vars.OPENCODE_VARIANT }}
-          prompt: ${{ inputs.prompt }}
-          use_github_token: true
-          share: false
-
-      - name: Record completed correction
-        if: github.event_name == 'workflow_dispatch' && success() && steps.guard.outputs.run == 'true' && inputs.review_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          REVIEW_ID: ${{ inputs.review_id }}
-          EXPECTED_HEAD: ${{ inputs.head_sha }}
-          EXPECTED_REF: ${{ inputs.head_ref }}
+          OPENCODE_VERSION: v1.18.33
+          OPENCODE_SHA256: e546123213ae47909a4268692aa4b94950d011afe9cac9938753a2194f1c16d5
         run: |
           set -euo pipefail
-          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
+          archive="$RUNNER_TEMP/opencode.tar.gz"
+          bindir="$RUNNER_TEMP/opencode-bin"
+          mkdir -p "$bindir"
+          curl -fsSL "https://github.com/anomalyco/opencode/releases/download/$OPENCODE_VERSION/opencode-linux-x64.tar.gz" -o "$archive"
+          echo "$OPENCODE_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$bindir"
+          test -x "$bindir/opencode"
+          echo "$bindir" >> "$GITHUB_PATH"
 
-          if [ "$current_ref" != "$EXPECTED_REF" ] || [ "$current_sha" = "$EXPECTED_HEAD" ]; then
-            echo "No verified new PR HEAD; correction round is not counted."
+      - name: Run OpenCode
+        if: steps.command.outputs.run == 'true'
+        env:
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
+          OPENCODE_VARIANT: ${{ vars.OPENCODE_VARIANT }}
+          OPENCODE_CONFIG_CONTENT: ${{ secrets.OPENCODE_CONFIG_CONTENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_PROVIDER_API_KEY: ${{ secrets.OPENCODE_PROVIDER_API_KEY }}
+          EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$OPENCODE_MODEL" || {
+            echo "Set repository Actions variable OPENCODE_MODEL to provider/model."
+            exit 1
+          }
+
+          args=(run --auto --model "$OPENCODE_MODEL")
+          if [ -n "${OPENCODE_VARIANT:-}" ]; then
+            args+=(--variant "$OPENCODE_VARIANT")
+          fi
+
+          opencode "${args[@]}" < "$RUNNER_TEMP/opencode-prompt.txt"
+
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" || {
+            echo "OpenCode committed locally even though the workflow owns commit/push. STOP."
+            exit 1
+          }
+
+      - name: Commit and push verified changes
+        id: publish
+        if: steps.command.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          EXPECTED_HEAD: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=completed from=$EXPECTED_HEAD to=$current_sha -->"
-          body="$marker
-          OpenCode correction completed for PR #$PR_NUMBER: HEAD advanced from $EXPECTED_HEAD to $current_sha."
-          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          current_ref="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')"
+          test "$current_sha" = "$EXPECTED_HEAD"
+          test "$current_ref" = "$HEAD_REF"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "OpenCode: amend PR #$PR_NUMBER"
+          new_head="$(git rev-parse HEAD)"
+
+          git remote set-url --push origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          git push origin "HEAD:$HEAD_REF"
+
+          remote_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          test "$remote_head" = "$new_head"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "new_head=$new_head" >> "$GITHUB_OUTPUT"
+
+      - name: Report result
+        if: steps.command.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          CHANGED: ${{ steps.publish.outputs.changed }}
+          NEW_HEAD: ${{ steps.publish.outputs.new_head }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGED" = "true" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="OpenCode manual command completed. New HEAD: `$NEW_HEAD`." >/dev/null
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="@codex review" >/dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="OpenCode manual command completed with no repository changes." >/dev/null
+          fi
