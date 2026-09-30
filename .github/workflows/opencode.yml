@@ -124,9 +124,9 @@ jobs:
               "Security boundary: read/search/edit repository files only. "
               "Do not run validation, shell commands, network tools, subagents, "
               "formatters, LSP, or external-directory tools. The workflow owns "
-              "commit/push and validation. Do not edit .git metadata or repository control-plane files "
-              "(.github/**, AGENTS.md, CLAUDE.md, docs/12_pr_review_rubric.md, .claude/**, "
-              "opencode.json/jsonc, .opencode/**, requirements.txt, or pyproject.toml)."
+              "commit/push and validation. Do not edit .git metadata or repository control-plane files: "
+              ".github/**, docs/12_pr_review_rubric.md, or any-depth AGENTS.md, CLAUDE.md, "
+              "opencode.json/jsonc, requirements.txt, pyproject.toml, .claude/**, or .opencode/**."
           )
           (pathlib.Path(os.environ["RUNNER_TEMP"]) / "opencode-prompt.txt").write_text(text, encoding="utf-8")
           PY
@@ -166,6 +166,8 @@ jobs:
         run: |
           set -euo pipefail
           meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<<"$meta")" = "open"
+          test "$(jq -r '.merged_at // ""' <<<"$meta")" = ""
           test "$(jq -r '.head.sha' <<<"$meta")" = "$EXPECTED_HEAD"
           test "$(jq -r '.head.ref' <<<"$meta")" = "$EXPECTED_REF"
           test "$(jq -r '.head.repo.full_name' <<<"$meta")" = "$GITHUB_REPOSITORY"
