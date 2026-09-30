@@ -76,7 +76,12 @@ jobs:
           import pathlib
 
           pages = json.loads((pathlib.Path(os.environ["RUNNER_TEMP"]) / "pr-files.json").read_text())
-          files = [item["filename"] for page in pages for item in page]
+          files = []
+          for page in pages:
+              for item in page:
+                  files.append(item["filename"])
+                  if item.get("previous_filename"):
+                      files.append(item["previous_filename"])
           protected_exact = {
               "AGENTS.md", "CLAUDE.md", "docs/12_pr_review_rubric.md",
               "opencode.json", "opencode.jsonc", "requirements.txt", "pyproject.toml",
@@ -312,6 +317,11 @@ jobs:
             exit 1
           fi
 
+          if git diff --cached --summary | grep -q 'mode change'; then
+            echo 'Automated patch changes executable/file mode; no trusted validator is configured.'
+            exit 1
+          fi
+
       - name: Classify validation requirements
         id: classify
         run: |
@@ -365,6 +375,17 @@ jobs:
       - name: Run Python regression suite
         if: steps.classify.outputs.needs_python == 'true'
         run: pytest
+
+      - name: Verify validated patch remained exact
+        env:
+          PATCH_SHA: ${{ needs.agent.outputs.patch_sha }}
+        run: |
+          set -euo pipefail
+          git diff --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          verified="$RUNNER_TEMP/validated.patch"
+          git diff --cached --binary --full-index --no-ext-diff > "$verified"
+          echo "$PATCH_SHA  $verified" | sha256sum -c -
 
   report-validation-failure:
     needs: [authorize, agent, validate]
@@ -435,7 +456,7 @@ jobs:
 
           test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')" = "$EXPECTED_HEAD"
           git remote set-url --push origin "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
-          git push --force-with-lease="refs/heads/$HEAD_REF:$EXPECTED_HEAD" origin "HEAD:refs/heads/$HEAD_REF"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
           remote_head="$(git ls-remote "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "refs/heads/$HEAD_REF" | awk '{print $1}')"
           test "$remote_head" = "$new_head"
 

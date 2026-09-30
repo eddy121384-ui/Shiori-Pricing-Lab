@@ -30,6 +30,8 @@ If the **same substantive P0/P1/P2 defect** is still present after two completed
 
 That signal means human/Sophira review is required. Judge substantive sameness semantically; do not rely on wording or title identity.
 
+For the automated relay, count a completed correction attempt only from a current-PR commit carrying the exact trailer `Shiori-Automation: opencode-codex-relay`; use its `Codex-Review-ID:` trailer to associate the reviewed round. Failed/aborted runs and PR comments do not count.
+
 ## 2. Severity
 
 | Priority | Meaning |
