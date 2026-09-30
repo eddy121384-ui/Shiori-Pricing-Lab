@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   relay:
-    if: startsWith(github.event.review.user.login, 'chatgpt-codex-connector')
+    if: >-
+      startsWith(github.event.review.user.login, 'chatgpt-codex-connector') &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
     steps:
@@ -38,39 +40,89 @@ jobs:
 
           review_commit="$(jq -r '.commit_id // ""' review.json)"
           current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-
           if [ "$current_head" != "$EVENT_HEAD_SHA" ] || { [ -n "$review_commit" ] && [ "$review_commit" != "$EVENT_HEAD_SHA" ]; }; then
             echo "dispatch=false" >> "$GITHUB_OUTPUT"
             echo "Skipping stale Codex review: review/event/current HEAD do not match."
             exit 0
           fi
 
-          marker="<!-- codex-opencode-relay:review=$REVIEW_ID"
-          duplicate="$(jq --arg marker "$marker" '[.[][]? | select((.body // "") | contains($marker))] | length' pr-comments.json)"
-          if [ "$duplicate" -gt 0 ]; then
-            echo "dispatch=false" >> "$GITHUB_OUTPUT"
-            echo "Review $REVIEW_ID was already handled."
-            exit 0
-          fi
-
           python - <<'PY'
+          import hashlib
           import json
+          import os
           import pathlib
           import re
 
-          pages = json.loads(pathlib.Path("review-comments.json").read_text())
-          comments = [item for page in pages for item in page]
-          findings = []
-          for comment in comments:
-              body = (comment.get("body") or "").strip()
-              if re.search(r"(?<![A-Za-z0-9])P[012](?![A-Za-z0-9])", body):
-                  findings.append(body)
+          review = json.loads(pathlib.Path("review.json").read_text())
+          review_pages = json.loads(pathlib.Path("review-comments.json").read_text())
+          pr_pages = json.loads(pathlib.Path("pr-comments.json").read_text())
+
+          review_comments = [item for page in review_pages for item in page]
+          pr_comments = [item for page in pr_pages for item in page]
+
+          material = re.compile(
+              r"P[012]\s+Badge|(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\[?P[012]\]?(?:\*\*)?\s*(?:[-—:])",
+              re.IGNORECASE,
+          )
+
+          bodies = [review.get("body") or ""] + [c.get("body") or "" for c in review_comments]
+          findings = [body.strip() for body in bodies if body.strip() and material.search(body)]
+
+          def fingerprint(body: str) -> str:
+              line = next((x for x in body.splitlines() if re.search(r"P[012]", x, re.I)), body[:240])
+              line = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", line)
+              line = re.sub(r"<[^>]+>", " ", line)
+              line = re.sub(r"https?://\S+", " ", line)
+              line = re.sub(r"[*_#\[\]()]", " ", line)
+              line = re.sub(r"\s+", " ", line).strip().lower()
+              return hashlib.sha256(line.encode()).hexdigest()[:12]
+
+          fingerprints = [fingerprint(body) for body in findings]
+          marker = f"<!-- codex-opencode-relay:review={os.environ['REVIEW_ID']}"
+
+          duplicate = any(marker in (c.get("body") or "") for c in pr_comments)
+          dispatch_markers = [
+              c.get("body") or ""
+              for c in pr_comments
+              if "<!-- codex-opencode-relay:" in (c.get("body") or "")
+              and "status=dispatched" in (c.get("body") or "")
+          ]
+
+          prior_counts = {}
+          for body in dispatch_markers:
+              match = re.search(r"fingerprints=([0-9a-f,]+)", body)
+              if not match:
+                  continue
+              for fp in match.group(1).split(","):
+                  prior_counts[fp] = prior_counts.get(fp, 0) + 1
+
+          repeated_twice = any(prior_counts.get(fp, 0) >= 2 for fp in fingerprints)
 
           pathlib.Path("findings.txt").write_text(
               "\n\n---\n\n".join(findings),
               encoding="utf-8",
           )
+          pathlib.Path("relay.env").write_text(
+              "\n".join(
+                  [
+                      f"duplicate={int(duplicate)}",
+                      f"prior_rounds={len(dispatch_markers)}",
+                      f"repeated_twice={int(repeated_twice)}",
+                      f"fingerprints={','.join(fingerprints)}",
+                  ]
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           PY
+
+          . ./relay.env
+
+          if [ "$duplicate" -gt 0 ]; then
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+            echo "Review $REVIEW_ID was already handled."
+            exit 0
+          fi
 
           if [ ! -s findings.txt ]; then
             echo "dispatch=false" >> "$GITHUB_OUTPUT"
@@ -78,9 +130,17 @@ jobs:
             exit 0
           fi
 
-          prior_rounds="$(jq '[.[][]? | select((.body // "") | contains("<!-- codex-opencode-relay:") and contains("status=dispatched"))] | length' pr-comments.json)"
+          if [ "$repeated_twice" -gt 0 ]; then
+            stop_marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=stopped fingerprints=$fingerprints -->"
+            body="$stop_marker
+          Same material finding survived two automated fixes. STOP — Eddy/Sophira review required."
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+            echo "dispatch=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [ "$prior_rounds" -ge "$MAX_AUTO_CORRECTIONS" ]; then
-            stop_marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=stopped -->"
+            stop_marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=stopped fingerprints=$fingerprints -->"
             body="$stop_marker
           Automatic correction limit reached ($MAX_AUTO_CORRECTIONS rounds). STOP — Eddy/Sophira review required."
             gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
@@ -92,6 +152,7 @@ jobs:
           echo "round=$((prior_rounds + 1))" >> "$GITHUB_OUTPUT"
           echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
           echo "head_sha=$EVENT_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "fingerprints=$fingerprints" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch OpenCode with the review batch
         if: steps.collect.outputs.dispatch == 'true'
@@ -102,6 +163,7 @@ jobs:
           HEAD_REF: ${{ steps.collect.outputs.head_ref }}
           HEAD_SHA: ${{ steps.collect.outputs.head_sha }}
           ROUND: ${{ steps.collect.outputs.round }}
+          FINGERPRINTS: ${{ steps.collect.outputs.fingerprints }}
         run: |
           set -euo pipefail
           findings="$(cat findings.txt)"
@@ -118,9 +180,17 @@ jobs:
           EOF
           )"
 
-          jq -n             --arg ref "main"             --arg prompt "$prompt"             --arg pr "$PR_NUMBER"             --arg head_ref "$HEAD_REF"             --arg head_sha "$HEAD_SHA"             --arg review_id "$REVIEW_ID"             '{ref:$ref, inputs:{prompt:$prompt, pr_number:$pr, head_ref:$head_ref, head_sha:$head_sha, review_id:$review_id}}'             | gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" --input -
+          jq -n \
+            --arg ref "main" \
+            --arg prompt "$prompt" \
+            --arg pr "$PR_NUMBER" \
+            --arg head_ref "$HEAD_REF" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg review_id "$REVIEW_ID" \
+            '{ref:$ref, inputs:{prompt:$prompt, pr_number:$pr, head_ref:$head_ref, head_sha:$head_sha, review_id:$review_id}}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" --input -
 
-          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=dispatched -->"
+          marker="<!-- codex-opencode-relay:review=$REVIEW_ID status=dispatched fingerprints=$FINGERPRINTS -->"
           body="$marker
           Codex P0-P2 batch relayed to OpenCode for PR #$PR_NUMBER (automatic correction round $ROUND/3)."
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
