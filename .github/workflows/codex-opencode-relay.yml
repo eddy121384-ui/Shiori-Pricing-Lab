@@ -235,11 +235,74 @@ jobs:
             exit 1
           }
 
-      - name: Validate without model credentials
+      - name: Validate correction before publication
         if: steps.collect.outputs.run == 'true'
+        env:
+          EXPECTED_HEAD: ${{ steps.collect.outputs.head_sha }}
+          ACTIONLINT_VERSION: v1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
           set -euo pipefail
-          python -m compileall -q src tests
+
+          changed="$(
+            {
+              git diff --name-only "$EXPECTED_HEAD" --
+              git ls-files --others --exclude-standard
+            } | sed '/^$/d' | sort -u
+          )"
+
+          if [ -z "$changed" ]; then
+            echo "No repository changes to validate."
+            exit 0
+          fi
+
+          printf '%s\n' "$changed"
+
+          needs_python=false
+          needs_actionlint=false
+          unsupported=""
+
+          while IFS= read -r path; do
+            case "$path" in
+              *.md|docs/*)
+                ;;
+              .github/workflows/*.yml|.github/workflows/*.yaml)
+                needs_actionlint=true
+                ;;
+              *.py|*.html|*.css|*.js|*.ts|*.tsx|*.json|*.toml|requirements.txt|pyproject.toml|src/*|tests/*)
+                needs_python=true
+                ;;
+              *)
+                unsupported="${unsupported}${unsupported:+$'\n'}$path"
+                ;;
+            esac
+          done <<< "$changed"
+
+          if [ -n "$unsupported" ]; then
+            echo "No trusted pre-publication validator is configured for:"
+            printf '%s\n' "$unsupported"
+            echo "STOP — Eddy/Sophira review required before publication."
+            exit 1
+          fi
+
+          if [ "$needs_actionlint" = true ]; then
+            archive="$RUNNER_TEMP/actionlint.tar.gz"
+            bindir="$RUNNER_TEMP/actionlint-bin"
+            mkdir -p "$bindir"
+            curl -fsSL "https://github.com/rhysd/actionlint/releases/download/$ACTIONLINT_VERSION/actionlint_1.7.12_linux_amd64.tar.gz" -o "$archive"
+            echo "$ACTIONLINT_SHA256  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$bindir"
+            find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
+              | xargs -0 -r "$bindir/actionlint"
+          fi
+
+          if [ "$needs_python" = true ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            pip install -e ".[quant]"
+            playwright install --with-deps chromium
+            pytest
+          fi
 
       - name: Publish exact correction commit
         id: publish
