@@ -33,7 +33,7 @@ jobs:
 
           body = os.environ["COMMENT_BODY"].strip()
           allowed = os.environ["AUTHOR_ASSOCIATION"] in {"OWNER", "MEMBER", "COLLABORATOR"}
-          match = re.fullmatch(r"/(?:oc|opencode)(?:[ \t]+([\s\S]*))?", body, re.IGNORECASE)
+          match = re.fullmatch(r"/(?:oc|opencode)(?:\s+([\s\S]*))?", body, re.IGNORECASE)
 
           run = bool(allowed and match)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
