@@ -79,14 +79,20 @@ jobs:
                       pr_files.append(item['previous_filename'])
           pr_commits = [x for page in commit_pages for x in page]
 
-          protected_exact = {
-              'AGENTS.md', 'CLAUDE.md', 'docs/12_pr_review_rubric.md',
-              'opencode.json', 'opencode.jsonc', 'requirements.txt', 'pyproject.toml',
+          protected_basenames = {
+              'AGENTS.md', 'CLAUDE.md', 'opencode.json', 'opencode.jsonc',
+              'requirements.txt', 'pyproject.toml',
           }
-          protected = [
-              path for path in pr_files
-              if path in protected_exact or path.startswith(('.github/', '.claude/', '.opencode/'))
-          ]
+          def is_protected(path: str) -> bool:
+              parts = path.split('/')
+              return (
+                  path == 'docs/12_pr_review_rubric.md'
+                  or parts[-1] in protected_basenames
+                  or '.github' in parts
+                  or '.claude' in parts
+                  or '.opencode' in parts
+              )
+          protected = [path for path in pr_files if is_protected(path)]
 
           material = re.compile(r"P[012]\s+Badge|(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\[?P[012]\]?(?:\*\*)?\s*(?:[-—:])", re.I)
           escalate = re.compile(r"(?im)^\s*ESCALATE\s*$")
@@ -444,13 +450,22 @@ jobs:
           paths = [p.decode('utf-8','surrogateescape') for p in raw.split(b'\0') if p]
           py = False
           bad = []
-          protected = {
-              'AGENTS.md', 'CLAUDE.md', 'docs/12_pr_review_rubric.md',
-              'opencode.json', 'opencode.jsonc', 'requirements.txt', 'pyproject.toml',
+          protected_basenames = {
+              'AGENTS.md', 'CLAUDE.md', 'opencode.json', 'opencode.jsonc',
+              'requirements.txt', 'pyproject.toml',
           }
+          def is_protected(path: str) -> bool:
+              parts = path.split('/')
+              return (
+                  path == 'docs/12_pr_review_rubric.md'
+                  or parts[-1] in protected_basenames
+                  or '.github' in parts
+                  or '.claude' in parts
+                  or '.opencode' in parts
+              )
           for p in paths:
               if any(ord(ch) < 32 for ch in p): bad.append(p)
-              elif p in protected or p.startswith(('.github/', '.claude/', '.opencode/')): bad.append(p)
+              elif is_protected(p): bad.append(p)
               elif p.endswith('.md'): pass
               elif p.startswith('docs/') and p.lower().endswith(('.png','.jpg','.jpeg','.webp','.json','.csv','.txt')): pass
               elif p.startswith('docs/'): bad.append(p)
@@ -564,7 +579,12 @@ jobs:
             -m "Codex-Review-ID: $REVIEW_ID"
           new_head="$(git rev-parse HEAD)"
 
-          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')" = "$EXPECTED_HEAD"
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<<"$meta")" = "open"
+          test "$(jq -r '.merged_at // ""' <<<"$meta")" = ""
+          test "$(jq -r '.head.repo.full_name' <<<"$meta")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r '.head.ref' <<<"$meta")" = "$HEAD_REF"
+          test "$(jq -r '.head.sha' <<<"$meta")" = "$EXPECTED_HEAD"
           git remote set-url --push origin "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
           git push origin "HEAD:refs/heads/$HEAD_REF"
           remote_head="$(git ls-remote "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "refs/heads/$HEAD_REF" | awk '{print $1}')"

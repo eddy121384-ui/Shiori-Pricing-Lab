@@ -32,13 +32,9 @@ jobs:
 
           body = os.environ["COMMENT_BODY"]
           allowed = os.environ["AUTHOR_ASSOCIATION"] == "OWNER"
-          match = re.fullmatch(r"/(?:oc|opencode)(?: +([\s\S]*))?", body)
-          run = bool(allowed and match)
-          prompt = ""
-          if run:
-              prompt = (match.group(1) or "").strip()
-              if not prompt:
-                  prompt = "Inspect this PR and address the latest unresolved material review findings. Follow AGENTS.md."
+          match = re.fullmatch(r"/(?:oc|opencode)(?:\s+([\s\S]+))?", body)
+          prompt = ((match.group(1) or "").strip() if match else "")
+          run = bool(allowed and match and prompt)
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"run={'true' if run else 'false'}\n")
@@ -82,14 +78,20 @@ jobs:
                   files.append(item["filename"])
                   if item.get("previous_filename"):
                       files.append(item["previous_filename"])
-          protected_exact = {
-              "AGENTS.md", "CLAUDE.md", "docs/12_pr_review_rubric.md",
-              "opencode.json", "opencode.jsonc", "requirements.txt", "pyproject.toml",
+          protected_basenames = {
+              "AGENTS.md", "CLAUDE.md", "opencode.json", "opencode.jsonc",
+              "requirements.txt", "pyproject.toml",
           }
-          protected = [
-              path for path in files
-              if path in protected_exact or path.startswith((".github/", ".claude/", ".opencode/"))
-          ]
+          def is_protected(path: str) -> bool:
+              parts = path.split("/")
+              return (
+                  path == "docs/12_pr_review_rubric.md"
+                  or parts[-1] in protected_basenames
+                  or ".github" in parts
+                  or ".claude" in parts
+                  or ".opencode" in parts
+              )
+          protected = [path for path in files if is_protected(path)]
           if protected:
               raise SystemExit("Automation is disabled for PRs that modify control-plane files: " + repr(protected))
           PY
@@ -333,14 +335,23 @@ jobs:
           paths = [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
           needs_python = False
           unsupported = []
-          protected = {
-              "AGENTS.md", "CLAUDE.md", "docs/12_pr_review_rubric.md",
-              "opencode.json", "opencode.jsonc", "requirements.txt", "pyproject.toml",
+          protected_basenames = {
+              "AGENTS.md", "CLAUDE.md", "opencode.json", "opencode.jsonc",
+              "requirements.txt", "pyproject.toml",
           }
+          def is_protected(path: str) -> bool:
+              parts = path.split("/")
+              return (
+                  path == "docs/12_pr_review_rubric.md"
+                  or parts[-1] in protected_basenames
+                  or ".github" in parts
+                  or ".claude" in parts
+                  or ".opencode" in parts
+              )
           for path in paths:
               if any(ord(ch) < 32 for ch in path):
                   unsupported.append(path)
-              elif path in protected or path.startswith((".github/", ".claude/", ".opencode/")):
+              elif is_protected(path):
                   unsupported.append(path)
               elif path.endswith(".md"):
                   pass
@@ -454,7 +465,12 @@ jobs:
           git commit --no-verify -m "OpenCode: amend PR #$PR_NUMBER"
           new_head="$(git rev-parse HEAD)"
 
-          test "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')" = "$EXPECTED_HEAD"
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<<"$meta")" = "open"
+          test "$(jq -r '.merged_at // ""' <<<"$meta")" = ""
+          test "$(jq -r '.head.repo.full_name' <<<"$meta")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r '.head.ref' <<<"$meta")" = "$HEAD_REF"
+          test "$(jq -r '.head.sha' <<<"$meta")" = "$EXPECTED_HEAD"
           git remote set-url --push origin "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
           git push origin "HEAD:refs/heads/$HEAD_REF"
           remote_head="$(git ls-remote "https://x-access-token:$PUBLISH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "refs/heads/$HEAD_REF" | awk '{print $1}')"
