@@ -1,203 +1,107 @@
-# 12 PR Review Rubric (for AI reviewers)
+# 12 PR Review Rubric
 
-This rubric tells an AI reviewer (Codex, Claude, or any assistant) how to review a
-pull request in Shiori Pricing Lab. The goal is **useful, diff-grounded review**,
-not roleplay, not generic commentary, and not verbosity.
+For AI reviewers of Shiori Pricing Lab pull requests.
 
-It complements `AGENTS.md` (the repository constitution) and the numbered
-architecture docs. When a PR touches pricing or risk, the financial-correctness
-rules in `AGENTS.md` and the relevant product/valuation docs win over anything
-here.
+This file complements `AGENTS.md`. It defines how to review; it does not add product scope or override approved methodology.
 
----
+## 1. Review objective
 
-## 1. How to review
+Review the **current PR HEAD** for concrete risks introduced by the diff.
 
-- **Be diff-grounded.** Every finding must point at a line the PR actually
-  changes (or a direct, concrete consequence of it). Do not review unchanged
-  code, do not restate the whole file, and do not invent hypothetical problems.
-- **Lenses, not personas.** The four lenses below (§3) are *angles to check*, not
-  characters to play. Never write "as a quant, I would…" or "pretend you are a
-  trader". No persona narration.
-- **Only the relevant lenses.** Apply a lens only if the diff actually touches
-  that concern. A docs-only PR usually needs the design/readability lens and
-  little else; a day-count change needs the quant lens. Do not force all four
-  lenses to speak on every PR.
-- **Concrete over generic.** Prefer naming a specific blocker, edge case, missing
-  test, broken contract, or misleading output over general advice ("add more
-  tests", "consider performance"). If you cannot tie advice to a concrete risk in
-  this diff, leave it out.
-- **Short by default.** A clean PR gets a short approval. Length is not a proxy
-  for rigor. Say nothing rather than pad.
-- **Respect scope.** This repo values small, boring changes. Do not ask a PR to
-  do more than its issue; flag *over*-reach (see the IT lens) as readily as
-  under-reach.
+- Be diff-grounded. Read unchanged code/docs only when needed to understand a changed contract or consequence.
+- Respect the issue scope. Do not demand unrelated refactors, abstractions, future-proofing, or cleanup.
+- Ordinary prose/docs usually need light review. **Methodology, schema, architecture, and implementation-contract docs are executable contracts**: ambiguity that forces downstream code to invent behavior is substantive.
+- Short is good. A clean PR can receive a one-line clear review.
 
-Each finding should carry a severity (§2), a one-line statement of the problem,
-and — where useful — a concrete failing case or the specific line.
+### Completeness rule
 
----
+Before submitting a review, make one completeness pass and report **all reasonably discoverable P0/P1/P2 findings together**.
 
-## 2. Severity scale
+A follow-up review should primarily:
+1. verify prior material findings against the new HEAD;
+2. check regressions introduced by the fix; and
+3. report newly discoverable material issues.
 
-| Severity | Use for |
+Do not intentionally drip-feed material findings that were reasonably discoverable in the previous review.
+
+If the **same substantive P0/P1/P2 defect** is still present after two completed correction attempts, do not request another automated fix. Include a separate line containing exactly:
+
+`ESCALATE`
+
+That signal means human/Sophira review is required. Judge substantive sameness semantically; do not rely on wording or title identity.
+
+For the automated relay, count a completed correction attempt only from a current-PR commit carrying the exact trailer `Shiori-Automation: opencode-codex-relay`; use its `Codex-Review-ID:` trailer to associate the reviewed round. Failed/aborted runs and PR comments do not count.
+
+## 2. Severity
+
+| Priority | Meaning |
 | --- | --- |
-| **P0 / P1** | Wrong PV or risk; market-data leakage / look-ahead / future-data use; a break of the deterministic pricing contract (`price(...)` / `PricingResult`); fabricated results (fake `0.0`, invented rates, made-up market data); or a safety / security issue. These block merge. |
-| **P2** | A missing edge case; unclear or wrong failure behavior; a missing test for new calculation or contract logic; a **likely** performance or maintenance risk. Should be addressed or explicitly deferred. |
-| **P3** | Naming, doc clarity, small cleanups, and non-blocking design/readability nits. Optional. |
+| **P0 / P1 — BLOCKER** | Wrong pricing/risk or units; look-ahead/data leakage; fabricated market data/results; unsafe fail-open behavior; broken deterministic pricing contract; security/safety issue; or a methodology/schema/architecture ambiguity that makes the next implementation invent material behavior. |
+| **P2 — MATERIAL** | Missing edge/failure case, deterministic test, contract field/ownership rule, or a likely performance/maintenance/testability problem that should be fixed or explicitly deferred. |
+| **P3 — MINOR** | Naming, wording, readability, optional cleanup, or non-blocking design preference. |
 
-### Where unnecessary complexity lands
+Do not inflate style preferences into P1/P2. A changed numeric result is not automatically a blocker if the change is intentional, deterministic, tested, and methodologically approved.
 
-Unnecessary complexity (see the IT lens, §3.2) is **P2 only if** it creates a
-**likely** performance, maintenance, testability, or future-editing risk.
-Otherwise it is **P3**. Do not inflate a stylistic preference into a blocker.
+## 3. Relevant review lenses
 
-### Number changes: escalate the wrong ones, not all of them
+Use only the lenses the diff needs.
 
-A PR that changes a PV, DV01, or other computed number is **not automatically
-P1**. Many PRs legitimately add or correct calculation logic, and the resulting
-number change is expected. Such a change is **acceptable** when it is:
+### Financial correctness
 
-- **explicit** — the PR states the number moved and why;
-- **tested** — a deterministic test pins the new value (ideally hand-checked);
-- **deterministic** — same inputs give the same result;
-- **explained** — the assumption/method behind the change is recorded (e.g. in
-  `assumptions`, the PR body, or a comment), not hidden.
+Check:
+- formula, sign, scaling, units, day count, calendars, dates, discount/forecast semantics;
+- explicit valuation/as-of dates; no hidden system clock;
+- no future-data use or market-state mixing;
+- missing/stale/unsupported inputs fail visibly rather than becoming fake values;
+- assumptions and methodology authority are explicit;
+- deterministic outputs and deterministic regression tests where calculations change.
 
-**Escalate a number change to P1 (or P2)** only when it is **incorrect, hidden,
-unsafe, untested, or non-deterministic**, or when it **breaks a pricing/risk
-contract, fabricates data or results, or introduces look-ahead / data-leakage
-risk**. In those cases it is at least P1 — and a genuine financial-correctness,
-determinism, data-leakage, or safety issue is **never** downgraded to a
-readability nit.
+### Contract / architecture
 
-Likewise, hiding a pricing assumption, using the system date in pricing, mixing
-market states, or letting AI/UI **bypass** the deterministic pricing API is at
-least P1 regardless of whether a number visibly changed.
+Check:
+- ownership and precedence are unambiguous;
+- required inputs, normalized units, lifecycle/state, outputs, and failure behavior are complete;
+- implementation boundaries do not force the next issue to guess;
+- docs, schemas, code, and examples describe the same contract;
+- existing validated compatibility boundaries remain intact.
 
----
+A contract may deliberately leave a **value** unresolved when the owner/evidence requirement is explicit. It may not call the **shape** complete while leaving the implementation unable to represent the eventual evidence.
 
-## 3. Review lenses
+### Engineering
 
-Apply the lenses that fit the diff. Most PRs need one or two.
+Check:
+- existing public behavior and error contracts do not regress;
+- new calculation/contract logic has focused deterministic tests;
+- data, pricing, UI, persistence, and AI responsibilities stay separated where the repo requires it;
+- the diff is no larger than the issue needs;
+- avoid speculative wrappers/factories/frameworks and repeated parsing/copying/work inside hot loops;
+- for automation/workflow changes, verify authorization and concurrency, secret/write-token separation, immutable handoff between model/validation/publisher, stale-HEAD checks, exact publication provenance, and fail-closed handling of self-modifying control-plane changes.
 
-### 3.1 Quant / financial correctness lens
+### Trader / audit workflow
 
-Use when the diff touches pricing, curves, schedules, day counts, discounting,
-risk, valuation dates, market data, or product schemas.
+When user-visible or persisted results change, check:
+- failures cannot look like valid prices;
+- units/currency/assumptions are understandable;
+- provenance is sufficient to reproduce the result;
+- the change does not add unnecessary desk workflow friction.
 
-Check for:
+## 4. Review discipline
 
-- **Wrong or approximated math** — day-count/accrual errors, discount/forecast
-  formula mistakes, sign or pay/receive errors, silent approximation of an
-  unsupported convention instead of an explicit failure.
-- **Determinism** — same inputs must give the same outputs; no reliance on
-  iteration order, dict ordering, or floating-point nondeterminism in results.
-- **No system date in pricing** — valuation date must come from explicit inputs,
-  never `date.today()` / `datetime.now()`.
-- **No future data / look-ahead** — valuing date `T` must not read a later date's
-  data (critical for historical valuation and backtesting).
-- **No fabricated results** — missing market data must fail explicitly
-  (`MISSING_MARKET_DATA`), never a fake `0.0`, invented curve, or back-filled
-  rate.
-- **Assumptions are surfaced** — single-curve, no-BDC, no-calendar, currency
-  scope, etc. are recorded (e.g. in `assumptions`) and not hidden in code.
-- **Contract fidelity** — results use `PricingResult` correctly (`pv is None` on
-  failure; structured error/warning codes; correct status).
+- Review the commit/HEAD actually requested. Treat findings tied only to superseded lines as outdated unless the issue still exists.
+- Prefer one precise finding over generic advice. State the concrete consequence.
+- Do not review unrelated pre-existing defects as blockers for this PR.
+- Do not prescribe a broad redesign when a smaller correct fix exists.
+- Do not downgrade financial correctness, determinism, data leakage, security, or a material unresolved contract decision to a readability nit.
+- P3-only findings may be omitted when they add no useful signal.
 
-### 3.2 IT / engineering lens
+## 5. Output
 
-Use for almost any code diff. Covers correctness-adjacent engineering and,
-importantly, **unnecessary code weight**.
+For each material finding use:
 
-Check for:
+`P0|P1|P2 — file:line — problem; concrete consequence; bounded fix direction if useful.`
 
-- **Layering** — data adapters, valuation context, pricing engines, UI, and AI
-  stay separate; no `pricing → data.providers` import. The **UI may orchestrate**:
-  it can call the deterministic pricing / scenario APIs (e.g. the Streamlit app
-  invoking `run_parallel_curve_shock` or `price(...)`). What is forbidden is
-  **implementing pricing logic inside UI code**, **hiding financial assumptions in
-  UI code**, or letting **UI or AI bypass the deterministic pricing APIs**. Flag
-  those, not a plain UI-to-API call.
-- **Broken contracts / regressions** — public function shapes, `PricingResult`
-  fields, and existing invariants stay intact; new failures are structured, not
-  raised where a `FAILED` result is expected (and vice-versa).
-- **Tests** — new calculation or contract logic has deterministic tests; failure
-  paths are tested, not just the happy path.
-- **Unnecessary code weight** (flag these explicitly):
-  - unnecessary abstractions, wrappers, factories, managers, adapters, or helper
-    layers added before there is a real second caller;
-  - duplicated logic, or needless data conversions / re-parsing / format
-    round-trips;
-  - broad refactors not required by the issue (scope creep in a small PR);
-  - generic, framework-like code built for hypothetical future use cases that do
-    not exist yet;
-  - hidden performance costs — work inside loops that could be hoisted, repeated
-    parsing, repeated object construction, avoidable copies of frames/arrays;
-  - code that makes the repo **harder for a future agent or human to understand
-    without improving correctness, safety, or user-visible behavior**.
-- **Severity for the above** — apply the §2 rule: P2 if it creates a likely
-  performance, maintenance, testability, or future-editing risk; otherwise P3.
-  Prefer suggesting the *smaller* version over demanding a rewrite.
+List the most severe first. Keep optional P3 items clearly separate.
 
-### 3.3 Trader / workflow lens
+If escalation is required, put `ESCALATE` on its own line.
 
-Use when the diff affects what a desk user sees or does: valuation output,
-result tables, error messages, statuses, provenance, or the flow a user drives.
-
-Check for:
-
-- **Misleading output** — a result that looks valid but is not (e.g. a `0.0` that
-  is really a failure, a PV with no indication of the currency or assumptions,
-  a success status hiding a data-quality problem).
-- **Actionable failures** — when something fails, can the user tell *why* and
-  *what to do*? Structured codes and a clear message beat a bare exception.
-- **Provenance / auditability** — rows/results carry enough context (valuation
-  date, market-data-as-of, source, engine) to be trusted and reproduced.
-- **Workflow fit** — does the change match how the desk actually values,
-  compares, or reviews trades, or does it add friction/steps without benefit?
-
-Do not invent product requirements here; tie comments to the diff's user-visible
-behavior.
-
-### 3.4 Design / readability lens
-
-Use for most PRs, but keep it P3 unless it impairs correctness or future edits.
-
-Check for:
-
-- **Boring, explicit code** — matches the repo's preference for readable,
-  obvious code over clever abstractions.
-- **Naming and comments** — names say what things are; comments explain financial
-  or design assumptions, not obvious syntax.
-- **Docs accuracy** — docs/comments match the code the PR ships; status notes,
-  issue references, and examples are correct.
-- **Consistency** — new code reads like the surrounding code (structure, naming,
-  error handling).
-
----
-
-## 4. What not to do
-
-- Do not roleplay a persona or force every lens to comment.
-- Do not review code the PR does not touch, or block on pre-existing issues
-  unrelated to the diff (mention them briefly at most).
-- Do not pad with generic advice, restated code, or speculative "could someday"
-  concerns.
-- Do not downgrade a financial-correctness, determinism, data-leakage, or safety
-  issue to a style nit.
-- Do not demand broad refactors, new abstractions, or extra generality the issue
-  did not ask for — the repo prefers the smallest correct change.
-
----
-
-## 5. Suggested review output shape
-
-Keep it short and skimmable:
-
-1. **One-line verdict** — approve / approve-with-nits / request-changes, and why.
-2. **Findings** — each as `severity — file:line — problem (+ concrete case or
-   fix)`, most severe first. Omit the section if there are none.
-3. **Optional nits** — P3 items, clearly marked optional.
-
-A clean PR can be a single approving line. Reserve length for PRs that earn it.
+If there are no P0/P1/P2 findings, say so concisely. Do not pad a clean review.
