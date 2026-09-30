@@ -1479,6 +1479,19 @@ input[readonly].control:not(.derived-control) {
   .capture-header-top { flex-wrap: wrap; }
   .capture-title-block { min-width: 0; }
   .capture-header-actions { flex-wrap: wrap; }
+  /* Capture review row (ATM + OTM/SABR share .capture-review-card): let the
+     reviewer field shrink and the actions wrap, so Reject/Confirm are never
+     clipped at phone widths. Higher specificity than vcub_capture.css's own
+     single-class rules, which load after this file. */
+  .capture-review-card .capture-review-actions { flex-wrap: wrap; }
+  .capture-review-card .capture-review-by {
+    flex: 1 1 180px;
+    min-width: 0;
+    width: auto;
+  }
+  /* Vol-surface snapshot picker: drop the 340px floor so it fits the card
+     on phones; arrow and selected text stay unclipped. */
+  .vol-surface-select { min-width: 0; width: 100%; max-width: 100%; }
   .instr-header { padding: 14px 16px; gap: 16px; }
   .stats { margin-left: 0; gap: 18px; }
   .form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: start; }
