@@ -2,21 +2,41 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=1672" />
-<title>Bond Option Pricer — Static Prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rates Atelier — Bond Option Workbench</title>
+<!-- No external font CDN: the prototype must not load scripts or styles
+   from another origin (browser-test enforced). The --serif/--sans/--mono
+   stacks below resolve to local system fonts when the webfonts are absent. -->
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="vcub_capture.css" />
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="shiori-wc" x="-20%" y="-20%" width="140%" height="140%">
+    <feTurbulence type="fractalNoise" baseFrequency=".012 .018" numOctaves="3" seed="7" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="38" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</defs></svg>
+<div class="wash" style="width:420px;height:300px;left:38%;top:-120px;background:radial-gradient(closest-side,rgba(255,222,190,.75),transparent)" aria-hidden="true"></div>
+<div class="wash" style="width:360px;height:360px;right:-80px;top:42%;background:radial-gradient(closest-side,rgba(168,214,244,.8),transparent)" aria-hidden="true"></div>
+<div class="wash" style="width:300px;height:240px;left:55%;top:70%;background:radial-gradient(closest-side,rgba(206,200,246,.55),transparent)" aria-hidden="true"></div>
+<div class="wash" style="width:380px;height:280px;left:-90px;top:48%;background:radial-gradient(closest-side,rgba(178,232,206,.8),transparent)" aria-hidden="true"></div>
 <div class="app">
 
   <!-- ===================== TOP NAV ===================== -->
   <header class="topnav">
     <div class="brand">
       <span class="logo">
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 6"/><polyline points="15 6 21 6 21 12"/></svg>
+        <svg width="34" height="34" viewBox="0 0 40 40" aria-hidden="true">
+          <circle cx="17" cy="20" r="12" fill="none" stroke="#6fa6d6" stroke-width="1.4" opacity=".85"/>
+          <circle cx="23" cy="20" r="12" fill="rgba(160,220,190,.30)" stroke="#62b59a" stroke-width="1.4"/>
+          <path d="M8 26 C 14 14, 22 30, 32 14" fill="none" stroke="#2b3445" stroke-width="1.1" stroke-linecap="round"/>
+        </svg>
       </span>
-      <span class="name">Bond Option Pricer</span>
+      <span>
+        <span class="name">Rates <em>Atelier</em></span>
+        <span class="sub">Pricing · Risk · Markets</span>
+      </span>
     </div>
     <nav class="tabs" id="pricing-subnav">
       <span class="tab active">Pricing</span>

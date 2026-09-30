@@ -1,88 +1,232 @@
-/* Static visual reproduction of
-   docs/ui/reference/standalone_bond_option_workbench_light_v1.png
-   Pure HTML/CSS prototype. No backend, no pricing, no data wiring. */
+/* Shiori Pricing Lab — Bond Option Workbench
+   Swap Atelier visual refresh (visual re-skin only).
+
+   Design language transferred from Swap Atelier; product semantics,
+   information architecture, pricing logic and API contracts unchanged.
+
+   - soft paper background with restrained watercolor washes (behind content)
+   - translucent white cards, subtle borders/shadows, rounded geometry
+   - editorial serif headings, clean sans labels, mono financial values
+   - pale-blue editable fields; sage = positive/receive, terra = negative/pay
+   - restrained indigo for primary valuation numbers
+   - financial data stays crisp, high-contrast, scannable
+   - every pre-existing selector/ID hook is preserved for script.js */
 
 :root {
-  --bg: #f3f4f7;
-  --card: #ffffff;
-  --border: #e6e8ec;
-  --border-strong: #d7dbe2;
-  --text: #1f2a44;
-  --text-strong: #16203a;
-  --muted: #6b7280;
-  --muted-2: #99a1b0;
-  --field-bg: #f4f5f7;
-  --field-border: #e2e5ea;
-  --teal: #13b0ab;
-  --blue: #2563eb;
-  --blue-soft-bg: #eaf1fe;
-  --blue-soft-text: #2f6fe0;
-  --orange: #e07b3c;
-  --green: #22a565;
+  /* ---- Swap Atelier core tokens ---- */
+  --paper: #ffffff;
+  --card: rgba(255, 255, 255, 0.84);
+  --ink: #2b3445;
+  --ink2: #5d6b7e;
+  --ink3: #9ba8b8;
+  --line: #e6eef2;
+  --line2: #f1f6f7;
+  --indigo: #4f7fb3;
+  --indigo-deep: #3f6f9f;
+  --indigo-soft: #e3effa;
+  --terra: #c25e4a;
+  --terra-strong: #b3401f;
+  --terra-soft: #fdebe5;
+  --sage: #3f8a6f;
+  --sage-strong: #14724a;
+  --sage-soft: #dff3ea;
+  --apricot: #f3f9fb;          /* editable field wash: pale sky */
+  --apricot-line: #9fcbe0;     /* editable field underline */
+  --violet: #7d86c9;
+  --serif: "Fraunces", Georgia, "Times New Roman", serif;
+  --sans: "Inter", "Helvetica Neue", Arial, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --r: 18px;
+
+  /* ---- Back-compat aliases (vcub_capture.css + legacy selectors) ---- */
+  --bg: #ffffff;
+  --border: var(--line);
+  --border-strong: #c9d8e2;
+  --text: var(--ink);
+  --text-strong: #1e2735;
+  --muted: var(--ink2);
+  --muted-2: var(--ink3);
+  --field-bg: var(--apricot);
+  --field-border: #d5e5ee;
+  --teal: var(--indigo-deep);
+  --blue: var(--indigo);
+  --blue-soft-bg: var(--indigo-soft);
+  --blue-soft-text: var(--indigo-deep);
+  --orange: var(--terra-strong);
+  --green: var(--sage-strong);
   --chart-line: #4a90d9;
   --chart-fill-top: rgba(74, 144, 217, 0.28);
   --chart-fill-bottom: rgba(74, 144, 217, 0.02);
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.05);
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 18px 40px -28px rgba(79, 127, 179, 0.35);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+html { background: #fff; }
+
 html, body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Inter", "Helvetica Neue", Arial, "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  font-family: var(--sans);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
+body { background: transparent; min-height: 100vh; }
+
+/* Restrained watercolor washes around the page edges — strictly behind
+   content (negative z-index, pointer-events none, blurred, low weight).
+   NOTE: body itself must stay transparent (only `html` carries #fff).
+   An opaque body box paints above this negative layer and buries it. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -40px;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(34vw 26vw at 4% 0%, rgba(168, 214, 240, 0.55), transparent 68%),
+    radial-gradient(30vw 24vw at 22% 8%, rgba(255, 226, 196, 0.45), transparent 70%),
+    radial-gradient(30vw 24vw at 98% 2%, rgba(184, 232, 210, 0.55), transparent 68%),
+    radial-gradient(26vw 22vw at 80% 20%, rgba(214, 208, 245, 0.35), transparent 70%),
+    radial-gradient(40vw 30vw at 70% 105%, rgba(176, 226, 214, 0.50), transparent 70%),
+    radial-gradient(32vw 26vw at 10% 100%, rgba(186, 216, 244, 0.45), transparent 70%),
+    radial-gradient(22vw 18vw at 45% 92%, rgba(255, 236, 190, 0.40), transparent 70%);
+  filter: blur(8px);
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.35;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='p'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 .55  0 0 0 0 .6  0 0 0 0 .62  0 0 0 .07 0'/></filter><rect width='100%' height='100%' filter='url(%23p)'/></svg>");
+}
+
+/* Fixed wash blobs (markup-provided, behind everything). */
+.wash {
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  filter: blur(2px);
+  opacity: 0.95;
+  mix-blend-mode: multiply;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .app {
-  width: 1672px;
-  height: 941px;
-  background: var(--bg);
+  width: 100%;
+  max-width: 1560px;
+  margin: 0 auto;
+  /* App shell: viewport-height owner so the action footer stays available
+     while the workbench content scrolls inside .main (which owns its own
+     scroll). Narrow screens revert to document scroll further below. */
+  height: 100vh;
+  height: 100dvh;
+  background: transparent;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 /* ---------- Top navigation ---------- */
 .topnav {
-  height: 62px;
-  background: var(--card);
-  border-bottom: 1px solid var(--border);
+  min-height: 62px;
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
-  padding: 0 22px;
+  padding: 10px 22px;
   flex: 0 0 auto;
+  gap: 18px;
+  flex-wrap: wrap;
 }
-.brand { display: flex; align-items: center; gap: 10px; width: 300px; }
-.brand .logo { color: var(--teal); display: flex; }
-.brand .name { font-size: 20px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.2px; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand .logo { color: var(--indigo); display: flex; }
+.brand .name {
+  font-family: var(--serif);
+  font-size: 21px;
+  font-weight: 400;
+  color: var(--text-strong);
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+}
+.brand .name em { font-style: italic; color: var(--indigo-deep); }
+.brand .sub {
+  display: block;
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--ink3);
+  margin-top: 1px;
+}
 
-.tabs { display: flex; align-items: center; gap: 30px; height: 100%; }
+/* Elegant thin-tab treatment (Swap Atelier language). */
+.tabs { display: flex; align-items: center; gap: 4px; height: 100%; flex-wrap: wrap; }
 .tab {
   height: 100%;
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 15px;
+  font-size: 14px;
   color: var(--muted);
   font-weight: 500;
-  border-bottom: 2.5px solid transparent;
+  border-bottom: 2px solid transparent;
   cursor: default;
+  padding: 12px 12px 13px;
+  position: relative;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  font-family: var(--sans);
+  white-space: nowrap;
 }
-.tab.active { color: var(--text-strong); font-weight: 600; border-bottom-color: var(--blue); }
+.tab:hover { color: var(--text-strong); }
+.tab.active { color: var(--text-strong); font-weight: 600; }
+.tab.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 2px;
+  height: 5px;
+  border-radius: 6px;
+  opacity: 0.85;
+  background: linear-gradient(90deg, rgba(143, 200, 230, 0.9), rgba(160, 220, 190, 0.9));
+}
 
-.nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 7px;
   height: 30px; padding: 0 12px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--line);
   border-radius: 999px;
   font-size: 13px; color: #3d4658; font-weight: 500;
-  background: #fff;
+  background: rgba(255, 255, 255, 0.7);
 }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; }
+.dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #62b59a; display: inline-block;
+  animation: shiori-pulse 2.4s infinite;
+}
+@keyframes shiori-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(98, 181, 154, 0.45); }
+  70% { box-shadow: 0 0 0 8px rgba(98, 181, 154, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(98, 181, 154, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dot { animation: none; }
+}
 .pill.verified { color: var(--blue-soft-text); border-color: #bcd3f7; }
 .pill.verified svg { color: var(--blue-soft-text); }
 .mid-badge { font-size: 14px; font-weight: 600; color: var(--blue-soft-text); padding: 0 4px; }
@@ -102,47 +246,53 @@ html, body {
 .icon-btn { color: var(--muted); display: flex; align-items: center; cursor: default; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
-  background: #dfe9fb; color: #2f6fe0; font-size: 12px; font-weight: 700;
+  background: var(--indigo-soft); color: var(--indigo-deep);
+  font-size: 12px; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
 }
 
 /* ---------- Body: sidebar + main ---------- */
-.body { flex: 1 1 auto; display: flex; min-height: 0; }
+.body { flex: 1 1 auto; display: flex; min-height: 0; align-items: stretch; }
 
 .sidebar {
   width: 168px;
-  background: var(--card);
-  border-right: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(10px);
+  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   padding: 16px 12px;
   flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .nav-item {
   display: flex; align-items: center; gap: 12px;
   height: 42px; padding: 0 12px;
-  border-radius: 8px;
-  color: #4b5563; font-size: 15px; font-weight: 500;
+  border-radius: 10px;
+  color: #4b5563; font-size: 14px; font-weight: 500;
   cursor: default;
 }
 .nav-item svg { color: #8a94a6; }
-.nav-item.active { background: var(--blue-soft-bg); color: var(--blue); font-weight: 600; }
-.nav-item.active svg { color: var(--blue); }
+.nav-item.active { background: var(--indigo-soft); color: var(--indigo-deep); font-weight: 600; }
+.nav-item.active svg { color: var(--indigo); }
 
 .sidebar-foot { margin-top: auto; padding: 12px; }
-.sidebar-foot .lbl { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.sidebar-foot .lbl { font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
 .sidebar-foot .live { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #3d4658; margin-bottom: 12px; }
-.sidebar-foot .asof { font-size: 12px; color: var(--muted-2); line-height: 1.5; }
+.sidebar-foot .asof { font-size: 12px; color: var(--muted-2); line-height: 1.5; font-family: var(--mono); }
 
 .main {
   flex: 1 1 auto;
-  padding: 10px 16px;
+  padding: 18px 22px 26px;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 16px;
   min-width: 0;
+  /* Scroll owner inside the app shell: tall workbench content scrolls
+     here while the topnav/sidebar/footer stay put. */
+  min-height: 0;
   overflow-y: auto;
-  overflow-x: hidden;
 }
 /* .main's own explicit `display: flex` ties the UA stylesheet's
    `[hidden] { display: none }` rule in specificity and (as the later, author
@@ -166,16 +316,52 @@ html, body {
   display: none;
 }
 
+/* ---------- Translucent atelier cards ---------- */
 .card {
+  position: relative;
   background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(214, 230, 236, 0.9);
+  border-radius: var(--r);
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
+/* Faint watercolor wash inside each card — decorative only, behind content. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60% 50% at 100% 0%, rgba(184, 226, 240, 0.20), transparent 70%),
+    radial-gradient(50% 40% at 0% 100%, rgba(196, 236, 214, 0.18), transparent 70%);
+}
+.card:nth-of-type(even)::before {
+  background:
+    radial-gradient(60% 50% at 0% 0%, rgba(206, 236, 220, 0.22), transparent 70%),
+    radial-gradient(50% 40% at 100% 100%, rgba(255, 232, 206, 0.18), transparent 70%);
+}
+.card > * { position: relative; z-index: 1; }
+/* Markets chart tooltips intentionally overflow above the plot and card
+   (e.g. a top-edge node). Keep the rounded card and its contained wash --
+   the wash (::before) is already inset:0 with its own border-radius, so it
+   needs no overflow clipping -- but let interactive content escape on the
+   cards that host HTML tooltips. Every other card keeps overflow hidden,
+   notably .pricing-results whose decorative ::after blob must stay clipped. */
+.markets-chart-card,
+.vol-surface-chart-card { overflow: visible; }
+
 .card-title {
-  font-size: 12.5px; font-weight: 700; letter-spacing: 0.06em;
-  color: #55607a; text-transform: uppercase;
+  font-family: var(--serif);
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: -0.1px;
+  color: var(--text-strong);
+  text-transform: none;
 }
+.card-title em { font-style: italic; color: var(--ink3); font-size: 13px; }
 
 /* ---------- Collapsible section headers (PR #141 third revision) ---------- */
 /* Every top-level card/section this round gets a clickable header row --
@@ -186,6 +372,7 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 9px;
   cursor: pointer;
 }
@@ -243,32 +430,38 @@ html, body {
 }
 
 /* ---------- Instrument header ---------- */
-.instr-header { display: flex; align-items: center; padding: 8px 22px; gap: 24px; }
-.instr-left { display: flex; flex-direction: column; gap: 6px; min-width: 430px; }
+.instr-header { display: flex; align-items: center; padding: 16px 22px; gap: 24px; flex-wrap: wrap; }
+.instr-left { display: flex; flex-direction: column; gap: 6px; min-width: 280px; flex: 1 1 320px; }
 .instr-title-row { display: flex; align-items: center; gap: 12px; }
 .flag { width: 30px; height: 30px; border-radius: 50%; overflow: hidden; box-shadow: 0 0 0 1px #e2e5ea; }
-.instr-title { font-size: 20px; font-weight: 700; color: var(--text-strong); }
+.instr-title { font-family: var(--serif); font-size: 22px; font-weight: 400; color: var(--text-strong); letter-spacing: -0.2px; }
 .star { color: #c3c9d4; }
-.badges { display: flex; gap: 10px; padding-left: 42px; }
+.badges { display: flex; gap: 10px; padding-left: 0; flex-wrap: wrap; }
 .badge {
   display: inline-flex; gap: 6px; align-items: center;
-  background: #eef1f6; border-radius: 6px; padding: 4px 9px; font-size: 12.5px;
+  background: #eef4fa; border-radius: 6px; padding: 4px 9px; font-size: 12.5px;
 }
 .badge .k { color: var(--blue-soft-text); font-weight: 600; }
-.badge .v { color: #4b5563; }
+.badge .v { color: #4b5563; font-family: var(--mono); }
 
-.stats { display: flex; align-items: flex-start; gap: 30px; margin-left: auto; }
-.stat { display: flex; flex-direction: column; gap: 3px; }
-.stat .s-lbl { font-size: 12.5px; color: var(--muted); }
-.stat .s-val { font-size: 22px; font-weight: 700; color: var(--text-strong); line-height: 1.1; letter-spacing: -0.3px; }
+.stats { display: flex; align-items: flex-start; gap: 30px; margin-left: auto; flex-wrap: wrap; }
+.stat { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.stat .s-lbl { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); }
+.stat .s-val {
+  font-family: var(--mono);
+  font-size: 20px; font-weight: 500; color: var(--text-strong);
+  line-height: 1.1; letter-spacing: -0.3px;
+  font-variant-numeric: tabular-nums;
+}
 .stat .s-sub { font-size: 12.5px; color: var(--muted-2); }
 .stat .s-val .pct { font-size: 14px; font-weight: 600; }
 .date-row { display: flex; align-items: center; gap: 8px; }
 .field-box {
   display: inline-flex; align-items: center; gap: 8px;
-  height: 36px; padding: 0 10px;
-  border: 1px solid var(--field-border); border-radius: 7px; background: #fff;
+  min-height: 36px; padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, 0.85);
   font-size: 14px; color: var(--text);
+  font-family: var(--mono);
 }
 .field-box.sm { padding: 0 10px; }
 .field-box svg { color: var(--muted-2); }
@@ -277,50 +470,152 @@ html, body {
 /* ---------- Workspace grid ---------- */
 .workspace {
   display: grid;
-  grid-template-columns: 470px 1fr;
-  gap: 12px;
+  grid-template-columns: 470px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
 }
-.option-terms { grid-column: 1; grid-row: 1; padding: 12px 18px; }
-.pricing-results { grid-column: 2; grid-row: 1; padding: 14px 20px; align-self: start; }
+.option-terms { grid-column: 1; grid-row: 1; padding: 20px 22px; }
+.pricing-results { grid-column: 2; grid-row: 1; padding: 20px 22px; align-self: start; }
 
 /* ---------- Option terms form ---------- */
 .option-terms .card-head { margin-bottom: 9px; }
 .form-row {
-  display: grid; grid-template-columns: 146px 1fr;
+  display: grid; grid-template-columns: 146px minmax(0, 1fr);
   align-items: center; gap: 10px; margin-bottom: 3px;
 }
-.form-row > label { font-size: 13.5px; color: #4b5563; }
+.form-row > label { font-size: 13px; color: #4b5563; font-weight: 500; }
+
+/* Editable fields: pale sky wash + mono numerals (Swap Atelier language). */
 .control {
-  height: 31px; border: 1px solid var(--field-border); border-radius: 7px;
-  background: var(--field-bg); display: flex; align-items: center;
-  padding: 0 12px; font-size: 14px; color: var(--text); width: 100%;
+  min-height: 31px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--apricot-line);
+  border-radius: 10px 10px 4px 4px;
+  background: var(--apricot);
+  display: flex; align-items: center;
+  padding: 5px 12px;
+  font-size: 13px; color: var(--ink);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  max-width: 100%;
+  transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
 }
 .control.select { justify-content: space-between; }
 .control.select svg { color: var(--muted-2); }
-.control .unit { margin-left: auto; color: var(--muted); font-size: 13px; }
+.control .unit { margin-left: auto; color: var(--muted); font-size: 13px; font-family: var(--sans); }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .split { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .dd-days { width: 92px; }
 
+input.control, select.control {
+  font-family: var(--mono);
+  outline: none;
+}
+input.control:focus, select.control:focus {
+  background: #fff;
+  border-color: var(--apricot-line);
+  box-shadow: 0 0 0 4px rgba(159, 203, 224, 0.28);
+}
+input.control:focus-visible, select.control:focus-visible, .btn:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+select.control {
+  font-family: var(--sans);
+  cursor: pointer;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink3) 50%),
+    linear-gradient(135deg, var(--ink3) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+select.control:focus { background-color: #fff; }
+
+/* Read-only / derived values: transparent, never pale-blue, never
+   mistakable for an editable input. */
+.derived-control[readonly] {
+  background: rgba(244, 246, 248, 0.7);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #344054;
+  cursor: default;
+  font-family: var(--mono);
+}
+input[readonly].control:not(.derived-control) {
+  background: transparent;
+  border-bottom-color: var(--line);
+}
+.derived-source {
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 3px;
+  font-family: var(--sans);
+}
+
+/* Direction toggles: sage = receive/buy (positive), terra = pay/sell. */
 .toggle {
   display: grid; grid-template-columns: 1fr 1fr;
-  height: 31px; border: 1px solid var(--field-border); border-radius: 7px;
+  min-height: 31px;
+  border: 1px solid var(--line); border-radius: 999px;
   overflow: hidden; background: #fff;
+  padding: 3px;
+  gap: 2px;
 }
-.toggle .opt { display: flex; align-items: center; justify-content: center; font-size: 14px; color: #4b5563; font-weight: 500; }
-.toggle .opt.on { background: var(--teal); color: #fff; font-weight: 600; }
+.toggle .opt {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; color: #4b5563; font-weight: 500;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-family: var(--sans);
+}
+.toggle .opt.on { background: var(--indigo-soft); color: var(--indigo-deep); font-weight: 600; }
+/* BUY/SELL carry directional meaning (the position sign); CALL/PUT and
+   BID/MID/OFFER do not, so they keep the neutral selected styling above. */
+#position-toggle .opt.on[data-value="BUY"] {
+  background: var(--sage-soft);
+  color: var(--sage-strong);
+}
+#position-toggle .opt.on[data-value="SELL"] {
+  background: var(--terra-soft);
+  color: var(--terra-strong);
+}
 
-/* ---------- Pricing results ---------- */
+/* ---------- Pricing results: valuation hierarchy ---------- */
 .pricing-results .card-head { margin-bottom: 12px; }
+/* Quote-card wash accent, kept faint and behind the numbers. */
+.pricing-results::after {
+  content: "";
+  position: absolute;
+  right: -70px;
+  top: -70px;
+  width: 240px;
+  height: 240px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(168, 214, 240, 0.4), rgba(196, 236, 214, 0.22) 45%, transparent 70%);
+}
 .pr-row { display: grid; padding: 12px 0; }
-.pr-row.r1 { grid-template-columns: repeat(3, 1fr); padding-top: 0; }
-.pr-row.r2 { grid-template-columns: repeat(4, 1fr); border-top: 1px solid #eef0f4; padding-bottom: 0; }
-.pr-cell .p-lbl { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-.pr-cell .p-val { font-size: 25px; font-weight: 700; color: var(--text-strong); line-height: 1.05; letter-spacing: -0.4px; }
-.pr-cell .p-val.teal { color: var(--teal); }
-.pr-cell .p-sub { font-size: 12.5px; color: var(--muted-2); margin-top: 3px; }
-.pr-row.r2 .p-val { font-size: 20px; }
-.pr-row.r2 .p-val.warn { color: var(--orange); }
+.pr-row.r1 { grid-template-columns: repeat(3, minmax(0, 1fr)); padding-top: 0; }
+.pr-row.r2 { grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid #eef0f4; padding-bottom: 0; }
+.pr-cell { min-width: 0; }
+.pr-cell .p-lbl { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+/* Primary valuation numbers: restrained indigo, serif/mono contrast. */
+.pr-cell .p-val {
+  font-family: var(--mono);
+  font-size: 25px; font-weight: 500; color: var(--text-strong);
+  line-height: 1.05; letter-spacing: -0.4px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: break-word;
+}
+.pr-cell .p-val.teal { font-family: var(--serif); font-weight: 400; color: var(--indigo-deep); font-size: 32px; }
+.pr-cell .p-sub { font-size: 12.5px; color: var(--muted-2); margin-top: 3px; font-family: var(--mono); }
+.pr-row.r2 .p-val { font-size: 19px; }
+.pr-row.r2 .p-val.warn { color: var(--terra); }
 /* .pr-row's own explicit `display: grid` ties the UA stylesheet's
    `[hidden] { display: none }` rule in specificity and (as the later,
    author rule) wins -- same class of bug documented and fixed elsewhere in
@@ -340,10 +635,10 @@ html, body {
    the coupon treatment label and every interim coupon's own carry stay one
    click away rather than absent. */
 .s490-trace { margin-top: 12px; border-top: 1px solid #eef0f4; padding-top: 10px; }
-.s490-trace > summary { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
+.s490-trace > summary { cursor: pointer; font-size: 12.5px; color: var(--indigo-deep); font-weight: 600; }
 .s490-trace-body { margin-top: 8px; display: grid; row-gap: 5px; }
-.s490-trace-line { font-size: 12.5px; color: var(--muted-2); }
-.s490-trace-line .s490-trace-key { color: var(--muted); margin-right: 8px; }
+.s490-trace-line { font-size: 12.5px; color: var(--muted-2); font-family: var(--mono); }
+.s490-trace-line .s490-trace-key { color: var(--muted); margin-right: 8px; font-family: var(--sans); }
 /* ---------- Historical Yield Vol -> Equivalent Price Vol (Issue #214) ---------- */
 /* Reuses the S490 panel's own row/trace styling above rather than restating
    it: the two panels do the same job -- show a Shiori-derived number with its
@@ -354,12 +649,13 @@ html, body {
   margin-top: 12px;
   padding: 12px 14px;
   border: 1px solid #e6e9ef;
-  border-radius: 10px;
-  background: #fbfcfe;
+  border-radius: 14px;
+  background: rgba(251, 252, 254, 0.85);
 }
 .derived-block .derived-title {
-  font-size: 13px;
-  font-weight: 700;
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 400;
   color: var(--text-strong);
   margin-bottom: 8px;
 }
@@ -373,26 +669,42 @@ html, body {
   display: none;
 }
 /* ---------- Bloomberg Bond Master (Advanced, read-only) ---------- */
-.collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--blue); font-weight: 600; }
+.collapse-toggle { cursor: pointer; font-size: 12.5px; color: var(--indigo-deep); font-weight: 600; }
 /* auto-fit rather than a fixed column count: this grid holds five blocks
    (Bloomberg Bond Master has more line items than the old placeholder
    panel it replaced) and should wrap gracefully rather than break if a
    block is ever added or removed again. */
 .id-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px 24px; }
-.id-block { display: grid; grid-template-columns: 150px 1fr; row-gap: 7px; align-content: start; }
-.id-block .i-k { font-size: 13.5px; color: var(--muted); }
+.id-block { display: grid; grid-template-columns: 150px minmax(0, 1fr); row-gap: 7px; align-content: start; }
+.id-block .i-k { font-size: 13px; color: var(--muted); }
 /* min-width: 0 lets a long label/value (e.g. "Bloomberg Calculation Type" /
    "STREET CONVENTION") actually wrap and shrink to its 1fr grid track
    instead of overflowing into the next block -- grid items default to
    min-width: auto (their content's min-content size), which otherwise
    forces the track wider than the space this grid actually has. */
 .id-block .i-k, .id-block .i-v { min-width: 0; overflow-wrap: break-word; }
-.id-block .i-v { font-size: 13.5px; color: var(--text-strong); font-weight: 500; }
+.id-block .i-v { font-size: 13.5px; color: var(--text-strong); font-weight: 500; font-family: var(--mono); }
 
-/* ---------- Footer ---------- */
+/* ---------- Footer: bottom valuation strip ---------- */
 .footer {
-  height: 56px; background: var(--card); border-top: 1px solid var(--border);
-  display: flex; align-items: center; padding: 0 22px; flex: 0 0 auto;
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  min-height: 56px;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid rgba(214, 230, 236, 0.9);
+  display: flex; align-items: center; padding: 8px 22px; flex: 0 0 auto;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.footer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(184, 226, 240, 0.22), rgba(255, 240, 214, 0.16) 50%, rgba(196, 236, 214, 0.22));
 }
 /* .footer's own explicit `display: flex` ties the UA stylesheet's
    `[hidden] { display: none }` rule in specificity and (as the later, author
@@ -401,16 +713,29 @@ html, body {
    (Issue #167) hides the footer while active, since its Price/Clear/Export
    actions are Pricing-only. */
 .footer[hidden] { display: none; }
-.valid { display: flex; align-items: center; gap: 9px; font-size: 14px; color: #3d4658; }
-.valid .check { color: var(--green); display: flex; }
-.foot-actions { margin-left: auto; display: flex; gap: 12px; }
+.valid { display: flex; align-items: center; gap: 9px; font-size: 13px; color: #3d4658; }
+.valid .check { color: var(--sage-strong); display: flex; }
+.valid .mono-id { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.foot-actions { margin-left: auto; display: flex; gap: 10px; flex-wrap: wrap; }
 .btn {
-  height: 40px; padding: 0 22px; border-radius: 8px; font-size: 14px; font-weight: 600;
-  display: inline-flex; align-items: center; gap: 8px; cursor: default; border: 1px solid transparent;
+  min-height: 40px; padding: 8px 22px; border-radius: 12px;
+  font-size: 13.5px; font-weight: 600; font-family: var(--sans);
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  cursor: default; border: 1px solid transparent;
+  transition: transform 0.18s, border-color 0.18s, background 0.18s, box-shadow 0.18s;
+  white-space: nowrap;
 }
 .btn.ghost { background: #fff; border-color: var(--border-strong); color: #3d4658; }
-.btn.outline { background: #fff; border-color: #bcd3f7; color: var(--blue); }
-.btn.primary { background: var(--blue); color: #fff; padding: 0 26px; }
+.btn.outline { background: #fff; border-color: #bcd3f7; color: var(--indigo-deep); }
+.btn.primary {
+  background: linear-gradient(135deg, #3f6f9f, #3d7a5f);
+  border-color: transparent;
+  color: #fff;
+  padding: 8px 26px;
+  box-shadow: 0 8px 18px -10px rgba(79, 127, 179, 0.8);
+}
+.btn.primary:hover { background: linear-gradient(135deg, #38648f, #356b53); }
+.btn.ghost:hover, .btn.outline:hover { border-color: var(--ink3); transform: translateY(-1px); }
 .btn.ghost, .btn.outline, .btn.primary { cursor: pointer; }
 /* Draft-gated state: visual companion to the JS-level draft/missing-fields
    guard in script.js -- Price/Refresh are dimmed and inert until the current
@@ -418,16 +743,17 @@ html, body {
 .btn.is-disabled { opacity: 0.45; pointer-events: none; cursor: not-allowed; }
 .valid .check-fail { display: none; }
 .valid.failed .check-ok { display: none; }
-.valid.failed .check-fail { display: flex; color: var(--orange); }
+.valid.failed .check-fail { display: flex; color: var(--terra-strong); }
 
 /* ---------- Manual pricing bridge additions (PR #136) ---------- */
 /* Honest placeholder for any value with no real model output this round --
    never a fabricated number, never styled to look like a real result. */
 .pending-value {
-  color: var(--muted-2);
+  color: var(--muted-2) !important;
   font-weight: 500;
   font-style: italic;
   font-size: 12.5px;
+  font-family: var(--sans) !important;
 }
 /* Overrides for value classes with higher base specificity than a bare
    .pending-value (e.g. ".stat .s-val") -- otherwise a "Not available"
@@ -441,26 +767,22 @@ html, body {
   color: var(--muted-2);
   letter-spacing: normal;
 }
-input.control {
-  font-family: inherit;
-  outline: none;
-}
-input.control:focus {
-  border-color: var(--blue);
-}
+/* Errors and blockers stay unmistakable: solid warm-tinted banner, dark
+   text, never washed out by the watercolor layer. */
 .error-banner {
   background: #fdeeea;
   border: 1px solid #f3c6b8;
-  color: #b3401f;
+  color: #8f2f14;
   font-size: 12.5px;
-  border-radius: 7px;
+  font-weight: 500;
+  border-radius: 10px;
   padding: 8px 12px;
   margin-bottom: 12px;
 }
 .error-banner:empty { display: none; }
 
 /* ---------- Underlying Bond: instrument-first Bloomberg lookup ---------- */
-.underlying-bond { padding: 12px 18px; }
+.underlying-bond { padding: 20px 22px; }
 .underlying-bond .card-head { margin-bottom: 9px; }
 /* Flex rather than a fixed grid: the two lookup actions sit at their natural
    width beside the two sized controls, instead of a trailing `auto` track
@@ -477,7 +799,7 @@ input.control:focus {
    and "Bond Identifier" are shorter labels than the Option Terms panel's,
    and the 3-way toggle needs the room a fixed 146px label would otherwise
    take from it (BID/MID/OFFER was clipping to "OFF" at that width). */
-.underlying-bond-controls .form-row { margin-bottom: 0; grid-template-columns: auto 1fr; gap: 10px; }
+.underlying-bond-controls .form-row { margin-bottom: 0; grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
 /* A 3-way toggle (BID/MID/OFFER) with deliberately no default selected --
    see setControlsEnabled()/script.js: nothing gets an "on" class until the
    trader clicks one, unlike the 2-way Call/Put and Buy/Sell toggles above,
@@ -489,18 +811,19 @@ input.control:focus {
   padding-top: 12px;
   border-top: 1px solid #eef0f4;
 }
-.rb-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 24px; }
-.rb-item { display: flex; flex-direction: column; gap: 2px; }
-.rb-item .rb-k { font-size: 12px; color: var(--muted); }
-.rb-item .rb-v { font-size: 13.5px; color: var(--text-strong); font-weight: 600; }
+.rb-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 24px; }
+.rb-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rb-item .rb-k { font-size: 11px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--muted); }
+.rb-item .rb-v { font-size: 13.5px; color: var(--text-strong); font-weight: 500; font-family: var(--mono); overflow-wrap: break-word; }
 .rb-item.rb-name { grid-column: 1 / -1; }
+.rb-item.rb-name .rb-v { font-family: var(--serif); font-size: 16px; font-weight: 400; }
 
 
 /* ---------- Manual completion sections (Issue #143) ---------- */
 /* Full-width rows inside the two-column workspace grid: the trader-entry
    sections that complete a Bloomberg-loaded draft. They live inside
    #workspace-section so they inherit its existing hasDraft gating. */
-.wide-card { grid-column: 1 / -1; padding: 12px 18px; }
+.wide-card { grid-column: 1 / -1; padding: 20px 22px; }
 .wide-card .card-head { margin-bottom: 9px; }
 
 /* Honest, non-decorative explanation of what Shiori fixes, what the trader
@@ -510,14 +833,14 @@ input.control:focus {
   font-size: 12px;
   line-height: 1.55;
   color: var(--muted);
-  background: #f7f8fa;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  background: rgba(247, 248, 250, 0.8);
+  border: 1px solid var(--line);
+  border-radius: 10px;
   padding: 7px 10px;
   margin-bottom: 10px;
 }
 .fixed-route-note code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 11.5px;
   background: #eceef2;
   border-radius: 4px;
@@ -525,32 +848,18 @@ input.control:focus {
 }
 .fixed-route-note strong { color: var(--text-strong); }
 
-.entry-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 20px; }
-.entry-grid-wide { grid-template-columns: repeat(3, 1fr); margin-top: 6px; }
-.entry-grid .form-row { grid-template-columns: 152px 1fr; margin-bottom: 6px; }
+.entry-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px 20px; }
+.entry-grid-wide { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 6px; }
+.entry-grid .form-row { grid-template-columns: 152px minmax(0, 1fr); margin-bottom: 6px; }
 
-select.control { font-family: inherit; outline: none; cursor: pointer; }
-select.control:focus { border-color: var(--blue); }
-
-.derived-control[readonly] {
-  background: #f4f6f8;
-  color: #344054;
-  cursor: default;
-}
-.derived-source {
-  color: var(--muted-2);
-  font-size: 11px;
-  line-height: 1.35;
-  margin-top: 3px;
-}
 .derived-timing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .route-metadata-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 7px 18px;
-  background: #f7f8fa;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  background: rgba(247, 248, 250, 0.8);
+  border: 1px solid var(--line);
+  border-radius: 10px;
   padding: 9px 10px;
 }
 .route-metadata-grid > div {
@@ -566,13 +875,15 @@ select.control:focus { border-color: var(--blue); }
 .route-metadata-grid strong {
   color: var(--text-strong);
   font-size: 12px;
+  font-family: var(--mono);
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 
 /* The UTC instant that will actually be sent to the contract, shown live so
    the normalization is visible rather than hidden. */
-.utc-preview { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; }
-.utc-preview.is-invalid { color: #b3401f; }
+.utc-preview { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; font-family: var(--mono); }
+.utc-preview.is-invalid { color: var(--terra-strong); font-weight: 600; }
 
 /* Bloomberg's raw description string, shown only as a hint next to the enum
    the trader must choose. Never written into the typed draft. */
@@ -585,11 +896,11 @@ select.control:focus { border-color: var(--blue); }
   margin-top: 3px;
   line-height: 1.35;
 }
-.field-provenance.is-auto { color: #2f6f5e; }
+.field-provenance.is-auto { color: var(--sage-strong); }
 .field-provenance.is-override { color: #7a5a12; }
 /* Issue #161: a field the resolver refused, or a control disabled because the
    whole product is unsupported. Read as a blocker, not as a filled value. */
-.field-provenance.is-blocked { color: #b3401f; }
+.field-provenance.is-blocked { color: var(--terra-strong); font-weight: 600; }
 /* A disabled Advanced control is disabled because editing it genuinely
    cannot make the ticket price -- it must not look like an ordinary input
    waiting to be filled. */
@@ -597,6 +908,7 @@ select.control:focus { border-color: var(--blue); }
   background: #f1efea;
   color: var(--muted-2);
   cursor: not-allowed;
+  border-bottom-color: #d8d2c4;
 }
 .advanced-profile-status {
   font-size: 11.5px;
@@ -604,12 +916,12 @@ select.control:focus { border-color: var(--blue); }
   color: var(--muted-2);
   margin-bottom: 8px;
 }
-.advanced-profile-status.is-supported { color: #2f6f5e; }
-.advanced-profile-status.is-unsupported { color: #b3401f; }
+.advanced-profile-status.is-supported { color: var(--sage-strong); }
+.advanced-profile-status.is-unsupported { color: var(--terra-strong); font-weight: 600; }
 
 .bbg-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 3px; }
 .bbg-hint code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 11px;
 }
 
@@ -617,15 +929,18 @@ select.control:focus { border-color: var(--blue); }
 .curve-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
 .curve-table th {
   text-align: left;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted);
   padding: 4px 8px 6px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
 }
 .curve-table td { padding: 4px 8px 4px 0; vertical-align: top; }
 .curve-table td:first-child { width: 160px; }
 .curve-table td:nth-child(2) { width: 260px; }
+.curve-table td .control { font-size: 12.5px; }
 .curve-row-remove {
   cursor: pointer;
   font-size: 12.5px;
@@ -633,9 +948,9 @@ select.control:focus { border-color: var(--blue); }
   font-weight: 600;
   user-select: none;
 }
-.curve-row-remove:hover { color: #b3401f; }
+.curve-row-remove:hover { color: var(--terra-strong); }
 .curve-actions { margin-bottom: 8px; }
-.btn.btn-small { height: 30px; padding: 0 14px; font-size: 13px; }
+.btn.btn-small { min-height: 30px; padding: 4px 14px; font-size: 13px; }
 /* Issue #217, found in workstation UAT: `.btn`'s explicit `display:
    inline-flex` wins over the UA `[hidden] { display: none }` rule (the same
    class of bug the overrides near the top of this file fix), so the Forward
@@ -651,9 +966,9 @@ select.control:focus { border-color: var(--blue); }
 
 /* Exact, blocking curve-coverage state -- never a soft warning that still
    lets a fabricated discount factor through. */
-.curve-coverage { font-size: 12px; line-height: 1.5; color: var(--muted); }
-.curve-coverage.is-blocking { color: #b3401f; font-weight: 500; }
-.curve-coverage.is-covered { color: var(--green); font-weight: 500; }
+.curve-coverage { font-size: 12px; line-height: 1.5; color: var(--muted); font-family: var(--mono); }
+.curve-coverage.is-blocking { color: var(--terra-strong); font-weight: 600; }
+.curve-coverage.is-covered { color: var(--sage-strong); font-weight: 600; }
 
 /* ---------- Minimum-input trader workflow (Issue #143) ---------- */
 
@@ -663,15 +978,17 @@ select.control:focus { border-color: var(--blue); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 17px;
-  height: 17px;
+  width: 20px;
+  height: 20px;
   margin-right: 7px;
   border-radius: 50%;
-  background: var(--blue-soft-bg);
-  color: var(--blue);
+  background: var(--indigo-soft);
+  color: var(--indigo-deep);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
+  font-family: var(--sans);
+  vertical-align: 2px;
 }
 
 /* Sourced values are read-only by default; this says so once, where the
@@ -688,11 +1005,11 @@ select.control:focus { border-color: var(--blue); }
    trader never faces a screen of unexplained blank fields. Remaining
    outstanding groups are named compactly beneath it, never hidden. */
 .unresolved-dependency {
-  padding: 12px 18px;
-  background: #fff8ec;
+  padding: 16px 22px;
+  background: rgba(255, 248, 236, 0.92);
   border-color: #f0d6a4;
 }
-.ud-head { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.ud-head { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; flex-wrap: wrap; }
 .ud-flag {
   display: inline-flex;
   align-items: center;
@@ -705,17 +1022,17 @@ select.control:focus { border-color: var(--blue); }
   border-radius: 999px;
   padding: 3px 10px;
 }
-.ud-title { font-size: 15px; font-weight: 700; color: #6d4a00; }
+.ud-title { font-family: var(--serif); font-size: 17px; font-weight: 400; color: #6d4a00; }
 .ud-grid {
   display: grid;
-  grid-template-columns: 168px 1fr;
+  grid-template-columns: 168px minmax(0, 1fr);
   gap: 5px 16px;
   font-size: 12.5px;
   line-height: 1.55;
 }
 .ud-grid dt { color: #8a5a00; font-weight: 600; }
 .ud-grid dd { color: #4a3a1c; }
-.ud-actions { display: flex; align-items: center; gap: 14px; margin-top: 11px; }
+.ud-actions { display: flex; align-items: center; gap: 14px; margin-top: 11px; flex-wrap: wrap; }
 .ud-also { font-size: 12px; color: #8a5a00; }
 
 /* ---------- One expiry interaction ---------- */
@@ -724,10 +1041,10 @@ select.control:focus { border-color: var(--blue); }
    close, timezone, holiday or business-day roll is ever inferred. */
 .expiry-row { align-items: start; }
 .expiry-row > label { margin-top: 7px; }
-.expiry-controls { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
+.expiry-controls { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 8px; }
 .expiry-offset { text-align: center; }
-.derived-source.is-invalid { color: #b3401f; }
-.field-provenance.is-invalid { color: #b3401f; }
+.derived-source.is-invalid { color: var(--terra-strong); font-weight: 600; }
+.field-provenance.is-invalid { color: var(--terra-strong); font-weight: 600; }
 
 /* ---------- Market inputs review ---------- */
 /* Forward, Vol and Discounting each get one review row stating its real
@@ -735,13 +1052,13 @@ select.control:focus { border-color: var(--blue); }
    whatever the trader supplied. */
 .market-review .card-body { display: flex; flex-direction: column; gap: 10px; }
 .review-row {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 9px 12px;
-  background: #fcfcfd;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(252, 252, 253, 0.85);
 }
-.review-head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
-.review-name { font-size: 13.5px; font-weight: 700; color: var(--text-strong); }
+.review-head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; flex-wrap: wrap; }
+.review-name { font-family: var(--serif); font-size: 16px; font-weight: 400; color: var(--text-strong); }
 .review-status {
   display: inline-flex;
   align-items: center;
@@ -751,19 +1068,20 @@ select.control:focus { border-color: var(--blue); }
   padding: 2px 9px;
 }
 .review-status.is-outstanding { background: #fce9c9; border: 1px solid #eec97a; color: #7a5300; }
-.review-status.is-reviewed { background: #e4f6ed; border: 1px solid #a9dcc4; color: #14724a; }
+.review-status.is-reviewed { background: var(--sage-soft); border: 1px solid #a9dcc4; color: var(--sage-strong); }
 .review-control {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 6px;
+  flex-wrap: wrap;
 }
 .review-control > label { font-size: 13px; color: #4b5563; min-width: 190px; }
-.review-control .control { width: 190px; }
+.review-control .control { width: 190px; flex: 0 1 190px; }
 .review-control .vol-basis { width: 220px; }
-.review-readout { font-size: 12.5px; color: #4b5563; flex: 1 1 auto; }
+.review-readout { font-size: 12.5px; color: #4b5563; flex: 1 1 auto; font-family: var(--mono); }
 .review-note { font-size: 11.5px; line-height: 1.5; color: var(--muted); }
-.review-provenance { font-size: 11.5px; line-height: 1.5; color: var(--muted-2); margin-top: 3px; }
+.review-provenance { font-size: 11.5px; line-height: 1.5; color: var(--muted-2); margin-top: 3px; font-family: var(--mono); }
 
 /* ---------- Advanced ---------- */
 /* Collapsed by default. Everything the reviewed contract needs but a trader
@@ -786,15 +1104,16 @@ select.control:focus { border-color: var(--blue); }
   text-transform: uppercase;
   color: #55607a;
   margin-bottom: 8px;
+  font-family: var(--sans);
 }
 
 /* ---------- Override provenance log ---------- */
 .provenance-log { list-style: none; display: flex; flex-direction: column; gap: 7px; }
 .provenance-entry {
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   padding: 7px 10px;
-  background: #f7f8fa;
+  background: rgba(247, 248, 250, 0.85);
 }
 .provenance-entry-head { font-size: 12.5px; font-weight: 600; color: var(--text-strong); }
 .provenance-entry-meta {
@@ -802,6 +1121,7 @@ select.control:focus { border-color: var(--blue); }
   line-height: 1.5;
   color: var(--muted);
   margin-top: 2px;
+  font-family: var(--mono);
 }
 .provenance-empty { font-size: 12px; color: var(--muted-2); font-style: italic; }
 .provenance-empty[hidden] { display: none; }
@@ -810,20 +1130,20 @@ select.control:focus { border-color: var(--blue); }
 /* #view-markets' own visibility is handled by the shared `.main[hidden]`
    override above (it carries class `.main` too). */
 
-.markets-header-card { padding: 16px 22px; }
-.markets-header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.markets-title-block { display: flex; flex-direction: column; gap: 6px; }
-.markets-title { font-size: 21px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.2px; }
+.markets-header-card { padding: 20px 22px; }
+.markets-header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.markets-title-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.markets-title { font-family: var(--serif); font-size: 24px; font-weight: 400; color: var(--text-strong); letter-spacing: -0.2px; }
 .markets-meta { font-size: 13px; color: var(--muted); }
 .markets-meta .sep { margin: 0 8px; color: var(--muted-2); }
-.markets-acquired { margin-top: 10px; font-size: 12.5px; color: var(--muted-2); text-align: right; }
+.markets-acquired { margin-top: 10px; font-size: 12.5px; color: var(--muted-2); text-align: right; font-family: var(--mono); }
 .markets-acquired .v { color: #4b5563; font-weight: 600; }
 
-.markets-status { padding: 14px 22px; font-size: 14px; color: var(--muted); }
-.markets-status-error { border-color: #f3c6c6; background: #fff6f6; }
+.markets-status { padding: 16px 22px; font-size: 14px; color: var(--muted); }
+.markets-status-error { border-color: #f3c6c6; background: rgba(255, 246, 246, 0.9); }
 .markets-error-title { font-weight: 700; color: #b0362f; margin-bottom: 4px; }
-.markets-error-detail { font-size: 13px; color: #8a3a35; }
-.markets-status-warning { border-color: #f4dfa8; background: #fffaf0; color: #8a641a; font-size: 13px; }
+.markets-error-detail { font-size: 13px; color: #8a3a35; font-family: var(--mono); }
+.markets-status-warning { border-color: #f4dfa8; background: rgba(255, 250, 240, 0.92); color: #8a641a; font-size: 13px; }
 .markets-stale-detail { display: block; margin-top: 2px; color: #8a3a35; }
 
 .markets-chart-card .card-body { display: flex; flex-direction: column; gap: 14px; }
@@ -841,30 +1161,31 @@ select.control:focus { border-color: var(--blue); }
   position: absolute; pointer-events: none; z-index: 5;
   background: var(--text-strong); color: #fff; font-size: 12px;
   border-radius: 8px; padding: 8px 10px; box-shadow: var(--shadow);
-  line-height: 1.6; white-space: nowrap;
+  line-height: 1.6; white-space: nowrap; font-family: var(--mono);
 }
 .markets-chart-tooltip[hidden] { display: none; }
 .markets-chart-tooltip .tt-row { display: flex; gap: 14px; justify-content: space-between; }
 .markets-chart-tooltip .tt-k { color: #b8c0d4; }
 
 .markets-summary-strip {
-  display: grid; grid-template-columns: repeat(6, 1fr);
-  border-top: 1px solid var(--border); padding-top: 12px;
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-top: 1px solid var(--line); padding-top: 12px;
 }
-.markets-summary-item { display: flex; flex-direction: column; gap: 4px; padding: 0 14px; border-left: 1px solid var(--border); }
+.markets-summary-item { display: flex; flex-direction: column; gap: 4px; padding: 0 14px; border-left: 1px solid var(--line); min-width: 0; }
 .markets-summary-item:first-child { border-left: none; padding-left: 0; }
-.ms-lbl { font-size: 12px; color: var(--muted); }
-.ms-val { font-size: 16px; font-weight: 700; color: var(--text-strong); }
+.ms-lbl { font-size: 11px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--muted); }
+.ms-val { font-size: 16px; font-weight: 500; color: var(--text-strong); font-family: var(--mono); }
 
 .markets-table-wrap { overflow-x: auto; }
 .markets-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .markets-table th {
-  text-align: left; font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em;
-  color: var(--muted); text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid var(--border);
+  text-align: left; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--muted); text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid var(--line);
+  font-family: var(--sans);
 }
 .markets-table th.num, .markets-table td.num { text-align: right; }
-.markets-table td { padding: 7px 10px; border-bottom: 1px solid #f1f2f5; color: var(--text); font-variant-numeric: tabular-nums; }
-.markets-table tbody tr:hover { background: #f9fafc; }
+.markets-table td { padding: 7px 10px; border-bottom: 1px solid #f1f2f5; color: var(--text); font-variant-numeric: tabular-nums; font-family: var(--mono); }
+.markets-table tbody tr:hover { background: rgba(227, 239, 250, 0.45); }
 .markets-table td.unavailable { color: var(--muted-2); }
 
 /* ===== Futures Yield view (Issue #190) =====
@@ -877,31 +1198,32 @@ select.control:focus { border-color: var(--blue); }
 .fy-subtitle { font-size: 13px; color: var(--muted); line-height: 1.55; }
 
 .fy-source-pill {
-  display: inline-flex; align-items: center; height: 22px; padding: 0 10px;
-  border-radius: 11px; font-size: 12px; font-weight: 600;
+  display: inline-flex; align-items: center; min-height: 22px; padding: 2px 10px;
+  border-radius: 999px; font-size: 12px; font-weight: 600;
   background: var(--field-bg); color: var(--muted); border: 1px solid var(--field-border);
 }
 /* An unconfirmed CTD source is loud on purpose: every number in this panel is
    only as current as the metadata behind it (Issue #190). */
 .fy-source-pill.is-unconfirmed { background: #fff6ec; color: #a15a12; border-color: #f0d3ae; }
-.fy-source-pill.is-confirmed { background: #eaf7f0; color: #1c7a4c; border-color: #bfe6d0; }
+.fy-source-pill.is-confirmed { background: var(--sage-soft); color: var(--sage-strong); border-color: #bfe6d0; }
 
 .fy-inline-note { margin-top: 8px; }
 
 .fy-manual-grid {
-  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px 22px;
 }
 
 .fy-convert-row {
-  padding: 10px 0; border-bottom: 1px solid var(--border);
+  padding: 10px 0; border-bottom: 1px solid var(--line);
 }
 .fy-convert-row:last-of-type { border-bottom: none; }
 
-.fy-answer { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
+.fy-answer { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
 .fy-answer-label { font-size: 13px; color: var(--muted); min-width: 146px; }
 .fy-answer-value {
-  font-size: 24px; font-weight: 650; color: var(--text-strong);
+  font-family: var(--serif);
+  font-size: 26px; font-weight: 400; color: var(--indigo-deep);
   font-variant-numeric: tabular-nums;
 }
 .fy-answer-note {
@@ -912,11 +1234,11 @@ select.control:focus { border-color: var(--blue); }
 .fy-actions { margin: 12px 0 4px; }
 
 .fy-detail-strip {
-  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
   display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 18px;
 }
 .fy-detail-strip dt { font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.03em; }
-.fy-detail-strip dd { font-size: 13px; color: var(--text); word-break: break-all; }
+.fy-detail-strip dd { font-size: 13px; color: var(--text); word-break: break-all; font-family: var(--mono); }
 
 @media (max-width: 860px) {
   .fy-manual-grid { grid-template-columns: 1fr; }
@@ -935,35 +1257,35 @@ select.control:focus { border-color: var(--blue); }
 .markets-panel { display: contents; }
 .markets-panel[hidden] { display: none; }
 
-.markets-view-switch { padding: 8px; }
-.markets-view-tabs { display: flex; gap: 6px; }
+.markets-view-switch { padding: 12px; }
+.markets-view-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .markets-view-tab {
   font: inherit; font-size: 13.5px; font-weight: 600; color: var(--muted);
-  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; border: 1px solid transparent; border-radius: 10px;
   padding: 8px 16px; cursor: pointer;
 }
 .markets-view-tab:hover { background: #f4f6fa; }
-.markets-view-tab.is-active { background: #eef4ff; border-color: #bcd3f7; color: var(--blue); }
+.markets-view-tab.is-active { background: var(--indigo-soft); border-color: #bcd3f7; color: var(--indigo-deep); }
 
 .vol-surface-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
 .vol-surface-picker-label { font-size: 12px; color: var(--muted); }
 .vol-surface-select {
-  font: inherit; font-size: 13px; height: 36px; min-width: 340px; max-width: 560px;
-  padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px;
-  background: #fff; color: var(--text); cursor: pointer;
+  font: inherit; font-size: 13px; min-height: 36px; min-width: 340px; max-width: 560px;
+  padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: #fff; color: var(--text); cursor: pointer; font-family: var(--sans);
 }
 .vol-surface-select:disabled { color: var(--muted-2); cursor: not-allowed; }
 
 .vol-surface-provenance {
-  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
   display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px 18px;
 }
 .vol-surface-provenance[hidden] { display: none; }
 .vsp-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .vsp-item.vsp-wide { grid-column: span 3; }
-.vsp-k { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.vsp-k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .vsp-v { font-size: 13.5px; font-weight: 600; color: var(--text-strong); overflow-wrap: anywhere; }
-.vsp-v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; }
+.vsp-v.mono { font-family: var(--mono); font-size: 12px; font-weight: 500; }
 /* An identity field the capture left unresolved. Never blank, never guessed:
    it reads as unresolved so a trader can see the surface is missing it. */
 .vsp-v.unresolved { color: var(--muted-2); font-weight: 500; font-style: italic; }
@@ -974,7 +1296,7 @@ select.control:focus { border-color: var(--blue); }
 .vol-surface-canvas-wrap { position: relative; width: 100%; min-width: 0; }
 .vol-surface-canvas-wrap canvas {
   display: block; width: 100%; height: auto; cursor: grab; touch-action: none;
-  background: #fbfcfe; border: 1px solid var(--border); border-radius: 8px;
+  background: #fbfcfe; border: 1px solid var(--line); border-radius: 10px;
 }
 .vol-surface-canvas-wrap canvas.is-dragging { cursor: grabbing; }
 .vol-surface-tooltip { white-space: nowrap; }
@@ -992,11 +1314,11 @@ select.control:focus { border-color: var(--blue); }
 @media (max-width: 1200px) { .vol-surface-slices { grid-template-columns: minmax(0, 1fr); } }
 .vol-surface-slice { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .vs-slice-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.vs-slice-title { font-size: 13.5px; font-weight: 700; color: var(--text-strong); margin-right: auto; }
+.vs-slice-title { font-family: var(--serif); font-size: 15px; font-weight: 400; color: var(--text-strong); margin-right: auto; }
 .vol-surface-slice-select {
-  font: inherit; font-size: 12.5px; height: 30px; min-width: 96px;
-  padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 7px;
-  background: #fff; color: var(--text); cursor: pointer;
+  font: inherit; font-size: 12.5px; min-height: 30px; min-width: 96px;
+  padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: #fff; color: var(--text); cursor: pointer; font-family: var(--sans);
 }
 .vs-slice-chart { position: relative; min-width: 0; }
 .vs-slice-chart svg { display: block; width: 100%; height: auto; }
@@ -1035,7 +1357,7 @@ select.control:focus { border-color: var(--blue); }
 .byh-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 200px; min-width: 0; }
 .byh-field-narrow { flex: 0 0 160px; }
 .byh-label {
-  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--muted);
 }
 /* The Yield field box starts pre-filled with an operator-convenience default
@@ -1070,56 +1392,126 @@ select.control:focus { border-color: var(--blue); }
 /* ===== Historical Yield Vol -- Middle Office (Issue #197) ============== */
 
 .hyv-methodology {
-  font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
   color: var(--blue-soft-text); background: var(--blue-soft-bg);
-  padding: 3px 8px; border-radius: 999px;
+  padding: 3px 8px; border-radius: 999px; font-family: var(--mono);
 }
 .hyv-intro { font-size: 12.5px; color: var(--muted); line-height: 1.55; }
 .hyv-result { margin-top: 14px; }
 .hyv-headline {
   display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start;
-  padding: 14px 0 16px; border-bottom: 1px solid var(--border);
+  padding: 14px 0 16px; border-bottom: 1px solid var(--line);
 }
 .hyv-headline-block { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .hyv-headline-label {
-  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--muted);
 }
 /* Printed verbatim from the server's own repr string: it can be long, and it
    is never truncated or re-formatted to fit. */
-.hyv-headline-value { font-size: 20px; font-weight: 700; color: var(--text-strong); word-break: break-all; }
+.hyv-headline-value { font-size: 20px; font-weight: 500; color: var(--text-strong); word-break: break-all; font-family: var(--mono); }
 .hyv-headline-unit { font-size: 12px; color: var(--muted-2); }
 .hyv-status-pill {
-  align-self: flex-start; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  align-self: flex-start; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
   padding: 4px 10px; border-radius: 999px; background: var(--field-bg); color: var(--muted);
 }
 /* A short or blocked window never reads like a completed one. */
-.hyv-status-pill.is-full { background: rgba(34, 165, 101, .12); color: var(--green); }
-.hyv-status-pill.is-short { background: rgba(224, 123, 60, .14); color: var(--orange); }
+.hyv-status-pill.is-full { background: rgba(34, 165, 101, 0.12); color: var(--green); }
+.hyv-status-pill.is-short { background: rgba(224, 123, 60, 0.14); color: var(--orange); }
 /* Fatal and non-fatal are told apart on sight, never by reading the text:
    a blocker means there is no number, a warning means there is one that must
    not be read as a full window. */
 .hyv-blockers, .hyv-warnings {
-  margin-top: 14px; padding: 12px 14px; border-radius: 8px;
+  margin-top: 14px; padding: 12px 14px; border-radius: 10px;
 }
 .hyv-blockers {
-  background: rgba(224, 123, 60, .12); border: 1px solid rgba(224, 123, 60, .4);
+  background: rgba(224, 123, 60, 0.12); border: 1px solid rgba(224, 123, 60, 0.4);
 }
 .hyv-warnings { background: #fffaf0; border: 1px solid #f4dfa8; }
 .hyv-blockers-title, .hyv-warnings-title {
-  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   margin-bottom: 6px;
 }
 .hyv-blockers-title { color: var(--orange); }
 .hyv-warnings-title { color: #8a641a; }
 .hyv-source-block {
-  margin-top: 14px; padding: 12px 14px; border-radius: 8px;
+  margin-top: 14px; padding: 12px 14px; border-radius: 10px;
   background: var(--field-bg); border: 1px solid var(--field-border);
 }
 .hyv-source-block.is-unavailable { background: #fff; border-style: dashed; }
 .hyv-source-title {
-  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--muted); margin-bottom: 5px;
 }
-.hyv-source-detail { font-size: 12.5px; color: var(--text); line-height: 1.5; word-break: break-word; }
+.hyv-source-detail { font-size: 12.5px; color: var(--text); line-height: 1.5; word-break: break-word; font-family: var(--mono); }
 .hyv-source-block.is-unavailable .hyv-source-detail { color: var(--muted); }
+
+/* ---------- Responsive: trader monitors down to narrow windows ---------- */
+@media (max-width: 1280px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .option-terms, .pricing-results { grid-column: 1 / -1; grid-row: auto; }
+  .entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .entry-grid-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rb-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pr-row.r1 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .pr-row.r2 { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; }
+  .vol-surface-provenance { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  /* Narrow screens revert to document scroll (no nested scroll areas);
+     the sticky footer below still keeps actions available while scrolling. */
+  .app { height: auto; min-height: 100vh; min-height: 100dvh; }
+  .body { flex-direction: column; }
+  .sidebar {
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    align-items: center;
+  }
+  .nav-item { height: 36px; font-size: 13px; }
+  .sidebar-foot { margin-top: 0; margin-left: auto; padding: 6px 12px; }
+  .main { padding: 14px 14px 20px; }
+  /* Capture / OTM-SABR headers: let title and actions wrap onto multiple
+     lines instead of clipping in one row at mobile widths. */
+  .capture-header-top { flex-wrap: wrap; }
+  .capture-title-block { min-width: 0; }
+  .capture-header-actions { flex-wrap: wrap; }
+  /* Capture review row (ATM + OTM/SABR share .capture-review-card): let the
+     reviewer field shrink and the actions wrap, so Reject/Confirm are never
+     clipped at phone widths. Higher specificity than vcub_capture.css's own
+     single-class rules, which load after this file. */
+  .capture-review-card .capture-review-actions { flex-wrap: wrap; }
+  .capture-review-card .capture-review-by {
+    flex: 1 1 180px;
+    min-width: 0;
+    width: auto;
+  }
+  /* Vol-surface snapshot picker: drop the 340px floor so it fits the card
+     on phones; arrow and selected text stay unclipped. */
+  .vol-surface-select { min-width: 0; width: 100%; max-width: 100%; }
+  .instr-header { padding: 14px 16px; gap: 16px; }
+  .stats { margin-left: 0; gap: 18px; }
+  .form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: start; }
+  /* Same-specificity overrides: the base `.entry-grid .form-row` and
+     `.underlying-bond-controls .form-row` rules (0-2-0) otherwise beat the
+     generic stacking rule above (0-1-0), leaving two-column rows on narrow
+     screens. These come later at equal specificity, so they win. */
+  .entry-grid .form-row,
+  .underlying-bond-controls .form-row { grid-template-columns: minmax(0, 1fr); }
+  .underlying-bond-controls .form-row:first-child,
+  .underlying-bond-controls .form-row:nth-child(2) { width: 100%; }
+  .entry-grid, .entry-grid-wide, .derived-timing-grid { grid-template-columns: minmax(0, 1fr); }
+  .rb-grid { grid-template-columns: minmax(0, 1fr); }
+  .pr-row.r1 { grid-template-columns: minmax(0, 1fr); row-gap: 12px; }
+  .pr-cell .p-val.teal { font-size: 28px; }
+  .ud-grid { grid-template-columns: minmax(0, 1fr); }
+  .markets-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; }
+  .markets-summary-item:nth-child(3) { border-left: none; padding-left: 0; }
+  .vol-surface-provenance { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .footer { padding: 10px 14px 14px; }
+  .foot-actions { margin-left: 0; width: 100%; }
+  .foot-actions .btn { flex: 1 1 auto; }
+}
