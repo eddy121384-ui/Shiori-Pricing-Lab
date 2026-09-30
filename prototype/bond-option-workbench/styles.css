@@ -1433,7 +1433,7 @@ input[readonly].control:not(.derived-control) {
 /* ---------- Responsive: trader monitors down to narrow windows ---------- */
 @media (max-width: 1280px) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
-  .option-terms, .pricing-results { grid-column: 1 / -1; }
+  .option-terms, .pricing-results { grid-column: 1 / -1; grid-row: auto; }
   .entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .entry-grid-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rb-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1458,6 +1458,12 @@ input[readonly].control:not(.derived-control) {
   .instr-header { padding: 14px 16px; gap: 16px; }
   .stats { margin-left: 0; gap: 18px; }
   .form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: start; }
+  /* Same-specificity overrides: the base `.entry-grid .form-row` and
+     `.underlying-bond-controls .form-row` rules (0-2-0) otherwise beat the
+     generic stacking rule above (0-1-0), leaving two-column rows on narrow
+     screens. These come later at equal specificity, so they win. */
+  .entry-grid .form-row,
+  .underlying-bond-controls .form-row { grid-template-columns: minmax(0, 1fr); }
   .underlying-bond-controls .form-row:first-child,
   .underlying-bond-controls .form-row:nth-child(2) { width: 100%; }
   .entry-grid, .entry-grid-wide, .derived-timing-grid { grid-template-columns: minmax(0, 1fr); }
