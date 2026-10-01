@@ -184,7 +184,7 @@ business_day_convention_by_role:  # D8 shape: same roles; every selection UNRESO
   observation_fixing_date: UNRESOLVED
 stub_rule: UNRESOLVED  # D9 (or owner-policy no-stub scope per E5)
 resolution_rules:
-  schedule_generation: C++ Rates module per approved contract, implemented in #228
+  schedule_generation: "C++ Rates module per approved contract, implemented in #228"
   fail_closed: Refuse anything the approved set cannot resolve; never silent-fill
   term_precedence: RESOLVED  # R2: ConventionSet authoritative; V1 supports no per-trade convention overrides; conflicting convention-like trade input fails closed, never silently overrides
 ```
