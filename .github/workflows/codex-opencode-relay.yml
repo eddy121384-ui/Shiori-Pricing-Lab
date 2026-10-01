@@ -306,9 +306,7 @@ jobs:
 
       - name: Run read-edit-only OpenCode
         env:
-          OPENCODE_MODEL: ${{ vars.OPENCODE_AUTOMATION_MODEL }}
-          OPENCODE_VARIANT: ${{ vars.OPENCODE_AUTOMATION_VARIANT }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENCODE_AUTOMATION_API_KEY }}
+          OPENCODE_MODEL: opencode/muse-spark-1.3-contributor-free
           OPENCODE_CONFIG_CONTENT: '{"formatter":false,"lsp":false,"plugin":[],"permission":{"*":"deny","read":{"*":"allow",".git/*":"deny","*.env":"deny","*.env.*":"deny"},"edit":{"*":"allow",".git/*":"deny"},"glob":"allow","grep":"allow"},"agent":{"build":{"permission":{"*":"deny","read":{"*":"allow",".git/*":"deny","*.env":"deny","*.env.*":"deny"},"edit":{"*":"allow",".git/*":"deny"},"glob":"allow","grep":"allow"}}}}'
           OPENCODE_DISABLE_AUTOUPDATE: 'true'
           OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true'
@@ -319,14 +317,8 @@ jobs:
           EXPECTED_HEAD: ${{ needs.collect.outputs.head_sha }}
         run: |
           set -euo pipefail
-          test -n "$OPENCODE_MODEL"
-          test -n "$OPENROUTER_API_KEY"
-          case "$OPENCODE_MODEL" in
-            openrouter/*) ;;
-            *) echo 'OPENCODE_AUTOMATION_MODEL must use openrouter/*.'; exit 1 ;;
-          esac
+          test "$OPENCODE_MODEL" = "opencode/muse-spark-1.3-contributor-free"
           args=(run --auto --agent build --model "$OPENCODE_MODEL")
-          if [ -n "${OPENCODE_VARIANT:-}" ]; then args+=(--variant "$OPENCODE_VARIANT"); fi
           opencode --pure "${args[@]}" < "$RUNNER_TEMP/prompt/prompt.txt"
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 
