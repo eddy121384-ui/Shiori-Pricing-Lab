@@ -751,7 +751,7 @@ model_input:
     - name: <string>                      # e.g. mean_reversion | volatility | ...
       value: <double>
       unit: <unit enum>                   # explicit; e.g. PER_YEAR | DECIMAL | ...
-  calibration_ref: <calibration_result_id | NULL>  # link to ModelCalibrationResult §14 where applicable
+  calibration_ref: <ValueOrReason<calibration_result_id>> # exact calibration result when calibration-derived; structured NOT_CALIBRATED reason otherwise
   calibration_timestamp: <ISO-8601 timestamp+offset | NULL_WITH_REASON>  # traceable to ModelCalibrationResult.calibrated_at where calibration-derived; NULL_WITH_REASON (NOT_CALIBRATED) otherwise — never fabricated
   valuation_date: <ISO date>
   source: <enum>                          # BLOOMBERG_DAPI | SCREEN_TRANSCRIPTION | SYNTHETIC_FIXTURE | RESEARCH_ADAPTER | CALIBRATION_OUTPUT
@@ -1035,7 +1035,7 @@ model_calibration_result:
   convergence:
     status: CONVERGED | NOT_CONVERGED | NOT_APPLICABLE  # machine-readable; never prose
     iterations: <int | NULL>
-    tolerance: <string | NULL>            # documented tolerance, e.g. ABS_1E_9
+    tolerance: <ValueOrReason<NumericWithUnit>> # exact stopping tolerance echoed from ModelCalibrationInput.convergence_policy when applicable
     optimizer_id: UNRESOLVED              # RED-model: optimizer identity; field defined, value open
     optimizer_version: UNRESOLVED
   source_provenance: { source, adapter_versions, upstream_ids, evidence_refs }
@@ -1048,6 +1048,8 @@ Rules:
 
 - A calibration result without `calibration_input_id`, `model_id`, `market_snapshot_id`, `instruments`, `parameters` (with units), `objective` identity, and `convergence.status` is incomplete and fails validation.
 - `ModelCalibrationResult.replay.inputs_fingerprint` MUST equal the consumed `ModelCalibrationInput.content_fingerprint`; `calibration_input_id` MUST equal that input's identity. Implementations may not hash an ad-hoc subset.
+- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, ordered `instruments[*].{instrument_id,instrument_type,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. Any mismatch is a malformed result, not a second authority.
+- When `convergence.tolerance` is applicable, it MUST echo the exact `ModelCalibrationInput.convergence_policy.tolerance` value+unit. Output-only facts are `calibrated_at`, calibrated `parameters`, objective error values, iteration count, convergence status, warnings/errors, and provenance.
 - `CONVERGED=false` (or `NOT_CONVERGED`) results are still first-class records: a downstream pricing call consuming a non-converged calibration fails closed unless an explicit override policy (itself RED-model, not defined here) permits it with the override recorded.
 - Objective, optimizer, tolerance, and model version VALUES are UNRESOLVED — RED-model. The fields exist so Phase-3 work can record them without redesigning the contract.
 
