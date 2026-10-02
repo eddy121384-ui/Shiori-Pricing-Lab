@@ -278,7 +278,11 @@ The canonical kernel boundary receives one explicit composition object. This is 
 ```yaml
 rates_kernel_input:
   schema_version: RATES_KERNEL_INPUT_V1
-  resolved_swap: <ResolvedSwap #224>          # embedded authoritative resolved trade
+  valuation_product:
+    product_id: <string>                     # identity of the trade/position being valued
+    product_type: <enum>                     # VANILLA_USD_SOFR_OIS | EUROPEAN_SWAPTION | ...; vocabulary only
+    underlying_product_id: <ValueOrReason<string>> # derivative: PRESENT and equals resolved_swap.product_id; vanilla swap: NOT_APPLICABLE
+  resolved_swap: <ResolvedSwap #224>          # embedded resolved swap: valued trade for vanilla swap, underlying trade for derivative
   market_snapshot: <MarketSnapshot §6>        # embedded authoritative market snapshot
   curve_selection:
     discount_curve_id: <curve_id>             # explicit selected discount-capable curve in market_snapshot.curve_set
@@ -296,6 +300,8 @@ rates_kernel_input:
 Rules:
 
 - `ResolvedSwap` and `MarketSnapshot` are always PRESENT.
+- `valuation_product` is the authoritative identity of WHAT is being valued. For a vanilla swap, `valuation_product.product_id == resolved_swap.product_id` and `underlying_product_id = NULL_WITH_REASON(NOT_APPLICABLE)`. For a derivative over that swap, `valuation_product.product_id` identifies the derivative trade/position, `underlying_product_id` MUST be PRESENT and equal `resolved_swap.product_id`, and the derivative id MUST NOT be inferred from or substituted by the underlying id.
+- `valuation_product.product_type` controls structural applicability (for example whether exercise/settlement terms are required); product identity and underlying identity are never collapsed.
 - `curve_selection` is mandatory. The kernel MUST NOT choose the first eligible curve, infer selection from array position, or derive a preferred curve internally. `discount_curve_id` and every `forecast_curve_by_index` target must exist in the embedded `CurveSet`, have compatible `curve_role`, and (for forecasts) match the stated `index_id`; mismatch fails closed.
 - Reusing one curve id for more than one role is permitted only when that curve's explicit role/methodology contract permits it; this document does not approve a new production single-curve methodology.
 - `ExerciseTerms`, `SettlementTerms`, and `ModelInput` are direct payloads when applicable; otherwise their `ValueOrReason` state must be `NULL_WITH_REASON(category=NOT_APPLICABLE)`. An id without payload is never sufficient at the kernel boundary.
@@ -787,7 +793,7 @@ exercise_terms:
   exercise_dates: <ISO date list>         # EUROPEAN: exactly 1; BERMUDAN: 1..n sorted ascending, duplicate-free
   notice_dates: <ValueOrReason<ISO date list>> # PRESENT only when notice semantics apply
   underlying_reference:
-    underlying_product_id: <product_id>   # MUST equal RatesKernelInput.resolved_swap.product_id; #224 defines product_id as ResolvedSwap product identity
+    underlying_product_id: <product_id>   # MUST equal RatesKernelInput.valuation_product.underlying_product_id and resolved_swap.product_id for derivative valuations
     underlying_start_rule: <enum>         # e.g. EXERCISE_DATE_IS_UNDERLYING_START vs UNDERLYING_START_PER_SCHEDULE; VALUES UNRESOLVED — RED where methodology-dependent
     underlying_start_rule_version: UNRESOLVED
   calendar_ref: <ValueOrReason<id>>       # holiday calendar or structured N/A/unresolved reason
@@ -801,7 +807,7 @@ Rules:
 
 - `EUROPEAN` with anything other than exactly one `exercise_date` fails closed. `BERMUDAN` with an empty or unsorted date list fails closed.
 - `notice_dates`, `timezone`, `expiry_time`, `calendar_ref` are present ONLY where the product genuinely requires them. Inventing notice semantics for a product that has none is forbidden; omitting them where the product requires them fails closed.
-- `underlying_reference.underlying_product_id` MUST equal the embedded `RatesKernelInput.resolved_swap.product_id`; mismatch fails closed. There is no invented `resolved_swap_id` field because #224 does not define one.
+- For derivative valuations, `underlying_reference.underlying_product_id` MUST equal both `RatesKernelInput.valuation_product.underlying_product_id.value` and embedded `RatesKernelInput.resolved_swap.product_id`; mismatch fails closed. For vanilla swaps, ExerciseTerms is NOT_APPLICABLE. There is no invented `resolved_swap_id` field because #224 does not define one.
 - The underlying effective/start relationship (`exercise_date` vs underlying swap start) is explicit data (`underlying_start_rule`), never inferred from date equality. Its VALUES are UNRESOLVED — RED where desk/workstation evidence is required.
 - American exercise is deliberately NOT in the vocabulary: no #222 product requires it, and adding it would be speculative future-proofing. If a later product needs it, the vocabulary extends under its own methodology review.
 - Cash vs physical outcome of exercise is NOT an exercise fact — it lives in SettlementTerms (§11).
@@ -858,20 +864,22 @@ Rules:
 ```yaml
 rates_pricing_result:
   schema_version: RATES_PRICING_RESULT_V1
-  product_id: <string>                    # trade identity; must match ResolvedSwap.product_id
-  product_type: <enum>                    # e.g. VANILLA_USD_SOFR_OIS | EUROPEAN_SWAPTION — vocabulary, value is data
+  product_id: <string>                    # MUST equal RatesKernelInput.valuation_product.product_id
+  product_type: <enum>                    # MUST equal RatesKernelInput.valuation_product.product_type
   valuation_date: <ISO date>              # the date valued; must equal MarketSnapshot.valuation_date
   valuation_context_id: <string>          # identity of the valuation request (date + reporting currency + snapshot + trade + model refs)
-  result_currency: <Currency enum>        # reporting currency; explicit, never assumed
-  pv: <double | NULL>                     # present value in result_currency; NULL only on FAILED
-  pv_unit: <unit enum>                    # CURRENCY_AMOUNT (e.g. USD amount); explicit on every result carrying a pv
-  pv_sign_convention: <enum>              # RECEIVE_MINUS_PAY_FROM_OWNER_PERSPECTIVE | ... ; explicit, never guessed — see §12.3
+  result_currency: <Currency enum>        # reporting currency for monetary outputs; explicit, never assumed
+  headline:                                # sole authoritative value a generic consumer displays
+    semantics: PRESENT_VALUE | PREMIUM | PAR_RATE | ANNUITY_PVBP
+    value: <double>
+    unit: <unit enum>
+    currency: <ValueOrReason<Currency enum>> # PRESENT for currency-denominated headline; structured N/A otherwise
+    sign_convention: <ValueOrReason<enum>>   # PRESENT when headline is signed; structured N/A when not applicable
+  pv: <ValueOrReason<NumericWithUnit>>     # supplemental PV metric; unit=CURRENCY_AMOUNT when PRESENT
+  pv_sign_convention: <ValueOrReason<enum>>
   component_pvs: <ValueOrReason<list[{component_id, value, unit, sign_convention_ref}]>> # each component serializes its unit/sign semantics
-  price_semantics: <enum>                 # PRESENT_VALUE | PREMIUM | PAR_RATE | ANNUITY_PVBP — what the headline number IS
-  annuity_pvbp: <double | NULL>           # where computed; NULL when not applicable
-  annuity_pvbp_unit: <unit enum | NULL>   # REQUIRED iff annuity_pvbp present; e.g. CURRENCY_AMOUNT_PER_BASIS_POINT or RATIO as explicitly selected
-  par_rate: <double | NULL>               # where computed; NULL when N/A
-  par_rate_unit: <unit enum | NULL>       # REQUIRED iff par_rate present; canonical Rates output uses explicit DECIMAL_ANNUAL tagging
+  annuity_pvbp: <ValueOrReason<NumericWithUnit>> # supplemental metric where computed
+  par_rate: <ValueOrReason<NumericWithUnit>>     # supplemental metric; unit=DECIMAL_ANNUAL when PRESENT
   status: SUCCESS | SUCCESS_WITH_WARNINGS | FAILED   # legacy PricingStatus spirit preserved
   warnings: <list[{code, message, detail}]>  # machine-readable codes; §16
   errors: <list[{code, message, detail}]>    # machine-readable codes; §16; FAILED carries >=1
@@ -901,15 +909,16 @@ rates_pricing_result:
 
 ### 12.3 Sign, unit, and price-semantics rules
 
-- Every monetary value carries its currency (`result_currency`) and its unit (`pv_unit`). A PV without a currency is malformed.
-- Every PV carries an explicit `pv_sign_convention`. The legacy reference engine's `RECEIVE-positive / PAY-negative from owner perspective` is REFERENCE ONLY term behavior, not a Rates decision: the Rates contract requires the convention to be STATED per result, so a reader never infers sign from engine folklore.
-- `price_semantics` states what the headline number is. A swaption premium is not a swap NPV is not a par rate is not an annuity: the UI must branch on this field, never on magnitude or product-type inference.
-- Component outputs (`component_pvs`) each carry `component_id + value + unit + sign_convention_ref` as fields. Components that do not sum to the headline (e.g. intrinsic/time splits) say so in `assumptions`.
-- `annuity_pvbp` and `par_rate` never rely on prose or product inference for units: when the value is present the adjacent unit field is mandatory; when absent the unit is null and applicability is represented by the owning result semantics/reason structure.
+- `headline` is the single authoritative generic-display value. A SUCCESS / SUCCESS_WITH_WARNINGS result MUST carry it; FAILED may omit the economic headline only through the result-status contract, never by silently substituting zero.
+- `headline.semantics` tells the consumer exactly what `headline.value` means, and `headline.unit` travels with that value. A consumer never chooses among `pv`, `par_rate`, or `annuity_pvbp` based on product type or magnitude.
+- Currency applicability is explicit: currency-denominated headline units require `headline.currency=PRESENT(result_currency)`; dimensionless/rate headlines use structured NOT_APPLICABLE unless their approved unit explicitly includes currency. Signed headline values require an explicit sign convention.
+- `pv`, `par_rate`, and `annuity_pvbp` are supplemental typed metrics. When `headline.semantics` designates one of them, the corresponding supplemental metric MUST be PRESENT and exactly equal the headline value+unit (and currency/sign semantics where applicable); disagreement fails closed. A successful PAR_RATE/ANNUITY headline does not require a fabricated PV.
+- Every PRESENT PV uses `CURRENCY_AMOUNT`, `result_currency`, and PRESENT `pv_sign_convention`. The legacy receive/pay sign rule remains REFERENCE ONLY; the actual sign convention must be stated.
+- Component outputs (`component_pvs`) each carry `component_id + value + unit + sign_convention_ref` as fields. Components that do not sum to the headline say so in `assumptions`.
 
 ### 12.4 Linkage rules
 
-- A result names the exact `market_snapshot_id`, `curve_set_id` (+ role map), `fixing_store_id`, `volatility_input_id`, `exercise_terms_id`, `settlement_terms_id`, `convention_set_id`, `resolved_swap_schema_version`, and `model_input_id` / `calibration_result_id` as applicable. A result that cannot name every PRESENT kernel input is not replayable and fails validation.
+- A result's `product_id/product_type` MUST echo `RatesKernelInput.valuation_product`. Its input identity also names the exact `market_snapshot_id`, `curve_set_id` (+ role map), `fixing_store_id`, optional vol/exercise/settlement/model/calibration identities, `convention_set_id`, and `resolved_swap_schema_version`. A result that cannot name every PRESENT kernel input is not replayable and fails validation.
 - `market_data_as_of` (legacy field spirit) is preserved as `valuation_date` + `market_snapshot_id`: the date alone is not identity; the snapshot id is.
 
 ---
@@ -925,7 +934,8 @@ rates_pricing_result:
 ```yaml
 rates_risk_result:
   schema_version: RATES_RISK_RESULT_V1
-  product_id: <string>
+  product_id: <string>                    # MUST equal RatesKernelInput.valuation_product.product_id
+  product_type: <enum>                    # MUST equal RatesKernelInput.valuation_product.product_type
   valuation_date: <ISO date>
   valuation_context_id: <string>
   result_currency: <Currency enum>
@@ -942,7 +952,18 @@ rates_risk_result:
       bucket_coordinate: <ValueOrReason<coordinate>> # PRESENT for bucketed measure; NULL_WITH_REASON for parallel/non-bucketed measure
       market_snapshot_id: <string>        # snapshot bumped
       model_version: <string | NULL>      # engine/model version used for revaluation
-  inputs_identity: { market_snapshot_id, curve_set_id, curve_role_map, fixing_store_id, volatility_input_id, exercise_terms_id, settlement_terms_id, convention_set_id, model_input_id }
+  inputs_identity:
+    market_snapshot_id: <string>
+    curve_set_id: <string>
+    curve_role_map: <map>                 # exact echo of RatesKernelInput.curve_selection
+    fixing_store_id: <string>
+    volatility_input_id: <ValueOrReason<string>>
+    exercise_terms_id: <ValueOrReason<string>>
+    settlement_terms_id: <ValueOrReason<string>>
+    convention_set_id: <string>
+    resolved_swap_schema_version: <string>
+    model_input_id: <ValueOrReason<string>>
+    calibration_result_id: <ValueOrReason<string>>
   status: SUCCESS | SUCCESS_WITH_WARNINGS | FAILED
   warnings / errors: <structured codes; §16>
   engine: { engine_name, engine_version, method }
@@ -952,6 +973,7 @@ rates_risk_result:
 
 Rules:
 
+- `product_id/product_type` MUST echo `RatesKernelInput.valuation_product`. Every optional input identity in `inputs_identity` MUST echo the corresponding `RatesKernelInput` applicability state: PRESENT carries the exact consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`. Omission, bare null, or fabricated ids are malformed.
 - Every measure names its `measure_id`, `bump_spec` (type + size + unit + revaluation rule), `unit`, and structured `bucket_coordinate`. Bucketed measures require PRESENT coordinates; parallel/non-bucketed measures require `NULL_WITH_REASON(category=NOT_APPLICABLE)`. A sensitivity without a bump spec is not a result.
 - Bump sizes and bucketing rules are per-measure data with explicit units. Production bump conventions (1bp vs 0.5bp, bucket boundaries) are UNRESOLVED — RED-risk where desk methodology is required; the fields exist so the choice is recordable, not so a default is smuggled in.
 - `DV01` vs `PV01` vs delta/gamma/vega naming follows the `measure_id` vocabulary here, not QuantLib or Bloomberg naming. A measure id unknown to this vocabulary fails closed rather than being passed through as free text.
@@ -1106,7 +1128,7 @@ Source + methodology + version are never collapsed into one string. Provenance w
   - the fingerprint field being computed never participates in its own preimage;
   - independent child / input fingerprints (e.g. a result's `inputs_fingerprint` referencing `market_snapshot_id` digests, or a `ModelInput.calibration_ref` target id) remain ordinary referenced input fields where the owning contract says they are part of the object — only self-reference is excluded.
 - No hashing algorithm or canonical numeric formatting is invented here: those details remain owned by #227. This fix is about PREIMAGE semantics (which fields participate), not implementation choice.
-- For `PricingResult` and `RiskResult`, `inputs_fingerprint` MUST equal the exact `RatesKernelInput.content_fingerprint` consumed by the call. Every PRESENT direct kernel payload therefore participates automatically: ResolvedSwap, MarketSnapshot, curve_selection, ExerciseTerms, SettlementTerms, ModelInput, and ValuationContext.
+- For `PricingResult` and `RiskResult`, `inputs_fingerprint` MUST equal the exact `RatesKernelInput.content_fingerprint` consumed by the call. Every direct kernel fact therefore participates automatically: valuation_product, ResolvedSwap, MarketSnapshot, curve_selection, ExerciseTerms, SettlementTerms, ModelInput, and ValuationContext.
 - Pricing/risk replay identity = `RatesKernelInput.content_fingerprint + engine_version + method + tolerance`. Given identical kernel input and engine version, the result must reproduce within `tolerance`. A nested `replay.content_fingerprint` likewise excludes its own field from its preimage.
 - `ModelCalibrationResult.replay.inputs_fingerprint` MUST equal the consumed `ModelCalibrationInput.content_fingerprint` defined in §14.2 and is not silently equated to a pricing `RatesKernelInput`; calibration and pricing are distinct invocation shapes.
 - `ValueOrReason<T>` / `NULL_WITH_REASON` state, including the structured reason category/code/detail, is part of the fingerprint: an unresolved field resolved later is a different input, not the same input clarified.
@@ -1201,14 +1223,14 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] Relation to approved `SwapTrade -> ConventionSet -> ResolvedSwap` (#224) explicit (§5, §12.4); no competing authoritative copies.
 - [ ] #223 ownership boundary preserved (§3): Python acquisition/normalization/persistence/UI vs C++ resolution/pricing; no live Bloomberg in kernel; QuantLib behind isolation, defaults never methodology.
 - [ ] #224 semantics preserved: R1/R2, wire versioning, D1–D13/E1–E6 untouched; no RED-02 value filled.
-- [ ] `RatesKernelInput` (§5.1) explicitly carries ResolvedSwap + MarketSnapshot + explicit per-valuation curve_selection + applicable ExerciseTerms / SettlementTerms / ModelInput payloads at the no-I/O boundary; MarketSnapshot contains MARKET data only; kernel never selects curves implicitly.
+- [ ] `RatesKernelInput` (§5.1) explicitly separates valuation_product identity from underlying ResolvedSwap identity, and carries MarketSnapshot + curve_selection + applicable ExerciseTerms / SettlementTerms / ModelInput at the no-I/O boundary; derivative product ids are never replaced by underlying swap ids.
 - [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
 - [ ] Curve ENGINE CONTRACT distinguishes identity / currency / role / discount-vs-forward / index / dates / pillars / curve-level value-type/unit / compounding / interpolation-extrapolation / complete provenance / schema / methodology-version (§7); unresolved pillars remain structurally present with typed reason; V1 forbids mixed per-pillar value semantics; every unapproved VALUE marked `UNRESOLVED — RED`; no naked double arrays.
 - [ ] FixingStore distinguishes observation_date from publication_date/publication_timestamp (§8.2–§8.5); history-vs-forecast availability is never inferred from observation date alone; forecast-only stores may carry an explicit empty source union without inventing a source; PROJECTED is complete audit-only state or rejected; same-day publication ambiguity carried at the single authoritative `FixingStore.same_day_rule`; no silent history-to-forecast.
 - [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); StrikeDimension uses one canonical token set (`ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS`) with approval status separate from token naming; unreadable nodes remain structurally present as NULL_WITH_REASON; VolatilityInput carries authoritative methodology_id/version; expiry/underlying axes preserve exact dates; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice / underlying-start rule / calendar-timezone (§10); underlying_product_id binds exactly to RatesKernelInput.resolved_swap.product_id; no invented ResolvedSwap identity field; unresolved methodology values remain RED.
 - [ ] Settlement separates type / cash-only method / physical-vs-cash / cash methodology / date-timing / provenance (§11); PHYSICAL carries structured NOT_APPLICABLE for cash-only method fields rather than unresolved fake values; no invented values (RED-225-S1).
-- [ ] Results carry identity / valuation context / currency / PV-price semantics / units / sign convention / components / model-market-convention linkage / diagnostics / replay (§12–§14); ModelCalibrationInput defines the exact calibration fingerprint preimage and ModelCalibrationResult binds to it; every field has a concrete downstream reason.
+- [ ] PricingResult carries a tagged authoritative headline value plus supplemental typed metrics; product identity echoes RatesKernelInput.valuation_product; RiskResult uses the same structured applicability states for optional input identities; ModelCalibrationInput defines exact calibration replay (§12–§14).
 - [ ] Versioning/provenance: actual value vs resolution-status separated (§15.1); machine-readable schema versions everywhere incl. `RATES_KERNEL_INPUT_V1` (§15.2); independently identity-bearing market/model objects satisfy the complete provenance envelope (§15.3); source/methodology/version never collapsed; replay fingerprints defined with NON-RECURSIVE preimage (§15.4); snapshot identity includes `captured_at` exactly once; ExerciseTerms/SettlementTerms carry identities + fingerprints.
 - [ ] Fail-closed rules enumerated (§16 + per-section rules); RED list complete with owners (§17); #226–#229 boundaries preserved (§18).
 - [ ] Same-defect-family audit performed (§A below): no naked units, no role-by-name, no comment-as-data, no collapsed provenance, no history/forecast ambiguity, no settlement/vol-coordinate ambiguity, no QuantLib/Bloomberg hidden dependence, nothing #227–#229 must infer.
@@ -1244,6 +1266,7 @@ Searched the new contract for each defect family; outcome per family:
 21. Round-5 deterministic-input/date families — FIXED: (a) RatesKernelInput carries explicit curve_selection and PricingResult curve_role_map echoes it; (b) pricing/risk inputs_fingerprint equals the entire RatesKernelInput.content_fingerprint, covering every PRESENT direct input; (c) FixingStore separates observation_date from publication_date/publication_timestamp and publication availability drives history-vs-forecast; (d) vol axes preserve exact expiry/underlying start/end dates when known instead of reconstructing them from year-fraction coordinates.
 22. Round-6 representation/replay families — FIXED: (a) reason-bearing nullable fields identified by review (index_tenor, VolatilityInput.strikes, RiskResult.bucket_coordinate) use ValueOrReason; (b) each curve pillar carries source_column or structured N/A; (c) forecast-only FixingStore source union may be explicitly empty; (d) ExerciseTerms binds to actual #224 ResolvedSwap.product_id; (e) ModelCalibrationInput defines the exact deterministic calibration replay preimage and ModelCalibrationResult binds its inputs_fingerprint to that input.
 23. Round-7 executable-payload/vocabulary/applicability families — FIXED: (a) every calibration instrument embeds its full versioned executable instrument_terms payload plus matching fingerprint, so replay does not depend on digest-only/external reconstruction; (b) StrikeDimension has one canonical token vocabulary and methodology approval is separate state; (c) cash-only settlement method fields are PRESENT only for CASH and structured NOT_APPLICABLE for PHYSICAL.
+24. Round-8 identity/headline/result-applicability families — FIXED: (a) RatesKernelInput.valuation_product separates derivative trade identity from underlying ResolvedSwap.product_id and results echo the valued product identity; (b) PricingResult headline is a tagged authoritative value, while PV/par-rate/annuity are supplemental ValueOrReason metrics with equality rules when designated as headline; (c) RiskResult optional input identities use the same ValueOrReason applicability states as PricingResult/inputs.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1276,6 +1299,9 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Calibration instrument executability — NO GUESS: each instrument embeds its owning versioned typed terms payload plus matching content fingerprint; digest alone is never executable input.
 - Strike vocabulary — NO GUESS: one canonical enum token set; approval status lives in methodology state, not alternate token names.
 - Settlement applicability — NO GUESS: cash-only method/methodology fields are structured NOT_APPLICABLE for PHYSICAL and required PRESENT for CASH.
+- Valued-product vs underlying identity — NO GUESS: §5.1 carries valuation_product separately; derivative underlying_product_id binds to ResolvedSwap.product_id; Pricing/Risk results echo valuation_product.
+- Headline result semantics — NO GUESS: §12.2 tagged headline contains semantics+value+unit(+currency/sign applicability); supplemental metrics cannot disagree.
+- Risk optional identities — NO GUESS: §13.2 uses ValueOrReason for vol/exercise/settlement/model/calibration ids, mirroring kernel applicability.
 
 Classification:
 
@@ -1337,6 +1363,11 @@ Round 7 (Sophira, three Codex P2 findings on `77013c3a...`):
 - Accepted all three: calibration instrument fingerprint without executable terms payload; inconsistent strike-dimension token names; cash-only settlement method mandatory for PHYSICAL.
 - Fixed payload location, canonical token vocabulary, and CASH-vs-PHYSICAL applicability only. No product economics, strike methodology, or cash settlement methodology value was selected.
 - Same-family audit confirms no second calibration instrument authority and no reserved-suffix strike tokens remain.
+
+Round 8 (Sophira, three Codex P2 findings on `837e3bb6...`):
+
+- Accepted all three: derivative trade identity collapsed into underlying ResolvedSwap.product_id; ambiguous PricingResult headline semantics; RiskResult optional identities lacking applicability encoding.
+- Added valuation_product identity at the kernel boundary, tagged authoritative headline semantics, and structured RiskResult input identity applicability. No product pricing methodology or market value was chosen.
 
 ---
 
