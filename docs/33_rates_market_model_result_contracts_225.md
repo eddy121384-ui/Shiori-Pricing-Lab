@@ -210,6 +210,28 @@ Contract-quality gate (asked of every field before acceptance):
 9. Can downstream UI/reporting interpret it without knowing QuantLib internals?
 10. Does this field accidentally make a methodology decision that belongs to a later issue?
 
+### 4.1 Structured optional / unresolved values
+
+When this document writes `ValueOrReason<T>`, the wire contract means the following typed union, not a bare JSON `null` and not prose attached to a null:
+
+```yaml
+value_or_reason:
+  state: PRESENT | NULL_WITH_REASON
+  value: <T | null>                       # required iff state=PRESENT
+  reason:                                # required iff state=NULL_WITH_REASON
+    category: NOT_APPLICABLE | UNAVAILABLE | UNRESOLVED_METHODOLOGY | MISSING_MARKET_DATA | FAILED_CAPTURE
+    code: <string>                        # stable machine-readable reason code
+    detail: <string | null>               # optional human detail; never the only semantic carrier
+```
+
+Rules:
+
+- `PRESENT` requires a value and forbids a reason.
+- `NULL_WITH_REASON` requires `value=null` plus the structured reason; a bare `null` is not equivalent.
+- Existing shorthand such as `<T | NULL_WITH_REASON>` means this exact union. A field written only as `<T | NULL>` is a literal nullable field and MUST NOT claim a structured reason in prose.
+- `NumericWithUnit` means `{ value: <double>, unit: <unit enum> }`. Economically meaningful numerics whose interpretation can vary by unit use an explicit unit field or this structure; comments and field names are not unit metadata.
+- These are serialization primitives only. They do not resolve any RED methodology value and are not a general error framework.
+
 ---
 
 ## 5. Canonical object graph
@@ -266,11 +288,14 @@ market_snapshot:
   captured_at: <ISO-8601 timestamp+offset>  # when this snapshot instance was assembled (distinct from valuation_date); participates once in snapshot_id preimage (§6.3)
   source: <enum>                            # e.g. BLOOMBERG_DAPI | SCREEN_TRANSCRIPTION | SYNTHETIC_FIXTURE | RESEARCH_ADAPTER; value list owned here as vocabulary, selection per snapshot is data
   source_detail: <string>                   # ticker universe / screen / adapter name; free text, never methodology
-  curve_set_ref: <curve_set_id>             # identity link to the CurveSet in §7 (embedded or by id; see §6.4)
-  fixing_store_ref: <fixing_store_id>       # identity link to the FixingStore in §8
-  volatility_ref: <volatility_input_id>     # identity link to the VolatilityInput in §9 (or NULL_IF_UNUSED with reason)
+  curve_set_ref: <curve_set_id>             # cache/persistence identity index; MUST equal embedded curve_set.curve_set_id
+  curve_set: <CurveSet §7>                   # REQUIRED embedded kernel payload
+  fixing_store_ref: <fixing_store_id>       # cache/persistence identity index; MUST equal embedded fixing_store.fixing_store_id
+  fixing_store: <FixingStore §8>             # REQUIRED embedded kernel payload
+  volatility_ref: <ValueOrReason<volatility_input_id>>  # identity index; PRESENT id MUST equal embedded volatility_input id
+  volatility_input: <ValueOrReason<VolatilityInput §9>> # embedded payload; NULL_WITH_REASON only when calculation does not require vol
   exercise_settlement_refs: <ids>           # links only where valuation requires them; trade-level terms live on the trade, market-level defaults never silently apply
-  model_input_ref: <model_input_id | NULL> # link to ModelInput where the kernel requires it (§14.1); NULL only with explicit reason
+  model_input_ref: <ValueOrReason<model_input_id>> # link where kernel requires it; structured reason when not applicable
   provenance:
     assembled_by: <string>                  # pipeline / operator identity
     adapter_versions: <map>                 # adapter name -> version for every Python adapter that contributed data
@@ -295,7 +320,9 @@ Owner decision (round 2, architecture/identity only — not market methodology):
 
 ### 6.4 Embedding vs referencing
 
-- The canonical wire form EMBEDS the `CurveSet`, `FixingStore`, and `VolatilityInput` payloads inside `MarketSnapshot` for replay atomicity. Reference-by-id links (`curve_set_id`, etc.) are the identity index for caching / persistence (#226), not a substitute for content at the kernel boundary. A kernel call that receives ids without embedded content fails closed (`MISSING_MARKET_DATA`).
+- The canonical wire form EMBEDS the `CurveSet`, `FixingStore`, and, when applicable, `VolatilityInput` payloads inside `MarketSnapshot` for replay atomicity. The corresponding `*_ref` fields are identity indexes for caching / persistence (#226), not substitutes for content at the kernel boundary.
+- `curve_set_ref == curve_set.curve_set_id` and `fixing_store_ref == fixing_store.fixing_store_id` are mandatory invariants. When volatility is PRESENT, `volatility_ref.value == volatility_input.value.volatility_input_id`. Any mismatch fails closed with `MARKET_SNAPSHOT_MISMATCH`.
+- A kernel call that receives only ids without the required embedded content fails closed (`MISSING_MARKET_DATA`). Volatility may be `NULL_WITH_REASON` only when the requested valuation genuinely does not require volatility; the ref and payload states must agree.
 - Cache-key composition (which fields participate in curve/DF/schedule/fixing reuse) is owned by #226. This contract guarantees only that every field the cache may key on is present and typed.
 
 ### 6.5 Fail-closed rules
@@ -334,7 +361,7 @@ curve_set:
   construction:
     construction_methodology_id: UNRESOLVED  # RED-01: e.g. RESOLVED_CURVE_SUPPLY vs BOOTSTRAP_FROM_INSTRUMENTS; field defined, value open
     construction_methodology_version: UNRESOLVED  # RED-01: version of the above once approved
-    construction_inputs_ref: <id | NULL>    # Path-B instrument inputs ref, only where Path B approved; else NULL_WITH_REASON
+    construction_inputs_ref: <ValueOrReason<id>> # Path-B instrument inputs ref; NULL_WITH_REASON when not applicable/unapproved
     evidence_refs: <list>                   # E-citations once RED-01 locks; empty until then
   provenance: { source, adapter_versions, upstream_ids, captured_at }
   content_fingerprint: <hex>                # digest of canonical CurveSet preimage per §15.4 (own fingerprint excluded)
@@ -370,10 +397,12 @@ discount_curve:
   reference_date: <ISO date>                # curve anchor date; normally == valuation_date; any difference is explicit data with reason
   pillars:
     - pillar_date: <ISO date>               # canonical coordinate: calendar date, never a bare year fraction
-      maturity_label: <string | NULL>       # original tenor label (e.g. "6M") where applicable; NULL_WITH_REASON otherwise; never used as the coordinate
-      value: <double>                       # the stored number; meaningless without value_type + unit below
+      maturity_label: <ValueOrReason<string>> # original tenor label where applicable; never used as coordinate
+      value_state: RESOLVED | NULL_WITH_REASON
+      value: <double | NULL>                # numeric only when value_state=RESOLVED; never NaN/sentinel
       value_type: <enum>                    # DISCOUNT_FACTOR | ZERO_RATE_CONTINUOUS | ZERO_RATE_SIMPLE | PAR_RATE_DISPLAY_ONLY_NEVER_PRICE — see §7.4
       value_unit: <unit enum>               # RATIO for DF; DECIMAL_ANNUAL for rates; see §7.4
+      unresolved_reason: <StructuredReason | NULL> # REQUIRED iff value_state=NULL_WITH_REASON; forbidden when RESOLVED
   rate_representation:                      # required to interpret stored values; VALUES unresolved where methodology
     compounding: UNRESOLVED                 # RED-01/RED-02-adjacent: CONTINUOUS | SIMPLE | ANNUAL | ... ; field defined, value open
     day_count: UNRESOLVED                   # RED: day-count basis for rate pillars; field defined, value open
@@ -388,7 +417,7 @@ discount_curve:
     parameters: <map | NULL>
   source_provenance:
     source: <enum>                          # BLOOMBERG_DAPI | SCREEN_TRANSCRIPTION | SYNTHETIC_FIXTURE | RESEARCH_ADAPTER
-    quote_timestamps: <per-pillar | NULL>   # quote time where known; NULL_WITH_REASON where unknown, never inferred
+    quote_timestamps: <per-pillar ValueOrReason<ISO-8601>> # quote time or structured reason per pillar; never inferred
     adapter_name: <string>
     adapter_version: <string>
     upstream_ids: <list>
@@ -400,7 +429,8 @@ discount_curve:
 
 Constraints:
 
-- `pillars` is non-empty, sorted strictly ascending by `pillar_date`, duplicate dates refused.
+- `pillars` is non-empty, sorted strictly ascending by `pillar_date`, duplicate dates refused. An unresolved pillar remains present at its original coordinate with `value_state=NULL_WITH_REASON`, `value=null`, and a structured `unresolved_reason`; dropping it, storing NaN, zero-filling it, or inventing a neighboring value is forbidden.
+- A resolved pillar requires `value_state=RESOLVED`, a numeric `value`, `value_type`, and `value_unit`, and forbids `unresolved_reason`. An unresolved pillar retains `value_type` / `value_unit` whenever those semantics are known from the curve contract, so its missing number is not confused with missing interpretation.
 - `value_type` + `value_unit` are mandatory per pillar set (one pair per curve, not per pillar, unless the curve genuinely mixes types — mixing requires explicit methodology approval and per-pillar tagging; unapproved mixing fails closed).
 - A curve whose `value_type` is `PAR_RATE_DISPLAY_ONLY_NEVER_PRICE` (the `USOSFR*` adapter output) is display-only by contract and can never be consumed as a pricing input; the kernel refuses it as `INVALID_PRODUCT` / `MISSING_MARKET_DATA` with the reason named.
 - Continuous (`exp(-r·T)`) vs simple (`1/(1+r·T)`) semantics are never unified silently (`docs/31 §2.4` compounding note preserved): the `compounding` + `value_type` pair decides the formula, and an `UNRESOLVED` pair fails closed.
@@ -416,8 +446,8 @@ forward_curve:
   curve_role: FORECAST
   index_id: <FloatingIndex enum>            # e.g. USD_SOFR; vocabulary from products/enums.py, value is data
   index_tenor: <string | NULL>             # e.g. "OVERNIGHT" vs "3M"; NULL only where the index has no tenor dimension, with reason
-  fixing_calendar_ref: <id | NULL>         # calendar governing observation/fixing dates where approved; NULL_WITH_REASON until RED-02 locks
-  observation_rules_ref: <id | NULL>       # link to approved observation mechanics once #224 D5 locks; NULL_WITH_REASON until then
+  fixing_calendar_ref: <ValueOrReason<id>> # calendar governing observation/fixing dates; NULL_WITH_REASON until RED-02 locks
+  observation_rules_ref: <ValueOrReason<id>> # approved observation mechanics ref; NULL_WITH_REASON until #224 D5 locks
 ```
 
 Rules:
@@ -550,16 +580,18 @@ vol_quote:
   schema_version: VOL_QUOTE_V1
   quote_type: NORMAL | LOGNORMAL | SHIFTED_LOGNORMAL   # vocabulary defined here; production selection per quote is data subject to RED-vol approval
   volatility_unit: <unit enum>            # DECIMAL (absolute decimal rate vol) | BASIS_POINTS (1bp=1e-4, normal space only) — explicit per quote
-  volatility: <double>                   # the number; meaningless without quote_type + unit + shift below
+  volatility_state: RESOLVED | NULL_WITH_REASON
+  volatility: <double | NULL>             # numeric only when RESOLVED; never NaN/sentinel
+  volatility_unresolved_reason: <StructuredReason | NULL> # REQUIRED iff NULL_WITH_REASON
   shift: <double | NULL>                 # displaced-diffusion shift where quote_type=SHIFTED_LOGNORMAL; NULL elsewhere
   shift_unit: <unit enum | NULL>          # DECIMAL | BASIS_POINTS; required iff shift present; shift without unit fails closed
   expiry: <coordinate>                   # option expiry; ISO date AND tenor label where both known; see §9.3
   underlying_tenor: <coordinate>          # underlying swap tenor; ISO date span AND tenor label; see §9.3
   strike: <strike coordinate>             # absolute strike (DECIMAL_ANNUAL) OR moneyness (see §9.4); one fact per field, never conflated
-  atm_definition: <id | NULL>            # which ATM rule this quote's strike/moneyness is measured against; NULL_WITH_REASON where N/A
-  forward_ref: <decimal | NULL>          # forward/ATM rate the moneyness is measured from, with unit; NULL where not stated, never invented
+  atm_definition: <ValueOrReason<id>>    # ATM rule identity or structured N/A/unresolved reason
+  forward_ref: <ValueOrReason<NumericWithUnit>> # forward/ATM rate used for moneyness; value and unit travel together
   source: <enum>                         # BLOOMBERG_VCUB | BLOOMBERG_DAPI | SYNTHETIC_FIXTURE | RESEARCH_ADAPTER
-  quote_timestamp: <ISO-8601 | NULL>     # where known; NULL_WITH_REASON where unknown
+  quote_timestamp: <ValueOrReason<ISO-8601 timestamp+offset>> # known timestamp or structured reason
   valuation_date: <ISO date>             # must equal MarketSnapshot.valuation_date
   methodology_id: UNRESOLVED             # RED-vol: production vol methodology (Black-76 / shifted-Black / Bachelier selection); field defined, value open
   methodology_version: UNRESOLVED
@@ -568,6 +600,7 @@ vol_quote:
 Rules:
 
 - `quote_type` changes formula/model interpretation (Black-76 lognormal vs shifted-lognormal vs Bachelier normal). That semantic is explicit and machine-readable in `quote_type`, never inferred from magnitude, unit, or shift presence. A `LOGNORMAL` quote with zero/negative strike or forward fails closed rather than being reinterpreted as shifted.
+- A resolved node requires `volatility_state=RESOLVED`, numeric `volatility`, and no unresolved reason. An unreadable node remains in the grid with `volatility_state=NULL_WITH_REASON`, `volatility=null`, its full coordinates/quote semantics, and a structured reason. Dropping the node, zero-filling it, using NaN, or borrowing a neighbor is forbidden.
 - `SHIFTED_LOGNORMAL` without an explicit `shift` + `shift_unit` fails closed. Shift in basis points vs decimal is never guessed: `shift_unit` is mandatory. A shift of `0` with explicit unit is data (equivalent to unshifted under the stated methodology); a missing shift is not zero.
 - `NORMAL` quotes in `BASIS_POINTS` normalize at `1bp=1e-4` (resolver precedent). Any other unit pairing (e.g. `LOGNORMAL` in `BASIS_POINTS`) fails closed unless a future approved methodology explicitly permits it with its conversion recorded.
 - Negative normal vols fail closed (resolver `NegativeVolatilityError` precedent generalized): a negative absolute normal vol is evidence of wrong capture/spread semantics, not a low vol.
@@ -630,14 +663,14 @@ One economic fact per field. The contract separates:
 ```yaml
 strike_coordinate:
   strike_dimension: ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE_RESERVED | LOG_MONEYNESS_RESERVED
-  absolute_strike: <decimal | NULL>       # DECIMAL_ANNUAL; present iff dimension is absolute
-  yield_offset_bp: <double | NULL>        # additive K-F in bp; present iff YIELD_OFFSET_BP
-  log_moneyness: <double | NULL>          # reserved; NULL until approved methodology defines it
-  moneyness_unit: BASIS_POINTS | DECIMAL | NULL  # explicit where applicable
+  absolute_strike: <ValueOrReason<NumericWithUnit>> # PRESENT iff absolute; unit carried in payload (canonical rate unit is explicit, not comment-only)
+  yield_offset: <ValueOrReason<NumericWithUnit>>    # PRESENT iff YIELD_OFFSET_BP; unit must be BASIS_POINTS for the observed VCUB coordinate
+  log_moneyness: <ValueOrReason<NumericWithUnit>>   # reserved; PRESENT only after approved methodology defines value+unit
 ```
 
-- `YIELD_OFFSET_BP` is the VCUB-observed additive coordinate (`mu* = K* - F*`, `K_ij = F_ij + mu*`). Its unit is basis points by screen statement, transcribed never inferred.
-- Absolute vs offset vs log-moneyness confusion fails closed. A `0bp` offset is not the ATM point (resolver precedent: ATM carries no offset).
+- `YIELD_OFFSET_BP` is the VCUB-observed additive coordinate (`mu* = K* - F*`, `K_ij = F_ij + mu*`). Its serialized `yield_offset.value.unit` must be `BASIS_POINTS`; the unit is data, not inferred from the field name or a comment.
+- Absolute vs offset vs log-moneyness confusion fails closed. The active strike member is PRESENT and the inactive members carry `NULL_WITH_REASON`; a `0bp` offset is not the ATM point (resolver precedent: ATM carries no offset).
+- `absolute_strike` and `forward_ref` each carry value + unit in the payload. A parser must not infer decimal-annual vs basis-point representation from magnitude, field name, product type, or comments.
 - The forward each moneyness is measured from (`forward_ref` in §9.1) is stated per quote or per corner where applicable, never assumed from the query's forward.
 
 ### 9.5 Source / timestamp / version
@@ -691,15 +724,15 @@ exercise_terms:
   schema_version: EXERCISE_TERMS_V1
   exercise_style: EUROPEAN | BERMUDAN     # vocabulary; EUROPEAN usable now, BERMUDAN shape reserved for callable work (Phases 3+)
   exercise_dates: <ISO date list>         # EUROPEAN: exactly 1; BERMUDAN: 1..n sorted ascending, duplicate-free
-  notice_dates: <ISO date list | NULL>    # present only where the contract architecture requires notice semantics; NULL_WITH_REASON otherwise
+  notice_dates: <ValueOrReason<ISO date list>> # PRESENT only when notice semantics apply
   underlying_reference:
     resolved_swap_ref: <resolved_swap_id> # the underlying swap being entered / cancelled
     underlying_start_rule: <enum>         # e.g. EXERCISE_DATE_IS_UNDERLYING_START vs UNDERLYING_START_PER_SCHEDULE; VALUES UNRESOLVED — RED where methodology-dependent
     underlying_start_rule_version: UNRESOLVED
-  calendar_ref: <id | NULL>               # holiday calendar governing exercise-date adjustment where genuinely required; NULL_WITH_REASON otherwise
-  business_day_convention: <enum | NULL>  # where genuinely required; NULL_WITH_REASON otherwise
-  timezone: <IANA string | NULL>           # only where exercise timing genuinely requires it (e.g. cross-region cutoffs); NULL_WITH_REASON otherwise
-  expiry_time: <time+timezone | NULL>     # exercise cutoff time where the product requires it; NULL_WITH_REASON otherwise
+  calendar_ref: <ValueOrReason<id>>       # holiday calendar or structured N/A/unresolved reason
+  business_day_convention: <ValueOrReason<enum>> # exercise-date BDC or structured N/A/unresolved reason
+  timezone: <ValueOrReason<IANA string>>   # only where exercise timing genuinely requires it
+  expiry_time: <ValueOrReason<time+timezone>> # exercise cutoff or structured N/A/unresolved reason
 ```
 
 Rules:
@@ -731,7 +764,7 @@ settlement_terms:
     methodology_version: UNRESOLVED
     settlement_rate_source: UNRESOLVED    # RED: which rate/curve sources the cash amount; field defined, value open
     settlement_date_rule: UNRESOLVED      # RED: timing rule (e.g. T+2 from exercise); field defined, value open
-  settlement_date: <ISO date | NULL>      # explicit date where known / required; NULL_WITH_REASON where rule-derived and not yet resolved
+  settlement_date: <ValueOrReason<ISO date>> # explicit date or structured unresolved/not-applicable reason
   settlement_currency: <Currency enum>    # explicit; never assumed equal to trade currency without a stated rule
   source_methodology_provenance: { source, evidence_refs, methodology_id/version }
 ```
@@ -764,10 +797,12 @@ rates_pricing_result:
   pv: <double | NULL>                     # present value in result_currency; NULL only on FAILED
   pv_unit: <unit enum>                    # CURRENCY_AMOUNT (e.g. USD amount); explicit on every result carrying a pv
   pv_sign_convention: <enum>              # RECEIVE_MINUS_PAY_FROM_OWNER_PERSPECTIVE | ... ; explicit, never guessed — see §12.3
-  component_pvs: <map | NULL>             # e.g. fixed_leg_pv / floating_leg_pv / exercise_value / intrinsic_vs_time split where the engine defines them; each with unit; NULL where the engine has no components
+  component_pvs: <ValueOrReason<list[{component_id, value, unit, sign_convention_ref}]>> # each component serializes its unit/sign semantics
   price_semantics: <enum>                 # PRESENT_VALUE | PREMIUM | PAR_RATE | ANNUITY_PVBP — what the headline number IS
-  annuity_pvbp: <double | NULL>           # where computed (swaps/swaptions); with unit CURRENCY_AMOUNT_PER_BASIS_POINT or RATIO as applicable; NULL where N/A
-  par_rate: <double | NULL>               # where computed; DECIMAL_ANNUAL; NULL where N/A
+  annuity_pvbp: <double | NULL>           # where computed; NULL when not applicable
+  annuity_pvbp_unit: <unit enum | NULL>   # REQUIRED iff annuity_pvbp present; e.g. CURRENCY_AMOUNT_PER_BASIS_POINT or RATIO as explicitly selected
+  par_rate: <double | NULL>               # where computed; NULL when N/A
+  par_rate_unit: <unit enum | NULL>       # REQUIRED iff par_rate present; canonical Rates output uses explicit DECIMAL_ANNUAL tagging
   status: SUCCESS | SUCCESS_WITH_WARNINGS | FAILED   # legacy PricingStatus spirit preserved
   warnings: <list[{code, message, detail}]>  # machine-readable codes; §16
   errors: <list[{code, message, detail}]>    # machine-readable codes; §16; FAILED carries >=1
@@ -798,7 +833,8 @@ rates_pricing_result:
 - Every monetary value carries its currency (`result_currency`) and its unit (`pv_unit`). A PV without a currency is malformed.
 - Every PV carries an explicit `pv_sign_convention`. The legacy reference engine's `RECEIVE-positive / PAY-negative from owner perspective` is REFERENCE ONLY term behavior, not a Rates decision: the Rates contract requires the convention to be STATED per result, so a reader never infers sign from engine folklore.
 - `price_semantics` states what the headline number is. A swaption premium is not a swap NPV is not a par rate is not an annuity: the UI must branch on this field, never on magnitude or product-type inference.
-- Component outputs (`component_pvs`) each carry their own unit and sign convention reference. Components that do not sum to the headline (e.g. intrinsic/time splits) say so in `assumptions`.
+- Component outputs (`component_pvs`) each carry `component_id + value + unit + sign_convention_ref` as fields. Components that do not sum to the headline (e.g. intrinsic/time splits) say so in `assumptions`.
+- `annuity_pvbp` and `par_rate` never rely on prose or product inference for units: when the value is present the adjacent unit field is mandatory; when absent the unit is null and applicability is represented by the owning result semantics/reason structure.
 
 ### 12.4 Linkage rules
 
@@ -871,7 +907,7 @@ model_calibration_result:
   instruments:                            # calibration instruments / identifiers
     - instrument_id: <string>             # e.g. swaption quote id / VolatilityInput node id
       instrument_type: <enum>             # EUROPEAN_SWAPTION | VANILLA_SWAP | ...
-      weight: <double | NULL>             # calibration weight with unit where applicable; NULL_WITH_REASON otherwise
+      weight: <ValueOrReason<NumericWithUnit>> # calibration weight value+unit or structured reason; no comment-only unit
   parameters:                             # calibrated parameters, one fact per parameter
     - name: <string>
       value: <double>
@@ -881,7 +917,7 @@ model_calibration_result:
     objective_version: UNRESOLVED
     error_value: <double | NULL>          # final objective value with unit; NULL where N/A with reason
     error_unit: <unit enum | NULL>
-    per_instrument_errors: <list | NULL>  # instrument_id -> error, with units; NULL_WITH_REASON where not recorded
+    per_instrument_errors: <ValueOrReason<list[{instrument_id, error_value, error_unit}]>> # each recorded error carries unit
   convergence:
     status: CONVERGED | NOT_CONVERGED | NOT_APPLICABLE  # machine-readable; never prose
     iterations: <int | NULL>
@@ -939,7 +975,7 @@ Every market/model object names: `source` (controlled enum), `adapter_name/versi
   - independent child / input fingerprints (e.g. a result's `inputs_fingerprint` referencing `market_snapshot_id` digests, or a `ModelInput.calibration_ref` target id) remain ordinary referenced input fields where the owning contract says they are part of the object — only self-reference is excluded.
 - No hashing algorithm or canonical numeric formatting is invented here: those details remain owned by #227. This fix is about PREIMAGE semantics (which fields participate), not implementation choice.
 - Replay identity for a result = `inputs_fingerprint` (canonical trade + convention + market + model inputs) + `engine_version` + `method` + `tolerance`. Given identical inputs and engine version, the result must reproduce within `tolerance`. A nested `replay.content_fingerprint` likewise excludes its own field from its preimage.
-- `NULL_WITH_REASON` is part of the fingerprint: an unresolved field resolved later is a different input, not the same input clarified.
+- `ValueOrReason<T>` / `NULL_WITH_REASON` state, including the structured reason category/code/detail, is part of the fingerprint: an unresolved field resolved later is a different input, not the same input clarified.
 
 ---
 
@@ -1031,9 +1067,10 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] Relation to approved `SwapTrade -> ConventionSet -> ResolvedSwap` (#224) explicit (§5, §12.4); no competing authoritative copies.
 - [ ] #223 ownership boundary preserved (§3): Python acquisition/normalization/persistence/UI vs C++ resolution/pricing; no live Bloomberg in kernel; QuantLib behind isolation, defaults never methodology.
 - [ ] #224 semantics preserved: R1/R2, wire versioning, D1–D13/E1–E6 untouched; no RED-02 value filled.
-- [ ] Curve ENGINE CONTRACT distinguishes identity / currency / role / discount-vs-forward / index / dates / pillars / value-type / compounding / interpolation-extrapolation / provenance / schema / methodology-version (§7); every unapproved VALUE marked `UNRESOLVED — RED`; no naked double arrays.
+- [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
+- [ ] Curve ENGINE CONTRACT distinguishes identity / currency / role / discount-vs-forward / index / dates / pillars / value-type / compounding / interpolation-extrapolation / provenance / schema / methodology-version (§7); unresolved pillars remain structurally present with typed reason; every unapproved VALUE marked `UNRESOLVED — RED`; no naked double arrays.
 - [ ] FixingStore distinguishes historical / forecast-required / projected / missing with observation state, index identity, fixing date, source, version, state-dependent projection fields (§8.2/§8.3); same-day ambiguity carried at the single authoritative embedded `FixingStore.same_day_rule` with no MarketSnapshot duplicate (§8.2/§8.5); fail-closed table deterministic (§8.4); no silent history-to-forecast.
-- [ ] Vol contract forbids naked `double` (§9.0); quote type NORMAL / LOGNORMAL / SHIFTED_LOGNORMAL explicit with unit + shift + shift-unit + coordinates + ATM + surface/cube + interpolation + source/timestamp/version/methodology (§9.1–§9.5); NORMAL vs SHIFTED_LOGNORMAL formula semantic machine-readable; no production vol methodology chosen (RED-225-V*).
+- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); unreadable nodes remain structurally present as NULL_WITH_REASON; quote type NORMAL / LOGNORMAL / SHIFTED_LOGNORMAL explicit with unit + shift + shift-unit + coordinates + ATM + surface/cube + interpolation + source/timestamp/version/methodology (§9.1–§9.5); strike/forward value units are payload fields; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice (only where required) / underlying-start rule / calendar-timezone (only where genuinely required) (§10); minimum structure for European now + Bermudan later; no exotic overdesign; unresolved values RED.
 - [ ] Settlement separates type / method / physical-vs-cash / cash methodology / date-timing / source-methodology-version (§11); no collapsed strings; no invented values (RED-225-S1).
 - [ ] Results carry identity / valuation context / currency / PV-price semantics / units / sign convention / components / model-market-convention linkage / diagnostics / replay (§12–§14); every field has a concrete downstream reason; no generic-library filler fields.
@@ -1067,16 +1104,21 @@ Searched the new contract for each defect family; outcome per family:
 16. Hidden Bloomberg dependence — PASS. Bloomberg sources are `source` enum VALUES per snapshot/quote (data), never methodology; no Bloomberg default adopted as a value. No cutoff/timezone invented in round 2 (§8.2/§8.5 all UNRESOLVED).
 17. Anything #227–#229 would have to infer — addressed in §B; remaining items are explicit RED (B) or handoff (C), none uncategorized.
 18. Round-2 families: (a) prose-described rule missing from YAML shape — FIXED (§8.2 same_day_rule embedded; §8.2 projection fields; §9.6 ModelInput provenance); (b) conditionally-required fields absent — FIXED (projection state rules; ModelInput calibration timestamp rule); (c) recursive fingerprint preimage — FIXED (§15.4 non-recursive rule applied to all fingerprinted objects); (d) double-counted timestamp identity — FIXED (§6.3 captured_at once; stale `digest + disambiguator` / `same rule as §6.3` language removed); (e) false idempotence claim — FIXED (reassembly at new captured_at is a new instance); (f) duplicate authoritative location — FIXED (single FixingStore.same_day_rule; §6.3/§8.5 state no snapshot duplicate); (g) result replay self-hash — FIXED (§15.4 + replay comments).
+19. Round-3 shape-vs-prose/unit families — FIXED: (a) MarketSnapshot now has actual embedded CurveSet/FixingStore/VolatilityInput fields plus ref/payload equality rules (§6.2/§6.4); (b) unresolved curve pillars serialize as value_state + nullable value + StructuredReason (§7.2); (c) unresolved vol nodes serialize equivalently without fabricated numerics (§9.1/§9.2); (d) strike/forward units are payload data via NumericWithUnit (§9.1/§9.4); (e) annuity PVBP + par rate + component PV units are explicit (§12.2/§12.3); (f) calibration weights and per-instrument errors carry units (§14.2); (g) every remaining NULL_WITH_REASON shorthand is governed by the typed ValueOrReason<T> union (§4.1), so reason semantics are serializable rather than comment-only.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
-Perspective: "If #227, #228, #229 were implemented literally by an engineer forbidden to ask what I meant, what would they still have to guess?" Remaining guesses classified. Round-2 focus areas checked explicitly:
+Perspective: "If #227, #228, #229 were implemented literally by an engineer forbidden to ask what I meant, what would they still have to guess?" Remaining guesses classified. Round-2 and round-3 focus areas checked explicitly:
 
 - Receiving same-day fixing methodology — NO GUESS: `FixingStore.same_day_rule` (§8.2) is the single authoritative typed location with rule_id/version/cutoff/cutoff-unit/timezone; unresolved → `SAME_DAY_FIXING_RULE_UNRESOLVED` (§8.4/§8.5). No snapshot-level duplicate to choose between.
 - Computing/verifying fingerprints — NO GUESS on preimage: §15.4 excludes each object's own fingerprint/identity field from its own preimage while keeping child/input fingerprints as ordinary fields; hash/format details explicitly C (#227).
 - Snapshot identity — NO GUESS: §6.3 derives `snapshot_id` from the canonical identity preimage including `captured_at` once, excluding self-referential fields; reassembly semantics explicit.
 - PROJECTED fixing audit metadata — NO GUESS: §8.2/§8.3 state-dependent projection rules name exactly which fields are REQUIRED vs `NULL_WITH_REASON` per observation state, including `projection_inputs_ref` minimum replay link.
 - ModelInput replay/provenance — NO GUESS: §9.6 lists every §15.3 provenance field plus `calibration_timestamp` linkage rule (equal to calibration `calibrated_at` when derived; `NULL_WITH_REASON` otherwise).
+- MarketSnapshot physical payload location — NO GUESS: §6.2 has typed embedded `curve_set`, `fixing_store`, and `volatility_input` fields; §6.4 requires identity-ref equality and rejects id-only kernel requests.
+- Unresolved curve/vol serialization — NO GUESS: §7.2 and §9.1 retain coordinates/semantics while carrying null numeric values plus structured reasons; NaN/sentinels/drop-and-bridge are forbidden.
+- Economic numeric units — NO GUESS for audited fields: strike/forward, annuity PVBP, par rate, component PVs, calibration weights/errors, risk values, curve/fixing/vol values all carry unit fields/structures.
+- NULL_WITH_REASON serialization — NO GUESS: §4.1 defines the wire union and structured reason categories; shorthand elsewhere refers to that exact representation.
 
 Classification:
 
@@ -1107,6 +1149,13 @@ Round 2 (this correction, on the existing branch — no new branch):
 - Grep for stale: `digest + disambiguator`, contradictory `idempotent`, detached `same_day_rule`, mentioned-but-not-shaped projection fields, recursive fingerprint wording, `same rule as §6.3`, incomplete ModelInput provenance — all clean after correction.
 - Re-ran same-defect-family audit (§A) and literal-implementer review (§B) with round-2 focus areas; no uncategorized guess remains.
 - Full diff against PR HEAD and against main inspected; `git diff --check` clean; only the intended docs file changed; #223/#224 and #226–#229 boundaries preserved.
+
+Round 3 (Sophira takeover after OpenCode session failure; same existing branch):
+
+- Started from Codex-reviewed HEAD `d1a22fa7cf440b5caf6bd5f3cf25dc2da81ee02c`; modified ONLY this document.
+- Applied all five accepted round-3 P2 representation fixes plus same-family audit: embedded market payload fields; representable unresolved curve/vol nodes; strike/forward unit payloads; annuity PVBP unit; additional component/par-rate/calibration unit gaps; typed `ValueOrReason<T>` semantics for structured nulls.
+- No production methodology value resolved. RED-01, RED-02, RED-225-* remain open; #223/#224 and #226–#229 ownership boundaries unchanged.
+- Because this correction was written through the GitHub connector rather than a local checkout, validation used exact-head/blob guards, one-file replacement, duplicate-replacement assertions, and a diff-equivalent whitespace scan; no runtime/build/test file was touched. Fresh CI/Codex review is required after push.
 
 ---
 
