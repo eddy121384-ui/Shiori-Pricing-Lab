@@ -684,7 +684,7 @@ volatility_input:
 - Surface vs cube is explicit data (`representation`), not a reader inference from column counts.
 - `VolatilityInput.methodology_id/version` is authoritative for the container. Every embedded `VolQuote` MUST carry matching `methodology_id/version`, `quote_type`, `volatility_unit`, and applicable `shift_unit`; any disagreement fails closed as malformed mixed semantics. V1 does not infer or merge conflicting quote methodologies.
 - Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; where strike dimension applies, its strike coordinate must likewise match the authoritative container strike axis. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch fails closed.
-- The third (strike) axis, where present, uses the `StrikeDimension` vocabulary generalized: `ATM` vs `YIELD_OFFSET_BP` (existing) plus explicitly reserved-but-unresolved `ABSOLUTE_STRIKE` and `LOG_MONEYNESS` members. Reserved members are NOT approved for production use; any use requires RED-vol methodology approval. No other strike convention is added for screens this repository has not observed.
+- The third (strike) axis, where present, uses one canonical `StrikeDimension` vocabulary: `ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS`. The existence of a vocabulary token does NOT approve its production methodology: `ABSOLUTE_STRIKE` and `LOG_MONEYNESS` remain UNRESOLVED for production use and require RED-225-V2 approval/evidence. Approval status is carried by methodology/version state, never encoded by changing the enum token name.
 - Unresolved nodes block any bracket reaching across them (resolver precedent). Interpolating over an unreadable column and reporting no fallback is forbidden.
 
 ### 9.3 Expiry / tenor coordinates
@@ -722,7 +722,7 @@ One economic fact per field. The contract separates:
 
 ```yaml
 strike_coordinate:
-  strike_dimension: ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE_RESERVED | LOG_MONEYNESS_RESERVED
+  strike_dimension: ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS
   absolute_strike: <ValueOrReason<NumericWithUnit>> # PRESENT iff absolute; unit carried in payload (canonical rate unit is explicit, not comment-only)
   yield_offset: <ValueOrReason<NumericWithUnit>>    # PRESENT iff YIELD_OFFSET_BP; unit must be BASIS_POINTS for the observed VCUB coordinate
   log_moneyness: <ValueOrReason<NumericWithUnit>>   # reserved; PRESENT only after approved methodology defines value+unit
@@ -821,25 +821,29 @@ settlement_terms:
   schema_version: SETTLEMENT_TERMS_V1
   settlement_terms_id: <string>           # content-derived immutable identity; own id/fingerprint excluded from preimage §15.4
   settlement_type: CASH | PHYSICAL        # what is delivered: cash amount vs underlying swap
-  settlement_method: <enum | UNRESOLVED>  # e.g. COLLATERALIZED_CASH_PRICE vs ... ; field defined, value open — RED-settlement
-  settlement_method_version: UNRESOLVED
-  cash_settlement_methodology:            # required iff settlement_type=CASH; forbidden otherwise
-    methodology_id: UNRESOLVED            # RED-settlement: e.g. ISDA cash-settlement rule, CCP rule, desk rule; field defined, value open
-    methodology_version: UNRESOLVED
-    settlement_rate_source: UNRESOLVED    # RED: which rate/curve sources the cash amount; field defined, value open
-    settlement_date_rule: UNRESOLVED      # RED: timing rule (e.g. T+2 from exercise); field defined, value open
+  settlement_method: <ValueOrReason<enum>> # CASH: PRESENT once approved; PHYSICAL: NULL_WITH_REASON(NOT_APPLICABLE)
+  settlement_method_version: <ValueOrReason<string>> # same applicability as settlement_method
+  cash_settlement_methodology: <ValueOrReason<CashSettlementMethodology>> # CASH: PRESENT object shaped below; PHYSICAL: structured N/A
   settlement_date: <ValueOrReason<ISO date>> # explicit date or structured unresolved/not-applicable reason
   settlement_currency: <Currency enum>    # explicit; never assumed equal to trade currency without a stated rule
   source_methodology_provenance: { source, evidence_refs, methodology_id/version }
   content_fingerprint: <hex>              # non-recursive preimage §15.4
+
+cash_settlement_methodology_type:
+  methodology_id: UNRESOLVED              # RED-225-S1
+  methodology_version: UNRESOLVED
+  settlement_rate_source: UNRESOLVED
+  settlement_date_rule: UNRESOLVED
 ```
 
 Rules:
 
-- `settlement_type` (CASH vs PHYSICAL — WHAT is delivered) and `settlement_method` (HOW the cash amount is determined — WHICH rulebook) are separate fields. Collapsing them into one string fails schema validation.
-- `CASH` without a cash-settlement methodology fails closed. `PHYSICAL` with a cash-settlement methodology fails closed.
+- `settlement_type` (CASH vs PHYSICAL — WHAT is delivered) and `settlement_method` (cash amount determination rulebook, applicable only to CASH) are separate fields. Collapsing them into one string fails schema validation.
+- For `CASH`: `settlement_method`, `settlement_method_version`, and `cash_settlement_methodology` MUST be PRESENT; unresolved methodology values remain RED-225-S1 and therefore fail closed until locked.
+- For `PHYSICAL`: `settlement_method`, `settlement_method_version`, and `cash_settlement_methodology` MUST each be `NULL_WITH_REASON(category=NOT_APPLICABLE)`. A physical settlement must not carry an eternally-UNRESOLVED cash-only method.
+- `CashSettlementMethodology` is the typed value carried inside the PRESENT `cash_settlement_methodology` union; the type declaration is not a second instance/authority.
 - Settlement date / timing rules (`settlement_date_rule`, `settlement_date`) are explicit. A settlement date derived from an unresolved timing rule is `NULL_WITH_REASON`, never guessed from payment-lag precedent (#224 D6 is a swap-cashflow rule, not a swaption-settlement rule).
-- No production settlement value (method, methodology, rate source, date rule) is chosen here. All are `UNRESOLVED — RED-settlement` pending Phase-2 (#232) workstation reconciliation.
+- No production CASH settlement value (method, methodology, rate source, date rule) is chosen here. All such values remain `UNRESOLVED — RED-225-S1` pending Phase-2 (#232) workstation reconciliation.
 
 ---
 
@@ -977,8 +981,10 @@ model_calibration_input:
   calibration_instruments: <ordered list>
     - instrument_id: <string>             # stable id within this calibration set
       instrument_type: <enum>             # e.g. EUROPEAN_SWAPTION | VANILLA_SWAP
-      instrument_schema_version: <string> # version of the concrete immutable instrument-terms contract
-      instrument_content_fingerprint: <hex> # fingerprint of those exact terms; concrete payload schema owned by later product issue
+      instrument_terms:                   # executable immutable terms payload; concrete schema owned/versioned by the product issue
+        schema_version: <string>           # exact owning product contract version
+        payload: <typed canonical object> # full product terms needed to construct the calibration instrument; never fingerprint-only
+        content_fingerprint: <hex>         # digest of this exact schema_version + payload under §15.4 non-recursive rules
       market_target_ref: <string>         # exact quote/node/market target identity used by objective
       weight: <ValueOrReason<NumericWithUnit>>
   initial_parameters: <ValueOrReason<ordered list[{name, value, unit}]>> # PRESENT when optimizer/model requires seed; structured N/A otherwise
@@ -1000,8 +1006,9 @@ model_calibration_input:
 
 Canonical calibration-input rules:
 
-- `ModelCalibrationInput.content_fingerprint` fingerprints ALL fields above in canonical serialization semantics: valuation context, full MarketSnapshot content, model id/version, ordered calibration-instrument records (including instrument terms fingerprints, market targets, and weights), initial parameters, objective id/version/settings, optimizer id/version/settings, and convergence policy.
-- Each `instrument_content_fingerprint` MUST refer to the exact immutable versioned instrument-terms payload supplied by the owning later product contract. #225 does not invent European swaption/callable instrument economics before those issues define them; a missing terms fingerprint is not replayable and fails validation.
+- `ModelCalibrationInput.content_fingerprint` fingerprints ALL fields above in canonical serialization semantics: valuation context, full MarketSnapshot content, model id/version, ordered calibration-instrument records (including each full `instrument_terms.schema_version + payload + content_fingerprint`, market targets, and weights), initial parameters, objective id/version/settings, optimizer id/version/settings, and convergence policy.
+- Each calibration instrument MUST carry the full immutable executable `instrument_terms.payload` defined by the owning later product contract, not merely a digest or external id. Its `instrument_terms.content_fingerprint` MUST match the embedded `schema_version + payload`; mismatch fails closed.
+- #225 does not invent European swaption/callable instrument economics before those issues define them. The envelope above fixes payload LOCATION / replay semantics only; the concrete typed payload schema and economic fields remain owned by the relevant later product issue.
 - Instrument order is canonical and deterministic (ascending `instrument_id` unless a later LOCKED methodology explicitly requires another ordering and records that version). Duplicate `instrument_id` values fail closed.
 - No default initial parameter, objective, optimizer, tolerance, max iterations, or model is selected here. UNRESOLVED methodology values remain RED-225-M1/M2 and cannot be made production inputs until locked.
 - Calibration may be orchestrated outside the pricing kernel, but replay identity is still deterministic and no implementation may choose a different input preimage while claiming `MODEL_CALIBRATION_INPUT_V1`.
@@ -1048,7 +1055,7 @@ Rules:
 
 - A calibration result without `calibration_input_id`, `model_id`, `market_snapshot_id`, `instruments`, `parameters` (with units), `objective` identity, and `convergence.status` is incomplete and fails validation.
 - `ModelCalibrationResult.replay.inputs_fingerprint` MUST equal the consumed `ModelCalibrationInput.content_fingerprint`; `calibration_input_id` MUST equal that input's identity. Implementations may not hash an ad-hoc subset.
-- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, ordered `instruments[*].{instrument_id,instrument_type,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. Any mismatch is a malformed result, not a second authority.
+- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, ordered `instruments[*].{instrument_id,instrument_type,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. The authoritative instrument economics remain the embedded `ModelCalibrationInput.calibration_instruments[*].instrument_terms`; result rows do not redefine them. Any mismatch is a malformed result, not a second authority.
 - When `convergence.tolerance` is applicable, it MUST echo the exact `ModelCalibrationInput.convergence_policy.tolerance` value+unit. Output-only facts are `calibrated_at`, calibrated `parameters`, objective error values, iteration count, convergence status, warnings/errors, and provenance.
 - `CONVERGED=false` (or `NOT_CONVERGED`) results are still first-class records: a downstream pricing call consuming a non-converged calibration fails closed unless an explicit override policy (itself RED-model, not defined here) permits it with the override recorded.
 - Objective, optimizer, tolerance, and model version VALUES are UNRESOLVED — RED-model. The fields exist so Phase-3 work can record them without redesigning the contract.
@@ -1198,9 +1205,9 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
 - [ ] Curve ENGINE CONTRACT distinguishes identity / currency / role / discount-vs-forward / index / dates / pillars / curve-level value-type/unit / compounding / interpolation-extrapolation / complete provenance / schema / methodology-version (§7); unresolved pillars remain structurally present with typed reason; V1 forbids mixed per-pillar value semantics; every unapproved VALUE marked `UNRESOLVED — RED`; no naked double arrays.
 - [ ] FixingStore distinguishes observation_date from publication_date/publication_timestamp (§8.2–§8.5); history-vs-forecast availability is never inferred from observation date alone; forecast-only stores may carry an explicit empty source union without inventing a source; PROJECTED is complete audit-only state or rejected; same-day publication ambiguity carried at the single authoritative `FixingStore.same_day_rule`; no silent history-to-forecast.
-- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); unreadable nodes remain structurally present as NULL_WITH_REASON; VolatilityInput carries authoritative methodology_id/version and embedded quotes must match container quote/method/unit semantics; expiry/underlying axes preserve exact calendar dates when known plus derived coordinates; strike/forward value units are payload fields; provenance includes evidence chain; no production vol methodology chosen (RED-225-V*).
+- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); StrikeDimension uses one canonical token set (`ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS`) with approval status separate from token naming; unreadable nodes remain structurally present as NULL_WITH_REASON; VolatilityInput carries authoritative methodology_id/version; expiry/underlying axes preserve exact dates; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice / underlying-start rule / calendar-timezone (§10); underlying_product_id binds exactly to RatesKernelInput.resolved_swap.product_id; no invented ResolvedSwap identity field; unresolved methodology values remain RED.
-- [ ] Settlement separates type / method / physical-vs-cash / cash methodology / date-timing / source-methodology-version (§11); no collapsed strings; no invented values (RED-225-S1).
+- [ ] Settlement separates type / cash-only method / physical-vs-cash / cash methodology / date-timing / provenance (§11); PHYSICAL carries structured NOT_APPLICABLE for cash-only method fields rather than unresolved fake values; no invented values (RED-225-S1).
 - [ ] Results carry identity / valuation context / currency / PV-price semantics / units / sign convention / components / model-market-convention linkage / diagnostics / replay (§12–§14); ModelCalibrationInput defines the exact calibration fingerprint preimage and ModelCalibrationResult binds to it; every field has a concrete downstream reason.
 - [ ] Versioning/provenance: actual value vs resolution-status separated (§15.1); machine-readable schema versions everywhere incl. `RATES_KERNEL_INPUT_V1` (§15.2); independently identity-bearing market/model objects satisfy the complete provenance envelope (§15.3); source/methodology/version never collapsed; replay fingerprints defined with NON-RECURSIVE preimage (§15.4); snapshot identity includes `captured_at` exactly once; ExerciseTerms/SettlementTerms carry identities + fingerprints.
 - [ ] Fail-closed rules enumerated (§16 + per-section rules); RED list complete with owners (§17); #226–#229 boundaries preserved (§18).
@@ -1236,6 +1243,7 @@ Searched the new contract for each defect family; outcome per family:
 20. Round-4 contract-consistency families — FIXED: (a) exercise/settlement/model payload location made explicit via RatesKernelInput; MarketSnapshot returned to market-only authority; ExerciseTerms/SettlementTerms gain identity+fingerprint; (b) curve value_type/value_unit canonicalized exactly once at curve level and V1 mixed semantics forbidden; (c) PROJECTED fixing is either complete audit-only state or malformed, with future date-state path allowing FORECAST_REQUIRED or PROJECTED as alternatives; (d) VolatilityInput owns methodology_id/version and embedded quote equality is mandatory; (e) CurveSet/DiscountCurve/FixingStore/VolatilityInput provenance envelopes completed; §15.3 narrowed explicitly by identity level to avoid meaningless leaf duplication while forbidding provenance inference.
 21. Round-5 deterministic-input/date families — FIXED: (a) RatesKernelInput carries explicit curve_selection and PricingResult curve_role_map echoes it; (b) pricing/risk inputs_fingerprint equals the entire RatesKernelInput.content_fingerprint, covering every PRESENT direct input; (c) FixingStore separates observation_date from publication_date/publication_timestamp and publication availability drives history-vs-forecast; (d) vol axes preserve exact expiry/underlying start/end dates when known instead of reconstructing them from year-fraction coordinates.
 22. Round-6 representation/replay families — FIXED: (a) reason-bearing nullable fields identified by review (index_tenor, VolatilityInput.strikes, RiskResult.bucket_coordinate) use ValueOrReason; (b) each curve pillar carries source_column or structured N/A; (c) forecast-only FixingStore source union may be explicitly empty; (d) ExerciseTerms binds to actual #224 ResolvedSwap.product_id; (e) ModelCalibrationInput defines the exact deterministic calibration replay preimage and ModelCalibrationResult binds its inputs_fingerprint to that input.
+23. Round-7 executable-payload/vocabulary/applicability families — FIXED: (a) every calibration instrument embeds its full versioned executable instrument_terms payload plus matching fingerprint, so replay does not depend on digest-only/external reconstruction; (b) StrikeDimension has one canonical token vocabulary and methodology approval is separate state; (c) cash-only settlement method fields are PRESENT only for CASH and structured NOT_APPLICABLE for PHYSICAL.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1265,6 +1273,9 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Forecast-only fixing provenance — NO GUESS: §8.6 permits an explicit empty PRESENT-source union without fabricating source data.
 - Exercise underlying binding — NO GUESS: §10 binds underlying_product_id to the actual #224 ResolvedSwap.product_id.
 - Calibration replay preimage — NO GUESS: §14.2 defines ModelCalibrationInput and §14.3 binds result inputs_fingerprint to its full content fingerprint.
+- Calibration instrument executability — NO GUESS: each instrument embeds its owning versioned typed terms payload plus matching content fingerprint; digest alone is never executable input.
+- Strike vocabulary — NO GUESS: one canonical enum token set; approval status lives in methodology state, not alternate token names.
+- Settlement applicability — NO GUESS: cash-only method/methodology fields are structured NOT_APPLICABLE for PHYSICAL and required PRESENT for CASH.
 
 Classification:
 
@@ -1320,6 +1331,12 @@ Round 6 (Sophira, five Codex P2 findings on `b2b5a5ce...`):
 - Accepted all five: reason-bearing bare-null fields, missing per-pillar source_column, forecast-only FixingStore source union, invalid invented resolved_swap_id reference, and undefined calibration replay preimage.
 - Added `ModelCalibrationInput` as a minimal deterministic replay contract without selecting model/objective/optimizer/tolerance values or inventing future swaption economics.
 - No production methodology value resolved; all RED-01/RED-02/RED-225-* remain open.
+
+Round 7 (Sophira, three Codex P2 findings on `77013c3a...`):
+
+- Accepted all three: calibration instrument fingerprint without executable terms payload; inconsistent strike-dimension token names; cash-only settlement method mandatory for PHYSICAL.
+- Fixed payload location, canonical token vocabulary, and CASH-vs-PHYSICAL applicability only. No product economics, strike methodology, or cash settlement methodology value was selected.
+- Same-family audit confirms no second calibration instrument authority and no reserved-suffix strike tokens remain.
 
 ---
 
