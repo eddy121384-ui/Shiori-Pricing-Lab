@@ -505,37 +505,36 @@ fixing_store:
     - index_id: <FloatingIndex enum>        # e.g. USD_SOFR; vocabulary, value is data
       fixing_date: <ISO date>               # observation / publication date for this fixing
       observation_state: <enum>             # HISTORICAL | FORECAST_REQUIRED | PROJECTED | MISSING — see §8.3
-      value: <double | NULL>                # decimal rate (DECIMAL_ANNUAL basis) where known; NULL per §8.3 rules
-      value_unit: DECIMAL_ANNUAL            # explicit on every entry; no untagged numerics
+      value: <ValueOrReason<NumericWithUnit>> # PRESENT fixing value must carry DECIMAL_ANNUAL unit; null state carries structured reason
       day_count_basis: <enum | UNRESOLVED>  # basis the fixing value is quoted on where applicable; UNRESOLVED — RED until evidenced
-      source: <enum>                        # BLOOMBERG_DAPI | SCREEN_TRANSCRIPTION | SYNTHETIC_FIXTURE | CURVE_PROJECTION | NULL_WITH_REASON
-      quote_timestamp: <ISO-8601 | NULL>    # where known; NULL_WITH_REASON where unknown, never inferred
-      version: <string>                     # source version / batch id for this fixing
-      projection_method_id: <string | UNRESOLVED | NULL_WITH_REASON>       # state-dependent; see §8.3 rules below
-      projection_method_version: <string | UNRESOLVED | NULL_WITH_REASON>  # state-dependent; see §8.3 rules below
-      projection_inputs_ref: <id | NULL_WITH_REASON>  # minimum replay link: curve_set_id / forward curve + observation-rules identity used for a PROJECTED audit value; NULL_WITH_REASON where N/A; no forecasting framework designed here
+      source: <ValueOrReason<enum>>         # PRESENT: BLOOMBERG_DAPI | SCREEN_TRANSCRIPTION | SYNTHETIC_FIXTURE | CURVE_PROJECTION; otherwise structured reason
+      quote_timestamp: <ValueOrReason<ISO-8601 timestamp+offset>> # known timestamp or structured reason; never inferred
+      version: <ValueOrReason<string>>      # source version / batch id or structured reason when no source exists
+      projection_method_id: <ValueOrReason<string>>      # state-dependent; see §8.3
+      projection_method_version: <ValueOrReason<string>> # state-dependent; see §8.3
+      projection_inputs_ref: <ValueOrReason<id>>         # minimum replay link: curve/observation identity or structured N/A/unresolved reason
   provenance: { assembled_by, adapter_versions, upstream_ids }
   content_fingerprint: <hex>                # digest of canonical FixingStore preimage per §15.4 (own fingerprint excluded; same_day_rule participates)
 ```
 
 State-dependent projection-field rules (machine-readable, enforced per entry):
 
-- `PROJECTED`: `projection_method_id` REQUIRED (once RED-225-F/projection methodology locks; `UNRESOLVED` until then and the entry fails closed where a projection is required but the methodology is open), `projection_method_version` REQUIRED under the same condition, `source` must be `CURVE_PROJECTION`, `projection_inputs_ref` must name the curve/observation-rule identity the audit value was projected from.
-- `HISTORICAL`: `projection_method_id` and `projection_method_version` must be `NULL_WITH_REASON` (reason `NOT_APPLICABLE_HISTORICAL`), `projection_inputs_ref` must be `NULL_WITH_REASON` (same reason); a historical entry carrying projection methodology is malformed and fails closed.
-- `FORECAST_REQUIRED`: `value` must be `NULL`, projection fields must be `NULL_WITH_REASON` (reason `TO_BE_PROJECTED_AT_VALUATION`); no projected value is stored as history — future projection is computed by the pricing/resolution path from the approved forward curve + observation mechanics, not read from this entry.
-- `MISSING`: `value` must be `NULL`, projection fields must be `NULL_WITH_REASON` (reason per missing cause); no projection methodology may convert `MISSING` into history.
+- `PROJECTED`: `value`, `source=CURVE_PROJECTION`, `projection_method_id`, `projection_method_version`, and `projection_inputs_ref` must all be PRESENT. If projection methodology is unknown/unapproved, the method fields carry `NULL_WITH_REASON(category=UNRESOLVED_METHODOLOGY)` and the projected entry is not usable as a pricing input.
+- `HISTORICAL`: `value` must be PRESENT with unit `DECIMAL_ANNUAL`; `source` and `version` must be PRESENT; projection fields must be `NULL_WITH_REASON` (reason `NOT_APPLICABLE_HISTORICAL`). A historical entry carrying projection methodology is malformed and fails closed.
+- `FORECAST_REQUIRED`: `value` is `NULL_WITH_REASON(TO_BE_PROJECTED_AT_VALUATION)`; projection fields are also structured not-yet-projected states. No projected value is stored as history — future projection is computed by the pricing/resolution path from the approved forward curve + observation mechanics, not read from this entry.
+- `MISSING`: `value`, `source`, `quote_timestamp`, and `version` carry structured missing/unavailable reasons as applicable; projection fields are `NULL_WITH_REASON`. No projection methodology may convert `MISSING` into history.
 
 ### 8.3 Observation states (machine-readable, not prose)
 
 | State | Meaning | `value` | `source` |
 |---|---|---|---|
-| `HISTORICAL` | Fixing published on/before valuation date and captured | Required decimal rate; projection fields `NULL_WITH_REASON` (`NOT_APPLICABLE_HISTORICAL`) | Market source (`BLOOMBERG_DAPI`, `SCREEN_TRANSCRIPTION`, `SYNTHETIC_FIXTURE`) |
-| `FORECAST_REQUIRED` | Fixing date after valuation date; kernel must project from curve | `NULL` (never a historical number); projection fields `NULL_WITH_REASON` (`TO_BE_PROJECTED_AT_VALUATION`) | `CURVE_PROJECTION` recorded at valuation time, not stored as history |
-| `PROJECTED` | A previously computed forecast carried for audit only | Decimal rate + required `projection_method_id/version` + `projection_inputs_ref` (§8.2 rules) | `CURVE_PROJECTION` with method recorded; never mistaken for history |
-| `MISSING` | Required historical fixing not held | `NULL`; projection fields `NULL_WITH_REASON` (missing cause) | `NULL_WITH_REASON` naming why (not yet published, capture gap, etc.) |
+| `HISTORICAL` | Fixing published on/before valuation date and captured | PRESENT `NumericWithUnit` with `unit=DECIMAL_ANNUAL`; projection fields structured N/A | PRESENT market source (`BLOOMBERG_DAPI`, `SCREEN_TRANSCRIPTION`, `SYNTHETIC_FIXTURE`) |
+| `FORECAST_REQUIRED` | Fixing date after valuation date; kernel must project from curve | `NULL_WITH_REASON(TO_BE_PROJECTED_AT_VALUATION)`; no historical number | Projection/source state is not treated as observed history |
+| `PROJECTED` | A previously computed forecast carried for audit only | PRESENT rate + PRESENT projection method/version + inputs ref REQUIRED | PRESENT `CURVE_PROJECTION`; never mistaken for history |
+| `MISSING` | Required historical fixing not held | Structured missing reason; no numeric value | Structured source/unavailability reason naming why (not yet published, capture gap, etc.) |
 
 - `HISTORICAL` vs `FORECAST_REQUIRED` vs `PROJECTED` vs `MISSING` is a dedicated enum field. Prose comments never decide it.
-- A `FORECAST_REQUIRED` entry never carries a `value`. A `HISTORICAL` entry never carries a null value. A `PROJECTED` value never appears where a `HISTORICAL` is required.
+- A `FORECAST_REQUIRED` entry never carries a PRESENT numeric fixing value. A `HISTORICAL` entry requires a PRESENT fixing value. A `PROJECTED` value never appears where a `HISTORICAL` is required.
 - Index identity (`index_id`) + `fixing_date` is the unique key. Entries for different indices on the same date are different facts.
 
 ### 8.4 Deterministic behavior (fail-closed table)
@@ -915,7 +914,7 @@ model_calibration_result:
   objective:
     objective_id: UNRESOLVED              # RED-model: e.g. WEIGHTED_SQUARE_PRICE_ERROR; field defined, value open
     objective_version: UNRESOLVED
-    error_value: <double | NULL>          # final objective value with unit; NULL where N/A with reason
+    error_value: <double | NULL>          # paired with error_unit below; NULL where N/A
     error_unit: <unit enum | NULL>
     per_instrument_errors: <ValueOrReason<list[{instrument_id, error_value, error_unit}]>> # each recorded error carries unit
   convergence:
