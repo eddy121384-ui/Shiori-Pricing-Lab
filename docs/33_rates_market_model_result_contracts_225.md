@@ -249,6 +249,7 @@ MarketSnapshot (§6)
 RatesKernelInput (§5.1)
  ├── ResolvedSwap (#224)                    -- resolved trade input
  ├── MarketSnapshot (§6)                    -- resolved market input only
+ ├── CurveSelection                         -- explicit discount/forecast curve ids
  ├── ExerciseTerms (§10)                    -- explicit product terms when applicable
  ├── SettlementTerms (§11)                  -- explicit product terms when applicable
  ├── ModelInput (§9.6 / §14.1)              -- explicit model input when applicable
@@ -594,6 +595,8 @@ State-dependent projection-field rules (machine-readable, enforced per entry):
 Whether an observation whose `publication_date` is the valuation date is already available as history at the valuation moment depends on publication timing, time zone, and desk convention that this repository has not evidenced. The `observation_date` may be earlier and is NOT reused as publication timing. This document does NOT invent a same-day rule. The contract exposes the ambiguity at its single authoritative location:
 
 - Authoritative location: `FixingStore.same_day_rule` (§8.2: `rule_id`, `rule_version`, `cutoff_time`, `cutoff_time_unit`, `timezone`). All values `UNRESOLVED — RED-225-F1`. No cutoff time, no cutoff unit, no timezone, and no same-day behavior is chosen here.
+- The deterministic as-of instant for applying a LOCKED same-day rule is `MarketSnapshot.captured_at`, supplied explicitly with offset. The kernel never reads the system clock. If the approved methodology later requires a different valuation-as-of timestamp, that must become an explicit versioned field before use; it is not inferred here.
+- Where `publication_timestamp` is PRESENT, it is the fact compared under the approved rule. Where only `publication_date` is PRESENT, a cutoff/timezone rule may determine availability only after RED-225-F1 is LOCKED; until then same-day use fails closed.
 - No duplicate authoritative rule exists at `MarketSnapshot` level (§6.3): the snapshot reaches the rule only through its embedded `FixingStore`.
 - `cutoff_time_unit` is a separate field from `cutoff_time` per P1 (one economic fact per field): the time and its basis/unit are never conflated.
 
@@ -679,6 +682,7 @@ volatility_input:
 
 - Surface vs cube is explicit data (`representation`), not a reader inference from column counts.
 - `VolatilityInput.methodology_id/version` is authoritative for the container. Every embedded `VolQuote` MUST carry matching `methodology_id/version`, `quote_type`, `volatility_unit`, and applicable `shift_unit`; any disagreement fails closed as malformed mixed semantics. V1 does not infer or merge conflicting quote methodologies.
+- Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; where strike dimension applies, its strike coordinate must likewise match the authoritative container strike axis. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch fails closed.
 - The third (strike) axis, where present, uses the `StrikeDimension` vocabulary generalized: `ATM` vs `YIELD_OFFSET_BP` (existing) plus explicitly reserved-but-unresolved `ABSOLUTE_STRIKE` and `LOG_MONEYNESS` members. Reserved members are NOT approved for production use; any use requires RED-vol methodology approval. No other strike convention is added for screens this repository has not observed.
 - Unresolved nodes block any bracket reaching across them (resolver precedent). Interpolating over an unreadable column and reporting no fallback is forbidden.
 
@@ -932,7 +936,7 @@ rates_risk_result:
       bucket_coordinate: <coordinate | NULL>  # pillar date / expiry-tenor-strike where bucketed; NULL for parallel measures with reason
       market_snapshot_id: <string>        # snapshot bumped
       model_version: <string | NULL>      # engine/model version used for revaluation
-  inputs_identity: { market_snapshot_id, curve_set_id, fixing_store_id, volatility_input_id, exercise_terms_id, settlement_terms_id, convention_set_id, model_input_id }
+  inputs_identity: { market_snapshot_id, curve_set_id, curve_role_map, fixing_store_id, volatility_input_id, exercise_terms_id, settlement_terms_id, convention_set_id, model_input_id }
   status: SUCCESS | SUCCESS_WITH_WARNINGS | FAILED
   warnings / errors: <structured codes; §16>
   engine: { engine_name, engine_version, method }
@@ -1200,8 +1204,9 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Provenance scope — NO GUESS: §15.3 names the identity-bearing objects that require full envelopes and the exact leaf-fact inheritance rule.
 - Curve selection — NO GUESS: §5.1 carries explicit discount/forecast curve ids and validates role/index compatibility; §12 echoes the same mapping.
 - Pricing/risk input fingerprint — NO GUESS: §15.4 binds it to the exact RatesKernelInput.content_fingerprint, covering every PRESENT direct input.
+- Same-day as-of instant — NO GUESS: §8.5 uses explicit `MarketSnapshot.captured_at`; kernel never reads system clock.
 - Fixing observation vs publication — NO GUESS: §8 carries separate economic observation date and publication availability date/time; history/forecast rules use publication availability.
-- Vol axis exact dates — NO GUESS: §9.3 preserves exact expiry and underlying start/end dates when known plus explicit derived coordinates.
+- Vol axis exact dates/authority — NO GUESS: §9.2–§9.3 preserve exact expiry and underlying start/end dates when known, and each quote coordinate must equal an authoritative container-axis entry.
 
 Classification:
 
