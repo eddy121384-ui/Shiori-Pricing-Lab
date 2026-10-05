@@ -1019,10 +1019,7 @@ model_calibration_input:
         schema_version: <string>           # exact owning product contract version
         payload: <typed canonical object> # full product terms needed to construct the calibration instrument; never fingerprint-only
         content_fingerprint: <hex>         # digest of this exact schema_version + payload under §15.4 non-recursive rules
-      market_target:
-        kind: VOL_QUOTE_NODE_V1            # only resolvable V1 target kind; later kinds require a schema revision
-        volatility_input_id: <string>      # MUST equal embedded market_snapshot.volatility_input id
-        node_key: <VolNodeKey>             # MUST resolve uniquely to exactly one embedded VolQuote
+      market_target: <CalibrationMarketTarget> # exact resolvable embedded-market target
       weight: <ValueOrReason<NumericWithUnit>>
   initial_parameters: <ValueOrReason<ordered list[{name, value, unit}]>> # PRESENT when optimizer/model requires seed; structured N/A otherwise
   objective:
@@ -1039,6 +1036,11 @@ model_calibration_input:
     policy_id: UNRESOLVED                 # RED-225-M2
     policy_version: UNRESOLVED
   content_fingerprint: <hex>              # digest of this full canonical input preimage; own id/fingerprint excluded
+
+calibration_market_target_type:
+  kind: VOL_QUOTE_NODE_V1                 # only resolvable V1 target kind; later kinds require schema revision
+  volatility_input_id: <string>           # MUST equal embedded market_snapshot.volatility_input id
+  node_key: <VolNodeKey>                  # MUST resolve uniquely to exactly one embedded VolQuote
 ```
 
 Canonical calibration-input rules:
@@ -1140,15 +1142,16 @@ Source + methodology + version are never collapsed into one string. Provenance w
 
 - Canonical serialization: every contract defines a canonical JSON form (sorted keys, fixed separators, decimal formatting pinned by the owning implementation issue — format details owned by #227, not chosen here).
 - Fingerprint-relevant arrays have schema-defined canonical order; source/acquisition order is never allowed to change a fingerprint:
-  - `CurveSet.curves`: ascending canonical tuple `(curve_role, index_id-or-empty, curve_id)`; duplicate `curve_id` forbidden.
+  - `CurveSet.curves`: ascending canonical tuple `(curve_role, index_id_sort_key, curve_id)`; for DiscountCurve (no `index_id` field), `index_id_sort_key` is exactly the empty UTF-8 string `""`; for ForwardCurve it is the canonical enum token. Duplicate `curve_id` forbidden.
   - `DiscountCurve/ForwardCurve.pillars`: strictly ascending `pillar_date`; duplicate dates forbidden (§7.2).
   - `FixingStore.entries`: ascending `(index_id, observation_date)`; duplicate economic keys forbidden (§8).
-  - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then active value unit/value. `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
+  - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then lexicographic canonical JSON serialization of the active `NumericWithUnit` payload (or the full StrikeCoordinate when no active numeric exists). `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
   - `exercise_dates`: ascending date, duplicate-free (§10). `calibration_instruments`: ascending `instrument_id`, duplicate-free (§14.2).
   - Named parameter lists (`ModelInput`, calibration input/result parameters) are ascending `name` with duplicate names forbidden. `per_instrument_errors` follows calibration-instrument order and permits at most one row per `instrument_id`.
   - `RiskResult.measures`: ascending `(measure_id, canonical bucket_coordinate serialization)`; duplicate exact measure/bucket keys forbidden.
   - Set-semantic provenance lists such as `upstream_ids`, `evidence_refs`, capture/surface ids are lexicographically sorted and duplicate-free before serialization.
-  - Lists whose order is itself an economic fact retain their explicitly defined domain order; warnings/errors/diagnostics are output records and must be emitted deterministically by the engine.
+  - `MarketSnapshot.diagnostics.unresolved_fields` is lexicographically sorted by canonical field-path string and duplicate-free before serialization.
+  - Lists whose order is itself an economic fact retain their explicitly defined domain order; warnings/errors/diagnostics other than the input-assembled `unresolved_fields` set are output records and must be emitted deterministically by the engine.
 - NON-RECURSIVE FINGERPRINT PREIMAGE (contract rule, not implementation convention). For any object carrying a `content_fingerprint` (RatesKernelInput, MarketSnapshot, CurveSet, DiscountCurve, ForwardCurve, FixingStore, VolatilityInput and applicable VolQuote objects, ModelInput, ExerciseTerms, SettlementTerms, Rates PricingResult / RiskResult / ModelCalibrationInput / ModelCalibrationResult, and any nested `replay.content_fingerprint`):
   - the object's own `content_fingerprint` field is EXCLUDED from its canonical fingerprint preimage;
   - the object's own identity field naming itself (`snapshot_id`, `curve_set_id`, `curve_id`, `fixing_store_id`, `volatility_input_id`, `model_input_id`, `calibration_result_id`, and equivalent result identity fields) is likewise EXCLUDED from its own preimage where including it would recurse, while all other identity content (including `captured_at` / `calibrated_at` / `valuation_date` where they are ordinary identity fields per §6.3/§14) participates normally;
@@ -1295,6 +1298,7 @@ Searched the new contract for each defect family; outcome per family:
 23. Round-7 executable-payload/vocabulary/applicability families — FIXED: (a) every calibration instrument embeds its full versioned executable instrument_terms payload plus matching fingerprint, so replay does not depend on digest-only/external reconstruction; (b) StrikeDimension has one canonical token vocabulary and methodology approval is separate state; (c) cash-only settlement method fields are PRESENT only for CASH and structured NOT_APPLICABLE for PHYSICAL.
 24. Round-8 identity/headline/result-applicability families — FIXED: (a) RatesKernelInput.valuation_product separates derivative trade identity from underlying ResolvedSwap.product_id and results echo the valued product identity; (b) PricingResult headline is a tagged authoritative value, while PV/par-rate/annuity are supplemental ValueOrReason metrics with equality rules when designated as headline; (c) RiskResult optional input identities use the same ValueOrReason applicability states as PricingResult/inputs.
 25. Round-9 OC/Codex audit families — FIXED: (a) removed duplicate curve schema_version_ref; (b) reference-date divergence has a serialized reason and unambiguous anchor role; (c) SURFACE/CUBE are structurally disjoint by strike cardinality; (d) container ATM definition supports structured NOT_APPLICABLE; (e) VolQuote node keys are deterministic/resolvable and calibration market targets use them; (f) fingerprint-relevant input lists have explicit canonical ordering/dedup; (g) #228 owns registries for forward id references; (h) calibration result rows echo market targets.
+26. Round-10 OC P3 determinism cleanup — FIXED: (a) DiscountCurve's absent index sort key is exactly empty UTF-8 string; (b) strike secondary ordering uses canonical JSON serialization, not implementation-defined unit comparison; (c) CalibrationMarketTarget has an explicit named type declaration; (d) MarketSnapshot.diagnostics.unresolved_fields is lexicographically ordered and duplicate-free.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1336,6 +1340,9 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Calibration market target — NO GUESS: typed VOL_QUOTE_NODE_V1 target resolves only inside embedded VolatilityInput; result echoes it.
 - Fingerprint list ordering — NO GUESS: §15.4 defines canonical ordering/dedup for every fingerprint-relevant input-list family.
 - Forward refs — NO GUESS on ownership: #228 owns versioned target registries for construction/calendar/observation refs.
+- Canonical sort sentinels — NO GUESS: DiscountCurve missing index uses exact empty-string sort key; strike secondary order is canonical-JSON lexicographic.
+- Calibration target DTO type — NO GUESS: CalibrationMarketTarget has one named declaration shared by input/result.
+- Snapshot unresolved-field order — NO GUESS: canonical field-path lexicographic order, duplicate-free.
 
 Classification:
 
@@ -1408,6 +1415,12 @@ Round 9 (Sophira using independent OC audit of HEAD `691e919b...` plus Codex rev
 - Accepted all five Codex findings and OC's SF1–SF3 same-family findings; SF4 (CurveSet assembled_by provenance style asymmetry) is explicitly non-blocking and left unchanged to avoid scope churn.
 - Changes are representation/determinism only: one curve schema version, serialized anchor reason, disjoint SURFACE/CUBE shape, ATM N/A state, typed VolNodeKey calibration target, canonical list ordering/dedup, #228 ref-registry ownership, calibration-result target echo.
 - No RED value, market convention, interpolation/smile/model/calibration methodology, or product economics was selected.
+
+Round 10 (Sophira, OC re-audit P3 cleanup on `ec5c84de...`):
+
+- OC reported no P1/P2 and four deterministic-wire P3s.
+- Closed all four without methodology changes: explicit DiscountCurve sort sentinel, canonical JSON strike sub-order, named CalibrationMarketTarget type, deterministic unresolved_fields ordering.
+- No additional architecture scope added.
 
 ---
 
