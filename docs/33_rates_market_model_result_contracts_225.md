@@ -430,8 +430,9 @@ discount_curve:
   curve_id: <string>                        # stable curve instance id: derived from canonical curve identity content (currency + role + index where applicable + pillars + methodology versions) per §15.4; own id + fingerprint excluded; no invented timestamp
   currency: <Currency enum>                 # e.g. USD
   curve_role: DISCOUNT | DISCOUNT_AND_FORECAST_REFERENCE_ONLY
-  valuation_date: <ISO date>                # reference date for T computations; explicit, never system date
-  reference_date: <ISO date>                # curve anchor date; normally == valuation_date; any difference is explicit data with reason
+  valuation_date: <ISO date>                # valuation context date; explicit, never system date
+  reference_date: <ISO date>                # curve anchor used for curve-time calculations; normally == valuation_date
+  reference_date_reason: <ValueOrReason<string>> # NOT_APPLICABLE when equal; PRESENT explanation required when different
   value_type: <enum>                        # one canonical V1 interpretation for all pillars; see §7.4
   value_unit: <unit enum>                   # one canonical V1 unit for all pillars; see §7.4
   pillars:
@@ -462,13 +463,13 @@ discount_curve:
     evidence_refs: <list>                  # E-citations once methodology locks; empty until then
   construction_methodology_id: UNRESOLVED    # RED-01: which approved construction produced these pillars
   construction_methodology_version: UNRESOLVED
-  schema_version_ref: DISCOUNT_CURVE_V1
   content_fingerprint: <hex>                # digest of canonical curve preimage per §15.4 (own fingerprint excluded)
 ```
 
 Constraints:
 
 - `pillars` is non-empty, sorted strictly ascending by `pillar_date`, duplicate dates refused. An unresolved pillar remains present at its original coordinate with `value_state=NULL_WITH_REASON`, `value=null`, and a structured `unresolved_reason`; dropping it, storing NaN, zero-filling it, or inventing a neighboring value is forbidden.
+- `reference_date == valuation_date` requires `reference_date_reason=NULL_WITH_REASON(category=NOT_APPLICABLE)`. If they differ, `reference_date_reason` MUST be PRESENT and explain the explicit anchor-date difference; differing dates without a reason fail closed. Curve-time calculations use `reference_date`, while `valuation_date` remains the valuation-context identity date.
 - A resolved pillar requires `value_state=RESOLVED` and a numeric `value`, and forbids `unresolved_reason`. Its interpretation comes from the enclosing curve-level `value_type` + `value_unit`.
 - `value_type` + `value_unit` are REQUIRED exactly once at curve level in V1 and apply uniformly to every pillar, including unresolved pillars. Mixed value types/units inside one V1 curve are NOT representable and fail closed; supporting a genuinely mixed curve would require a future schema version rather than ambiguous per-pillar repetition.
 - A curve whose `value_type` is `PAR_RATE_DISPLAY_ONLY_NEVER_PRICE` (the `USOSFR*` adapter output) is display-only by contract and can never be consumed as a pricing input; the kernel refuses it as `INVALID_PRODUCT` / `MISSING_MARKET_DATA` with the reason named.
@@ -637,8 +638,9 @@ vol_quote:
   shift_unit: <unit enum | NULL>          # DECIMAL | BASIS_POINTS; required iff shift present; shift without unit fails closed
   expiry: <ExpiryAxisEntry>               # exact expiry date + label + derived coordinate where known; see §9.3
   underlying_tenor: <UnderlyingTenorAxisEntry> # exact underlying start/end + label + derived coordinate where known; see §9.3
-  strike: <strike coordinate>             # absolute strike (DECIMAL_ANNUAL) OR moneyness (see §9.4); one fact per field, never conflated
-  atm_definition: <ValueOrReason<id>>    # ATM rule identity or structured N/A/unresolved reason
+  strike: <StrikeCoordinate>              # absolute strike / moneyness / ATM; see §9.4
+  node_key: <VolNodeKey>                   # exact deterministic key derived from expiry + tenor + strike; see §9.2
+  atm_definition: <ValueOrReason<id>>      # ATM rule identity or structured N/A/unresolved reason
   forward_ref: <ValueOrReason<NumericWithUnit>> # forward/ATM rate used for moneyness; value and unit travel together
   source: <enum>                         # BLOOMBERG_VCUB | BLOOMBERG_DAPI | SYNTHETIC_FIXTURE | RESEARCH_ADAPTER
   quote_timestamp: <ValueOrReason<ISO-8601 timestamp+offset>> # known timestamp or structured reason
@@ -662,7 +664,7 @@ Rules:
 volatility_input:
   schema_version: VOLATILITY_INPUT_V1
   volatility_input_id: <string>           # immutable VolatilityInput instance identity: derived from canonical vol identity preimage per §15.4 (own id + fingerprint excluded; no invented timestamp)
-  representation: SURFACE | CUBE          # SURFACE = Expiry x Tenor (+ strike); CUBE = Expiry x Tenor x Strike with full third axis
+  representation: SURFACE | CUBE          # structural invariant defined below; token alone never changes dimensionality
   quote_type: <enum>                      # uniform per container
   volatility_unit: <unit enum>            # uniform per container
   shift_unit: <unit enum | NULL>          # required iff SHIFTED_LOGNORMAL
@@ -670,9 +672,9 @@ volatility_input:
   methodology_version: UNRESOLVED
   expiries: <ordered ExpiryAxisEntry list>          # §9.3
   underlying_tenors: <ordered UnderlyingTenorAxisEntry list> # §9.3
-  strikes: <ValueOrReason<ordered StrikeCoordinate list>> # PRESENT for strike-dimensional surface/cube; NULL_WITH_REASON for ATM-only representation
-  quotes: <VolQuote list>                # every node carries §9.1 semantics; unresolved nodes carried as NULL_WITH_REASON, never dropped
-  atm_definition_id: <id | UNRESOLVED>    # RED-vol where ATM convention matters; field defined, value open
+  strikes: <ValueOrReason<ordered StrikeCoordinate list>> # SURFACE: N/A for ATM-only or PRESENT exactly 1; CUBE: PRESENT with >=2 distinct strikes
+  quotes: <VolQuote list>                 # canonically ordered by node_key; duplicate node_key forbidden
+  atm_definition_id: <ValueOrReason<id>>  # PRESENT iff methodology requires ATM anchor; N/A when genuinely irrelevant; unresolved only when applicable but unlocked
   smile_model_id: UNRESOLVED              # RED-vol: PWL vs SABR vs ...; field defined, value open (PWL_ADDITIVE_MONEYNESS_NORMAL_V1 precedent is reference only)
   smile_model_version: UNRESOLVED
   interpolation:
@@ -687,9 +689,15 @@ volatility_input:
   content_fingerprint: <hex>                # digest of canonical vol preimage per §15.4 (own fingerprint excluded)
 ```
 
-- Surface vs cube is explicit data (`representation`), not a reader inference from column counts.
+- `representation` has a structural invariant, not just a label:
+  - `SURFACE` is exactly one strike slice across Expiry × Tenor. ATM-only surface: `strikes=NULL_WITH_REASON(NOT_APPLICABLE)` and every quote uses `strike_dimension=ATM`. Non-ATM surface: `strikes=PRESENT` with exactly one StrikeCoordinate and every quote uses that coordinate.
+  - `CUBE` is Expiry × Tenor × Strike with `strikes=PRESENT` containing at least two distinct StrikeCoordinates; every quoted strike must be one of them.
+  - Any payload that can satisfy both or neither shape fails closed; changing only the representation token can never turn one structure into the other.
+- `atm_definition_id` is PRESENT exactly when the approved container methodology requires an ATM anchor. A genuinely ATM-independent absolute-strike methodology uses `NULL_WITH_REASON(category=NOT_APPLICABLE)`; if ATM is required but its convention is not yet locked, use structured `UNRESOLVED_METHODOLOGY` and fail closed rather than fabricating an id.
 - `VolatilityInput.methodology_id/version` is authoritative for the container. Every embedded `VolQuote` MUST carry matching `methodology_id/version`, `quote_type`, `volatility_unit`, and applicable `shift_unit`; any disagreement fails closed as malformed mixed semantics. V1 does not infer or merge conflicting quote methodologies.
-- Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; where strike dimension applies, its strike coordinate must likewise match the authoritative container strike axis. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch fails closed.
+- Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; its strike must satisfy the SURFACE/CUBE invariant above. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch fails closed.
+- `VolNodeKey` is the canonical typed tuple `{expiry_coordinate, underlying_tenor_coordinate, strike}`, where the two coordinates equal the authoritative axis-entry numeric coordinates and `strike` is the canonical StrikeCoordinate object. Each `VolQuote.node_key` MUST equal the tuple derived from that quote's embedded fields. Duplicate node keys are forbidden.
+- `VolatilityInput.quotes` is canonically sorted ascending by canonical serialization of `node_key`; source capture order never affects the wire payload or fingerprint.
 - The third (strike) axis, where present, uses one canonical `StrikeDimension` vocabulary: `ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS`. The existence of a vocabulary token does NOT approve its production methodology: `ABSOLUTE_STRIKE` and `LOG_MONEYNESS` remain UNRESOLVED for production use and require RED-225-V2 approval/evidence. Approval status is carried by methodology/version state, never encoded by changing the enum token name.
 - Unresolved nodes block any bracket reaching across them (resolver precedent). Interpolating over an unreadable column and reporting no fallback is forbidden.
 
@@ -1011,7 +1019,10 @@ model_calibration_input:
         schema_version: <string>           # exact owning product contract version
         payload: <typed canonical object> # full product terms needed to construct the calibration instrument; never fingerprint-only
         content_fingerprint: <hex>         # digest of this exact schema_version + payload under §15.4 non-recursive rules
-      market_target_ref: <string>         # exact quote/node/market target identity used by objective
+      market_target:
+        kind: VOL_QUOTE_NODE_V1            # only resolvable V1 target kind; later kinds require a schema revision
+        volatility_input_id: <string>      # MUST equal embedded market_snapshot.volatility_input id
+        node_key: <VolNodeKey>             # MUST resolve uniquely to exactly one embedded VolQuote
       weight: <ValueOrReason<NumericWithUnit>>
   initial_parameters: <ValueOrReason<ordered list[{name, value, unit}]>> # PRESENT when optimizer/model requires seed; structured N/A otherwise
   objective:
@@ -1032,7 +1043,8 @@ model_calibration_input:
 
 Canonical calibration-input rules:
 
-- `ModelCalibrationInput.content_fingerprint` fingerprints ALL fields above in canonical serialization semantics: valuation context, full MarketSnapshot content, model id/version, ordered calibration-instrument records (including each full `instrument_terms.schema_version + payload + content_fingerprint`, market targets, and weights), initial parameters, objective id/version/settings, optimizer id/version/settings, and convergence policy.
+- `ModelCalibrationInput.content_fingerprint` fingerprints ALL fields above in canonical serialization semantics: valuation context, full MarketSnapshot content, model id/version, ordered calibration-instrument records (including each full `instrument_terms.schema_version + payload + content_fingerprint`, typed market target, and weights), initial parameters, objective id/version/settings, optimizer id/version/settings, and convergence policy.
+- Each `market_target.kind=VOL_QUOTE_NODE_V1` MUST name the embedded `VolatilityInput` actually present in `market_snapshot` and a `VolNodeKey` that resolves to exactly one embedded quote; missing, zero-match, or duplicate-match targets fail closed. A free-form string or external lookup is not a V1 market target. Curve/fixing target kinds are not invented here and require a later schema revision if needed.
 - Each calibration instrument MUST carry the full immutable executable `instrument_terms.payload` defined by the owning later product contract, not merely a digest or external id. Its `instrument_terms.content_fingerprint` MUST match the embedded `schema_version + payload`; mismatch fails closed.
 - #225 does not invent European swaption/callable instrument economics before those issues define them. The envelope above fixes payload LOCATION / replay semantics only; the concrete typed payload schema and economic fields remain owned by the relevant later product issue.
 - Instrument order is canonical and deterministic (ascending `instrument_id` unless a later LOCKED methodology explicitly requires another ordering and records that version). Duplicate `instrument_id` values fail closed.
@@ -1052,9 +1064,10 @@ model_calibration_result:
   valuation_context_id: <string>          # context calibrated under
   market_snapshot_id: <string>            # exact snapshot calibrated against
   instruments:                            # calibration instruments / identifiers
-    - instrument_id: <string>             # e.g. swaption quote id / VolatilityInput node id
+    - instrument_id: <string>
       instrument_type: <enum>             # EUROPEAN_SWAPTION | VANILLA_SWAP | ...
-      weight: <ValueOrReason<NumericWithUnit>> # calibration weight value+unit or structured reason; no comment-only unit
+      market_target: <CalibrationMarketTarget> # exact echo of consumed ModelCalibrationInput target
+      weight: <ValueOrReason<NumericWithUnit>> # exact echo of input weight
   parameters:                             # calibrated parameters, one fact per parameter
     - name: <string>
       value: <double>
@@ -1081,7 +1094,7 @@ Rules:
 
 - A calibration result without `calibration_input_id`, `model_id`, `market_snapshot_id`, `instruments`, `parameters` (with units), `objective` identity, and `convergence.status` is incomplete and fails validation.
 - `ModelCalibrationResult.replay.inputs_fingerprint` MUST equal the consumed `ModelCalibrationInput.content_fingerprint`; `calibration_input_id` MUST equal that input's identity. Implementations may not hash an ad-hoc subset.
-- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, ordered `instruments[*].{instrument_id,instrument_type,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. The authoritative instrument economics remain the embedded `ModelCalibrationInput.calibration_instruments[*].instrument_terms`; result rows do not redefine them. Any mismatch is a malformed result, not a second authority.
+- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, ordered `instruments[*].{instrument_id,instrument_type,market_target,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. The authoritative instrument economics remain the embedded `ModelCalibrationInput.calibration_instruments[*].instrument_terms`; result rows do not redefine them. Any mismatch is a malformed result, not a second authority.
 - When `convergence.tolerance` is applicable, it MUST echo the exact `ModelCalibrationInput.convergence_policy.tolerance` value+unit. Output-only facts are `calibrated_at`, calibrated `parameters`, objective error values, iteration count, convergence status, warnings/errors, and provenance.
 - `CONVERGED=false` (or `NOT_CONVERGED`) results are still first-class records: a downstream pricing call consuming a non-converged calibration fails closed unless an explicit override policy (itself RED-model, not defined here) permits it with the override recorded.
 - Objective, optimizer, tolerance, and model version VALUES are UNRESOLVED — RED-model. The fields exist so Phase-3 work can record them without redesigning the contract.
@@ -1126,6 +1139,16 @@ Source + methodology + version are never collapsed into one string. Provenance w
 ### 15.4 Deterministic replay
 
 - Canonical serialization: every contract defines a canonical JSON form (sorted keys, fixed separators, decimal formatting pinned by the owning implementation issue — format details owned by #227, not chosen here).
+- Fingerprint-relevant arrays have schema-defined canonical order; source/acquisition order is never allowed to change a fingerprint:
+  - `CurveSet.curves`: ascending canonical tuple `(curve_role, index_id-or-empty, curve_id)`; duplicate `curve_id` forbidden.
+  - `DiscountCurve/ForwardCurve.pillars`: strictly ascending `pillar_date`; duplicate dates forbidden (§7.2).
+  - `FixingStore.entries`: ascending `(index_id, observation_date)`; duplicate economic keys forbidden (§8).
+  - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then active value unit/value. `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
+  - `exercise_dates`: ascending date, duplicate-free (§10). `calibration_instruments`: ascending `instrument_id`, duplicate-free (§14.2).
+  - Named parameter lists (`ModelInput`, calibration input/result parameters) are ascending `name` with duplicate names forbidden. `per_instrument_errors` follows calibration-instrument order and permits at most one row per `instrument_id`.
+  - `RiskResult.measures`: ascending `(measure_id, canonical bucket_coordinate serialization)`; duplicate exact measure/bucket keys forbidden.
+  - Set-semantic provenance lists such as `upstream_ids`, `evidence_refs`, capture/surface ids are lexicographically sorted and duplicate-free before serialization.
+  - Lists whose order is itself an economic fact retain their explicitly defined domain order; warnings/errors/diagnostics are output records and must be emitted deterministically by the engine.
 - NON-RECURSIVE FINGERPRINT PREIMAGE (contract rule, not implementation convention). For any object carrying a `content_fingerprint` (RatesKernelInput, MarketSnapshot, CurveSet, DiscountCurve, ForwardCurve, FixingStore, VolatilityInput and applicable VolQuote objects, ModelInput, ExerciseTerms, SettlementTerms, Rates PricingResult / RiskResult / ModelCalibrationInput / ModelCalibrationResult, and any nested `replay.content_fingerprint`):
   - the object's own `content_fingerprint` field is EXCLUDED from its canonical fingerprint preimage;
   - the object's own identity field naming itself (`snapshot_id`, `curve_set_id`, `curve_id`, `fixing_store_id`, `volatility_input_id`, `model_input_id`, `calibration_result_id`, and equivalent result identity fields) is likewise EXCLUDED from its own preimage where including it would recurse, while all other identity content (including `captured_at` / `calibrated_at` / `valuation_date` where they are ordinary identity fields per §6.3/§14) participates normally;
@@ -1215,7 +1238,7 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 
 - **#226 (build / QuantLib isolation / concurrency / caching / benchmark methodology).** Owns: C++20/CMake skeleton decisions, dependency pinning, QuantLib isolation interface, thread-safety contract, cache-key composition + invalidation (over the identity fields defined here), benchmark methodology, CI. Must not invent DTO field semantics belonging to #225 (this issue) or #224. Dependency recorded here: caching requires every cache-keyable field present and typed (§6.4); concurrency requires immutable snapshot semantics (§6.3) — implementation belongs to #226.
 - **#227 (C++20 skeleton + versioned DTO/JSON contract + CI).** Consumes: `RatesKernelInput` boundary composition (§5.1), wire-schema versions (§15.2), canonical serialization + NON-RECURSIVE preimage rule (§15.4, format/hash details owned by #227), `UNKNOWN_SCHEMA_VERSION` / `UNKNOWN_METHODOLOGY_VERSION` fail-closed behavior (§16). Must refuse unknown versions before content; must implement `NULL_WITH_REASON` as fingerprint-participating (§15.4); must exclude each object's own fingerprint/identity field from its own preimage while keeping child/input fingerprints as ordinary fields.
-- **#228 (curve, fixing, calendar, resolved SOFR schedule primitives).** Consumes: `CurveSet` / `DiscountCurve` / `ForwardCurve` shapes (§7) with RED-01 values still open — implements the MECHANICS against the contract without choosing production values; `FixingStore` semantics + embedded `same_day_rule` (§8.2/§8.5) + state-dependent projection fields (§8.2/§8.3) + fail-closed table (§8.4); calendar/BDC role shape from #224 (values still RED-02). Must not silently close RED-01, RED-02, RED-225-C*, or RED-225-F*.
+- **#228 (curve, fixing, calendar, resolved SOFR schedule primitives).** Consumes: `CurveSet` / `DiscountCurve` / `ForwardCurve` shapes (§7) with RED-01 values still open — implements the MECHANICS against the contract without choosing production values; `FixingStore` semantics + embedded `same_day_rule` (§8.2/§8.5) + state-dependent projection fields (§8.2/§8.3) + fail-closed table (§8.4); calendar/BDC role shape from #224 (values still RED-02). #228 owns the versioned target registries / DTO targets that make `construction_inputs_ref`, `fixing_calendar_ref`, and `observation_rules_ref` resolvable; until those target schemas exist, these refs remain structured unresolved/not-applicable values and MUST NOT trigger external guessing. Must not silently close RED-01, RED-02, RED-225-C*, or RED-225-F*.
 - **#229 (C++ vanilla USD SOFR swap kernel).** Consumes: `RatesKernelInput` (§5.1), whose vanilla-swap invocation carries `ResolvedSwap` + `MarketSnapshot` and structured NOT_APPLICABLE exercise/settlement/model terms as appropriate, plus `PricingResult` (§12) + `RiskResult` (§13, DV01 scope). Must record `curve_role_map`, inputs identity, assumptions, diagnostics, and replay fingerprints per §12; must implement the §16 fail-closed table literally. Must not invent curve/vol/model methodology to fill RED gaps.
 - Later issues (#230 workstation reconciliation, #231–#232 swaption engine + quote/settlement reconciliation, #233–#235 Hull-White/Bermudan, #236–#238 accruals) consume §9–§11 + §14 without contract redesign, filling RED-225-V*/E*/S*/M* values with evidence at their own gates.
 
@@ -1229,12 +1252,12 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] #224 semantics preserved: R1/R2, wire versioning, D1–D13/E1–E6 untouched; no RED-02 value filled.
 - [ ] `RatesKernelInput` (§5.1) explicitly separates valuation_product identity from underlying ResolvedSwap identity, and carries MarketSnapshot + curve_selection + applicable ExerciseTerms / SettlementTerms / ModelInput at the no-I/O boundary; derivative product ids are never replaced by underlying swap ids.
 - [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
-- [ ] Curve ENGINE CONTRACT distinguishes identity / currency / role / discount-vs-forward / index / dates / pillars / curve-level value-type/unit / compounding / interpolation-extrapolation / complete provenance / schema / methodology-version (§7); unresolved pillars remain structurally present with typed reason; V1 forbids mixed per-pillar value semantics; every unapproved VALUE marked `UNRESOLVED — RED`; no naked double arrays.
+- [ ] Curve ENGINE CONTRACT has exactly one wire schema version authority; reference_date differences carry a serialized reason; identity / currency / role / dates / pillars / value semantics / provenance / methodology are explicit (§7); unresolved pillars remain structurally present; no naked double arrays.
 - [ ] FixingStore distinguishes observation_date from publication_date/publication_timestamp (§8.2–§8.5); history-vs-forecast availability is never inferred from observation date alone; forecast-only stores may carry an explicit empty source union without inventing a source; PROJECTED is complete audit-only state or rejected; same-day publication ambiguity carried at the single authoritative `FixingStore.same_day_rule`; no silent history-to-forecast.
-- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); StrikeDimension uses one canonical token set (`ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS`) with approval status separate from token naming; unreadable nodes remain structurally present as NULL_WITH_REASON; VolatilityInput carries authoritative methodology_id/version; expiry/underlying axes preserve exact dates; no production vol methodology chosen (RED-225-V*).
+- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); SURFACE and CUBE have disjoint cardinality invariants; ATM definition can be structured NOT_APPLICABLE; VolQuote nodes have deterministic typed VolNodeKey identity, canonical order, and duplicate refusal; StrikeDimension remains canonical; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice / underlying-start rule / calendar-timezone (§10); derivative underlying_product_id binds to both RatesKernelInput.valuation_product.underlying_product_id and embedded ResolvedSwap.product_id; no invented ResolvedSwap identity field; unresolved methodology values remain RED.
 - [ ] Settlement separates type / cash-only method / physical-vs-cash / cash methodology / date-timing / provenance (§11); PHYSICAL carries structured NOT_APPLICABLE for cash-only method fields rather than unresolved fake values; no invented values (RED-225-S1).
-- [ ] PricingResult carries a tagged authoritative headline value plus supplemental typed metrics; product identity echoes RatesKernelInput.valuation_product; RiskResult uses the same structured applicability states for optional input identities; ModelCalibrationInput defines exact calibration replay (§12–§14).
+- [ ] PricingResult carries a tagged authoritative headline value plus supplemental typed metrics; product identity echoes RatesKernelInput.valuation_product; RiskResult uses structured applicability; ModelCalibrationInput targets embedded VolQuote nodes through resolvable VolNodeKey and ModelCalibrationResult echoes the same target (§12–§14).
 - [ ] Versioning/provenance: actual value vs resolution-status separated (§15.1); machine-readable schema versions everywhere incl. `RATES_KERNEL_INPUT_V1` (§15.2); independently identity-bearing market/model objects satisfy the complete provenance envelope (§15.3); source/methodology/version never collapsed; replay fingerprints defined with NON-RECURSIVE preimage (§15.4); snapshot identity includes `captured_at` exactly once; ExerciseTerms/SettlementTerms carry identities + fingerprints.
 - [ ] Fail-closed rules enumerated (§16 + per-section rules); RED list complete with owners (§17); #226–#229 boundaries preserved (§18).
 - [ ] Same-defect-family audit performed (§A below): no naked units, no role-by-name, no comment-as-data, no collapsed provenance, no history/forecast ambiguity, no settlement/vol-coordinate ambiguity, no QuantLib/Bloomberg hidden dependence, nothing #227–#229 must infer.
@@ -1271,6 +1294,7 @@ Searched the new contract for each defect family; outcome per family:
 22. Round-6 representation/replay families — FIXED: (a) reason-bearing nullable fields identified by review (index_tenor, VolatilityInput.strikes, RiskResult.bucket_coordinate) use ValueOrReason; (b) each curve pillar carries source_column or structured N/A; (c) forecast-only FixingStore source union may be explicitly empty; (d) ExerciseTerms binds to actual #224 ResolvedSwap.product_id; (e) ModelCalibrationInput defines the exact deterministic calibration replay preimage and ModelCalibrationResult binds its inputs_fingerprint to that input.
 23. Round-7 executable-payload/vocabulary/applicability families — FIXED: (a) every calibration instrument embeds its full versioned executable instrument_terms payload plus matching fingerprint, so replay does not depend on digest-only/external reconstruction; (b) StrikeDimension has one canonical token vocabulary and methodology approval is separate state; (c) cash-only settlement method fields are PRESENT only for CASH and structured NOT_APPLICABLE for PHYSICAL.
 24. Round-8 identity/headline/result-applicability families — FIXED: (a) RatesKernelInput.valuation_product separates derivative trade identity from underlying ResolvedSwap.product_id and results echo the valued product identity; (b) PricingResult headline is a tagged authoritative value, while PV/par-rate/annuity are supplemental ValueOrReason metrics with equality rules when designated as headline; (c) RiskResult optional input identities use the same ValueOrReason applicability states as PricingResult/inputs.
+25. Round-9 OC/Codex audit families — FIXED: (a) removed duplicate curve schema_version_ref; (b) reference-date divergence has a serialized reason and unambiguous anchor role; (c) SURFACE/CUBE are structurally disjoint by strike cardinality; (d) container ATM definition supports structured NOT_APPLICABLE; (e) VolQuote node keys are deterministic/resolvable and calibration market targets use them; (f) fingerprint-relevant input lists have explicit canonical ordering/dedup; (g) #228 owns registries for forward id references; (h) calibration result rows echo market targets.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1306,6 +1330,12 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Valued-product vs underlying identity — NO GUESS: §5.1 carries valuation_product separately; derivative underlying_product_id binds to ResolvedSwap.product_id; Pricing/Risk results echo valuation_product.
 - Headline result semantics — NO GUESS: §12.2 tagged headline contains semantics+value+unit(+currency/sign applicability); supplemental metrics cannot disagree.
 - Risk optional identities — NO GUESS: §13.2 uses ValueOrReason for vol/exercise/settlement/model/calibration ids, mirroring kernel applicability.
+- Curve schema/anchor semantics — NO GUESS: one schema_version authority; reference_date carries explicit reason when differing from valuation_date.
+- Vol dimensionality/node identity — NO GUESS: SURFACE/CUBE cardinality is disjoint; VolNodeKey canonically identifies each quote; duplicate keys fail.
+- ATM applicability — NO GUESS: container atm_definition_id uses ValueOrReason and can be genuinely NOT_APPLICABLE.
+- Calibration market target — NO GUESS: typed VOL_QUOTE_NODE_V1 target resolves only inside embedded VolatilityInput; result echoes it.
+- Fingerprint list ordering — NO GUESS: §15.4 defines canonical ordering/dedup for every fingerprint-relevant input-list family.
+- Forward refs — NO GUESS on ownership: #228 owns versioned target registries for construction/calendar/observation refs.
 
 Classification:
 
@@ -1372,6 +1402,12 @@ Round 8 (Sophira, three Codex P2 findings on `837e3bb6...`):
 
 - Accepted all three: derivative trade identity collapsed into underlying ResolvedSwap.product_id; ambiguous PricingResult headline semantics; RiskResult optional identities lacking applicability encoding.
 - Added valuation_product identity at the kernel boundary, tagged authoritative headline semantics, and structured RiskResult input identity applicability. No product pricing methodology or market value was chosen.
+
+Round 9 (Sophira using independent OC audit of HEAD `691e919b...` plus Codex review):
+
+- Accepted all five Codex findings and OC's SF1–SF3 same-family findings; SF4 (CurveSet assembled_by provenance style asymmetry) is explicitly non-blocking and left unchanged to avoid scope churn.
+- Changes are representation/determinism only: one curve schema version, serialized anchor reason, disjoint SURFACE/CUBE shape, ATM N/A state, typed VolNodeKey calibration target, canonical list ordering/dedup, #228 ref-registry ownership, calibration-result target echo.
+- No RED value, market convention, interpolation/smile/model/calibration methodology, or product economics was selected.
 
 ---
 
