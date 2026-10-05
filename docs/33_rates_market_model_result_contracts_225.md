@@ -564,7 +564,7 @@ fixing_store:
       version: <ValueOrReason<string>>      # source version / batch id or structured reason when no source exists
       projection_method_id: <ValueOrReason<string>>      # state-dependent; see §8.3
       projection_method_version: <ValueOrReason<string>> # state-dependent; see §8.3
-      projection_inputs_ref: <ValueOrReason<ProjectionInputsRef>> # exact curve-set/forward-curve/observation-rule inputs used for audit projection
+      projection_inputs_ref: <ValueOrReason<ProjectionInputsRef>> # exact curve-set/forecast-curve/observation-rule inputs used for audit projection
   provenance:
     sources: <list<enum>>                  # exact union of PRESENT entry sources; MAY be empty for forecast-only/MISSING-only store; never invent a market source
     assembled_by: <string>
@@ -576,13 +576,13 @@ fixing_store:
 
 projection_inputs_ref_type:
   curve_set_id: <curve_set_id>              # MUST identify sibling MarketSnapshot.curve_set when embedded
-  forward_curve_id: <curve_id>              # MUST resolve to FORECAST curve with matching entry.index_id
+  forecast_curve_id: <curve_id>             # MUST resolve to a forecast-capable curve with matching entry.index_id (§8.2 state rules)
   observation_rules_ref: <id>               # MUST resolve through the #228-owned observation-rule registry
 ```
 
 State-dependent projection-field rules (machine-readable, enforced per entry):
 
-- `PROJECTED`: valid only as a complete audit-only forecast record. `value`, `source=CURVE_PROJECTION`, `projection_method_id`, `projection_method_version`, and `projection_inputs_ref` MUST all be PRESENT. The typed reference MUST identify the sibling `CurveSet`, a FORECAST `forward_curve_id` whose `index_id` equals the entry's `index_id`, and the exact observation-rule id resolved by the #228-owned registry; zero-match, mismatch, or opaque/external-only references fail closed. If projection methodology is unknown/unapproved, do NOT serialize the entry as `PROJECTED`; use the applicable non-projected state (normally `FORECAST_REQUIRED`).
+- `PROJECTED`: valid only as a complete audit-only forecast record. `value`, `source=CURVE_PROJECTION`, `projection_method_id`, `projection_method_version`, and `projection_inputs_ref` MUST all be PRESENT. The typed reference MUST identify the sibling `CurveSet`, a forecast-capable `forecast_curve_id` whose role permits forecasting (`FORECAST`, or explicitly-authorized `DISCOUNT_AND_FORECAST_REFERENCE_ONLY` per §7.1.1/§7.3) and whose PRESENT `index_id` exactly equals the entry's `index_id`, and the exact observation-rule id resolved by the #228-owned registry; zero-match, role/index mismatch, or opaque/external-only references fail closed. The reference is selected by `curve_id` under the same forecast-capable rule as `curve_selection` (§5.1) and is never restricted to the `ForwardCurve` concrete shape, so an explicitly-authorized combined-role reference curve that actually produced the projection is representable. If projection methodology is unknown/unapproved, do NOT serialize the entry as `PROJECTED`; use the applicable non-projected state (normally `FORECAST_REQUIRED`).
 - `HISTORICAL`: `value` must be PRESENT with unit `DECIMAL_ANNUAL`; `source` and `version` must be PRESENT; projection fields must be `NULL_WITH_REASON` (reason `NOT_APPLICABLE_HISTORICAL`). A historical entry carrying projection methodology is malformed and fails closed.
 - `FORECAST_REQUIRED`: `value` is `NULL_WITH_REASON(TO_BE_PROJECTED_AT_VALUATION)`; projection fields are also structured not-yet-projected states. No projected value is stored as history — future projection is computed by the pricing/resolution path from the approved forward curve + observation mechanics, not read from this entry.
 - `MISSING`: `value`, `source`, `quote_timestamp`, and `version` carry structured missing/unavailable reasons as applicable; projection fields are `NULL_WITH_REASON`. No projection methodology may convert `MISSING` into history.
@@ -652,7 +652,7 @@ vol_quote:
   shift: <double | NULL>                 # displaced-diffusion shift where quote_type=SHIFTED_LOGNORMAL; NULL elsewhere
   shift_unit: <unit enum | NULL>          # DECIMAL | BASIS_POINTS; required iff shift present; shift without unit fails closed
   expiry: <ExpiryAxisEntry>               # exact expiry date + label + derived coordinate where known; see §9.3
-  underlying_tenor: <UnderlyingTenorAxisEntry> # exact underlying start/end + label + derived coordinate where known; see §9.3
+  underlying_tenor: <UnderlyingTenorAxisEntry> # relative tenor-axis echo (label + coordinate + coordinate method); exact start/end dates live on the (expiry, tenor) corner; see §9.3
   strike: <StrikeCoordinate>              # absolute strike / moneyness / ATM; see §9.4
   node_key: <VolNodeKey>                   # exact deterministic key derived from expiry + tenor + strike; see §9.2
   atm_definition: <ValueOrReason<id>>      # ATM rule identity or structured N/A/unresolved reason
@@ -689,7 +689,8 @@ volatility_input:
   methodology_id: UNRESOLVED              # authoritative container methodology — RED-225-V1
   methodology_version: UNRESOLVED
   expiries: <ordered ExpiryAxisEntry list>          # §9.3
-  underlying_tenors: <ordered UnderlyingTenorAxisEntry list> # §9.3
+  underlying_tenors: <ordered UnderlyingTenorAxisEntry list> # §9.3; relative axis only (label + coordinate + coordinate method)
+  underlying_corners: <ordered UnderlyingCornerEntry list> # §9.3; exactly one per quoted (expiry, tenor) pair; single authority for exact underlying start/end dates
   strikes: <ValueOrReason<ordered StrikeCoordinate list>> # SURFACE: N/A for ATM-only or PRESENT exactly 1; CUBE: PRESENT with >=2 distinct strikes
   quotes: <VolQuote list>                 # canonically ordered by node_key; duplicate node_key forbidden
   atm_definition_id: <ValueOrReason<id>>  # PRESENT iff methodology requires ATM anchor; N/A when genuinely irrelevant; unresolved only when applicable but unlocked
@@ -714,7 +715,7 @@ volatility_input:
   - Any payload that can satisfy both or neither shape fails closed; changing only the representation token can never turn one structure into the other.
 - `atm_definition_id` is PRESENT exactly when the approved container methodology requires an ATM anchor. A genuinely ATM-independent absolute-strike methodology uses `NULL_WITH_REASON(category=NOT_APPLICABLE)`; if ATM is required but its convention is not yet locked, use structured `UNRESOLVED_METHODOLOGY` and fail closed rather than fabricating an id.
 - `VolatilityInput.methodology_id/version` is authoritative for the container. Every embedded `VolQuote` MUST carry matching `methodology_id/version`, `quote_type`, `volatility_unit`, applicable `shift_unit`, and an `atm_definition` ValueOrReason state/value exactly equal to container `atm_definition_id`. A quote cannot introduce a second ATM authority; any disagreement (including PRESENT vs NOT_APPLICABLE vs UNRESOLVED state) fails closed as malformed mixed semantics.
-- Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; its strike must satisfy the SURFACE/CUBE invariant above. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch fails closed.
+- Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; its strike must satisfy the SURFACE/CUBE invariant above. In addition, every quoted `(expiry_coordinate, underlying_tenor_coordinate)` pair MUST match exactly one `underlying_corners` entry, which is the single authority for that pair's exact underlying start/end dates. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch, a missing corner, or a duplicate corner pair fails closed.
 - `VolNodeKey` is the canonical typed tuple `{expiry_coordinate, underlying_tenor_coordinate, strike}`, where the two coordinates equal the authoritative axis-entry numeric coordinates and `strike` is the canonical StrikeCoordinate object. Each `VolQuote.node_key` MUST equal the tuple derived from that quote's embedded fields. Duplicate node keys are forbidden.
 - `VolatilityInput.quotes` is canonically sorted ascending by canonical serialization of `node_key`; source capture order never affects the wire payload or fingerprint.
 - The third (strike) axis, where present, uses one canonical `StrikeDimension` vocabulary: `ATM | YIELD_OFFSET_BP | ABSOLUTE_STRIKE | LOG_MONEYNESS`. The existence of a vocabulary token does NOT approve its production methodology: `ABSOLUTE_STRIKE` and `LOG_MONEYNESS` remain UNRESOLVED for production use and require RED-225-V2 approval/evidence. Approval status is carried by methodology/version state, never encoded by changing the enum token name.
@@ -735,16 +736,23 @@ expiry_axis_entry:
 
 underlying_tenor_axis_entry:
   label: <string>                         # e.g. "10Y"; verbatim/source label
-  underlying_start_date: <ValueOrReason<ISO date>> # exact start date when known
-  underlying_end_date: <ValueOrReason<ISO date>>   # exact maturity/end date when known
   coordinate: <double>                    # derived tenor interpolation coordinate
   coordinate_unit: YEARS_FRACTION
   coordinate_method_id: UNRESOLVED
   coordinate_method_version: UNRESOLVED
+
+underlying_corner_entry:                  # exact calendar identity of one (expiry, tenor) corner
+  expiry_coordinate: <double>             # MUST equal exactly one expiries[].coordinate
+  underlying_tenor_coordinate: <double>   # MUST equal exactly one underlying_tenors[].coordinate
+  underlying_start_date: <ValueOrReason<ISO date>> # exact underlying start date for THIS corner
+  underlying_end_date: <ValueOrReason<ISO date>>   # exact underlying maturity/end date for THIS corner
 ```
 
-- When exact expiry/start/end dates are known from the source or resolved instrument, they MUST be PRESENT and preserved. An adapter must not discard them and require a downstream consumer to reconstruct dates from `coordinate`.
+- Exact underlying start/end dates are keyed by BOTH coordinates (`underlying_corner_entry.expiry_coordinate` + `underlying_tenor_coordinate`), never by the tenor axis alone: the same tenor has different underlying dates at different expiries (e.g. `1Y × 10Y` vs `2Y × 10Y`). The one-dimensional `underlying_tenor_axis_entry` stays relative (label + coordinate + coordinate method) and never carries a start or end date.
+- When exact expiry/start/end dates are known from the source or resolved instrument, they MUST be PRESENT and preserved at their authoritative location (expiry date on the expiry axis entry; underlying start/end on the `(expiry, tenor)` corner). An adapter must not discard them and require a downstream consumer to reconstruct dates from `coordinate`.
 - When an exact date is genuinely unavailable from the source, the field is `NULL_WITH_REASON`; the numeric coordinate may still be present only if an explicit coordinate methodology produced it from authoritative inputs. No reverse derivation from coordinate to calendar date is allowed.
+- Corner coverage is total and duplicate-free: exactly one `underlying_corners` entry per distinct `(expiry_coordinate, underlying_tenor_coordinate)` pair present in `quotes`, each referencing coordinates that resolve to the authoritative `expiries` / `underlying_tenors` axes. A quoted pair without a corner entry fails closed, and incomplete coverage is never repaired by inferring a date from the tenor coordinate.
+- A `VOL_QUOTE_V1` object is defined for embedded use inside a `VOLATILITY_INPUT_V1` container; exact underlying start/end dates are authoritative only on that container's `underlying_corners`, never duplicated onto the quote.
 - Coverage must be complete: a label without a required interpolation coordinate fails closed.
 - Duplicate coordinates across labels fail closed (bracketing ambiguous).
 - Out-of-range queries fail closed (`FAIL_CLOSED`); Bloomberg's own flat extrapolation is deliberately not mirrored.
@@ -980,6 +988,7 @@ rates_risk_result:
         bump_type: PARALLEL_BP | BUCKETED_TENOR | VOL_POINT | MODEL_PARAM # exact V1 vocabulary
         bump_size: <double>
         bump_unit: <unit enum>            # BASIS_POINTS | DECIMAL | ... ; explicit
+        bump_target: <ValueOrReason<RiskBumpTarget>> # typed bumped-curve scope; PRESENT iff bump_type=PARALLEL_BP, else structured NOT_APPLICABLE
         revaluation_rule_id: UNRESOLVED   # RED-risk: full revaluation vs analytic; field defined, value open
         revaluation_rule_version: UNRESOLVED
       bucket_coordinate: <ValueOrReason<RiskBucketCoordinate>> # exact tagged union below; N/A only for PARALLEL_BP
@@ -1022,16 +1031,34 @@ risk_bucket_coordinate_type:
     kind: MODEL_PARAMETER
     model_input_id: <string>              # MUST equal the consumed ModelInput id
     parameter_name: <string>              # MUST resolve to exactly one named ModelInput parameter
+
+risk_bump_target_type:
+  # Tagged union; exactly one variant is serialized. Identifies WHICH selected curve(s) received the bump.
+  # Carries no bump size, bucket boundary, or revaluation rule: those stay in bump_spec / RED-225-R1.
+  ALL_SELECTED_CURVES:
+    kind: ALL_SELECTED_CURVES             # every distinct curve_id named by inputs_identity.curve_role_map
+  DISCOUNT_CURVE:
+    kind: DISCOUNT_CURVE
+    curve_id: <curve_id>                  # MUST equal inputs_identity.curve_role_map.discount_curve_id
+  FORECAST_CURVE:
+    kind: FORECAST_CURVE
+    curve_id: <curve_id>                  # MUST equal inputs_identity.curve_role_map.forecast_curve_by_index[index_id]
+    index_id: <FloatingIndex enum>        # PRESENT selection-map key; the bumped forecasting role
 ```
 
 Rules:
 
 - `product_id/product_type` MUST echo `RatesKernelInput.valuation_product`, and `inputs_identity.resolved_swap_product_id` MUST equal the embedded `ResolvedSwap.product_id`. Every optional input identity MUST echo the corresponding `RatesKernelInput` applicability state: PRESENT carries the exact consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`. Omission, bare null, or fabricated ids are malformed.
-- Every measure names its `measure_id`, `bump_spec` (type + size + unit + revaluation rule), `unit`, and structured `bucket_coordinate`. A sensitivity without a bump spec is not a result.
+- Every measure names its `measure_id`, `bump_spec` (type + size + unit + typed target + revaluation rule), `unit`, and structured `bucket_coordinate`. A sensitivity without a bump spec is not a result.
 - `bucket_coordinate` applicability is exact by `bump_type`: `PARALLEL_BP` requires `NULL_WITH_REASON(category=NOT_APPLICABLE)`; `BUCKETED_TENOR` requires PRESENT `RiskBucketCoordinate(kind=TENOR)`; `VOL_POINT` requires PRESENT `kind=VOL_NODE`; `MODEL_PARAM` requires PRESENT `kind=MODEL_PARAMETER`. Any other pairing fails closed.
 - `TENOR` identifies both WHICH selected curve and WHICH valuation role was bumped. For `curve_usage_role=DISCOUNT`, `curve_id` MUST equal `inputs_identity.curve_role_map.discount_curve_id` and `index_id` is structured NOT_APPLICABLE. For `FORECAST`, `index_id` MUST be PRESENT and `curve_id` MUST equal `inputs_identity.curve_role_map.forecast_curve_by_index[index_id]`. The referenced curve's intrinsic role/index must permit that usage under §5.1/§7; this also distinguishes discount vs forecast bumps when the same combined-role curve serves both.
 - `TENOR.coordinate` is the authoritative machine coordinate and MUST carry `unit=YEARS_FRACTION`; `label` is optional display/source text only and cannot change identity. `VOL_NODE` and `MODEL_PARAMETER` coordinates must resolve uniquely against the exact consumed input objects named in the coordinate. Free-form dates, tenor strings, parameter aliases, or ad-hoc maps are not valid RATES_RISK_RESULT_V1 bucket coordinates.
-- Bump sizes and bucketing rules are per-measure data with explicit units. Production bump conventions (1bp vs 0.5bp, bucket boundaries) are UNRESOLVED — RED-risk where desk methodology is required; the fields exist so the choice is recordable, not so a default is smuggled in.
+- `bump_target` applicability is exact by `bump_type`: `PARALLEL_BP` requires PRESENT `RiskBumpTarget`; `BUCKETED_TENOR`, `VOL_POINT`, and `MODEL_PARAM` require structured `NULL_WITH_REASON(category=NOT_APPLICABLE)` because their `bucket_coordinate` variant already names the bumped curve / vol input / model input. Carrying a second copy of that identity would be a duplicate authority.
+- `PARALLEL_BP` has no single bucket coordinate, so `bump_target` is the only identity that distinguishes a discount-curve bump, a forecast bump for a specific index, and an all-selected-curves bump. It is a closed union: an arbitrary, unlisted, or free-text curve set is not representable.
+- `DISCOUNT_CURVE.curve_id` MUST equal `inputs_identity.curve_role_map.discount_curve_id`. `FORECAST_CURVE.{curve_id, index_id}` MUST match one `inputs_identity.curve_role_map.forecast_curve_by_index` entry exactly, and the referenced curve's role/index must permit forecast usage under §5.1/§7.3. `ALL_SELECTED_CURVES` is exactly the set of distinct `curve_id` values in `curve_role_map`: a combined-role curve selected for both roles is one curve and is bumped once. Unknown, unresolved, or non-selected targets fail closed.
+- `PARALLEL_BP` + `DISCOUNT_CURVE` and `PARALLEL_BP` + `FORECAST_CURVE` may both be emitted against the same combined-role reference curve, because they are different bumped valuation roles, exactly as `TENOR` distinguishes them.
+- Which bump target a production DV01 uses is per-measure data, never a contract default. The union records the bumped scope deterministically and approves no production bump, bucketing, or all-curves DV01 methodology (RED-225-R1 remains open, §17).
+- Bump sizes, bucketing rules, and bumped-target scope are per-measure data with explicit units. Production bump conventions (1bp vs 0.5bp, bucket boundaries, which curve(s) a parallel bump covers) are UNRESOLVED — RED-risk where desk methodology is required; the fields exist so the choice is recordable, not so a default is smuggled in.
 - RATES_RISK_RESULT_V1 measure vocabulary is EXACTLY `DV01 | PV01 | DELTA | GAMMA | VEGA`. Unknown identifiers (including RHO, CS01, or product-specific aliases) fail closed; adding a measure requires a future schema-version vocabulary extension, not free text. #229 consumes only DV01 scope; defining the other tokens does not approve their production methodology.
 
 ---
@@ -1199,10 +1226,10 @@ Source + methodology + version are never collapsed into one string. Provenance w
   - `CurveSet.curves`: ascending canonical tuple `(curve_role, index_id_sort_key, curve_id)`; `index_id_sort_key` is the PRESENT canonical enum token when `index_id` is PRESENT, otherwise exactly the empty UTF-8 string `""`. Duplicate `curve_id` forbidden.
   - `DiscountCurve/ForwardCurve.pillars`: strictly ascending `pillar_date`; duplicate dates forbidden (§7.2).
   - `FixingStore.entries`: ascending `(index_id, observation_date)`; duplicate economic keys forbidden (§8).
-  - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then lexicographic canonical JSON serialization of the active `NumericWithUnit` payload (or the full StrikeCoordinate when no active numeric exists). `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
+  - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then lexicographic canonical JSON serialization of the active `NumericWithUnit` payload (or the full StrikeCoordinate when no active numeric exists). `underlying_corners`: ascending `(expiry_coordinate, underlying_tenor_coordinate)`; duplicate pairs forbidden. `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
   - `exercise_dates`: ascending date, duplicate-free (§10). `calibration_instruments`: ascending `instrument_id`, duplicate-free (§14.2).
   - Named parameter lists (`ModelInput`, calibration input/result parameters) are ascending `name` with duplicate names forbidden. `per_instrument_errors` follows calibration-instrument order and permits at most one row per `instrument_id`.
-  - `RiskResult.measures`: ascending `(measure_id, canonical RiskBucketCoordinate serialization)`; structured NOT_APPLICABLE sorts before PRESENT; duplicate exact measure/bucket keys forbidden.
+  - `RiskResult.measures`: ascending `(measure_id, canonical bump_spec.bump_target serialization, canonical RiskBucketCoordinate serialization)`; structured NOT_APPLICABLE sorts before PRESENT within each component; duplicate exact measure/target/bucket keys forbidden. `bump_target` participates so two per-curve `PARALLEL_BP` rows (e.g. discount curve vs one forecast index) remain distinct.
   - Set-semantic provenance lists such as `upstream_ids`, `evidence_refs`, capture/surface ids are lexicographically sorted and duplicate-free before serialization.
   - `MarketSnapshot.diagnostics.unresolved_fields` is lexicographically sorted by canonical field-path string and duplicate-free before serialization.
   - Lists whose order is itself an economic fact retain their explicitly defined domain order; warnings/errors/diagnostics other than the input-assembled `unresolved_fields` set are output records and must be emitted deterministically by the engine.
@@ -1286,7 +1313,7 @@ New unresolved methodology VALUES defined-as-fields-but-not-chosen here (each `U
 - **RED-225-S1 — Settlement method + cash-settlement methodology + rate source + date rule** (§11.2). Evidence: Phase-2 (#232) settlement reconciliation.
 - **RED-225-M1 — Model choice + version** (§9.6/§14: Hull-White 1F target is direction, not approval). Evidence: Phase-3 calibration framework + workstation reconciliation.
 - **RED-225-M2 — Calibration objective + optimizer + tolerance + convergence policy** (§14.2). Evidence: Phase-3 methodology approval.
-- **RED-225-R1 — Risk bump sizes / bucketing / revaluation rule values** (§13.2). Evidence: desk risk methodology where required.
+- **RED-225-R1 — Risk bump sizes / bucketing / bumped-target scope / revaluation rule values** (§13.2). Evidence: desk risk methodology where required. The `RiskBumpTarget` union records which selected curve(s) were bumped; which scope production DV01 uses is per-measure data and is not chosen here.
 
 No stop-condition trigger occurred in writing this document: no Bloomberg/workstation evidence was created, cited, or implied beyond what the repository already records; no production value was filled.
 
@@ -1311,11 +1338,11 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] `RatesKernelInput` (§5.1) has closed V1 product vocabulary `OIS | SWAPTION` with exact applicability, explicit underlying identity, V1 single-currency compatibility, deterministic valuation-context identity, and no-I/O calibration evidence.
 - [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
 - [ ] Curve ENGINE CONTRACT has exactly one wire schema version authority; reference_date differences carry a serialized reason; identity / currency / role / dates / pillars / value semantics / provenance / methodology are explicit (§7); unresolved pillars remain structurally present; no naked double arrays.
-- [ ] FixingStore distinguishes observation/publication dates and typed state (§8.2–§8.5); PROJECTED audit rows carry resolvable typed ProjectionInputsRef (curve set + forward curve + observation rule); no opaque projection ids or silent history-to-forecast.
-- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); VolatilityInput carries currency + underlying OIS/index semantic identity and must match the resolved underlying; SURFACE/CUBE are disjoint; container ATM is authoritative; VolNodeKey identity/order is deterministic; no production vol methodology chosen (RED-225-V*).
+- [ ] FixingStore distinguishes observation/publication dates and typed state (§8.2–§8.5); PROJECTED audit rows carry resolvable typed ProjectionInputsRef (curve set + forecast-capable curve + observation rule); no opaque projection ids or silent history-to-forecast.
+- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); VolatilityInput carries currency + underlying OIS/index semantic identity and must match the resolved underlying; SURFACE/CUBE are disjoint; container ATM is authoritative; VolNodeKey identity/order is deterministic; exact underlying start/end dates are keyed by the `(expiry, tenor)` corner rather than by the relative tenor axis; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice / underlying-start rule / calendar-timezone (§10); derivative underlying_product_id binds to both RatesKernelInput.valuation_product.underlying_product_id and embedded ResolvedSwap.product_id; no invented ResolvedSwap identity field; unresolved methodology values remain RED.
 - [ ] Settlement separates type / cash-only method / physical-vs-cash / cash methodology / date-timing / provenance (§11); PHYSICAL carries structured NOT_APPLICABLE for cash-only method fields rather than unresolved fake values; no invented values (RED-225-S1).
-- [ ] PricingResult/RiskResult/ModelCalibrationResult have literal separate warnings + errors fields; RiskResult V1 measure vocabulary is closed; ModelInput embeds calibration result evidence so convergence is enforceable without external lookup (§12–§14).
+- [ ] PricingResult/RiskResult/ModelCalibrationResult have literal separate warnings + errors fields; RiskResult V1 measure vocabulary is closed and every `PARALLEL_BP` measure carries a typed curve-bump target so per-curve parallel sensitivities stay distinct; ModelInput embeds calibration result evidence so convergence is enforceable without external lookup (§12–§14).
 - [ ] Versioning/provenance: actual value vs resolution-status separated (§15.1); machine-readable schema versions everywhere incl. `RATES_KERNEL_INPUT_V1` (§15.2); independently identity-bearing market/model objects satisfy the complete provenance envelope (§15.3); source/methodology/version never collapsed; replay fingerprints defined with NON-RECURSIVE preimage (§15.4); snapshot identity includes `captured_at` exactly once; ExerciseTerms/SettlementTerms carry identities + fingerprints.
 - [ ] Fail-closed rules enumerated (§16 + per-section rules); RED list complete with owners (§17); #226–#229 boundaries preserved (§18).
 - [ ] Same-defect-family audit performed (§A below): no naked units, no role-by-name, no comment-as-data, no collapsed provenance, no history/forecast ambiguity, no settlement/vol-coordinate ambiguity, no QuantLib/Bloomberg hidden dependence, nothing #227–#229 must infer.
@@ -1360,6 +1387,7 @@ Searched the new contract for each defect family; outcome per family:
 30. Round-14 calibration-context parity — FIXED: ModelCalibrationInput now carries reporting_currency beside valuation_date, derives valuation_context_id from the same exact V1 preimage as pricing, enforces single-currency calibration against curves/vol/instrument underlyings, and ModelCalibrationResult echoes reporting_currency.
 31. Round-15 risk-bucket wire typing — FIXED: RiskResult bump_type vocabulary is closed and bucket_coordinate is a tagged RiskBucketCoordinate union with deterministic TENOR / VOL_NODE / MODEL_PARAMETER shapes, exact bump-type applicability, units/resolution rules, and canonical sorting.
 32. Round-16 curve-role identity closure — FIXED: (a) TENOR risk buckets include selected curve_id + usage role + conditional index_id so multi-curve and combined-role sensitivities are distinguishable; (b) all curves carry role-applicable ValueOrReason index_id, allowing explicitly-authorized DISCOUNT_AND_FORECAST_REFERENCE_ONLY curves to satisfy forecast selection deterministically.
+33. Round-17 current-head Codex P2 families — FIXED: (a) exact underlying start/end dates moved off the one-dimensional tenor axis onto a deterministic `(expiry, tenor)` `underlying_corners` structure, so `1Y × 10Y` and `2Y × 10Y` no longer collide while `underlying_tenors` stays a relative axis and no date is reconstructed from a year fraction; (b) PROJECTED `projection_inputs_ref` now validates the same forecast-capable role/index rule as `curve_selection`, so an explicitly-authorized DISCOUNT_AND_FORECAST_REFERENCE_ONLY curve that actually produced the projection is referencable without approving a new single-curve methodology; (c) `PARALLEL_BP` now carries a typed `RiskBumpTarget`, so a selected discount curve, a per-index forecast curve, and an all-selected-curves scope are distinguishable and no longer collide under the duplicate measure/bucket rule.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1383,7 +1411,7 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Pricing/risk input fingerprint — NO GUESS: §15.4 binds it to the exact RatesKernelInput.content_fingerprint, covering every PRESENT direct input.
 - Same-day as-of instant — NO GUESS: §8.5 uses explicit `MarketSnapshot.captured_at`; kernel never reads system clock.
 - Fixing observation vs publication — NO GUESS: §8 carries separate economic observation date and publication availability date/time; history/forecast rules use publication availability.
-- Vol axis exact dates/authority — NO GUESS: §9.2–§9.3 preserve exact expiry and underlying start/end dates when known, and each quote coordinate must equal an authoritative container-axis entry.
+- Vol axis exact dates/authority — NO GUESS: §9.2–§9.3 preserve exact expiry and underlying start/end dates when known — expiry date on the expiry axis entry, underlying start/end on the `(expiry, tenor)` corner — and each quote coordinate must equal an authoritative container-axis entry with exactly one matching corner.
 - Reason-bearing optional values — NO GUESS: reviewed fields use ValueOrReason rather than bare nulls.
 - Curve pillar source audit — NO GUESS: §7.2 carries source_column per pillar plus structured N/A.
 - Forecast-only fixing provenance — NO GUESS: §8.6 permits an explicit empty PRESENT-source union without fabricating source data.
@@ -1408,7 +1436,7 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Currency compatibility — NO GUESS: V1 has no FX path; reporting, selected curves, CurveSet base, and settlement currency must equal ResolvedSwap currency.
 - ATM authority — NO GUESS: per-quote atm_definition is an exact echo of container atm_definition_id.
 - Risk vocabulary — NO GUESS: exact V1 tokens are DV01/PV01/DELTA/GAMMA/VEGA.
-- Projection replay target — NO GUESS: typed ProjectionInputsRef resolves sibling CurveSet/ForwardCurve plus #228 observation-rule registry.
+- Projection replay target — NO GUESS: typed ProjectionInputsRef resolves the sibling CurveSet, a forecast-capable curve (`FORECAST`, or explicitly-authorized combined reference role) whose PRESENT index exactly matches the fixing entry, plus the #228 observation-rule registry.
 - Result warning/error wire shape — NO GUESS: separate fields in Pricing/Risk/Calibration results.
 - Curve identity — NO GUESS: full canonical price-affecting payload participates in curve_id.
 - Calibration curve selection — NO GUESS: ModelCalibrationInput explicitly names discount/forecast curves; fingerprint includes the mapping and ModelCalibrationResult echoes it.
@@ -1418,6 +1446,7 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Valuation context identity — NO GUESS: exact preimage is valuation_date + reporting_currency only.
 - Calibration valuation context — NO GUESS: ModelCalibrationInput carries both preimage fields, validates the id locally, enforces the V1 currency invariant, and ModelCalibrationResult echoes reporting_currency.
 - Risk bucket coordinate — NO GUESS: bump_type is closed and each bucketed type maps to one tagged RiskBucketCoordinate variant with explicit unit/reference resolution and canonical serialization.
+- Parallel bump target — NO GUESS: `PARALLEL_BP` carries one typed `RiskBumpTarget` variant (`DISCOUNT_CURVE`, `FORECAST_CURVE` + index, or `ALL_SELECTED_CURVES`) resolved against `curve_role_map`, and that target participates in the canonical measure identity, so per-curve parallel rows never collide and no free-text curve set is representable.
 - Tenor risk curve identity — NO GUESS: TENOR carries curve_id + DISCOUNT/FORECAST usage role + role-applicable index_id and resolves against the consumed curve_role_map.
 - Combined-role forecast selection — NO GUESS: DISCOUNT_AND_FORECAST_REFERENCE_ONLY carries PRESENT index_id and can serve forecast only when explicitly authorized and index-matched.
 
@@ -1534,6 +1563,15 @@ Round 16 (Sophira, Codex review on `54c08a74...`):
 - Added selected curve identity and valuation usage role to TENOR risk buckets, including forecast index association, so discount/forecast sensitivities at the same tenor remain distinct.
 - Added role-applicable `index_id` to the common curve shape: plain DISCOUNT=N/A; FORECAST and combined-role=PRESENT.
 - Explicitly-authorized combined-role reference curves can now satisfy forecast selection without a deterministic-schema contradiction. No production single-curve methodology was approved.
+
+Round 17 (current-head Codex three P2s on `0834d71e...`; this correction round):
+
+- Accepted all three as genuine representation/identity defects and fixed them in this document only.
+- (a) Exact underlying start/end dates are now keyed by BOTH expiry and tenor through `underlying_corners` (§9.2/§9.3); `underlying_tenors` is a relative axis only. The `1Y × 10Y` vs `2Y × 10Y` collision is closed, and no date is reconstructed from a year fraction or tenor label.
+- (b) `ProjectionInputsRef.forecast_curve_id` (renamed from `forward_curve_id`, which wrongly implied the `ForwardCurve` concrete shape) now validates the same forecast-capable role/index rule as `curve_selection` (§5.1, §7.1.1, §7.3). An explicitly-authorized `DISCOUNT_AND_FORECAST_REFERENCE_ONLY` curve that actually produced a PROJECTED fixing is now referencable; no new single-curve methodology was approved.
+- (c) `PARALLEL_BP` carries a typed `RiskBumpTarget` union (§13.2) so a selected discount curve, a selected forecast curve for a specific index, and an all-selected-curves scope are distinguishable, and the canonical measure identity now includes the target so per-curve parallel rows cannot collide.
+- No RED methodology value was chosen. RED-01, RED-02, and every RED-225-* remain open, including the newly typed but unselected bumped-target scope.
+- Same-family grep audit run across the whole document for all three families; §9.2/§9.3 coverage rules, §15.4 canonical ordering/dedup, §13.2 bump-target applicability, §17 RED ownership text, §19 acceptance checklist, and the §A/§B audit text were updated for consistency. `git diff --check` clean; only this document changed.
 
 ---
 
