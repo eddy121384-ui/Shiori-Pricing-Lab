@@ -1028,8 +1028,9 @@ model_calibration_input:
   schema_version: MODEL_CALIBRATION_INPUT_V1
   calibration_input_id: <string>          # content-derived immutable identity; own id/fingerprint excluded from preimage §15.4
   valuation_context:
-    valuation_context_id: <string>
+    valuation_context_id: <string>        # exact preimage {valuation_date, reporting_currency}, same V1 contract as §5.1
     valuation_date: <ISO date>            # MUST equal market_snapshot.valuation_date
+    reporting_currency: <Currency enum>   # V1 single-currency calibration context; see rules below
   market_snapshot: <MarketSnapshot §6>    # exact embedded market payload calibrated against
   curve_selection:
     discount_curve_id: <curve_id>          # explicit discount-capable curve selected from embedded market_snapshot.curve_set
@@ -1070,7 +1071,9 @@ calibration_market_target_type:
 Canonical calibration-input rules:
 
 - `ModelCalibrationInput.content_fingerprint` fingerprints ALL fields above in canonical serialization semantics: valuation context, full MarketSnapshot content, explicit `curve_selection`, model id/version, ordered calibration-instrument records (including each full `instrument_terms.schema_version + payload + content_fingerprint`, typed market target, and weights), initial parameters, objective id/version/settings, optimizer id/version/settings, and convergence policy.
-- Calibration `curve_selection` follows the same deterministic validation as §5.1 pricing: selected ids MUST exist in the embedded CurveSet; discount selection must be discount-capable; each forecast selection must match the stated index; selected curves must satisfy the V1 single-currency rule against the relevant calibration instrument / underlying currency. The calibrator MUST NOT choose curves by array position, first match, or implementation default.
+- `valuation_context.valuation_context_id` uses the exact same V1 preimage as §5.1: canonical `{valuation_date, reporting_currency}`, excluding the id itself. The calibration path MUST be able to derive and validate this id from fields inside ModelCalibrationInput alone; arbitrary/external context ids are invalid.
+- Calibration is single-currency in V1. `valuation_context.reporting_currency` MUST equal `market_snapshot.curve_set.base_currency`, every selected curve's `currency`, every targeted VolatilityInput `currency`, and the currency of each calibration instrument's underlying product. Any mismatch fails closed with `CURRENCY_MISMATCH`; no FX conversion is inferred.
+- Calibration `curve_selection` follows the same deterministic validation as §5.1 pricing: selected ids MUST exist in the embedded CurveSet; discount selection must be discount-capable; each forecast selection must match the stated index; selected curves must satisfy the same V1 currency invariant. The calibrator MUST NOT choose curves by array position, first match, or implementation default.
 - Each `market_target.kind=VOL_QUOTE_NODE_V1` MUST name the embedded `VolatilityInput` actually present in `market_snapshot` and a `VolNodeKey` that resolves to exactly one embedded quote; missing, zero-match, or duplicate-match targets fail closed. A free-form string or external lookup is not a V1 market target. Curve/fixing target kinds are not invented here and require a later schema revision if needed.
 - Each calibration instrument MUST carry the full immutable executable `instrument_terms.payload` defined by the owning later product contract, not merely a digest or external id. Its `instrument_terms.content_fingerprint` MUST match the embedded `schema_version + payload`; mismatch fails closed.
 - #225 does not invent European swaption/callable instrument economics before those issues define them. The envelope above fixes payload LOCATION / replay semantics only; the concrete typed payload schema and economic fields remain owned by the relevant later product issue.
@@ -1088,7 +1091,8 @@ model_calibration_result:
   model_id: <enum>                        # HULL_WHITE_1F | BLACK_76 | BACHELIER | ... — vocabulary, selection is RED-model data
   model_version: UNRESOLVED               # RED-model: version of the approved model contract; field defined, value open
   calibrated_at: <ISO-8601 timestamp+offset>  # when calibration ran; distinct from valuation_date
-  valuation_context_id: <string>          # context calibrated under
+  valuation_context_id: <string>          # exact echo of ModelCalibrationInput.valuation_context.valuation_context_id
+  reporting_currency: <Currency enum>     # exact echo of ModelCalibrationInput.valuation_context.reporting_currency
   market_snapshot_id: <string>            # exact snapshot calibrated against
   curve_role_map: <map>                    # exact echo of consumed ModelCalibrationInput.curve_selection
   instruments:                            # calibration instruments / identifiers
@@ -1123,7 +1127,7 @@ Rules:
 
 - A calibration result without `calibration_input_id`, `model_id`, `market_snapshot_id`, `instruments`, `parameters` (with units), `objective` identity, and `convergence.status` is incomplete and fails validation.
 - `ModelCalibrationResult.replay.inputs_fingerprint` MUST equal the consumed `ModelCalibrationInput.content_fingerprint`; `calibration_input_id` MUST equal that input's identity. Implementations may not hash an ad-hoc subset.
-- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, `curve_role_map == input.curve_selection`, ordered `instruments[*].{instrument_id,instrument_type,market_target,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. The authoritative instrument economics remain the embedded `ModelCalibrationInput.calibration_instruments[*].instrument_terms`; result rows do not redefine them. Any mismatch is a malformed result, not a second authority.
+- Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `reporting_currency == input.valuation_context.reporting_currency`, `market_snapshot_id == input.market_snapshot.snapshot_id`, `curve_role_map == input.curve_selection`, ordered `instruments[*].{instrument_id,instrument_type,market_target,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. The authoritative instrument economics remain the embedded `ModelCalibrationInput.calibration_instruments[*].instrument_terms`; result rows do not redefine them. Any mismatch is a malformed result, not a second authority.
 - When `convergence.tolerance` is applicable, it MUST echo the exact `ModelCalibrationInput.convergence_policy.tolerance` value+unit. Output-only facts are `calibrated_at`, calibrated `parameters`, objective error values, iteration count, convergence status, warnings/errors, and provenance.
 - `NOT_CONVERGED` results are still first-class audit records, but RATES_KERNEL_INPUT_V1 cannot consume them through ModelInput. This V1 schema has no override carrier; a future override path requires an explicit schema revision and RED-225-M2 approval.
 - Objective, optimizer, tolerance, and model version VALUES are UNRESOLVED — RED-model. The fields exist so Phase-3 work can record them without redesigning the contract.
@@ -1330,6 +1334,7 @@ Searched the new contract for each defect family; outcome per family:
 27. Round-11 final Codex consistency families — FIXED: (a) embedded calibration_result makes convergence/parameter linkage enforceable by the no-I/O kernel and V1 forbids non-converged override; (b) reporting/selected-curve/settlement currencies must equal ResolvedSwap currency because V1 has no FX contract; (c) VolQuote atm_definition exactly echoes container authority; (d) RiskResult V1 measure vocabulary is closed; (e) ProjectionInputsRef is typed/resolvable; (f) RiskResult and ModelCalibrationResult serialize separate warnings/errors; (g) curve_id derives from the full canonical curve payload, excluding only self id/fingerprint.
 28. Round-12 review-accounting correction — FIXED: ModelCalibrationInput now carries explicit curve_selection with the same role/index/currency validation as pricing; its fingerprint includes the selection and ModelCalibrationResult echoes it as curve_role_map. This closes the ninth P2 that was present in the earlier overlapping Codex review but omitted from the Round-11 eight-item checklist.
 29. Round-13 final-review consistency families — FIXED: (a) VolatilityInput carries currency + underlying OIS/index identity and is validated against the resolved underlying; (b) CurveSet construction methodology is authoritative and per-curve copies are exact echoes; (c) RATES_KERNEL_INPUT_V1 product_type is closed to docs/04-aligned OIS | SWAPTION with exact applicability; (d) valuation_context_id has exact preimage {valuation_date, reporting_currency}, while all other request facts remain independent kernel-fingerprint inputs.
+30. Round-14 calibration-context parity — FIXED: ModelCalibrationInput now carries reporting_currency beside valuation_date, derives valuation_context_id from the same exact V1 preimage as pricing, enforces single-currency calibration against curves/vol/instrument underlyings, and ModelCalibrationResult echoes reporting_currency.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1386,6 +1391,7 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Curve construction authority — NO GUESS: CurveSet construction methodology is authoritative; per-curve copies are exact echoes or fail closed.
 - Product applicability — NO GUESS: RATES_KERNEL_INPUT_V1 accepts only OIS and SWAPTION with explicit ValueOrReason applicability states; later products require schema extension.
 - Valuation context identity — NO GUESS: exact preimage is valuation_date + reporting_currency only.
+- Calibration valuation context — NO GUESS: ModelCalibrationInput carries both preimage fields, validates the id locally, enforces the V1 currency invariant, and ModelCalibrationResult echoes reporting_currency.
 
 Classification:
 
@@ -1482,6 +1488,12 @@ Round 13 (Sophira, final Codex review on `ee097915...`):
 - Accepted four P2s as representation/identity defects and fixed them without selecting methodology values.
 - Volatility identity now binds to currency + OIS/index; CurveSet owns construction methodology authority with curve echoes; product_type is closed/aligned with docs/04; valuation_context_id has an exact minimal preimage.
 - Callable Swap / Range Accrual remain later #222 phases and require an explicit future RATES_KERNEL_INPUT schema version rather than ambiguous V1 applicability.
+
+Round 14 (Sophira, final Codex single P2 on `c4e2802f...`):
+
+- Added reporting_currency to ModelCalibrationInput.valuation_context so its valuation_context_id is locally derivable from the same exact {valuation_date, reporting_currency} preimage as pricing.
+- Added fail-closed V1 calibration currency equality across CurveSet, selected curves, targeted VolatilityInput, and calibration instrument underlyings.
+- ModelCalibrationResult now echoes reporting_currency. No FX or other methodology was introduced.
 
 ---
 
