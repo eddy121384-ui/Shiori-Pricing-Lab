@@ -280,7 +280,7 @@ rates_kernel_input:
   schema_version: RATES_KERNEL_INPUT_V1
   valuation_product:
     product_id: <string>                     # identity of the trade/position being valued
-    product_type: <enum>                     # VANILLA_USD_SOFR_OIS | EUROPEAN_SWAPTION | ...; vocabulary only
+    product_type: OIS | SWAPTION             # exact RATES_KERNEL_INPUT_V1 vocabulary; aligned with docs/04 product schema
     underlying_product_id: <ValueOrReason<string>> # derivative: PRESENT and equals resolved_swap.product_id; vanilla swap: NOT_APPLICABLE
   resolved_swap: <ResolvedSwap #224>          # embedded resolved swap: valued trade for vanilla swap, underlying trade for derivative
   market_snapshot: <MarketSnapshot §6>        # embedded authoritative market snapshot
@@ -291,7 +291,7 @@ rates_kernel_input:
   settlement_terms: <ValueOrReason<SettlementTerms §11>> # PRESENT iff product requires settlement terms
   model_input: <ValueOrReason<ModelInput §9.6>>          # PRESENT iff pricing method requires model input
   valuation_context:
-    valuation_context_id: <string>            # derived identity of this valuation context; no system-clock default
+    valuation_context_id: <string>            # content-derived from exact V1 preimage {valuation_date, reporting_currency}; own id excluded
     valuation_date: <ISO date>                # MUST equal market_snapshot.valuation_date
     reporting_currency: <Currency enum>       # V1 MUST equal resolved_swap.currency; no FX conversion contract exists
   content_fingerprint: <hex>                  # non-recursive preimage rule §15.4
@@ -301,13 +301,18 @@ Rules:
 
 - `ResolvedSwap` and `MarketSnapshot` are always PRESENT.
 - `valuation_product` is the authoritative identity of WHAT is being valued. For a vanilla swap, `valuation_product.product_id == resolved_swap.product_id` and `underlying_product_id = NULL_WITH_REASON(NOT_APPLICABLE)`. For a derivative over that swap, `valuation_product.product_id` identifies the derivative trade/position, `underlying_product_id` MUST be PRESENT and equal `resolved_swap.product_id`, and the derivative id MUST NOT be inferred from or substituted by the underlying id.
-- `valuation_product.product_type` controls structural applicability (for example whether exercise/settlement terms are required); product identity and underlying identity are never collapsed.
+- RATES_KERNEL_INPUT_V1 product vocabulary is EXACTLY `OIS | SWAPTION`, aligned with `docs/04_product_definition_schema.md`. `EUROPEAN` is an `ExerciseTerms.exercise_style`, not a product-type token.
+- Applicability is exact in V1:
+  - `OIS`: `valuation_product.underlying_product_id`, `exercise_terms`, `settlement_terms`, `model_input`, and `market_snapshot.volatility_input` are structured `NULL_WITH_REASON(NOT_APPLICABLE)`.
+  - `SWAPTION`: `underlying_product_id` is PRESENT and equals `resolved_swap.product_id`; `exercise_terms` is PRESENT with `exercise_style=EUROPEAN`; `settlement_terms` is PRESENT; `market_snapshot.volatility_input` is PRESENT and must pass §9.2 underlying-identity checks; `model_input` is `NULL_WITH_REASON(NOT_APPLICABLE)` for the Phase-2 Black/shifted-Black/Bachelier path.
+- `CALLABLE_SWAP` and `RANGE_ACCRUAL` are #222 later-phase products but are NOT tokens in RATES_KERNEL_INPUT_V1. Their eventual applicability requires an explicit future schema-version extension; validators must reject them as unknown in V1 rather than infer partial payload rules. Product identity and underlying identity are never collapsed.
 - `curve_selection` is mandatory. The kernel MUST NOT choose the first eligible curve, infer selection from array position, or derive a preferred curve internally. `discount_curve_id` and every `forecast_curve_by_index` target must exist in the embedded `CurveSet`, have compatible `curve_role`, and (for forecasts) match the stated `index_id`; mismatch fails closed.
 - V1 is single-currency at the pricing boundary because no FX input/conversion contract exists. `market_snapshot.curve_set.base_currency`, every selected discount/forecast curve's `currency`, `valuation_context.reporting_currency`, and any PRESENT `settlement_terms.settlement_currency` MUST equal `resolved_swap.currency`. A mismatch fails closed with `CURRENCY_MISMATCH`; the kernel never relabels or converts an amount and never invents FX.
 - Reusing one curve id for more than one role is permitted only when that curve's explicit role/methodology contract permits it; this document does not approve a new production single-curve methodology.
 - `ExerciseTerms`, `SettlementTerms`, and `ModelInput` are direct payloads when applicable; otherwise their `ValueOrReason` state must be `NULL_WITH_REASON(category=NOT_APPLICABLE)`. An id without payload is never sufficient at the kernel boundary.
 - Product applicability is structural, not a market default: e.g. a vanilla swap does not gain exercise/settlement terms merely because a snapshot contains related market data.
 - `valuation_context.valuation_date` must equal `market_snapshot.valuation_date`; mismatch fails closed.
+- `valuation_context_id` has one exact V1 identity preimage: canonical `{valuation_date, reporting_currency}`, excluding the id itself. Curve selection, product, snapshot, exercise, settlement, and model are NOT part of valuation-context identity because they already participate independently in `RatesKernelInput.content_fingerprint`. #227 owns the concrete hash/encoding details but not this field-membership rule.
 - #227 owns concrete C++/JSON type implementation, not the semantics or payload locations above.
 
 ---
@@ -397,8 +402,8 @@ curve_set:
     - <DiscountCurve §7.2>                  # 1..n, each role-tagged
     - <ForwardCurve §7.3>                   # 0..n, each role-tagged + index-associated
   construction:
-    construction_methodology_id: UNRESOLVED  # RED-01: e.g. RESOLVED_CURVE_SUPPLY vs BOOTSTRAP_FROM_INSTRUMENTS; field defined, value open
-    construction_methodology_version: UNRESOLVED  # RED-01: version of the above once approved
+    construction_methodology_id: UNRESOLVED  # RED-01 authoritative set-level construction methodology
+    construction_methodology_version: UNRESOLVED  # RED-01 authoritative set-level version
     construction_inputs_ref: <ValueOrReason<id>> # Path-B instrument inputs ref; NULL_WITH_REASON when not applicable/unapproved
     evidence_refs: <list>                   # E-citations once RED-01 locks; empty until then
   provenance: { sources, adapter_versions, upstream_ids, captured_at, evidence_refs }
@@ -408,6 +413,7 @@ curve_set:
 Rules:
 
 - Every curve carries its own `curve_id`, `curve_role` (§7.1.1), and `currency`. Role is never implied by variable name or array position.
+- `CurveSet.construction.{construction_methodology_id, construction_methodology_version}` is the single authoritative construction rulebook for the set. Each contained curve's same-named fields are REQUIRED self-description echoes so a curve remains auditable when inspected standalone; they MUST exactly equal the set-level values. Any disagreement fails closed. This equality rule chooses no RED-01 value.
 - `valuation_date` on `CurveSet` and on each curve must all agree with `MarketSnapshot.valuation_date`; any disagreement fails closed.
 - Single-curve vs multi-curve usage is a per-valuation fact recorded in result replay metadata (§12), not a `CurveSet` invariant: a `CurveSet` may hold one discount curve used for both discounting and forecasting (legacy reference behavior) or separate curves, but the kernel records which curve served which role for each calculation.
 
@@ -462,8 +468,8 @@ discount_curve:
     adapter_version: <string>
     upstream_ids: <list>
     evidence_refs: <list>                  # E-citations once methodology locks; empty until then
-  construction_methodology_id: UNRESOLVED    # RED-01: which approved construction produced these pillars
-  construction_methodology_version: UNRESOLVED
+  construction_methodology_id: UNRESOLVED    # REQUIRED exact echo of enclosing CurveSet construction methodology
+  construction_methodology_version: UNRESOLVED # REQUIRED exact echo of enclosing CurveSet construction version
   content_fingerprint: <hex>                # digest of canonical curve preimage per §15.4 (own fingerprint excluded)
 ```
 
@@ -671,6 +677,9 @@ Rules:
 volatility_input:
   schema_version: VOLATILITY_INPUT_V1
   volatility_input_id: <string>           # immutable VolatilityInput instance identity: derived from canonical vol identity preimage per §15.4 (own id + fingerprint excluded; no invented timestamp)
+  currency: <Currency enum>               # currency of the underlying rates product represented by this vol input
+  underlying_product_type: OIS            # exact VOLATILITY_INPUT_V1 underlying family for #222 Phase-2 swaption path
+  underlying_index_id: <FloatingIndex enum> # e.g. USD_SOFR; must identify the floating index of the underlying resolved swap
   representation: SURFACE | CUBE          # structural invariant defined below; token alone never changes dimensionality
   quote_type: <enum>                      # uniform per container
   volatility_unit: <unit enum>            # uniform per container
@@ -696,6 +705,7 @@ volatility_input:
   content_fingerprint: <hex>                # digest of canonical vol preimage per §15.4 (own fingerprint excluded)
 ```
 
+- `currency`, `underlying_product_type`, and `underlying_index_id` are semantic identity, not descriptive metadata. For a SWAPTION kernel invocation they MUST equal `resolved_swap.currency`, `OIS`, and the floating index carried by the embedded ResolvedSwap. A mismatch fails closed before reading vol numbers. For ModelCalibrationInput, every calibration instrument targeting this VolatilityInput must have the same underlying currency/product family/index; mixed-underlying calibration requires a future versioned contract rather than implicit reuse.
 - `representation` has a structural invariant, not just a label:
   - `SURFACE` is exactly one strike slice across Expiry × Tenor. ATM-only surface: `strikes=NULL_WITH_REASON(NOT_APPLICABLE)` and every quote uses `strike_dimension=ATM`. Non-ATM surface: `strikes=PRESENT` with exactly one StrikeCoordinate and every quote uses that coordinate.
   - `CUBE` is Expiry × Tenor × Strike with `strikes=PRESENT` containing at least two distinct StrikeCoordinates; every quoted strike must be one of them.
@@ -885,7 +895,7 @@ rates_pricing_result:
   product_id: <string>                    # MUST equal RatesKernelInput.valuation_product.product_id
   product_type: <enum>                    # MUST equal RatesKernelInput.valuation_product.product_type
   valuation_date: <ISO date>              # the date valued; must equal MarketSnapshot.valuation_date
-  valuation_context_id: <string>          # identity of the valuation request (date + reporting currency + snapshot + trade + model refs)
+  valuation_context_id: <string>          # exact echo of RatesKernelInput.valuation_context.valuation_context_id; preimage is {valuation_date, reporting_currency}
   result_currency: <Currency enum>        # MUST equal RatesKernelInput.valuation_context.reporting_currency == resolved_swap.currency in V1
   headline: <ValueOrReason<HeadlineValue>> # SUCCESS: PRESENT; FAILED: structured UNAVAILABLE(PRICING_FAILED)
   pv: <ValueOrReason<NumericWithUnit>>     # supplemental PV metric; unit=CURRENCY_AMOUNT when PRESENT
@@ -958,7 +968,7 @@ rates_risk_result:
   product_id: <string>                    # MUST equal RatesKernelInput.valuation_product.product_id
   product_type: <enum>                    # MUST equal RatesKernelInput.valuation_product.product_type
   valuation_date: <ISO date>
-  valuation_context_id: <string>
+  valuation_context_id: <string>          # exact echo of RatesKernelInput.valuation_context.valuation_context_id
   result_currency: <Currency enum>        # MUST equal RatesKernelInput.valuation_context.reporting_currency == resolved_swap.currency in V1
   measures:
     - measure_id: DV01 | PV01 | DELTA | GAMMA | VEGA # exact RATES_RISK_RESULT_V1 vocabulary; no open-ended members
@@ -1271,11 +1281,11 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] Relation to approved `SwapTrade -> ConventionSet -> ResolvedSwap` (#224) explicit (§5, §12.4); no competing authoritative copies.
 - [ ] #223 ownership boundary preserved (§3): Python acquisition/normalization/persistence/UI vs C++ resolution/pricing; no live Bloomberg in kernel; QuantLib behind isolation, defaults never methodology.
 - [ ] #224 semantics preserved: R1/R2, wire versioning, D1–D13/E1–E6 untouched; no RED-02 value filled.
-- [ ] `RatesKernelInput` (§5.1) explicitly separates valuation_product identity from underlying ResolvedSwap identity, carries all direct payloads, enforces V1 single-currency compatibility (no hidden FX), and can validate embedded calibration convergence evidence without I/O.
+- [ ] `RatesKernelInput` (§5.1) has closed V1 product vocabulary `OIS | SWAPTION` with exact applicability, explicit underlying identity, V1 single-currency compatibility, deterministic valuation-context identity, and no-I/O calibration evidence.
 - [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
 - [ ] Curve ENGINE CONTRACT has exactly one wire schema version authority; reference_date differences carry a serialized reason; identity / currency / role / dates / pillars / value semantics / provenance / methodology are explicit (§7); unresolved pillars remain structurally present; no naked double arrays.
 - [ ] FixingStore distinguishes observation/publication dates and typed state (§8.2–§8.5); PROJECTED audit rows carry resolvable typed ProjectionInputsRef (curve set + forward curve + observation rule); no opaque projection ids or silent history-to-forecast.
-- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); SURFACE/CUBE are disjoint; container ATM definition is the single authority and every quote exactly echoes its ValueOrReason state/value; VolNodeKey identity/order is deterministic; no production vol methodology chosen (RED-225-V*).
+- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); VolatilityInput carries currency + underlying OIS/index semantic identity and must match the resolved underlying; SURFACE/CUBE are disjoint; container ATM is authoritative; VolNodeKey identity/order is deterministic; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice / underlying-start rule / calendar-timezone (§10); derivative underlying_product_id binds to both RatesKernelInput.valuation_product.underlying_product_id and embedded ResolvedSwap.product_id; no invented ResolvedSwap identity field; unresolved methodology values remain RED.
 - [ ] Settlement separates type / cash-only method / physical-vs-cash / cash methodology / date-timing / provenance (§11); PHYSICAL carries structured NOT_APPLICABLE for cash-only method fields rather than unresolved fake values; no invented values (RED-225-S1).
 - [ ] PricingResult/RiskResult/ModelCalibrationResult have literal separate warnings + errors fields; RiskResult V1 measure vocabulary is closed; ModelInput embeds calibration result evidence so convergence is enforceable without external lookup (§12–§14).
@@ -1319,6 +1329,7 @@ Searched the new contract for each defect family; outcome per family:
 26. Round-10 OC P3 determinism cleanup — FIXED: (a) DiscountCurve's absent index sort key is exactly empty UTF-8 string; (b) strike secondary ordering uses canonical JSON serialization, not implementation-defined unit comparison; (c) CalibrationMarketTarget has an explicit named type declaration; (d) MarketSnapshot.diagnostics.unresolved_fields is lexicographically ordered and duplicate-free.
 27. Round-11 final Codex consistency families — FIXED: (a) embedded calibration_result makes convergence/parameter linkage enforceable by the no-I/O kernel and V1 forbids non-converged override; (b) reporting/selected-curve/settlement currencies must equal ResolvedSwap currency because V1 has no FX contract; (c) VolQuote atm_definition exactly echoes container authority; (d) RiskResult V1 measure vocabulary is closed; (e) ProjectionInputsRef is typed/resolvable; (f) RiskResult and ModelCalibrationResult serialize separate warnings/errors; (g) curve_id derives from the full canonical curve payload, excluding only self id/fingerprint.
 28. Round-12 review-accounting correction — FIXED: ModelCalibrationInput now carries explicit curve_selection with the same role/index/currency validation as pricing; its fingerprint includes the selection and ModelCalibrationResult echoes it as curve_role_map. This closes the ninth P2 that was present in the earlier overlapping Codex review but omitted from the Round-11 eight-item checklist.
+29. Round-13 final-review consistency families — FIXED: (a) VolatilityInput carries currency + underlying OIS/index identity and is validated against the resolved underlying; (b) CurveSet construction methodology is authoritative and per-curve copies are exact echoes; (c) RATES_KERNEL_INPUT_V1 product_type is closed to docs/04-aligned OIS | SWAPTION with exact applicability; (d) valuation_context_id has exact preimage {valuation_date, reporting_currency}, while all other request facts remain independent kernel-fingerprint inputs.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1371,6 +1382,10 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Result warning/error wire shape — NO GUESS: separate fields in Pricing/Risk/Calibration results.
 - Curve identity — NO GUESS: full canonical price-affecting payload participates in curve_id.
 - Calibration curve selection — NO GUESS: ModelCalibrationInput explicitly names discount/forecast curves; fingerprint includes the mapping and ModelCalibrationResult echoes it.
+- Volatility underlying identity — NO GUESS: currency, underlying_product_type=OIS, and underlying_index_id must match the embedded ResolvedSwap / calibration instruments.
+- Curve construction authority — NO GUESS: CurveSet construction methodology is authoritative; per-curve copies are exact echoes or fail closed.
+- Product applicability — NO GUESS: RATES_KERNEL_INPUT_V1 accepts only OIS and SWAPTION with explicit ValueOrReason applicability states; later products require schema extension.
+- Valuation context identity — NO GUESS: exact preimage is valuation_date + reporting_currency only.
 
 Classification:
 
@@ -1461,6 +1476,12 @@ Round 12 (Sophira, review-accounting correction):
 - Live comment accounting showed the `ec5c84de...` Codex review had five P2s, not four; `Add curve selection to calibration inputs` had not been included in the Round-11 eight-family checklist.
 - Added explicit calibration curve_selection, canonical fingerprint participation, pricing-equivalent role/index/currency validation, and result echo.
 - No methodology value was selected.
+
+Round 13 (Sophira, final Codex review on `ee097915...`):
+
+- Accepted four P2s as representation/identity defects and fixed them without selecting methodology values.
+- Volatility identity now binds to currency + OIS/index; CurveSet owns construction methodology authority with curve echoes; product_type is closed/aligned with docs/04; valuation_context_id has an exact minimal preimage.
+- Callable Swap / Range Accrual remain later #222 phases and require an explicit future RATES_KERNEL_INPUT schema version rather than ambiguous V1 applicability.
 
 ---
 
