@@ -975,12 +975,12 @@ rates_risk_result:
       value: <double>
       unit: <unit enum>                   # e.g. CURRENCY_AMOUNT_PER_BASIS_POINT for DV01; DECIMAL_SENSITIVITY where applicable; explicit per measure
       bump_spec:                          # methodology that produced this measure; required per measure
-        bump_type: <enum>                 # PARALLEL_BP | BUCKETED_TENOR | VOL_POINT | MODEL_PARAM — vocabulary here
+        bump_type: PARALLEL_BP | BUCKETED_TENOR | VOL_POINT | MODEL_PARAM # exact V1 vocabulary
         bump_size: <double>
         bump_unit: <unit enum>            # BASIS_POINTS | DECIMAL | ... ; explicit
         revaluation_rule_id: UNRESOLVED   # RED-risk: full revaluation vs analytic; field defined, value open
         revaluation_rule_version: UNRESOLVED
-      bucket_coordinate: <ValueOrReason<coordinate>> # PRESENT for bucketed measure; NULL_WITH_REASON for parallel/non-bucketed measure
+      bucket_coordinate: <ValueOrReason<RiskBucketCoordinate>> # exact tagged union below; N/A only for PARALLEL_BP
       market_snapshot_id: <string>        # snapshot bumped
       model_version: <string | NULL>      # engine/model version used for revaluation
   inputs_identity:
@@ -1002,12 +1002,29 @@ rates_risk_result:
   engine: { engine_name, engine_version, method }
   diagnostics: <map>
   replay: { content_fingerprint, inputs_fingerprint, tolerance }  # inputs_fingerprint = consumed RatesKernelInput.content_fingerprint; content fingerprint per §15.4
+
+risk_bucket_coordinate_type:
+  # Tagged union; exactly one variant is serialized.
+  TENOR:
+    kind: TENOR
+    coordinate: <NumericWithUnit>         # explicit tenor coordinate; unit must be YEARS_FRACTION
+    label: <ValueOrReason<string>>        # optional source/display label; never the authoritative numeric coordinate
+  VOL_NODE:
+    kind: VOL_NODE
+    volatility_input_id: <string>         # MUST equal the consumed VolatilityInput id
+    node_key: <VolNodeKey>                # MUST resolve to exactly one embedded vol node
+  MODEL_PARAMETER:
+    kind: MODEL_PARAMETER
+    model_input_id: <string>              # MUST equal the consumed ModelInput id
+    parameter_name: <string>              # MUST resolve to exactly one named ModelInput parameter
 ```
 
 Rules:
 
 - `product_id/product_type` MUST echo `RatesKernelInput.valuation_product`, and `inputs_identity.resolved_swap_product_id` MUST equal the embedded `ResolvedSwap.product_id`. Every optional input identity MUST echo the corresponding `RatesKernelInput` applicability state: PRESENT carries the exact consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`. Omission, bare null, or fabricated ids are malformed.
-- Every measure names its `measure_id`, `bump_spec` (type + size + unit + revaluation rule), `unit`, and structured `bucket_coordinate`. Bucketed measures require PRESENT coordinates; parallel/non-bucketed measures require `NULL_WITH_REASON(category=NOT_APPLICABLE)`. A sensitivity without a bump spec is not a result.
+- Every measure names its `measure_id`, `bump_spec` (type + size + unit + revaluation rule), `unit`, and structured `bucket_coordinate`. A sensitivity without a bump spec is not a result.
+- `bucket_coordinate` applicability is exact by `bump_type`: `PARALLEL_BP` requires `NULL_WITH_REASON(category=NOT_APPLICABLE)`; `BUCKETED_TENOR` requires PRESENT `RiskBucketCoordinate(kind=TENOR)`; `VOL_POINT` requires PRESENT `kind=VOL_NODE`; `MODEL_PARAM` requires PRESENT `kind=MODEL_PARAMETER`. Any other pairing fails closed.
+- `TENOR.coordinate` is the authoritative machine coordinate and MUST carry `unit=YEARS_FRACTION`; `label` is optional display/source text only and cannot change identity. `VOL_NODE` and `MODEL_PARAMETER` coordinates must resolve uniquely against the exact consumed input objects named in the coordinate. Free-form dates, tenor strings, parameter aliases, or ad-hoc maps are not valid RATES_RISK_RESULT_V1 bucket coordinates.
 - Bump sizes and bucketing rules are per-measure data with explicit units. Production bump conventions (1bp vs 0.5bp, bucket boundaries) are UNRESOLVED — RED-risk where desk methodology is required; the fields exist so the choice is recordable, not so a default is smuggled in.
 - RATES_RISK_RESULT_V1 measure vocabulary is EXACTLY `DV01 | PV01 | DELTA | GAMMA | VEGA`. Unknown identifiers (including RHO, CS01, or product-specific aliases) fail closed; adding a measure requires a future schema-version vocabulary extension, not free text. #229 consumes only DV01 scope; defining the other tokens does not approve their production methodology.
 
@@ -1179,7 +1196,7 @@ Source + methodology + version are never collapsed into one string. Provenance w
   - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then lexicographic canonical JSON serialization of the active `NumericWithUnit` payload (or the full StrikeCoordinate when no active numeric exists). `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
   - `exercise_dates`: ascending date, duplicate-free (§10). `calibration_instruments`: ascending `instrument_id`, duplicate-free (§14.2).
   - Named parameter lists (`ModelInput`, calibration input/result parameters) are ascending `name` with duplicate names forbidden. `per_instrument_errors` follows calibration-instrument order and permits at most one row per `instrument_id`.
-  - `RiskResult.measures`: ascending `(measure_id, canonical bucket_coordinate serialization)`; duplicate exact measure/bucket keys forbidden.
+  - `RiskResult.measures`: ascending `(measure_id, canonical RiskBucketCoordinate serialization)`; structured NOT_APPLICABLE sorts before PRESENT; duplicate exact measure/bucket keys forbidden.
   - Set-semantic provenance lists such as `upstream_ids`, `evidence_refs`, capture/surface ids are lexicographically sorted and duplicate-free before serialization.
   - `MarketSnapshot.diagnostics.unresolved_fields` is lexicographically sorted by canonical field-path string and duplicate-free before serialization.
   - Lists whose order is itself an economic fact retain their explicitly defined domain order; warnings/errors/diagnostics other than the input-assembled `unresolved_fields` set are output records and must be emitted deterministically by the engine.
@@ -1335,6 +1352,7 @@ Searched the new contract for each defect family; outcome per family:
 28. Round-12 review-accounting correction — FIXED: ModelCalibrationInput now carries explicit curve_selection with the same role/index/currency validation as pricing; its fingerprint includes the selection and ModelCalibrationResult echoes it as curve_role_map. This closes the ninth P2 that was present in the earlier overlapping Codex review but omitted from the Round-11 eight-item checklist.
 29. Round-13 final-review consistency families — FIXED: (a) VolatilityInput carries currency + underlying OIS/index identity and is validated against the resolved underlying; (b) CurveSet construction methodology is authoritative and per-curve copies are exact echoes; (c) RATES_KERNEL_INPUT_V1 product_type is closed to docs/04-aligned OIS | SWAPTION with exact applicability; (d) valuation_context_id has exact preimage {valuation_date, reporting_currency}, while all other request facts remain independent kernel-fingerprint inputs.
 30. Round-14 calibration-context parity — FIXED: ModelCalibrationInput now carries reporting_currency beside valuation_date, derives valuation_context_id from the same exact V1 preimage as pricing, enforces single-currency calibration against curves/vol/instrument underlyings, and ModelCalibrationResult echoes reporting_currency.
+31. Round-15 risk-bucket wire typing — FIXED: RiskResult bump_type vocabulary is closed and bucket_coordinate is a tagged RiskBucketCoordinate union with deterministic TENOR / VOL_NODE / MODEL_PARAMETER shapes, exact bump-type applicability, units/resolution rules, and canonical sorting.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1392,6 +1410,7 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Product applicability — NO GUESS: RATES_KERNEL_INPUT_V1 accepts only OIS and SWAPTION with explicit ValueOrReason applicability states; later products require schema extension.
 - Valuation context identity — NO GUESS: exact preimage is valuation_date + reporting_currency only.
 - Calibration valuation context — NO GUESS: ModelCalibrationInput carries both preimage fields, validates the id locally, enforces the V1 currency invariant, and ModelCalibrationResult echoes reporting_currency.
+- Risk bucket coordinate — NO GUESS: bump_type is closed and each bucketed type maps to one tagged RiskBucketCoordinate variant with explicit unit/reference resolution and canonical serialization.
 
 Classification:
 
@@ -1494,6 +1513,12 @@ Round 14 (Sophira, final Codex single P2 on `c4e2802f...`):
 - Added reporting_currency to ModelCalibrationInput.valuation_context so its valuation_context_id is locally derivable from the same exact {valuation_date, reporting_currency} preimage as pricing.
 - Added fail-closed V1 calibration currency equality across CurveSet, selected curves, targeted VolatilityInput, and calibration instrument underlyings.
 - ModelCalibrationResult now echoes reporting_currency. No FX or other methodology was introduced.
+
+Round 15 (Sophira, current-head Codex P2 on `318b01c0...`):
+
+- Replaced the untyped `ValueOrReason<coordinate>` placeholder with a named tagged `RiskBucketCoordinate` union.
+- Closed bump_type vocabulary and bound BUCKETED_TENOR / VOL_POINT / MODEL_PARAM to TENOR / VOL_NODE / MODEL_PARAMETER variants; PARALLEL_BP is structured NOT_APPLICABLE.
+- Canonical sort now uses the typed coordinate serialization. No risk bump-size/bucketing methodology value was selected.
 
 ---
 
