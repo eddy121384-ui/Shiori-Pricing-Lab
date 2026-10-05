@@ -306,7 +306,7 @@ Rules:
   - `OIS`: `valuation_product.underlying_product_id`, `exercise_terms`, `settlement_terms`, `model_input`, and `market_snapshot.volatility_input` are structured `NULL_WITH_REASON(NOT_APPLICABLE)`.
   - `SWAPTION`: `underlying_product_id` is PRESENT and equals `resolved_swap.product_id`; `exercise_terms` is PRESENT with `exercise_style=EUROPEAN`; `settlement_terms` is PRESENT; `market_snapshot.volatility_input` is PRESENT and must pass §9.2 underlying-identity checks; `model_input` is `NULL_WITH_REASON(NOT_APPLICABLE)` for the Phase-2 Black/shifted-Black/Bachelier path.
 - `CALLABLE_SWAP` and `RANGE_ACCRUAL` are #222 later-phase products but are NOT tokens in RATES_KERNEL_INPUT_V1. Their eventual applicability requires an explicit future schema-version extension; validators must reject them as unknown in V1 rather than infer partial payload rules. Product identity and underlying identity are never collapsed.
-- `curve_selection` is mandatory. The kernel MUST NOT choose the first eligible curve, infer selection from array position, or derive a preferred curve internally. `discount_curve_id` and every `forecast_curve_by_index` target must exist in the embedded `CurveSet`, have compatible `curve_role`, and (for forecasts) match the stated `index_id`; mismatch fails closed.
+- `curve_selection` is mandatory. The kernel MUST NOT choose the first eligible curve, infer selection from array position, or derive a preferred curve internally. `discount_curve_id` must resolve to a curve whose role permits discounting (`DISCOUNT` or explicitly-authorized `DISCOUNT_AND_FORECAST_REFERENCE_ONLY`). Every `forecast_curve_by_index[index]` target must resolve to a curve whose role permits forecasting (`FORECAST` or explicitly-authorized `DISCOUNT_AND_FORECAST_REFERENCE_ONLY`) and whose `index_id` is PRESENT and exactly equals the map key. Role/index mismatch fails closed.
 - V1 is single-currency at the pricing boundary because no FX input/conversion contract exists. `market_snapshot.curve_set.base_currency`, every selected discount/forecast curve's `currency`, `valuation_context.reporting_currency`, and any PRESENT `settlement_terms.settlement_currency` MUST equal `resolved_swap.currency`. A mismatch fails closed with `CURRENCY_MISMATCH`; the kernel never relabels or converts an amount and never invents FX.
 - Reusing one curve id for more than one role is permitted only when that curve's explicit role/methodology contract permits it; this document does not approve a new production single-curve methodology.
 - `ExerciseTerms`, `SettlementTerms`, and `ModelInput` are direct payloads when applicable; otherwise their `ValueOrReason` state must be `NULL_WITH_REASON(category=NOT_APPLICABLE)`. An id without payload is never sufficient at the kernel boundary.
@@ -437,6 +437,7 @@ discount_curve:
   curve_id: <string>                        # content-derived identity from the FULL canonical curve payload per §15.4, excluding only curve_id and content_fingerprint themselves
   currency: <Currency enum>                 # e.g. USD
   curve_role: DISCOUNT | DISCOUNT_AND_FORECAST_REFERENCE_ONLY
+  index_id: <ValueOrReason<FloatingIndex enum>> # DISCOUNT: NOT_APPLICABLE; combined-role: PRESENT forecast index association
   valuation_date: <ISO date>                # valuation context date; explicit, never system date
   reference_date: <ISO date>                # curve anchor used for curve-time calculations; normally == valuation_date
   reference_date_reason: <ValueOrReason<string>> # NOT_APPLICABLE when equal; PRESENT explanation required when different
@@ -475,6 +476,7 @@ discount_curve:
 
 Constraints:
 
+- `index_id` applicability is role-exact: `DISCOUNT` requires `NULL_WITH_REASON(category=NOT_APPLICABLE)`; `DISCOUNT_AND_FORECAST_REFERENCE_ONLY` requires PRESENT `FloatingIndex` so any forecast use can be validated deterministically. Missing or PRESENT-on-DISCOUNT index state fails closed.
 - `pillars` is non-empty, sorted strictly ascending by `pillar_date`, duplicate dates refused. An unresolved pillar remains present at its original coordinate with `value_state=NULL_WITH_REASON`, `value=null`, and a structured `unresolved_reason`; dropping it, storing NaN, zero-filling it, or inventing a neighboring value is forbidden.
 - `curve_id` uses the full canonical curve payload as its identity preimage: currency, role/index fields, valuation/reference dates + reason, value semantics, all pillars, rate representation, interpolation/extrapolation ids/versions/parameters, provenance, and construction methodology all participate. No price-affecting field may be omitted from curve identity. Only `curve_id` and `content_fingerprint` are excluded to avoid self-reference.
 - `reference_date == valuation_date` requires `reference_date_reason=NULL_WITH_REASON(category=NOT_APPLICABLE)`. If they differ, `reference_date_reason` MUST be PRESENT and explain the explicit anchor-date difference; differing dates without a reason fail closed. Curve-time calculations use `reference_date`, while `valuation_date` remains the valuation-context identity date.
@@ -485,14 +487,14 @@ Constraints:
 
 ### 7.3 ForwardCurve
 
-`ForwardCurve` inherits every `DiscountCurve` field plus index association. A forward curve without an index is malformed.
+`ForwardCurve` inherits the common `DiscountCurve` fields and uses the same `ValueOrReason<FloatingIndex>` association field. A forward curve without a PRESENT index is malformed.
 
 ```yaml
 forward_curve:
   <<: *discount_curve_fields
   schema_version: FORWARD_CURVE_V1
   curve_role: FORECAST
-  index_id: <FloatingIndex enum>            # e.g. USD_SOFR; vocabulary from products/enums.py, value is data
+  index_id: <ValueOrReason<FloatingIndex enum>> # REQUIRED PRESENT; e.g. USD_SOFR
   index_tenor: <ValueOrReason<string>>     # PRESENT for tenor-dimensional indices; NULL_WITH_REASON when index has no tenor dimension
   fixing_calendar_ref: <ValueOrReason<id>> # calendar governing observation/fixing dates; NULL_WITH_REASON until RED-02 locks
   observation_rules_ref: <ValueOrReason<id>> # approved observation mechanics ref; NULL_WITH_REASON until #224 D5 locks
@@ -500,8 +502,8 @@ forward_curve:
 
 Rules:
 
-- The kernel never forecasts a `USD_SOFR` coupon from a curve whose `index_id` is `USD_SOFR_TERM_3M` or vice versa; index mismatch fails closed (`INVALID_PRODUCT` with both ids named).
-- Discount-vs-forward role confusion fails closed: a `DISCOUNT`-role curve is never used to forecast, a `FORECAST`-role curve is never used to discount, unless the single `DISCOUNT_AND_FORECAST_REFERENCE_ONLY` reference shape is explicitly invoked with its methodology version recorded.
+- A `FORECAST` curve requires PRESENT `index_id`. The kernel never forecasts a `USD_SOFR` coupon from a curve whose PRESENT `index_id` is `USD_SOFR_TERM_3M` or vice versa; missing/index mismatch fails closed (`INVALID_PRODUCT` with both ids named).
+- Discount-vs-forward role confusion fails closed: a `DISCOUNT`-role curve is never used to forecast, a `FORECAST`-role curve is never used to discount. `DISCOUNT_AND_FORECAST_REFERENCE_ONLY` may serve both roles only when its reference-only methodology is explicitly authorized/recorded, and its PRESENT `index_id` MUST equal each forecast-selection map key that targets it.
 
 ### 7.4 Value types and units (vocabulary)
 
@@ -1007,6 +1009,9 @@ risk_bucket_coordinate_type:
   # Tagged union; exactly one variant is serialized.
   TENOR:
     kind: TENOR
+    curve_id: <curve_id>                  # exact selected curve whose tenor node/segment was bumped
+    curve_usage_role: DISCOUNT | FORECAST # valuation role being bumped; distinct even if one combined-role curve serves both
+    index_id: <ValueOrReason<FloatingIndex enum>> # FORECAST: PRESENT and equals selection-map key; DISCOUNT: NOT_APPLICABLE
     coordinate: <NumericWithUnit>         # explicit tenor coordinate; unit must be YEARS_FRACTION
     label: <ValueOrReason<string>>        # optional source/display label; never the authoritative numeric coordinate
   VOL_NODE:
@@ -1024,6 +1029,7 @@ Rules:
 - `product_id/product_type` MUST echo `RatesKernelInput.valuation_product`, and `inputs_identity.resolved_swap_product_id` MUST equal the embedded `ResolvedSwap.product_id`. Every optional input identity MUST echo the corresponding `RatesKernelInput` applicability state: PRESENT carries the exact consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`. Omission, bare null, or fabricated ids are malformed.
 - Every measure names its `measure_id`, `bump_spec` (type + size + unit + revaluation rule), `unit`, and structured `bucket_coordinate`. A sensitivity without a bump spec is not a result.
 - `bucket_coordinate` applicability is exact by `bump_type`: `PARALLEL_BP` requires `NULL_WITH_REASON(category=NOT_APPLICABLE)`; `BUCKETED_TENOR` requires PRESENT `RiskBucketCoordinate(kind=TENOR)`; `VOL_POINT` requires PRESENT `kind=VOL_NODE`; `MODEL_PARAM` requires PRESENT `kind=MODEL_PARAMETER`. Any other pairing fails closed.
+- `TENOR` identifies both WHICH selected curve and WHICH valuation role was bumped. For `curve_usage_role=DISCOUNT`, `curve_id` MUST equal `inputs_identity.curve_role_map.discount_curve_id` and `index_id` is structured NOT_APPLICABLE. For `FORECAST`, `index_id` MUST be PRESENT and `curve_id` MUST equal `inputs_identity.curve_role_map.forecast_curve_by_index[index_id]`. The referenced curve's intrinsic role/index must permit that usage under §5.1/§7; this also distinguishes discount vs forecast bumps when the same combined-role curve serves both.
 - `TENOR.coordinate` is the authoritative machine coordinate and MUST carry `unit=YEARS_FRACTION`; `label` is optional display/source text only and cannot change identity. `VOL_NODE` and `MODEL_PARAMETER` coordinates must resolve uniquely against the exact consumed input objects named in the coordinate. Free-form dates, tenor strings, parameter aliases, or ad-hoc maps are not valid RATES_RISK_RESULT_V1 bucket coordinates.
 - Bump sizes and bucketing rules are per-measure data with explicit units. Production bump conventions (1bp vs 0.5bp, bucket boundaries) are UNRESOLVED — RED-risk where desk methodology is required; the fields exist so the choice is recordable, not so a default is smuggled in.
 - RATES_RISK_RESULT_V1 measure vocabulary is EXACTLY `DV01 | PV01 | DELTA | GAMMA | VEGA`. Unknown identifiers (including RHO, CS01, or product-specific aliases) fail closed; adding a measure requires a future schema-version vocabulary extension, not free text. #229 consumes only DV01 scope; defining the other tokens does not approve their production methodology.
@@ -1190,7 +1196,7 @@ Source + methodology + version are never collapsed into one string. Provenance w
 
 - Canonical serialization: every contract defines a canonical JSON form (sorted keys, fixed separators, decimal formatting pinned by the owning implementation issue — format details owned by #227, not chosen here).
 - Fingerprint-relevant arrays have schema-defined canonical order; source/acquisition order is never allowed to change a fingerprint:
-  - `CurveSet.curves`: ascending canonical tuple `(curve_role, index_id_sort_key, curve_id)`; for DiscountCurve (no `index_id` field), `index_id_sort_key` is exactly the empty UTF-8 string `""`; for ForwardCurve it is the canonical enum token. Duplicate `curve_id` forbidden.
+  - `CurveSet.curves`: ascending canonical tuple `(curve_role, index_id_sort_key, curve_id)`; `index_id_sort_key` is the PRESENT canonical enum token when `index_id` is PRESENT, otherwise exactly the empty UTF-8 string `""`. Duplicate `curve_id` forbidden.
   - `DiscountCurve/ForwardCurve.pillars`: strictly ascending `pillar_date`; duplicate dates forbidden (§7.2).
   - `FixingStore.entries`: ascending `(index_id, observation_date)`; duplicate economic keys forbidden (§8).
   - Vol axes: ascending numeric `coordinate`; duplicate coordinates forbidden. `strikes`: ascending by StrikeDimension enum order `ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS`, then lexicographic canonical JSON serialization of the active `NumericWithUnit` payload (or the full StrikeCoordinate when no active numeric exists). `quotes`: ascending canonical `VolNodeKey`; duplicate node keys forbidden (§9.2–§9.4).
@@ -1353,6 +1359,7 @@ Searched the new contract for each defect family; outcome per family:
 29. Round-13 final-review consistency families — FIXED: (a) VolatilityInput carries currency + underlying OIS/index identity and is validated against the resolved underlying; (b) CurveSet construction methodology is authoritative and per-curve copies are exact echoes; (c) RATES_KERNEL_INPUT_V1 product_type is closed to docs/04-aligned OIS | SWAPTION with exact applicability; (d) valuation_context_id has exact preimage {valuation_date, reporting_currency}, while all other request facts remain independent kernel-fingerprint inputs.
 30. Round-14 calibration-context parity — FIXED: ModelCalibrationInput now carries reporting_currency beside valuation_date, derives valuation_context_id from the same exact V1 preimage as pricing, enforces single-currency calibration against curves/vol/instrument underlyings, and ModelCalibrationResult echoes reporting_currency.
 31. Round-15 risk-bucket wire typing — FIXED: RiskResult bump_type vocabulary is closed and bucket_coordinate is a tagged RiskBucketCoordinate union with deterministic TENOR / VOL_NODE / MODEL_PARAMETER shapes, exact bump-type applicability, units/resolution rules, and canonical sorting.
+32. Round-16 curve-role identity closure — FIXED: (a) TENOR risk buckets include selected curve_id + usage role + conditional index_id so multi-curve and combined-role sensitivities are distinguishable; (b) all curves carry role-applicable ValueOrReason index_id, allowing explicitly-authorized DISCOUNT_AND_FORECAST_REFERENCE_ONLY curves to satisfy forecast selection deterministically.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1411,6 +1418,8 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Valuation context identity — NO GUESS: exact preimage is valuation_date + reporting_currency only.
 - Calibration valuation context — NO GUESS: ModelCalibrationInput carries both preimage fields, validates the id locally, enforces the V1 currency invariant, and ModelCalibrationResult echoes reporting_currency.
 - Risk bucket coordinate — NO GUESS: bump_type is closed and each bucketed type maps to one tagged RiskBucketCoordinate variant with explicit unit/reference resolution and canonical serialization.
+- Tenor risk curve identity — NO GUESS: TENOR carries curve_id + DISCOUNT/FORECAST usage role + role-applicable index_id and resolves against the consumed curve_role_map.
+- Combined-role forecast selection — NO GUESS: DISCOUNT_AND_FORECAST_REFERENCE_ONLY carries PRESENT index_id and can serve forecast only when explicitly authorized and index-matched.
 
 Classification:
 
@@ -1519,6 +1528,12 @@ Round 15 (Sophira, current-head Codex P2 on `318b01c0...`):
 - Replaced the untyped `ValueOrReason<coordinate>` placeholder with a named tagged `RiskBucketCoordinate` union.
 - Closed bump_type vocabulary and bound BUCKETED_TENOR / VOL_POINT / MODEL_PARAM to TENOR / VOL_NODE / MODEL_PARAMETER variants; PARALLEL_BP is structured NOT_APPLICABLE.
 - Canonical sort now uses the typed coordinate serialization. No risk bump-size/bucketing methodology value was selected.
+
+Round 16 (Sophira, Codex review on `54c08a74...`):
+
+- Added selected curve identity and valuation usage role to TENOR risk buckets, including forecast index association, so discount/forecast sensitivities at the same tenor remain distinct.
+- Added role-applicable `index_id` to the common curve shape: plain DISCOUNT=N/A; FORECAST and combined-role=PRESENT.
+- Explicitly-authorized combined-role reference curves can now satisfy forecast selection without a deterministic-schema contradiction. No production single-curve methodology was approved.
 
 ---
 
