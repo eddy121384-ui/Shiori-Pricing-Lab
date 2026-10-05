@@ -293,7 +293,7 @@ rates_kernel_input:
   valuation_context:
     valuation_context_id: <string>            # derived identity of this valuation context; no system-clock default
     valuation_date: <ISO date>                # MUST equal market_snapshot.valuation_date
-    reporting_currency: <Currency enum>       # explicit reporting currency
+    reporting_currency: <Currency enum>       # V1 MUST equal resolved_swap.currency; no FX conversion contract exists
   content_fingerprint: <hex>                  # non-recursive preimage rule §15.4
 ```
 
@@ -303,6 +303,7 @@ Rules:
 - `valuation_product` is the authoritative identity of WHAT is being valued. For a vanilla swap, `valuation_product.product_id == resolved_swap.product_id` and `underlying_product_id = NULL_WITH_REASON(NOT_APPLICABLE)`. For a derivative over that swap, `valuation_product.product_id` identifies the derivative trade/position, `underlying_product_id` MUST be PRESENT and equal `resolved_swap.product_id`, and the derivative id MUST NOT be inferred from or substituted by the underlying id.
 - `valuation_product.product_type` controls structural applicability (for example whether exercise/settlement terms are required); product identity and underlying identity are never collapsed.
 - `curve_selection` is mandatory. The kernel MUST NOT choose the first eligible curve, infer selection from array position, or derive a preferred curve internally. `discount_curve_id` and every `forecast_curve_by_index` target must exist in the embedded `CurveSet`, have compatible `curve_role`, and (for forecasts) match the stated `index_id`; mismatch fails closed.
+- V1 is single-currency at the pricing boundary because no FX input/conversion contract exists. `market_snapshot.curve_set.base_currency`, every selected discount/forecast curve's `currency`, `valuation_context.reporting_currency`, and any PRESENT `settlement_terms.settlement_currency` MUST equal `resolved_swap.currency`. A mismatch fails closed with `CURRENCY_MISMATCH`; the kernel never relabels or converts an amount and never invents FX.
 - Reusing one curve id for more than one role is permitted only when that curve's explicit role/methodology contract permits it; this document does not approve a new production single-curve methodology.
 - `ExerciseTerms`, `SettlementTerms`, and `ModelInput` are direct payloads when applicable; otherwise their `ValueOrReason` state must be `NULL_WITH_REASON(category=NOT_APPLICABLE)`. An id without payload is never sufficient at the kernel boundary.
 - Product applicability is structural, not a market default: e.g. a vanilla swap does not gain exercise/settlement terms merely because a snapshot contains related market data.
@@ -427,7 +428,7 @@ curve_role: DISCOUNT | FORECAST | DISCOUNT_AND_FORECAST_REFERENCE_ONLY
 ```yaml
 discount_curve:
   schema_version: DISCOUNT_CURVE_V1
-  curve_id: <string>                        # stable curve instance id: derived from canonical curve identity content (currency + role + index where applicable + pillars + methodology versions) per §15.4; own id + fingerprint excluded; no invented timestamp
+  curve_id: <string>                        # content-derived identity from the FULL canonical curve payload per §15.4, excluding only curve_id and content_fingerprint themselves
   currency: <Currency enum>                 # e.g. USD
   curve_role: DISCOUNT | DISCOUNT_AND_FORECAST_REFERENCE_ONLY
   valuation_date: <ISO date>                # valuation context date; explicit, never system date
@@ -469,6 +470,7 @@ discount_curve:
 Constraints:
 
 - `pillars` is non-empty, sorted strictly ascending by `pillar_date`, duplicate dates refused. An unresolved pillar remains present at its original coordinate with `value_state=NULL_WITH_REASON`, `value=null`, and a structured `unresolved_reason`; dropping it, storing NaN, zero-filling it, or inventing a neighboring value is forbidden.
+- `curve_id` uses the full canonical curve payload as its identity preimage: currency, role/index fields, valuation/reference dates + reason, value semantics, all pillars, rate representation, interpolation/extrapolation ids/versions/parameters, provenance, and construction methodology all participate. No price-affecting field may be omitted from curve identity. Only `curve_id` and `content_fingerprint` are excluded to avoid self-reference.
 - `reference_date == valuation_date` requires `reference_date_reason=NULL_WITH_REASON(category=NOT_APPLICABLE)`. If they differ, `reference_date_reason` MUST be PRESENT and explain the explicit anchor-date difference; differing dates without a reason fail closed. Curve-time calculations use `reference_date`, while `valuation_date` remains the valuation-context identity date.
 - A resolved pillar requires `value_state=RESOLVED` and a numeric `value`, and forbids `unresolved_reason`. Its interpretation comes from the enclosing curve-level `value_type` + `value_unit`.
 - `value_type` + `value_unit` are REQUIRED exactly once at curve level in V1 and apply uniformly to every pillar, including unresolved pillars. Mixed value types/units inside one V1 curve are NOT representable and fail closed; supporting a genuinely mixed curve would require a future schema version rather than ambiguous per-pillar repetition.
@@ -554,7 +556,7 @@ fixing_store:
       version: <ValueOrReason<string>>      # source version / batch id or structured reason when no source exists
       projection_method_id: <ValueOrReason<string>>      # state-dependent; see §8.3
       projection_method_version: <ValueOrReason<string>> # state-dependent; see §8.3
-      projection_inputs_ref: <ValueOrReason<id>>         # minimum replay link: curve/observation identity or structured N/A/unresolved reason
+      projection_inputs_ref: <ValueOrReason<ProjectionInputsRef>> # exact curve-set/forward-curve/observation-rule inputs used for audit projection
   provenance:
     sources: <list<enum>>                  # exact union of PRESENT entry sources; MAY be empty for forecast-only/MISSING-only store; never invent a market source
     assembled_by: <string>
@@ -563,11 +565,16 @@ fixing_store:
     captured_at: <ISO-8601 timestamp+offset>
     evidence_refs: <list>                  # E-citations once methodology locks; empty until then
   content_fingerprint: <hex>                # digest of canonical FixingStore preimage per §15.4 (own fingerprint excluded; same_day_rule participates)
+
+projection_inputs_ref_type:
+  curve_set_id: <curve_set_id>              # MUST identify sibling MarketSnapshot.curve_set when embedded
+  forward_curve_id: <curve_id>              # MUST resolve to FORECAST curve with matching entry.index_id
+  observation_rules_ref: <id>               # MUST resolve through the #228-owned observation-rule registry
 ```
 
 State-dependent projection-field rules (machine-readable, enforced per entry):
 
-- `PROJECTED`: valid only as a complete audit-only forecast record. `value`, `source=CURVE_PROJECTION`, `projection_method_id`, `projection_method_version`, and `projection_inputs_ref` MUST all be PRESENT. If projection methodology is unknown/unapproved, do NOT serialize the entry as `PROJECTED`; use the applicable non-projected state (normally `FORECAST_REQUIRED` for a future fixing). An incomplete `PROJECTED` entry is malformed and fails closed.
+- `PROJECTED`: valid only as a complete audit-only forecast record. `value`, `source=CURVE_PROJECTION`, `projection_method_id`, `projection_method_version`, and `projection_inputs_ref` MUST all be PRESENT. The typed reference MUST identify the sibling `CurveSet`, a FORECAST `forward_curve_id` whose `index_id` equals the entry's `index_id`, and the exact observation-rule id resolved by the #228-owned registry; zero-match, mismatch, or opaque/external-only references fail closed. If projection methodology is unknown/unapproved, do NOT serialize the entry as `PROJECTED`; use the applicable non-projected state (normally `FORECAST_REQUIRED`).
 - `HISTORICAL`: `value` must be PRESENT with unit `DECIMAL_ANNUAL`; `source` and `version` must be PRESENT; projection fields must be `NULL_WITH_REASON` (reason `NOT_APPLICABLE_HISTORICAL`). A historical entry carrying projection methodology is malformed and fails closed.
 - `FORECAST_REQUIRED`: `value` is `NULL_WITH_REASON(TO_BE_PROJECTED_AT_VALUATION)`; projection fields are also structured not-yet-projected states. No projected value is stored as history — future projection is computed by the pricing/resolution path from the approved forward curve + observation mechanics, not read from this entry.
 - `MISSING`: `value`, `source`, `quote_timestamp`, and `version` carry structured missing/unavailable reasons as applicable; projection fields are `NULL_WITH_REASON`. No projection methodology may convert `MISSING` into history.
@@ -694,7 +701,7 @@ volatility_input:
   - `CUBE` is Expiry × Tenor × Strike with `strikes=PRESENT` containing at least two distinct StrikeCoordinates; every quoted strike must be one of them.
   - Any payload that can satisfy both or neither shape fails closed; changing only the representation token can never turn one structure into the other.
 - `atm_definition_id` is PRESENT exactly when the approved container methodology requires an ATM anchor. A genuinely ATM-independent absolute-strike methodology uses `NULL_WITH_REASON(category=NOT_APPLICABLE)`; if ATM is required but its convention is not yet locked, use structured `UNRESOLVED_METHODOLOGY` and fail closed rather than fabricating an id.
-- `VolatilityInput.methodology_id/version` is authoritative for the container. Every embedded `VolQuote` MUST carry matching `methodology_id/version`, `quote_type`, `volatility_unit`, and applicable `shift_unit`; any disagreement fails closed as malformed mixed semantics. V1 does not infer or merge conflicting quote methodologies.
+- `VolatilityInput.methodology_id/version` is authoritative for the container. Every embedded `VolQuote` MUST carry matching `methodology_id/version`, `quote_type`, `volatility_unit`, applicable `shift_unit`, and an `atm_definition` ValueOrReason state/value exactly equal to container `atm_definition_id`. A quote cannot introduce a second ATM authority; any disagreement (including PRESENT vs NOT_APPLICABLE vs UNRESOLVED state) fails closed as malformed mixed semantics.
 - Every `VolQuote.expiry` MUST exactly equal one entry in `VolatilityInput.expiries`, and every `VolQuote.underlying_tenor` MUST exactly equal one entry in `underlying_tenors`; its strike must satisfy the SURFACE/CUBE invariant above. Embedded quote coordinates are echoes for node self-description, not competing authorities. Mismatch fails closed.
 - `VolNodeKey` is the canonical typed tuple `{expiry_coordinate, underlying_tenor_coordinate, strike}`, where the two coordinates equal the authoritative axis-entry numeric coordinates and `strike` is the canonical StrikeCoordinate object. Each `VolQuote.node_key` MUST equal the tuple derived from that quote's embedded fields. Duplicate node keys are forbidden.
 - `VolatilityInput.quotes` is canonically sorted ascending by canonical serialization of `node_key`; source capture order never affects the wire payload or fingerprint.
@@ -765,8 +772,9 @@ model_input:
     - name: <string>                      # e.g. mean_reversion | volatility | ...
       value: <double>
       unit: <unit enum>                   # explicit; e.g. PER_YEAR | DECIMAL | ...
-  calibration_ref: <ValueOrReason<calibration_result_id>> # exact calibration result when calibration-derived; structured NOT_CALIBRATED reason otherwise
-  calibration_timestamp: <ISO-8601 timestamp+offset | NULL_WITH_REASON>  # traceable to ModelCalibrationResult.calibrated_at where calibration-derived; NULL_WITH_REASON (NOT_CALIBRATED) otherwise — never fabricated
+  calibration_ref: <ValueOrReason<calibration_result_id>> # identity index; PRESENT iff calibration_result payload is PRESENT
+  calibration_result: <ValueOrReason<ModelCalibrationResult §14.3>> # embedded no-I/O evidence; PRESENT iff calibration-derived
+  calibration_timestamp: <ValueOrReason<ISO-8601 timestamp+offset>> # MUST equal embedded calibration_result.calibrated_at; NOT_CALIBRATED otherwise
   valuation_date: <ISO date>
   source: <enum>                          # BLOOMBERG_DAPI | SCREEN_TRANSCRIPTION | SYNTHETIC_FIXTURE | RESEARCH_ADAPTER | CALIBRATION_OUTPUT
   methodology_id: <string | UNRESOLVED>   # model methodology identity once approved; UNRESOLVED — RED-225-M1 until then
@@ -780,8 +788,10 @@ model_input:
 ```
 
 - Model choice itself is RED-model (Phase 3+): defining the `model_id` vocabulary here does not approve any model for production. Hull-White 1F is the #222 Phase-3 target, not an approval.
-- Calibration objective, optimizer, tolerance, and convergence semantics are owned by §14. A `ModelInput` without a calibration link where the model requires calibration fails closed.
-- `ModelInput` satisfies the §15.3 common provenance contract (source, methodology_id/version, adapter_name/version, upstream_ids, evidence_refs, applicable timestamp, content_fingerprint) rather than weakening it. For calibration-derived inputs `calibration_timestamp` must equal the linked `ModelCalibrationResult.calibrated_at`; for non-calibrated inputs no calibration timestamp is invented (`NULL_WITH_REASON`).
+- Calibration objective, optimizer, tolerance, and convergence semantics are owned by §14. For a calibration-derived input, `calibration_ref` and embedded `calibration_result` MUST both be PRESENT; the ref must equal `calibration_result.calibration_result_id`, `calibration_timestamp` must equal `calibration_result.calibrated_at`, `model_id/model_version` must match, and `ModelInput.parameters` must exactly equal the embedded result's calibrated `parameters`. Any mismatch fails closed.
+- The no-I/O kernel MUST inspect the embedded calibration evidence. V1 permits consumption only when `calibration_result.status` is SUCCESS or SUCCESS_WITH_WARNINGS AND `calibration_result.convergence.status=CONVERGED`. FAILED / NOT_CONVERGED / NOT_APPLICABLE calibration evidence is not consumable. V1 intentionally has no calibration-override carrier; any future override requires a new versioned contract plus RED-225-M2 approval rather than an implicit bypass.
+- For a non-calibrated ModelInput, `calibration_ref`, `calibration_result`, and `calibration_timestamp` are all structured `NULL_WITH_REASON(category=NOT_APPLICABLE, code=NOT_CALIBRATED)`.
+- `ModelInput` satisfies the §15.3 common provenance contract (source, methodology_id/version, adapter_name/version, upstream_ids, evidence_refs, applicable timestamp, content_fingerprint) rather than weakening it.
 
 ---
 
@@ -876,7 +886,7 @@ rates_pricing_result:
   product_type: <enum>                    # MUST equal RatesKernelInput.valuation_product.product_type
   valuation_date: <ISO date>              # the date valued; must equal MarketSnapshot.valuation_date
   valuation_context_id: <string>          # identity of the valuation request (date + reporting currency + snapshot + trade + model refs)
-  result_currency: <Currency enum>        # reporting currency for monetary outputs; explicit, never assumed
+  result_currency: <Currency enum>        # MUST equal RatesKernelInput.valuation_context.reporting_currency == resolved_swap.currency in V1
   headline: <ValueOrReason<HeadlineValue>> # SUCCESS: PRESENT; FAILED: structured UNAVAILABLE(PRICING_FAILED)
   pv: <ValueOrReason<NumericWithUnit>>     # supplemental PV metric; unit=CURRENCY_AMOUNT when PRESENT
   pv_sign_convention: <ValueOrReason<enum>>
@@ -949,9 +959,9 @@ rates_risk_result:
   product_type: <enum>                    # MUST equal RatesKernelInput.valuation_product.product_type
   valuation_date: <ISO date>
   valuation_context_id: <string>
-  result_currency: <Currency enum>
+  result_currency: <Currency enum>        # MUST equal RatesKernelInput.valuation_context.reporting_currency == resolved_swap.currency in V1
   measures:
-    - measure_id: <enum>                  # e.g. DV01 | PV01 | DELTA | GAMMA | VEGA | ... — vocabulary defined here, selection per result is data
+    - measure_id: DV01 | PV01 | DELTA | GAMMA | VEGA # exact RATES_RISK_RESULT_V1 vocabulary; no open-ended members
       value: <double>
       unit: <unit enum>                   # e.g. CURRENCY_AMOUNT_PER_BASIS_POINT for DV01; DECIMAL_SENSITIVITY where applicable; explicit per measure
       bump_spec:                          # methodology that produced this measure; required per measure
@@ -977,7 +987,8 @@ rates_risk_result:
     model_input_id: <ValueOrReason<string>>
     calibration_result_id: <ValueOrReason<string>>
   status: SUCCESS | SUCCESS_WITH_WARNINGS | FAILED
-  warnings / errors: <structured codes; §16>
+  warnings: <list[{code, message, detail}]>
+  errors: <list[{code, message, detail}>>   # FAILED carries >=1
   engine: { engine_name, engine_version, method }
   diagnostics: <map>
   replay: { content_fingerprint, inputs_fingerprint, tolerance }  # inputs_fingerprint = consumed RatesKernelInput.content_fingerprint; content fingerprint per §15.4
@@ -988,7 +999,7 @@ Rules:
 - `product_id/product_type` MUST echo `RatesKernelInput.valuation_product`, and `inputs_identity.resolved_swap_product_id` MUST equal the embedded `ResolvedSwap.product_id`. Every optional input identity MUST echo the corresponding `RatesKernelInput` applicability state: PRESENT carries the exact consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`. Omission, bare null, or fabricated ids are malformed.
 - Every measure names its `measure_id`, `bump_spec` (type + size + unit + revaluation rule), `unit`, and structured `bucket_coordinate`. Bucketed measures require PRESENT coordinates; parallel/non-bucketed measures require `NULL_WITH_REASON(category=NOT_APPLICABLE)`. A sensitivity without a bump spec is not a result.
 - Bump sizes and bucketing rules are per-measure data with explicit units. Production bump conventions (1bp vs 0.5bp, bucket boundaries) are UNRESOLVED — RED-risk where desk methodology is required; the fields exist so the choice is recordable, not so a default is smuggled in.
-- `DV01` vs `PV01` vs delta/gamma/vega naming follows the `measure_id` vocabulary here, not QuantLib or Bloomberg naming. A measure id unknown to this vocabulary fails closed rather than being passed through as free text.
+- RATES_RISK_RESULT_V1 measure vocabulary is EXACTLY `DV01 | PV01 | DELTA | GAMMA | VEGA`. Unknown identifiers (including RHO, CS01, or product-specific aliases) fail closed; adding a measure requires a future schema-version vocabulary extension, not free text. #229 consumes only DV01 scope; defining the other tokens does not approve their production methodology.
 
 ---
 
@@ -1088,7 +1099,8 @@ model_calibration_result:
     optimizer_version: UNRESOLVED
   source_provenance: { source, adapter_versions, upstream_ids, evidence_refs }
   status: SUCCESS | SUCCESS_WITH_WARNINGS | FAILED
-  warnings / errors: <structured codes; §16>
+  warnings: <list[{code, message, detail}]>
+  errors: <list[{code, message, detail}>>   # FAILED carries >=1
   replay: { content_fingerprint, inputs_fingerprint, tolerance }  # inputs_fingerprint MUST equal consumed ModelCalibrationInput.content_fingerprint; content fingerprint per §15.4
 ```
 
@@ -1098,7 +1110,7 @@ Rules:
 - `ModelCalibrationResult.replay.inputs_fingerprint` MUST equal the consumed `ModelCalibrationInput.content_fingerprint`; `calibration_input_id` MUST equal that input's identity. Implementations may not hash an ad-hoc subset.
 - Every result field that echoes calibration input identity MUST match it exactly: `model_id/model_version`, `valuation_context_id`, `market_snapshot_id == input.market_snapshot.snapshot_id`, ordered `instruments[*].{instrument_id,instrument_type,market_target,weight}`, `objective.{objective_id,objective_version}`, and `convergence.{optimizer_id,optimizer_version}`. The authoritative instrument economics remain the embedded `ModelCalibrationInput.calibration_instruments[*].instrument_terms`; result rows do not redefine them. Any mismatch is a malformed result, not a second authority.
 - When `convergence.tolerance` is applicable, it MUST echo the exact `ModelCalibrationInput.convergence_policy.tolerance` value+unit. Output-only facts are `calibrated_at`, calibrated `parameters`, objective error values, iteration count, convergence status, warnings/errors, and provenance.
-- `CONVERGED=false` (or `NOT_CONVERGED`) results are still first-class records: a downstream pricing call consuming a non-converged calibration fails closed unless an explicit override policy (itself RED-model, not defined here) permits it with the override recorded.
+- `NOT_CONVERGED` results are still first-class audit records, but RATES_KERNEL_INPUT_V1 cannot consume them through ModelInput. This V1 schema has no override carrier; a future override path requires an explicit schema revision and RED-225-M2 approval.
 - Objective, optimizer, tolerance, and model version VALUES are UNRESOLVED — RED-model. The fields exist so Phase-3 work can record them without redesigning the contract.
 
 ---
@@ -1180,6 +1192,7 @@ Error-code vocabulary (minimum; extension requires methodology review):
 | `UNSUPPORTED_PRODUCT` | Product / style / role outside approved scope |
 | `MISSING_MARKET_DATA` | Required market section / pillar / fixing / vol node absent or unresolved |
 | `VALUATION_DATE_MISMATCH` | Valuation date disagrees with snapshot / curve / fixing / vol date |
+| `CURRENCY_MISMATCH` | Reporting / selected-curve / settlement currency disagrees with ResolvedSwap currency where V1 has no FX contract |
 | `MARKET_SNAPSHOT_MISMATCH` | Snapshot identity disagrees with query scope (e.g. vol from another snapshot) |
 | `INVALID_PRODUCT` | Malformed trade / index mismatch / role confusion / display-only curve as pricing input |
 | `MISSING_REFERENCE_DATA` | Reference term present but uninterpretable (never silently coerced) |
@@ -1253,14 +1266,14 @@ No stop-condition trigger occurred in writing this document: no Bloomberg/workst
 - [ ] Relation to approved `SwapTrade -> ConventionSet -> ResolvedSwap` (#224) explicit (§5, §12.4); no competing authoritative copies.
 - [ ] #223 ownership boundary preserved (§3): Python acquisition/normalization/persistence/UI vs C++ resolution/pricing; no live Bloomberg in kernel; QuantLib behind isolation, defaults never methodology.
 - [ ] #224 semantics preserved: R1/R2, wire versioning, D1–D13/E1–E6 untouched; no RED-02 value filled.
-- [ ] `RatesKernelInput` (§5.1) explicitly separates valuation_product identity from underlying ResolvedSwap identity, and carries MarketSnapshot + curve_selection + applicable ExerciseTerms / SettlementTerms / ModelInput at the no-I/O boundary; derivative product ids are never replaced by underlying swap ids.
+- [ ] `RatesKernelInput` (§5.1) explicitly separates valuation_product identity from underlying ResolvedSwap identity, carries all direct payloads, enforces V1 single-currency compatibility (no hidden FX), and can validate embedded calibration convergence evidence without I/O.
 - [ ] MarketSnapshot canonical wire shape contains typed embedded CurveSet/FixingStore/VolatilityInput payloads plus matching identity refs (§6.2/§6.4); ids without required content and ref/payload identity mismatches fail closed.
 - [ ] Curve ENGINE CONTRACT has exactly one wire schema version authority; reference_date differences carry a serialized reason; identity / currency / role / dates / pillars / value semantics / provenance / methodology are explicit (§7); unresolved pillars remain structurally present; no naked double arrays.
-- [ ] FixingStore distinguishes observation_date from publication_date/publication_timestamp (§8.2–§8.5); history-vs-forecast availability is never inferred from observation date alone; forecast-only stores may carry an explicit empty source union without inventing a source; PROJECTED is complete audit-only state or rejected; same-day publication ambiguity carried at the single authoritative `FixingStore.same_day_rule`; no silent history-to-forecast.
-- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); SURFACE and CUBE have disjoint cardinality invariants; ATM definition can be structured NOT_APPLICABLE; VolQuote nodes have deterministic typed VolNodeKey identity, canonical order, and duplicate refusal; StrikeDimension remains canonical; no production vol methodology chosen (RED-225-V*).
+- [ ] FixingStore distinguishes observation/publication dates and typed state (§8.2–§8.5); PROJECTED audit rows carry resolvable typed ProjectionInputsRef (curve set + forward curve + observation rule); no opaque projection ids or silent history-to-forecast.
+- [ ] Vol contract forbids naked/ambiguous vol semantics (§9.0); SURFACE/CUBE are disjoint; container ATM definition is the single authority and every quote exactly echoes its ValueOrReason state/value; VolNodeKey identity/order is deterministic; no production vol methodology chosen (RED-225-V*).
 - [ ] Exercise distinguishes style / dates / notice / underlying-start rule / calendar-timezone (§10); derivative underlying_product_id binds to both RatesKernelInput.valuation_product.underlying_product_id and embedded ResolvedSwap.product_id; no invented ResolvedSwap identity field; unresolved methodology values remain RED.
 - [ ] Settlement separates type / cash-only method / physical-vs-cash / cash methodology / date-timing / provenance (§11); PHYSICAL carries structured NOT_APPLICABLE for cash-only method fields rather than unresolved fake values; no invented values (RED-225-S1).
-- [ ] PricingResult carries a tagged authoritative headline value plus supplemental typed metrics; product identity echoes RatesKernelInput.valuation_product; RiskResult uses structured applicability; ModelCalibrationInput targets embedded VolQuote nodes through resolvable VolNodeKey and ModelCalibrationResult echoes the same target (§12–§14).
+- [ ] PricingResult/RiskResult/ModelCalibrationResult have literal separate warnings + errors fields; RiskResult V1 measure vocabulary is closed; ModelInput embeds calibration result evidence so convergence is enforceable without external lookup (§12–§14).
 - [ ] Versioning/provenance: actual value vs resolution-status separated (§15.1); machine-readable schema versions everywhere incl. `RATES_KERNEL_INPUT_V1` (§15.2); independently identity-bearing market/model objects satisfy the complete provenance envelope (§15.3); source/methodology/version never collapsed; replay fingerprints defined with NON-RECURSIVE preimage (§15.4); snapshot identity includes `captured_at` exactly once; ExerciseTerms/SettlementTerms carry identities + fingerprints.
 - [ ] Fail-closed rules enumerated (§16 + per-section rules); RED list complete with owners (§17); #226–#229 boundaries preserved (§18).
 - [ ] Same-defect-family audit performed (§A below): no naked units, no role-by-name, no comment-as-data, no collapsed provenance, no history/forecast ambiguity, no settlement/vol-coordinate ambiguity, no QuantLib/Bloomberg hidden dependence, nothing #227–#229 must infer.
@@ -1299,6 +1312,7 @@ Searched the new contract for each defect family; outcome per family:
 24. Round-8 identity/headline/result-applicability families — FIXED: (a) RatesKernelInput.valuation_product separates derivative trade identity from underlying ResolvedSwap.product_id and results echo the valued product identity; (b) PricingResult headline is a tagged authoritative value, while PV/par-rate/annuity are supplemental ValueOrReason metrics with equality rules when designated as headline; (c) RiskResult optional input identities use the same ValueOrReason applicability states as PricingResult/inputs.
 25. Round-9 OC/Codex audit families — FIXED: (a) removed duplicate curve schema_version_ref; (b) reference-date divergence has a serialized reason and unambiguous anchor role; (c) SURFACE/CUBE are structurally disjoint by strike cardinality; (d) container ATM definition supports structured NOT_APPLICABLE; (e) VolQuote node keys are deterministic/resolvable and calibration market targets use them; (f) fingerprint-relevant input lists have explicit canonical ordering/dedup; (g) #228 owns registries for forward id references; (h) calibration result rows echo market targets.
 26. Round-10 OC P3 determinism cleanup — FIXED: (a) DiscountCurve's absent index sort key is exactly empty UTF-8 string; (b) strike secondary ordering uses canonical JSON serialization, not implementation-defined unit comparison; (c) CalibrationMarketTarget has an explicit named type declaration; (d) MarketSnapshot.diagnostics.unresolved_fields is lexicographically ordered and duplicate-free.
+27. Round-11 final Codex consistency families — FIXED: (a) embedded calibration_result makes convergence/parameter linkage enforceable by the no-I/O kernel and V1 forbids non-converged override; (b) reporting/selected-curve/settlement currencies must equal ResolvedSwap currency because V1 has no FX contract; (c) VolQuote atm_definition exactly echoes container authority; (d) RiskResult V1 measure vocabulary is closed; (e) ProjectionInputsRef is typed/resolvable; (f) RiskResult and ModelCalibrationResult serialize separate warnings/errors; (g) curve_id derives from the full canonical curve payload, excluding only self id/fingerprint.
 
 ## B. Literal-implementer review (performed before push; round 2 repeated with focus areas)
 
@@ -1343,6 +1357,13 @@ Perspective: "If #227, #228, #229 were implemented literally by an engineer forb
 - Canonical sort sentinels — NO GUESS: DiscountCurve missing index uses exact empty-string sort key; strike secondary order is canonical-JSON lexicographic.
 - Calibration target DTO type — NO GUESS: CalibrationMarketTarget has one named declaration shared by input/result.
 - Snapshot unresolved-field order — NO GUESS: canonical field-path lexicographic order, duplicate-free.
+- Calibration convergence — NO GUESS: calibration-derived ModelInput embeds the exact ModelCalibrationResult; params/ids/timestamp must match and only CONVERGED is consumable in V1.
+- Currency compatibility — NO GUESS: V1 has no FX path; reporting, selected curves, CurveSet base, and settlement currency must equal ResolvedSwap currency.
+- ATM authority — NO GUESS: per-quote atm_definition is an exact echo of container atm_definition_id.
+- Risk vocabulary — NO GUESS: exact V1 tokens are DV01/PV01/DELTA/GAMMA/VEGA.
+- Projection replay target — NO GUESS: typed ProjectionInputsRef resolves sibling CurveSet/ForwardCurve plus #228 observation-rule registry.
+- Result warning/error wire shape — NO GUESS: separate fields in Pricing/Risk/Calibration results.
+- Curve identity — NO GUESS: full canonical price-affecting payload participates in curve_id.
 
 Classification:
 
@@ -1421,6 +1442,12 @@ Round 10 (Sophira, OC re-audit P3 cleanup on `ec5c84de...`):
 - OC reported no P1/P2 and four deterministic-wire P3s.
 - Closed all four without methodology changes: explicit DiscountCurve sort sentinel, canonical JSON strike sub-order, named CalibrationMarketTarget type, deterministic unresolved_fields ordering.
 - No additional architecture scope added.
+
+Round 11 (Sophira, reconciled overlapping Codex reviews on `ec5c84de...` and `5acdef2c...`):
+
+- Timing overlap exposed eight unresolved P2 findings, not four; all eight were independently verified against current HEAD and fixed together.
+- Fixes are contract-completeness/fail-closed only: no FX methodology, calibration override policy, risk bump convention, curve interpolation methodology, or market convention was invented.
+- V1 deliberately chooses fail-closed constraints where supporting a missing capability would require a new input contract.
 
 ---
 
