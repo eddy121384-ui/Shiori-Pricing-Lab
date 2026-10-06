@@ -1496,15 +1496,16 @@ These are RED-governed (§13.2). **PROPOSED:** until they are resolved, an engin
 
 **PROPOSED — framework: GoogleTest.** Issue #226 allows "GoogleTest or Catch2, or another explicitly approved equivalent". GoogleTest is selected because: it is the framework the pinned dependency manager already carries a port for (so it does not add a second acquisition mechanism); it has first-class CTest integration including XML/JUnit output; it provides **death tests** and typed/parameterised tests, which the defaults-policy matrix (§3.6 D1–D17) and the cache-key matrix (§7.7 CT2/CT3/CT3b) need in order to be exhaustive rather than sampled; and it is the framework the sanitizer CI jobs (§11.6) are best understood with. **Trade-off recorded:** Catch2 needs no build step and reads more fluently for small suites; the deciding factor is the matrix tooling, not aesthetics. Switching later is possible but would touch every test file, so the choice is made now, once.
 
-**PROPOSED — layout** (mirrors §2.9/§2.10; the `tests/` subtree below is **identical** to §2.9's, which is canonical):
+**PROPOSED — layout.** Two authorities are combined here and must not be confused: the **production paths reproduce §2.3 verbatim** (which is the locked layout), and the **`tests/` subtree is identical to §2.9** (which is the canonical test layout). §9 adds no third tree.
 
 ```text
 cpp/rates_engine/
-  core/                     production library (no QuantLib)
-  dto/                      contracts + canonical serialization (no QuantLib)
-  quantlib_adapter/         the ONLY QuantLib-dependent target
-  diagnostics/              structured diagnostics
-  tests/
+  include/shiori_rates/     PUBLIC headers: dto/, engine/, diagnostics/   (§2.3)
+  src/dto/                  contracts + canonical serialization (no QuantLib)
+  src/quantlib_adapter/     the ONLY QuantLib-dependent target
+  src/engine/               production pricing kernel (no QuantLib)
+  src/diagnostics/          structured diagnostics
+  tests/                    identical to §2.9, which is canonical
     unit/                   per-component logic; pure logic, no QuantLib
     dto/                    JSON round-trip + schema-version + fail-closed (TL0)
     adapter/                the ONLY test area that may use QuantLib directly
@@ -1519,6 +1520,8 @@ cpp/rates_engine/
     fixtures/               synthetic, identity-stamped fixtures
   benchmarks/               §10 (separate executable, §2.10)
 ```
+
+**PROPOSED — why the production lines are repeated rather than omitted.** An earlier draft of this block listed the production directories at the *root* of `cpp/rates_engine/` as `core/`, `dto/`, `quantlib_adapter/`, `diagnostics/`. That was a **competing layout**: §2.3 locks those under `include/shiori_rates/` and `src/`, and names the kernel target `engine`, not `core`. Since the document tells #227 not to reopen the layout, two trees would have left both the implementation paths and the §3.9 E1a include allow-list ambiguous. The production lines are therefore reproduced from §2.3 exactly — and if §2.3 and this block ever diverge, **§2.3 is authoritative**.
 
 **PROPOSED:** the `tests/` list is not re-derived here. It is §2.9's list, reproduced so a reader of §9 sees the same directories; if the two ever diverge, **§2.9 is authoritative** and this block is the stale one.
 
@@ -1681,7 +1684,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 |---|---|
 | CS1 | `WARM` requires a documented population procedure (which keys were primed, by what input), not merely "ran twice" |
 | CS2 | `DISABLED` must genuinely bypass the cache, and is the only state that measures real computation |
-| CS3 | A regression is only comparable across runs that match on **M2–M11** — with **M1 (engine version / commit SHA) the intentional comparison variable** (§10.7 BM3) |
+| CS3 | A regression is only comparable across runs that match on **M2–M11** — with **M1 (engine version / commit SHA) the intentional comparison variable** (§10.7 BM3), and with **M11 matched only on its *configured* concurrency mode**. M11's other half is **observed gate acquisition/wait contention**, which is a *measurement* that varies with scheduling and load even between two runs of the same build; it is therefore **reported, never matched** (§10.5–§10.7 BM3). An earlier draft made CS3 require all of M2–M11 to match, which would have declared two otherwise perfectly controlled runs incomparable |
 
 ### 10.7 Statistical and comparison policy
 
@@ -1745,7 +1748,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 |
 | existing `test`, `windows-launcher-smoke` | unchanged | — | §11.2 |
 
-**PROPOSED — why the platform split is explicit.** Concurrency correctness is a *platform* property (the Windows build is static-linked and uses MSVC; the Linux build is dynamic and uses GCC/Clang), so the test **must** run on both. Only TSan is platform-restricted. The matrix therefore delivers: **T1, T2, T4–T7 on Windows and Linux; T3 (TSan) on Linux; T8 on both platforms once — and only once — an enablement proposal names the candidate configuration it exercises (§9.8 Q6).** Every *currently applicable* concurrency test is thus executed on both platforms, and the three deliberate earlier failures are avoided: one draft required all tests on both platforms while assigning all test execution to Linux; a later draft left T8 off the Windows job while PE1 required it there; and a third made T8 unconditionally required, which no existing candidate configuration could satisfy.
+**PROPOSED — why the platform split is explicit.** Concurrency correctness is a *platform* property (the Windows build uses MSVC and the static-only QuantLib linkage §2.6 establishes for that platform; the Linux build uses GCC/Clang), so the test **must** run on both. **Linkage on Linux is deliberately *not* asserted here**: §2.6 leaves static-vs-shared to the selected triplet and forbids assuming shared linkage anywhere in the design, so this rationale rests on the **compiler and runtime**, not on an unproven linkage choice — an earlier draft called the Linux build "dynamic", which the build contract does not guarantee. Only TSan is platform-restricted. The matrix therefore delivers: **T1, T2, T4–T7 on Windows and Linux; T3 (TSan) on Linux; T8 on both platforms once — and only once — an enablement proposal names the candidate configuration it exercises (§9.8 Q6).** Every *currently applicable* concurrency test is thus executed on both platforms, and the three deliberate earlier failures are avoided: one draft required all tests on both platforms while assigning all test execution to Linux; a later draft left T8 off the Windows job while PE1 required it there; and a third made T8 unconditionally required, which no existing candidate configuration could satisfy.
 
 **PROPOSED — the concurrency tests run in CI in §9.8's evidence mode.** They are not awaited on a gated default run, because §5.8's preconditions are not yet satisfied; CI invokes them as explicit evidence collection so that PE1's evidence can actually exist (§9.8 Q0). Evidence mode runs **T1–T7**; **T8 reports not-applicable with a reason** until a candidate configuration is supplied (§9.8 Q6), so the required jobs can be green while no unapproved configuration is exercised.
 
