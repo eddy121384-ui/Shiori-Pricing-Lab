@@ -1925,7 +1925,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | 11 | Immutable snapshot / ownership / lifetime rules explicit | §6.2, §6.4, §6.6 | **Satisfied** |
 | 12 | Allowed cache layers enumerated | §7.4 L1–L8 | **Satisfied** |
 | 13 | Every cache layer has deterministic key + invalidation rules | §7.4 (key/lifetime/invalidation columns), §7.5, §7.7 | **Satisfied** |
-| 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5 | **Satisfied** |
+| 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5, §8.6 **U-L**, §9.2 TL5 | **Satisfied** — reuse is explicit *and* explicitly conditional: a warning-bearing entry is not reusable until §8.6 U-L is discharged by the TL5 warning-stability test |
 | 15 | C++ test framework and layout defined | §9.1, §9.2 | **Satisfied** |
 | 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T8, §7.7 CT1–CT8 + CT3b, §9.6 | **Satisfied** |
 | 17 | Benchmark methodology separates cold/warm and cache state | §10.3, §10.4, §10.6 | **Satisfied** |
