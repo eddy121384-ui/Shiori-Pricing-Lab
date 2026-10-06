@@ -1860,7 +1860,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | Level | Mechanism |
 |---|---|
 | **Structural** | The adapter layer is the only QuantLib-dependent target (§3.4); the DTO layer cannot see QuantLib (§3.5, §6.5 B2) |
-| **Behavioural** | Every default listed in §3.6 D1–D17 is set **explicitly**, and L1 asserts it |
+| **Behavioural** | Every default listed in §3.6 D1–D17 is **either set explicitly from an owner-approved input or refused** — never silently inherited — and the **TL1** defaults-audit test asserts exactly that contract (set-or-refuse, matching §3.6). The behavioural level enforces the *same* contract as the fail-closed level below, deliberately not a stronger one: a rule demanding that every default be *set* would be unsatisfiable for D9/D14, whose approved values do not yet exist, and would leave #227 no way to be green except by selecting methodology |
 | **Fail-closed** | Where an explicit value is required but unspecified, the engine refuses `UNRESOLVED_METHODOLOGY` rather than falling through to a QuantLib default (§3.6, X3) |
 
 ### 13.2 RED items — explicitly NOT resolved here
@@ -1979,7 +1979,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | D-8 | Diagnostics emitter | §12 |
 | D-9 | `.gitignore` narrowing for the C++ tree | §1.9 / §2.2 — the repo-wide `build/` rule is a **naming trap**; #227 must add a narrow explicit ignore and verify with `git check-ignore` |
 | D-10 | The concurrency-correctness suite's enablement | §5.7/§5.8 |
-| D-11 | The defaults-audit test matrix | §3.6 D1–D17 + L1 |
+| D-11 | The defaults-audit test matrix | §3.6 D1–D17 + **TL1** |
 
 ### 15.3 What this document deliberately leaves open
 
@@ -2099,7 +2099,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 3. **Concurrency:** **single-threaded serialized per process; parallel pricing DISABLED**; scale by multiple processes; all QuantLib access behind one measured gate; enabling parallelism requires §5.7 T1–T8 — **including T8, which tests the configuration actually being enabled** — **and** an owner decision; the absence of library-internal parallelism must be **verified** (`_OPENMP` undefined), not inferred from the OpenMP option.
 4. **Inputs:** caller-owned, immutable, borrowed, never mutated after publication, no I/O in the kernel, no global fixing store.
 5. **Caching:** cache **values**, never QuantLib objects; keys from explicit input identity only; no pointer, clock, global or unknown-version identity; version mismatch is a miss.
-6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, unresolved policy ⇒ refuse.
+6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, **warning-bearing entries not reusable until warning stability is proven (U-L)**, unresolved policy ⇒ refuse.
 7. **Tests:** GoogleTest, layers **TL0–TL8**, defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
 8. **Benchmarks:** Google Benchmark, separate target; cold/warm × cache-state × phase; no blended number; mandatory reproducibility metadata; correctness-checked; no absolute-time CI gate.
 9. **CI:** existing Python and launcher jobs preserved; new C++ build/test/sanitizer/benchmark-smoke jobs; no path filter may bypass required validation.
