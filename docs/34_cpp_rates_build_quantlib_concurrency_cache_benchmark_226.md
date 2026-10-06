@@ -442,7 +442,7 @@ cpp/rates_engine/tests/
 ├── adapter/             # the ONLY test area that may use QuantLib directly
 ├── defaults/            # QuantLib default-audit matrix, §3.6 D1–D17 (TL1)
 ├── determinism/         # replay identity, §9.5 / #225 §15.4 (TL3)
-├── cache/               # §7.7 CT1–CT7 + CT3b (TL4)
+├── cache/               # §7.7 CT1–CT8 + CT3b (TL4)
 ├── calibration/         # §8.3 outcome preservation (TL5)
 ├── concurrency/         # §5.7 T1–T8 (TL6) — quarantined per §9.8
 ├── benchmark/           # §10.8 correctness-checked benchmarks (TL7)
@@ -499,13 +499,14 @@ This is the direct C++-engine expression of an already-approved #225 requirement
 | Decision | Value |
 |---|---|
 | Pin form | **One exact version**, recorded in `vcpkg.json` `overrides` and reinforced by the pinned `builtin-baseline` (§2.7 P1/P2) |
-| Candidate initial pin | **`1.43`** — supported by the EXTERNAL EVIDENCE in §3.3 that the vcpkg port currently carries version `1.43` |
-| Who may change the pin | Only via the §3.8 upgrade procedure. No incidental bump, no "while I was in there" |
+| **Initial pin — LOCKED** | **`1.43`**, and it is **locked, not a candidate**. Every fact in §4 — the process-global singletons, the macro defaults, the `LazyObject` ordering, the OpenMP pragma sites — is explicitly scoped to `v1.43`. Another exact version would invalidate that evidence base rather than merely being a different pin |
+| Who may change the pin | Only via the §3.8 upgrade procedure **and** a repeat of the §4 audit for the candidate version. No incidental bump, no "while I was in there" |
+| Deviation from `1.43` on a first implementation | **Re-audit is mandatory.** §3.8's audit is *change*-triggered, and a first implementation has no prior recorded pin for it to trigger from — so the obligation is stated here instead: selecting any version other than `1.43` requires repeating the §4 version-specific audit and obtaining §3.8 approval **before** implementation, because §4's defaults, singleton and OpenMP findings are version-conditioned |
 | Where the pin is recorded | The manifest (authority), the diagnostics output (§12), the benchmark metadata (§10.5), and the replay identity (§8.1) |
 | Range/`>=` pins | **Forbidden** for the C++ dependency. A range pin is what makes a hidden default change possible on a clean CI machine |
 | Python side | **Unchanged.** `pyproject.toml`'s `quant` extra keeps its existing lower bound. The two planes are independent (§2.7 P6) |
 
-**PROPOSED:** the initial pin is a *candidate*, not a locked value. #227 must confirm at implementation time that the exact version it pins is (a) available from the pinned baseline and (b) green on all three compilers; it then records the confirmed version. #226 does not fabricate a green result for a build that has never run.
+**PROPOSED — "version is locked" and "the build is green" are two different claims, and only the first is made here.** #226 locks the **version** to `1.43`, because that is the version every §4 fact is scoped to. #226 does **not** claim the build has ever run: no local C++ toolchain exists in this environment (§1.10), so the build outcome remains **UNPROVEN**. #227 must confirm that `1.43` is (a) available from the pinned baseline and (b) green on all three compilers. If `1.43` cannot satisfy (a) or (b), that is a §3.8/§13 matter to raise with the owner — **not** a licence to select a different version silently, which is exactly the gap this rule closes. An earlier draft said the pin was "a candidate, not a locked value", which would have let #227 choose a version that §4 never audited while §3.8's change-triggered audit stayed silent for want of a prior pin.
 
 ### 3.3 How QuantLib is acquired and linked
 
@@ -632,7 +633,7 @@ This section is the **evidence** for the claims §3 and §5 rely on. It delibera
 
 ### 4.1 Method and pinned evidence base
 
-**EXTERNAL EVIDENCE — method.** Claims were taken from the **QuantLib source at the `v1.43` release tag**, read directly, because that is the candidate pin in §3.2. Source files read (all at tag `v1.43`):
+**EXTERNAL EVIDENCE — method.** Claims were taken from the **QuantLib source at the `v1.43` release tag**, read directly, because that is the **locked** pin in §3.2 (not a candidate — see §3.2). Source files read (all at tag `v1.43`):
 
 | File | What it establishes |
 |---|---|
@@ -1321,7 +1322,7 @@ Rationale is §4: a QuantLib curve/model/instrument/helper is a `LazyObject` wit
 
 | # | Layer | Verdict | Key (required identity) | Owner | Lifetime | Invalidation | Concurrency | Methodology/version compatibility |
 |---|---|---|---|---|---|---|---|---|
-| L1 | **Parsed DTO** | **CACHED (process-local)** | Input `content_fingerprint` + `schema_version` set + engine version | Engine | Process | Eviction/backpressure only; entries immutable once stored | Read-only after publish; population under the gate or a documented single-writer policy | A mismatch of schema or engine version is a **miss** (§7.6) |
+| L1 | **Parsed DTO** | **CACHED (process-local)** | **Fingerprint recomputed from the received canonical bytes** — *never* the declared/embedded `content_fingerprint` field — + `schema_version` set + engine version | Engine | Process | Eviction/backpressure only; entries immutable once stored | Read-only after publish; population under the gate or a documented single-writer policy | A mismatch of schema or engine version is a **miss** (§7.6); a declared fingerprint that does not match its recomputation is a **refusal, never a hit** (§7.4.1) |
 | L2 | **Schedule / calendar** | **CACHED (process-local)** | Resolved schedule inputs: convention-set identity + resolved dates + calendar identity + day-count id + BDC + EOM/stub policy + `ResolvedSwap` identity | Engine | Process | Never invalidated by time (all inputs explicit); eviction only | Immutable result; safe to share | Must include convention/method version ids |
 | L3 | **Materialized curve (values)** | **CACHED (process-local)** | Curve id + curve content fingerprint + `valuation_date` + extraction grid + **construction methodology id/version** | Engine | Process | New snapshot or new methodology version ⇒ different key, not an invalidation of the old one | Immutable numeric table; safe to share | **Must include construction methodology version**; RED-01 unresolved ⇒ no default methodology may be assumed |
 | L4 | **Term structure (QuantLib object)** | **NOT CACHED** | — | — | — | — | — | §7.3 forbids caching the object. The *values* may be cached as L3 |
@@ -1338,6 +1339,30 @@ Rationale is §4: a QuantLib curve/model/instrument/helper is a `LazyObject` wit
 - **L5** is **conditional, and currently blocked**: caching a model requires a resolved model identity, and per #225 the model/methodology items are RED. Until resolved, L5 must not be implemented (a cache key that omits model identity is forbidden by §7.6).
 - **L7** exists so that benchmark speedups are never achieved by a cache that production cannot use. It is **physically separated** at the target/link level, not merely by convention.
 - **L8** is refused because process-local lifetime is the only lifetime for which this document can state a coherent compatibility and concurrency story. A persistent cache would require its own issue.
+
+#### 7.4.1 Trust boundary: an embedded fingerprint is verified, never trusted
+
+**PROPOSED — this rule exists because L1 is keyed on a fingerprint, and a fingerprint carried *inside* the payload is attacker- and staleness-controlled.**
+
+> **No cache lookup — L1 especially — may be keyed on a `content_fingerprint` that the engine has not itself recomputed from the bytes it actually received.**
+
+The failure this prevents is concrete and severe. If L1 were keyed on the **declared** fingerprint field:
+
+1. a caller (or a serialization bug) could present payload bytes that do **not** match the fingerprint they declare — stale after an edit, truncated, or deliberately forged;
+2. the key would match a previously cached parsed DTO, and the lookup would **hit**;
+3. the engine would then price the *cached* input rather than the payload it received, and return a result whose `inputs_fingerprint` describes something the caller never sent;
+4. and because decoding was skipped, the fail-closed checks — `UNKNOWN_SCHEMA_VERSION` and the unknown-methodology refusal (§6.5 B4/B5, #225 §16) — would be **bypassed**, converting a fail-closed boundary into a fail-open one.
+
+**PROPOSED rules:**
+
+| # | Rule |
+|---|---|
+| T-L1a | The L1 key is the fingerprint **recomputed from the received canonical bytes**, or is derived directly from those bytes. It is never the embedded/declared field |
+| T-L1b | When a payload also *declares* a fingerprint, that declaration is **checked, not believed**: recompute and compare. A mismatch is a **refusal with a reason** (never a miss, never a hit, never a silently-priced stale entry) |
+| T-L1c | **No cache lookup may precede schema-version validation.** Decode-and-validate is fail-closed and comes first; the version is part of the key so a valid payload can still hit, but an unknown version can never reach the cache |
+| T-L1d | The same rule generalizes: any cache layer whose key contains a fingerprint of a **received payload** uses the recomputed value. Fingerprints the engine computes over data it owns (§6.7) are unaffected |
+
+**PROPOSED:** adding the embedded fingerprint to the key *as well* is permitted and harmless — but it can never be the *only* fingerprint component, because then the payload would be choosing its own cache identity. This is the cache-side expression of the same principle §6.7 and #225 §15.4 apply on the replay side: identity is **derived**, not **asserted**.
 
 ### 7.5 Invalidation and population policy
 
@@ -1383,8 +1408,9 @@ Rationale is §4: a QuantLib curve/model/instrument/helper is a `LazyObject` wit
 | CT5 | **Methodology-version test** | A methodology-version change invalidates the relevant entries (miss), and never returns a stale result |
 | CT6 | **Eviction-safety test** | Eviction cannot change a result (I3) |
 | CT7 | **No-QuantLib-object test** | No cache value is, or contains, a QuantLib-typed object or handle (§7.3) — enforced by a type-level check where possible |
+| CT8 | **Fingerprint-trust test (§7.4.1)** | A payload whose **declared** `content_fingerprint` does not match the fingerprint recomputed from its own bytes never yields a cache **hit**: it is refused with a reason and never priced. Also asserts that an **unknown schema version** can never reach the L1 cache, i.e. that no lookup precedes fail-closed decode. This is the test that would catch a fail-open regression in L1 |
 
-**PROPOSED:** CT3 and CT3b are deliberately *opposite* in direction, and both are required. A suite with only one of them can be satisfied by a cache that is simultaneously over-keyed (CT3 would fail) or under-keyed (CT3b would fail) in a way the other test cannot see.
+**PROPOSED:** CT3 and CT3b are deliberately *opposite* in direction, and both are required. A suite with only one of them can be satisfied by a cache that is simultaneously over-keyed (CT3 would fail) or under-keyed (CT3b would fail) in a way the other test cannot see. **CT8 is separate again**, because it tests neither key sensitivity nor key invariance but the *trust* placed in a key component: a cache can have a perfectly composed key and still be wrong if it computes that key from a value the caller supplied.
 
 ---
 
@@ -1484,7 +1510,7 @@ cpp/rates_engine/
     adapter/                the ONLY test area that may use QuantLib directly
     defaults/               QuantLib default-audit matrix, §3.6 D1–D17 (TL1)
     determinism/            replay identity, §9.5 / #225 §15.4 (TL3)
-    cache/                  §7.7 CT1–CT7 + CT3b (TL4)
+    cache/                  §7.7 CT1–CT8 + CT3b (TL4)
     calibration/            §8.3 outcome preservation (TL5)
     concurrency/            §5.7 T1–T8 (TL6) — quarantined per §9.8
     benchmark/              §10.8 correctness-checked benchmarks (TL7)
@@ -1506,7 +1532,7 @@ cpp/rates_engine/
 | **TL1 Defaults audit** | One test per row of §3.6 D1–D17: assert the engine **sets** the value explicitly, and detect a change in the underlying QuantLib default | §3.6, AC 7 — this is the mechanical enforcement of "QuantLib defaults MUST NOT silently become Shiori methodology" |
 | **TL2 Boundary isolation** | Compile-time/structural assertion that no public DTO depends on a QuantLib type | §3.5 A1–A5, §6.5 B2, AC 6 |
 | **TL3 Determinism / replay** | Same input twice ⇒ identical output; fingerprint stability; no clock/global influence | §6.7, AC 11 |
-| **TL4 Cache correctness** | §7.7 CT1–CT7 + CT3b | §7, AC 12/13 |
+| **TL4 Cache correctness** | §7.7 CT1–CT8 + CT3b | §7, AC 12/13 |
 | **TL5 Calibration outcomes** | Converged / warnings / non-converged / failed / refused are distinguishable and survive the cache | §8.3, AC 14 |
 | **TL6 Concurrency correctness** | §5.7 T1–T8 | §5, AC 16 — **the sole gate for AC 10** |
 | **TL7 Benchmark correctness** | §10.8 — every benchmark validates its result | §10, AC 17/18 |
@@ -1550,7 +1576,7 @@ cpp/rates_engine/
 
 ### 9.6 Concurrency and cache test requirements
 
-Fully specified in **§5.7 (T1–T8)** and **§7.7 (CT1–CT7 + CT3b)**. Summary of the gating logic: **TL6 is the only evidence that can satisfy AC 10**, and TL4/CT2/CT3/CT3b are what make AC 13 auditable rather than aspirational.
+Fully specified in **§5.7 (T1–T8)** and **§7.7 (CT1–CT8 + CT3b)**. Summary of the gating logic: **TL6 is the only evidence that can satisfy AC 10**, and TL4/CT2/CT3/CT3b are what make AC 13 auditable rather than aspirational.
 
 ### 9.7 Bloomberg / UAT fixture integration (future)
 
@@ -1626,7 +1652,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 
 ### 10.5 Reproducibility metadata (mandatory)
 
-**PROPOSED.** A benchmark result is **invalid** without all of the following. This is the AC-18 set, extended with the two items §4/§7 require, marked (+).
+**PROPOSED.** A benchmark result is **invalid** without all of the following. This is the **AC 18** set, extended with the two items §4/§7 require, marked (+).
 
 | # | Field | Source |
 |---|---|---|
@@ -1896,7 +1922,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | 13 | Every cache layer has deterministic key + invalidation rules | §7.4 (key/lifetime/invalidation columns), §7.5, §7.7 | **Satisfied** |
 | 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5 | **Satisfied** |
 | 15 | C++ test framework and layout defined | §9.1, §9.2 | **Satisfied** |
-| 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T8, §7.7 CT1–CT7 + CT3b, §9.6 | **Satisfied** |
+| 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T8, §7.7 CT1–CT8 + CT3b, §9.6 | **Satisfied** |
 | 17 | Benchmark methodology separates cold/warm and cache state | §10.3, §10.4, §10.6 | **Satisfied** |
 | 18 | Benchmark reproducibility metadata defined | §10.5 M1–M11 | **Satisfied** |
 | 19 | Python + C++ CI integration strategy defined | §11.1–§11.11 | **Satisfied** |
@@ -1942,7 +1968,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | D-2 | `CMakeLists.txt` + `CMakePresets.json` | §2.2, §2.4 |
 | D-3 | Dependency manifest + pinned QuantLib port | §2.6, §2.7, §3.2 |
 | D-4 | Canonical serialization + hashing format | #225 §15.4 owns it; §6.5 B1 confirms the boundary |
-| D-5 | GoogleTest wiring + the L0–L8 suite | §9 |
+| D-5 | GoogleTest wiring + the **TL0–TL8** suite | §9 |
 | D-6 | Google Benchmark harness | §10 |
 | D-7 | CI workflows | §11 |
 | D-8 | Diagnostics emitter | §12 |
@@ -2069,7 +2095,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 4. **Inputs:** caller-owned, immutable, borrowed, never mutated after publication, no I/O in the kernel, no global fixing store.
 5. **Caching:** cache **values**, never QuantLib objects; keys from explicit input identity only; no pointer, clock, global or unknown-version identity; version mismatch is a miss.
 6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, unresolved policy ⇒ refuse.
-7. **Tests:** GoogleTest, layers L0–L8, defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
+7. **Tests:** GoogleTest, layers **TL0–TL8**, defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
 8. **Benchmarks:** Google Benchmark, separate target; cold/warm × cache-state × phase; no blended number; mandatory reproducibility metadata; correctness-checked; no absolute-time CI gate.
 9. **CI:** existing Python and launcher jobs preserved; new C++ build/test/sanitizer/benchmark-smoke jobs; no path filter may bypass required validation.
 10. **Diagnostics:** structured and versioned; engine + QuantLib version, macro config, cache hit/miss, execution path, concurrency mode, timing hooks; never a second source of methodology.
