@@ -437,15 +437,25 @@ Rationale: claiming binary or bit-level reproducibility would be an unevidenced 
 
 ```text
 cpp/rates_engine/tests/
-├── unit/                # pure logic, no QuantLib
-├── dto/                 # JSON round-trip + schema-version + fail-closed tests (§9)
+├── unit/                # per-component logic; pure logic, no QuantLib
+├── dto/                 # JSON round-trip + schema-version + fail-closed tests (TL0)
 ├── adapter/             # the ONLY test area that may use QuantLib directly
-├── concurrency/         # correctness-under-concurrency tests (§5.7)
+├── defaults/            # QuantLib default-audit matrix, §3.6 D1–D17 (TL1)
+├── determinism/         # replay identity, §9.5 / #225 §15.4 (TL3)
+├── cache/               # §7.7 CT1–CT7 + CT3b (TL4)
+├── calibration/         # §8.3 outcome preservation (TL5)
+├── concurrency/         # §5.7 T1–T8 (TL6) — quarantined per §9.8
+├── benchmark/           # §10.8 correctness-checked benchmarks (TL7)
 ├── regression/          # ports of docs/31 §3.1 authoritative anchors
+├── parity/              # Python ↔ C++ boundary, §9.3 PB1–PB6
 └── fixtures/            # synthetic, deterministic fixture data (no live market values)
 ```
 
+**PROPOSED — this tree is the single canonical test layout for the whole document.** §9.1 previously published a *different* tree (it had `contract/`/`determinism/`/`cache/`/`parity/` but no `adapter/`, `defaults/`, `calibration/`, `regression/`) while this section had the reverse. Two disagreeing layouts would leave #227 unable to build the test target list without re-deciding it, which is exactly what #226 exists to prevent. §9.1 now reproduces this tree verbatim rather than defining its own. `dto/` here is the directory §9.1's earlier draft called `contract/`; the name `dto/` is retained because it matches §2.3's `dto/` target.
+
 **PROPOSED:** one CMake test executable per directory above, registered with CTest (`add_test`), so `ctest` is the single CI entry point and a failing directory is individually identifiable. Fixtures are **synthetic and committed**; no live Bloomberg value and no workstation evidence is ever a test input (consistent with `docs/31...:98-104`).
+
+**PROPOSED — the QuantLib-permitted test directories are exactly two** and are the only ones the E1a allow-list may name: `adapter/` (the declared QuantLib-using test area) and `defaults/` (the default-audit matrix, which must read QuantLib's own defaults to detect a change in them). `unit/` is declared **no-QuantLib**, so it is deliberately **not** on that list.
 
 ### 2.10 Benchmark executable layout
 
@@ -605,7 +615,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 | # | Check | Mechanism |
 |---|---|---|
 | E1 | No `ql/` include outside `src/quantlib_adapter/` **in the production and public trees** (`core/`, `dto/`, `diagnostics/`, `include/`). The QuantLib **audit and adapter tests are an explicit, enumerated exception** — see E1a | CI grep over the production/public source trees only (never over all of `cpp/`) |
-| E1a | The exception is *required*, not a convenience: `tests/defaults/` is the default-audit matrix (TL1) whose stated job is to "detect a change in the underlying QuantLib default", and it cannot do that without reading QuantLib. Adapter unit tests likewise construct QuantLib objects. The guard must therefore **enumerate** the permitted paths (`src/quantlib_adapter/`, `tests/defaults/`, `tests/unit/`, and any future QuantLib-reading test directory) rather than forbid everything outside the adapter. **A guard that rejects those tests defeats AC 7** — the mechanical enforcement of "QuantLib defaults MUST NOT silently become Shiori methodology" | Guard is an explicit **allow-list** of directories, not a deny-list; adding a QuantLib-reading test directory is a reviewed one-line change to that list |
+| E1a | The exception is *required*, not a convenience, and the permitted paths are **exactly two**, both named by §2.9's canonical layout: (1) `tests/adapter/` — which §2.9 declares as "the ONLY test area that may use QuantLib directly"; and (2) `tests/defaults/` — the default-audit matrix (TL1) whose stated job is to "detect a change in the underlying QuantLib default" and which cannot do that without reading QuantLib. Plus `src/quantlib_adapter/` for production. The guard must therefore **enumerate** those paths rather than forbid everything outside the adapter. **`tests/unit/` is deliberately excluded**, because §2.9 declares it "pure logic, no QuantLib" — permitting it would silently allow QuantLib into the directory whose whole purpose is to be free of it, while the adapter tests that legitimately need QuantLib were previously unlisted. **A guard that rejects the adapter/defaults tests defeats AC 7** — the mechanical enforcement of "QuantLib defaults MUST NOT silently become Shiori methodology" | Guard is an explicit **allow-list** of directories, not a deny-list; adding a QuantLib-reading test directory is a reviewed one-line change to that list |
 | E2 | No `QuantLib::`/`ql::` token in any public header or exported signature | CI grep over `include/` + compile-fail negative test |
 | E3 | `shiori_rates_dto` / `shiori_rates_core` do not link QuantLib | Target graph + link-symbol inspection (`.lib`/`.so` symbol scan) |
 | E4 | No `ql::` exception is part of a caller-visible signature | E2 plus an exception-mapping test (A2) |
@@ -1460,7 +1470,7 @@ These are RED-governed (§13.2). **PROPOSED:** until they are resolved, an engin
 
 **PROPOSED — framework: GoogleTest.** Issue #226 allows "GoogleTest or Catch2, or another explicitly approved equivalent". GoogleTest is selected because: it is the framework the pinned dependency manager already carries a port for (so it does not add a second acquisition mechanism); it has first-class CTest integration including XML/JUnit output; it provides **death tests** and typed/parameterised tests, which the defaults-policy matrix (§3.6 D1–D17) and the cache-key matrix (§7.7 CT2/CT3/CT3b) need in order to be exhaustive rather than sampled; and it is the framework the sanitizer CI jobs (§11.6) are best understood with. **Trade-off recorded:** Catch2 needs no build step and reads more fluently for small suites; the deciding factor is the matrix tooling, not aesthetics. Switching later is possible but would touch every test file, so the choice is made now, once.
 
-**PROPOSED — layout** (mirrors §2.9/§2.10):
+**PROPOSED — layout** (mirrors §2.9/§2.10; the `tests/` subtree below is **identical** to §2.9's, which is canonical):
 
 ```text
 cpp/rates_engine/
@@ -1469,16 +1479,22 @@ cpp/rates_engine/
   quantlib_adapter/         the ONLY QuantLib-dependent target
   diagnostics/              structured diagnostics
   tests/
-    unit/                   per-component
-    contract/               schema decode, round-trip, fail-closed
-    defaults/               QuantLib default-audit matrix (§3.6)
-    determinism/            replay identity (§9.5)
-    cache/                  §7.7 CT1–CT7 + CT3b
-    concurrency/            §5.7 T1–T8 (T1–T7 quarantined until §5.8)
-    parity/                 Python ↔ C++ boundary
-    fixtures/               versioned, identity-stamped fixtures
+    unit/                   per-component logic; pure logic, no QuantLib
+    dto/                    JSON round-trip + schema-version + fail-closed (TL0)
+    adapter/                the ONLY test area that may use QuantLib directly
+    defaults/               QuantLib default-audit matrix, §3.6 D1–D17 (TL1)
+    determinism/            replay identity, §9.5 / #225 §15.4 (TL3)
+    cache/                  §7.7 CT1–CT7 + CT3b (TL4)
+    calibration/            §8.3 outcome preservation (TL5)
+    concurrency/            §5.7 T1–T8 (TL6) — quarantined per §9.8
+    benchmark/              §10.8 correctness-checked benchmarks (TL7)
+    regression/             ports of docs/31 §3.1 authoritative anchors
+    parity/                 Python ↔ C++ boundary, §9.3 PB1–PB6
+    fixtures/               synthetic, identity-stamped fixtures
   benchmarks/               §10 (separate executable, §2.10)
 ```
+
+**PROPOSED:** the `tests/` list is not re-derived here. It is §2.9's list, reproduced so a reader of §9 sees the same directories; if the two ever diverge, **§2.9 is authoritative** and this block is the stale one.
 
 ### 9.2 Test layers
 
@@ -1530,7 +1546,7 @@ cpp/rates_engine/
 
 **OBSERVED.** `docs/08_performance_engine_backend_strategy.md` requires that "every accelerated backend must match a reference implementation within documented tolerance", and that no performance claim be made without a benchmark.
 
-**PROPOSED.** The obligation is honoured **structurally** by TD1–TD8 plus a fixture set that is *shared* between the Python and C++ planes, so parity is testable. **Important scope limit:** parity is asserted **at the DTO/数值 boundary**, and only for behaviour the approved contracts actually define. Where no reference behaviour exists yet — because the pricing methodology is unresolved (§13.2) — **no parity test and no expected value is invented**. A missing reference is recorded as missing; it is never replaced by a QuantLib output. This is the specific mechanism that prevents `docs/08`'s parity rule from becoming a back door that legitimises QuantLib defaults as Shiori results.
+**PROPOSED.** The obligation is honoured **structurally** by TD1–TD8 plus a fixture set that is *shared* between the Python and C++ planes, so parity is testable. **Important scope limit:** parity is asserted **at the DTO/numeric boundary**, and only for behaviour the approved contracts actually define. Where no reference behaviour exists yet — because the pricing methodology is unresolved (§13.2) — **no parity test and no expected value is invented**. A missing reference is recorded as missing; it is never replaced by a QuantLib output. This is the specific mechanism that prevents `docs/08`'s parity rule from becoming a back door that legitimises QuantLib defaults as Shiori results.
 
 ### 9.6 Concurrency and cache test requirements
 
@@ -1552,14 +1568,23 @@ Fully specified in **§5.7 (T1–T8)** and **§7.7 (CT1–CT7 + CT3b)**. Summary
 
 ### 9.8 Quarantine policy for not-yet-enabled tests
 
-**PROPOSED.** The concurrency suite (§5.7) must **exist** from the start but must not run in the default configuration until §5.8's preconditions hold — because running it would imply a guarantee that does not exist. The policy prevents this from becoming a silent gap:
+**PROPOSED.** The concurrency suite (§5.7) must **exist** from the start. "Quarantine" means exactly two things, and **must not** be read as a third:
+
+1. the suite does **not** run as part of the default/gating configuration; and
+2. **no claim of concurrency safety** may rest on it.
+
+It must **not** mean "the suite cannot be executed". An earlier draft said the suite "must not run in the default configuration until §5.8's preconditions hold", which is **circular**: §5.8 PE1 requires T1–T8 to *pass*, so if the suite cannot run until PE1 holds, the very evidence PE1 demands can never be produced, and the §11.3 jobs that are supposed to run these tests would contradict this section. The resolution is an explicit evidence-only opt-in:
 
 | # | Rule |
 |---|---|
-| Q1 | Quarantined tests are **listed in the test executable** and reported as skipped with a reason naming §5.8 |
+| Q0 | The suite is runnable in an explicit **evidence-collection mode** — a dedicated CMake option plus a CTest label (e.g. `-DSHIORI_EVIDENCE_RUNS=ON` and `ctest -L concurrency-evidence`), which the §11.3 jobs invoke to produce PE1's evidence. **Quarantine governs the default configuration and the claims made, never the ability to gather evidence** |
+| Q1 | In the **default** configuration, quarantined tests are **listed in the test executable** and reported as skipped with a reason naming §5.8. In evidence mode the same tests run and report normally |
 | Q2 | A skip count of zero is **not** evidence of correctness; the suite's status is reported in CI output and diagnostics (§12) |
 | Q3 | Nothing may be described as "concurrency-safe" on the basis of a skipped test |
 | Q4 | When the suite is enabled, a **failure is a blocker**, never a flake to be retried (§11.8) |
+| Q5 | Evidence gathered in evidence mode is valid **only as input to §5.8's gate**. It never by itself changes the production posture: §5.2 stays DISABLED until PE6 (an owner decision). A green evidence run is a precondition, not an enablement |
+
+**PROPOSED:** Q0 is what makes the architecture self-consistent. Without it, §5.8 is unsatisfiable by construction, and the only ways out would be to weaken PE1 or to run the suite in a configuration the document forbids — both of which would be worse than naming the opt-in explicitly.
 
 ### 9.9 What the test suite must not do
 
@@ -1687,13 +1712,15 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 
 | Job | Runner | Config | Purpose |
 |---|---|---|---|
-| `cpp-build-test-windows` | windows-latest (MSVC) | `ci-release` | Primary toolchain; proves the static-link QuantLib path (§2.6); and **runs the C++ test suite on Windows, including the platform-applicable concurrency tests (T1, T2, T4–T7)** so that §5.8 PE1 is actually satisfiable |
+| `cpp-build-test-windows` | windows-latest (MSVC) | `ci-release` | Primary toolchain; proves the static-link QuantLib path (§2.6); and **runs the C++ test suite on Windows, including the platform-applicable concurrency tests (T1, T2, T4–T8)** so that §5.8 PE1 is actually satisfiable. **T8 is included deliberately**: PE1 requires it on both platforms, and T8 is the only test of the configuration parallel enablement would actually use — running it on Linux only would leave the Windows-first static-linked configuration untested while PE1 claimed otherwise |
 | `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full** suite including T1–T8 |
 | `cpp-sanitizers` | ubuntu-latest (Clang) | ASan/UBSan, and **TSan** (Linux-only) | Memory and race defects that equivalence tests cannot see; owns **§5.7 T3**, which is a Linux/Clang requirement because MSVC ships no ThreadSanitizer |
 | `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 |
 | existing `test`, `windows-launcher-smoke` | unchanged | — | §11.2 |
 
-**PROPOSED — why the platform split is explicit.** Concurrency correctness is a *platform* property (the Windows build is static-linked and uses MSVC; the Linux build is dynamic and uses GCC/Clang), so the test **must** run on both. Only TSan is platform-restricted. The matrix therefore delivers: **T1, T2, T4–T7 on Windows and Linux; T3 (TSan) on Linux.** Stating this prevents the gate in §5.8 from being formally unattainable — an earlier draft required all seven tests on both platforms while assigning all test execution to Linux.
+**PROPOSED — why the platform split is explicit.** Concurrency correctness is a *platform* property (the Windows build is static-linked and uses MSVC; the Linux build is dynamic and uses GCC/Clang), so the test **must** run on both. Only TSan is platform-restricted. The matrix therefore delivers: **T1, T2, T4–T8 on Windows and Linux; T3 (TSan) on Linux.** Every concurrency test is thus executed on both platforms, and the two deliberate earlier failures are avoided: one draft required all tests on both platforms while assigning all test execution to Linux, and a later draft left T8 off the Windows job while PE1 required it there.
+
+**PROPOSED — the concurrency tests run in CI in §9.8's evidence mode.** They are not awaited on a gated default run, because §5.8's preconditions are not yet satisfied; CI invokes them as explicit evidence collection so that PE1's evidence can actually exist (§9.8 Q0).
 
 **PROPOSED:** TSan is **always compiled** even while the concurrency suite is quarantined (§9.8), so that enabling the suite later does not require new CI plumbing.
 
