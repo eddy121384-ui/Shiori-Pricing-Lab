@@ -140,14 +140,25 @@ protected_basenames = {
 
 - `pyproject.toml` `[project.optional-dependencies] quant = ["QuantLib>=1.32"]`. There is **no** upper bound and **no** exact pin.
 - `pyproject.toml`'s `capture` extra carries an explicit design comment that optional extras exist so "the ordinary `start_shiori.bat` install should stay as light as it is today". The same optionality principle therefore already governs QuantLib.
-- `src/shiori_pricing_lab/pricing/bli_quantlib_bond_adapter.py` is the **only** module that imports QuantLib. Its module docstring states the scope precisely (`:1-9`): QuantLib is used for **bond mechanics only** — regular coupon schedule generation, per-100 coupon cashflow amounts, and accrued interest at one explicit caller-supplied date — and that "**No curve, no discount factor, no forward clean price, no yield-to-price conversion, no volatility, no Black-76, no option PV, and no Greeks are computed, imported, or read here.** QuantLib never prices anything in this module."
-- The import is a **guarded optional import**: `import QuantLib as ql` at `:152`, with `BLIQuantLibNotAvailableError` (`:157`), `is_quantlib_available()` (`:212`), and `_require_quantlib()` (`:218`).
-- Calendars: the adapter uses `ql.NullCalendar()` deliberately (`:11-15`), and calendar-adjusted payment dates are declared out of scope "until a separate, reviewed calendar-source contract exists".
+- **OBSERVED — there are FOUR production modules that import QuantLib under `src/`.** All four use the same **guarded optional import** pattern, and each states in its own docstring that it **prices nothing**.
+- `src/shiori_pricing_lab/pricing/bli_quantlib_bond_adapter.py` is the **bond-mechanics** module. Its module docstring states the scope precisely (`:1-9`): QuantLib is used for **bond mechanics only** — regular coupon schedule generation, per-100 coupon cashflow amounts, and accrued interest at one explicit caller-supplied date — and that "**No curve, no discount factor, no forward clean price, no yield-to-price conversion, no volatility, no Black-76, no option PV, and no Greeks are computed, imported, or read here.** QuantLib never prices anything in this module."
+- Its import is guarded: `import QuantLib as ql` at `:152`, with `BLIQuantLibNotAvailableError` (`:157`), `is_quantlib_available()` (`:212`), and `_require_quantlib()` (`:218`).
+- **OBSERVED — the complete list of production QuantLib consumers** (this matters because an incomplete inventory would make §3.4's isolation boundary wrong):
+
+| Module | Import site | QuantLib used for | Stated scope |
+|---|---|---|---|
+| `pricing/bli_quantlib_bond_adapter.py` | `:152` | coupon schedule generation, per-100 cashflow amounts, accrued interest | "QuantLib never prices anything in this module." |
+| `pricing/bli_bond_advanced_field_resolver.py` | `:364` | coupon grid / `last_coupon_date` derivation for the standalone route (Issue #161) | "**This module prices nothing.** It computes no forward, no volatility, no discount factor, no curve node, no Black-76 value and no Greek" |
+| `pricing/bli_bond_convention_profile.py` | `:70` | **settlement calendars** reused verbatim, per market convention profile (Issue #161) | market-specific convention values and rules only |
+| `pricing/bli_ust_coupon_payment_date.py` | `:58` | **payment-date calendar** (Fedwire funds) mapping scheduled → actually-paid date (Issue #175) | "one small, explicit, deterministic function" — no schedule, amount, accrual, price, or curve |
+
+- Each of the latter three uses the guarded form `try: import QuantLib as ql / except ImportError: ql = None`, with a comment pointing at the optional extra (e.g. `bli_bond_advanced_field_resolver.py:363-365`).
+- Calendars: the **adapter** uses `ql.NullCalendar()` deliberately (`:11-15`) and declares calendar-adjusted payment dates out of scope "until a separate, reviewed calendar-source contract exists". **Separately, and importantly for §3.6 D2**, the two convention modules above already reuse **named** QuantLib calendars by approved convention (SIFMA settlement in `bli_bond_convention_profile.py`; Fedwire funds in `bli_ust_coupon_payment_date.py`, deliberately distinct from it). So the repository's precedent is that a calendar source is an **explicit convention choice**, never an inherited default.
 - **OBSERVED:** `docs/31...:213` states the intended governance of this optionality: "core never requires QuantLib (`pyproject.toml`: QuantLib in `quant` extra only; CI installs `[quant]`, local minimal installs may not — the missing-QuantLib error must propagate, never be caught into `FAILED`)".
 - **OBSERVED:** tests guard on availability, e.g. a module-level `_requires_quantlib = pytest.mark.skipif(...)` in `tests/test_bli_black76_european_greeks.py:33`.
 - **OBSERVED:** the legacy `SPEC_v1.4.md:473` still describes a "Pricing Core | QuantLib-Python + custom wrapper" and `README.md:61` mentions installing "including QuantLib" into the repo-local `.venv`. These are **legacy reference** statements; the authoritative post-#222 direction is `docs/31` §4/§8 (C++ owns new Rates pricing; Python keeps acquisition/normalization/persistence/UI).
 
-**Implication (PROPOSED §3):** QuantLib already exists in Shiori in exactly two roles — an *optional* Python dependency and a *bond-mechanics-only* adapter. #226 must not silently convert either role into "QuantLib is the Rates pricing engine by default".
+**Implication (PROPOSED §3):** QuantLib already exists in Shiori in exactly two *roles* — an **optional** Python dependency, and modules confined to **bond mechanics and date/convention resolution** that explicitly price nothing. **Four** modules occupy the second role, and all four sit on the protected bond-option line (§1.8). #226 must not silently convert either role into "QuantLib is the Rates pricing engine by default", and §3.4's dependency boundary is drawn against this four-module reality rather than a single-module one.
 
 ### 1.7 Packaging / launcher constraints
 
@@ -168,9 +179,12 @@ protected_basenames = {
 **OBSERVED.** Per `docs/31...:7` §7 and `docs/31...:210-215`, the validated bond-option line is defined by these modules, and the rule is that they may be **read** (and pure math ported with pinned tests) but **never modified** in a way that changes bond-option behavior:
 
 - `pricing/bli_quantlib_bond_adapter.py` (schedule/accrual only, `NullCalendar`, optional import, `BLIQuantLibNotAvailableError` propagates)
+- the other **three** guarded QuantLib consumers identified in §1.6, which sit on this same line: `pricing/bli_bond_advanced_field_resolver.py`, `pricing/bli_bond_convention_profile.py`, `pricing/bli_ust_coupon_payment_date.py`
 - the BLI curve chain: `bli_curve_selector`, `bli_zero_curve_nodes`, `bli_zero_rate_interpolation`, `bli_discount_factor`, `bli_curve_discount_factor`
 - `data/bli_snapshot.py`, `data/bli_standalone_option_request.py`
 - the bond-option pricing modules in `src/shiori_pricing_lab/pricing/` (`bli_bond_option_price_basis`, `bli_forward_clean_price`, `bli_black76_price_option`, `bli_bond_modified_duration`, `bli_repo_carry_forward`, …) and their tests under `tests/test_bli_*`.
+
+**OBSERVED — the guard extends to tests.** Eight test modules import QuantLib or guard on its availability (`test_bli_black76_european_greeks`, `test_bli_bond_advanced_field_resolver`, `test_bli_bond_convention_profile`, `test_bli_mvp_ui`, `test_bli_quantlib_bond_adapter`, `test_bli_ust_coupon_payment_date`, `test_corporate_direct_vol_pricing`, `test_standalone_option_workbench_prototype_browser`). A change that made QuantLib mandatory would surface here first, which is why §11.2 PR1 keeps the Python suite mandatory and unfiltered.
 
 **OBSERVED:** the build-level expression of this boundary (`docs/31...:213`) — the Python core must never *require* QuantLib, and a missing QuantLib must surface as the typed error rather than being swallowed into a `FAILED` pricing status.
 
@@ -493,12 +507,15 @@ This is the direct C++-engine expression of an already-approved #225 requirement
 
 ### 3.4 Which parts of Shiori may depend directly on QuantLib
 
-**PROPOSED.** Exactly two, and they are disjoint:
+**PROPOSED. The QuantLib-dependent surface is exactly these, and the two planes are disjoint:**
 
 | Consumer | Nature | Change by #226 |
 |---|---|---|
 | `src/shiori_pricing_lab/pricing/bli_quantlib_bond_adapter.py` (+ its tests) | **Existing Python** bond-mechanics-only usage, optional import, `NullCalendar` | **None.** Protected path (§1.8) |
+| `pricing/bli_bond_advanced_field_resolver.py`, `pricing/bli_bond_convention_profile.py`, `pricing/bli_ust_coupon_payment_date.py` (+ their tests) | **Existing Python** date/convention resolution using guarded optional imports and named QuantLib calendars; each documents that it prices nothing (§1.6) | **None.** Same protected line (§1.8) |
 | `shiori_rates_quantlib_adapter` (C++ target) | **New C++** adapter; the only C++ TU allowed to include `ql/...` | Not created in #226; contract defined here |
+
+**PROPOSED:** the two planes are independent — the **Python** consumers are the protected bond-option line and must not be disturbed (AC 20), while the **new C++** adapter is the only place C++ may see QuantLib (AC 6). Note that the Python plane already establishes the discipline §3.6 D2/D3 rely on: calendars and day counts arrive from an **explicit convention**, not from a library default.
 
 **PROPOSED prohibitions:**
 
@@ -1051,7 +1068,7 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 
 | # | Condition |
 |---|---|
-| PE1 | §5.7 T1–T7 exist and pass, on **both** Windows and Linux CI |
+| PE1 | §5.7 T1–T7 exist and pass: **T1, T2, T4–T7 on both Windows and Linux**; **T3 (TSan) on Linux**, the only platform in the §11.3 matrix providing ThreadSanitizer. (An earlier draft required all of T1–T7 on both platforms while assigning all test execution to Linux, which made this gate unattainable) |
 | PE2 | The specific QuantLib configuration used is **named** (version + every relevant macro), and the reason it is safe is derived from §4-style source evidence — not from a community claim |
 | PE3 | The evaluation-date / fixing / observer / lazy-cache mechanisms are each shown either unused or provably isolated per request |
 | PE4 | Reproducibility under concurrency is demonstrated per #225 §15.4's replay identity — concurrent execution must not change a result |
@@ -1223,9 +1240,24 @@ A cache entry may be found again using only values that a `RatesKernelInput` (or
 | K3 | **System clock** (now, "today", elapsed time, timestamps) | Unreconstructible and non-reproducible; also the exact mechanism by which an unset evaluation date leaks the wall clock (§4.3) |
 | K4 | **Implicit current evaluation date** | A *derived* value from K2/K3 unless explicitly supplied; using it implicitly reintroduces the midnight-rollover hazard |
 | K5 | **Mutable object identity** (a `Handle`, a relinkable target, a shared mutable QuantLib object) | The key would change value without changing identity, or vice versa (§4.7) |
-| K6 | **Unknown / unrecorded engine version** | Two different engines would share entries; a methodology-affecting change would be delivered as a hit |
 
-**PROPOSED:** each forbidden component has a **catch test** (§7.7): a test that constructs two keys differing only in that component and asserts they do **not** collide. A cache whose tests do not include these is unverified.
+**PROPOSED — the correct reading, which the test must encode.** A forbidden component is one whose value must **not** be able to change the key. The required assertion is therefore the **opposite** of "the keys differ":
+
+> **Two otherwise-identical explicit inputs that differ *only* in a forbidden component (K1–K5) must produce the *same* key — and may therefore legitimately hit the same entry.**
+
+That is precisely what makes explicit-input determinism real. A cache that folded hidden state (a pointer, an ambient global, a timestamp) into the key would produce *different* keys for the **same** business input, which is the defect K1–K5 exist to prevent. **An implementation must never "fix" a failing invariance test by adding the forbidden value to the key** — that would convert a cache defect into a determinism defect.
+
+#### 7.2.1 The complement: required identity
+
+**PROPOSED.** Forbidden components have a complement, and the two directions must not be confused:
+
+| # | Required identity | Rule |
+|---|---|---|
+| K6 | **Engine version — recorded, never unknown** | The engine version is a **mandatory, present** key component, *not* a forbidden value. Changing it **must** change the key (or render the entry unusable), because two different engines must never share entries. What is prohibited is an **unknown / unrecorded** version, not a known one. |
+
+**PROPOSED:** K6 is stated here rather than in the table above precisely because it is a **presence** requirement. Classifying it as a forbidden value (as an earlier draft of this document did) yields a self-contradictory test that would simultaneously demand a change of engine version *must* and *must not* alter the key.
+
+**PROPOSED — the two catch tests run in opposite directions** (§7.7 CT3/CT3b): changing a **forbidden** component must leave the key **unchanged**, while changing any **required** component (including the recorded engine version) must change the key. A cache whose tests lack either direction is unverified.
 
 ### 7.3 The central cache rule: never cache a QuantLib object
 
@@ -1306,12 +1338,15 @@ Rationale is §4: a QuantLib curve/model/instrument/helper is a `LazyObject` wit
 | # | Test | Proves |
 |---|---|---|
 | CT1 | **Hit/miss equivalence** | Cached and uncached paths return identical results on the fixture set |
-| CT2 | **Key-sensitivity test** | Two inputs differing in exactly one required identity field produce different keys (§7.4's key column, field by field) |
-| CT3 | **Forbidden-component tests (K1–K6)** | Differing only in pointer identity / global state / clock / implicit evaluation date / mutable identity / engine version does **not** produce a hit |
+| CT2 | **Required-field sensitivity** | Two inputs differing in exactly one **required** identity field produce different keys (§7.4's key column, field by field) |
+| CT3 | **Forbidden-component invariance (K1–K5)** | Two otherwise-identical explicit inputs differing **only** in pointer identity / ambient global state / clock / implicit evaluation date / mutable identity produce the **same** key (and may legitimately hit) — proving the key carries no hidden state. This test fails if an implementation wrongly adds a forbidden value to the key |
+| CT3b | **Required-component sensitivity, incl. engine version (K6)** | Changing the recorded engine version — or any other required identity field — changes the key or renders the entry unusable; an entry whose engine version is **unknown** is never returned. This is the direction that must *not* be inverted |
 | CT4 | **Immutability test** | A returned cached value cannot be mutated by a caller, and mutating the caller's view does not corrupt the entry |
 | CT5 | **Methodology-version test** | A methodology-version change invalidates the relevant entries (miss), and never returns a stale result |
 | CT6 | **Eviction-safety test** | Eviction cannot change a result (I3) |
 | CT7 | **No-QuantLib-object test** | No cache value is, or contains, a QuantLib-typed object or handle (§7.3) — enforced by a type-level check where possible |
+
+**PROPOSED:** CT3 and CT3b are deliberately *opposite* in direction, and both are required. A suite with only one of them can be satisfied by a cache that is simultaneously over-keyed (CT3 would fail) or under-keyed (CT3b would fail) in a way the other test cannot see.
 
 ---
 
@@ -1395,7 +1430,7 @@ These are RED-governed (§13.2). **PROPOSED:** until they are resolved, an engin
 
 ### 9.1 Framework and layout
 
-**PROPOSED — framework: GoogleTest.** Issue #226 allows "GoogleTest or Catch2, or another explicitly approved equivalent". GoogleTest is selected because: it is the framework the pinned dependency manager already carries a port for (so it does not add a second acquisition mechanism); it has first-class CTest integration including XML/JUnit output; it provides **death tests** and typed/parameterised tests, which the defaults-policy matrix (§3.6 D1–D17) and the cache-key matrix (§7.7 CT2/CT3) need in order to be exhaustive rather than sampled; and it is the framework the sanitizer CI jobs (§11.6) are best understood with. **Trade-off recorded:** Catch2 needs no build step and reads more fluently for small suites; the deciding factor is the matrix tooling, not aesthetics. Switching later is possible but would touch every test file, so the choice is made now, once.
+**PROPOSED — framework: GoogleTest.** Issue #226 allows "GoogleTest or Catch2, or another explicitly approved equivalent". GoogleTest is selected because: it is the framework the pinned dependency manager already carries a port for (so it does not add a second acquisition mechanism); it has first-class CTest integration including XML/JUnit output; it provides **death tests** and typed/parameterised tests, which the defaults-policy matrix (§3.6 D1–D17) and the cache-key matrix (§7.7 CT2/CT3/CT3b) need in order to be exhaustive rather than sampled; and it is the framework the sanitizer CI jobs (§11.6) are best understood with. **Trade-off recorded:** Catch2 needs no build step and reads more fluently for small suites; the deciding factor is the matrix tooling, not aesthetics. Switching later is possible but would touch every test file, so the choice is made now, once.
 
 **PROPOSED — layout** (mirrors §2.9/§2.10):
 
@@ -1471,7 +1506,7 @@ cpp/rates_engine/
 
 ### 9.6 Concurrency and cache test requirements
 
-Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the gating logic: **TL6 is the only evidence that can satisfy AC 10**, and TL4/CT2/CT3 are what make AC 13 auditable rather than aspirational.
+Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the gating logic: **TL6 is the only evidence that can satisfy AC 10**, and TL4/CT2/CT3/CT3b are what make AC 13 auditable rather than aspirational.
 
 ### 9.7 Bloomberg / UAT fixture integration (future)
 
@@ -1563,7 +1598,7 @@ Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the
 |---|---|
 | CS1 | `WARM` requires a documented population procedure (which keys were primed, by what input), not merely "ran twice" |
 | CS2 | `DISABLED` must genuinely bypass the cache, and is the only state that measures real computation |
-| CS3 | A regression is only comparable across runs with **identical** M1–M11 (§10.7 BM3) |
+| CS3 | A regression is only comparable across runs that match on **M2–M11** — with **M1 (engine version / commit SHA) the intentional comparison variable** (§10.7 BM3) |
 
 ### 10.7 Statistical and comparison policy
 
@@ -1573,7 +1608,7 @@ Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the
 |---|---|
 | BM1 | Report **dispersion**, not a single point estimate (e.g. median **and** spread). A mean without spread is not publishable |
 | BM2 | Repetition and warm-up policies are fixed and recorded (M9/M10) |
-| BM3 | Two runs are comparable only if M1–M11 match. Cross-machine comparison is **explicitly not claimed** |
+| BM3 | Two runs are comparable only if **M2–M11** match (compiler, build type, QuantLib version + macros, fixture identity, cache state, thread count, platform, warm-up, repetition policy, concurrency mode). **M1 — engine version / commit SHA — is the intentional comparison variable and is *expected* to differ**: a proposed performance change is *defined* by a different M1, so requiring M1 to match would make every improvement claim and every regression comparison impossible. Cross-machine comparison is **explicitly not claimed** |
 | BM4 | Outlier removal, if any, must be **pre-declared and identical** across the compared runs; post-hoc trimming to obtain a desired result is prohibited |
 | BM5 | A claimed improvement requires a **threshold and a noise estimate** stated in advance. "Faster by an unspecified amount" is not a claim |
 | BM6 | **No benchmark may gate a build on an absolute wall-clock threshold.** Performance gates on shared CI runners are inherently flaky; the correct gate is correctness plus relative-regression detection with a generous, documented band |
@@ -1621,11 +1656,13 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 
 | Job | Runner | Config | Purpose |
 |---|---|---|---|
-| `cpp-configure-build` | windows-latest (MSVC) | `ci-release` | Primary toolchain; also proves the static-link QuantLib path (§2.6) |
-| `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types |
-| `cpp-sanitizers` | ubuntu-latest (Clang) | ASan/UBSan, and **TSan** for §5.7 T3 | Memory and race defects that equivalence tests cannot see |
+| `cpp-build-test-windows` | windows-latest (MSVC) | `ci-release` | Primary toolchain; proves the static-link QuantLib path (§2.6); and **runs the C++ test suite on Windows, including the platform-applicable concurrency tests (T1, T2, T4–T7)** so that §5.8 PE1 is actually satisfiable |
+| `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full** suite including T1–T7 |
+| `cpp-sanitizers` | ubuntu-latest (Clang) | ASan/UBSan, and **TSan** (Linux-only) | Memory and race defects that equivalence tests cannot see; owns **§5.7 T3**, which is a Linux/Clang requirement because MSVC ships no ThreadSanitizer |
 | `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 |
 | existing `test`, `windows-launcher-smoke` | unchanged | — | §11.2 |
+
+**PROPOSED — why the platform split is explicit.** Concurrency correctness is a *platform* property (the Windows build is static-linked and uses MSVC; the Linux build is dynamic and uses GCC/Clang), so the test **must** run on both. Only TSan is platform-restricted. The matrix therefore delivers: **T1, T2, T4–T7 on Windows and Linux; T3 (TSan) on Linux.** Stating this prevents the gate in §5.8 from being formally unattainable — an earlier draft required all seven tests on both platforms while assigning all test execution to Linux.
 
 **PROPOSED:** TSan is **always compiled** even while the concurrency suite is quarantined (§9.8), so that enabling the suite later does not require new CI plumbing.
 
