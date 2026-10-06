@@ -604,12 +604,15 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 
 | # | Check | Mechanism |
 |---|---|---|
-| E1 | No `ql/` include outside `src/quantlib_adapter/` | CI grep over the source tree |
+| E1 | No `ql/` include outside `src/quantlib_adapter/` **in the production and public trees** (`core/`, `dto/`, `diagnostics/`, `include/`). The QuantLib **audit and adapter tests are an explicit, enumerated exception** — see E1a | CI grep over the production/public source trees only (never over all of `cpp/`) |
+| E1a | The exception is *required*, not a convenience: `tests/defaults/` is the default-audit matrix (TL1) whose stated job is to "detect a change in the underlying QuantLib default", and it cannot do that without reading QuantLib. Adapter unit tests likewise construct QuantLib objects. The guard must therefore **enumerate** the permitted paths (`src/quantlib_adapter/`, `tests/defaults/`, `tests/unit/`, and any future QuantLib-reading test directory) rather than forbid everything outside the adapter. **A guard that rejects those tests defeats AC 7** — the mechanical enforcement of "QuantLib defaults MUST NOT silently become Shiori methodology" | Guard is an explicit **allow-list** of directories, not a deny-list; adding a QuantLib-reading test directory is a reviewed one-line change to that list |
 | E2 | No `QuantLib::`/`ql::` token in any public header or exported signature | CI grep over `include/` + compile-fail negative test |
 | E3 | `shiori_rates_dto` / `shiori_rates_core` do not link QuantLib | Target graph + link-symbol inspection (`.lib`/`.so` symbol scan) |
 | E4 | No `ql::` exception is part of a caller-visible signature | E2 plus an exception-mapping test (A2) |
 | E5 | Every D1–D17 setting is explicit or refused | §3.6 default-audit tests |
 | E6 | QuantLib version is emitted by diagnostics and appears in benchmark metadata | §12, §10.5 |
+
+**PROPOSED:** E1/E1a are stated as an **allow-list** deliberately. A deny-list formulation ("no `ql/` anywhere else") is the natural phrasing but it is wrong here, because the tests that make the isolation auditable must themselves see QuantLib. The isolatable property is that **production targets** do not depend on QuantLib — which E3 enforces structurally at the link level — not that the string `ql/` appears nowhere outside one directory.
 
 ---
 
@@ -869,10 +872,12 @@ The flag is set **before** `performCalculations()` runs. A second thread that re
 
 | # | Rule |
 |---|---|
-| O1 | Shiori does **not** enable `QL_ENABLE_OPENMP` in the pinned build, so the proposed configuration has no library-internal parallelism |
+| O1 | Shiori does **not** enable `QL_ENABLE_OPENMP` in the pinned build |
 | O2 | Shiori does **not** rely on intra-calculation parallelism for speed; if it were ever enabled, the four sites above are the only paths affected, and each would need its own correctness review |
 | O3 | No design may reference a QuantLib thread pool, because none exists |
 | O4 | The parallel unit-test runner is a **test-harness** option and is never conflated with production concurrency |
+| O5 | **Verifying the absence of library-internal parallelism is a build obligation, not an inference from O1.** O1 is necessary but **not sufficient**: the option governs detection and link flags only, while three of the four pragma sites are **bare** (caveat above). The build must therefore **also** verify that **`_OPENMP` is undefined** for the QuantLib translation units, and **fail closed** if any OpenMP flag (`-fopenmp`, `-openmp`, `/openmp`) reaches them. A triplet, toolchain, or environment that injects such flags independently would otherwise activate those loops *while the option still reports "off"* — silently breaking §5.2's single-threaded posture with no configuration value to point at |
+| O6 | O5 is mechanically checkable and must be checked, not asserted: the §2.4 CMake contract inspects the QuantLib compile line for OpenMP flags, a build-time check rejects a QuantLib target compiled with `_OPENMP` defined, and §11.6's CI asserts the same property on the produced binary |
 
 **UNPROVEN (narrow, and independent of the above):** whether any *individual pricing engine* that Shiori later calls spawns threads of its own. Shared infrastructure has been audited; a per-engine audit was **not** performed, and the safe default is "not safe unless shown otherwise" (**U-D**).
 
@@ -1070,13 +1075,18 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 
 | # | Test | What it must prove |
 |---|---|---|
-| T1 | **Deterministic N-thread / N-request equivalence** — price the same `RatesKernelInput` set sequentially and (under the gate) from N threads | Identical results, bit-for-bit on the fixture set; no divergence, no ordering dependence |
+| T1 | **Gate-serialized N-thread / N-request equivalence (current posture)** — price the same `RatesKernelInput` set sequentially and, from N threads contending on the serialization gate, again | Identical results, bit-for-bit on the fixture set; no divergence, no ordering dependence. **Note the scope: this validates the gate that is *present*, i.e. the disabled posture.** It cannot be extrapolated to a gate-removed configuration |
 | T2 | **Request-isolation test** — concurrent requests whose evaluation dates and fixing sets differ | No request observes another's evaluation date, fixings, or market data. This is the test that would catch an accidental `IndexManager`/`Settings` read |
-| T3 | **ThreadSanitizer run** of T1/T2 on the Linux CI job | No data race reported in Shiori code **or** in the QuantLib paths the engine exercises. TSan findings in third-party code are still evidence and must be triaged, not suppressed |
+| T3 | **ThreadSanitizer run** of **T1, T2 and T8** on the Linux CI job | No data race reported in Shiori code **or** in the QuantLib paths the engine exercises. TSan findings in third-party code are still evidence and must be triaged, not suppressed |
 | T4 | **Global-state set/restore test** — assert that after every request, `Settings` and the other globals are exactly as before, including on the exception path | C1/C2 hold under failure, not only on the happy path |
 | T5 | **Lifetime/teardown test** — destroy QuantLib objects under load while observers exist | No crash, no use-after-free (C9) |
 | T6 | **Cache-under-concurrency test** — a shared cache hit/miss under N threads | No torn entries, no duplicate *observable* population beyond the documented policy (§7.5), and no mutation of the returned object |
 | T7 | **Gate-accounting test** — attempt a bypass | The bypass is detected and fails closed |
+| T8 | **Candidate-configuration test — the configuration PE would actually enable.** Rerun T1, T2, T5 and T6 with the gate **removed or narrowed exactly as the enablement proposal would remove or narrow it**, and subject that same candidate configuration to TSan | Equivalence, isolation, lifetime and cache safety hold **without** the gate. This is the only test that speaks to the enabled posture |
+
+**PROPOSED — why T8 is not optional, and why T1–T7 cannot substitute for it.** T1–T7 are tests *of the serialized posture and of the gate itself*. Enabling parallel pricing does not merely relax a policy: it **changes the configuration under test**, because the gate is what serializes execution today. Evidence gathered with the gate held is therefore evidence about a configuration that enablement would delete. Without T8 the engine could pass every gate in §5.8 and then run a configuration that was never equivalence-checked or TSan-checked. The rule is accordingly:
+
+> **No configuration may be enabled unless that exact configuration has itself passed the equivalence, isolation and TSan checks (T8).** Evidence from the gated configuration is necessary but cannot be promoted.
 
 **PROPOSED:** T3's TSan run is required because T1/T2 alone cannot distinguish "no race" from "no race *observed today*". A passing equivalence test is necessary but not sufficient.
 
@@ -1086,14 +1096,14 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 
 | # | Condition |
 |---|---|
-| PE1 | §5.7 T1–T7 exist and pass: **T1, T2, T4–T7 on both Windows and Linux**; **T3 (TSan) on Linux**, the only platform in the §11.3 matrix providing ThreadSanitizer. (An earlier draft required all of T1–T7 on both platforms while assigning all test execution to Linux, which made this gate unattainable) |
+| PE1 | §5.7 **T1–T8** exist and pass: **T1, T2, T4–T8 on both Windows and Linux**; **T3 (TSan, covering T1/T2/T8) on Linux**, the only platform in the §11.3 matrix providing ThreadSanitizer. **T8 is the load-bearing one** — it is the only test run in the configuration enablement would actually enable. (An earlier draft required all of T1–T7 on both platforms while assigning all test execution to Linux, which made this gate unattainable; a later draft omitted the ungated configuration entirely) |
 | PE2 | The specific QuantLib configuration used is **named** (version + every relevant macro), and the reason it is safe is derived from §4-style source evidence — not from a community claim |
 | PE3 | The evaluation-date / fixing / observer / lazy-cache mechanisms are each shown either unused or provably isolated per request |
 | PE4 | Reproducibility under concurrency is demonstrated per #225 §15.4's replay identity — concurrent execution must not change a result |
 | PE5 | A benchmark serves as a **verification** step (does parallelism still reproduce results), with published concurrency semantics per §10.5 |
-| PE6 | An owner decision accepts the posture, with the risks of P1–P5 stated |
+| PE6 | An owner decision accepts the posture, with the risks of **PE1–PE5** stated |
 
-**PROPOSED:** until P1–P6 are satisfied, the answer to "can we parallelise pricing?" is **no**, and the answer to "the single thread is too slow" is §10 measurement plus the multi-process path — not a thread pool.
+**PROPOSED:** until **PE1–PE6** are satisfied, the answer to "can we parallelise pricing?" is **no**, and the answer to "the single thread is too slow" is §10 measurement plus the multi-process path — not a thread pool.
 
 ### 5.9 UNPROVEN (concurrency)
 
@@ -1463,8 +1473,8 @@ cpp/rates_engine/
     contract/               schema decode, round-trip, fail-closed
     defaults/               QuantLib default-audit matrix (§3.6)
     determinism/            replay identity (§9.5)
-    cache/                  §7.7 CT1–CT7
-    concurrency/            §5.7 T1–T7 (quarantined until §5.8)
+    cache/                  §7.7 CT1–CT7 + CT3b
+    concurrency/            §5.7 T1–T8 (T1–T7 quarantined until §5.8)
     parity/                 Python ↔ C++ boundary
     fixtures/               versioned, identity-stamped fixtures
   benchmarks/               §10 (separate executable, §2.10)
@@ -1480,9 +1490,9 @@ cpp/rates_engine/
 | **TL1 Defaults audit** | One test per row of §3.6 D1–D17: assert the engine **sets** the value explicitly, and detect a change in the underlying QuantLib default | §3.6, AC 7 — this is the mechanical enforcement of "QuantLib defaults MUST NOT silently become Shiori methodology" |
 | **TL2 Boundary isolation** | Compile-time/structural assertion that no public DTO depends on a QuantLib type | §3.5 A1–A5, §6.5 B2, AC 6 |
 | **TL3 Determinism / replay** | Same input twice ⇒ identical output; fingerprint stability; no clock/global influence | §6.7, AC 11 |
-| **TL4 Cache correctness** | §7.7 CT1–CT7 | §7, AC 12/13 |
+| **TL4 Cache correctness** | §7.7 CT1–CT7 + CT3b | §7, AC 12/13 |
 | **TL5 Calibration outcomes** | Converged / warnings / non-converged / failed / refused are distinguishable and survive the cache | §8.3, AC 14 |
-| **TL6 Concurrency correctness** | §5.7 T1–T7 | §5, AC 16 — **the sole gate for AC 10** |
+| **TL6 Concurrency correctness** | §5.7 T1–T8 | §5, AC 16 — **the sole gate for AC 10** |
 | **TL7 Benchmark correctness** | §10.8 — every benchmark validates its result | §10, AC 17/18 |
 | **TL8 Failure / fail-closed** | Every refusal path returns a reason; nothing silently degrades | §6.8, §13 |
 
@@ -1524,7 +1534,7 @@ cpp/rates_engine/
 
 ### 9.6 Concurrency and cache test requirements
 
-Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the gating logic: **TL6 is the only evidence that can satisfy AC 10**, and TL4/CT2/CT3/CT3b are what make AC 13 auditable rather than aspirational.
+Fully specified in **§5.7 (T1–T8)** and **§7.7 (CT1–CT7 + CT3b)**. Summary of the gating logic: **TL6 is the only evidence that can satisfy AC 10**, and TL4/CT2/CT3/CT3b are what make AC 13 auditable rather than aspirational.
 
 ### 9.7 Bloomberg / UAT fixture integration (future)
 
@@ -1535,7 +1545,8 @@ Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the
 | BF1 | Fixtures are **opaque, versioned blobs plus a metadata sidecar**. The test harness reads the metadata for identity and never reaches into the fixture for market conventions |
 | BF2 | A future captured market snapshot is integrated by **adding a fixture**, not by adding a live call. This preserves §6.3 |
 | BF3 | Captured data is treated as **data**, never as authority for a convention or methodology value. A capture that would settle a RED item is escalated, not adopted (§13.3) |
-| BF4 | Fixture provenance (source, capture date, system) is recorded as **metadata**, and never participates in a cache key (§7.2 K3) |
+| BF4 | Fixture provenance (`source`, capture date/`captured_at`, system) is recorded as **explicit metadata** and **does participate in identity** — but only through the approved #225 canonical identity, i.e. `snapshot_id` and the canonical content fingerprint (`docs/33` §6.3 identity rules, §6.4 embedding vs referencing, §15.4 replay identity). **Correction recorded:** an earlier draft of this rule required provenance to "never participate in a cache key". That was a defect, not a hardening — it would let two *distinct* explicit snapshots share a key and return a result carrying the wrong `inputs_fingerprint`. What §7.2 K3 actually forbids is **ambient** derivation of time or state (reading the system clock), not a caller-supplied capture timestamp that is already part of the declared input. The K3/K4 distinction is "implicit vs explicit", and provenance here is explicit |
+| BF5 | Consequently, provenance is part of the **cache key only via that canonical identity** — never as free-form, un-hashed, or host-derived text, and never as a second, parallel notion of snapshot identity that #225 does not define |
 
 **PROPOSED:** BF3 is the load-bearing rule. It is what allows a captured desk snapshot to be *reproduced* without letting a workstation convention silently become Shiori methodology.
 
@@ -1604,9 +1615,11 @@ Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the
 | M8 | Platform (OS + version + architecture) | Harness |
 | M9 | Warm-up policy | Harness |
 | M10 | Repetition policy | Harness |
-| M11 | Concurrency mode + gate contention observed (+) | §5.2.1 / §12 — required so a serialized number is never mistaken for a parallel one |
+| M11 | **Concurrency mode (configured)** *and* **observed gate contention** (+) — these two halves have different comparability roles. The **configured mode** (serialized / N threads / gate removed) is part of the comparability set. **Observed contention is a measured outcome, not a configuration**, so it is **excluded** from the equality requirement (§10.7 BM3) and is reported instead | §5.2.1 / §12 — required so a serialized number is never mistaken for a parallel one |
 
 **PROPOSED:** M4 and M11 are the two additions this document makes to the issue's list, and both are forced by evidence: M4 by §4.4 (macro-dependent class layouts and semantics), M11 by §5.2.1 (an explicit gate whose cost must be visible).
+
+**PROPOSED — why M11 is split.** Gate contention is measured by *acquisition counts and wait times*, which vary with scheduling and machine load even between two runs of the **same** build with the **same** configured mode. Treating it as an equality prerequisite would therefore make two otherwise perfectly controlled runs formally incomparable, and would be self-defeating: the metadata that exists to make comparisons trustworthy would forbid them. The rule is that **configuration is compared and measurement is reported** — the same distinction §10.7 BM1 already draws between a point estimate and its dispersion.
 
 ### 10.6 Cache-state semantics
 
@@ -1626,7 +1639,7 @@ Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the
 |---|---|
 | BM1 | Report **dispersion**, not a single point estimate (e.g. median **and** spread). A mean without spread is not publishable |
 | BM2 | Repetition and warm-up policies are fixed and recorded (M9/M10) |
-| BM3 | Two runs are comparable only if **M2–M11** match (compiler, build type, QuantLib version + macros, fixture identity, cache state, thread count, platform, warm-up, repetition policy, concurrency mode). **M1 — engine version / commit SHA — is the intentional comparison variable and is *expected* to differ**: a proposed performance change is *defined* by a different M1, so requiring M1 to match would make every improvement claim and every regression comparison impossible. Cross-machine comparison is **explicitly not claimed** |
+| BM3 | Two runs are comparable only if **M2–M11** match (compiler, build type, QuantLib version + macros, fixture identity, cache state, thread count, platform, warm-up, repetition policy, **configured** concurrency mode). **Two fields are deliberately excluded from the equality requirement:** **M1 — engine version / commit SHA — is the intentional comparison variable and is *expected* to differ** (a proposed performance change is *defined* by a different M1, so requiring M1 to match would make every improvement claim and every regression comparison impossible), and **M11's *observed* gate contention is a measurement, not a configuration**, so it is compared only for reporting, never as a precondition. Cross-machine comparison is **explicitly not claimed** |
 | BM4 | Outlier removal, if any, must be **pre-declared and identical** across the compared runs; post-hoc trimming to obtain a desired result is prohibited |
 | BM5 | A claimed improvement requires a **threshold and a noise estimate** stated in advance. "Faster by an unspecified amount" is not a claim |
 | BM6 | **No benchmark may gate a build on an absolute wall-clock threshold.** Performance gates on shared CI runners are inherently flaky; the correct gate is correctness plus relative-regression detection with a generous, documented band |
@@ -1642,7 +1655,7 @@ Fully specified in **§5.7 (T1–T7)** and **§7.7 (CT1–CT7)**. Summary of the
 
 ### 10.10 What may not be claimed
 
-**PROPOSED.** No performance claim may be made without a benchmark (per `docs/08`). No claim may be extrapolated across platforms, compilers, build types, cache states or concurrency modes. **No benchmark result may be used as evidence of correctness** — that is the role of §9's suite, and specifically of §5.7 T1–T7 for concurrency.
+**PROPOSED.** No performance claim may be made without a benchmark (per `docs/08`). No claim may be extrapolated across platforms, compilers, build types, cache states or concurrency modes. **No benchmark result may be used as evidence of correctness** — that is the role of §9's suite, and specifically of §5.7 T1–T8 for concurrency (T1–T7 for the gated posture, T8 for the candidate configuration).
 
 ### 10.11 CI treatment
 
@@ -1675,7 +1688,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | Job | Runner | Config | Purpose |
 |---|---|---|---|
 | `cpp-build-test-windows` | windows-latest (MSVC) | `ci-release` | Primary toolchain; proves the static-link QuantLib path (§2.6); and **runs the C++ test suite on Windows, including the platform-applicable concurrency tests (T1, T2, T4–T7)** so that §5.8 PE1 is actually satisfiable |
-| `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full** suite including T1–T7 |
+| `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full** suite including T1–T8 |
 | `cpp-sanitizers` | ubuntu-latest (Clang) | ASan/UBSan, and **TSan** (Linux-only) | Memory and race defects that equivalence tests cannot see; owns **§5.7 T3**, which is a Linux/Clang requirement because MSVC ships no ThreadSanitizer |
 | `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 |
 | existing `test`, `windows-launcher-smoke` | unchanged | — | §11.2 |
@@ -1766,10 +1779,13 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 
 | # | Rule |
 |---|---|
-| DG1 | Diagnostic **content** is deterministic for a given input (no wall-clock in the identity-relevant fields). Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
+| DG1 | Diagnostic content is deterministic for a given input **over the identity/replay-relevant fields** — **G-1, G-2, G-3, G-8, G-9, G-10, G-11**: what was computed, from what, with which engine, and why if refused. These describe *what happened* and must be reproducible. Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
+| DG1a | **Operational measurements are explicitly nondeterministic and must not be asserted deterministic.** **G-4** (cache hit/miss per layer), **G-6** (concurrency mode + observed gate contention: acquisitions, waits) and **G-7** (timing breakdown) legitimately vary for the *same* input with cache population, concurrent load and elapsed time. Requiring them to be stable would force an implementation to either suppress them or fabricate them — destroying the observability §12 exists to provide. Tests assert their **presence and structural validity**, never their values. (An earlier draft required *all* diagnostic content to be deterministic, which was incompatible with emitting G-4/G-6/G-7 at all) |
 | DG2 | No secrets, credentials, or raw captured market data are emitted |
 | DG3 | Fingerprints are logged **hashed**; the preimage is not emitted (§6.7) |
 | DG4 | Diagnostics must be attributable: a diagnostic line without G-1/G-3 is not usable, because it cannot be reproduced |
+
+**PROPOSED:** the DG1/DG1a split is the same "identity vs observation" boundary drawn in §7.2 (K3 vs K4) and §10.7 (configuration vs measurement). A determinism rule that sweeps in runtime measurements is not a stricter rule — it is an unsatisfiable one, and the cheapest apparent way to satisfy it would be to stop emitting the measurements.
 
 ### 12.5 Fail-closed introspection
 
@@ -1853,7 +1869,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | 13 | Every cache layer has deterministic key + invalidation rules | §7.4 (key/lifetime/invalidation columns), §7.5, §7.7 | **Satisfied** |
 | 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5 | **Satisfied** |
 | 15 | C++ test framework and layout defined | §9.1, §9.2 | **Satisfied** |
-| 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T7, §7.7 CT1–CT7, §9.6 | **Satisfied** |
+| 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T8, §7.7 CT1–CT7 + CT3b, §9.6 | **Satisfied** |
 | 17 | Benchmark methodology separates cold/warm and cache state | §10.3, §10.4, §10.6 | **Satisfied** |
 | 18 | Benchmark reproducibility metadata defined | §10.5 M1–M11 | **Satisfied** |
 | 19 | Python + C++ CI integration strategy defined | §11.1–§11.11 | **Satisfied** |
@@ -2022,7 +2038,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 
 1. **Build:** C++20, no extensions, CMake ≥ 3.25 with presets, out-of-source, four locked targets, Windows-first without being Windows-only, dependencies pinned by a manifest, no fast-math.
 2. **QuantLib:** pinned, acquired through the manifest, isolated behind one adapter target; it **never** crosses the DTO boundary; **every default is set explicitly** or the engine refuses.
-3. **Concurrency:** **single-threaded serialized per process; parallel pricing DISABLED**; scale by multiple processes; all QuantLib access behind one measured gate; enabling parallelism requires §5.7 T1–T7 **and** an owner decision.
+3. **Concurrency:** **single-threaded serialized per process; parallel pricing DISABLED**; scale by multiple processes; all QuantLib access behind one measured gate; enabling parallelism requires §5.7 T1–T8 — **including T8, which tests the configuration actually being enabled** — **and** an owner decision; the absence of library-internal parallelism must be **verified** (`_OPENMP` undefined), not inferred from the OpenMP option.
 4. **Inputs:** caller-owned, immutable, borrowed, never mutated after publication, no I/O in the kernel, no global fixing store.
 5. **Caching:** cache **values**, never QuantLib objects; keys from explicit input identity only; no pointer, clock, global or unknown-version identity; version mismatch is a miss.
 6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, unresolved policy ⇒ refuse.
