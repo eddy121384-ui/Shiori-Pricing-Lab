@@ -623,16 +623,23 @@ This section is the **evidence** for the claims §3 and §5 rely on. It delibera
 
 | File | What it establishes |
 |---|---|
-| `ql/settings.hpp` | `Settings` contents and the `Singleton` base |
+| `ql/settings.hpp`, `ql/settings.cpp` | `Settings` contents, the `DateProxy` today-fallback, `SavedSettings`, and the optional explicit-evaluation-date behaviour |
 | `ql/patterns/singleton.hpp` | The singleton implementation and the official thread-safety sentence |
-| `ql/patterns/observable.hpp` | `Observable`/`Observer`/`ObservableSettings`, both branches |
-| `ql/patterns/lazyobject.hpp` | Lazy caching and the `LazyObject::Defaults` singleton |
-| `ql/handle.hpp` | `Handle` / `RelinkableHandle` relinking semantics |
-| `ql/termstructure.hpp` | Term-structure observer wiring and the global-evaluation-date constructor |
-| `ql/termstructures/yieldtermstructure.hpp` | Discount/zero/forward access and the `extrapolate` parameters |
+| `ql/patterns/observable.hpp`, `ql/patterns/observable.cpp` | `Observable`/`Observer`/`ObservableSettings`, both branches |
+| `ql/patterns/lazyobject.hpp` | Lazy caching, the `calculate()` ordering, and the `LazyObject::Defaults` singleton |
+| `ql/handle.hpp` | `Handle` / `RelinkableHandle` relinking semantics and reference-returning accessors |
+| `ql/termstructure.hpp` | Term-structure observer wiring, mutable cached state, and the global-evaluation-date constructor |
+| `ql/termstructures/yieldtermstructure.hpp` | Discount/zero/forward access, jump handling, and the `extrapolate` parameters |
+| `ql/math/interpolations/extrapolation.hpp` | The non-atomic, non-observable extrapolation switch |
+| `ql/termstructures/interpolatedcurve.hpp` | The mutable `times_`/`data_`/`interpolation_` working state a bootstrap writes |
 | `ql/indexes/indexmanager.hpp` | The global fixing repository |
 | `ql/models/calibrationhelper.hpp` | Calibration-helper mutability |
-| `CMakeLists.txt` | Every relevant compile-time option and its **default** |
+| `ql/math/optimization/method.hpp`, `…/problem.hpp`, `…/levenbergmarquardt.hpp`, `ql/models/model.hpp` | Optimizer/`Problem`/model statefulness (§4.10) |
+| `ql/time/ecb.cpp`, `ql/time/calendars/target.cpp` | A mutable non-singleton global, and the immutable shared calendar-implementation pattern (§4.2.1) |
+| `ql/qldefines.hpp` | The Boost floor required by the thread-safe observer pattern |
+| `CMakeLists.txt`, `configure.ac`, `ql/userconfig.hpp` | Every relevant compile-time option and its **default**, from three independent declarations |
+
+**EXTERNAL EVIDENCE — corroborating secondary sources.** The reference manual (`config.html`) for the official option descriptions, the vcpkg `ports/quantlib/` recipe for what the pinned port actually passes, and maintainer statements for the official position (§4.12). These are labelled as secondary/advisory where used, and in every case the primary source is cited alongside.
 
 **IMPORTANT SCOPE LIMIT (stated so no reader over-reads this audit).** These are facts about **QuantLib 1.43 as configured by its own default CMake options**, which is what a default vcpkg build of the pinned port produces (the port passes only `-DQL_BUILD_EXAMPLES=OFF -DQL_BUILD_TEST_SUITE=OFF`, per §2.6). They are **not** claims about the `master` branch, about older versions such as the Python-side `1.32` lower bound, or about a build that enables sessions or the thread-safe observer pattern. Where a fact is conditional, the condition is named.
 
@@ -831,6 +838,16 @@ The flag is set **before** `performCalculations()` runs. A second thread that re
 
 **Consequence:** even a helper that is only *read* is not safe to share across threads, and "read-only calibration objects" is not an available assumption.
 
+**EXTERNAL EVIDENCE — the optimizer side is stateful too.** The helper is only half of a calibration; the solver and the model carry working state as well:
+
+- `OptimizationMethod::minimize(Problem& P, const EndCriteria& endCriteria)` takes the `Problem` by **non-const reference** and returns `EndCriteria::Type` — the call mutates its argument.
+- `Problem` holds the cost function by reference and carries mutable members (`functionEvaluation`, `gradientEvaluation`, `value`, `squaredNorm`, `currentIteration`, …), so a `Problem` is a per-calibration work object, not a reusable immutable input.
+- Concrete minimizers such as `LevenbergMarquardt` keep **instance state** across `minimize` calls (lambda/parameter bookkeeping), so a shared optimizer instance is a shared mutable object.
+- `CalibratedModel::calibrate(...)` is likewise a **non-const** operation: it mutates the model's parameter vector and notifies observers, which is also the path by which a curve object becomes mutable (see §4.8).
+- No synchronisation was found in these types outside the optional observer-pattern build, i.e. the same condition as §4.12.
+
+**Consequence for §8:** a calibration is a *transaction over mutable library objects* (helpers, `Problem`, minimizer, model). This is the structural reason the calibration cache is **keyed but not productive** until the RED-owned objective/optimizer/tolerance policies have identities (§8.4), and it is why "reuse a warm optimizer" is not an available optimisation — reuse would carry one calibration's mutable work state into another's.
+
 ### 4.11 QuantLib's own internal parallelism
 
 **EXTERNAL EVIDENCE — a commonly repeated premise is REFUTED.** `GlobalThreadPool`, `ThreadPool` and `GaussianPathGenerator` **do not exist in QuantLib**. A whole-tree search for `SessionSettings|GlobalThreadPool|ThreadPool|threadPool|thread_pool` returns **zero matches**, there is no thread-pool header in `ql/patterns/` or `ql/utilities/`, and probing `ql/patterns/threadpool.hpp` and `ql/utilities/threadpool.hpp` across a series of historical tags returns HTTP 404 for every combination. **Any design, README or secondary summary that assumes QuantLib exposes a global thread pool — or that pricing can be parallelised by configuring one — rests on a false premise.** This is recorded as a **refutation**, not as an UNPROVEN item, so that #227 does not inherit it.
@@ -937,13 +954,14 @@ The flag is set **before** `performCalculations()` runs. A second thread that re
 
 Given §4, the proposed build has all of the following simultaneously true:
 
-1. Four process-global singletons (`Settings`, `ObservableSettings`, `LazyObject::Defaults`, `IndexManager`) — §4.2.
+1. **Ten** process-global singletons (G1–G10 in §4.2 — `Settings`, `ObservableSettings`, `LazyObject::Defaults`, `IndexManager`, `ExchangeRateManager`, `SeedGenerator`, `Money::Settings`, `IborCoupon::Settings`, `Tracing`, and the commodity settings) **plus** at least one mutable process-global that is not a singleton (the ECB known-date registry) — §4.2.
 2. An **unsynchronised** observer registry and unsynchronised global update flags — §4.5.
-3. **Unsynchronised mutable caches** on `LazyObject`, and therefore on curves, models, instruments and calibration helpers, where even the *read* path writes state — §4.6, §4.10.
+3. **Unsynchronised mutable caches** on `LazyObject`, and therefore on curves, models, instruments and calibration helpers, where even the *read* path writes state **and can be observed mid-construction** — §4.6, §4.10.
 4. A **public relink channel** into shared objects — §4.7.
 5. Term structures that read the **global evaluation date at query time** — §4.8.
 6. A **global fixing history** whose scope is process-wide (or at best per-thread) but never per-request — §4.9.
 7. The library's own guarantee covering **only** `Singleton::instance()` retrieval — §4.12.
+8. **No synchronisation at all** outside the optional observer-pattern build: outside that `#ifdef`, `Settings`, `IndexManager`, `Handle`, `LazyObject`, term structures and the optimizers contain no locks — §4.5, §4.10, §4.12.
 
 The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the default, pinned configuration offers no compiled-in guarantee that two threads may concurrently price with shared QuantLib objects, and several mechanisms that are demonstrably racy if they do.** Therefore Shiori must not begin from a parallel posture and then look for races.
 
