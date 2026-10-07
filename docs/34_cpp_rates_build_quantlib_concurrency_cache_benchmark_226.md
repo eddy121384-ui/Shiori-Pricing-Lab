@@ -10,7 +10,7 @@ This issue: #226 — ARCHITECTURE / PERFORMANCE CONTRACT ONLY.
 | Branch | `arch/226-cpp-build-quantlib-perf` |
 | Base SHA | `5b63f86f28b3dd738f0bd884e6e35e4bc08c8093` (main, merge of PR #248 / #225) |
 | Deliverable | This document only |
-| Scope | C++20 build contract, QuantLib version + isolation, concurrency posture, immutable-input consumption, cache + calibration-cache identity, test architecture, benchmark methodology, Python+C++ CI, diagnostics |
+| Scope | C++20 build contract, QuantLib version + isolation, concurrency posture, immutable-input consumption, cache + calibration-cache identity, test architecture, benchmark methodology, Python+C++ CI, diagnostics (two-lane: #225 result diagnostics + `RATES_RUNTIME_TELEMETRY_V1`, §12.2) |
 | Non-goals | No production pricing, no executable CMake/build/engine scaffolding (deferred to #227), no methodology values, no bond-option behavior change |
 | Methodology authority | Sophira (architecture/methodology scope, RED decisions, review interpretation) |
 | Final merge authority | Eddy |
@@ -297,12 +297,12 @@ cpp/
     ├── include/shiori_rates/          # PUBLIC headers — the only installable surface
     │   ├── dto/                       # versioned DTO / wire-shape types  [BOUNDARY]
     │   ├── engine/                    # kernel entry points + result types
-    │   └── diagnostics/               # diagnostics types (§12)
+    │   └── diagnostics/               # runtime-telemetry types only (Lane B, §12.2)
     ├── src/
     │   ├── dto/                       # (de)serialization implementation — nlohmann::json
     │   ├── quantlib_adapter/          # ONLY place QuantLib headers may appear [ADAPTER]
     │   ├── engine/                    # pricing kernel implementation (empty skeleton in #227)
-    │   └── diagnostics/
+    │   └── diagnostics/               # Lane B telemetry emission + serialization
     ├── tests/                         # GoogleTest/DooDoo unit + contract + concurrency tests
     ├── benchmarks/                    # Google Benchmark targets (§10)
     └── fuzz/                          # OPTIONAL later; not created in #227 unless required
@@ -315,7 +315,7 @@ cpp/
 | **DTO / serialization boundary** | `shiori_rates_dto` | **No** | **No** | Versioned wire shapes + canonical (de)serialization. Depends only on `nlohmann::json` and the standard library |
 | **QuantLib adapter** | `shiori_rates_quantlib_adapter` | **Yes — exclusively** | **No** (returns/accepts only DTO types) | Translates DTO → request-local QuantLib objects and back; the sole containment boundary for QuantLib |
 | **Production Rates core** | `shiori_rates_core` | **No** | **No** | Deterministic kernel over DTO inputs. If it needs QuantLib behaviour, it calls the adapter through a DTO-shaped interface |
-| **Diagnostics** | `shiori_rates_diagnostics` | No | No | Engine/QuantLib/compiler identity, cache counters, timing hooks |
+| **Diagnostics / telemetry** | `shiori_rates_diagnostics` | No | No | **Lane B** runtime telemetry (§12.2): engine/QuantLib/compiler identity echoes, cache counters, timing hooks, gate contention. **Lane A** result diagnostics are **not** here — they are carried by the `shiori_rates_dto` result types per #225, and this target must never become the carrier of result-contract content |
 | **Tests** | `shiori_rates_tests_*` | Only in adapter-targeted tests | n/a | §9 |
 | **Benchmarks** | `shiori_rates_bench_*` | **No** — benchmarks measure the engine through its public **DTO-shaped** API and include no `ql/` headers. §2.10's benchmark tree has **no** adapter directory, and §10.4's phases are measured across the pipeline's public boundary. Permitting direct QuantLib here would require a **fourth** E1a allow-list path for a measuring-only target that does not need one | n/a | §10 |
 | **Integration glue (optional)** | deferred to #227 | No | No | The Python-facing binding/CLI, if any. Not designed here |
@@ -411,7 +411,7 @@ cpp/
 | P1 | Every C++ dependency is pinned to an **exact version** in `vcpkg.json` `overrides`, not a range and not "latest" |
 | P2 | The vcpkg registry itself is pinned by an exact **`builtin-baseline` commit SHA**; a floating baseline is forbidden because it silently changes dependency versions |
 | P3 | Integrity is verified by the hash recorded in the port (`SHA512` for the QuantLib port, per its `portfile.cmake`) |
-| P4 | **QuantLib's pinned version is a first-class part of the engine identity**, recorded in diagnostics (§12), in benchmark metadata (§10.5), and in the replay identity required by #225 §15.4 |
+| P4 | **QuantLib's pinned version is a first-class part of the engine identity**, recorded in **Lane A** result diagnostics where #225's result carries it (§12.2), in benchmark metadata (§10.5), and in the replay identity required by #225 §15.4 |
 | P5 | The Python side is **not** changed by this policy. `pyproject.toml`'s `QuantLib>=1.32` lower bound stays as-is; #226 neither tightens nor loosens it |
 | P6 | The C++ pinned version and the Python `quant` extra version may differ, but the *difference must be visible and deliberate*: they are separate dependency planes. A shared version is **not** required and must not be assumed |
 | P7 | No `CMakeLists.txt` / `vcpkg.json` is added by #226 (§1.2), and any future change to them is a protected-path change requiring explicit review |
@@ -503,7 +503,7 @@ This is the direct C++-engine expression of an already-approved #225 requirement
 | **Initial pin — LOCKED** | **`1.43`**, and it is **locked, not a candidate**. Every fact in §4 — the process-global singletons, the macro defaults, the `LazyObject` ordering, the OpenMP pragma sites — is explicitly scoped to `v1.43`. Another exact version would invalidate that evidence base rather than merely being a different pin |
 | Who may change the pin | Only via the §3.8 upgrade procedure **and** a repeat of the §4 audit for the candidate version. No incidental bump, no "while I was in there" |
 | Deviation from `1.43` on a first implementation | **Re-audit is mandatory.** §3.8's audit is *change*-triggered, and a first implementation has no prior recorded pin for it to trigger from — so the obligation is stated here instead: selecting any version other than `1.43` requires repeating the §4 version-specific audit and obtaining §3.8 approval **before** implementation, because §4's defaults, singleton and OpenMP findings are version-conditioned |
-| Where the pin is recorded | The manifest (authority), the diagnostics output (§12), the benchmark metadata (§10.5), and the replay identity (§8.1) |
+| Where the pin is recorded | The manifest (authority), the diagnostics output (**Lane A** where the result carries it, **Lane B** otherwise — §12.2), the benchmark metadata (§10.5), and the replay identity (§8.1) |
 | Range/`>=` pins | **Forbidden** for the C++ dependency. A range pin is what makes a hidden default change possible on a clean CI machine |
 | Python side | **Unchanged.** `pyproject.toml`'s `quant` extra keeps its existing lower bound. The two planes are independent (§2.7 P6) |
 
@@ -580,7 +580,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 | D14 | `Settings` flags beyond the evaluation date (e.g. historic-fixing enforcement, reference-date-event inclusion, same-day cashflow inclusion) | **Explicit from an owner-approved input, or refused with `UNRESOLVED_METHODOLOGY`** — the same treatment as D9, and for the same reason. These flags change **which cashflows enter a result**, so they are pricing/methodology choices, not adapter settings. **"Record and pin the pinned version's value" is *not* an approved alternative**: pinning prevents upgrade drift but does not approve the choice, and it would let the engine adopt QuantLib 1.43's preference by the act of recording it. A flag that is not yet exposed as an approved input is therefore **refused, not inherited**. The D1–D17 pinning test still asserts each *effective* value so a version upgrade fails the build rather than changing a price — but that test is a drift detector, never an approval mechanism |
 | D15 | Index fixing history / any index-level state | Explicitly scoped per request; see §4 and §5 for what is UNPROVEN |
 | D16 | Day counter, tenor, and frequency defaults in convenience constructors | Avoided by using explicit constructors; no convenience overload that silently applies a default |
-| D17 | Internal QuantLib parallelism (the optional OpenMP code paths — see §4.11; **no thread pool exists in the library**) | Explicitly configured or disabled (§5), and recorded in diagnostics (§12) |
+| D17 | Internal QuantLib parallelism (the optional OpenMP code paths — see §4.11; **no thread pool exists in the library**) | Explicitly configured or disabled (§5), and recorded in **Lane B** runtime telemetry (§12.2) |
 
 **PROPOSED default-audit test (falsifiable, required of #227).** A test constructs the adapter's request with no optional fields set and asserts that **every** restricted DTO field is either present or produces a fail-closed error — i.e. the test proves that the adapter cannot silently proceed on a default. A second test pins the *effective* value of each D1–D17 setting so that a QuantLib upgrade changing a default produces a **test failure** rather than a changed price. This converts §3.1 from a documented intention into a regression gate.
 
@@ -592,7 +592,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 
 - The existence, scope (process-global vs thread-local), and configurability of QuantLib global/session state is a **version-, build-flag-, and configuration-dependent** property. §4 states exactly what is proven and what stays **UNPROVEN**.
 - **PROPOSED:** the engine does **not** assume bank-level thread safety of QuantLib global state, and **production parallel pricing remains DISABLED** until the dedicated concurrency-correctness tests in §5.7 prove the chosen configuration safe (§5.2).
-- **PROPOSED:** the adapter treats any global/session state it must touch as a **serialized, explicitly-owned critical section**, and diagnostics record which mode was in effect (§12).
+- **PROPOSED:** the adapter treats any global/session state it must touch as a **serialized, explicitly-owned critical section**, and **Lane B** telemetry records which mode was in effect (§12.2).
 
 ### 3.8 Policy for future QuantLib upgrades
 
@@ -604,7 +604,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 | U2 | **Regression evidence** over the authoritative anchors of `docs/31...` §3.1 — the ported tests must run and their values must hold within the documented tolerance |
 | U3 | A re-run of the default-audit tests (§3.6). A changed default must be an intentional, documented decision — which, if it changes comparison semantics rather than costs, is a **RED** item and stops for owner input |
 | U4 | A re-run of the concurrency-correctness tests (§5.7), because a new version may change observer/lazy-object or session behaviour |
-| U5 | Recorded identity update: diagnostics, benchmark metadata, replay identity |
+| U5 | Recorded identity update: result diagnostics (Lane A), runtime telemetry (Lane B), benchmark metadata, replay identity |
 | U6 | The pinned baseline commit is updated deliberately, with the resulting dependency-version deltas visible in the diff |
 | U7 | No upgrade is bundled with unrelated work (AGENTS.md rule 2) |
 
@@ -622,7 +622,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 | E3 | `shiori_rates_dto` / `shiori_rates_core` do not link QuantLib | Target graph **plus a link-artifact scan over every artifact shape the build can actually produce** — `.lib` and `.a` **static archives**, `.so` shared objects, and the final linked executables or link map. **A `.lib`/`.so`-only scan is insufficient:** §2.6 makes Windows static-only and §11.3 deliberately does not assert Linux linkage, so a compliant **static Linux build** produces `.a` archives that such a scan never opens, and a forbidden QuantLib reference escapes E3 entirely on a build that satisfies every other rule. The platform-specific artifact set must be **derived from the built targets**, not hard-coded (MSVC `.lib`, GNU/LLVM `.a`) |
 | E4 | No `ql::` exception is part of a caller-visible signature | E2 plus an exception-mapping test (A2) |
 | E5 | Every D1–D17 setting is explicit or refused | §3.6 default-audit tests |
-| E6 | QuantLib version is emitted by diagnostics and appears in benchmark metadata | §12, §10.5 |
+| E6 | QuantLib version is emitted as **engine provenance** (Lane A where #225's result carries it) and appears in benchmark metadata | §12.2, §10.5 |
 
 **PROPOSED:** E1/E1a are stated as an **allow-list** deliberately. A deny-list formulation ("no `ql/` anywhere else") is the natural phrasing but it is wrong here, because the tests that make the isolation auditable must themselves see QuantLib. The isolatable property is that **production targets** do not depend on QuantLib — which E3 enforces structurally at the link level — not that the string `ql/` appears nowhere outside one directory.
 
@@ -998,7 +998,7 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 | Any thread that does touch the QuantLib layer | Must hold the single process-wide **serialization gate** (§5.2.1) |
 | Enablement condition | Only by satisfying §5.8, which requires new, *recorded* evidence |
 
-**PROPOSED:** the posture is a **contract property, not an accident of implementation**. It must be visible: diagnostics report the concurrency mode (§12), and the benchmark metadata records it (§10.5), so a benchmark number can never be silently produced under a different concurrency posture than the one stated.
+**PROPOSED:** the posture is a **contract property, not an accident of implementation**. It must be visible: **Lane B** telemetry reports the concurrency mode (§12.2), and the benchmark metadata records it (§10.5), so a benchmark number can never be silently produced under a different concurrency posture than the one stated.
 
 #### 5.2.1 The serialization gate
 
@@ -1010,7 +1010,7 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 | Coverage | All adapter entry points, without exception. A bypass is a defect |
 | Ordering | No reentrancy; the gate is not held across a callback into the caller |
 | Failure | A holder that throws must release (RAII), never leak the gate |
-| Observability | Diagnostics expose acquisition count and wait time (§12), so contention is *measured* rather than guessed |
+| Observability | **Lane B** telemetry exposes acquisition count and wait time (§12.2), so contention is *measured* rather than guessed |
 | Removal | The gate is removed only under §5.8 |
 
 **PROPOSED rationale:** an explicit gate is strictly better than an implicit one. Without it, the serialization is real but invisible and untestable; with it, the constraint is enforced in one place and its cost is measurable. It also makes the "disabled" posture *checkable* rather than merely documented.
@@ -1182,7 +1182,7 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 
 | # | Rule |
 |---|---|
-| N1 | After publication, an input is **never** mutated — not by the engine, not by the caller, not by a cache, not by diagnostics |
+| N1 | After publication, an input is **never** mutated — not by the engine, not by the caller, not by a cache, not by **either** diagnostics lane (§12.2) |
 | N2 | A DTO type carries **no mutation API** reachable after construction: no setters, no public non-const members, no `mutable` members, no lazy caches, no observer registration |
 | N3 | A DTO type **must not** contain a QuantLib type, a `Handle`/`RelinkableHandle`, a `shared_ptr<Observable>`, or any type whose value can change after construction |
 | N4 | The engine's read-only treatment is enforced by **`const` in the type system**, and a violation is a compile error — not a review finding |
@@ -1458,7 +1458,7 @@ The failure this prevents is concrete and severe. If L1 were keyed on the **decl
 | **Non-converged result** | **No, not as a success.** Per #225 §16 rule 15, a non-converged calibration may not be consumed without an explicit RED-approved override | Must not be silently cached, and must not be silently reusable |
 | **Refused** (`UNRESOLVED_METHODOLOGY`, missing input) | **No** | A refusal is cheap to reproduce and must stay visible |
 
-**PROPOSED:** the distinction between "converged with warnings", "non-converged", and "failed" is preserved **end to end** — through the cache, the DTO result, and diagnostics. Collapsing them would destroy exactly the information #225 §16 rule 15 relies on.
+**PROPOSED:** the distinction between "converged with warnings", "non-converged", and "failed" is preserved **end to end** — through the cache, the DTO result, and its **result diagnostics (Lane A**, §12.2). Collapsing them would destroy exactly the information #225 §16 rule 15 relies on.
 
 ### 8.4 Unresolved methodology must stay unresolved
 
@@ -1507,7 +1507,7 @@ cpp/rates_engine/
   src/dto/                  contracts + canonical serialization (no QuantLib)
   src/quantlib_adapter/     the ONLY QuantLib-dependent target
   src/engine/               production pricing kernel (no QuantLib)
-  src/diagnostics/          structured diagnostics
+  src/diagnostics/          runtime telemetry + diagnostics emitters (Lane B, §12.2)
   tests/                    identical to §2.9, which is canonical
     unit/                   per-component logic; pure logic, no QuantLib
     dto/                    JSON round-trip + schema-version + fail-closed (TL0)
@@ -1611,7 +1611,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 |---|---|
 | Q0 | The suite is runnable in an explicit **evidence-collection mode** — a dedicated CMake option plus a CTest label (e.g. `-DSHIORI_EVIDENCE_RUNS=ON` and `ctest -L concurrency-evidence`), which the §11.3 jobs invoke to produce PE1's evidence. **Quarantine governs the default configuration and the claims made, never the ability to gather evidence** |
 | Q1 | In the **default** configuration, quarantined tests are **listed in the test executable** and reported as skipped with a reason naming §5.8. In evidence mode the same tests run and report normally, **except T8, which is governed by Q6** |
-| Q2 | A skip count of zero is **not** evidence of correctness; the suite's status is reported in CI output and diagnostics (§12) |
+| Q2 | A skip count of zero is **not** evidence of correctness; the suite's status is reported in CI output and **Lane B** telemetry (§12.2) |
 | Q3 | Nothing may be described as "concurrency-safe" on the basis of a skipped test |
 | Q4 | When a test is running and applicable, a **failure is a blocker**, never a flake to be retried (§11.8) |
 | Q5 | Evidence gathered in evidence mode is valid **only as input to §5.8's gate**. It never by itself changes the production posture: §5.2 stays DISABLED until PE6 (an owner decision). A green evidence run is a precondition, not an enablement |
@@ -1808,49 +1808,83 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 
 ### 12.1 Principle
 
-**PROPOSED.** Diagnostics **describe** execution; they never **define** it. Specifically: enabling, disabling, or altering diagnostics must not change any pricing result, any cache key, or any methodology selection.
+**PROPOSED.** #226 defines **two diagnostics lanes**, each with **one authority**:
+
+- **Lane A — result diagnostics.** The deterministic, replay-relevant diagnostic content of the `PricingResult` / `RiskResult` result DTOs defined by #225. **Authoritative, owned by #225; #226 does not define, extend, rename, move, or remove it.**
+- **Lane B — runtime telemetry.** `RATES_RUNTIME_TELEMETRY_V1`, an out-of-band operational channel **owned by #226**, which is **not** part of `PricingResult`/`RiskResult` and does **not** participate in their content fingerprints.
+
+Neither lane may **define** execution; both only **describe** it. Enabling, disabling, or altering either lane must not change any pricing result, any cache key, or any methodology selection.
 
 > **Diagnostics must not become a second source of pricing methodology.**
 
-### 12.2 Required fields
+**PROPOSED — why the lanes are separated.** A single "diagnostics" channel forces one rule to cover two incompatible things: facts needed to *reproduce an economic result*, and measurements of *how this invocation happened*. The first must be bit-stable and fingerprint-participating; the second legitimately varies with cache population, scheduling, load and elapsed time. Merging them produces exactly the defect this section removes — a rule that either forbids emitting operational measurements, or drags volatile values into the result fingerprint. **An earlier revision of this section stated that diagnostics "are not part of the pricing DTO", which was wrong and would have instructed #227 to omit the field #225 requires at `docs/33_rates_market_model_result_contracts_225.md:937` and `:1014`.**
 
-**PROPOSED.** Minimum set, mapped to the issue's list (AC from issue §10):
 
-| # | Field | Note |
-|---|---|---|
-| G-1 | Engine version | Also required for cache validity (§7.6) |
-| G-2 | QuantLib version **and macro configuration** | §4.4 — the version alone is insufficient |
-| G-3 | Build / configuration identity (build type, compiler + version, flags that affect numerics) | §2.4 / §10.5 |
-| G-4 | Cache hit/miss diagnostics, **per layer**, with the key hashed | §7; hashed so keys are comparable without leaking values |
-| G-5 | Selected execution path | Which layer served the result (cache vs computed; which construction path) |
-| G-6 | Concurrency mode + gate contention (acquisitions, waits) | §5.2.1 |
-| G-7 | Timing breakdown hooks | §10.4 phases |
-| G-8 | Evaluation date actually used | §4.3 — makes an accidental wall-clock fallback visible rather than invisible |
-| G-9 | Input fingerprint | §6.7 — the identity a result can be replayed from |
-| G-10 | Refusal reason / `NULL_WITH_REASON` category | §6.8, §8.3 |
-| G-11 | Calibration outcome (converged / warnings / non-converged / failed) | §8.3 — preserving the distinction end to end |
+### 12.2 The two lanes
 
-### 12.3 Schema and versioning
+**PROPOSED.**
 
-**PROPOSED.** Diagnostics are emitted as **structured, versioned** data (`RATES_DIAGNOSTICS_V1`-style, per #225's `<CONTRACT>_V<n>` convention) using the pinned JSON library. A diagnostics consumer must be able to detect an unknown version rather than mis-parse it. Diagnostics are **not** part of the pricing DTO and must not be merged into it.
+| Lane | Channel / carrier | Authority | Member of the result DTO? | Deterministic? | In the result content fingerprint? | Content |
+|---|---|---|---|---|---|---|
+| **A — result diagnostics** | #225 `PricingResult` / `RiskResult` — their `diagnostics` map, plus the enclosing `engine` / `status` / `warnings` / `errors` / `replay` content (docs/33 §12) | **#225** | **Yes** | Yes — deterministic output records | **Yes**, exactly as #225's non-recursive preimage rule (`:1236`) specifies | replay-relevant, result-semantic facts: leg PVs, period counts, weights, deterministic fallback facts, refusal reason, calibration outcome |
+| **B — runtime telemetry** | `RATES_RUNTIME_TELEMETRY_V1` | **#226** | **No** — never a member of `PricingResult` / `RiskResult` | No — varies with cache state, scheduling, load, elapsed time | **No** | per-layer cache hit/miss, execution path served, gate acquisitions/waits/contention, timing breakdown, process/build/runtime observations |
 
-### 12.4 Determinism and privacy
+> **#226 MUST NOT instruct #227 to omit, rename, or move #225's result-diagnostics fields out of the result DTO.** Wording in #226 that appears to do so is a defect in #226, not a licence to alter the contract.
+
+**PROPOSED — the placement test.** *If a fact is required to reproduce or interpret the economic result, it belongs to **Lane A**, deterministically and fingerprint-participating. If it describes **how this invocation happened operationally** and can vary with cache state, scheduling, load, or elapsed time, it belongs to **Lane B** only.* No fact has two authorities: lane B may **echo a stable correlation identifier** (the result's content/inputs fingerprint, engine identity), but the result DTO remains authoritative and the echo never enters its preimage.
+
+### 12.3 Required fields, by lane
+
+**PROPOSED.** Minimum set, mapped to the issue's list (AC from issue §10) and assigned to a lane by the §12.2 placement test:
+
+| # | Field | Lane | Note |
+|---|---|---|---|
+| G-1 | Engine version | **A** (+ B correlation echo) | Part of #225's result `engine` identity; also required for cache validity (§7.6) |
+| G-2 | QuantLib version **and macro configuration** | **A** (engine provenance; operational echo in B) | §4.4 — the version alone is insufficient. It determines numerics, so it is methodology identity rather than a runtime observation |
+| G-3 | Build / configuration identity (build type, compiler + version, flags that affect numerics) | **B** | A process/build observation. Independently a §7.2 **cache-key** component — that cache role is not telemetry and is unaffected by this split |
+| G-4 | Cache hit/miss, **per layer**, with the key hashed | **B** | §7; hashed so keys are comparable without leaking values |
+| G-5 | Selected execution path | **B** | Which layer served the result (cache vs computed; which construction path) — varies with cache state |
+| G-6 | Concurrency mode + gate contention (acquisitions, waits) | **B** | §5.2.1 |
+| G-7 | Timing breakdown hooks | **B** | §10.4 phases |
+| G-8 | Evaluation date actually used | **A** | §4.3 — makes an accidental wall-clock fallback visible rather than invisible; it is replay-relevant, so it is a result-diagnostic fact |
+| G-9 | Input fingerprint | **A** | §6.7 — #225 `replay.inputs_fingerprint`; the identity a result can be replayed from |
+| G-10 | Refusal reason / `NULL_WITH_REASON` category | **A** | §6.8, §8.3 — #225 makes reason state fingerprint-participating |
+| G-11 | Calibration outcome (converged / warnings / non-converged / failed) | **A** | §8.3, carried by #225's result `status`/`warnings` — preserving the distinction end to end |
+
+**PROPOSED:** the G-numbers are an **issue-scoped checklist**, not a #226-authored schema. Where a Lane A field is defined by #225, #225's placement and naming govern; #226 records only that the fact must be emitted deterministically. **#226 adds no field to any #225 result type.**
+
+### 12.4 Schema and versioning
+
+**PROPOSED.** Both lanes are **structured, versioned** data carried through the pinned JSON library and following #225's `<CONTRACT>_V<n>` convention — but they version **separately**:
+
+- **Lane A** uses #225's **existing** result-contract versions. #226 **adds nothing, renumbers nothing, and does not modify `docs/33_rates_market_model_result_contracts_225.md`** (§12.7).
+- **Lane B** is `RATES_RUNTIME_TELEMETRY_V1`, a #226-owned version. The earlier working name `RATES_DIAGNOSTICS_V1` is **retired**: naming this channel "diagnostics" invited precisely the conflation with #225's result diagnostics that §12.2 removes.
+
+A consumer of **either** channel must detect an unknown version and fail closed rather than mis-parse it (§13.1). `RATES_RUNTIME_TELEMETRY_V1` is **not** part of `PricingResult`/`RiskResult` and must never be merged into them — and, symmetrically, **#225's result diagnostics must never be moved into it or dropped in favour of it**.
+
+### 12.5 Determinism and privacy
 
 **PROPOSED.**
 
 | # | Rule |
 |---|---|
-| DG1 | Diagnostic content is deterministic for a given input **over the identity/replay-relevant fields** — **G-1, G-2, G-3, G-8, G-9, G-10, G-11**: what was computed, from what, with which engine, and why if refused. These describe *what happened* and must be reproducible. Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
-| DG1a | **Operational measurements are explicitly nondeterministic and must not be asserted deterministic.** **G-4** (cache hit/miss per layer), **G-6** (concurrency mode + observed gate contention: acquisitions, waits) and **G-7** (timing breakdown) legitimately vary for the *same* input with cache population, concurrent load and elapsed time. Requiring them to be stable would force an implementation to either suppress them or fabricate them — destroying the observability §12 exists to provide. Tests assert their **presence and structural validity**, never their values. (An earlier draft required *all* diagnostic content to be deterministic, which was incompatible with emitting G-4/G-6/G-7 at all) |
-| DG2 | No secrets, credentials, or raw captured market data are emitted |
+| DG1 | **Lane A content** is deterministic for a given input over the replay-relevant fields — **G-1, G-2, G-8, G-9, G-10, G-11**: what was computed, from what, with which engine, and why if refused — and **participates in the result content fingerprint exactly as #225 §15.4 specifies**. These describe *what happened* and must be reproducible. Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
+| DG1a | **Lane B measurements are explicitly nondeterministic and must not be asserted deterministic.** **G-3** is stable per build, but **G-4** (cache hit/miss per layer), **G-5** (execution path served), **G-6** (concurrency mode + observed gate contention: acquisitions, waits) and **G-7** (timing breakdown) legitimately vary for the *same* input with cache population, concurrent load and elapsed time. Requiring them to be stable would force an implementation to either suppress them or fabricate them — destroying the observability §12 exists to provide. Tests assert their **presence and structural validity**, never their values. (An earlier draft required *all* diagnostic content to be deterministic, which was incompatible with emitting G-4/G-5/G-6/G-7 at all) |
+| DG2 | No secrets, credentials, or raw captured market data are emitted in **either** lane |
 | DG3 | Fingerprints are logged **hashed**; the preimage is not emitted (§6.7) |
-| DG4 | Diagnostics must be attributable: a diagnostic line without G-1/G-3 is not usable, because it cannot be reproduced |
+| DG4 | **Attribution.** A **Lane A** diagnostic is unusable without the engine identity (**G-1**); a **Lane B** telemetry record is unusable without the build identity (**G-3**) and a correlation identifier (§12.2). Neither lane may be the sole carrier of the other's identity facts |
+| DG5 | **No fact has two authorities.** A lane B echo of a result fingerprint, inputs fingerprint, or engine identity is **correlation only** and never becomes part of the referenced result's fingerprint preimage (§12.2) |
+| DG6 | Neither lane may affect pricing/risk results, cache identity, or methodology selection (§12.1), and telemetry must never be treated as an input to any of them |
 
-**PROPOSED:** the DG1/DG1a split is the same "identity vs observation" boundary drawn in §7.2 (K3 vs K4) and §10.7 (configuration vs measurement). A determinism rule that sweeps in runtime measurements is not a stricter rule — it is an unsatisfiable one, and the cheapest apparent way to satisfy it would be to stop emitting the measurements.
+**PROPOSED:** the DG1/DG1a split is the same "identity vs observation" boundary drawn in §7.2 (K3 vs K4) and §10.7 (configuration vs measurement) — and it is now also a **channel** boundary (§12.2), which is what makes it enforceable rather than merely stated. A determinism rule that sweeps in runtime measurements is not a stricter rule — it is an unsatisfiable one, and the cheapest apparent way to satisfy it would be to stop emitting the measurements.
 
-### 12.5 Fail-closed introspection
+### 12.6 Fail-closed introspection
 
-**PROPOSED.** Following §7.6: an engine that **cannot state its own version** must not populate caches, and must not present its output as reproducible. This is a deliberate coupling — the inability to self-describe is treated as a correctness condition, not a logging inconvenience. It is what makes AC 18 (benchmark metadata) and AC 13 (cache invalidation) enforceable at runtime rather than only in review.
+**PROPOSED.** Following §7.6: an engine that **cannot state its own version** must not populate caches, and must not present its output as reproducible. This applies to **Lane A**: engine identity is result-diagnostic content, so it may not be relegated to lane B telemetry as a substitute. This is a deliberate coupling — the inability to self-describe is treated as a correctness condition, not a logging inconvenience. It is what makes AC 18 (benchmark metadata) and AC 13 (cache invalidation) enforceable at runtime rather than only in review.
+
+### 12.7 No revision to #225
+
+**PROPOSED.** #226 **does not modify** `docs/33_rates_market_model_result_contracts_225.md`, and adds no field, version, or rule to the #225 result contracts. The two-lane model above is a **#226 clarification of #226's own channel** that preserves the already-approved #225 contract intact: lane A states that #225's result diagnostics remain authoritative and untouched, and lane B introduces only a new out-of-band telemetry channel that #226 owns.
 
 ---
 
@@ -1979,7 +2013,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | D-5 | GoogleTest wiring + the **TL0–TL8** suite | §9 |
 | D-6 | Google Benchmark harness | §10 |
 | D-7 | CI workflows | §11 |
-| D-8 | Diagnostics emitter | §12 |
+| D-8 | Result-diagnostics (Lane A) and runtime-telemetry (Lane B) emitters | §12.2 |
 | D-9 | `.gitignore` narrowing for the C++ tree | §1.9 / §2.2 — the repo-wide `build/` rule is a **naming trap**; #227 must add a narrow explicit ignore and verify with `git check-ignore` |
 | D-10 | The concurrency-correctness suite's enablement | §5.7/§5.8 |
 | D-11 | The defaults-audit test matrix | §3.6 D1–D17 + **TL1** |
@@ -2106,7 +2140,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 7. **Tests:** GoogleTest, layers **TL0–TL8**, defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
 8. **Benchmarks:** Google Benchmark, separate target; cold/warm × cache-state × phase; no blended number; mandatory reproducibility metadata; correctness-checked; no absolute-time CI gate.
 9. **CI:** existing Python and launcher jobs preserved; new C++ build/test/sanitizer/benchmark-smoke jobs; no path filter may bypass required validation.
-10. **Diagnostics:** structured and versioned; engine + QuantLib version, macro config, cache hit/miss, execution path, concurrency mode, timing hooks; never a second source of methodology.
+10. **Diagnostics — two lanes (§12.2).** **Lane A:** #225's result diagnostics stay inside `PricingResult`/`RiskResult`, deterministic and fingerprint-participating; **#226 never removes, renames, or moves them**. **Lane B:** `RATES_RUNTIME_TELEMETRY_V1` carries operational measurements (per-layer cache hit/miss, execution path, gate contention, timing, build/runtime identity) **out of band**, is **not** part of any result DTO, and does **not** enter a result fingerprint. Neither lane is a second source of methodology.
 
 **The rule that governs everything above:** *correctness dominates performance, and an unproven configuration is not adopted merely because it is faster.*
 
