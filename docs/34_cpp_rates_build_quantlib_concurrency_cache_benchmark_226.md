@@ -939,7 +939,7 @@ The flag is set **before** `performCalculations()` runs. A second thread that re
 | U-D | Whether any individual pricing engine Shiori calls spawns threads of its own | A per-engine audit — the shared infrastructure does not establish it |
 | U-E | Whether `QL_THROW_IN_CYCLES` should be enabled (it would convert a silently-swallowed notification cycle into an exception) | A decision with behaviour consequences; recorded, not taken |
 | U-F | Whether the thread-safe observer pattern is ABI-compatible with anything already linked | Verified at configure time in #227, if ever considered |
-| U-G | Interoperability between the Python `QuantLib>=1.32` binding and the C++ `1.43` pin | **Not required by this architecture** (§2.7 P6 makes them independent planes), and therefore not investigated |
+| U-G | Whether the Python `QuantLib>=1.32` binding and the C++ `1.43` pin **share library/global instances when both are loaded in one process**, for each supported linkage | **An earlier revision recorded this as "not required by this architecture … therefore not investigated", which was wrong.** §2.7 P6 makes the two **dependency planes** independent, but independence of versions does not keep their in-process **state** separate. The gap it leaves is load-bearing for gate completeness and is now a requirement with three permitted resolutions (§5.2.1). **Unproven for every linkage**; #227 must establish one resolution per supported configuration and record the evidence |
 | U-H2 | The exact macro configuration of any **pre-built** QuantLib binary used instead of the pinned port | Source-level defaults are established for the pinned version; a packager's flags are not. §5.5 C10's verification requirement exists so this is checked rather than assumed |
 | U-I2 | Whether `QL_REQUIRE_EXPLICIT_EVALUATION_DATE` (an upstream option that makes an *unset* evaluation date **throw** instead of silently using today's date) is present in the pinned release | Confirmed present on a later development tree and **not** verified for `v1.43`. If available it is a **strong candidate hardening** for §5.5 C1; recorded as a candidate, and this document does **not** depend on it |
 | U-J2 | Any maintainer discussion in the mailing-list archives | Not audited; §4.12's statements cover the same ground more authoritatively, but the archives were not searched |
@@ -1007,13 +1007,20 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 | Property | Required behaviour |
 |---|---|
 | Scope | Process-wide, one gate per process |
-| Coverage | All adapter entry points, without exception. A bypass is a defect |
+| Coverage | **All adapter entry points, without exception. A bypass is a defect.** The gate must additionally cover **every other in-process caller that can reach the same QuantLib library** — not only the adapter's public API. See the cross-plane rule below |
 | Ordering | No reentrancy; the gate is not held across a callback into the caller |
 | Failure | A holder that throws must release (RAII), never leak the gate |
 | Observability | **Lane B** telemetry exposes acquisition count and wait time (§12.2), so contention is *measured* rather than guessed |
 | Removal | The gate is removed only under §5.8 |
 
 **PROPOSED rationale:** an explicit gate is strictly better than an implicit one. Without it, the serialization is real but invisible and untestable; with it, the constraint is enforced in one place and its cost is measurable. It also makes the "disabled" posture *checkable* rather than merely documented.
+
+**PROPOSED — the cross-plane coverage rule (gate completeness).** The gate is sound only if **no** other in-process caller can touch the same QuantLib library while it is held. Shiori already has **four** production Python QuantLib consumers (§1.6, §1.8), and §2.7 **P6** deliberately makes the Python binding and the C++ pin **separate dependency planes**. If a host loads the future C++ engine *and* still invokes those Python callers in the **same process**, and both resolve to the **same** QuantLib library instance, those calls sit **outside** the gate: they can overlap the adapter while it temporarily changes `Settings` or uses other unsynchronised library state (§4.2–§4.10), defeating the one-thread posture and making results **call-order dependent**. Independence of *versions* (P6) does not by itself keep their in-process **state** separate, so this gap cannot be waved away as out of scope. **Per supported linkage, #227 must satisfy exactly one of the following and record which:**
+(1) **a process boundary** — the C++ engine and any in-process Python QuantLib consumer never share a process (§5.4's multi-process scaling path already provides this); or
+(2) **proven disjoint instances** — the binding and the pin are demonstrated to hold separate library/global instances for that linkage, so no shared mutable state exists; or
+(3) **extend the gate** — every in-process caller that can reach the shared library is brought under the same process-wide gate, Python callers included.
+
+Option (2) is the only one that is a **proof obligation** rather than an architecture choice, and it must be demonstrated for **every** supported linkage (§2.6 deliberately leaves static-vs-shared open on Linux), not asserted from the fact that the two planes version independently.
 
 ### 5.3 State classification
 
@@ -1051,6 +1058,7 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 | A cache that returns a **shared mutable QuantLib object** across requests | The central cache hazard; §7.3 forbids it structurally |
 | Relying on `QL_ENABLE_SESSIONS` for isolation | Not enabled, and not demonstrated sufficient (§4.4, §4.13 U-B) |
 | Adding a thread pool "for performance" | Correctness dominates performance; and it would be an unmeasurable change without §10's methodology |
+| Loading the C++ engine **and** the Python QuantLib binding into the **same process** | Permitted **only** under one of §5.2.1's three cross-plane resolutions. Absent one, the Python callers sit outside the gate and can overlap the adapter while it mutates library-global state — the failure §5.2.1's cross-plane rule exists to prevent |
 
 **PROPOSED:** "add a worker pool" is explicitly **not** an available response to a slow benchmark in this architecture. The available responses are §10's staged measurement and the multi-process scaling path.
 
@@ -1073,6 +1081,7 @@ The conclusion is not "QuantLib is unusable"; it is narrower and firmer: **the d
 | C11 | **Every lazy recalculation is forced to completion inside the gate** before any result is read, so no object is ever handed out in a "calculated on first access" state | §4.6: `calculate()` sets `calculated_ = true` *before* `performCalculations()`, so an unforced object can be observed mid-construction. This is the rule the library's own engines use (`gaussian1dswaptionengine.cpp`) |
 | C12 | No design may rely on `QL_ENABLE_THREAD_SAFE_OBSERVER_PATTERN` for concurrency, and `enableExtrapolation()`/`disableExtrapolation()` is never called on a live curve | §4.5: the switch covers the observer pattern only. §4.8: `Extrapolator`'s flag is a non-atomic `bool` on an object that is **not** an `Observable`, so changing it is unsynchronised shared-state mutation that notifies nobody |
 | C13 | **The calendar mutators are never called.** `addHoliday()`, `removeHoliday()` and `resetAddedAndRemovedHolidays()` appear nowhere in the engine, the adapter, or any host path the engine controls, and **no externally-mutated calendar may be accepted as an input**. Calendars are therefore treated as **read-only shared state — never as immutable** (§4.2.1). Because a calendar *copy* shares the same `impl_`, "the engine does not mutate it" is **not** sufficient on its own: a mutation performed anywhere else in the process is visible to every request, and one request could silently change another's schedule | §4.2.1: `Calendar::Impl::addedHolidays`/`removedHolidays` are non-`const` and are read by a `const` `isBusinessDay()` through a shared `ext::shared_ptr<Calendar::Impl>` (verified at the `v1.43` tag) |
+| C14 | **No in-process QuantLib caller outside the gate.** Any process hosting the adapter must satisfy one of §5.2.1's three cross-plane resolutions. A second in-process caller reaching the same library without the gate is a **defect**, not a configuration choice | §5.2.1, §1.8, §2.7 P6 |
 
 ### 5.6 Fail closed, not "assert safe"
 
@@ -1826,7 +1835,7 @@ Neither lane may **define** execution; both only **describe** it. Enabling, disa
 
 | Lane | Channel / carrier | Authority | Member of the result DTO? | Deterministic? | In the result content fingerprint? | Content |
 |---|---|---|---|---|---|---|
-| **A — result diagnostics** | #225 `PricingResult` / `RiskResult` — their `diagnostics` map, plus the enclosing `engine` / `status` / `warnings` / `errors` / `replay` content (docs/33 §12) | **#225** | **Yes** | Yes — deterministic output records | **Yes**, exactly as #225's non-recursive preimage rule (`:1236`) specifies | replay-relevant, result-semantic facts: leg PVs, period counts, weights, deterministic fallback facts, refusal reason, calibration outcome |
+| **A — result diagnostics** | #225 `PricingResult` / `RiskResult` — their `diagnostics` map, plus the enclosing `engine` / `status` / `warnings` / `errors` / `replay` content (docs/33 §12); **bounded to fields #225 already approves** — #226 creates no result field (§12.3, §12.7) | **#225** | **Yes** | Yes — deterministic output records | **Yes**, exactly as #225's non-recursive preimage rule (`:1236`) specifies | replay-relevant, result-semantic facts: leg PVs, period counts, weights, deterministic fallback facts, refusal reason, calibration outcome |
 | **B — runtime telemetry** | `RATES_RUNTIME_TELEMETRY_V1` | **#226** | **No** — never a member of `PricingResult` / `RiskResult` | No — varies with cache state, scheduling, load, elapsed time | **No** | per-layer cache hit/miss, execution path served, gate acquisitions/waits/contention, timing breakdown, process/build/runtime observations |
 
 > **#226 MUST NOT instruct #227 to omit, rename, or move #225's result-diagnostics fields out of the result DTO.** Wording in #226 that appears to do so is a defect in #226, not a licence to alter the contract.
@@ -1840,7 +1849,7 @@ Neither lane may **define** execution; both only **describe** it. Enabling, disa
 | # | Field | Lane | Note |
 |---|---|---|---|
 | G-1 | Engine version | **A** (+ B correlation echo) | Part of #225's result `engine` identity; also required for cache validity (§7.6) |
-| G-2 | QuantLib version **and macro configuration** | **A** (engine provenance; operational echo in B) | §4.4 — the version alone is insufficient. It determines numerics, so it is methodology identity rather than a runtime observation |
+| G-2 | QuantLib version, **and** its macro configuration | **A** for the **version**, via the **approved** engine identity / **B** for the **macro configuration** | §4.4 — the version alone is insufficient. **#226 creates no field:** #225's approved `RATES_PRICING_RESULT_V1`/`RATES_RISK_RESULT_V1` define only `engine_name`, `engine_version`, `method`, so the QuantLib **version** must be recoverable from that approved engine-identity content (a content requirement, not a new field), while the **macro configuration** is a build/process fact — the same lane as **G-3** — and is **Lane B** (§10.5 M4, §7.2 cache key). Requiring a **new** fingerprint-participating result field would have forced #227 to invent schema and contradicted §12.7 |
 | G-3 | Build / configuration identity (build type, compiler + version, flags that affect numerics) | **B** | A process/build observation. Independently a §7.2 **cache-key** component — that cache role is not telemetry and is unaffected by this split |
 | G-4 | Cache hit/miss, **per layer**, with the key hashed | **B** | §7; hashed so keys are comparable without leaking values |
 | G-5 | Selected execution path | **B** | Which layer served the result (cache vs computed; which construction path) — varies with cache state |
@@ -1851,7 +1860,7 @@ Neither lane may **define** execution; both only **describe** it. Enabling, disa
 | G-10 | Refusal reason / `NULL_WITH_REASON` category | **A** | §6.8, §8.3 — #225 makes reason state fingerprint-participating |
 | G-11 | Calibration outcome (converged / warnings / non-converged / failed) | **A** | §8.3, carried by #225's result `status`/`warnings` — preserving the distinction end to end |
 
-**PROPOSED:** the G-numbers are an **issue-scoped checklist**, not a #226-authored schema. Where a Lane A field is defined by #225, #225's placement and naming govern; #226 records only that the fact must be emitted deterministically. **#226 adds no field to any #225 result type.**
+**PROPOSED:** the G-numbers are an **issue-scoped checklist**, not a #226-authored schema. Where a Lane A field is defined by #225, #225's placement and naming govern; #226 records only that the fact must be emitted deterministically. **#226 adds no field to any #225 result type.** Where a lane A fact is **not** already carried by an approved #225 field, it is **not** promoted into the result DTO on #226's authority: its configuration/build component is routed to **Lane B** instead — which is exactly how **G-2** is resolved (version → approved engine identity; macro configuration → Lane B).
 
 ### 12.4 Schema and versioning
 
@@ -1868,8 +1877,8 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 
 | # | Rule |
 |---|---|
-| DG1 | **Lane A content** is deterministic for a given input over the replay-relevant fields — **G-1, G-2, G-8, G-9, G-10, G-11**: what was computed, from what, with which engine, and why if refused — and **participates in the result content fingerprint exactly as #225 §15.4 specifies**. These describe *what happened* and must be reproducible. Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
-| DG1a | **Lane B measurements are explicitly nondeterministic and must not be asserted deterministic.** **G-3** is stable per build, but **G-4** (cache hit/miss per layer), **G-5** (execution path served), **G-6** (concurrency mode + observed gate contention: acquisitions, waits) and **G-7** (timing breakdown) legitimately vary for the *same* input with cache population, concurrent load and elapsed time. Requiring them to be stable would force an implementation to either suppress them or fabricate them — destroying the observability §12 exists to provide. Tests assert their **presence and structural validity**, never their values. (An earlier draft required *all* diagnostic content to be deterministic, which was incompatible with emitting G-4/G-5/G-6/G-7 at all) |
+| DG1 | **Lane A content** is deterministic for a given input over the replay-relevant fields — **G-1, G-8, G-9, G-10, G-11**, plus the **version** component of **G-2** as carried by the **approved** engine identity: what was computed, from what, with which engine, and why if refused — and **participates in the result content fingerprint exactly as #225 §15.4 specifies**. These describe *what happened* and must be reproducible. Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
+| DG1a | **Lane B measurements are explicitly nondeterministic and must not be asserted deterministic.** **G-3** is stable per build, and so is the **macro-configuration component of G-2**, but **G-4** (cache hit/miss per layer), **G-5** (execution path served), **G-6** (concurrency mode + observed gate contention: acquisitions, waits) and **G-7** (timing breakdown) legitimately vary for the *same* input with cache population, concurrent load and elapsed time. Requiring them to be stable would force an implementation to either suppress them or fabricate them — destroying the observability §12 exists to provide. Tests assert their **presence and structural validity**, never their values. (An earlier draft required *all* diagnostic content to be deterministic, which was incompatible with emitting G-4/G-5/G-6/G-7 at all) |
 | DG2 | No secrets, credentials, or raw captured market data are emitted in **either** lane |
 | DG3 | Fingerprints are logged **hashed**; the preimage is not emitted (§6.7) |
 | DG4 | **Attribution.** A **Lane A** diagnostic is unusable without the engine identity (**G-1**); a **Lane B** telemetry record is unusable without the build identity (**G-3**) and a correlation identifier (§12.2). Neither lane may be the sole carrier of the other's identity facts |
@@ -2102,7 +2111,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | U-D | Per-engine thread behaviour | Verification | #227 |
 | U-E | Should `QL_THROW_IN_CYCLES` be enabled? | Decision (behaviour) | Owner |
 | U-F | Thread-safe observer ABI compatibility | Verification | #227 if considered |
-| U-G | Python/C++ QuantLib binding interop | Not required | — |
+| U-G | Do the Python binding and the C++ pin share library/global instances in one process, per supported linkage? | **Verification (requirement)** | #227 — must satisfy one of §5.2.1's three cross-plane resolutions and record it (§5.5 **C14**) |
 | U-H2 | Macro config of any pre-built binary | Verification | #227 (§5.5 C10) |
 | U-I2 | Is `QL_REQUIRE_EXPLICIT_EVALUATION_DATE` in the pin? | Verification | #227 |
 | U-J2 | Mailing-list archives | Not audited | — |
