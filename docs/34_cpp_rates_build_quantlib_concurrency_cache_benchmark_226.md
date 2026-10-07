@@ -1393,7 +1393,7 @@ The failure this prevents is concrete and severe. If L1 were keyed on the **decl
 |---|---|
 | I1 | **Invalidation is by key, not by mutation.** Because every key component is an explicit input value, a changed input produces a *different key*; there is no in-place update of an entry. Entries are immutable once published |
 | I2 | The **only** invalidation mechanism is eviction (capacity/backpressure, or process exit). Time-based expiry is **not** a correctness mechanism and must not be used to compensate for an incomplete key |
-| I3 | A time-based or size-based eviction policy is **performance** policy and must never be able to change a result: a hit and a miss must produce identical output. This is testable (§9.4) |
+| I3 | A time-based or size-based eviction policy is **performance** policy and must never be able to change a result: **for an ordinary, fully deterministic derivation**, a hit and a miss must produce identical output. **For calibration results this is narrowed** — a recomputation of the same calibration input is a *new run instance* and may legitimately differ in run-instance provenance fields, so I3 must **not** be read as requiring instance-identity equality there. The governing rule is §8.3.1's calibration equivalence invariant. This is testable (§9.4, §7.7 CT1/CT9) |
 | I4 | Entry publication is **atomic** — consumers observe either no entry or a complete entry, never a partial one |
 | I5 | Duplicate population of the same key concurrently must converge to one logically equivalent entry; a "thundering herd" may recompute, but must never publish a torn or conflicting entry |
 | I6 | A **failed** derivation is **not** silently cached as a success. Negative caching, if ever introduced, requires an explicit reason value and its own version identity, and must not mask a transient failure as a permanent one |
@@ -1417,11 +1417,11 @@ The failure this prevents is concrete and severe. If L1 were keyed on the **decl
 
 ### 7.7 Required cache tests
 
-**PROPOSED.** #227 must implement these before any cache is enabled:
+**PROPOSED.** Implement these before any cache is enabled. **CT1–CT8 are skeleton-executable (#227, §5.7 Tier S).** **CT9 is deferred** with the concrete calibration methodology, because it cannot be written against a calibration path that has no approved objective, optimizer or tolerance (§8.4, §9.2 TL5).
 
 | # | Test | Proves |
 |---|---|---|
-| CT1 | **Hit/miss equivalence** | Cached and uncached paths return identical results on the fixture set |
+| CT1 | **Hit/miss equivalence** — **ordinary entries only** | Cached and uncached paths return identical results on the fixture set. **Does not apply to calibration results**, whose hit/recompute invariant is §8.3.1 (CT9) |
 | CT2 | **Required-field sensitivity** | Two inputs differing in exactly one **required** identity field produce different keys (§7.4's key column, field by field) |
 | CT3 | **Forbidden-component invariance (K1–K5)** | Two otherwise-identical explicit inputs differing **only** in pointer identity / ambient global state / clock / implicit evaluation date / mutable identity produce the **same** key (and may legitimately hit) — proving the key carries no hidden state. This test fails if an implementation wrongly adds a forbidden value to the key |
 | CT3b | **Required-component sensitivity, incl. engine version (K6)** | Changing the recorded engine version — or any other required identity field — changes the key or renders the entry unusable; an entry whose engine version is **unknown** is never returned. This is the direction that must *not* be inverted |
@@ -1430,6 +1430,7 @@ The failure this prevents is concrete and severe. If L1 were keyed on the **decl
 | CT6 | **Eviction-safety test** | Eviction cannot change a result (I3) |
 | CT7 | **No-QuantLib-object test** | No cache value is, or contains, a QuantLib-typed object or handle (§7.3) — enforced by a type-level check where possible |
 | CT8 | **Fingerprint-trust test (§7.4.1)** | A payload whose **declared** `content_fingerprint` does not match the fingerprint recomputed from its own bytes never yields a cache **hit**: it is refused with a reason and never priced. Also asserts that an **unknown schema version** can never reach the L1 cache, i.e. that no lookup precedes fail-closed decode. This is the test that would catch a fail-open regression in L1 |
+| CT9 | **Calibration instance-identity test (§8.3.1)** | A calibration cache **hit** returns the **original** `ModelCalibrationResult` content **unchanged** — including its original `calibrated_at`, `calibration_result_id`, provenance, warnings and replay fingerprint; **no** fresh timestamp or identity is fabricated on a hit. A forced **recompute** of the same input under the same complete key is a **new instance** and is permitted to differ in exactly those run-instance provenance fields, while preserving the contract-defined calibration/economic semantics and deterministic fields. Requires the concrete calibration methodology, so it is **not** #227's (§9.2 TL5, §5.7 tiers) |
 
 **PROPOSED:** CT3 and CT3b are deliberately *opposite* in direction, and both are required. A suite with only one of them can be satisfied by a cache that is simultaneously over-keyed (CT3 would fail) or under-keyed (CT3b would fail) in a way the other test cannot see. **CT8 is separate again**, because it tests neither key sensitivity nor key invariance but the *trust* placed in a key component: a cache can have a perfectly composed key and still be wrong if it computes that key from a value the caller supplied.
 
@@ -1470,13 +1471,33 @@ The failure this prevents is concrete and severe. If L1 were keyed on the **decl
 
 | Outcome | Cacheable? | Policy |
 |---|---|---|
-| **Converged, no warnings** | **Yes** — cacheable as a success | Reusable under the full key |
+| **Converged, no warnings** | **Yes** — cacheable as a success | Reusable under the full key, **as the original immutable result instance** (§8.3.1) |
 | **Converged with warnings** | **NOT reusable from cache until warning stability is proven.** The *numeric* outcome may be stored, but a cached entry may **not** be served as a hit | The warnings are part of the result and must not be discarded — but if two runs with identical inputs can produce **different warning sets** (warning-set stability is **UNPROVEN**: §8.6 **U-L**, and the **TL5 warning-stability test** is what discharges it — TL5 **does** require that test (§9.2 TL5)), a cache **hit** would return an earlier run's warnings while an uncached run returns the current ones. That breaks I3's hit/miss equivalence and the end-to-end warning semantics promised below. A warning-bearing calibration therefore stays **non-reusable** until **U-L** is discharged by a deterministic test proving the warning set is a function of the key. A caller must still see the warnings — produced by the run that returns them, not replayed from an entry |
 | **Failed calibration** (numeric failure, invalid input, exception) | **No** | Not cached as a reusable success (I6). A failure is reported, not memoized as if it were a result |
 | **Non-converged result** | **No, not as a success.** Per #225 §16 rule 15, a non-converged calibration may not be consumed without an explicit RED-approved override | Must not be silently cached, and must not be silently reusable |
 | **Refused** (`UNRESOLVED_METHODOLOGY`, missing input) | **No** | A refusal is cheap to reproduce and must stay visible |
 
 **PROPOSED:** the distinction between "converged with warnings", "non-converged", and "failed" is preserved **end to end** — through the cache, the DTO result, and its **result diagnostics (Lane A**, §12.2). Collapsing them would destroy exactly the information #225 §16 rule 15 relies on.
+
+### 8.3.1 Calibration instance identity and the hit/recompute invariant
+
+**PROPOSED — owner decision.** `MODEL_CALIBRATION_RESULT_V1.calibrated_at` is the timestamp of the calibration run that **actually occurred**, and it participates in the result instance identity and fingerprint. A cache hit must therefore **not** manufacture a new `calibrated_at`, `calibration_result_id`, provenance envelope, or result fingerprint. The locked rule is:
+
+> A reusable calibration-cache entry is the **complete immutable `ModelCalibrationResult` instance** produced by the original successful calibration run. A cache hit returns that original result instance content **unchanged** (a value copy or other immutable representation is fine), including its original `calibrated_at`, `calibration_result_id`, provenance, warnings, and replay fingerprint.
+
+Consequences:
+
+1. A hit truthfully means *"reuse this prior calibration result"*; it does **not** claim that a new calibration ran.
+2. A forced miss or recomputation with the same calibration input is a **new calibration instance**, and may legitimately carry a different `calibrated_at`, `calibration_result_id`, provenance and result content fingerprint.
+3. **I3 is narrowed accordingly** (§7.5). I3's "a hit and a miss must produce identical output" is a rule about *ordinary deterministic derivations*; it must **not** be read as requiring instance-identity equality between a cached calibration result and a later recomputation of the same input.
+4. **Calibration-specific equivalence invariant** — replacing raw instance equality with the property that actually matters:
+   - a cache **hit** returns the exact cached result content **unchanged**;
+   - a **recomputation under the same complete cache key** must preserve the contract-defined calibration and economic semantics, and every deterministic field required by the owning calibration methodology and its tests — but **run-instance provenance fields (`calibrated_at`, `calibration_result_id`) are explicitly exempt from equality**;
+   - **no fresh timestamp or identity may be fabricated on a hit.**
+5. Warning-bearing results remain **non-reusable** until the warning-stability gate (§8.6 **U-L**) is discharged.
+6. Failed, refused and non-converged outcomes remain governed by §8.3's existing policy; this decision does **not** make them reusable.
+
+**PROPOSED — scope.** This is an architecture/cache/provenance decision. It selects **no** pricing or calibration methodology value and changes **no** #225 schema (§8.4, §13.2).
 
 ### 8.4 Unresolved methodology must stay unresolved
 
@@ -1497,7 +1518,7 @@ These are RED-governed (§13.2). **PROPOSED:** until they are resolved, an engin
 |---|---|
 | CR1 | Concurrent duplicate requests for the same key: it is **acceptable to recompute**, and unacceptable to serve a torn or partially-populated entry (I4) |
 | CR2 | There is **no** "in-flight" placeholder that a second requester can observe as a completed result. A requester either gets a complete entry or computes its own |
-| CR3 | Publication is atomic and last-writer-wins **only** between logically equivalent entries (same full key ⇒ equivalent result). **The "⇒" is an obligation on the entry type, not an assumption**: for a warning-bearing calibration it is exactly what §8.6 **U-L** leaves unproven, which is why §8.3 makes such entries non-reusable and CR4 must therefore never return one |
+| CR3 | Publication is atomic and last-writer-wins **only** between logically equivalent entries (same full key ⇒ equivalent result). **For calibration, "equivalent" means §8.3.1's invariant — NOT instance identity**: two runs of the same input may legitimately differ in `calibrated_at` and `calibration_result_id`. **The "⇒" is an obligation on the entry type, not an assumption**: for a warning-bearing calibration it is exactly what §8.6 **U-L** leaves unproven, which is why §8.3 makes such entries non-reusable and CR4 must therefore never return one |
 | CR4 | A calibration entry is only returned to a caller if its full key matches, including CC7 identity — **and the entry is of a reusable kind**. A warning-bearing entry (§8.3) is **never** returned from the cache, key match notwithstanding, until §8.6 U-L is discharged |
 | CR5 | Cross-process calibration sharing is **not** designed here (L8) |
 
@@ -1765,7 +1786,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | Job | Runner | Config | Purpose |
 |---|---|---|---|
 | `cpp-build-test-windows` | windows-latest (MSVC) | `ci-release` | Primary toolchain; proves the static-link QuantLib path (§2.6); and **runs the C++ test suite on Windows, including the platform-applicable Tier S concurrency tests (T4, T5, T7)** so that the skeleton-executable half of §5.8 PE1 is actually satisfiable. **Tier K (T1, T2, T3, T6, T8) is deliberately *not* in #227's required set**: every test in it prices a `RatesKernelInput`, which `docs/33…225.md` `:1324–1327` assigns to **#229**, so requiring it here would force #227 to add out-of-scope pricing, invent a `RED-01` methodology value, or leave a required job permanently red (§5.7 tiers, §9.8 Q7). Tier K becomes required — on both platforms — in the change that lands the kernel. **T8 is additionally gated on a candidate configuration existing** (§9.8 Q6) |
-| `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full skeleton-executable suite (Tier S: T4, T5, T7, plus §7.7 `CT*`)**, and **the full Tier K set (T1, T2, T3, T6, T8) once #229 supplies the kernel** |
+| `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full skeleton-executable suite (Tier S: T4, T5, T7, plus §7.7 `CT1–CT8`)**, and **the full Tier K set (T1, T2, T3, T6, T8) once #229 supplies the kernel** |
 | `cpp-sanitizers` | ubuntu-latest (Clang) | ASan/UBSan, and **TSan** (Linux-only) with a **TSan-instrumented QuantLib** built from source on a dedicated triplet | Memory and race defects that equivalence tests cannot see; owns **§5.7 T3**, which is a Linux/Clang requirement because MSVC ships no ThreadSanitizer. **The TSan leg instruments QuantLib itself, not only Shiori** (§5.7 T3): the job builds the dependency from source with `-fsanitize=thread` on a dedicated triplet and must **not** draw that dependency from the ordinary binary cache — the instrumented build carries its own cache identity (§11.4). A TSan job that reused the standard prebuilt QuantLib would satisfy this row's letter while being unable to detect a race inside the library, which is the entire point of the leg |
 | `cpp-isolation-guard` | ubuntu-latest | n/a (static analysis only) | **The mechanical enforcement of §2.3 and §3.9.** Fails the build on (a) a `ql/` include outside E1a's **three** allow-listed paths, in **either** delimiter form, and (b) a QuantLib type in a public header or exported signature under E2's **syntax-aware** check. §2.3 states the architecture is "only real if a build fails when it is violated" and §3.4 calls it "enforced by the target graph **and** the CI guard" — but the guard was described in §2.3/§3.9 while **no job existed in §11**, so neither sentence was true and a violation could only ever produce a review comment. Required on every PR |
 | `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 |
@@ -1956,9 +1977,11 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 
 ### 13.5 Merge gate
 
-**PROPOSED / OBSERVED.** Per AGENTS.md rule 12 and the issue's Governance section: no agent or automation may merge; Eddy is the sole merge authority. The terminal status of this work is:
+**PROPOSED / OBSERVED.** Per AGENTS.md rule 12 and the issue's Governance section: no agent or automation may merge; Eddy is the sole merge authority. The token below is a **conditional gate token and publication policy**, **not** this document's current status:
 
 `READY TO MERGE — 等待 Eddy 明確批准`
+
+**It may be asserted only when every prerequisite holds:** the exact-head Codex review has **no unresolved P0/P1/P2** (AC 24), the exact-head required CI is **green** (AC 25), and **Eddy has given explicit approval**. While any prerequisite is pending — which is the case for this document — the terminal status must **not** be asserted, and the document's **current** status is the one recorded in §1's status row (`PENDING CODEX REVIEW — DO NOT MERGE`). AC 24 and AC 25 are **external PR-state conditions**: they are **never** marked satisfied by editing this document (§14 honesty note).
 
 ---
 
@@ -2029,7 +2052,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | D-2 | `CMakeLists.txt` + `CMakePresets.json` | §2.2, §2.4 |
 | D-3 | Dependency manifest + pinned QuantLib port | §2.6, §2.7, §3.2 |
 | D-4 | Canonical serialization + hashing format | #225 §15.4 owns it; §6.5 B1 confirms the boundary |
-| D-5 | GoogleTest wiring + the **TL0–TL8** suite | §9 |
+| D-5 | GoogleTest wiring + the **TL0–TL8** suite, **split by tier and owner** — not a blanket #227 deliverable. **#227** implements the framework and only the tests executable at the skeleton/boundary stage: **TL0**, **TL1**, **TL2**, **TL3**, **TL4** (§7.7 CT1–CT8 + CT3b), **TL8**, TL7's benchmark **framework** and any non-price-bearing benchmark, and **§5.7 Tier S** (T4, T5, T7). **Deferred to their already-named later owners:** TL5's **warning-stability** half and §7.7 **CT9** require the concrete calibration methodology (§8, §9.2 TL5); **TL6's Tier K** (T1, T2, T3, T6, T8) and any benchmark that **prices** require the pricing kernel (**#229**, §5.7 tiers). #227 must **not** invent calibration or pricing behaviour to make a deferred test pass | §9, §5.7 tiers |
 | D-6 | Google Benchmark harness | §10 |
 | D-7 | CI workflows | §11 |
 | D-8 | Result-diagnostics (Lane A) and runtime-telemetry (Lane B) emitters | §12.2 |
@@ -2128,7 +2151,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | U-K2 | ≤1.28 vs ≥1.29 session differences | Not enumerated | — |
 | U-O | **Approved placement of QuantLib dependency provenance (version + macro configuration) in the #225 result contract** | **Schema decision (owner / #225)** | Owner — #226 must not invent DTO semantics (`docs/33…225.md` `:1324–1325`); until approved it is emitted via Lane B + §10.5 M4 + §7.2 cache key (§12.3 G-2) |
 | U-H/I/J (concurrency) | Gate sufficiency, contention magnitude, multi-process scaling | Measurement | #227 (§10) |
-| U-K/L/M (calibration) | Is calibration caching worthwhile; warning stability; key comparability across engines | Measurement | #227 |
+| U-K/L/M (calibration) | Is calibration caching worthwhile; warning stability; key comparability across engines | Measurement | **Deferred** with the concrete calibration methodology (§8.4, §9.2 TL5) — not #227's scope |
 | D-9 | Narrow `.gitignore` for the C++ tree (`build/` trap) | Implementation | #227 |
 
 ---
@@ -2156,8 +2179,8 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 3. **Concurrency:** **single-threaded serialized per process; parallel pricing DISABLED**; scale by multiple processes; all QuantLib access behind one measured gate; enabling parallelism requires §5.7 T1–T8 — **including T8, which tests the configuration actually being enabled** — **and** an owner decision; the absence of library-internal parallelism must be **verified** (`_OPENMP` undefined), not inferred from the OpenMP option.
 4. **Inputs:** caller-owned, immutable, borrowed, never mutated after publication, no I/O in the kernel, no global fixing store.
 5. **Caching:** cache **values**, never QuantLib objects; keys from explicit input identity only; no pointer, clock, global or unknown-version identity; version mismatch is a miss.
-6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, **warning-bearing entries not reusable until warning stability is proven (U-L)**, unresolved policy ⇒ refuse.
-7. **Tests:** GoogleTest, layers **TL0–TL8**, defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
+6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, **warning-bearing entries not reusable until warning stability is proven (U-L)**, unresolved policy ⇒ refuse; a **hit returns the original immutable calibration result instance unchanged — never a fabricated `calibrated_at`/id** (§8.3.1).
+7. **Tests:** GoogleTest, layers **TL0–TL8** (**tiered by owner** — #227 owns only the skeleton-executable layers; TL5's stability half, TL6's Tier K and CT9 are deferred, §9.2 / §5.7 tiers), defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
 8. **Benchmarks:** Google Benchmark, separate target; cold/warm × cache-state × phase; no blended number; mandatory reproducibility metadata; correctness-checked; no absolute-time CI gate.
 9. **CI:** existing Python and launcher jobs preserved; new C++ build/test/sanitizer/benchmark-smoke jobs; no path filter may bypass required validation.
 10. **Diagnostics — two lanes (§12.2).** **Lane A:** #225's result diagnostics stay inside `PricingResult`/`RiskResult`, deterministic and fingerprint-participating; **#226 never removes, renames, or moves them**. **Lane B:** `RATES_RUNTIME_TELEMETRY_V1` carries operational measurements (per-layer cache hit/miss, execution path, gate contention, timing, build/runtime identity) **out of band**, is **not** part of any result DTO, and does **not** enter a result fingerprint. Neither lane is a second source of methodology.
