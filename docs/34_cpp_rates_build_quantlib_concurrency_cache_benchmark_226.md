@@ -257,7 +257,7 @@ Shiori-Pricing-Lab/
 | Ratchet | Later versions (C++23/26) require an explicit engine-dependency change under §3.7, not an opportunistic bump |
 | Warning policy | Warnings-as-errors in CI for the project's own sources (§2.5); **not** applied to third-party targets |
 
-Rationale: C++20 is fixed by #222/#223 (`docs/31...:238`) and is the minimum that gives designated initializers (useful for readable DTO construction), concepts (constrain the adapter interface), `std::span`/`std::string_view` (zero-copy views over caller-owned inputs), and three-way comparison — all of which directly reduce the risk surface #226 is asked to close. "No extensions" matters because extension mode changes behaviour silently and is not available on MSVC, which would fork semantics between Windows-first and Linux CI.
+Rationale: C++20 is fixed by #222/#223 (`docs/31...:238`) and is the minimum that gives designated initializers (useful for readable DTO construction), concepts (constrain the adapter interface), `std::span`/`std::string_view` (zero-copy views — permitted **only** as request-local views over engine-owned immutable storage, §6.4 N5/N6; **never** retained as published request state), and three-way comparison — all of which directly reduce the risk surface #226 is asked to close. "No extensions" matters because extension mode changes behaviour silently and is not available on MSVC, which would fork semantics between Windows-first and Linux CI.
 
 **UNPROVEN:** that no required dependency mandates a language-extension or a lower standard. #227 must prove this at configure time on both runners.
 
@@ -359,7 +359,7 @@ cpp/
 | MinGW / Cygwin | — | **Not supported** for production | — |
 | Windows ARM64, macOS | — | Out of scope for #226 | — |
 
-**PROPOSED:** *the exact minimum compiler versions are intentionally not frozen in #226*, because freezing a number that no runner can satisfy would be a fabricated constraint. Instead #227 must (a) record the versions actually provided by the chosen runner images, (b) set the minimum to the lowest version it can prove green, and (c) record that version in the diagnostics output (§12) and the benchmark metadata (§10.5).
+**PROPOSED:** *the exact minimum compiler versions are intentionally not frozen in #226*, because freezing a number that no runner can satisfy would be a fabricated constraint. Instead #227 must (a) record the versions actually provided by the chosen runner images, (b) set the minimum to the lowest version it can prove green, and (c) record that version in the diagnostics output (§12.2 **Lane B**) and the benchmark metadata (§10.5).
 
 **UNPROVEN (explicitly):** that a single source tree compiles cleanly on all three compilers, and what the real minimum versions are. No such claim is made here.
 
@@ -416,7 +416,7 @@ cpp/
 | P6 | The C++ pinned version and the Python `quant` extra version may differ, but the *difference must be visible and deliberate*: they are separate dependency planes. A shared version is **not** required and must not be assumed |
 | P7 | No `CMakeLists.txt` / `vcpkg.json` is added by #226 (§1.2), and any future change to them is a protected-path change requiring explicit review |
 
-**OBSERVED tension worth naming:** `pyproject.toml`'s `QuantLib>=1.32` is a lower bound, while the vcpkg port currently carries `1.43`. P6 is what keeps this from becoming a silent inconsistency: the Python binding version and the C++ library version are independently owned, and the engine identity records which one it was built against.
+**OBSERVED tension worth naming:** `pyproject.toml`'s `QuantLib>=1.32` is a lower bound, while the vcpkg port currently carries `1.43`. P6 is what keeps this from becoming a silent inconsistency: the Python binding version and the C++ library version are independently owned, and the **build identity** — **Lane B** runtime/build telemetry, §10.5 **M4** and the §7.2 cache key (§3.2) — records which one it was built against, **not** #225's result `engine` identity, for which no dependency-provenance field is approved (**U-O**).
 
 ### 2.8 Reproducibility expectations
 
@@ -426,7 +426,7 @@ cpp/
 |---|---|
 | Same source + same pinned manifest + same baseline + same compiler major + same build type ⇒ same *behaviour* on the regression fixtures | **PROPOSED**, to be proven in #227 |
 | Dependency *versions* are reproducible from the manifest alone (no floating resolution) | **PROPOSED** (P1/P2/P3) |
-| The exact toolchain identity used for a given artifact is *recorded* (compiler, version, flags, QuantLib version, baseline) | **PROPOSED** (§10.5, §12) |
+| The exact toolchain identity used for a given artifact is *recorded* (compiler, version, flags, QuantLib version, baseline) | **PROPOSED** (§10.5 **M4**, §12.2 **Lane B**) |
 | **Bit-identical binaries** across platforms, compilers, or machines | **NOT CLAIMED.** The build does not reproduce bit-identical binaries, and no design decision depends on it |
 | Bit-identical *numeric results* across compilers | **NOT CLAIMED.** Regression anchors assert agreement within a documented absolute tolerance (the `1e-9` anchor from `docs/31...:93`), not bit equality |
 
@@ -464,7 +464,15 @@ cpp/rates_engine/tests/
 
 ```text
 cpp/rates_engine/benchmarks/
-├── startup/             # process startup / static-init cost
+cpp/rates_engine/benchmarks/
+├── startup/             # process startup / static-init cost   — #227, available now (§10.3)
+├── dto/                 # decode / encode                      — #227, available now (§10.3)
+├── materialize/         # non-price-bearing object construction — #227, available now (§10.3)
+│                      # curve/model materialization is DEFINED / DEFERRED (§10.3) — NOT created by #227
+├── kernel/              # pricing kernel                        — DEFINED / DEFERRED, pricing-kernel owner, no earlier than #229
+├── risk/                # risk                                 — DEFINED / DEFERRED, owning risk implementation/methodology issue
+├── calibration/         # calibration                          — DEFINED / DEFERRED, calibration-methodology owner
+└── fixtures/            # benchmark fixture descriptors (identity-bearing, §10.5)
 ├── dto/                 # decode / encode
 ├── materialize/         # object construction, curve/model materialization
 ├── kernel/              # pricing kernel
@@ -473,7 +481,7 @@ cpp/rates_engine/benchmarks/
 └── fixtures/            # benchmark fixture descriptors (identity-bearing, §10.5)
 ```
 
-**PROPOSED:** one executable per stage, mirroring §10.2. A single monolithic "benchmark the engine" binary is rejected because it would produce exactly the blended number §10.6 forbids.
+**PROPOSED:** one executable per stage, mirroring §10.3's phase rows. A single monolithic "benchmark the engine" binary is rejected because it would produce exactly the blended number §10.6 forbids. **Only the phases marked available in §10.3 are created by #227.** The remaining directories above are declared **placeholders**: they must not be populated, built, or made executable before their owning issue lands (#229 for the kernel, the owning risk/calibration/curve issues otherwise).
 
 ### 2.11 Non-production statement for this section
 
@@ -503,9 +511,19 @@ This is the direct C++-engine expression of an already-approved #225 requirement
 | **Initial pin — LOCKED** | **`1.43`**, and it is **locked, not a candidate**. Every fact in §4 — the process-global singletons, the macro defaults, the `LazyObject` ordering, the OpenMP pragma sites — is explicitly scoped to `v1.43`. Another exact version would invalidate that evidence base rather than merely being a different pin |
 | Who may change the pin | Only via the §3.8 upgrade procedure **and** a repeat of the §4 audit for the candidate version. No incidental bump, no "while I was in there" |
 | Deviation from `1.43` on a first implementation | **Re-audit is mandatory.** §3.8's audit is *change*-triggered, and a first implementation has no prior recorded pin for it to trigger from — so the obligation is stated here instead: selecting any version other than `1.43` requires repeating the §4 version-specific audit and obtaining §3.8 approval **before** implementation, because §4's defaults, singleton and OpenMP findings are version-conditioned |
-| Where the pin is recorded | The manifest (authority), the diagnostics output (**Lane A** where the result carries it, **Lane B** otherwise — §12.2), the benchmark metadata (§10.5), and the replay identity (§8.1) |
+| Where the pin is recorded | The manifest (authority), **Lane B** runtime/build telemetry, the benchmark metadata (§10.5 **M4**), the §7.2 **cache key** / version tagging (§7.6), and CI/build evidence. **Not** in `PricingResult.diagnostics`, `RiskResult.diagnostics`, `replay`, or any other existing #225 Lane-A field — see the placement rule below |
 | Range/`>=` pins | **Forbidden** for the C++ dependency. A range pin is what makes a hidden default change possible on a clean CI machine |
 | Python side | **Unchanged.** `pyproject.toml`'s `quant` extra keeps its existing lower bound. The two planes are independent (§2.7 P6) |
+
+**PROPOSED — the dependency-provenance placement rule (reconciled; authoritative).** The approved #225 result schemas contain **no** dedicated dependency-provenance field for the QuantLib pin or its configuration. Therefore:
+
+- #226 does **not** require the QuantLib version, pin, or macro configuration to be encoded into `PricingResult.diagnostics`, `RiskResult.diagnostics`, `replay`, or any other existing #225 Lane-A/result field, unless #225 already defines that field **for that semantic**.
+- #226 must **not** overload `engine_version`, `method`, assumptions, diagnostics, or any other existing field merely to smuggle dependency provenance into the result contract.
+- The pin remains **required** in **Lane B** runtime/build telemetry, benchmark metadata (§10.5 **M4**), build identity, cache compatibility / version tagging (§7.6), and CI/build evidence.
+- Result-level dependency provenance remains **U-O — unresolved placement** until an owning schema issue explicitly adds a field. #226 may identify the need; **#227 must not invent the encoding** (§12.3 G-2, Appendix C).
+- **This does not weaken cache compatibility.** The QuantLib version/configuration may still be part of internal cache validity and version identity without becoming a #225 result-DTO field.
+
+Every other site in this document that mentions where the pin or dependency identity is "recorded" is normalized to this rule (§2.5, §2.7 P4 **and the P6 paragraph**, §2.8, §3.9 U5, §4.5, §5.8 PE2, §7.6, §12.2, §12.3, Appendix C).
 
 **PROPOSED — "version is locked" and "the build is green" are two different claims, and only the first is made here.** #226 locks the **version** to `1.43`, because that is the version every §4 fact is scoped to. #226 does **not** claim the build has ever run: no local C++ toolchain exists in this environment (§1.10), so the build outcome remains **UNPROVEN**. #227 must confirm that `1.43` is (a) available from the pinned baseline and (b) green on all three compilers. If `1.43` cannot satisfy (a) or (b), that is a §3.8/§13 matter to raise with the owner — **not** a licence to select a different version silently, which is exactly the gap this rule closes. An earlier draft said the pin was "a candidate, not a locked value", which would have let #227 choose a version that §4 never audited while §3.8's change-triggered audit stayed silent for want of a prior pin.
 
@@ -604,7 +622,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 | U2 | **Regression evidence** over the authoritative anchors of `docs/31...` §3.1 — the ported tests must run and their values must hold within the documented tolerance |
 | U3 | A re-run of the default-audit tests (§3.6). A changed default must be an intentional, documented decision — which, if it changes comparison semantics rather than costs, is a **RED** item and stops for owner input |
 | U4 | A re-run of the concurrency-correctness tests (§5.7), because a new version may change observer/lazy-object or session behaviour |
-| U5 | Recorded identity update: result diagnostics (Lane A), runtime telemetry (Lane B), benchmark metadata, replay identity |
+| U5 | Recorded identity update on upgrade: **Lane B** runtime/build telemetry, benchmark metadata (§10.5 **M4**), and the §7.2 cache key / version tag (§7.6). **No Lane-A / #225 result field is written**, because none is approved for dependency provenance — see **U-O** and §3.2's placement rule |
 | U6 | The pinned baseline commit is updated deliberately, with the resulting dependency-version deltas visible in the diff |
 | U7 | No upgrade is bundled with unrelated work (AGENTS.md rule 2) |
 
@@ -770,7 +788,7 @@ This section is the **evidence** for the claims §3 and §5 rely on. It delibera
 
 **EXTERNAL EVIDENCE — and it is not a "thread affinity" rule.** It is tempting to summarise the default behaviour as "an observer must be notified on the thread that created it". **That requirement is not documented, and this audit found no such statement.** The accurate finding is narrower and different in kind: notification is **unsynchronised**, so cross-thread notification is a **data race** on `observers_`, on the observer's own `observables_`, and on `ObservableSettings`' deferral map — not a rule violation that a misuse-detector would catch. §5 therefore treats it as a race to be excluded, not a convention to be followed.
 
-**EXTERNAL EVIDENCE — a behaviour difference that is a methodology hazard, not merely a performance one.** A runtime switch exists for the lazy-object notification policy — `LazyObject::Defaults` (§4.6) — and the two observer branches are **not** functionally identical: the thread-safe branch uses a `Proxy` + weak-reference scheme, and the default branch's `Observable::operator=` sends a notification *before* the copy has changed its members (the header warns about exactly this ordering). **PROPOSED (reinforcing §3.6 D17):** the observer pattern configuration is treated as an **engine dependency property** that must be *recorded*, never toggled opportunistically, because toggling it changes both thread-behaviour and notification ordering.
+**EXTERNAL EVIDENCE — a behaviour difference that is a methodology hazard, not merely a performance one.** A runtime switch exists for the lazy-object notification policy — `LazyObject::Defaults` (§4.6) — and the two observer branches are **not** functionally identical: the thread-safe branch uses a `Proxy` + weak-reference scheme, and the default branch's `Observable::operator=` sends a notification *before* the copy has changed its members (the header warns about exactly this ordering). **PROPOSED (reinforcing §3.6 D17):** the observer pattern configuration is treated as an **engine dependency property** that must be *recorded* in **Lane B** runtime/build telemetry and benchmark metadata (§10.5 **M4**) — **never** in a result-DTO field — and never toggled opportunistically, because toggling it changes both thread-behaviour and notification ordering.
 
 ### 4.6 `LazyObject` — cached results and the global default switch
 
@@ -1032,11 +1050,11 @@ Option (2) is the only one that is a **proof obligation** rather than an archite
 | **REQUEST-LOCAL** | Constructed for one request, used, destroyed; never escapes | Never shared. One per request | QuantLib object graph built by the adapter for a single `RatesKernelInput` |
 | **THREAD-LOCAL** | Genuinely per-thread by construction, with no cross-thread handoff | Shareable only with the thread that owns it | **Not used for pricing state.** The QuantLib session mechanism would create such state, and it is **not enabled** (§4.4) |
 | **PROCESS-GLOBAL** | One instance for the whole process | Must be treated as mutable and unsynchronised | `Settings`, `ObservableSettings`, `LazyObject::Defaults`, `IndexManager` (§4.2) |
-| **SHARED READ-ONLY** | Shiori-owned, immutable objects handed to the engine by the caller, which the engine only reads | Shareable across threads; **the engine must not mutate** | Caller-owned input DTOs (§6) |
+| **SHARED READ-ONLY** | Shiori-**defined**, **caller-owned** input DTOs whose *published state* is owning immutable value state or provably deep-immutable (§6.4 N4–N7) | Shareable across threads **only because the storage backing the identity cannot change for the request lifetime** (N4–N7) — **not** because the engine merely reads it | Caller-owned input DTOs (§6) |
 | **UNSAFE / UNPROVEN** | No evidence of safety in the pinned configuration | **Never shared across threads** | Any QuantLib `LazyObject` (curves, models, instruments, calibration helpers); anything holding a `RelinkableHandle`; anything reading a moving term structure without an explicit evaluation date |
 | **SERIALIZED BEHIND THE GATE** | May be touched only while holding the gate | Mutually exclusive | Every adapter entry point; every read or write of a PROCESS-GLOBAL; construction/destruction of QuantLib objects |
 
-**PROPOSED:** the classification is **not** inferable from a type name. In particular, "SHARED READ-ONLY" is a Shiori-owned property (an immutable DTO), and must **never** be asserted of a QuantLib object — because §4.6 and §4.10 show that QuantLib "reads" mutate, and §4.7 shows a handle can be relinked. **`UNSAFE / UNPROVEN` is the default class for any QuantLib-typed object**, and a QuantLib object may leave it only by a positive construction argument recorded in review.
+**PROPOSED:** the classification is **not** inferable from a type name. In particular, "SHARED READ-ONLY" is a Shiori-**defined** property (a DTO whose *published state* is owning immutable value state, §6.4 N4–N7), and must **never** be asserted of a QuantLib object — because §4.6 and §4.10 show that QuantLib "reads" mutate, and §4.7 shows a handle can be relinked. **`UNSAFE / UNPROVEN` is the default class for any QuantLib-typed object**, and a QuantLib object may leave it only by a positive construction argument recorded in review.
 
 ### 5.4 What concurrency is permitted today
 
@@ -1045,7 +1063,7 @@ Option (2) is the only one that is a **proof obligation** rather than an archite
 | Permitted | Notes |
 |---|---|
 | **Multiple processes**, each single-threaded | The recommended scaling path. Process isolation makes PROCESS-GLOBAL state genuinely isolated, which the Windows static-link constraint (§2.6) makes impossible within one process |
-| Concurrent read-only *Shiori-DTO* access | Safe because IMMUTABLE/SHARED READ-ONLY, and because the engine never writes to caller inputs (§6.4) |
+| Concurrent read-only *Shiori-DTO* access | Safe because the input's identity-bearing **storage** is owning immutable value state for the request lifetime (§6.4 N4–N7) — **not** because the engine merely reads it. Caller mutation after fingerprint publication is an **explicit failure case** (§9.2 TL3) |
 | Threads elsewhere in the host that never reach the adapter | Allowed; the gate makes this explicit |
 | Benchmarking single-thread vs multi-thread | **Permitted pre-gate for evidence collection only**, when an enablement proposal names a candidate configuration — §5.8 PE5 *requires* that benchmark to produce its own evidence, so forbidding it here was **circular** (PE5 required a benchmark that this row forbade until PE5 was satisfied). Such a run is **evidence-only**: never a published performance claim, never a production speedup, and it **cannot itself enable** production parallelism. Production multi-thread benchmarking and use remain prohibited, and §5.2 stays DISABLED until PE1–PE6 hold, including the **PE6 owner decision**. §10.3 states the same exception |
 
@@ -1128,7 +1146,7 @@ T3 is Tier K even though it is a sanitizer run, because it is defined as a TSan 
 | # | Condition |
 |---|---|
 | PE1 | **§5.7 Tier S (T4, T5, T7)** exists and passes **now**, on the gated posture, on **both Windows and Linux** — the part #227 can and must satisfy. **Tier K (T1, T2, T3, T6, T8) cannot be satisfied before #229 supplies the first swap kernel** (`docs/33…225.md` `:1324–1327`), because every test in it prices a `RatesKernelInput`; requiring it of #227 would force out-of-scope pricing or an invented `RED-01` value (§5.7 tiers). PE1's full force therefore applies **at enablement**, when the kernel exists: **T1–T7 must then all pass**, with **T3 (TSan, covering T1, T2 and T6) on Linux**, the only platform in the §11.3 matrix providing ThreadSanitizer — and that TSan evidence is admissible **only** as produced by the **TSan-instrumented dependency build** (§5.7 T3, §11.3), never by a TSan run over an uninstrumented QuantLib. **T8 is conditional and is not part of this "exist and pass now" set**: it is defined as a rerun of T1/T2/T5/T6 under *the gate removed or narrowed exactly as an enablement proposal would*, so it is **not applicable until an enablement proposal supplies a candidate configuration**. While no such proposal exists, T8 is **reported as not-applicable with a reason** (§9.8 Q1/Q6) and is **not** a green-gate requirement — otherwise §11.3's required jobs could never be green without #227 inventing and passing a parallel concurrency configuration that has not been approved. **When** a proposal is submitted, T8 becomes **required and blocking for that proposal**: PE1 then means T1–T8 all pass *for that named candidate configuration*. **T8 is the load-bearing one *for enablement*** — it is the only test run in the configuration enablement would actually enable. (An earlier draft required all of T1–T7 on both platforms while assigning all test execution to Linux, which made this gate unattainable; a later draft omitted the ungated configuration entirely; a third made T8 unconditionally required, which no candidate configuration existed to satisfy) |
-| PE2 | The specific QuantLib configuration used is **named** (version + every relevant macro), and the reason it is safe is derived from §4-style source evidence — not from a community claim |
+| PE2 | The specific QuantLib configuration used is **named** in **Lane B** runtime/build telemetry and benchmark metadata (§10.5 **M4**) — not in a result-DTO field (version + every relevant macro), and the reason it is safe is derived from §4-style source evidence — not from a community claim |
 | PE3 | The evaluation-date / fixing / observer / lazy-cache mechanisms are each shown either unused or provably isolated per request |
 | PE4 | Reproducibility under concurrency is demonstrated per #225 §15.4's replay identity — concurrent execution must not change a result |
 | PE5 | A benchmark serves as a **verification** step (does parallelism still reproduce results), with published concurrency semantics per §10.5. **Producing this evidence is explicitly permitted *before* the gate passes**: an evidence-only multi-thread benchmark of the named candidate configuration (§10.3, keyed to §9.8 Q6). Without that exception PE5 would depend on itself — it requires a benchmark that the §10.3 matrix would otherwise forbid until PE5 was already satisfied |
@@ -1173,12 +1191,12 @@ T3 is Tier K even though it is a sanitizer run, because it is defined as a TSan 
 | Question | Decision |
 |---|---|
 | Who owns the input? | **The caller.** The engine never takes ownership and never frees it |
-| How does the engine hold it? | By reference / non-owning view for the duration of one request |
+| How does the engine hold it? | By an **owning immutable snapshot**, or by a **non-owning view over engine-owned immutable backing storage**, for the duration of one request — **never** a retained alias into caller-mutable storage (§6.4 N4–N7) |
 | May the engine retain it beyond the request? | **No**, with one exception: if an entry is cached, the retained artifact is a cache entry keyed by value identity — never a pointer to the caller's object (§7) |
 | How long must the input stay valid? | For the whole of the request, including any work performed under the serialization gate |
 | May a caller mutate an input during a request? | **No.** The engine's correctness assumes immutability from the moment it is accepted (§6.4) |
 
-**PROPOSED:** because the engine borrows rather than owns, an input may be shared across concurrent requests **only** when it is genuinely immutable (§5.3 SHARED READ-ONLY). This is what makes "share the DTO, never share the QuantLib object" the central rule of the design.
+**PROPOSED:** because the engine **does not own** the input, an input may be shared across concurrent requests **only** when it is genuinely immutable (§5.3 SHARED READ-ONLY) — and "genuinely immutable" means the **storage backing the identity** cannot change, **not** merely that the engine holds a `const` view of it (§6.4 N4–N7). This is what makes "share the DTO, never share the QuantLib object" the central rule of the design.
 
 ### 6.3 No live acquisition inside pricing
 
@@ -1196,18 +1214,25 @@ T3 is Tier K even though it is a sanitizer run, because it is defined as a TSan 
 
 ### 6.4 Immutability after publication
 
-**PROPOSED.** Define *publication* as the moment an input's fingerprint is computed (§6.7). The rules are:
+**PROPOSED.** Define *publication* as the moment an input's fingerprint is computed (§6.7). The locked rule is:
+
+> Once an input DTO/content fingerprint is published for pricing, every byte/value that participates in that identity must be backed by storage whose contents **cannot change for the lifetime of that published request snapshot**.
+
+The rules are:
 
 | # | Rule |
 |---|---|
-| N1 | After publication, an input is **never** mutated — not by the engine, not by the caller, not by a cache, not by **either** diagnostics lane (§12.2) |
+| N1 | After publication, an input is **never** mutated — not by the engine, not by the caller, not by a cache, not by **either** diagnostics lane (§12.2). Compliance is established by **N4–N7** (immutable backing storage), **not** by caller cooperation |
 | N2 | A DTO type carries **no mutation API** reachable after construction: no setters, no public non-const members, no `mutable` members, no lazy caches, no observer registration |
 | N3 | A DTO type **must not** contain a QuantLib type, a `Handle`/`RelinkableHandle`, a `shared_ptr<Observable>`, or any type whose value can change after construction |
-| N4 | The engine's read-only treatment is enforced by **`const` in the type system**, and a violation is a compile error — not a review finding |
-| N5 | Any derived value computed during a request is **request-local** (§5.3) and never written back into the input |
-| N6 | If a caller needs a modified input, it constructs a **new** object with its own identity and fingerprint. In-place "update" is not a supported workflow |
+| N4 | Public/published DTO state must be **owning immutable value state**, or otherwise **prove** equivalent deep immutability — and that proof must be over **storage the engine owns**, or equally immutable storage whose lifetime dominates the published snapshot. **Non-owning views never appear in published DTO state** (N6 governs). **`const` is not that proof:** `const` on a view or reference does **not** prevent mutation of the backing storage through another alias, so "the engine receives it as `const`" must **not** appear anywhere in this design as an immutability argument |
+| N5 | A `std::span`, `std::string_view`, pointer, reference, or any other **non-owning alias into caller-mutable storage** must **not** be retained as published request state |
+| N6 | Zero-copy/non-owning views may exist **only** as request-local implementation views over **engine-owned immutable backing storage** whose lifetime dominates the view and whose contents cannot mutate after fingerprint publication |
+| N7 | **Fingerprinting and then pricing mutable caller-owned backing storage is forbidden.** A request whose identity-bearing bytes can change between fingerprint computation and pricing has **no valid identity** |
+| N8 | Any derived value computed during a request is either **request-local** (§5.3) or, where §7 permits caching, stored only as an **owning immutable value** (§6.6 V3). It is **never written back into the input** |
+| N9 | If a caller needs a modified input, it constructs a **new** object with its own identity and fingerprint. In-place "update" is not a supported workflow |
 
-**PROPOSED rationale for N4:** N1–N3 are only meaningful if violating them fails to compile. `const`-qualified accessors plus non-`mutable` members make mutation of a published input a compile error, which is the strongest available enforcement short of hardware protection.
+**PROPOSED — why the rule is stated over storage, not syntax.** N1–N3 are only meaningful if violating them fails. `const`-qualified accessors plus non-`mutable` members catch *in-type* mutation, but they **cannot** catch mutation through a **second alias to the same backing bytes**. That is why the invariant is stated over the **storage** that backs the identity, and why N4–N7 exist: they are precisely the part a `const`-only formulation silently misses. A design that skipped them would let the engine price **different content under the published cache/replay identity** — a correctness failure, not a style one.
 
 ### 6.5 The Python ↔ C++ DTO boundary
 
@@ -1230,7 +1255,7 @@ T3 is Tier K even though it is a sanitizer run, because it is defined as a TSan 
 **PROPOSED.** Materializing a resolved input into QuantLib objects is a **derivation**, and every derivation is request-local:
 
 ```text
-caller-owned immutable DTO input  (SHARED READ-ONLY, §5.3)
+caller-owned input DTO — *published state* owning / deep-immutable (§6.4 N4–N7)  (SHARED READ-ONLY, §5.3)
         |
         |  adapter translates under the serialization gate (§5.2.1)
         v
@@ -1287,7 +1312,7 @@ DTO result  (immutable, returned by value)
 
 > **Cache identity must be reconstructible from explicit input contracts.**
 
-A cache entry may be found again using only values that a `RatesKernelInput` (or a documented derivation of one) explicitly carries. If reconstructing a key requires the *history* of the process — what was set globally, what time it is, what was constructed before — the cache is not a cache; it is hidden state with a hit rate.
+A cache entry may be found again using only values that a `RatesKernelInput` (or a documented derivation of one) explicitly carries. If reconstructing a key requires the *history* of the process — what was set globally, what time it is, what was constructed before — the cache is not a cache; it is hidden state with a hit rate. **Explicitness includes the recorded build/engine identity, not only input fields:** `engine_version` (§6.7, K6, §7.2.1) and the pinned-version tag of §7.6 are *explicit recorded identity*, not ambient state, and remain required key components. This rule excludes **hidden** state — it does not exclude the documented version tags.
 
 ### 7.2 Forbidden key components
 
@@ -1296,7 +1321,7 @@ A cache entry may be found again using only values that a `RatesKernelInput` (or
 | # | Forbidden | Why it is unsafe |
 |---|---|---|
 | K1 | **Pointer address / object identity** | Addresses are reused after free; two different values can share an address over time, and two equal values can have different addresses. Guarantees wrong hits *and* wrong misses |
-| K2 | **Hidden global state** (any PROCESS-GLOBAL from §4.2, or any other ambient setting) | Not reconstructible from the input; makes behaviour depend on call order (§4.6's lazy default is the archetype) |
+| K2 | **Hidden global state** (any PROCESS-GLOBAL from §4.2, or any other ambient setting — but **not** the *explicit* recorded engine/pinned-version tag of §6.7 K6 and §7.6, which is identity rather than ambient state) | Not reconstructible from the input; makes behaviour depend on call order (§4.6's lazy default is the archetype) |
 | K3 | **System clock** (now, "today", elapsed time, timestamps) | Unreconstructible and non-reproducible; also the exact mechanism by which an unset evaluation date leaks the wall clock (§4.3) |
 | K4 | **Implicit current evaluation date** | A *derived* value from K2/K3 unless explicitly supplied; using it implicitly reintroduces the midnight-rollover hazard |
 | K5 | **Mutable object identity** (a `Handle`, a relinkable target, a shared mutable QuantLib object) | The key would change value without changing identity, or vice versa (§4.7) |
@@ -1425,9 +1450,9 @@ The failure this prevents is concrete and severe. If L1 were keyed on the **decl
 | CT2 | **Required-field sensitivity** | Two inputs differing in exactly one **required** identity field produce different keys (§7.4's key column, field by field) |
 | CT3 | **Forbidden-component invariance (K1–K5)** | Two otherwise-identical explicit inputs differing **only** in pointer identity / ambient global state / clock / implicit evaluation date / mutable identity produce the **same** key (and may legitimately hit) — proving the key carries no hidden state. This test fails if an implementation wrongly adds a forbidden value to the key |
 | CT3b | **Required-component sensitivity, incl. engine version (K6)** | Changing the recorded engine version — or any other required identity field — changes the key or renders the entry unusable; an entry whose engine version is **unknown** is never returned. This is the direction that must *not* be inverted |
-| CT4 | **Immutability test** | A returned cached value cannot be mutated by a caller, and mutating the caller's view does not corrupt the entry |
-| CT5 | **Methodology-version test** | A methodology-version change invalidates the relevant entries (miss), and never returns a stale result |
-| CT6 | **Eviction-safety test** | Eviction cannot change a result (I3) |
+| CT4 | **Immutability test** | A returned cached value cannot be mutated by a caller; mutating the caller's view does not corrupt the entry; and **mutating the storage that backed a published input's identity fails explicitly** (§6.4 N4–N7, §9.2 TL3) |
+| CT5 | **Methodology-version test** | A methodology-version change invalidates the relevant entries (miss), and never returns a stale result. **Also covers the §7.6 pinned-version tag:** an entry tagged with a different QuantLib version/configuration is a **miss** (this is the cache-compatibility half of §3.2's invariant, and it does **not** require any result-DTO field) |
+| CT6 | **Eviction-safety test** — **ordinary entries only** | Eviction cannot change a result (I3). **Calibration is excepted**: evicting and recomputing yields a *new instance* by design (§8.3.1, CT9) |
 | CT7 | **No-QuantLib-object test** | No cache value is, or contains, a QuantLib-typed object or handle (§7.3) — enforced by a type-level check where possible |
 | CT8 | **Fingerprint-trust test (§7.4.1)** | A payload whose **declared** `content_fingerprint` does not match the fingerprint recomputed from its own bytes never yields a cache **hit**: it is refused with a reason and never priced. Also asserts that an **unknown schema version** can never reach the L1 cache, i.e. that no lookup precedes fail-closed decode. This is the test that would catch a fail-open regression in L1 |
 | CT9 | **Calibration instance-identity test (§8.3.1)** | A calibration cache **hit** returns the **original** `ModelCalibrationResult` content **unchanged** — including its original `calibrated_at`, `calibration_result_id`, provenance, warnings and replay fingerprint; **no** fresh timestamp or identity is fabricated on a hit. A forced **recompute** of the same input under the same complete key is a **new instance** and is permitted to differ in exactly those run-instance provenance fields, while preserving the contract-defined calibration/economic semantics and deterministic fields. Requires the concrete calibration methodology, so it is **not** #227's (§9.2 TL5, §5.7 tiers) |
@@ -1575,12 +1600,12 @@ cpp/rates_engine/
 |---|---|---|
 | **TL0 Contract / schema** | Version decode, round-trip, unknown-version refusal, `NULL_WITH_REASON` preservation, canonical-form stability | §6.5 B4/B5, AC 6 |
 | **TL1 Defaults audit** | One test per row of §3.6 D1–D17: assert the engine **either sets the value explicitly from an owner-approved input *or* refuses with `UNRESOLVED_METHODOLOGY`** — never silently proceeds on a default — **and pin the effective value** so a QuantLib upgrade that changes a default produces a test failure rather than a changed price. The wording matches §3.6's own (a)/(b) contract deliberately: requiring a *set* would be **unsatisfiable** for D9 and D14, whose owner-approved values do not yet exist, and the only ways to make such a test green would be to invent methodology or to leave the suite permanently red | §3.6, AC 7 — this is the mechanical enforcement of "QuantLib defaults MUST NOT silently become Shiori methodology" |
-| **TL2 Boundary isolation** | Compile-time/structural assertion that no public DTO depends on a QuantLib type | §3.5 A1–A5, §6.5 B2, AC 6 |
-| **TL3 Determinism / replay** | Same input twice ⇒ identical output; fingerprint stability; no clock/global influence | §6.7, AC 11 |
+| **TL2 Boundary isolation** | Structural no-QuantLib-type assertion per §3.9 **E2** (syntax-aware — a compile-fail test alone is insufficient), supplemented by the `cpp-isolation-guard` CI job (§11.3) | §3.5 A1–A5, §3.9 E2, §6.5 B2, AC 6 |
+| **TL3 Determinism / replay** | Same input twice ⇒ identical output; fingerprint stability; no clock/global influence; **alias mutation of identity-bearing storage after fingerprint publication is an explicit failure case** (§6.4 N4–N7) | §6.7, AC 11 |
 | **TL4 Cache correctness** | §7.7 CT1–CT8 + CT3b | §7, AC 12/13 |
 | **TL5 Calibration outcomes** | Converged / warnings / non-converged / failed / refused are distinguishable and survive the cache — **plus the warning-stability test** that discharges §8.6 **U-L**: identical inputs produce an identical warning set, which is what the §8.3 "converged with warnings" rule waits on before such an entry may ever be reused. **#227 cannot discharge this half.** #227 has skeleton/DTO scope only, and there is no approved calibration objective, optimizer, tolerance, or concrete calibration implementation (`RED-225-*`, §8), so a mock or refusal-only test proves nothing about the real path's warning behaviour — and treating it as proof would allow warning-bearing entries to be served from cache without that implementation ever being validated. The **distinguishability** half is #227's (a DTO/cache-shape property); the **stability** half is required **in the change that introduces the concrete calibration methodology**, and **U-L stays open until then** | §8.3, §8.6 U-L, AC 14 |
-| **TL6 Concurrency correctness** | §5.7 T1–T8 | §5, AC 16 — **the sole gate for AC 10** |
-| **TL7 Benchmark correctness** | §10.8 — every benchmark validates its result | §10, AC 17/18 |
+| **TL6 Concurrency correctness** | §5.7 T1–T8 — **tiered**: Tier S (T4, T5, T7) is #227's now; Tier K (T1, T2, T3, T6, T8) requires the #229 kernel | §5, AC 16 — **the sole gate for AC 10** |
+| **TL7 Benchmark correctness** | §10.8 — every benchmark **that #227 implements** validates its result | §10, AC 17/18 — **tiered**: only non-price-bearing phases are #227's (§10.3) |
 | **TL8 Failure / fail-closed** | Every refusal path returns a reason; nothing silently degrades | §6.8, §13 |
 
 ### 9.3 Python ↔ C++ boundary tests
@@ -1673,7 +1698,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 
 > **Never publish one blended number that hides setup and pricing cost.** A timing is publishable only with the phase decomposition, the cache state, the concurrency mode, and the reproducibility metadata of §10.5. A single "swaps per second" figure is **not** a deliverable of this architecture.
 
-**PROPOSED rationale:** the issue requires measurement of DTO decode, object construction, curve/model materialization, pricing kernel, risk and calibration *separately* (AC 17, §8 of the issue, and `docs/08`'s no-unbenchmarked-claims rule). A blended number cannot distinguish "the kernel is fast" from "the cache answered", and it therefore cannot guide any decision #227 will have to make.
+**PROPOSED rationale:** the issue requires measurement of DTO decode, object construction, curve/model materialization, pricing kernel, risk and calibration *separately* (AC 17, §8 of the issue, and `docs/08`'s no-unbenchmarked-claims rule). A blended number cannot distinguish "the kernel is fast" from "the cache answered", and it therefore cannot guide any decision #227 will have to make. **This list is the target architecture, not a #227 execution set**: availability per phase is decided by §10.3, and only the non-price-bearing phases are #227's.
 
 ### 10.2 Tooling
 
@@ -1683,11 +1708,18 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 
 **PROPOSED.** The matrix is deliberately **not** fully populated: multi-thread rows are defined but **unused for production claims** until §5.8 is satisfied (AC 10 / AC 17) — with **one explicit exception**, because otherwise §5.8 would be unsatisfiable: an **evidence-only** multi-thread benchmark of a *named candidate configuration*, which is how PE5's evidence is produced. The exception is stated in the row below and keyed to §9.8 Q6.
 
+**PROPOSED — benchmark availability follows implementation ownership.** #226 defines the **full** benchmark taxonomy; **definition does not mean #227 must already execute every phase**. #227 must create the benchmark **framework/harness and smoke capability** only for phases **executable without production pricing or unresolved methodology** — process/startup, DTO serialization/deserialization, and other **non-price-bearing skeleton operations that have real executable behaviour**. Pricing-kernel benchmarks are deferred to the pricing-kernel owner (no earlier than **#229**); risk benchmarks to the owning risk implementation/methodology issue; calibration benchmarks to the owning calibration-methodology issue; and any curve/model-materialization benchmark that depends on unresolved construction/model methodology to its owning issue. Every unavailable phase must be explicitly marked **DEFINED / DEFERRED**, never "available now". The full phase list remains the target architecture (§15.2 D-6, §11.3). **"Non-price-bearing" is defined here as:** the operation neither computes nor depends on any pricing, risk, calibration, curve-construction or model-selection methodology outcome — its output is infrastructure state (bytes decoded, objects constructed, process initialized), not an economic number.
+
 | Dimension | Values | Available now? |
 |---|---|---|
 | **Process state** | cold start (first call in a fresh process) · warm process | Yes |
 | **Cache state** | cold cache · warmed cache · cache **disabled** | Yes |
-| **Phase** | DTO decode · object construction · curve/model materialization · pricing kernel · risk · calibration | Yes |
+| **Phase** | DTO decode | **Yes** — #227 (non-price-bearing skeleton operation) |
+| **Phase** | request-local object construction (non-price-bearing; **excludes** curve/model materialization) | **Yes** — #227 |
+| **Phase** | curve/model materialization | **DEFINED / DEFERRED** — owning curve/model construction issue; depends on unresolved construction/model methodology |
+| **Phase** | pricing kernel | **DEFINED / DEFERRED** — pricing-kernel owner (no earlier than **#229**) |
+| **Phase** | risk | **DEFINED / DEFERRED** — owning risk implementation/methodology issue |
+| **Phase** | calibration | **DEFINED / DEFERRED** — concrete calibration-methodology owner (§9.2 TL5) |
 | **Concurrency** | single-thread | Yes |
 | **Concurrency** | multi-thread | **DEFINED; production use BLOCKED** until §5.8. **Exception — evidence-only, keyed to §9.8 Q6:** when an enablement proposal names a candidate configuration, that configuration **may** be benchmarked (single-thread baseline vs the proposed multi-thread mode) *for the proposal's own evidence*, because §5.8 PE5 requires exactly that verification and would otherwise be unattainable — the same circularity §9.8 Q0/Q6 resolves for the test suite. Such a run is labelled **evidence-only**: it is never a published performance claim, it never appears as a production speedup, and it does **not** enable production parallelism (§5.2 stays DISABLED until PE6). A multi-threaded benchmark is additionally a *correctness verification*, not only a timing (§5.8 PE5) |
 
@@ -1745,7 +1777,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 
 ### 10.8 Correctness-checked benchmarks
 
-**PROPOSED.** Every benchmark **also validates its output** against a fixture expectation (L7). A benchmark that measures a wrong answer quickly is worse than no benchmark, and — given `docs/08`'s parity requirement — a timing without a correctness assertion would be exactly the "claim performance improvement without a benchmark" failure the repository already prohibits. Where no correct expected value can exist yet, the benchmark must **refuse to report a timing** rather than report one whose correctness is unknown.
+**PROPOSED.** Every benchmark **that exists also validates its output** against a fixture expectation (L7). Benchmarks for **DEFERRED** phases (§10.3) are **not written by #227 at all**, so this rule has nothing to validate for them until their owning issue lands. A benchmark that measures a wrong answer quickly is worse than no benchmark, and — given `docs/08`'s parity requirement — a timing without a correctness assertion would be exactly the "claim performance improvement without a benchmark" failure the repository already prohibits. Where no correct expected value can exist yet, the benchmark must **refuse to report a timing** rather than report one whose correctness is unknown.
 
 ### 10.9 Separation from production
 
@@ -1757,7 +1789,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 
 ### 10.11 CI treatment
 
-**PROPOSED.** CI runs a **benchmark smoke test** (does the benchmark build and complete a minimal run, and do its correctness checks pass?) on every C++ change, and does **not** attempt a statistically meaningful full benchmark run (AC from issue §9: "benchmark smoke vs full benchmark separation"). Full runs are performed deliberately, on a recorded machine, and published with §10.5's metadata. This keeps the CI signal about correctness while preserving the ability to measure.
+**PROPOSED.** CI runs a **benchmark smoke test** (does the benchmark build and complete a minimal run, and do its correctness checks pass?) on every C++ change, and does **not** attempt a statistically meaningful full benchmark run (AC from issue §9: "benchmark smoke vs full benchmark separation"). **The smoke test covers only the phases #227 actually implements** (§10.3): it must **not** require fabricated pricing, risk, or calibration behaviour merely to turn green, and deferred phases are simply absent from the smoke set until their owning issue lands. Full runs are performed deliberately, on a recorded machine, and published with §10.5's metadata. This keeps the CI signal about correctness while preserving the ability to measure.
 
 ---
 
@@ -1789,7 +1821,7 @@ Recorded in §1.2. In summary: two workflows exist — `test` (ubuntu-latest, Py
 | `cpp-test-linux` | ubuntu-latest (GCC **and** Clang) | `ci-debug` + `ci-release` | Portability + both build types; runs the **full skeleton-executable suite (Tier S: T4, T5, T7, plus §7.7 `CT1–CT8`)**, and **the full Tier K set (T1, T2, T3, T6, T8) once #229 supplies the kernel** |
 | `cpp-sanitizers` | ubuntu-latest (Clang) | ASan/UBSan, and **TSan** (Linux-only) with a **TSan-instrumented QuantLib** built from source on a dedicated triplet | Memory and race defects that equivalence tests cannot see; owns **§5.7 T3**, which is a Linux/Clang requirement because MSVC ships no ThreadSanitizer. **The TSan leg instruments QuantLib itself, not only Shiori** (§5.7 T3): the job builds the dependency from source with `-fsanitize=thread` on a dedicated triplet and must **not** draw that dependency from the ordinary binary cache — the instrumented build carries its own cache identity (§11.4). A TSan job that reused the standard prebuilt QuantLib would satisfy this row's letter while being unable to detect a race inside the library, which is the entire point of the leg |
 | `cpp-isolation-guard` | ubuntu-latest | n/a (static analysis only) | **The mechanical enforcement of §2.3 and §3.9.** Fails the build on (a) a `ql/` include outside E1a's **three** allow-listed paths, in **either** delimiter form, and (b) a QuantLib type in a public header or exported signature under E2's **syntax-aware** check. §2.3 states the architecture is "only real if a build fails when it is violated" and §3.4 calls it "enforced by the target graph **and** the CI guard" — but the guard was described in §2.3/§3.9 while **no job existed in §11**, so neither sentence was true and a violation could only ever produce a review comment. Required on every PR |
-| `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 |
+| `cpp-benchmark-smoke` | ubuntu-latest | `bench` | §10.11 — **non-price-bearing phases only** (§10.3); must not require fabricated pricing/risk/calibration behaviour |
 | existing `test`, `windows-launcher-smoke` | unchanged | — | §11.2 |
 
 **PROPOSED — why the platform split is explicit.** Concurrency correctness is a *platform* property (the Windows build uses MSVC and the static-only QuantLib linkage §2.6 establishes for that platform; the Linux build uses GCC/Clang), so the test **must** run on both. **Linkage on Linux is deliberately *not* asserted here**: §2.6 leaves static-vs-shared to the selected triplet and forbids assuming shared linkage anywhere in the design, so this rationale rests on the **compiler and runtime**, not on an unproven linkage choice — an earlier draft called the Linux build "dynamic", which the build contract does not guarantee. Only TSan is platform-restricted. The matrix therefore delivers: **T1, T2, T4–T7 on Windows and Linux; T3 (TSan, covering T1, T2 and T6) on Linux; T8 on both platforms once — and only once — an enablement proposal names the candidate configuration it exercises (§9.8 Q6).** Every *currently applicable* concurrency test is thus executed on both platforms, and the three deliberate earlier failures are avoided: one draft required all tests on both platforms while assigning all test execution to Linux; a later draft left T8 off the Windows job while PE1 required it there; and a third made T8 unconditionally required, which no existing candidate configuration could satisfy.
@@ -1871,7 +1903,7 @@ Neither lane may **define** execution; both only **describe** it. Enabling, disa
 
 > **#226 MUST NOT instruct #227 to omit, rename, or move #225's result-diagnostics fields out of the result DTO.** Wording in #226 that appears to do so is a defect in #226, not a licence to alter the contract.
 
-**PROPOSED — the placement test.** *If a fact is required to reproduce or interpret the economic result, it belongs to **Lane A**, deterministically and fingerprint-participating. If it describes **how this invocation happened operationally** and can vary with cache state, scheduling, load, or elapsed time, it belongs to **Lane B** only.* No fact has two authorities: lane B may **echo a stable correlation identifier** (the result's content/inputs fingerprint, engine identity), but the result DTO remains authoritative and the echo never enters its preimage.
+**PROPOSED — the placement test.** *If a fact is required to reproduce or interpret the economic result, it belongs to **Lane A**, deterministically and fingerprint-participating. If it describes **how this invocation happened operationally** and can vary with cache state, scheduling, load, or elapsed time, it belongs to **Lane B** only.* No fact has two authorities: lane B may **echo a stable correlation identifier** (the result's content/inputs fingerprint, engine identity), but the result DTO remains authoritative and the echo never enters its preimage. **Deliberate exception:** dependency provenance (**G-2**) is stable and replay-relevant, but #225 approves **no** field for it, so it is **Lane B + §10.5 M4 + the §7.2 cache key**, and its result-contract placement is **U-O** (§3.2, §12.3 G-2).
 
 ### 12.3 Required fields, by lane
 
@@ -2001,13 +2033,13 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | 8 | Initial concurrency posture explicit | §5.2, §5.4 | **Satisfied** |
 | 9 | Known global/session-state risks documented | §4.2–§4.10, §4.13–§4.14 | **Satisfied** |
 | 10 | Production parallel pricing remains disabled unless correctness proven | §5.2, §5.7, §5.8, §10.3, §13 | **Satisfied** (disabled by contract; gate defined) |
-| 11 | Immutable snapshot / ownership / lifetime rules explicit | §6.2, §6.4, §6.6 | **Satisfied** |
+| 11 | Immutable snapshot / ownership / lifetime rules explicit | §6.2, §6.4 (**N1–N9**, deep immutability over storage), §6.6, §9.2 **TL3** (alias mutation after publication is an explicit failure case) | **Satisfied** |
 | 12 | Allowed cache layers enumerated | §7.4 L1–L8 | **Satisfied** |
 | 13 | Every cache layer has deterministic key + invalidation rules | §7.4 (key/lifetime/invalidation columns), §7.5, §7.7 | **Satisfied** |
 | 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5, §8.6 **U-L**, §9.2 TL5 | **Satisfied** — reuse is explicit *and* explicitly conditional: a warning-bearing entry is not reusable until §8.6 U-L is discharged by the TL5 warning-stability test — which **#227 cannot supply** (§9.2 TL5) |
 | 15 | C++ test framework and layout defined | §9.1, §9.2 | **Satisfied** |
 | 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T8 (**tiered S/K** — Tier S required of #227, Tier K with #229), §7.7 CT1–CT8 + CT3b, §9.6, §9.8 Q7 | **Satisfied** |
-| 17 | Benchmark methodology separates cold/warm and cache state | §10.3, §10.4, §10.6 | **Satisfied** |
+| 17 | Benchmark methodology separates cold/warm and cache state | §10.3, §10.4, §10.6 | **Satisfied** — **availability is tiered** (§10.3): only non-price-bearing phases exist in #227; kernel/risk/calibration benchmarks are **DEFINED / DEFERRED** |
 | 18 | Benchmark reproducibility metadata defined | §10.5 M1–M11 | **Satisfied** |
 | 19 | Python + C++ CI integration strategy defined | §11.1–§11.11 | **Satisfied** |
 | 20 | Existing Python / bond-option validation remains protected | §11.2 PR1–PR5, §11.8, §1.8 | **Satisfied** |
@@ -2053,7 +2085,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | D-3 | Dependency manifest + pinned QuantLib port | §2.6, §2.7, §3.2 |
 | D-4 | Canonical serialization + hashing format | #225 §15.4 owns it; §6.5 B1 confirms the boundary |
 | D-5 | GoogleTest wiring + the **TL0–TL8** suite, **split by tier and owner** — not a blanket #227 deliverable. **#227** implements the framework and only the tests executable at the skeleton/boundary stage: **TL0**, **TL1**, **TL2**, **TL3**, **TL4** (§7.7 CT1–CT8 + CT3b), **TL8**, TL7's benchmark **framework** and any non-price-bearing benchmark, and **§5.7 Tier S** (T4, T5, T7). **Deferred to their already-named later owners:** TL5's **warning-stability** half and §7.7 **CT9** require the concrete calibration methodology (§8, §9.2 TL5); **TL6's Tier K** (T1, T2, T3, T6, T8) and any benchmark that **prices** require the pricing kernel (**#229**, §5.7 tiers). #227 must **not** invent calibration or pricing behaviour to make a deferred test pass | §9, §5.7 tiers |
-| D-6 | Google Benchmark harness | §10 |
+| D-6 | Google Benchmark **framework/harness + smoke capability**, for **executable, non-price-bearing phases only**; price-bearing phases are **DEFINED / DEFERRED** to their owning issues (§10.3, §10.11) | §10 |
 | D-7 | CI workflows | §11 |
 | D-8 | Result-diagnostics (Lane A) and runtime-telemetry (Lane B) emitters | §12.2 |
 | D-9 | `.gitignore` narrowing for the C++ tree | §1.9 / §2.2 — the repo-wide `build/` rule is a **naming trap**; #227 must add a narrow explicit ignore and verify with `git check-ignore` |
@@ -2075,8 +2107,8 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | A-1 | Contradictory ownership rules | Checked §3.5 vs §6.5 vs §9.3: the "no QuantLib across the boundary" rule is stated once (§3.5) and referenced, not redefined. No competing ownership claims |
 | A-2 | Hidden global-state assumptions | Checked every rule that consumes QuantLib; §4.2's inventory (G1–G10) plus ECB is the single reference. C3/C5/C7 and §7.2 K2 all point at it. No rule silently depends on an unlisted global |
 | A-3 | Cache keys missing methodology/version identity | Checked §7.4 column-by-column for L1–L8; L3 and L5 explicitly carry methodology identity, and §7.6 makes an unknown engine version unusable (K6). §8.2 CC7 carries calibration-policy identity |
-| A-4 | Undeterminable invalidation | Checked §7.5: invalidation is by key (I1), eviction is the only mechanism (I2), and I3 makes a hit/miss difference in the *result* a testable defect (CT1/CT6) |
-| A-5 | Ambiguous process/thread/request lifetime | Checked §5.3's classes against §6.2/§6.6/§7.3: PROCESS-GLOBAL, THREAD-LOCAL, REQUEST-LOCAL, IMMUTABLE and SHARED-READ-ONLY are defined once and used consistently |
+| A-4 | Undeterminable invalidation | Checked §7.5: invalidation is by key (I1), eviction is the only mechanism (I2), and I3 makes a hit/miss difference in the *result* a testable defect (CT1/CT6) — **for ordinary entries**; calibration is governed by §8.3.1 instead |
+| A-5 | Ambiguous process/thread/request lifetime | Checked §5.3's classes against §6.2/§6.6/§7.3: PROCESS-GLOBAL, THREAD-LOCAL, REQUEST-LOCAL, IMMUTABLE and SHARED-READ-ONLY are defined once and used consistently — including the §5.3-vs-§6.2 ownership wording and the storage qualifier, both corrected in this reconciliation |
 | A-6 | QuantLib types leaking across public boundaries | Checked §3.5 A1–A5, §6.4 N3, §6.5 B2, §7.3, §9.3 PB5. Structurally enforced, not merely stated |
 | A-7 | Benchmark warm/cold ambiguity | Checked §10.3/§10.6: process state and cache state are *separate* axes, both enumerated, and CS1 requires a documented priming procedure |
 | A-8 | Benchmark cache-state ambiguity | Checked §10.6 CS1–CS3 and §10.5 M6/M11: cache state and concurrency mode are mandatory metadata |
@@ -2086,6 +2118,9 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | A-12 | Accidental methodology choices | Checked §13.2 item-by-item, plus §8.4 and §6.8 X3. No RED value is selected anywhere; §3.6's defaults policy recuses itself explicitly (D8) |
 | A-13 | Accidental #227 implementation | Checked: no code, no build files, no workflows added (§13.4). Every normative item is marked as a contract for #227 |
 | A-14 | Claim-classification discipline | Checked that each section's claims carry OBSERVED / EXTERNAL EVIDENCE / PROPOSED / UNPROVEN, and that no statement blends a sourced fact with an unsourced one |
+| A-15 | **Benchmark phase availability vs implementation ownership** | Checked §10.3 against §2.10's tree, §10.8, §10.11, §15.2 D-6, §9.2 TL7 and Appendix C: every price-bearing or methodology-dependent phase is marked **DEFINED / DEFERRED**, is not a #227 deliverable, and cannot be required by the CI smoke test. *(This class was added because the §2.10 sibling survived an earlier audit that had no such row.)* |
+| A-16 | **Immutability asserted by `const`/read-only rather than by backing storage** | Checked §5.3/§5.4 against §6.2/§6.4 N1–N9: shareability is justified by **owning immutable storage**, never by "the engine only reads"; alias mutation of published identity is an explicit failure case (§9.2 TL3). *Added because §5.3/§5.4 still carried the pre-fix justification.* |
+| A-17 | **Dependency provenance placed in a #225 result field** | Checked §3.2's placement rule against §2.5, §2.7 P4/P6, §2.8, §3.9 U5, §4.5, §5.8 PE2, §12.3 G-2 and Appendix C U-O: the pin is Lane B + M4 + cache key everywhere, no existing field is overloaded, and no site names a Lane-A home. *Added because the §2.7 P6 paragraph survived an earlier audit that had no such row.* |
 
 **PROPOSED:** A-9 and A-12 are the two classes where a plausible-looking document fails most easily, and both are addressed by *removing* claims (rejecting the community assertions in §4.12, listing the UNPROVEN remainder) rather than by adding assurance.
 
@@ -2150,7 +2185,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | U-J2 | Mailing-list archives | Not audited | — |
 | U-K2 | ≤1.28 vs ≥1.29 session differences | Not enumerated | — |
 | U-O | **Approved placement of QuantLib dependency provenance (version + macro configuration) in the #225 result contract** | **Schema decision (owner / #225)** | Owner — #226 must not invent DTO semantics (`docs/33…225.md` `:1324–1325`); until approved it is emitted via Lane B + §10.5 M4 + §7.2 cache key (§12.3 G-2) |
-| U-H/I/J (concurrency) | Gate sufficiency, contention magnitude, multi-process scaling | Measurement | #227 (§10) |
+| U-H/I/J (concurrency) | Gate sufficiency, contention magnitude, multi-process scaling | Measurement | **#227** only for the **non-price-bearing harness path** (§10.3); **realistic-use contention magnitude and multi-process scaling are DEFERRED** to the #229-kernel era and require a §9.8 Q6 enablement proposal (§5.8 PE5) |
 | U-K/L/M (calibration) | Is calibration caching worthwhile; warning stability; key comparability across engines | Measurement | **Deferred** with the concrete calibration methodology (§8.4, §9.2 TL5) — not #227's scope |
 | D-9 | Narrow `.gitignore` for the C++ tree (`build/` trap) | Implementation | #227 |
 
@@ -2177,11 +2212,11 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 1. **Build:** C++20, no extensions, CMake ≥ 3.25 with presets, out-of-source, four locked targets, Windows-first without being Windows-only, dependencies pinned by a manifest, no fast-math.
 2. **QuantLib:** pinned, acquired through the manifest, isolated behind one adapter target; it **never** crosses the DTO boundary; **every default is set explicitly** or the engine refuses.
 3. **Concurrency:** **single-threaded serialized per process; parallel pricing DISABLED**; scale by multiple processes; all QuantLib access behind one measured gate; enabling parallelism requires §5.7 T1–T8 — **including T8, which tests the configuration actually being enabled** — **and** an owner decision; the absence of library-internal parallelism must be **verified** (`_OPENMP` undefined), not inferred from the OpenMP option.
-4. **Inputs:** caller-owned, immutable, borrowed, never mutated after publication, no I/O in the kernel, no global fixing store.
+4. **Inputs:** caller-owned and immutable — published state must be **owning immutable value state** or equivalently deep-immutable (§6.4 N4–N7); **no** non-owning alias into caller-mutable storage is retained as published request state; never mutated after publication; no I/O in the kernel; no global fixing store.
 5. **Caching:** cache **values**, never QuantLib objects; keys from explicit input identity only; no pointer, clock, global or unknown-version identity; version mismatch is a miss.
 6. **Calibration:** separate namespace, full key including methodology-policy identity, failures and non-convergence **not** reusable, **warning-bearing entries not reusable until warning stability is proven (U-L)**, unresolved policy ⇒ refuse; a **hit returns the original immutable calibration result instance unchanged — never a fabricated `calibrated_at`/id** (§8.3.1).
 7. **Tests:** GoogleTest, layers **TL0–TL8** (**tiered by owner** — #227 owns only the skeleton-executable layers; TL5's stability half, TL6's Tier K and CT9 are deferred, §9.2 / §5.7 tiers), defaults-audit matrix, structural no-QuantLib check, Python↔C++ parity, quarantined concurrency suite.
-8. **Benchmarks:** Google Benchmark, separate target; cold/warm × cache-state × phase; no blended number; mandatory reproducibility metadata; correctness-checked; no absolute-time CI gate.
+8. **Benchmarks:** Google Benchmark, separate target; cold/warm × cache-state × phase; no blended number; mandatory reproducibility metadata; correctness-checked; no absolute-time CI gate. **Taxonomy complete, availability tiered** — #227 builds the harness and smoke for non-price-bearing phases only, and price-bearing phases stay **DEFINED / DEFERRED** (§10.3).
 9. **CI:** existing Python and launcher jobs preserved; new C++ build/test/sanitizer/benchmark-smoke jobs; no path filter may bypass required validation.
 10. **Diagnostics — two lanes (§12.2).** **Lane A:** #225's result diagnostics stay inside `PricingResult`/`RiskResult`, deterministic and fingerprint-participating; **#226 never removes, renames, or moves them**. **Lane B:** `RATES_RUNTIME_TELEMETRY_V1` carries operational measurements (per-layer cache hit/miss, execution path, gate contention, timing, build/runtime identity) **out of band**, is **not** part of any result DTO, and does **not** enter a result fingerprint. Neither lane is a second source of methodology.
 
