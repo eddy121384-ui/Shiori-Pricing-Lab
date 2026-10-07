@@ -411,7 +411,7 @@ cpp/
 | P1 | Every C++ dependency is pinned to an **exact version** in `vcpkg.json` `overrides`, not a range and not "latest" |
 | P2 | The vcpkg registry itself is pinned by an exact **`builtin-baseline` commit SHA**; a floating baseline is forbidden because it silently changes dependency versions |
 | P3 | Integrity is verified by the hash recorded in the port (`SHA512` for the QuantLib port, per its `portfile.cmake`) |
-| P4 | **QuantLib's pinned version is a first-class part of the engine identity**, recorded in **Lane A** result diagnostics where #225's result carries it (§12.2), in benchmark metadata (§10.5), and in the replay identity required by #225 §15.4 |
+| P4 | **QuantLib's pinned version is a first-class part of the build and cache identity**, recorded in **benchmark metadata** (§10.5 **M4**), in the §7.2 **cache key**, and in **Lane B** telemetry — but **not** in the #225 result contract. #225 approves no field for dependency provenance, so #226 must **not** place it in **Lane A** and must **not** add it to #225's replay identity: doing so would force #227 to overload `engine_version` or invent a field (§12.3 **G-2**, open item **U-O**). The pin is what makes the identity exact; *where it is recorded* is bounded by #225's schema |
 | P5 | The Python side is **not** changed by this policy. `pyproject.toml`'s `QuantLib>=1.32` lower bound stays as-is; #226 neither tightens nor loosens it |
 | P6 | The C++ pinned version and the Python `quant` extra version may differ, but the *difference must be visible and deliberate*: they are separate dependency planes. A shared version is **not** required and must not be assumed |
 | P7 | No `CMakeLists.txt` / `vcpkg.json` is added by #226 (§1.2), and any future change to them is a protected-path change requiring explicit review |
@@ -622,7 +622,7 @@ The rule is implemented by **inversion**: rather than starting from QuantLib's d
 | E3 | `shiori_rates_dto` / `shiori_rates_core` do not link QuantLib | Target graph **plus a link-artifact scan over every artifact shape the build can actually produce** — `.lib` and `.a` **static archives**, `.so` shared objects, and the final linked executables or link map. **A `.lib`/`.so`-only scan is insufficient:** §2.6 makes Windows static-only and §11.3 deliberately does not assert Linux linkage, so a compliant **static Linux build** produces `.a` archives that such a scan never opens, and a forbidden QuantLib reference escapes E3 entirely on a build that satisfies every other rule. The platform-specific artifact set must be **derived from the built targets**, not hard-coded (MSVC `.lib`, GNU/LLVM `.a`) |
 | E4 | No `ql::` exception is part of a caller-visible signature | E2 plus an exception-mapping test (A2) |
 | E5 | Every D1–D17 setting is explicit or refused | §3.6 default-audit tests |
-| E6 | QuantLib version is emitted as **engine provenance** (Lane A where #225's result carries it) and appears in benchmark metadata | §12.2, §10.5 |
+| E6 | QuantLib version is emitted as **dependency provenance** in **Lane B** telemetry and in benchmark metadata (§10.5 **M4**) — **not** in the #225 result contract, which approves no field for it (§12.3 **G-2**, Appendix C **U-O**) | §12.2–§12.3, §10.5 |
 
 **PROPOSED:** E1/E1a are stated as an **allow-list** deliberately. A deny-list formulation ("no `ql/` anywhere else") is the natural phrasing but it is wrong here, because the tests that make the isolation auditable must themselves see QuantLib. The isolatable property is that **production targets** do not depend on QuantLib — which E3 enforces structurally at the link level — not that the string `ql/` appears nowhere outside one directory.
 
@@ -1093,7 +1093,7 @@ Option (2) is the only one that is a **proof obligation** rather than an archite
 
 ### 5.7 Concurrency-correctness tests (the evidence gate)
 
-**PROPOSED.** These tests do not exist yet. They are the **only** route from §5.2's disabled posture to anything else, and #227+ must create them.
+**PROPOSED.** These tests do not exist yet. They are the **only** route from §5.2's disabled posture to anything else, and **#227** must create Tier S and **#229** Tier K (§5.7 tiers).
 
 | # | Test | What it must prove |
 |---|---|---|
@@ -1557,7 +1557,7 @@ cpp/rates_engine/
 | **TL2 Boundary isolation** | Compile-time/structural assertion that no public DTO depends on a QuantLib type | §3.5 A1–A5, §6.5 B2, AC 6 |
 | **TL3 Determinism / replay** | Same input twice ⇒ identical output; fingerprint stability; no clock/global influence | §6.7, AC 11 |
 | **TL4 Cache correctness** | §7.7 CT1–CT8 + CT3b | §7, AC 12/13 |
-| **TL5 Calibration outcomes** | Converged / warnings / non-converged / failed / refused are distinguishable and survive the cache — **plus the warning-stability test** that discharges §8.6 **U-L**: identical inputs produce an identical warning set, which is what the §8.3 "converged with warnings" rule waits on before such an entry may ever be reused | §8.3, §8.6 U-L, AC 14 |
+| **TL5 Calibration outcomes** | Converged / warnings / non-converged / failed / refused are distinguishable and survive the cache — **plus the warning-stability test** that discharges §8.6 **U-L**: identical inputs produce an identical warning set, which is what the §8.3 "converged with warnings" rule waits on before such an entry may ever be reused. **#227 cannot discharge this half.** #227 has skeleton/DTO scope only, and there is no approved calibration objective, optimizer, tolerance, or concrete calibration implementation (`RED-225-*`, §8), so a mock or refusal-only test proves nothing about the real path's warning behaviour — and treating it as proof would allow warning-bearing entries to be served from cache without that implementation ever being validated. The **distinguishability** half is #227's (a DTO/cache-shape property); the **stability** half is required **in the change that introduces the concrete calibration methodology**, and **U-L stays open until then** | §8.3, §8.6 U-L, AC 14 |
 | **TL6 Concurrency correctness** | §5.7 T1–T8 | §5, AC 16 — **the sole gate for AC 10** |
 | **TL7 Benchmark correctness** | §10.8 — every benchmark validates its result | §10, AC 17/18 |
 | **TL8 Failure / fail-closed** | Every refusal path returns a reason; nothing silently degrades | §6.8, §13 |
@@ -1628,7 +1628,7 @@ It must **not** mean "the suite cannot be executed". An earlier draft said the s
 | # | Rule |
 |---|---|
 | Q0 | The suite is runnable in an explicit **evidence-collection mode** — a dedicated CMake option plus a CTest label (e.g. `-DSHIORI_EVIDENCE_RUNS=ON` and `ctest -L concurrency-evidence`), which the §11.3 jobs invoke to produce PE1's evidence. **Quarantine governs the default configuration and the claims made, never the ability to gather evidence** |
-| Q1 | In the **default** configuration, quarantined tests are **listed in the test executable** and reported as skipped with a reason naming §5.8. In evidence mode the same tests run and report normally, **except T8, which is governed by Q6** |
+| Q1 | In the **default** configuration, quarantined tests are **listed in the test executable** and reported as skipped with a reason naming §5.8. In evidence mode the same tests run and report normally, **except Tier K, which is governed by Q7, and T8, which is governed by Q6** |
 | Q2 | A skip count of zero is **not** evidence of correctness; the suite's status is reported in CI output and **Lane B** telemetry (§12.2) |
 | Q3 | Nothing may be described as "concurrency-safe" on the basis of a skipped test |
 | Q4 | When a test is running and applicable, a **failure is a blocker**, never a flake to be retried (§11.8) |
@@ -1887,7 +1887,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 
 | # | Rule |
 |---|---|
-| DG1 | **Lane A content** is deterministic for a given input over the replay-relevant fields — **G-1, G-8, G-9, G-10, G-11** (every one carried by an approved #225 field): what was computed, from what, with which engine, and why if refused — and **participates in the result content fingerprint exactly as #225 §15.4 specifies**. These describe *what happened* and must be reproducible. Timestamps may exist as log annotations but must never enter a §7.2 key or a result |
+| DG1 | **Lane A content** is deterministic for a given input over the replay-relevant fields — **G-1, G-8, G-9, G-10, G-11** (every one carried by an approved #225 field): what was computed, from what, with which engine, and why if refused — and **participates in the result content fingerprint exactly as #225 §15.4 specifies**. These describe *what happened* and must be reproducible. **Only *ambient* timestamps and other wall-clock observations are excluded** — they may exist as log annotations but must never define identity. **Contract-defined timestamps are not ambient and MUST be preserved in canonical identity:** an explicit input such as `MarketSnapshot.captured_at` **does** participate in `snapshot_id` and the canonical content fingerprint (§9.7 **BF4**; #225 §6.3 identity rules), so forbidding it would collapse two distinct snapshots onto one cache key and serve a result with the wrong input provenance. **The test is provenance, not type:** if #225's contract names the value as an input, it is identity; if the engine merely observed the clock, it is not |
 | DG1a | **Lane B measurements are explicitly nondeterministic and must not be asserted deterministic.** **G-2** (QuantLib version + macro configuration) and **G-3** (build identity) are stable **per build**; **G-4** (cache hit/miss per layer), **G-5** (execution path served), **G-6** (concurrency mode + observed gate contention: acquisitions, waits) and **G-7** (timing breakdown) legitimately vary for the *same* input with cache population, concurrent load and elapsed time. Requiring them to be stable would force an implementation to either suppress them or fabricate them — destroying the observability §12 exists to provide. Tests assert their **presence and structural validity**, never their values. (An earlier draft required *all* diagnostic content to be deterministic, which was incompatible with emitting G-4/G-5/G-6/G-7 at all) |
 | DG2 | No secrets, credentials, or raw captured market data are emitted in **either** lane |
 | DG3 | Fingerprints are logged **hashed**; the preimage is not emitted (§6.7) |
@@ -1981,7 +1981,7 @@ A consumer of **either** channel must detect an unknown version and fail closed 
 | 11 | Immutable snapshot / ownership / lifetime rules explicit | §6.2, §6.4, §6.6 | **Satisfied** |
 | 12 | Allowed cache layers enumerated | §7.4 L1–L8 | **Satisfied** |
 | 13 | Every cache layer has deterministic key + invalidation rules | §7.4 (key/lifetime/invalidation columns), §7.5, §7.7 | **Satisfied** |
-| 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5, §8.6 **U-L**, §9.2 TL5 | **Satisfied** — reuse is explicit *and* explicitly conditional: a warning-bearing entry is not reusable until §8.6 U-L is discharged by the TL5 warning-stability test |
+| 14 | Calibration-cache identity and reuse rules explicit | §8.2, §8.3, §8.5, §8.6 **U-L**, §9.2 TL5 | **Satisfied** — reuse is explicit *and* explicitly conditional: a warning-bearing entry is not reusable until §8.6 U-L is discharged by the TL5 warning-stability test — which **#227 cannot supply** (§9.2 TL5) |
 | 15 | C++ test framework and layout defined | §9.1, §9.2 | **Satisfied** |
 | 16 | Concurrency and cache correctness test requirements defined | §5.7 T1–T8 (**tiered S/K** — Tier S required of #227, Tier K with #229), §7.7 CT1–CT8 + CT3b, §9.6, §9.8 Q7 | **Satisfied** |
 | 17 | Benchmark methodology separates cold/warm and cache state | §10.3, §10.4, §10.6 | **Satisfied** |
