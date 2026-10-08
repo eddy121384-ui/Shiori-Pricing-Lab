@@ -55,9 +55,11 @@ TEST(CanonicalNumber, CollapsesSignedZeroToOneRepresentation) {
 }
 
 TEST(CanonicalNumber, RefusesNonFiniteValues) {
-  EXPECT_THROW(Shiori::rates::dto::canonical_number(std::nan("")), ContractViolation);
-  EXPECT_THROW(Shiori::rates::dto::canonical_number(1.0 / 0.0), ContractViolation);
-  EXPECT_THROW(Shiori::rates::dto::canonical_number(-1.0 / 0.0), ContractViolation);
+  // The result is deliberately discarded: these cases prove the refusal, not the rendering, and a
+  // discarded [[nodiscard]] result inside EXPECT_THROW is exactly what -Wunused-result rejects.
+  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(std::nan("")), ContractViolation);
+  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(1.0 / 0.0), ContractViolation);
+  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(-1.0 / 0.0), ContractViolation);
   // A non-finite double is not representable, so it must be refused at construction too.
   EXPECT_THROW(CanonicalValue(std::nan("")), ContractViolation);
 }
@@ -77,7 +79,7 @@ TEST(CanonicalObject, OrdersKeysByUtf8ByteOrder) {
 }
 
 TEST(CanonicalObject, RefusesDuplicateKeys) {
-  EXPECT_THROW((CanonicalValue::make_object({
+  EXPECT_THROW(((void)CanonicalValue::make_object({
                    {"a", CanonicalValue(1)},
                    {"a", CanonicalValue(2)},
                })),
