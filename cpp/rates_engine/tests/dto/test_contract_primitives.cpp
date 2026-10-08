@@ -27,8 +27,14 @@ using Shiori::rates::dto::ContractViolation;
 
 template <typename Enum>
 [[nodiscard]] bool token_is_known(const char* token) {
-  Enum value{};
-  return Shiori::rates::dto::enum_from_token<Enum>(std::string_view(token), value);
+  // enum_from_token<Enum> is the fail-closed form: it RAISES on an unknown token instead of returning
+  // a status, so "is this token known" has to be answered by catching the refusal.
+  try {
+    (void)Shiori::rates::dto::enum_from_token<Enum>(std::string_view(token), "");
+    return true;
+  } catch (const ContractViolation&) {
+    return false;
+  }
 }
 
 }  // namespace
@@ -42,13 +48,12 @@ TEST(Vocabulary, RoundTripsAReusedCrossLanguageToken) {
   // the C++ engine must agree on the exact tokens, so this is a cross-language anchor, not a local
   // naming choice.
   for (const char* token : {"USD", "EUR"}) {
-    Currency parsed{};
-    ASSERT_TRUE(enum_from_token(std::string_view(token), parsed)) << token;
+    const Currency parsed = enum_from_token<Currency>(std::string_view(token), "");
     EXPECT_EQ(std::string(enum_to_token(parsed)), token);
   }
-  Currency unused{};
-  EXPECT_FALSE(enum_from_token(std::string_view("NOT_A_CURRENCY"), unused));
-  EXPECT_FALSE(enum_from_token(std::string_view("usd"), unused))
+  EXPECT_TRUE(token_is_known<Currency>("USD"));
+  EXPECT_FALSE(token_is_known<Currency>("NOT_A_CURRENCY"));
+  EXPECT_FALSE(token_is_known<Currency>("usd"))
       << "vocabulary matching is exact case; a lowercase accept would create two vocabularies";
 }
 
@@ -168,12 +173,13 @@ TEST(ValueOrReason, RoundTripsThePresentStateAndRefusesAMalformedUnion) {
   using Shiori::rates::dto::Unit;
   using Shiori::rates::dto::ValueOrReason;
 
-  Unit decimal_annual{};
-  ASSERT_TRUE(Shiori::rates::dto::enum_from_token<Unit>(
-      std::string_view("DECIMAL_ANNUAL"), decimal_annual));
+  const Unit decimal_annual = Shiori::rates::dto::enum_from_token<Unit>(
+      std::string_view("DECIMAL_ANNUAL"), "");
   const NumericWithUnit rate = NumericWithUnit::from_canonical(
       Shiori::rates::dto::parse_canonical_json(R"({"unit":"DECIMAL_ANNUAL","value":0.0425})"), "");
-  rate.require_unit(decimal_annual, "");
+  // require_unit is [[nodiscard]]: discarding it would be a warning, and with warnings-as-errors a
+  // silent failure to check the unit must not be expressible.
+  (void)rate.require_unit(decimal_annual, "");
 
   const ValueOrReason<NumericWithUnit> present = ValueOrReason<NumericWithUnit>::of(rate);
   const CanonicalValue encoded = present.to_canonical();
@@ -204,18 +210,16 @@ TEST(NumericWithUnit, RefusesAUnitThatDisagreesWithTheFieldSemantics) {
   using Shiori::rates::dto::NumericWithUnit;
   using Shiori::rates::dto::Unit;
 
-  Unit percent_raw{};
-  ASSERT_TRUE(Shiori::rates::dto::enum_from_token<Unit>(std::string_view("PERCENT_RAW_UNCONVERTED"),
-                                                        percent_raw));
-  Unit ratio{};
-  ASSERT_TRUE(Shiori::rates::dto::enum_from_token<Unit>(std::string_view("RATIO"), ratio));
+  const Unit percent_raw = Shiori::rates::dto::enum_from_token<Unit>(
+      std::string_view("PERCENT_RAW_UNCONVERTED"), "");
+  const Unit ratio = Shiori::rates::dto::enum_from_token<Unit>(std::string_view("RATIO"), "");
 
   const NumericWithUnit as_percent = NumericWithUnit::from_canonical(
       Shiori::rates::dto::parse_canonical_json(
           R"({"unit":"PERCENT_RAW_UNCONVERTED","value":4.25})"),
       "");
-  as_percent.require_unit(percent_raw, "");
+  (void)as_percent.require_unit(percent_raw, "");
   // A discount factor is a RATIO; a raw percent quote is not, and RE-BASING it here would invent a
   // conversion the contract never approved.
-  EXPECT_THROW(as_percent.require_unit(ratio, ""), ContractViolation);
+  EXPECT_THROW((void)as_percent.require_unit(ratio, ""), ContractViolation);
 }
