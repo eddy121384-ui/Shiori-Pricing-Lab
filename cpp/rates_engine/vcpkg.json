@@ -1,0 +1,51 @@
+{
+  "$comment": [
+    "Shiori Rates Engine native dependency manifest (Issue #227, contract locked by Issue #226 section 2.6/2.7).",
+    "PRIMARY acquisition path. The pinned 'builtin-baseline' plus exact 'overrides' are the reproducible",
+    "dependency identity (Issue #226 P1/P2): no range pins, no 'latest compatible', no floating baseline.",
+    "QuantLib is pinned to 1.43 and is NOT a routine bump (Issue #226 section 3.2/3.8).",
+    "The vcpkg quantlib port declares supports '!(windows & !static)', so Windows must use a static triplet",
+    "(x64-windows-static). See CMakePresets.json."
+  ],
+  "name": "shiori-rates-engine",
+  "version-string": "0.1.0",
+  "builtin-baseline": "2750401336fb7c95f6619657a46a7e798661341c",
+  "dependencies": [
+    {
+      "name": "quantlib",
+      "version>=": "1.43"
+    },
+    {
+      "name": "nlohmann-json",
+      "version>=": "3.12.0"
+    },
+    {
+      "name": "gtest",
+      "version>=": "1.18.0"
+    },
+    {
+      "name": "benchmark",
+      "version>=": "1.9.5"
+    }
+  ],
+  "overrides": [
+    {
+      "name": "quantlib",
+      "version": "1.43",
+      "port-version": 0
+    },
+    {
+      "name": "nlohmann-json",
+      "version-semver": "3.12.0",
+      "port-version": 2
+    },
+    {
+      "name": "gtest",
+      "version-semver": "1.18.0"
+    },
+    {
+      "name": "benchmark",
+      "version-semver": "1.9.5"
+    }
+  ]
+}

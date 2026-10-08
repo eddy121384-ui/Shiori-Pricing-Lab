@@ -15,6 +15,12 @@ build/
 dist/
 *.egg-info/
 
+# C++ Rates Engine (Issue #227): CMakePresets is the only configuration authority and every preset
+# places its tree under cpp/rates_engine/build/<preset>/. Generated headers and vcpkg material are
+# never committed. Stated explicitly so the C++ tree's build output path cannot be mistaken for a
+# source directory.
+/cpp/rates_engine/build/
+
 # Test / coverage
 .pytest_cache/
 .coverage
