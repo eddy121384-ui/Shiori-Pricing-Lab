@@ -17,6 +17,9 @@
 #include <string_view>
 
 #include "shiori_rates/dto/kernel_input.hpp"
+// dto::EngineIdentity is declared here; keeping identity() typed as a DTO is deliberate, so the
+// engine reports exactly the wire identity the documents carry.
+#include "shiori_rates/dto/result.hpp"
 
 namespace Shiori::rates::engine {
 

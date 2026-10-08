@@ -351,18 +351,20 @@ CanonicalValue CanonicalValue::make_object(CanonicalMembers members) {
            "duplicate object key is not representable in canonical JSON");
     }
   }
-  CanonicalValue value;
   auto object = std::make_shared<Object>();
   object->members = std::move(members);
-  value.storage_ = std::move(object);
+  // Emplace the active alternative instead of assigning into the variant: assignment instantiates
+  // every alternative's assignment operator, including the shared_ptr one.
+  CanonicalValue value;
+  value.storage_.emplace<std::shared_ptr<const Object>>(std::move(object));
   return value;
 }
 
 CanonicalValue CanonicalValue::make_array(CanonicalItems items) {
-  CanonicalValue value;
   auto array = std::make_shared<Array>();
   array->items = std::move(items);
-  value.storage_ = std::move(array);
+  CanonicalValue value;
+  value.storage_.emplace<std::shared_ptr<const Array>>(std::move(array));
   return value;
 }
 

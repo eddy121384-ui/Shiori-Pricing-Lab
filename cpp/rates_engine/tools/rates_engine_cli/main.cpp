@@ -29,6 +29,10 @@
 #include "shiori_rates/diagnostics/runtime_telemetry.hpp"
 #include "shiori_rates/quantlib_adapter/adapter.hpp"
 
+// The helpers below qualify types as dto::/engine::/adapter::/diagnostics::, so the Shiori::rates
+// namespaces have to be visible at file scope. `main` itself stays at global scope.
+using namespace Shiori::rates;
+
 namespace {
 
 using dto::CanonicalItems;

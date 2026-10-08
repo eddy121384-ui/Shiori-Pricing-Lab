@@ -55,7 +55,7 @@ TEST(QuantLibDefaults, GuardInstallsAnExplicitEvaluationDateThatQuantLibItselfRe
 TEST(QuantLibDefaults, GuardPreservesUnrelatedProcessGlobalSettings) {
   QuantLib::Settings& settings = QuantLib::Settings::instance();
   const bool original = settings.enforcesTodaysHistoricFixings();
-  settings.enforcesTodaysHistoricFixings(true);
+  settings.enforcesTodaysHistoricFixings() = true;
   EXPECT_TRUE(QuantLib::Settings::instance().enforcesTodaysHistoricFixings());
   {
     QuantLibSettingsGuard guard("2026-06-10");
@@ -64,7 +64,7 @@ TEST(QuantLibDefaults, GuardPreservesUnrelatedProcessGlobalSettings) {
   // The flag is part of the process-global state the guard is responsible for; leaving it flipped
   // would make a later valuation depend on an earlier caller.
   EXPECT_TRUE(QuantLib::Settings::instance().enforcesTodaysHistoricFixings());
-  settings.enforcesTodaysHistoricFixings(original);
+  settings.enforcesTodaysHistoricFixings() = original;
 }
 
 TEST(QuantLibDefaults, IdentityNamesTheGlobalStateTheBoundaryOwns) {

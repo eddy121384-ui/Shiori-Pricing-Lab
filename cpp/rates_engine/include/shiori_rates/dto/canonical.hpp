@@ -67,11 +67,12 @@ class CanonicalValue {
   CanonicalValue(bool value) noexcept : storage_(value) {}
   CanonicalValue(std::int64_t value) noexcept : storage_(value) {}
   CanonicalValue(int value) noexcept : storage_(static_cast<std::int64_t>(value)) {}
-  CanonicalValue(std::size_t value) {
+  CanonicalValue(std::size_t value) : storage_(static_cast<std::int64_t>(value)) {
+    // R4, as for double: refuse a value the canonical form cannot represent, at construction and
+    // not by assigning into a default-constructed variant.
     if (value > static_cast<std::size_t>(kMaxInt64)) {
       fail_numeric();
     }
-    storage_ = static_cast<std::int64_t>(value);
   }
   CanonicalValue(double value) : storage_(value) {
     // R4: refuse unrepresentable numerics at construction time rather than at dump time.

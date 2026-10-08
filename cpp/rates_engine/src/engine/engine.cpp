@@ -24,7 +24,7 @@ namespace {
   return value.dump();
 }
 
-void capture_refusal(dto::OperationOutcome& outcome, const dto::ContractViolation& violation) {
+void capture_refusal(OperationOutcome& outcome, const dto::ContractViolation& violation) {
   outcome.success = false;
   outcome.refusal_token = std::string(violation.token());
   outcome.refusal_pointer = violation.pointer();
@@ -73,8 +73,8 @@ const BuildIdentity& build_identity() {
   return identity_value;
 }
 
-dto::OperationOutcome validate_kernel_input(std::string_view canonical_json) {
-  dto::OperationOutcome outcome;
+OperationOutcome validate_kernel_input(std::string_view canonical_json) {
+  OperationOutcome outcome;
   try {
     const dto::RatesKernelInput input = decode_and_validate(canonical_json);
     // The reported facts are identity facts only. No price, no discount factor, no curve value and no
@@ -104,8 +104,8 @@ dto::OperationOutcome validate_kernel_input(std::string_view canonical_json) {
   return outcome;
 }
 
-dto::OperationOutcome canonicalize_kernel_input(std::string_view canonical_json) {
-  dto::OperationOutcome outcome;
+OperationOutcome canonicalize_kernel_input(std::string_view canonical_json) {
+  OperationOutcome outcome;
   try {
     const dto::RatesKernelInput input = decode_and_validate(canonical_json);
     const dto::CanonicalValue document = input.to_canonical();

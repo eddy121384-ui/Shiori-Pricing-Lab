@@ -1,3 +1,5 @@
+#include "shiori_rates/diagnostics/runtime_telemetry.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>

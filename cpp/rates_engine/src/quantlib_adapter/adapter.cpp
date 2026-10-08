@@ -333,7 +333,7 @@ QuantLibSettingsGuard::QuantLibSettingsGuard(std::string_view iso_valuation_date
   impl_->armed = true;
 
   QuantLib::Settings& settings = QuantLib::Settings::instance();
-  settings.evaluationDate(requested);
+  settings.evaluationDate() = requested;
 
   const QuantLib::Date observed = QuantLib::Settings::instance().evaluationDate();
   if (!(observed == requested)) {
@@ -359,7 +359,7 @@ QuantLibSettingsGuard::~QuantLibSettingsGuard() {
       return;
     }
   } else {
-    settings.evaluationDate(impl_->previous_evaluation_date);
+    settings.evaluationDate() = impl_->previous_evaluation_date;
     if (QuantLib::Settings::instance().evaluationDate() != impl_->previous_evaluation_date) {
       refusal_reason_ =
           "QuantLib settings guard could not restore the previous evaluation date";
@@ -368,7 +368,7 @@ QuantLibSettingsGuard::~QuantLibSettingsGuard() {
       return;
     }
   }
-  settings.enforcesTodaysHistoricFixings(impl_->previous_enforces_historic_fixings);
+  settings.enforcesTodaysHistoricFixings() = impl_->previous_enforces_historic_fixings;
   if (QuantLib::Settings::instance().enforcesTodaysHistoricFixings() !=
       impl_->previous_enforces_historic_fixings) {
     refusal_reason_ =
