@@ -430,7 +430,7 @@ CurveCommon curve_common_from_canonical(const CanonicalValue& node, const std::s
 
   // Role/applicability rules, section 7.2/7.3.
   if (result.curve_role == CurveRole::kDiscount) {
-    result.index_id.require_null_with_reason(child(pointer, "index_id"),
+    (void)result.index_id.require_null_with_reason(child(pointer, "index_id"),
                                              ReasonCategory::kNotApplicable);
   } else {
     if (!result.index_id.present) {
@@ -464,7 +464,7 @@ CurveCommon curve_common_from_canonical(const CanonicalValue& node, const std::s
   // Section 7.2: reference_date_reason is NOT_APPLICABLE when the dates agree, and PRESENT with an
   // explicit explanation when they differ.
   if (result.reference_date.text == result.valuation_date.text) {
-    result.reference_date_reason.require_null_with_reason(
+    (void)result.reference_date_reason.require_null_with_reason(
         child(pointer, "reference_date_reason"), ReasonCategory::kNotApplicable);
   } else if (!result.reference_date_reason.present) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "reference_date_reason"),
@@ -542,8 +542,6 @@ CanonicalValue curve_full_canonical(const CurveCommon& common, const SchemaVersi
   return CanonicalValue::make_object(std::move(members));
 }
 
-CanonicalValue DiscountCurve::to_canonical() const { return curve_common_to_canonical(common); }
-
 const CurveCommon& Curve::common() const {
   if (std::holds_alternative<DiscountCurve>(body)) {
     return std::get<DiscountCurve>(body).common;
@@ -573,7 +571,7 @@ Curve Curve::from_canonical(const CanonicalValue& node, const std::string& point
   }
   const std::string& version_token = version_node->as_string();
   if (version_token == to_token(SchemaVersion::kDiscountCurveV1)) {
-    require_schema_version(node, SchemaVersion::kDiscountCurveV1, pointer);
+    (void)require_schema_version(node, SchemaVersion::kDiscountCurveV1, pointer);
     DiscountCurve curve;
     curve.common = curve_common_from_canonical(node, pointer, discount_curve_keys());
     Curve result{std::move(curve)};
@@ -581,7 +579,7 @@ Curve Curve::from_canonical(const CanonicalValue& node, const std::string& point
     return result;
   }
   if (version_token == to_token(SchemaVersion::kForwardCurveV1)) {
-    require_schema_version(node, SchemaVersion::kForwardCurveV1, pointer);
+    (void)require_schema_version(node, SchemaVersion::kForwardCurveV1, pointer);
     ForwardCurve curve;
     curve.common = curve_common_from_canonical(node, pointer, forward_curve_keys());
     curve.index_tenor = ValueOrReason<std::string>::from_canonical(
@@ -699,7 +697,7 @@ CanonicalValue CurveSet::to_canonical() const {
 }
 
 CurveSet CurveSet::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kCurveSetV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kCurveSetV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "curve_set_id", "valuation_date", "base_currency", "curves",
                      "construction", "provenance", "content_fingerprint"});
@@ -908,7 +906,7 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
   // Section 8.2: a PRESENT fixing value must carry DECIMAL_ANNUAL, and the mountain of
   // state-dependent fields must agree with `observation_state`.
   if (result.value.present) {
-    result.value.value.require_unit(Unit::kDecimalAnnual, child(pointer, "value"));
+    (void)result.value.value.require_unit(Unit::kDecimalAnnual, child(pointer, "value"));
     if (result.observation_state == ObservationState::kMissing) {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "observation_state"),
            "a MISSING observation must not carry a PRESENT value");
@@ -1006,7 +1004,7 @@ CanonicalValue FixingStore::to_canonical() const {
 }
 
 FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kFixingStoreV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kFixingStoreV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "fixing_store_id", "valuation_date", "same_day_rule",
                      "entries", "provenance", "content_fingerprint"});
@@ -1103,7 +1101,7 @@ CanonicalValue VolatilityInput::to_canonical() const {
 
 VolatilityInput VolatilityInput::from_canonical(const CanonicalValue& node,
                                                 const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kVolatilityInputV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kVolatilityInputV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "volatility_input_id", "valuation_date", "payload",
                      "provenance", "content_fingerprint"});
@@ -1215,7 +1213,7 @@ CanonicalValue MarketSnapshot::to_canonical() const {
 }
 
 MarketSnapshot MarketSnapshot::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kMarketSnapshotV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kMarketSnapshotV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "snapshot_id", "valuation_date", "captured_at", "source",
                      "source_detail", "curve_set_ref", "curve_set", "fixing_store_ref",

@@ -385,7 +385,7 @@ CanonicalValue PricingResult::to_canonical() const {
 }
 
 PricingResult PricingResult::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kRatesPricingResultV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kRatesPricingResultV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "product_id", "product_type", "valuation_date",
                      "valuation_context_id", "result_currency", "headline", "pv",
@@ -554,11 +554,11 @@ TenorBucketCoordinate TenorBucketCoordinate::from_canonical(const CanonicalValue
                                                       child(pointer, "coordinate"));
   // Section 13.2: the tenor coordinate is the authoritative machine coordinate and must be a year
   // fraction; a label can never change identity.
-  result.coordinate.require_unit(Unit::kYearsFraction, child(pointer, "coordinate"));
+  (void)result.coordinate.require_unit(Unit::kYearsFraction, child(pointer, "coordinate"));
   result.label = ValueOrReason<std::string>::from_canonical(node.at("label", pointer),
                                                             child(pointer, "label"));
   if (result.curve_usage_role == CurveUsageRole::kDiscount) {
-    result.index_id.require_null_with_reason(child(pointer, "index_id"),
+    (void)result.index_id.require_null_with_reason(child(pointer, "index_id"),
                                              ReasonCategory::kNotApplicable);
   } else if (!result.index_id.present) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "index_id"),
@@ -835,7 +835,7 @@ RiskMeasure RiskMeasure::from_canonical(const CanonicalValue& node, const std::s
   // Section 13.2: bucket_coordinate and bump_target applicability are exact by bump_type.
   const RiskBumpType bump_type = result.bump_spec.bump_type;
   if (bump_type == RiskBumpType::kParallelBp) {
-    result.bucket_coordinate.require_null_with_reason(child(pointer, "bucket_coordinate"),
+    (void)result.bucket_coordinate.require_null_with_reason(child(pointer, "bucket_coordinate"),
                                                       ReasonCategory::kNotApplicable);
     if (!result.bump_spec.bump_target.present) {
       fail(ContractViolationKind::kInvalidTaggedUnionState, child(pointer, "bump_spec"),
@@ -847,7 +847,7 @@ RiskMeasure RiskMeasure::from_canonical(const CanonicalValue& node, const std::s
       fail(ContractViolationKind::kInvalidTaggedUnionState, child(pointer, "bucket_coordinate"),
            "a bucketed bump type requires a PRESENT bucket coordinate");
     }
-    result.bump_spec.bump_target.require_null_with_reason(
+    (void)result.bump_spec.bump_target.require_null_with_reason(
         child(child(pointer, "bump_spec"), "bump_target"), ReasonCategory::kNotApplicable);
     const RiskBucketKind expected =
         bump_type == RiskBumpType::kBucketedTenor
@@ -888,7 +888,7 @@ CanonicalValue RiskResult::to_canonical() const {
 }
 
 RiskResult RiskResult::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kRatesRiskResultV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kRatesRiskResultV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "product_id", "product_type", "valuation_date",
                      "valuation_context_id", "result_currency", "measures", "inputs_identity",

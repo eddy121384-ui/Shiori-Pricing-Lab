@@ -68,7 +68,7 @@ CanonicalValue ModelCalibrationInput::to_canonical() const {
 
 ModelCalibrationInput ModelCalibrationInput::from_canonical(const CanonicalValue& node,
                                                             const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kModelCalibrationInputV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kModelCalibrationInputV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "calibration_input_id", "payload", "provenance",
                      "content_fingerprint"});
@@ -141,7 +141,7 @@ CanonicalValue ModelCalibrationResult::to_canonical() const {
 
 ModelCalibrationResult ModelCalibrationResult::from_canonical(const CanonicalValue& node,
                                                               const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kModelCalibrationResultV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kModelCalibrationResultV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "calibration_result_id", "payload", "provenance",
                      "content_fingerprint"});

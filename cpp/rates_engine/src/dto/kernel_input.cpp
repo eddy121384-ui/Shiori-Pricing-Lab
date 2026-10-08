@@ -43,26 +43,6 @@ namespace {
   return CanonicalValue::make_object(std::move(members));
 }
 
-// One derived pair: id + content fingerprint, where the id is optional (ResolvedSwap and
-// RatesKernelInput have no id field).
-[[nodiscard]] std::string derive_id(const CanonicalValue& document,
-                                    const std::vector<std::string_view>& excluded) {
-  CanonicalMembers members;
-  for (const auto& member : document.as_object().members) {
-    bool drop = false;
-    for (const std::string_view key : excluded) {
-      if (member.first == key) {
-        drop = true;
-        break;
-      }
-    }
-    if (!drop) {
-      members.push_back(member);
-    }
-  }
-  return fingerprint_of(CanonicalValue::make_object(std::move(members)));
-}
-
 [[nodiscard]] std::vector<Date> date_list_from_canonical(const CanonicalValue& node,
                                                          const std::string& pointer) {
   if (!node.is_array()) {
@@ -115,7 +95,7 @@ CanonicalValue ResolvedSwap::to_canonical() const {
 }
 
 ResolvedSwap ResolvedSwap::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kResolvedSwapV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kResolvedSwapV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "product_id", "convention_set_id", "currency", "notional",
                      "pay_receive", "fixed_rate", "spread", "floating_index", "resolved",
@@ -130,15 +110,15 @@ ResolvedSwap ResolvedSwap::from_canonical(const CanonicalValue& node, const std:
                                                   child(pointer, "currency"));
   result.notional = NumericWithUnit::from_canonical(node.at("notional", pointer),
                                                     child(pointer, "notional"));
-  result.notional.require_unit(Unit::kCurrencyAmount, child(pointer, "notional"));
+  (void)result.notional.require_unit(Unit::kCurrencyAmount, child(pointer, "notional"));
   result.pay_receive = enum_from_canonical<PayReceive>(node.at("pay_receive", pointer),
                                                        child(pointer, "pay_receive"));
   result.fixed_rate = NumericWithUnit::from_canonical(node.at("fixed_rate", pointer),
                                                       child(pointer, "fixed_rate"));
-  result.fixed_rate.require_unit(Unit::kDecimalAnnual, child(pointer, "fixed_rate"));
+  (void)result.fixed_rate.require_unit(Unit::kDecimalAnnual, child(pointer, "fixed_rate"));
   result.spread = NumericWithUnit::from_canonical(node.at("spread", pointer),
                                                   child(pointer, "spread"));
-  result.spread.require_unit(Unit::kDecimalAnnual, child(pointer, "spread"));
+  (void)result.spread.require_unit(Unit::kDecimalAnnual, child(pointer, "spread"));
   result.floating_index = enum_from_canonical<FloatingIndex>(node.at("floating_index", pointer),
                                                              child(pointer, "floating_index"));
   const CanonicalValue& resolved_node = node.at("resolved", pointer);
@@ -233,7 +213,7 @@ CanonicalValue ExerciseTerms::to_canonical() const {
 }
 
 ExerciseTerms ExerciseTerms::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kExerciseTermsV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kExerciseTermsV1, pointer);
   const std::vector<std::string_view> allowed_keys(std::begin(kExerciseKeys),
                                                   std::end(kExerciseKeys));
   require_only_keys(node, pointer, allowed_keys);
@@ -412,7 +392,7 @@ CanonicalValue SettlementTerms::to_canonical() const {
 
 SettlementTerms SettlementTerms::from_canonical(const CanonicalValue& node,
                                                 const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kSettlementTermsV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kSettlementTermsV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "settlement_terms_id", "settlement_type",
                      "settlement_method", "settlement_method_version",
@@ -457,11 +437,11 @@ SettlementTerms SettlementTerms::from_canonical(const CanonicalValue& node,
            "CASH settlement requires a PRESENT cash settlement methodology");
     }
   } else {
-    result.settlement_method.require_null_with_reason(child(pointer, "settlement_method"),
+    (void)result.settlement_method.require_null_with_reason(child(pointer, "settlement_method"),
                                                      ReasonCategory::kNotApplicable);
-    result.settlement_method_version.require_null_with_reason(
+    (void)result.settlement_method_version.require_null_with_reason(
         child(pointer, "settlement_method_version"), ReasonCategory::kNotApplicable);
-    result.cash_settlement_methodology.require_null_with_reason(
+    (void)result.cash_settlement_methodology.require_null_with_reason(
         child(pointer, "cash_settlement_methodology"), ReasonCategory::kNotApplicable);
   }
   verify_settlement_terms_identities(result, pointer);
@@ -520,7 +500,7 @@ CanonicalValue ModelInput::to_canonical() const {
 }
 
 ModelInput ModelInput::from_canonical(const CanonicalValue& node, const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kModelInputV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kModelInputV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "model_input_id", "model_id", "model_version", "payload",
                      "provenance", "content_fingerprint"});
@@ -697,7 +677,7 @@ CanonicalValue RatesKernelInput::to_canonical() const {
 
 RatesKernelInput RatesKernelInput::from_canonical(const CanonicalValue& node,
                                                   const std::string& pointer) {
-  require_schema_version(node, SchemaVersion::kRatesKernelInputV1, pointer);
+  (void)require_schema_version(node, SchemaVersion::kRatesKernelInputV1, pointer);
   require_only_keys(node, pointer,
                     {"schema_version", "valuation_product", "resolved_swap", "market_snapshot",
                      "curve_selection", "exercise_terms", "settlement_terms", "model_input",
@@ -801,16 +781,16 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
       fail(ContractViolationKind::kIdentityMismatch, child(pointer, "valuation_product"),
            "for a vanilla OIS the product id must equal resolved_swap.product_id");
     }
-    valuation_product.underlying_product_id.require_null_with_reason(
+    (void)valuation_product.underlying_product_id.require_null_with_reason(
         child(child(pointer, "valuation_product"), "underlying_product_id"),
         ReasonCategory::kNotApplicable);
-    exercise_terms.require_null_with_reason(child(pointer, "exercise_terms"),
+    (void)exercise_terms.require_null_with_reason(child(pointer, "exercise_terms"),
                                            ReasonCategory::kNotApplicable);
-    settlement_terms.require_null_with_reason(child(pointer, "settlement_terms"),
+    (void)settlement_terms.require_null_with_reason(child(pointer, "settlement_terms"),
                                               ReasonCategory::kNotApplicable);
-    model_input.require_null_with_reason(child(pointer, "model_input"),
+    (void)model_input.require_null_with_reason(child(pointer, "model_input"),
                                         ReasonCategory::kNotApplicable);
-    market_snapshot.volatility_input.require_null_with_reason(
+    (void)market_snapshot.volatility_input.require_null_with_reason(
         child(child(pointer, "market_snapshot"), "volatility_input"), ReasonCategory::kNotApplicable);
   } else {
     if (!valuation_product.underlying_product_id.present) {
@@ -841,7 +821,7 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
            child(child(pointer, "market_snapshot"), "volatility_input"),
            "a swaption requires a PRESENT volatility input");
     }
-    model_input.require_null_with_reason(child(pointer, "model_input"),
+    (void)model_input.require_null_with_reason(child(pointer, "model_input"),
                                         ReasonCategory::kNotApplicable);
     // Section 10.2/5.1: the exercise terms' underlying reference must agree with both the product
     // declaration and the embedded resolved swap.

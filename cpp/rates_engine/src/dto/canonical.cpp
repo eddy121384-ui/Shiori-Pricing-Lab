@@ -176,7 +176,7 @@ CanonicalValue convert(const nlohmann::json& input, const std::string& pointer) 
       members.reserve(raw_object.size());
       for (const auto& entry : raw_object) {
         if (!is_valid_utf8(entry.first)) {
-          fail(ContractViolationKind::kInvalidUtf8, pointer_index(pointer, entry.first),
+          fail(ContractViolationKind::kInvalidUtf8, pointer_child(pointer, entry.first),
                "object key is not well-formed UTF-8");
         }
         members.emplace_back(entry.first, convert(entry.second, pointer_child(pointer, entry.first)));
@@ -508,7 +508,10 @@ CanonicalValue parse_canonical_json(const std::string_view text) {
 std::string read_text_file(const std::string& path) {
   std::ifstream stream(path, std::ios::binary);
   if (!stream) {
-    fail(ContractViolationKind::kInvalidProduct, path, "file could not be opened");
+    // No violation kind describes an unreadable input file: this is not a document-content violation
+    // at all, it is a violated API precondition. kInvariantViolation is the honest fit; inventing a
+    // new token would change the refusal vocabulary #225 fixes.
+    fail(ContractViolationKind::kInvariantViolation, path, "file could not be opened");
   }
   std::ostringstream buffer;
   buffer << stream.rdbuf();

@@ -91,9 +91,23 @@ jobs:
           $vsPath = & $vswhere -latest -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vsPath) { throw "Visual Studio with the C++ toolset was not found" }
-          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
-            if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path ("Env:" + $matches[1]) -Value $matches[2] }
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          # `Set-Item Env:` only affects THIS step, so the previous version left the Configure/Build/Test
+          # steps without cl.exe on PATH ("CMAKE_CXX_COMPILER = cl" was not resolvable). The developer
+          # environment is therefore also exported through GITHUB_ENV, which GitHub applies to every
+          # later step. The location is discovered, never hard-coded.
+          $exported = 0
+          foreach ($line in (cmd /c "`"$vcvars`" && set")) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              Set-Item -Path ("Env:" + $matches[1]) -Value $matches[2]
+              "$($matches[1])=$($matches[2])" |
+                Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              $exported += 1
+            }
           }
+          if ($exported -lt 10) { throw "vcvars64.bat exported only $exported variables" }
+          "MSVC developer environment exported to later steps: $exported variables"
           cl 2>&1 | Select-Object -First 3
           ninja --version
 
@@ -141,7 +155,7 @@ jobs:
       - name: Build
         shell: bash
         working-directory: cpp/rates_engine
-        run: cmake --build --preset ${{ matrix.preset }}
+        run: cmake --build --preset ${{ matrix.preset }} -- -k 0
 
       - name: Test
         shell: bash
@@ -196,7 +210,7 @@ jobs:
       - name: Build
         shell: bash
         working-directory: cpp/rates_engine
-        run: cmake --build --preset clang-sanitizers
+        run: cmake --build --preset clang-sanitizers -- -k 0
 
       - name: Test under AddressSanitizer + UndefinedBehaviorSanitizer
         shell: bash
@@ -250,7 +264,7 @@ jobs:
       - name: Build
         shell: bash
         working-directory: cpp/rates_engine
-        run: cmake --build --preset clang-tsan
+        run: cmake --build --preset clang-tsan -- -k 0
 
       - name: Test under ThreadSanitizer
         shell: bash
@@ -337,7 +351,7 @@ jobs:
       - name: Build
         shell: bash
         working-directory: cpp/rates_engine
-        run: cmake --build --preset gcc-bench
+        run: cmake --build --preset gcc-bench -- -k 0
 
       - name: Smoke-run every benchmark (no timing gate)
         shell: bash

@@ -154,13 +154,6 @@ std::atomic<std::int64_t>& counter_ref(int index) {
   return QuantLib::Date(day, static_cast<QuantLib::Month>(month), year);
 }
 
-[[nodiscard]] std::string from_quantlib_date(const QuantLib::Date& date) {
-  char buffer[16];
-  std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d", date.year(),
-                static_cast<int>(date.month()), date.dayOfMonth());
-  return std::string(buffer);
-}
-
 }  // namespace
 
 const QuantLibIdentity& quantlib_identity() {
