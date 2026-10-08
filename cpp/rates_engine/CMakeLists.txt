@@ -130,24 +130,27 @@ if(SHIORI_BUILD_TESTS)
   set(SHIORI_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
 
   # group-name -> libraries. The group name is also the test directory name.
+  # A group's libraries are comma-separated: a SEMICOLON here would be a CMake list separator, so
+  # "determinism|a;b" would split into two list elements and silently produce the bogus group "b".
   set(SHIORI_TEST_GROUPS
     "dto|shiori_rates_dto"
     "unit|shiori_rates_core"
     "adapter|shiori_rates_quantlib_adapter"
     "adapter_poison|shiori_rates_quantlib_adapter"
     "defaults|shiori_rates_quantlib_adapter"
-    "determinism|shiori_rates_dto;shiori_rates_core"
-    "cache|shiori_rates_dto;shiori_rates_core"
+    "determinism|shiori_rates_dto,shiori_rates_core"
+    "cache|shiori_rates_dto,shiori_rates_core"
     "calibration|shiori_rates_dto"
     "concurrency|shiori_rates_quantlib_adapter"
-    "parity|shiori_rates_dto;shiori_rates_core"
-    "regression|shiori_rates_dto;shiori_rates_core"
+    "parity|shiori_rates_dto,shiori_rates_core"
+    "regression|shiori_rates_dto,shiori_rates_core"
   )
 
   foreach(_group_spec IN LISTS SHIORI_TEST_GROUPS)
     string(REPLACE "|" ";" _group_parts "${_group_spec}")
     list(GET _group_parts 0 _group)
     list(GET _group_parts 1 _group_libraries)
+    string(REPLACE "," ";" _group_libraries "${_group_libraries}")
     file(GLOB _group_sources CONFIGURE_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_group}/*.cpp")
     if(NOT _group_sources)
