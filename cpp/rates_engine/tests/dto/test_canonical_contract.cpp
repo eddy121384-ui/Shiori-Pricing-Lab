@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -57,9 +58,13 @@ TEST(CanonicalNumber, CollapsesSignedZeroToOneRepresentation) {
 TEST(CanonicalNumber, RefusesNonFiniteValues) {
   // The result is deliberately discarded: these cases prove the refusal, not the rendering, and a
   // discarded [[nodiscard]] result inside EXPECT_THROW is exactly what -Wunused-result rejects.
+  // MSVC rejects the literal `1.0 / 0.0` at compile time (C2124), so the same non-finite inputs are
+  // spelled portably: the contract refuses non-finite values either way.
   EXPECT_THROW((void)Shiori::rates::dto::canonical_number(std::nan("")), ContractViolation);
-  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(1.0 / 0.0), ContractViolation);
-  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(-1.0 / 0.0), ContractViolation);
+  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(std::numeric_limits<double>::infinity()),
+               ContractViolation);
+  EXPECT_THROW((void)Shiori::rates::dto::canonical_number(-std::numeric_limits<double>::infinity()),
+               ContractViolation);
   // A non-finite double is not representable, so it must be refused at construction too.
   EXPECT_THROW(CanonicalValue(std::nan("")), ContractViolation);
 }
