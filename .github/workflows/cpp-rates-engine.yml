@@ -1,0 +1,361 @@
+name: C++ rates engine
+
+# Issue #227: the C++20 rates-engine foundation. This workflow is the ONLY build and test evidence for
+# cpp/rates_engine on a clean machine, so it must be reproducible: every job configures through a
+# CMakePreset, resolves dependencies from a PINNED vcpkg baseline, and runs the real CTest suite.
+#
+# Deliberate properties:
+#   * No `continue-on-error` and no `|| true`: a failure fails the check.
+#   * The vcpkg baseline is pinned to a commit, not a branch, so an upstream vcpkg change cannot alter
+#     what this repository builds (docs/34 section 2).
+#   * Dependency binaries are cached per (OS, triplet, baseline) so the sanitizer closures, which are
+#     instrumented differently from the release closure, can never be shared.
+#   * `fetch-depth: 0` is required: the engine's build identity reports the git revision.
+#
+# This workflow does not touch python-tests.yml; the Python side of the repository is validated there.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cpp/rates_engine/**"
+      - ".github/workflows/cpp-rates-engine.yml"
+  pull_request:
+    paths:
+      - "cpp/rates_engine/**"
+      - ".github/workflows/cpp-rates-engine.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpp-rates-engine-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned vcpkg commit (docs/34 section 2.1). Changing this is a dependency change and must be
+  # reviewed as one: it can change QuantLib's macro configuration and therefore the numbers produced.
+  SHIORI_VCPKG_BASELINE: 2750401336fb7c95f6619657a46a7e798661341c
+  VCPKG_DISABLE_METRICS: "1"
+
+jobs:
+  cpp-build:
+    name: build (${{ matrix.preset }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            preset: msvc-release
+            triplet: x64-windows-static
+          - os: ubuntu-24.04
+            preset: gcc-release
+            triplet: x64-linux-shiori-gcc
+          - os: ubuntu-24.04
+            preset: clang-release
+            triplet: x64-linux-shiori-clang
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux build tools (ninja, pkg-config)
+        if: runner.os == 'Linux'
+        shell: bash
+        # The presets use the Ninja generator and vcpkg's pkgconfig fixup needs pkg-config. Neither is
+        # guaranteed to be on a bare runner image, so both are installed explicitly rather than assumed.
+        run: |
+          set -euo pipefail
+          packages="ninja-build pkg-config"
+          case "${{ matrix.preset }}" in
+            clang-*) packages="${packages} clang" ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --yes ${packages}
+          cmake --version
+          ninja --version
+
+      - name: Set up the MSVC developer environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # The presets use the Ninja generator with CMAKE_CXX_COMPILER=cl, which requires the Visual
+        # Studio toolset environment. It is built here from the runner's own vswhere installation
+        # rather than pulled from a third-party action.
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found on the runner" }
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "Visual Studio with the C++ toolset was not found" }
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          # `Set-Item Env:` only affects THIS step, so the previous version left the Configure/Build/Test
+          # steps without cl.exe on PATH ("CMAKE_CXX_COMPILER = cl" was not resolvable). The developer
+          # environment is therefore also exported through GITHUB_ENV, which GitHub applies to every
+          # later step. The location is discovered, never hard-coded.
+          $exported = 0
+          foreach ($line in (cmd /c "`"$vcvars`" && set")) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              Set-Item -Path ("Env:" + $matches[1]) -Value $matches[2]
+              "$($matches[1])=$($matches[2])" |
+                Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              $exported += 1
+            }
+          }
+          if ($exported -lt 10) { throw "vcvars64.bat exported only $exported variables" }
+          "MSVC developer environment exported to later steps: $exported variables"
+          cl 2>&1 | Select-Object -First 3
+          ninja --version
+
+      - name: Clone the pinned vcpkg baseline (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${GITHUB_WORKSPACE}/.vcpkg-root"
+          git init "${root}"
+          git -C "${root}" remote add origin https://github.com/microsoft/vcpkg
+          git -C "${root}" fetch --depth 1 origin "${SHIORI_VCPKG_BASELINE}"
+          git -C "${root}" checkout --detach FETCH_HEAD
+          "${root}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${root}" >> "${GITHUB_ENV}"
+          mkdir -p "${GITHUB_WORKSPACE}/.vcpkg-cache"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${GITHUB_WORKSPACE}/.vcpkg-cache,readwrite" >> "${GITHUB_ENV}"
+
+      - name: Clone the pinned vcpkg baseline (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE ".vcpkg-root"
+          git init $root
+          git -C $root remote add origin https://github.com/microsoft/vcpkg
+          git -C $root fetch --depth 1 origin $env:SHIORI_VCPKG_BASELINE
+          git -C $root checkout --detach FETCH_HEAD
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\.vcpkg-cache" | Out-Null
+          "VCPKG_BINARY_SOURCES=clear;files,$env:GITHUB_WORKSPACE/.vcpkg-cache,readwrite" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ env.SHIORI_VCPKG_BASELINE }}-${{ hashFiles('cpp/rates_engine/vcpkg.json') }}
+
+      - name: Configure
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --build --preset ${{ matrix.preset }} -- -k 0
+
+      - name: Test
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  cpp-sanitizers:
+    name: sanitizers (address+undefined)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install clang and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes clang ninja-build pkg-config
+          ninja --version
+
+      - name: Clone the pinned vcpkg baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${GITHUB_WORKSPACE}/.vcpkg-root-asan"
+          git init "${root}"
+          git -C "${root}" remote add origin https://github.com/microsoft/vcpkg
+          git -C "${root}" fetch --depth 1 origin "${SHIORI_VCPKG_BASELINE}"
+          git -C "${root}" checkout --detach FETCH_HEAD
+          "${root}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${root}" >> "${GITHUB_ENV}"
+          mkdir -p "${GITHUB_WORKSPACE}/.vcpkg-cache-asan"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${GITHUB_WORKSPACE}/.vcpkg-cache-asan,readwrite" >> "${GITHUB_ENV}"
+
+      - name: Restore the sanitizer vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          # A SEPARATE cache scope: the triplet instruments the whole dependency closure, so an
+          # uninstrumented binary from the release cache must never be picked up here.
+          path: ${{ github.workspace }}/.vcpkg-cache-asan
+          key: vcpkg-asan-${{ env.SHIORI_VCPKG_BASELINE }}-${{ hashFiles('cpp/rates_engine/vcpkg.json') }}
+
+      - name: Configure
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --preset clang-sanitizers
+
+      - name: Build
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --build --preset clang-sanitizers -- -k 0
+
+      - name: Test under AddressSanitizer + UndefinedBehaviorSanitizer
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: ctest --preset clang-sanitizers --output-on-failure
+
+  cpp-thread-sanitizer:
+    name: sanitizers (thread)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install clang and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes clang ninja-build pkg-config
+          ninja --version
+
+      - name: Clone the pinned vcpkg baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${GITHUB_WORKSPACE}/.vcpkg-root-tsan"
+          git init "${root}"
+          git -C "${root}" remote add origin https://github.com/microsoft/vcpkg
+          git -C "${root}" fetch --depth 1 origin "${SHIORI_VCPKG_BASELINE}"
+          git -C "${root}" checkout --detach FETCH_HEAD
+          "${root}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${root}" >> "${GITHUB_ENV}"
+          mkdir -p "${GITHUB_WORKSPACE}/.vcpkg-cache-tsan"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${GITHUB_WORKSPACE}/.vcpkg-cache-tsan,readwrite" >> "${GITHUB_ENV}"
+
+      - name: Restore the thread-sanitizer vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          # TSan and ASan instrumentations are mutually exclusive, so this is a third cache scope.
+          path: ${{ github.workspace }}/.vcpkg-cache-tsan
+          key: vcpkg-tsan-${{ env.SHIORI_VCPKG_BASELINE }}-${{ hashFiles('cpp/rates_engine/vcpkg.json') }}
+
+      - name: Configure
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --preset clang-tsan
+
+      - name: Build
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --build --preset clang-tsan -- -k 0
+
+      - name: Test under ThreadSanitizer
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: ctest --preset clang-tsan --output-on-failure
+
+  cpp-isolation-guard:
+    name: isolation guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Guard self-test (proves the guard can fail)
+        shell: bash
+        run: python3 cpp/rates_engine/tools/isolation_guard.py --root . --self-test
+
+      - name: Guard scan of the real tree
+        shell: bash
+        run: python3 cpp/rates_engine/tools/isolation_guard.py --root . --json
+
+      - name: Negative control on the real tree
+        shell: bash
+        # A self-test in a temporary directory proves the scanner logic. This proves the same guard
+        # fails against an injected include in the ACTUAL tree, which is the property the other jobs
+        # rely on. The injected file is removed by the trap on every exit path.
+        run: |
+          set -euo pipefail
+          control="cpp/rates_engine/src/dto/_guard_negative_control.cpp"
+          printf '#include <ql/date.hpp>\n' > "${control}"
+          trap 'rm -f "${control}"' EXIT
+          if python3 cpp/rates_engine/tools/isolation_guard.py --root . > "${RUNNER_TEMP}/guard_control.txt" 2>&1; then
+            echo "FAIL: the guard accepted a QuantLib include in src/dto"
+            cat "${RUNNER_TEMP}/guard_control.txt"
+            exit 1
+          fi
+          grep -q "QUANTLIB_INCLUDE" "${RUNNER_TEMP}/guard_control.txt"
+          echo "negative control passed: the guard refused the injected QuantLib include"
+
+  cpp-benchmark-smoke:
+    name: benchmark smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes ninja-build pkg-config
+          ninja --version
+
+      - name: Clone the pinned vcpkg baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${GITHUB_WORKSPACE}/.vcpkg-root-bench"
+          git init "${root}"
+          git -C "${root}" remote add origin https://github.com/microsoft/vcpkg
+          git -C "${root}" fetch --depth 1 origin "${SHIORI_VCPKG_BASELINE}"
+          git -C "${root}" checkout --detach FETCH_HEAD
+          "${root}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${root}" >> "${GITHUB_ENV}"
+          mkdir -p "${GITHUB_WORKSPACE}/.vcpkg-cache-bench"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${GITHUB_WORKSPACE}/.vcpkg-cache-bench,readwrite" >> "${GITHUB_ENV}"
+
+      - name: Restore the benchmark vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.vcpkg-cache-bench
+          key: vcpkg-bench-${{ env.SHIORI_VCPKG_BASELINE }}-${{ hashFiles('cpp/rates_engine/vcpkg.json') }}
+
+      - name: Configure
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --preset gcc-bench
+
+      - name: Build
+        shell: bash
+        working-directory: cpp/rates_engine
+        run: cmake --build --preset gcc-bench -- -k 0
+
+      - name: Smoke-run every benchmark (no timing gate)
+        shell: bash
+        working-directory: cpp/rates_engine
+        # #226 section 10.8 forbids an absolute-time gate. The benchmarks must RUN, print their M4
+        # metadata and exit cleanly; the measured numbers are for humans, never for pass/fail.
+        run: ctest --preset gcc-bench --output-on-failure -L benchmark
