@@ -33,8 +33,6 @@ set(SHIORI_DEPENDENCY_PROVISIONING_ERROR
 # --------------------------------------------------------------------------------------------
 set(SHIORI_VCPKG_BASELINE "2750401336fb7c95f6619657a46a7e798661341c" CACHE INTERNAL "" FORCE)
 set(SHIORI_QUANTLIB_VERSION "1.43" CACHE INTERNAL "" FORCE)
-set(SHIORI_QUANTLIB_VERSION_MAJOR "1" CACHE INTERNAL "" FORCE)
-set(SHIORI_QUANTLIB_VERSION_MINOR "43" CACHE INTERNAL "" FORCE)
 set(SHIORI_NLOHMANN_JSON_VERSION "3.12.0" CACHE INTERNAL "" FORCE)
 set(SHIORI_GTEST_VERSION "1.18.0" CACHE INTERNAL "" FORCE)
 set(SHIORI_BENCHMARK_VERSION "1.9.5" CACHE INTERNAL "" FORCE)
@@ -65,20 +63,33 @@ function(shiori_assert_quantlib_version)
 
   include(CheckCXXSourceCompiles)
   set(CMAKE_REQUIRED_INCLUDES "${_ql_inc}")
-  set(CMAKE_REQUIRED_QUIET ON)
+  # NOT quiet: if this compile fails, the compiler's own diagnostic is the only thing that says WHY
+  # (missing header, missing include directory, a different version). Suppressing it turns every
+  # failure into the same misleading "wrong version" message.
+  set(CMAKE_REQUIRED_QUIET OFF)
+  # QuantLib 1.43's ql/version.hpp defines QL_VERSION (a string) and QL_HEX_VERSION, but NOT a
+  # QL_VERSION_MAJOR/MINOR/PATCH triple. The pin is therefore asserted against the string the library
+  # itself publishes, at compile time.
   check_cxx_source_compiles("
     #include <ql/version.hpp>
-    #ifndef QL_VERSION_MAJOR
-    #  error QL_VERSION_MAJOR is not defined by ql/version.hpp
+    #ifndef QL_VERSION
+    #  error QL_VERSION is not defined by ql/version.hpp
     #endif
-    static_assert(QL_VERSION_MAJOR == ${SHIORI_QUANTLIB_VERSION_MAJOR}, \"QuantLib major version mismatch\");
-    static_assert(QL_VERSION_MINOR == ${SHIORI_QUANTLIB_VERSION_MINOR}, \"QuantLib minor version mismatch\");
+    template <int N>
+    constexpr bool ql_version_has_prefix(const char* value, const char (&prefix)[N], int index = 0) {
+      return index == N - 1 ? true
+                            : (value[index] == prefix[index] &&
+                               ql_version_has_prefix(value, prefix, index + 1));
+    }
+    static_assert(ql_version_has_prefix(QL_VERSION, \"${SHIORI_QUANTLIB_VERSION}\"),
+                  \"QuantLib must be pinned to ${SHIORI_QUANTLIB_VERSION}\");
     int main() { return 0; }
   " SHIORI_QUANTLIB_VERSION_MATCHES_PIN)
 
   if(NOT SHIORI_QUANTLIB_VERSION_MATCHES_PIN)
     shiori_dependency_error(
-      "the resolved QuantLib does not report version ${SHIORI_QUANTLIB_VERSION}. "
+      "the resolved QuantLib does not report a QL_VERSION starting with "
+      "${SHIORI_QUANTLIB_VERSION} (the compiler diagnostic above shows what was found). "
       "QuantLib is pinned to ${SHIORI_QUANTLIB_VERSION} by Issue #226 section 3.2. Refusing to build "
       "against a floating or substituted QuantLib; change the pin deliberately instead.")
   endif()

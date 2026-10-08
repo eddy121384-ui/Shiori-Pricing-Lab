@@ -166,21 +166,26 @@ std::atomic<std::int64_t>& counter_ref(int index) {
 const QuantLibIdentity& quantlib_identity() {
   static const QuantLibIdentity identity = [] {
     QuantLibIdentity value;
-    value.major = QL_VERSION_MAJOR;
-    value.minor = QL_VERSION_MINOR;
-    // The patch component is guarded: QuantLib has not always declared one, and #227 must not fail to
-    // compile against a pinned release because of a version-header detail.
-#ifdef QL_VERSION_PATCH
-    value.patch = QL_VERSION_PATCH;
-    value.version = SHIORI_STRINGIZE(QL_VERSION_MAJOR) "." SHIORI_STRINGIZE(QL_VERSION_MINOR) "." SHIORI_STRINGIZE(QL_VERSION_PATCH);
-#else
-    value.version = SHIORI_STRINGIZE(QL_VERSION_MAJOR) "." SHIORI_STRINGIZE(QL_VERSION_MINOR);
-#endif
-#ifdef QL_VERSION
+    // The version is read from QuantLib's OWN version string. QuantLib 1.43's `ql/version.hpp` defines
+    // `QL_VERSION` and `QL_HEX_VERSION` but NOT a QL_VERSION_MAJOR/MINOR/PATCH triple (verified
+    // against the pinned release), so the dotted components are parsed from the string rather than
+    // assumed to exist as macros.
     value.version_string = QL_VERSION;
-#else
-    value.version_string = value.version;
-#endif
+    value.version = QL_VERSION;
+    int components[3] = {0, 0, 0};
+    int component = 0;
+    for (const char* cursor = QL_VERSION; *cursor != '\0' && component < 3; ++cursor) {
+      if (*cursor >= '0' && *cursor <= '9') {
+        components[component] = components[component] * 10 + (*cursor - '0');
+      } else if (*cursor == '.') {
+        ++component;
+      } else {
+        break;  // a pre-release or vendor suffix ends the numeric prefix
+      }
+    }
+    value.major = components[0];
+    value.minor = components[1];
+    value.patch = components[2];
     value.macro_configuration = quantlib_macro_configuration();
     value.build_platform = build_platform();
     value.global_settings_quantifiable =
