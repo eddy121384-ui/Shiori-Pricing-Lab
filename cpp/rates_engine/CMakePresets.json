@@ -162,7 +162,7 @@
       "displayName": "Linux Clang x64 (ASan + UBSan, instrumented dependency closure)",
       "inherits": [
         "_linux-clang",
-        "_debug"
+        "_release"
       ],
       "cacheVariables": {
         "SHIORI_ENABLE_SANITIZERS": "ON",
@@ -174,7 +174,7 @@
       "displayName": "Linux Clang x64 (ThreadSanitizer, instrumented dependency closure)",
       "inherits": [
         "_linux-clang",
-        "_debug"
+        "_release"
       ],
       "cacheVariables": {
         "SHIORI_ENABLE_TSAN": "ON",

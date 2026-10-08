@@ -15,4 +15,7 @@ set(VCPKG_CXX_FLAGS "-fsanitize=thread -fno-omit-frame-pointer -ffp-contract=off
 set(VCPKG_C_FLAGS "-fsanitize=thread -fno-omit-frame-pointer -ffp-contract=off -fno-fast-math -fno-unsafe-math-optimizations")
 set(VCPKG_LINKER_FLAGS "-fsanitize=thread")
 
-set(VCPKG_BUILD_TYPE debug)
+# RELEASE-ONLY for the same reason as the ASan triplet: a debug-only staging tree puts the .pc files
+# where vcpkg's pkgconfig fixup does not look on Linux, which fails the dependency install. TSan works
+# in an optimized build.
+set(VCPKG_BUILD_TYPE release)

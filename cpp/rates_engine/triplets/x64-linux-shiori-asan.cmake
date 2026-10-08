@@ -16,4 +16,10 @@ set(VCPKG_CXX_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer -ffp-c
 set(VCPKG_C_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer -ffp-contract=off -fno-fast-math -fno-unsafe-math-optimizations")
 set(VCPKG_LINKER_FLAGS "-fsanitize=address,undefined")
 
-set(VCPKG_BUILD_TYPE debug)
+# RELEASE-ONLY, deliberately. A debug-only install (`set(VCPKG_BUILD_TYPE debug)`) makes vcpkg's
+# pkgconfig fixup fail on Linux: for a debug-only staging tree the .pc file lands in
+# `<package>/debug/share/pkgconfig`, while the fixup searches `<package>/share/pkgconfig` and reports
+# "Package nlohmann_json was not found in the pkg-config search path". Building the release
+# configuration avoids that mismatch, and sanitizers are supported in an optimized build -- which also
+# exercises optimizer-dependent undefined behaviour that a Debug build cannot reach.
+set(VCPKG_BUILD_TYPE release)
