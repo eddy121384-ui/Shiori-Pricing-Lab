@@ -9,9 +9,11 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -191,6 +193,97 @@ CanonicalValue convert(const nlohmann::json& input, const std::string& pointer) 
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Stage 0: duplicate-member detection on the input tokens.
+//
+// nlohmann's DOM parser stores an object in a keyed container, so a repeated source key is COLLAPSED
+// before any DTO code can run: `{"a":1,"a":2}` would silently become `{"a":2}` and two different
+// documents would share one canonical form. This SAX pass is the lossless admission check instead:
+// the parser hands over every object key once per source occurrence, decoded but before it can be
+// inserted into any map, so a repeated member is refused at EVERY nesting level - including in a
+// document that carries no version tag at all, which is what places duplicate detection in Stage 0
+// rather than in any schema decision. The pass interprets nothing: values are ignored and only the
+// object nesting is tracked.
+//
+// The class deliberately implements the parser's SAX callbacks directly (no inheritance): the parser
+// only requires the callbacks to exist with the pinned signatures, which `sax_parse` checks at
+// compile time.
+// ---------------------------------------------------------------------------------------------
+class DuplicateKeySax {
+ public:
+  bool null() { return true; }
+  bool boolean(bool) { return true; }
+  bool number_integer(std::int64_t) { return true; }
+  bool number_unsigned(std::uint64_t) { return true; }
+  bool number_float(double, const std::string&) { return true; }
+  bool string(std::string&) { return true; }
+  bool binary(nlohmann::json::binary_t&) { return true; }
+
+  bool start_object(std::size_t) {
+    object_keys_.emplace_back();
+    return true;
+  }
+
+  bool key(std::string& value) {
+    // A `key` event is only ever emitted inside an object, so the top frame is the containing one. The
+    // emptiness test is not reachable through the parser's state machine, but a key with no containing
+    // object cannot be attributed to anything, so it is refused rather than trusted with a back().
+    if (object_keys_.empty()) {
+      malformed_ = true;
+      return false;
+    }
+    if (!object_keys_.back().insert(value).second && !duplicate_seen_) {
+      duplicate_seen_ = true;
+      // The same locator the programmatic duplicate refusal in `make_object` reports: the key's own
+      // pointer segment.
+      duplicate_pointer_ = pointer_child("", value);
+    }
+    // Parsing continues after a duplicate so that an input that is ALSO malformed is still refused as
+    // the malformed document it is.
+    return true;
+  }
+
+  bool end_object() {
+    object_keys_.pop_back();
+    return true;
+  }
+
+  bool start_array(std::size_t) { return true; }
+  bool end_array() { return true; }
+
+  bool parse_error(std::size_t, const std::string&, const nlohmann::json::exception&) {
+    malformed_ = true;
+    return false;
+  }
+
+  [[nodiscard]] bool has_duplicate_key() const noexcept { return duplicate_seen_; }
+  [[nodiscard]] const std::string& duplicate_pointer() const noexcept { return duplicate_pointer_; }
+  [[nodiscard]] bool is_malformed() const noexcept { return malformed_; }
+
+ private:
+  // One key set per open object, in nesting order.
+  std::vector<std::set<std::string>> object_keys_;
+  std::string duplicate_pointer_;
+  bool duplicate_seen_ = false;
+  bool malformed_ = false;
+};
+
+// Stage 0 gate: well-formed JSON with no repeated member key at any nesting level.
+void admit_json_syntax(const std::string_view text) {
+  DuplicateKeySax sax;
+  const bool parsed_completely =
+      nlohmann::json::sax_parse(text.data(), text.data() + text.size(), &sax);
+  // Syntax is the outer half of Stage 0: malformed input is refused as malformed even when it also
+  // repeats a key, because "is this JSON at all" is answered before "does it duplicate a member".
+  if (!parsed_completely || sax.is_malformed()) {
+    fail(ContractViolationKind::kWrongType, "", "input is not well-formed JSON");
+  }
+  if (sax.has_duplicate_key()) {
+    fail(ContractViolationKind::kDuplicateKey, sax.duplicate_pointer(),
+         "duplicate object key is not representable in canonical JSON");
+  }
+}
+
 }  // namespace
 
 bool is_valid_utf8(const std::string_view text) noexcept {
@@ -292,12 +385,37 @@ std::string canonical_number(double value) {
 
   int exponent = 0;
   {
-    const auto parsed = std::from_chars(exponent_text.data(),
-                                        exponent_text.data() + exponent_text.size(), exponent);
-    if (parsed.ec != std::errc()) {
+    // `to_chars(scientific)` emits the exponent with an explicit sign. `std::from_chars` for an
+    // integral type deliberately does NOT accept a leading '+', so the sign and the digits are
+    // consumed explicitly here, and the WHOLE token must be consumed: a partially parsed exponent
+    // would silently move the decimal point and change every fingerprint of the value.
+    std::size_t index = 0;
+    bool exponent_negative = false;
+    if (index < exponent_text.size() &&
+        (exponent_text[index] == '+' || exponent_text[index] == '-')) {
+      exponent_negative = exponent_text[index] == '-';
+      ++index;
+    }
+    if (index == exponent_text.size()) {
       fail(ContractViolationKind::kNumericNotRepresentable, "",
            "std::to_chars produced an unparsable exponent");
     }
+    int magnitude_exponent = 0;
+    for (; index < exponent_text.size(); ++index) {
+      const char digit = exponent_text[index];
+      if (digit < '0' || digit > '9') {
+        fail(ContractViolationKind::kNumericNotRepresentable, "",
+             "std::to_chars produced an unparsable exponent");
+      }
+      // A double's decimal exponent is bounded by the IEEE-754 range (|e| <= 308), so this bound is
+      // unreachable for a real conversion; it exists so a malformed token can never overflow `int`.
+      if (magnitude_exponent > 100000) {
+        fail(ContractViolationKind::kNumericNotRepresentable, "",
+             "std::to_chars produced an out-of-range exponent");
+      }
+      magnitude_exponent = magnitude_exponent * 10 + (digit - '0');
+    }
+    exponent = exponent_negative ? -magnitude_exponent : magnitude_exponent;
   }
 
   // `digits` is already free of leading zeros (the mantissa always starts with a non-zero digit)
@@ -493,9 +611,15 @@ void CanonicalValue::fail_numeric() {
 }
 
 CanonicalValue parse_canonical_json(const std::string_view text) {
+  // Stage 0, in the locked order: well-formed UTF-8, then well-formed JSON with no duplicate member
+  // key at any nesting level. Only a document that passes Stage 0 is parsed into a value tree at all,
+  // so no partially admitted document can reach a DTO decoder.
   if (!is_valid_utf8(text)) {
     fail(ContractViolationKind::kInvalidUtf8, "",
          "input bytes are not well-formed UTF-8");
+  }
+  if (!text.empty()) {
+    admit_json_syntax(text);
   }
   nlohmann::json parsed = nlohmann::json::parse(text.data(), text.data() + text.size(),
                                                /*cb=*/nullptr, /*allow_exceptions=*/false,

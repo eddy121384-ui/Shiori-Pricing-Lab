@@ -1,6 +1,5 @@
 #include "shiori_rates/dto/fingerprint.hpp"
 
-#include <cctype>
 #include <string>
 #include <string_view>
 
@@ -12,9 +11,11 @@ namespace Shiori::rates::dto {
 
 namespace {
 
+// The approved #227 canonical representation spells a digest in LOWERCASE hex only. Uppercase A-F is
+// therefore not a valid token: it is refused rather than normalized, so a declared fingerprint is
+// compared byte-for-byte against the digest this build recomputes.
 bool is_hex_digit(const char character) noexcept {
-  return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') ||
-         (character >= 'A' && character <= 'F');
+  return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
 }
 
 }  // namespace
@@ -40,12 +41,11 @@ std::string fingerprint_of(const CanonicalValue& value) {
 }
 
 std::string require_valid_fingerprint(std::string token, const std::string& pointer) {
+  // is_valid_fingerprint refuses uppercase, so there is nothing to normalize here: the token that is
+  // validated is exactly the token that gets compared with the recomputed digest.
   if (!is_valid_fingerprint(token)) {
     fail(ContractViolationKind::kFingerprintMismatch, pointer,
-         "declared fingerprint is not a 64-character hex SHA-256 token");
-  }
-  for (char& character : token) {
-    character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+         "declared fingerprint is not a 64-character lowercase hex SHA-256 token");
   }
   return token;
 }

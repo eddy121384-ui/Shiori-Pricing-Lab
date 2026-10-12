@@ -134,8 +134,24 @@ TEST(CanonicalParse, RefusesMalformedDuplicatedOrUnrepresentableInput) {
   };
   EXPECT_EQ(refusal_kind("{"), ContractViolationKind::kWrongType);
   EXPECT_EQ(refusal_kind(R"({"a":1,"a":2})"), ContractViolationKind::kDuplicateKey);
+  // The duplicate scan is lossless and depth-independent: it sees every key exactly once per source
+  // occurrence, decoded and before any map can collapse it, so a nested member cannot hide a repeat.
+  // `\u0061` decodes to `a`, which is the same member as a literal `a`.
+  EXPECT_EQ(refusal_kind(R"({"outer":{"a":1,"a":2}})"), ContractViolationKind::kDuplicateKey);
+  EXPECT_EQ(refusal_kind(R"({"outer":[{"a":1,"a":2}]})"), ContractViolationKind::kDuplicateKey);
+  EXPECT_EQ(refusal_kind(R"({"a":1,"\u0061":2})"), ContractViolationKind::kDuplicateKey);
   EXPECT_EQ(refusal_kind(R"({"a":9223372036854775808})"),
             ContractViolationKind::kNumericNotRepresentable);
+}
+
+TEST(CanonicalParse, AcceptsDistinctKeysAtEveryNestingLevel) {
+  // The Stage 0 duplicate scan must never refuse valid input. The same key name in two DIFFERENT
+  // objects is not a duplicate, and neither is a key repeated across sibling array elements, so these
+  // documents must canonicalize exactly as they did before the scan existed.
+  const CanonicalValue parsed = Shiori::rates::dto::parse_canonical_json(
+      R"({"outer":{"a":1,"b":2},"list":[{"a":3},{"b":4},{}]})");
+  EXPECT_EQ(parsed.dump(), R"({"list":[{"a":3},{"b":4},{}],"outer":{"a":1,"b":2}})");
+  EXPECT_EQ(Shiori::rates::dto::parse_canonical_json(parsed.dump()).dump(), parsed.dump());
 }
 
 TEST(CanonicalUtf8, ValidatesWellFormedTextAndRejectsSurrogates) {

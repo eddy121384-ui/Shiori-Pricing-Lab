@@ -34,6 +34,8 @@ namespace Shiori::rates::dto {
 
 inline constexpr std::size_t kFingerprintHexLength = 64;
 
+// A valid token is exactly kFingerprintHexLength LOWERCASE hex characters. Uppercase A-F is refused
+// rather than normalized, so the declared token must equal the recomputed digest byte-for-byte.
 [[nodiscard]] bool is_valid_fingerprint(std::string_view text) noexcept;
 
 // Fingerprint of already-canonical UTF-8 bytes.
@@ -42,8 +44,8 @@ inline constexpr std::size_t kFingerprintHexLength = 64;
 // Canonicalizes, then fingerprints.
 [[nodiscard]] std::string fingerprint_of(const CanonicalValue& value);
 
-// Validates a declared fingerprint token, returning the normalized (lowercase) form.
-// An empty, wrong-length, or non-hex token is refused.
+// Validates a declared fingerprint token and returns it unchanged (nothing is normalized):
+// an empty, wrong-length, non-hex, or uppercase token is refused.
 [[nodiscard]] std::string require_valid_fingerprint(std::string token, const std::string& pointer);
 
 // Verifies a declared fingerprint against recomputed canonical bytes.

@@ -45,11 +45,15 @@ enum class SchemaVersion {
 // Returns false for an unknown token. Never guesses and never coerces across versions.
 [[nodiscard]] bool schema_version_from_token(std::string_view token, SchemaVersion& out) noexcept;
 
-// Reads `schema_version` and validates it.
-//   * absent          -> ContractViolation(kMissingRequiredField)
-//   * unknown token   -> ContractViolation(kUnknownSchemaVersion)
-//   * known, != want  -> ContractViolation(kUnknownSchemaVersion) (a document of another contract
-//                        is not partially honoured)
+// Reads `schema_version` and validates it. This is the whole Stage 1 wire-schema fence: it runs before
+// any other member of the object is read or interpreted, and it is the only correct answer to a
+// version-shape problem.
+//   * absent          -> ContractViolation(kUnknownSchemaVersion) at `pointer/schema_version`
+//   * not a string    -> ContractViolation(kUnknownSchemaVersion) at `pointer/schema_version`
+//   * unknown token   -> ContractViolation(kUnknownSchemaVersion) at `pointer/schema_version`
+//   * known, != want  -> ContractViolation(kUnknownSchemaVersion) at `pointer/schema_version` (a
+//                        document of another contract is not partially honoured)
+// An absent version is NEVER reported as a missing business field and NEVER assumed to be V1.
 // Callers must invoke this before reading any other member of the object.
 [[nodiscard]] SchemaVersion require_schema_version(const CanonicalValue& node,
                                                   SchemaVersion expected,

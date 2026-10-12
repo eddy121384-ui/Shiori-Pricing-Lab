@@ -132,20 +132,40 @@ CanonicalValue RuntimeTelemetry::to_canonical() const {
 
 RuntimeTelemetry RuntimeTelemetry::from_canonical(const CanonicalValue& node,
                                                   const std::string& pointer) {
-  dto::require_only_keys(node, pointer,
-                         {"telemetry_version", "telemetry_id", "correlation_result_fingerprint",
-                          "correlation_inputs_fingerprint", "metadata", "cache_layers",
-                          "execution_path", "gate", "phases", "content_fingerprint"});
-  RuntimeTelemetry result;
-  result.telemetry_version = require_text(node.at("telemetry_version", pointer),
-                                          dto::pointer_child(pointer, "telemetry_version"),
-                                          "string telemetry version");
-  if (result.telemetry_version != "RATES_RUNTIME_TELEMETRY_V1") {
+  // Stage 1 (locked precedence): the wire version is read and validated BEFORE any other member, so a
+  // version-shape failure can never be masked by an unknown-key or a missing-field refusal, and V1 is
+  // never assumed. Lane B is versioned independently of the result documents, but it is still a
+  // versioned DTO entry point, so it owns the same fence: absent and non-string are VERSION failures,
+  // not a missing business field and not a wrong type. This mirrors `require_schema_version`, which
+  // cannot be reused here because its member name is fixed to `schema_version`.
+  const CanonicalValue* version_node = node.find("telemetry_version");
+  if (version_node == nullptr) {
+    dto::fail(dto::ContractViolationKind::kUnknownSchemaVersion,
+              dto::pointer_child(pointer, "telemetry_version"),
+              "wire version is absent; a document is never assumed to be V1");
+  }
+  if (!version_node->is_string()) {
+    std::string message = "wire version must be a string token, found ";
+    message += version_node->type_name();
+    dto::fail(dto::ContractViolationKind::kUnknownSchemaVersion,
+              dto::pointer_child(pointer, "telemetry_version"), std::move(message));
+  }
+  if (version_node->as_string() != "RATES_RUNTIME_TELEMETRY_V1") {
     dto::fail(dto::ContractViolationKind::kUnknownSchemaVersion,
               dto::pointer_child(pointer, "telemetry_version"),
               "unknown telemetry version; Lane B is versioned independently of the result "
               "documents");
   }
+
+  // The version is recognised, so the approved shape is checked next. Unknown keys are still refused
+  // after the fence, and `telemetry_version` stays in the allowed set. The accepted document shape is
+  // unchanged: `RATES_RUNTIME_TELEMETRY_V1` is still the only accepted token.
+  dto::require_only_keys(node, pointer,
+                         {"telemetry_version", "telemetry_id", "correlation_result_fingerprint",
+                          "correlation_inputs_fingerprint", "metadata", "cache_layers",
+                          "execution_path", "gate", "phases", "content_fingerprint"});
+  RuntimeTelemetry result;
+  result.telemetry_version = version_node->as_string();
   result.telemetry_id = require_text(node.at("telemetry_id", pointer),
                                      dto::pointer_child(pointer, "telemetry_id"),
                                      "string telemetry id");

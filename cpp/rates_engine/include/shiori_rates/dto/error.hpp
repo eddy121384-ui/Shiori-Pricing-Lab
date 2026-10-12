@@ -98,6 +98,8 @@ class ContractViolation : public std::runtime_error {
 
 // Convenience constructors used throughout the decoder.
 [[noreturn]] void fail(ContractViolationKind kind, std::string pointer, std::string message);
+// `pointer` locates the object that should have carried `field`; the refusal is reported at
+// `pointer/field`, the missing member's own locator.
 [[noreturn]] void fail_missing(std::string pointer, std::string_view field);
 [[noreturn]] void fail_wrong_type(std::string pointer, std::string_view expected,
                                   std::string_view actual);

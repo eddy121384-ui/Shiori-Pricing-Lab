@@ -12,6 +12,7 @@
 #include "shiori_rates/dto/canonical.hpp"
 #include "shiori_rates/dto/error.hpp"
 #include "shiori_rates/dto/kernel_input.hpp"
+#include "shiori_rates/dto/market.hpp"
 #include "shiori_rates/dto/result.hpp"
 #include "shiori_rates/dto/version.hpp"
 
@@ -39,6 +40,19 @@ using Shiori::rates::dto::parse_canonical_json;
   return "<no refusal>";
 }
 
+// Every curve document used below MUST be refused, so a missing refusal is reported as a test failure
+// rather than folded into a sentinel that could be confused with a real refusal.
+[[nodiscard]] ContractViolation refusal_for_curve(const char* json) {
+  try {
+    (void)Shiori::rates::dto::Curve::from_canonical(parse_canonical_json(json), "");
+  } catch (const ContractViolation& violation) {
+    return violation;
+  }
+  ADD_FAILURE() << "a curve document must be refused: " << json;
+  return ContractViolation(ContractViolationKind::kMissingRequiredField, "<no refusal>",
+                           "no refusal was thrown");
+}
+
 }  // namespace
 
 TEST(KernelInputDecoder, RefusesAnAbsentVersionTagBeforeReadingAnyField) {
@@ -52,6 +66,36 @@ TEST(KernelInputDecoder, RefusesAnUnknownVersionTag) {
             ContractViolationKind::kUnknownSchemaVersion);
   EXPECT_EQ(refusal_kind_for_kernel(R"({"schema_version":1})"),
             ContractViolationKind::kUnknownSchemaVersion);
+}
+
+TEST(KernelInputDecoder, RefusesDuplicateKeysBeforeAnyVersionDecision) {
+  // Stage 0 (syntactic/canonical admission) runs BEFORE the Stage 1 version fence, so a syntactically
+  // valid document that repeats a member key is a duplicate-key refusal even when it carries no
+  // version tag at all: no schema decision is allowed to see such a document first.
+  EXPECT_EQ(refusal_kind_for_kernel(R"({"a":1,"a":2})"), ContractViolationKind::kDuplicateKey);
+  // The duplicate is detected on decoded input tokens, not on raw source text: `\u0061` decodes to
+  // `a`, so it is the same member as a literal `a` - exactly the collapse a map parser would perform.
+  EXPECT_EQ(refusal_kind_for_kernel(R"({"a":1,"\u0061":2})"),
+            ContractViolationKind::kDuplicateKey);
+}
+
+TEST(KernelInputDecoder, RefusesANestedDuplicateMemberBeforeAnyDtoInterpretation) {
+  // The gate is depth-independent: a duplicate nested inside an object or inside an array element is
+  // still a Stage 0 refusal, so a partially interpreted DTO can never reach a version or field
+  // decision.
+  EXPECT_EQ(refusal_kind_for_kernel(R"({"outer":{"a":1,"a":2}})"),
+            ContractViolationKind::kDuplicateKey);
+  EXPECT_EQ(refusal_kind_for_kernel(R"({"outer":[{"a":1,"a":2}]})"),
+            ContractViolationKind::kDuplicateKey);
+}
+
+TEST(KernelInputDecoder, PointsEveryVersionShapeFailureAtTheVersionMember) {
+  // Stage 1 owns absent, non-string, unknown and wrong version alike, and reports each of them at the
+  // version member: a version-shape problem is never reported against a business field.
+  EXPECT_EQ(refusal_pointer_for_kernel("{}"), "/schema_version");
+  EXPECT_EQ(refusal_pointer_for_kernel(R"({"schema_version":1})"), "/schema_version");
+  EXPECT_EQ(refusal_pointer_for_kernel(R"({"schema_version":"RATES_KERNEL_INPUT_V2"})"),
+            "/schema_version");
 }
 
 TEST(KernelInputDecoder, RefusesAnUnknownTopLevelKey) {
@@ -79,6 +123,9 @@ TEST(KernelInputDecoder, RefusesAMissingMandatoryMemberWithItsOwnLocation) {
       refusal_pointer_for_kernel(R"({"schema_version":"RATES_KERNEL_INPUT_V1"})");
   EXPECT_NE(pointer, "<no refusal>");
   EXPECT_NE(pointer.find("valuation_product"), std::string::npos) << pointer;
+  // The locator must be the MISSING MEMBER'S OWN pointer, not the enclosing object's: only then can
+  // the refusal be attributed to the field that is actually absent.
+  EXPECT_EQ(pointer, "/valuation_product") << pointer;
 }
 
 TEST(ResultDecoders, FenceBothResultDocumentsByVersion) {
@@ -102,4 +149,28 @@ TEST(ResultDecoders, FenceBothResultDocumentsByVersion) {
       (void)Shiori::rates::dto::PricingResult::from_canonical(
           parse_canonical_json(R"({"schema_version":"RATES_PRICING_RESULT_V2"})"), ""),
       ContractViolation);
+}
+
+TEST(CurveDecoder, FencesTheCurveEntryPointByItsOwnVersionBeforeItsBody) {
+  // A curve inside a market snapshot is its own versioned entry point, so it owns the same fence as
+  // the top-level documents: every version-shape problem is an unknown wire version AT THE VERSION
+  // MEMBER, reported before a single curve member is read.
+  const ContractViolation absent = refusal_for_curve("{}");
+  EXPECT_EQ(absent.kind(), ContractViolationKind::kUnknownSchemaVersion);
+  EXPECT_EQ(absent.pointer(), "/schema_version");
+
+  const ContractViolation non_string = refusal_for_curve(R"({"schema_version":1})");
+  EXPECT_EQ(non_string.kind(), ContractViolationKind::kUnknownSchemaVersion);
+  EXPECT_EQ(non_string.pointer(), "/schema_version");
+
+  const ContractViolation unknown = refusal_for_curve(R"({"schema_version":"DISCOUNT_CURVE_V2"})");
+  EXPECT_EQ(unknown.kind(), ContractViolationKind::kUnknownSchemaVersion);
+  EXPECT_EQ(unknown.pointer(), "/schema_version");
+
+  // A recognised V1 token gets past the fence, so what is missing afterwards is a mandatory curve
+  // member: a different refusal, at that member's own pointer and not at the version.
+  const ContractViolation incomplete =
+      refusal_for_curve(R"({"schema_version":"DISCOUNT_CURVE_V1"})");
+  EXPECT_EQ(incomplete.kind(), ContractViolationKind::kMissingRequiredField);
+  EXPECT_EQ(incomplete.pointer(), "/curve_id") << incomplete.pointer();
 }

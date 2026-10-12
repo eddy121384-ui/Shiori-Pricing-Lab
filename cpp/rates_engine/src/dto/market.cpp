@@ -564,10 +564,19 @@ CanonicalValue Curve::to_canonical() const {
 
 Curve Curve::from_canonical(const CanonicalValue& node, const std::string& pointer) {
   // The curve's own schema_version decides which shape is read; it is validated before any other
-  // content so an unknown or mismatched version fails closed first.
+  // content so an unknown or mismatched version fails closed first. An absent or non-string version is
+  // a version-shape failure, not a missing business field, so it is reported as an unknown wire
+  // version at the version member (Stage 1) exactly as the top-level fence does.
   const CanonicalValue* version_node = node.find("schema_version");
-  if (version_node == nullptr || !version_node->is_string()) {
-    fail_missing(pointer, "schema_version");
+  if (version_node == nullptr) {
+    fail(ContractViolationKind::kUnknownSchemaVersion, child(pointer, "schema_version"),
+         "wire version is absent; a document is never assumed to be V1");
+  }
+  if (!version_node->is_string()) {
+    std::string message = "wire version must be a string token, found ";
+    message += version_node->type_name();
+    fail(ContractViolationKind::kUnknownSchemaVersion, child(pointer, "schema_version"),
+         std::move(message));
   }
   const std::string& version_token = version_node->as_string();
   if (version_token == to_token(SchemaVersion::kDiscountCurveV1)) {

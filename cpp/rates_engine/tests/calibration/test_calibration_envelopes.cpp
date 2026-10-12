@@ -68,6 +68,42 @@ TEST(CalibrationEnvelopes, RefuseAWrongVersionTokenAndAnUnknownKey) {
                ContractViolation);
 }
 
+TEST(CalibrationEnvelopes, RefusesAVersionOnlyDocumentAtTheMissingMember) {
+  // Stage 1 accepts the recognised version and then the declared shape is required: what is missing is
+  // a mandatory member, reported at THAT member's own pointer rather than at the envelope.
+  try {
+    (void)ModelCalibrationInput::from_canonical(
+        parse_canonical_json(R"({"schema_version":"MODEL_CALIBRATION_INPUT_V1"})"), "");
+    FAIL() << "a version-only calibration input must be refused";
+  } catch (const ContractViolation& violation) {
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kMissingRequiredField);
+    EXPECT_EQ(violation.pointer(), "/calibration_input_id") << violation.pointer();
+  }
+  try {
+    (void)ModelCalibrationResult::from_canonical(
+        parse_canonical_json(R"({"schema_version":"MODEL_CALIBRATION_RESULT_V1"})"), "");
+    FAIL() << "a version-only calibration result must be refused";
+  } catch (const ContractViolation& violation) {
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kMissingRequiredField);
+    EXPECT_EQ(violation.pointer(), "/calibration_result_id") << violation.pointer();
+  }
+}
+
+TEST(CalibrationEnvelopes, AcceptAValidV1DocumentThroughTheFrontDoor) {
+  // A well-formed V1 document is still accepted exactly as before. The envelope is built by the DTO
+  // itself, so this walks the whole path: parse -> Stage 0 admission -> version fence -> required
+  // members -> identity verification -> byte-exact round trip.
+  ModelCalibrationInput input;
+  input.payload = parse_canonical_json(R"({"shape":"STRUCTURAL_PLACEHOLDER"})");
+  Shiori::rates::dto::assign_derived_identities(input);
+  const std::string document = input.to_canonical().dump();
+  const ModelCalibrationInput decoded =
+      ModelCalibrationInput::from_canonical(parse_canonical_json(document), "");
+  EXPECT_EQ(decoded.calibration_input_id, input.calibration_input_id);
+  EXPECT_EQ(decoded.content_fingerprint, input.content_fingerprint);
+  EXPECT_EQ(decoded.to_canonical().dump(), document);
+}
+
 TEST(CalibrationEnvelopes, UseDistinctVersionTokens) {
   using Shiori::rates::dto::SchemaVersion;
   using Shiori::rates::dto::to_token;

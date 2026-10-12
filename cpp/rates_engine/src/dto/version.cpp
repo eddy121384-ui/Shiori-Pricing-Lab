@@ -67,13 +67,17 @@ SchemaVersion require_schema_version(const CanonicalValue& node, const SchemaVer
   }
   const CanonicalValue* version_node = node.find("schema_version");
   if (version_node == nullptr) {
-    // The version is checked before any other content, so a missing version is reported against the
-    // object itself rather than against a field path that does not exist yet.
-    fail_missing(pointer, "schema_version");
+    // Stage 1 owns every version-shape failure, so an absent version is refused as an UNKNOWN wire
+    // version at the version member rather than collapsed into a missing business field. A document
+    // is never assumed to be V1: that assumption is exactly what a version fence exists to prevent.
+    fail(ContractViolationKind::kUnknownSchemaVersion, pointer_child(pointer, "schema_version"),
+         "wire version is absent; a document is never assumed to be V1");
   }
   if (!version_node->is_string()) {
-    fail_wrong_type(pointer_child(pointer, "schema_version"), "string version token",
-                    version_node->type_name());
+    std::string message = "wire version must be a string token, found ";
+    message += version_node->type_name();
+    fail(ContractViolationKind::kUnknownSchemaVersion, pointer_child(pointer, "schema_version"),
+         std::move(message));
   }
   const std::string& token = version_node->as_string();
   SchemaVersion found = expected;

@@ -98,11 +98,15 @@ void fail(ContractViolationKind kind, std::string pointer, std::string message) 
 }
 
 void fail_missing(std::string pointer, std::string_view field) {
+  // A missing mandatory member is reported at the MISSING MEMBER'S OWN pointer (for example
+  // `/valuation_product`), never at the enclosing object: a refusal with only the parent's location
+  // cannot be attributed to the field that is actually absent. `pointer` is the enclosing object's
+  // locator and `field` names the member, so the two are combined here rather than at every call site.
   std::string message = "mandatory field '";
   message += field;
   message += "' is absent";
-  throw ContractViolation(ContractViolationKind::kMissingRequiredField, std::move(pointer),
-                          std::move(message));
+  throw ContractViolation(ContractViolationKind::kMissingRequiredField,
+                          pointer_child(pointer, field), std::move(message));
 }
 
 void fail_wrong_type(std::string pointer, std::string_view expected, std::string_view actual) {

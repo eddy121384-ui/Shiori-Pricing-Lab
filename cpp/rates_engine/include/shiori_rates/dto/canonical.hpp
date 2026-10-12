@@ -107,7 +107,8 @@ class CanonicalValue {
 
   // Non-throwing object lookup. Returns nullptr when absent or when this is not an object.
   [[nodiscard]] const CanonicalValue* find(std::string_view key) const noexcept;
-  // Requiring lookup: refuses a missing member with kMissingRequiredField.
+  // Requiring lookup: refuses a missing member with kMissingRequiredField at the member's own
+  // pointer (`pointer/key`), never at the enclosing object.
   [[nodiscard]] const CanonicalValue& at(std::string_view key, const std::string& pointer) const;
 
   // R3-R6. Deterministic serialization to Canonical UTF-8 JSON.
@@ -130,6 +131,12 @@ struct CanonicalValue::Array {
 };
 
 // Parses UTF-8 JSON text into a CanonicalValue.
+//
+// Admission is Stage 0 of the decoder precedence and happens before any DTO interpretation: the bytes
+// must be well-formed UTF-8, the text must be well-formed JSON, and no object may repeat a member key
+// at ANY nesting level. Duplicate detection runs on the parser's own key events, before a DOM parser
+// could collapse two source keys into one map entry, so a duplicated member is refused in a
+// version-less document too. Only a document that passes Stage 0 is parsed at all.
 //
 // The parser is strict about what the canonical mechanism can faithfully represent:
 //   * integers outside signed 64-bit range are refused (kNumericNotRepresentable);

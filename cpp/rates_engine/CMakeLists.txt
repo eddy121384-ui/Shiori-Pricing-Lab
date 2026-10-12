@@ -72,6 +72,38 @@ target_include_directories(shiori_rates_dto PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/
 # interface, so the dependency stays PRIVATE.
 target_link_libraries(shiori_rates_dto PRIVATE nlohmann_json::nlohmann_json)
 
+# ---------------------------------------------------------------------------------------------
+# TEMPORARY TOOLCHAIN WAIVER — GCC 13 only, one translation unit, diagnostic stays visible.
+#
+# GCC 13's -Wmaybe-uninitialized reports a libstdc++-internal inlined path while compiling
+# src/dto/value_or_reason.cpp: /usr/include/c++/13/bits/shared_ptr_base.h:1099
+# (`__shared_count::operator=` reading `__r._M_pi`, i.e. `_Sp_counted_base<_Lp>* __tmp = __r._M_pi;`)
+# and /usr/include/c++/13/variant:224, reached from
+# CanonicalValue::CanonicalValue(CanonicalValue&&) <- std::pair<std::string, CanonicalValue> <-
+# std::construct_at <- std::vector<...>::emplace_back <- StructuredReason::to_canonical().
+# Clang and MSVC do not diagnose this, and the ASan/UBSan and TSan runs report no invalid access or
+# uninitialized read, so it is recorded as a known non-fatal toolchain diagnostic, not as a defect
+# that may be hidden.
+#
+# Scope: GNU C++ major version 13 and this single source file only. -Wno-error=... keeps the warning
+# VISIBLE; it does not disable it (that would be -Wno-maybe-uninitialized, which is NOT authorized).
+# Every other warning in this and every other file remains fatal under the project's -Werror, and a
+# different GCC uninitialized diagnostic is a new finding that is not waived.
+#
+# Owner authorization: issue #227, Sophira owner decision comment 6115796337, option (a).
+# REMOVAL TRIGGER: any change of the GCC major version, the libstdc++ implementation/version, the
+# pinned CI compiler image, or any redesign of CanonicalValue's storage — whichever comes first.
+# ---------------------------------------------------------------------------------------------
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14.0)
+  set_source_files_properties(src/dto/value_or_reason.cpp PROPERTIES
+                              COMPILE_OPTIONS "-Wno-error=maybe-uninitialized")
+  message(STATUS
+          "shiori_rates_dto: temporary GCC ${CMAKE_CXX_COMPILER_VERSION} waiver for "
+          "src/dto/value_or_reason.cpp (-Wno-error=maybe-uninitialized; warning remains visible)")
+endif()
+
 # =============================================================================================
 # shiori_rates_quantlib_adapter — the sole production QuantLib containment boundary.
 # =============================================================================================
