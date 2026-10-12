@@ -107,7 +107,10 @@
       "inherits": [
         "_msvc",
         "_bench"
-      ]
+      ],
+      "cacheVariables": {
+        "SHIORI_BUILD_BENCHMARKS": "ON"
+      }
     },
     {
       "name": "gcc-release",
@@ -131,7 +134,10 @@
       "inherits": [
         "_linux-gcc",
         "_bench"
-      ]
+      ],
+      "cacheVariables": {
+        "SHIORI_BUILD_BENCHMARKS": "ON"
+      }
     },
     {
       "name": "clang-release",
@@ -155,7 +161,10 @@
       "inherits": [
         "_linux-clang",
         "_bench"
-      ]
+      ],
+      "cacheVariables": {
+        "SHIORI_BUILD_BENCHMARKS": "ON"
+      }
     },
     {
       "name": "clang-sanitizers",
