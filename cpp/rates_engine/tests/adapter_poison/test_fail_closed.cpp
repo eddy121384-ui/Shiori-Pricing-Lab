@@ -52,9 +52,14 @@ TEST(AdapterPoison, RefusesEveryOperationOncePoisoned) {
   EXPECT_TRUE(Shiori::rates::adapter::adapter_poison_reason().empty());
 
   // With the poison cleared the engine is usable again, which proves the refusal came from the poison
-  // flag and not from an unrelated failure.
-  const SerializationGate recovered = SerializationGate::acquire("recovered");
-  EXPECT_TRUE(recovered.held());
+  // flag and not from an unrelated failure. The recovered gate is deliberately confined to its own
+  // scope: QuantLibSettingsGuard acquires the same single-process gate, so holding it across the guard
+  // construction would be correctly refused as same-thread re-entrancy; the anti-deadlock posture this
+  // suite pins must stay in force, so the guard is exercised only once the gate is released.
+  {
+    const SerializationGate recovered = SerializationGate::acquire("recovered");
+    EXPECT_TRUE(recovered.held());
+  }
   QuantLibSettingsGuard guard("2026-06-10");
   EXPECT_TRUE(guard.satisfied()) << guard.refusal_reason();
 }

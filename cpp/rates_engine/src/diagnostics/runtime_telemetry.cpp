@@ -49,6 +49,15 @@ using dto::CanonicalValue;
   return dto::enum_to_token(state);
 }
 
+// The one documented stable Lane B identity derivation, shared by encode and decode so the two can
+// never drift apart: `telemetry_id = fingerprint_of("telemetry_version:content_fingerprint")`. It is
+// a function of the version and the content fingerprint alone, so it carries no wall-clock, address
+// or counter identity.
+[[nodiscard]] std::string derive_telemetry_id(const std::string& telemetry_version,
+                                              const std::string& content_fingerprint) {
+  return dto::fingerprint_of(CanonicalValue(telemetry_version + ":" + content_fingerprint));
+}
+
 }  // namespace
 
 CanonicalValue CacheLayerObservation::to_canonical() const {
@@ -314,20 +323,38 @@ RuntimeTelemetry RuntimeTelemetry::from_canonical(const CanonicalValue& node,
   result.content_fingerprint = require_text(node.at("content_fingerprint", pointer),
                                            dto::pointer_child(pointer, "content_fingerprint"),
                                            "string content fingerprint");
-  if (telemetry_content_fingerprint(result) != result.content_fingerprint) {
+  // The declared content fingerprint is verified against the recomputed preimage (which, per the
+  // non-recursive Lane B rule, excludes this document's own `content_fingerprint` and its own
+  // `telemetry_id`). A declared label is an input, never an authority.
+  const std::string recomputed_fingerprint = telemetry_content_fingerprint(result);
+  if (recomputed_fingerprint != result.content_fingerprint) {
     dto::fail(dto::ContractViolationKind::kFingerprintMismatch,
               dto::pointer_child(pointer, "content_fingerprint"),
               "declared content_fingerprint does not match the recomputed canonical preimage");
+  }
+  // ... and then the derived label is verified independently with the SAME derivation the encoder
+  // used. Neither label is silently repaired, and because `telemetry_id` is excluded from the
+  // preimage above, a tampered id cannot be masked by the fingerprint check (nor the reverse).
+  if (result.telemetry_id !=
+      derive_telemetry_id(result.telemetry_version, recomputed_fingerprint)) {
+    dto::fail(dto::ContractViolationKind::kIdentityMismatch,
+              dto::pointer_child(pointer, "telemetry_id"),
+              "declared telemetry_id does not match the derived identity");
   }
   return result;
 }
 
 std::string telemetry_content_fingerprint(const RuntimeTelemetry& telemetry) {
+  // Locked non-recursive Lane B self-identity (Sophira owner decision 6117299766 section B): the
+  // content-fingerprint preimage excludes BOTH the document's own `content_fingerprint` AND its own
+  // derived `telemetry_id` — `telemetry_id` is derived from this fingerprint, so it cannot also be an
+  // input to it. Every other participating measurement/metadata/correlation field stays in the
+  // preimage: genuine timing, cache and gate observations are not suppressed.
   CanonicalValue document = telemetry.to_canonical();
   dto::CanonicalMembers members;
   members.reserve(document.as_object().members.size());
   for (const auto& member : document.as_object().members) {
-    if (member.first != "content_fingerprint") {
+    if (member.first != "content_fingerprint" && member.first != "telemetry_id") {
       members.push_back(member);
     }
   }
@@ -336,11 +363,10 @@ std::string telemetry_content_fingerprint(const RuntimeTelemetry& telemetry) {
 
 void assign_derived_identities(RuntimeTelemetry& telemetry) {
   telemetry.telemetry_version = "RATES_RUNTIME_TELEMETRY_V1";
+  // Fingerprint first, then the derived id, both from the same preimage rule the decoder verifies.
   telemetry.content_fingerprint = telemetry_content_fingerprint(telemetry);
-  // `telemetry_id` is derived from the version + fingerprint so it is deterministic and carries no
-  // wall-clock or address identity.
-  telemetry.telemetry_id = dto::fingerprint_of(dto::CanonicalValue(
-      telemetry.telemetry_version + ":" + telemetry.content_fingerprint));
+  telemetry.telemetry_id =
+      derive_telemetry_id(telemetry.telemetry_version, telemetry.content_fingerprint);
 }
 
 }  // namespace Shiori::rates::diagnostics

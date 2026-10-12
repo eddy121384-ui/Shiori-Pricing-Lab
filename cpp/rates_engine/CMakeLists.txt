@@ -171,6 +171,7 @@ if(SHIORI_BUILD_TESTS)
     "adapter_poison|shiori_rates_quantlib_adapter"
     "defaults|shiori_rates_quantlib_adapter"
     "determinism|shiori_rates_dto,shiori_rates_core"
+    "diagnostics|shiori_rates_diagnostics"
     "cache|shiori_rates_dto,shiori_rates_core"
     "calibration|shiori_rates_dto"
     "concurrency|shiori_rates_quantlib_adapter"

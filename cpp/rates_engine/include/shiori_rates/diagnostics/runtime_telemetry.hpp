@@ -99,6 +99,16 @@ struct RuntimeTelemetry {
                                                        const std::string& pointer);
 };
 
+// Locked non-recursive Lane B self-identity (Sophira owner decision 6117299766 section B):
+//   * `telemetry_content_fingerprint` is the digest of the canonical content with BOTH the document's
+//     own `content_fingerprint` AND its own derived `telemetry_id` excluded. `telemetry_id` is
+//     derived from this fingerprint, so it must not be an input to it. Every other participating
+//     measurement/metadata/correlation field stays in the preimage.
+//   * `telemetry_id = fingerprint_of("telemetry_version:content_fingerprint")`, the same derivation on
+//     encode (`assign_derived_identities`) and on decode (`from_canonical`), and never a
+//     timestamp/pointer/counter.
+// A decode independently verifies both declared labels and refuses a mismatch; it never repairs one.
+// This is the Lane B channel only: it changes no #225 `PricingResult`/`RiskResult` preimage.
 [[nodiscard]] std::string telemetry_content_fingerprint(const RuntimeTelemetry& telemetry);
 void assign_derived_identities(RuntimeTelemetry& telemetry);
 

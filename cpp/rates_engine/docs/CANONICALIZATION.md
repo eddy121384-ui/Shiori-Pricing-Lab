@@ -77,6 +77,35 @@ Escaping is reversible: parsing an escaped document and re-serializing it reprod
     therefore includes the derived id;
   - `ResolvedSwap` and `RatesKernelInput` have **no id**; they are identified by fingerprint only.
 
+### 4.1 Lane B runtime telemetry identity (non-recursive; #226 §12.4 clarification)
+
+Lane B (`RATES_RUNTIME_TELEMETRY_V1`) has its own identity rule. It is a **clarification of the
+out-of-band diagnostic channel only**; it does not modify any #225 document-level preimage and it does
+not modify the #226 contract. Authority: **Sophira owner decision 6117299766 section B**, locked and
+implemented by `src/diagnostics/runtime_telemetry.cpp`:
+
+1. The telemetry `content_fingerprint` preimage **excludes BOTH** the document's own
+   `content_fingerprint` **and** its own derived `telemetry_id`. `telemetry_id` is derived from that
+   fingerprint, so it cannot also be an input to it — this is what makes the Lane B identity
+   non-recursive. (For #225 identity-bearing documents the rule in §4 is unchanged: their
+   `content_fingerprint` preimage still excludes only `content_fingerprint` and still includes the
+   derived id.)
+2. The preimage **keeps** `telemetry_version` and every other currently participating
+   measurement/metadata/correlation field: genuine timing, cache and gate observations are never
+   suppressed to make an identity look stable.
+3. Order of derivation, identical on encode (`assign_derived_identities`) and on decode
+   (`RuntimeTelemetry::from_canonical`): compute `content_fingerprint` from the preimage above first,
+   then `telemetry_id = fingerprint_of("telemetry_version:content_fingerprint")`. No
+   timestamp/pointer/counter-based identity is used.
+4. A decode independently verifies **both** declared labels against that recomputation and **refuses**
+   a mismatch — never silently repairs it. Existing violation vocabulary only: a declared
+   `content_fingerprint` that does not match is `FINGERPRINT_MISMATCH` at `/content_fingerprint`; a
+   declared `telemetry_id` that does not match the derived id is `IDENTITY_MISMATCH` at
+   `/telemetry_id`.
+5. Lane B stays operational/nondeterministic and **outside** the #225 `PricingResult`/`RiskResult`
+   content/replay fingerprints. No Lane A (result diagnostics) or #225 preimage membership changes:
+   #225 and #226 contracts are unmodified by this clarification.
+
 ## 5. Immutability of a published request
 
 `FrozenKernelInput` owns the validated DTO together with the canonical bytes and the content
@@ -115,6 +144,7 @@ envelopes are **documented placeholders**; see `PHASE0_CONTRACT_MATRIX.md`.
 
 - The row-level vocabulary of `assumptions` and `diagnostics` is **Lane A** and is a map of JSON
   scalars only. **Lane B** runtime telemetry (`RATES_RUNTIME_TELEMETRY_V1`) is out of band: it is
-  never a member of `PricingResult`/`RiskResult` and does not participate in any fingerprint.
+  never a member of `PricingResult`/`RiskResult` and does not participate in any result fingerprint.
+  Lane B has its own non-recursive identity rule (§4.1), which no result preimage shares.
 - QuantLib version, macro configuration and build identity are Lane B (G-2/G-3): they are reported and
   participate in the cache key, never in a document's content fingerprint.

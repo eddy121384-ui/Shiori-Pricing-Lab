@@ -324,7 +324,13 @@ QuantLibSettingsGuard::QuantLibSettingsGuard(std::string_view iso_valuation_date
   impl_->gate = SerializationGate::acquire("quantlib_settings_guard");
 
   const QuantLib::Settings& const_settings = QuantLib::Settings::instance();
-  impl_->previous_evaluation_date = const_settings.evaluationDate();
+  // Capture the RAW stored value, never the DateProxy's implicit conversion to Date. `DateProxy`
+  // inherits `ObservableValue<Date>`, whose `value() const` is the only accessor that exposes the raw
+  // date; `DateProxy::operator Date()` substitutes `Date::todaysDate()` for a raw-null date (verified
+  // against QuantLib 1.43 `ql/settings.hpp` / `ql/utilities/observablevalue.hpp`), so capturing
+  // through the conversion would record a raw-null state as an explicit "today" and lose the very
+  // distinction this restoration contract exists to preserve.
+  impl_->previous_evaluation_date = const_settings.evaluationDate().value();
   // A raw-null QuantLib date means "no explicit evaluation date": the library follows the clock.
   // This is a DIFFERENT state from an explicit date and must be restored as itself.
   impl_->previous_was_unset = (impl_->previous_evaluation_date == QuantLib::Date());
@@ -335,7 +341,7 @@ QuantLibSettingsGuard::QuantLibSettingsGuard(std::string_view iso_valuation_date
   QuantLib::Settings& settings = QuantLib::Settings::instance();
   settings.evaluationDate() = requested;
 
-  const QuantLib::Date observed = QuantLib::Settings::instance().evaluationDate();
+  const QuantLib::Date observed = QuantLib::Settings::instance().evaluationDate().value();
   if (!(observed == requested)) {
     refusal_reason_ = "QuantLib settings guard could not observe the requested evaluation date";
     poison_adapter_for_testing(refusal_reason_);
@@ -349,9 +355,12 @@ QuantLibSettingsGuard::~QuantLibSettingsGuard() {
     return;
   }
   QuantLib::Settings& settings = QuantLib::Settings::instance();
+  // Restoration is verified through the RAW accessor for the same reason the capture uses it: the
+  // DateProxy conversion would report a raw-null state as `Date::todaysDate()` and therefore cannot
+  // prove that the raw-null / clock-following state came back.
   if (impl_->previous_was_unset) {
     settings.resetEvaluationDate();
-    if (!(QuantLib::Settings::instance().evaluationDate() == QuantLib::Date())) {
+    if (!(QuantLib::Settings::instance().evaluationDate().value() == QuantLib::Date())) {
       refusal_reason_ =
           "QuantLib settings guard could not restore the unset (follow-the-clock) evaluation date";
       poison_adapter_for_testing(refusal_reason_);
@@ -360,7 +369,8 @@ QuantLibSettingsGuard::~QuantLibSettingsGuard() {
     }
   } else {
     settings.evaluationDate() = impl_->previous_evaluation_date;
-    if (QuantLib::Settings::instance().evaluationDate() != impl_->previous_evaluation_date) {
+    if (QuantLib::Settings::instance().evaluationDate().value() !=
+        impl_->previous_evaluation_date) {
       refusal_reason_ =
           "QuantLib settings guard could not restore the previous evaluation date";
       poison_adapter_for_testing(refusal_reason_);

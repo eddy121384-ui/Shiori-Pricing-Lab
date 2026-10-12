@@ -1,0 +1,234 @@
+// Lane B `RATES_RUNTIME_TELEMETRY_V1` self-identity: the CLI encode -> parse -> decode -> re-encode
+// round trip, the non-recursive preimage property, and the two tampered-label refusals.
+//
+// Authority: Sophira owner decision 6117299766 section B (locked, non-recursive):
+//   * the content-fingerprint preimage excludes BOTH the document's own `content_fingerprint` AND its
+//     own derived `telemetry_id`;
+//   * `telemetry_id = fingerprint_of("telemetry_version:content_fingerprint")`, the same derivation on
+//     encode and on decode, never a timestamp/pointer/counter;
+//   * a decode independently verifies BOTH declared labels and never silently repairs one.
+//
+// Lane B is out of band: it is not a member of #225 `PricingResult`/`RiskResult`, so these tests touch
+// no #225 / Lane A preimage. The construction path mirrors
+// `tools/rates_engine_cli/main.cpp --operation telemetry`: fill the observations and metadata, then
+// `assign_derived_identities`, then `to_canonical`.
+#include <gtest/gtest.h>
+
+#include <cstddef>
+#include <string>
+#include <utility>
+
+#include "shiori_rates/diagnostics/runtime_telemetry.hpp"
+#include "shiori_rates/dto/canonical.hpp"
+#include "shiori_rates/dto/error.hpp"
+#include "shiori_rates/dto/fingerprint.hpp"
+#include "shiori_rates/dto/units.hpp"
+
+namespace {
+
+using Shiori::rates::diagnostics::CacheLayerObservation;
+using Shiori::rates::diagnostics::PhaseTiming;
+using Shiori::rates::diagnostics::RuntimeTelemetry;
+using Shiori::rates::diagnostics::assign_derived_identities;
+using Shiori::rates::diagnostics::telemetry_content_fingerprint;
+using Shiori::rates::dto::CacheState;
+using Shiori::rates::dto::CanonicalValue;
+using Shiori::rates::dto::ContractViolation;
+using Shiori::rates::dto::ContractViolationKind;
+using Shiori::rates::dto::fingerprint_of;
+using Shiori::rates::dto::parse_canonical_json;
+
+// Literal test inputs, not observations of any run: the values only have to be complete and distinct
+// enough that each participating field can be shown to move the fingerprint.
+[[nodiscard]] RuntimeTelemetry build_cli_lane_b_telemetry() {
+  RuntimeTelemetry telemetry;
+  telemetry.telemetry_version = "RATES_RUNTIME_TELEMETRY_V1";
+  telemetry.correlation_result_fingerprint = "unavailable-for-this-operation";
+  telemetry.correlation_inputs_fingerprint = "unavailable-for-this-operation";
+  telemetry.metadata.engine_version = "0.1.0";
+  telemetry.metadata.quantlib_version = "1.35";
+  telemetry.metadata.quantlib_macro_configuration = "QL_USE_STD_SHARED_PTR";
+  telemetry.metadata.acquisition_mode = "vcpkg-manifest";
+  telemetry.metadata.vcpkg_baseline = "0000000000000000000000000000000000000000";
+  telemetry.metadata.vcpkg_triplet = "x64-windows";
+  telemetry.metadata.build_type = "Release";
+  telemetry.metadata.compiler = "msvc/19.44";
+  telemetry.metadata.numeric_flags = "/fp:precise (fast-math forbidden)";
+  telemetry.metadata.benchmark_name = "none";
+  telemetry.metadata.fixture_id = "none";
+
+  // G-4: the cache is not implemented in #227, so the honest observation is DISABLED with zero
+  // activity, exactly as the CLI reports it.
+  CacheLayerObservation layer;
+  layer.layer_id = "kernel_input";
+  layer.state = CacheState::kDisabled;
+  layer.key_digest = "none";
+  telemetry.cache_layers.push_back(std::move(layer));
+
+  telemetry.execution_path.path_id = "VALIDATE_ONLY";
+  telemetry.execution_path.served_from_cache = false;
+
+  telemetry.gate.mode = "SERIALIZED";
+  telemetry.gate.gate_id = "shiori_rates_quantlib_gate";
+  telemetry.gate.acquisitions = 3;
+  telemetry.gate.waits = 1;
+  telemetry.gate.reentrant_refusals = 0;
+
+  PhaseTiming phase;
+  phase.phase_id = "validate_kernel_input";
+  phase.milliseconds = 0.125;
+  telemetry.phases.push_back(std::move(phase));
+  return telemetry;
+}
+
+// The CLI path through `assign_derived_identities`, so the round-trip test starts from real encode
+// input.
+[[nodiscard]] RuntimeTelemetry cli_lane_b_telemetry_with_identities() {
+  RuntimeTelemetry telemetry = build_cli_lane_b_telemetry();
+  assign_derived_identities(telemetry);
+  return telemetry;
+}
+
+// Replaces the value of one top-level string member of an already-canonical document, so the only
+// difference from the encoded document is that one label. A missing needle is a test bug and is
+// reported rather than silently returning the untampered text.
+[[nodiscard]] std::string tamper_top_level_string_member(const std::string& json,
+                                                         const std::string& member,
+                                                         const std::string& original,
+                                                         const std::string& tampered) {
+  const std::string needle = "\"" + member + "\":\"" + original + "\"";
+  const std::size_t position = json.find(needle);
+  if (position == std::string::npos) {
+    ADD_FAILURE() << "member " << member << " with value " << original << " is not present in "
+                  << json;
+    return json;
+  }
+  std::string result = json;
+  result.replace(position, needle.size(), "\"" + member + "\":\"" + tampered + "\"");
+  return result;
+}
+
+// A different label of the same 64-lowercase-hex shape, so a refusal can only be the label
+// comparison and never a shape check.
+[[nodiscard]] std::string flip_first_hex_character(std::string token) {
+  if (token.empty()) {
+    ADD_FAILURE() << "a derived Lane B label must not be empty";
+    return token;
+  }
+  token[0] = (token[0] == 'a') ? 'b' : 'a';
+  return token;
+}
+
+// Every document handed to this helper MUST be refused, so a missing refusal fails the test instead
+// of being folded into a sentinel that could be confused with a real refusal.
+[[nodiscard]] ContractViolation refusal_for_telemetry(const std::string& json) {
+  try {
+    (void)RuntimeTelemetry::from_canonical(parse_canonical_json(json), "");
+  } catch (const ContractViolation& violation) {
+    return violation;
+  }
+  ADD_FAILURE() << "a Lane B telemetry document must be refused: " << json;
+  return ContractViolation(ContractViolationKind::kInvariantViolation, "<no refusal>",
+                           "no refusal was thrown");
+}
+
+}  // namespace
+
+TEST(LaneBTelemetryIdentity, CliEncodeDecodeReencodeIsByteIdentical) {
+  const RuntimeTelemetry encoded_telemetry = cli_lane_b_telemetry_with_identities();
+  const std::string encoded = encoded_telemetry.to_canonical().dump();
+
+  const RuntimeTelemetry decoded =
+      RuntimeTelemetry::from_canonical(parse_canonical_json(encoded), "");
+
+  // Byte-identical re-encode: the decoder neither normalizes nor repairs the document.
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded);
+  EXPECT_EQ(decoded.telemetry_version, encoded_telemetry.telemetry_version);
+  EXPECT_EQ(decoded.telemetry_id, encoded_telemetry.telemetry_id);
+  EXPECT_EQ(decoded.content_fingerprint, encoded_telemetry.content_fingerprint);
+  // The id is exactly the documented version-plus-fingerprint derivation.
+  EXPECT_EQ(encoded_telemetry.telemetry_id,
+            fingerprint_of(CanonicalValue(encoded_telemetry.telemetry_version + ":" +
+                                          encoded_telemetry.content_fingerprint)));
+}
+
+TEST(LaneBTelemetryIdentity, PreimageExcludesBothOwnIdentityFieldsAndKeepsObservations) {
+  const RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  const std::string baseline = telemetry_content_fingerprint(telemetry);
+
+  // Rule 1: neither of the document's own identity labels is an input to its own fingerprint.
+  RuntimeTelemetry other_id = telemetry;
+  other_id.telemetry_id = flip_first_hex_character(telemetry.telemetry_id);
+  EXPECT_EQ(telemetry_content_fingerprint(other_id), baseline);
+
+  RuntimeTelemetry other_fingerprint = telemetry;
+  other_fingerprint.content_fingerprint = flip_first_hex_character(telemetry.content_fingerprint);
+  EXPECT_EQ(telemetry_content_fingerprint(other_fingerprint), baseline);
+
+  // Rule 2: genuine observations still participate; the preimage is not emptied.
+  RuntimeTelemetry other_gate = telemetry;
+  other_gate.gate.waits += 1;
+  EXPECT_NE(telemetry_content_fingerprint(other_gate), baseline);
+
+  RuntimeTelemetry other_timing = telemetry;
+  other_timing.phases[0].milliseconds += 0.5;
+  EXPECT_NE(telemetry_content_fingerprint(other_timing), baseline);
+
+  RuntimeTelemetry other_cache = telemetry;
+  other_cache.cache_layers[0].misses += 1;
+  EXPECT_NE(telemetry_content_fingerprint(other_cache), baseline);
+
+  RuntimeTelemetry other_path = telemetry;
+  other_path.execution_path.served_from_cache = true;
+  EXPECT_NE(telemetry_content_fingerprint(other_path), baseline);
+
+  RuntimeTelemetry other_metadata = telemetry;
+  other_metadata.metadata.compiler = "msvc/19.45";
+  EXPECT_NE(telemetry_content_fingerprint(other_metadata), baseline);
+
+  RuntimeTelemetry other_correlation = telemetry;
+  other_correlation.correlation_result_fingerprint = "some-result-fingerprint";
+  EXPECT_NE(telemetry_content_fingerprint(other_correlation), baseline);
+
+  RuntimeTelemetry other_version = telemetry;
+  other_version.telemetry_version = "RATES_RUNTIME_TELEMETRY_V2";
+  EXPECT_NE(telemetry_content_fingerprint(other_version), baseline);
+}
+
+TEST(LaneBTelemetryIdentity, RefusesATamperedTelemetryId) {
+  const RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  const std::string encoded = telemetry.to_canonical().dump();
+  const std::string tampered = tamper_top_level_string_member(
+      encoded, "telemetry_id", telemetry.telemetry_id,
+      flip_first_hex_character(telemetry.telemetry_id));
+
+  const ContractViolation violation = refusal_for_telemetry(tampered);
+  // `telemetry_id` is excluded from the content-fingerprint preimage, so the declared
+  // content_fingerprint still matches and the refusal is attributable to the id alone.
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kIdentityMismatch);
+  EXPECT_EQ(violation.pointer(), "/telemetry_id");
+}
+
+TEST(LaneBTelemetryIdentity, RefusesATamperedContentFingerprint) {
+  const RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  const std::string encoded = telemetry.to_canonical().dump();
+  const std::string tampered = tamper_top_level_string_member(
+      encoded, "content_fingerprint", telemetry.content_fingerprint,
+      flip_first_hex_character(telemetry.content_fingerprint));
+
+  const ContractViolation violation = refusal_for_telemetry(tampered);
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kFingerprintMismatch);
+  EXPECT_EQ(violation.pointer(), "/content_fingerprint");
+}
+
+TEST(LaneBTelemetryIdentity, KeepsTheStageOneVersionFence) {
+  // The retained Stage-1 fence: an absent or non-string version is a VERSION refusal at the version
+  // member, before any other member is read, and V1 is never assumed.
+  const ContractViolation absent = refusal_for_telemetry("{}");
+  EXPECT_EQ(absent.kind(), ContractViolationKind::kUnknownSchemaVersion);
+  EXPECT_EQ(absent.pointer(), "/telemetry_version");
+
+  const ContractViolation non_string = refusal_for_telemetry(R"({"telemetry_version":1})");
+  EXPECT_EQ(non_string.kind(), ContractViolationKind::kUnknownSchemaVersion);
+  EXPECT_EQ(non_string.pointer(), "/telemetry_version");
+}
