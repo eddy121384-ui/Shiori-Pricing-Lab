@@ -337,12 +337,13 @@ if(SHIORI_BUILD_BENCHMARKS)
   set(SHIORI_BENCH_GROUPS
     "startup|shiori_rates_core"
     "dto|shiori_rates_dto"
-    "materialize|shiori_rates_dto;shiori_rates_core"
+    "materialize|shiori_rates_dto,shiori_rates_core"
   )
   foreach(_group_spec IN LISTS SHIORI_BENCH_GROUPS)
     string(REPLACE "|" ";" _group_parts "${_group_spec}")
     list(GET _group_parts 0 _group)
     list(GET _group_parts 1 _group_libraries)
+    string(REPLACE "," ";" _group_libraries "${_group_libraries}")
     file(GLOB _group_sources CONFIGURE_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/${_group}/*.cpp")
     if(NOT _group_sources)
