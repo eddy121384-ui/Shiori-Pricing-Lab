@@ -152,6 +152,52 @@ shiori_configure_target(shiori_rates_cli)
 target_link_libraries(shiori_rates_cli
   PRIVATE shiori_rates_core shiori_rates_diagnostics shiori_rates_quantlib_adapter)
 
+# ---------------------------------------------------------------------------------------------
+# TEMPORARY TOOLCHAIN WAIVERS W-002 .. W-004 — GCC 13 + the RelWithDebInfo benchmark configuration,
+# one option per named translation unit, diagnostic stays visible.
+#
+# The benchmark preset (RelWithDebInfo, SHIORI_BUILD_BENCHMARKS=ON) makes GCC 13's
+# -Wmaybe-uninitialized report the same libstdc++-internal inlined std::variant / std::shared_ptr
+# artifact already recorded as W-001, in three further translation units:
+#   W-002  src/dto/numeric.cpp                    (shiori_rates_dto)
+#   W-003  src/diagnostics/runtime_telemetry.cpp  (shiori_rates_diagnostics)
+#   W-004  tools/rates_engine_cli/main.cpp        (shiori_rates_cli)
+# The Release configuration of the same sources is clean (CI `build (gcc-release)` is green), so these
+# three are additionally narrowed to RelWithDebInfo. Clang, MSVC and the sanitizer configurations do
+# not diagnose it. This block is placed after every target that owns these files so the property can
+# never be lost to target-definition ordering.
+#
+# Scope: GNU C++ major version 13, RelWithDebInfo, and exactly those three files, each separately
+# documented as W-002/W-003/W-004 in docs/TOOLCHAIN_WAIVERS.md and independently removable.
+# -Wno-error=... keeps the warning VISIBLE; it does not disable it (that would be
+# -Wno-maybe-uninitialized, which is NOT authorized, just as a target-wide/global -Wno-error or
+# dropping -Werror is not). Every other warning in these and every other file stays fatal under the
+# project's -Werror, and a NEW GCC uninitialized diagnostic - another class, or a further translation
+# unit - is a new finding that is not waived.
+#
+# Owner authorization: issue #227, Sophira owner decision comment 6118664190, Decision 1.
+# REMOVAL TRIGGER: any change of the GCC major version, the libstdc++ implementation/version, the
+# pinned CI compiler image, the benchmark build type, or any redesign of CanonicalValue's storage -
+# whichever comes first.
+# ---------------------------------------------------------------------------------------------
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14.0
+   AND CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+  # Deliberately three separate calls, not a loop over a list: each waiver can be dropped on its own
+  # without touching the others or W-001.
+  set_source_files_properties(src/dto/numeric.cpp PROPERTIES
+                              COMPILE_OPTIONS "-Wno-error=maybe-uninitialized")
+  set_source_files_properties(src/diagnostics/runtime_telemetry.cpp PROPERTIES
+                              COMPILE_OPTIONS "-Wno-error=maybe-uninitialized")
+  set_source_files_properties(tools/rates_engine_cli/main.cpp PROPERTIES
+                              COMPILE_OPTIONS "-Wno-error=maybe-uninitialized")
+  message(STATUS
+          "shiori: temporary GCC ${CMAKE_CXX_COMPILER_VERSION} RelWithDebInfo waivers W-002..W-004 for "
+          "src/dto/numeric.cpp, src/diagnostics/runtime_telemetry.cpp and "
+          "tools/rates_engine_cli/main.cpp (-Wno-error=maybe-uninitialized; warnings remain visible)")
+endif()
+
 # =============================================================================================
 # Tests
 # =============================================================================================
@@ -186,6 +232,13 @@ if(SHIORI_BUILD_TESTS)
     string(REPLACE "," ";" _group_libraries "${_group_libraries}")
     file(GLOB _group_sources CONFIGURE_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_group}/*.cpp")
+    # The mandatory #226 section 5.7 T4 forced-restoration-failure test latches PERMANENT adapter
+    # poison, so it must never share a process with the other adapter tests: a shared binary would make
+    # their outcome depend on test order. The file stays in tests/adapter/ to remain inside the approved
+    # QuantLib test include allow-list, and is built into the isolated target below instead.
+    if(_group STREQUAL "adapter")
+      list(FILTER _group_sources EXCLUDE REGEX "/t4_forced_restoration_failure\\.cpp$")
+    endif()
     if(NOT _group_sources)
       message(FATAL_ERROR
         "test group '${_group}' has no sources. A silently empty test target would make the suite "
@@ -206,6 +259,33 @@ if(SHIORI_BUILD_TESTS)
       TEST_PREFIX "${_group}/"
       PROPERTIES LABELS "${_group}" TIMEOUT 300)
   endforeach()
+
+  # Isolated #226 section 5.7 T4 forced-restoration-failure executable. It is a REQUIRED test, not an
+  # optional extra: it proves that a restoration-time fault (a throwing QuantLib observer) latches
+  # permanent adapter poison before the single-process gate can be released, so the process is never
+  # left usable in a polluted state and a later request is refused promptly instead of deadlocking.
+  # A missing source is a configuration error - the leg may not be dropped silently.
+  set(_shiori_t4_source
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/adapter/t4_forced_restoration_failure.cpp")
+  if(NOT EXISTS "${_shiori_t4_source}")
+    message(FATAL_ERROR
+      "#226 section 5.7 T4 is mandatory for #227: ${_shiori_t4_source} is missing. The "
+      "forced-restoration-failure leg may not be dropped silently; add the test or remove the "
+      "requirement explicitly.")
+  endif()
+  add_executable(shiori_rates_tests_adapter_t4 "${_shiori_t4_source}")
+  shiori_configure_target(shiori_rates_tests_adapter_t4)
+  target_link_libraries(shiori_rates_tests_adapter_t4
+    PRIVATE shiori_rates_quantlib_adapter GTest::gtest_main)
+  target_compile_definitions(shiori_rates_tests_adapter_t4 PRIVATE
+    "SHIORI_FIXTURE_DIR=\"${SHIORI_FIXTURE_DIR}\"")
+  if(SHIORI_EVIDENCE_RUNS)
+    target_compile_definitions(shiori_rates_tests_adapter_t4 PRIVATE SHIORI_EVIDENCE_RUNS=1)
+  endif()
+  gtest_discover_tests(shiori_rates_tests_adapter_t4
+    DISCOVERY_TIMEOUT 60
+    TEST_PREFIX "adapter_t4/"
+    PROPERTIES LABELS "adapter_t4" TIMEOUT 300)
 
   # The isolation guard is a test, not a convention (#226 section 3.9).
   find_package(Python3 COMPONENTS Interpreter QUIET)
