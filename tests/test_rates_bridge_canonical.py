@@ -540,6 +540,10 @@ def test_invoke_executes_the_validated_file_not_a_same_named_executable_on_path(
     validated_cli.write_text("", encoding="utf-8")
     decoy_cli = decoy_dir / "shiori_rates_cli"
     decoy_cli.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        # `execvp`'s PATH search (and `shutil.which`) only considers an executable candidate, so the
+        # decoy must carry the executable bit for the ambiguity under test to be real on POSIX.
+        decoy_cli.chmod(0o755)
 
     monkeypatch.chdir(validated_dir)
     monkeypatch.setenv("PATH", str(decoy_dir) + os.pathsep + os.environ.get("PATH", ""))
