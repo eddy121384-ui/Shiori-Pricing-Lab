@@ -112,7 +112,11 @@ OperationOutcome canonicalize_kernel_input(std::string_view canonical_json) {
     const std::string bytes = document.dump();
     // Self-check: the canonical form of an accepted document must fingerprint to the document's own
     // declared content fingerprint. This makes the operation its own cross-language parity anchor.
-    if (dto::fingerprint_of_canonical_bytes(bytes) != input.content_fingerprint) {
+    // #225 section 15.4 excludes an object's own content_fingerprint from its own preimage, so the
+    // comparison uses the defined kernel-input preimage helper: hashing the complete serialized
+    // document (which contains the fingerprint field itself) can never reproduce the declared value
+    // and would refuse every valid input.
+    if (dto::kernel_input_content_fingerprint(input) != input.content_fingerprint) {
       dto::fail(dto::ContractViolationKind::kFingerprintMismatch, "",
                 "canonical re-serialization does not reproduce the declared content_fingerprint");
     }

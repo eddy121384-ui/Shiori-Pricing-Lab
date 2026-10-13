@@ -1,6 +1,7 @@
 #include "shiori_rates/dto/market.hpp"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "shiori_rates/dto/codec_traits.hpp"
@@ -28,6 +29,18 @@ namespace {
   return node.as_string();
 }
 
+// A set-semantic string list. #225 section 15.4 (docs/33 lines 1233-1234) requires every such list
+// to be lexicographically sorted and duplicate-free BEFORE serialization, because the list is part of
+// a fingerprint preimage and source/acquisition order must never change a fingerprint:
+//   `upstream_ids` / `evidence_refs` on SourceProvenance (VolatilityInput.provenance),
+//   CurveSourceProvenance, CurveSetConstruction, CurveSetProvenance, FixingStoreProvenance and
+//   SnapshotProvenance, plus `MarketSnapshot.diagnostics.unresolved_fields`.
+// Every call site of this helper is one of those set-semantic lists, so the rule is enforced here
+// rather than at each site; no order-significant string list (for example the per-pillar
+// `CurveSourceProvenance.quote_timestamps`, which is positional) is read through this helper.
+// The adjacent comparison is the same strictly-ascending idiom the pillar and curve ordering rules
+// use, and it proves sortedness and duplicate-freeness at once. A non-canonical list is REFUSED, not
+// re-sorted: silently reordering would reinterpret the producer's document.
 [[nodiscard]] std::vector<std::string> require_string_list(const CanonicalValue& node,
                                                            const std::string& pointer,
                                                            const char* what) {
@@ -43,6 +56,11 @@ namespace {
       fail_wrong_type(pointer_index(pointer, index), "string", item.type_name());
     }
     result.push_back(item.as_string());
+    if (index > 0 && !(result[index - 1] < result[index])) {
+      fail(ContractViolationKind::kInvariantViolation, pointer_index(pointer, index),
+           "a set-semantic list must be strictly ascending (lexicographically sorted and "
+           "duplicate-free) before serialization");
+    }
   }
   return result;
 }
@@ -583,6 +601,15 @@ Curve Curve::from_canonical(const CanonicalValue& node, const std::string& point
     (void)require_schema_version(node, SchemaVersion::kDiscountCurveV1, pointer);
     DiscountCurve curve;
     curve.common = curve_common_from_canonical(node, pointer, discount_curve_keys());
+    // Section 7.2 (docs/33 line 439) fixes the DISCOUNT_CURVE_V1 role vocabulary to
+    // `DISCOUNT | DISCOUNT_AND_FORECAST_REFERENCE_ONLY`, and section 7.3 (line 496) fixes
+    // FORWARD_CURVE_V1 to `FORECAST`. The schema token and the role are two statements about the same
+    // curve, so a disagreement is refused at the curve rather than resolved in either direction.
+    if (curve.common.curve_role == CurveRole::kForecast) {
+      fail(ContractViolationKind::kInvariantViolation, pointer,
+           "DISCOUNT_CURVE_V1 permits only the DISCOUNT or DISCOUNT_AND_FORECAST_REFERENCE_ONLY "
+           "role; a FORECAST curve is FORWARD_CURVE_V1");
+    }
     Curve result{std::move(curve)};
     verify_curve_identities(result, pointer);
     return result;
@@ -591,6 +618,13 @@ Curve Curve::from_canonical(const CanonicalValue& node, const std::string& point
     (void)require_schema_version(node, SchemaVersion::kForwardCurveV1, pointer);
     ForwardCurve curve;
     curve.common = curve_common_from_canonical(node, pointer, forward_curve_keys());
+    // Section 7.3 (docs/33 line 496): `curve_role: FORECAST`. A discount or combined-role curve is a
+    // DISCOUNT_CURVE_V1 shape, so a FORWARD_CURVE_V1 token carrying either role is refused.
+    if (curve.common.curve_role != CurveRole::kForecast) {
+      fail(ContractViolationKind::kInvariantViolation, pointer,
+           "FORWARD_CURVE_V1 requires the FORECAST role; a discount or combined-role curve is "
+           "DISCOUNT_CURVE_V1");
+    }
     curve.index_tenor = ValueOrReason<std::string>::from_canonical(
         node.at("index_tenor", pointer), child(pointer, "index_tenor"));
     curve.fixing_calendar_ref = ValueOrReason<std::string>::from_canonical(
@@ -705,6 +739,41 @@ CanonicalValue CurveSet::to_canonical() const {
   return CanonicalValue::make_object(std::move(members));
 }
 
+namespace {
+
+// #225 section 15.4 (docs/33 line 1226): canonical sort key for `CurveSet.curves`, the tuple
+// `(curve_role, index_id_sort_key, curve_id)` where `index_id_sort_key` is the PRESENT canonical enum
+// token when `index_id` is PRESENT and exactly the empty UTF-8 string otherwise, and duplicate
+// `curve_id` is forbidden. The components are compared as their canonical tokens: the contract itself
+// defines this key's middle member as the enum TOKEN, and where it means enum declaration order it
+// says so explicitly (line 1229, strikes: "ascending by StrikeDimension enum order").
+struct CurveOrderKey {
+  std::string curve_role;
+  std::string index_id_sort_key;
+  std::string curve_id;
+
+  friend bool operator<(const CurveOrderKey& left, const CurveOrderKey& right) {
+    if (left.curve_role != right.curve_role) {
+      return left.curve_role < right.curve_role;
+    }
+    if (left.index_id_sort_key != right.index_id_sort_key) {
+      return left.index_id_sort_key < right.index_id_sort_key;
+    }
+    return left.curve_id < right.curve_id;
+  }
+};
+
+[[nodiscard]] CurveOrderKey curve_order_key(const Curve& curve) {
+  const CurveCommon& common = curve.common();
+  return CurveOrderKey{
+      std::string(enum_to_token<CurveRole>(common.curve_role)),
+      common.index_id.present ? std::string(enum_to_token<FloatingIndex>(common.index_id.value))
+                              : std::string(),
+      common.curve_id};
+}
+
+}  // namespace
+
 CurveSet CurveSet::from_canonical(const CanonicalValue& node, const std::string& pointer) {
   (void)require_schema_version(node, SchemaVersion::kCurveSetV1, pointer);
   require_only_keys(node, pointer,
@@ -731,6 +800,29 @@ CurveSet CurveSet::from_canonical(const CanonicalValue& node, const std::string&
   for (std::size_t index = 0; index < items.size(); ++index) {
     result.curves.push_back(
         Curve::from_canonical(items[index], pointer_index(child(pointer, "curves"), index)));
+  }
+  // Section 15.4 (docs/33 line 1226): `curves` is in ascending canonical order of the tuple
+  // (curve_role, index_id_sort_key, curve_id), and duplicate `curve_id` is forbidden. A caller's
+  // acquisition order is never allowed to reach a fingerprint preimage, and the decoder REFUSES a
+  // non-canonical list rather than sorting for the caller (a silent reorder would reinterpret the
+  // document). The duplicate scan reports a repeated curve_id wherever it sits; the ordering scan
+  // then reports any inversion between adjacent entries.
+  for (std::size_t index = 0; index < result.curves.size(); ++index) {
+    for (std::size_t other = index + 1; other < result.curves.size(); ++other) {
+      if (result.curves[index].curve_id() == result.curves[other].curve_id()) {
+        fail(ContractViolationKind::kInvariantViolation,
+             pointer_index(child(pointer, "curves"), other),
+             "duplicate curve_id in CurveSet.curves");
+      }
+    }
+  }
+  for (std::size_t index = 1; index < result.curves.size(); ++index) {
+    if (!(curve_order_key(result.curves[index - 1]) < curve_order_key(result.curves[index]))) {
+      fail(ContractViolationKind::kInvariantViolation,
+           pointer_index(child(pointer, "curves"), index),
+           "curves must be strictly ascending by the canonical tuple "
+           "(curve_role, index_id_sort_key, curve_id)");
+    }
   }
   result.construction = CurveSetConstruction::from_canonical(node.at("construction", pointer),
                                                              child(pointer, "construction"));
@@ -877,6 +969,58 @@ CanonicalValue FixingEntry::to_canonical() const {
   return CanonicalValue::make_object(std::move(members));
 }
 
+namespace {
+
+// The two structured reason codes #225 section 8.2 names for a fixing entry's projection fields
+// (docs/33 lines 586-587). They are the contract's own tokens; #227 chooses no reason vocabulary.
+constexpr const char* kNotApplicableHistoricalReason = "NOT_APPLICABLE_HISTORICAL";
+constexpr const char* kToBeProjectedAtValuationReason = "TO_BE_PROJECTED_AT_VALUATION";
+
+// Section 8.2 (docs/33 line 586): a HISTORICAL entry's projection fields must be
+// NULL_WITH_REASON(reason NOT_APPLICABLE_HISTORICAL) - "A historical entry carrying projection
+// methodology is malformed and fails closed". Section 8.3's state table (line 594) states the same
+// fields as "projection fields structured N/A", which is the NOT_APPLICABLE reason category. The
+// reason code is asserted because the contract names it; it is what distinguishes "not applicable
+// because this entry is history" from a generic NOT_APPLICABLE.
+template <class T>
+void require_historical_projection_field(const ValueOrReason<T>& field, const std::string& pointer,
+                                         std::string_view name) {
+  const std::string field_pointer = pointer_child(pointer, name);
+  if (field.present) {
+    fail(ContractViolationKind::kInvariantViolation, field_pointer,
+         "a HISTORICAL entry must not carry projection methodology");
+  }
+  if (field.reason.category != ReasonCategory::kNotApplicable ||
+      field.reason.code != kNotApplicableHistoricalReason) {
+    fail(ContractViolationKind::kInvariantViolation, pointer_child(field_pointer, "reason"),
+         "a HISTORICAL entry's projection field requires the NOT_APPLICABLE_HISTORICAL reason");
+  }
+}
+
+// Section 8.2 (docs/33 line 587): a FORECAST_REQUIRED entry's projection fields are "structured
+// not-yet-projected states"; line 588: a MISSING entry's projection fields are NULL_WITH_REASON.
+// Neither state is a completed projection record, so a PRESENT projection field is a mixed state and
+// is refused. The contract names no reason token for these two states, so only the state is
+// enforced; #227 invents no code.
+void require_projection_not_present(const FixingEntry& entry, const std::string& pointer,
+                                    const char* state_token) {
+  const std::string message = std::string("a ") + state_token +
+                              " observation's projection fields are not-yet-projected states and "
+                              "must be NULL_WITH_REASON";
+  if (entry.projection_method_id.present) {
+    fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_id"), message);
+  }
+  if (entry.projection_method_version.present) {
+    fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_version"),
+         message);
+  }
+  if (entry.projection_inputs_ref.present) {
+    fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_inputs_ref"), message);
+  }
+}
+
+}  // namespace
+
 FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::string& pointer) {
   require_only_keys(node, pointer,
                     {"index_id", "observation_date", "publication_date", "publication_timestamp",
@@ -912,35 +1056,104 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
   result.projection_inputs_ref = ValueOrReason<ProjectionInputsRef>::from_canonical(
       node.at("projection_inputs_ref", pointer), child(pointer, "projection_inputs_ref"));
 
-  // Section 8.2: a PRESENT fixing value must carry DECIMAL_ANNUAL, and the mountain of
-  // state-dependent fields must agree with `observation_state`.
+  // Section 8.2 state-dependent rules (docs/33 lines 583-588) plus the section 8.3 table (lines
+  // 592-601). `observation_state` is the single authority and every state-dependent field must agree
+  // with it; a contradictory or mixed state is refused fail closed rather than normalized toward a
+  // "closest" state, because history and forecast are different facts with different identities
+  // (section 8.1) and a FORECAST_REQUIRED entry must never carry a PRESENT numeric fixing value
+  // (line 600). A PRESENT fixing value always carries DECIMAL_ANNUAL (line 560).
   if (result.value.present) {
     (void)result.value.value.require_unit(Unit::kDecimalAnnual, child(pointer, "value"));
-    if (result.observation_state == ObservationState::kMissing) {
-      fail(ContractViolationKind::kInvariantViolation, child(pointer, "observation_state"),
-           "a MISSING observation must not carry a PRESENT value");
-    }
   }
-  if (!result.value.present &&
-      (result.observation_state == ObservationState::kHistorical ||
-       result.observation_state == ObservationState::kProjected)) {
-    fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
-         "a HISTORICAL or PROJECTED observation requires a PRESENT value with a structured reason "
-         "only where the contract permits it");
-  }
-  if (result.observation_state == ObservationState::kForecastRequired) {
-    // Section 8.3: a forecast carries the explicit projection methodology that produced it.
-    if (!result.projection_method_id.present || !result.projection_method_version.present) {
-      fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_id"),
-           "FORECAST_REQUIRED requires PRESENT projection method id and version");
+
+  switch (result.observation_state) {
+    case ObservationState::kHistorical: {
+      // Line 586: value PRESENT with unit DECIMAL_ANNUAL; source and version PRESENT; projection
+      // fields NULL_WITH_REASON(NOT_APPLICABLE_HISTORICAL). Line 594 names the PRESENT source as a
+      // market source, and line 596 ties CURVE_PROJECTION to the audit-only PROJECTED state ("never
+      // mistaken for history"), so a CURVE_PROJECTION source on history is refused.
+      if (!result.value.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
+             "a HISTORICAL observation requires a PRESENT fixing value");
+      }
+      if (!result.source.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
+             "a HISTORICAL observation requires a PRESENT market source");
+      }
+      if (result.source.value == MarketSource::kCurveProjection) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
+             "CURVE_PROJECTION marks an audit-only PROJECTED record and is never stored as history");
+      }
+      if (!result.version.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "version"),
+             "a HISTORICAL observation requires a PRESENT source version");
+      }
+      require_historical_projection_field(result.projection_method_id, pointer,
+                                          "projection_method_id");
+      require_historical_projection_field(result.projection_method_version, pointer,
+                                          "projection_method_version");
+      require_historical_projection_field(result.projection_inputs_ref, pointer,
+                                          "projection_inputs_ref");
+      break;
     }
-    if (!result.value.present) {
-      fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
-           "FORECAST_REQUIRED requires the projected value");
+    case ObservationState::kProjected: {
+      // Line 585: PROJECTED is valid only as a complete audit-only forecast record. All four fields
+      // below MUST be PRESENT, and the source MUST be CURVE_PROJECTION (lines 585/596). Absence of any
+      // of them is the state the defective decoder used to accept as FORECAST_REQUIRED.
+      if (!result.value.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
+             "a PROJECTED observation is a complete audit-only forecast record and requires a "
+             "PRESENT value");
+      }
+      if (!result.source.present || result.source.value != MarketSource::kCurveProjection) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
+             "a PROJECTED observation requires a PRESENT source=CURVE_PROJECTION");
+      }
+      if (!result.projection_method_id.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_id"),
+             "a PROJECTED observation requires a PRESENT projection method id");
+      }
+      if (!result.projection_method_version.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_version"),
+             "a PROJECTED observation requires a PRESENT projection method version");
+      }
+      if (!result.projection_inputs_ref.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_inputs_ref"),
+             "a PROJECTED observation requires a PRESENT projection inputs reference");
+      }
+      break;
     }
-  } else if (result.projection_method_id.present || result.projection_method_version.present) {
-    fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_id"),
-         "projection methodology is meaningful only for a forecast observation");
+    case ObservationState::kForecastRequired: {
+      // Line 587: value is NULL_WITH_REASON(TO_BE_PROJECTED_AT_VALUATION) and the projection fields
+      // are structured not-yet-projected states. Line 600: a FORECAST_REQUIRED entry never carries a
+      // PRESENT numeric fixing value, so no projected number is ever stored as history.
+      if (result.value.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
+             "a FORECAST_REQUIRED observation never carries a PRESENT numeric fixing value");
+      }
+      if (result.value.reason.code != kToBeProjectedAtValuationReason) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
+             "a FORECAST_REQUIRED value requires the TO_BE_PROJECTED_AT_VALUATION reason");
+      }
+      require_projection_not_present(result, pointer, "FORECAST_REQUIRED");
+      break;
+    }
+    case ObservationState::kMissing: {
+      // Line 588: value, source and the projection fields carry structured missing/unavailable
+      // reasons; line 597 states MISSING has no numeric value and a structured source reason. No
+      // projection methodology may convert MISSING into history.
+      if (result.value.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
+             "a MISSING observation must not carry a PRESENT value");
+      }
+      if (result.source.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
+             "a MISSING observation carries a structured source/unavailability reason, never a "
+             "PRESENT source");
+      }
+      require_projection_not_present(result, pointer, "MISSING");
+      break;
+    }
   }
   return result;
 }
@@ -1053,6 +1266,27 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
              pointer_index(child(pointer, "entries"), other),
              "duplicate fixing (index_id, observation_date) key");
       }
+    }
+  }
+  // Section 15.4 (docs/33 line 1228): entries are in ascending `(index_id, observation_date)`. The
+  // duplicate scan above owns the repeated-economic-key refusal (unchanged); this scan refuses an
+  // inverted or equal-ordering pair, so a producer's acquisition order can never reach a fingerprint
+  // preimage. Both components are compared as their canonical tokens, matching the convention section
+  // 15.4 uses when it defines `index_id_sort_key` as the canonical enum token (line 1226); the
+  // observation date is compared as its canonical `YYYY-MM-DD` text, exactly as the strictly-ascending
+  // pillar_date rule does (line 1227). A non-canonical list is refused, never re-sorted.
+  for (std::size_t index = 1; index < result.entries.size(); ++index) {
+    const FixingEntry& previous = result.entries[index - 1];
+    const FixingEntry& current = result.entries[index];
+    const std::pair<std::string, std::string> previous_key{
+        enum_to_token<FloatingIndex>(previous.index_id), previous.observation_date.text};
+    const std::pair<std::string, std::string> current_key{
+        enum_to_token<FloatingIndex>(current.index_id), current.observation_date.text};
+    if (!(previous_key < current_key)) {
+      fail(ContractViolationKind::kInvariantViolation,
+           pointer_index(child(pointer, "entries"), index),
+           "entries must be strictly ascending by (index_id, observation_date) with no duplicate "
+           "economic key");
     }
   }
   // Section 8.4: provenance.sources is the deterministic union of the PRESENT entry sources.
@@ -1303,6 +1537,57 @@ void MarketSnapshot::validate_invariants(const std::string& pointer) const {
       volatility_input.value.valuation_date.text != valuation_date.text) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "volatility_input"),
          "volatility_input.valuation_date must equal MarketSnapshot.valuation_date");
+  }
+  // Section 8.2 PROJECTED typed-reference rule (docs/33 line 585). A PROJECTED entry is a complete
+  // audit-only forecast record, so its `projection_inputs_ref` MUST identify the sibling CurveSet, a
+  // forecast-capable curve whose role permits forecasting (`FORECAST`, or the explicitly-authorized
+  // combined role of sections 7.1.1/7.3) and whose PRESENT `index_id` exactly equals the entry's
+  // `index_id`; zero-match, role mismatch and index mismatch all fail closed. The reference is
+  // resolved by `curve_id` and is deliberately NOT restricted to the FORWARD_CURVE_V1 concrete shape,
+  // so a combined-role reference curve is representable. The same clause also requires the exact
+  // observation-rule id to resolve through the #228-owned observation-rule registry; that registry is
+  // not modelled in this DTO layer, so it is not asserted here (reported as an open gap, not silently
+  // claimed).
+  for (std::size_t index = 0; index < fixing_store.entries.size(); ++index) {
+    const FixingEntry& entry = fixing_store.entries[index];
+    if (entry.observation_state != ObservationState::kProjected) {
+      continue;
+    }
+    const std::string entry_pointer =
+        pointer_index(child(child(pointer, "fixing_store"), "entries"), index);
+    const std::string reference_pointer = child(entry_pointer, "projection_inputs_ref");
+    const ProjectionInputsRef& reference =
+        entry.projection_inputs_ref.require_present(reference_pointer);
+    if (reference.curve_set_id != curve_set.curve_set_id) {
+      fail(ContractViolationKind::kIdentityMismatch, child(reference_pointer, "curve_set_id"),
+           "projection_inputs_ref.curve_set_id must identify the sibling CurveSet");
+    }
+    const Curve* referenced = nullptr;
+    for (const Curve& curve : curve_set.curves) {
+      if (curve.curve_id() == reference.forecast_curve_id) {
+        referenced = &curve;
+        break;
+      }
+    }
+    if (referenced == nullptr) {
+      fail(ContractViolationKind::kInvariantViolation,
+           child(reference_pointer, "forecast_curve_id"),
+           "projection_inputs_ref.forecast_curve_id must resolve to a curve in the sibling "
+           "CurveSet");
+    }
+    const CurveRole role = referenced->curve_role();
+    if (role != CurveRole::kForecast && role != CurveRole::kDiscountAndForecastReferenceOnly) {
+      fail(ContractViolationKind::kInvariantViolation,
+           child(reference_pointer, "forecast_curve_id"),
+           "the referenced curve's role does not permit forecasting (FORECAST or "
+           "DISCOUNT_AND_FORECAST_REFERENCE_ONLY)");
+    }
+    const ValueOrReason<FloatingIndex>& curve_index = referenced->common().index_id;
+    if (!curve_index.present || curve_index.value != entry.index_id) {
+      fail(ContractViolationKind::kInvariantViolation,
+           child(reference_pointer, "forecast_curve_id"),
+           "the referenced curve's PRESENT index_id must exactly equal the entry's index_id");
+    }
   }
 }
 

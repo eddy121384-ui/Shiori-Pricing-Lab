@@ -11,10 +11,11 @@ pricing results, or a path to an executable that is not on disk.
 A call has exactly three outcomes:
 
 * **exit 0** -- stdout is the result JSON object, returned as a ``dict``;
-* **exit 2** -- the engine's *fail-closed domain refusal*: stdout carries
-  ``errors[0].{code,message,detail}`` and that refusal is raised as
-  :class:`RatesEngineError` **with the engine's own code** (it is a result, not a
-  transport failure);
+* **exit 2** -- the engine's *fail-closed domain refusal*: stdout carries the CLI
+  transport envelope's ``errors[0].{code,message,pointer}`` and that refusal is raised
+  as :class:`RatesEngineError` **with the engine's own code** (it is a result, not a
+  transport failure). The engine's own failing location is preserved as
+  ``detail["pointer"]``, and nothing is invented when the engine supplies no pointer;
 * **anything else** -- a transport failure
   (``ENGINE_TRANSPORT_FAILURE``), including timeouts, a missing executable, an
   unusable JSON response, and non-zero exits the engine does not define.
@@ -93,10 +94,12 @@ class RatesEngineError(Exception):
     * ``ENGINE_CLI_NOT_FOUND`` when no executable is available;
     * ``ENGINE_TRANSPORT_FAILURE`` for every other unusable outcome.
 
-    ``message`` is human-readable, ``detail`` carries the engine's structured detail
-    (or bridge-side context: exit code, stderr, timeout). No component of the error is
-    synthesized when the engine did not supply it -- an unparseable refusal envelope
-    becomes a transport failure, never an invented error code.
+    ``message`` is human-readable. ``detail`` carries the engine's structured detail --
+    for an exit-2 refusal that is ``{"pointer": <errors[0].pointer>}``, the engine's own
+    failing field location -- or bridge-side context (exit code, stderr, timeout). No
+    component of the error is synthesized when the engine did not supply it: an
+    unparseable refusal envelope becomes a transport failure, never an invented error
+    code.
     """
 
     def __init__(self, code: str, message: str = "", detail: Any = None) -> None:
@@ -309,10 +312,19 @@ def _refusal(stdout: str, stderr: str, cli: Path, operation: str) -> RatesEngine
         code = first.get("code")
         if isinstance(code, str) and code:
             message = first.get("message")
+            # The CLI's transport envelope (``TransportError::to_canonical`` in
+            # cpp/rates_engine/tools/rates_engine_cli/main.cpp) reports the failing location as
+            # ``pointer``; it never carries a ``detail`` member. The pointer is therefore
+            # surfaced through the exception's existing structured-detail dict -- the module's
+            # own way of expressing detail -- rather than inventing a ``detail`` key on the
+            # wire. It is preserved verbatim, including an empty string (the CLI's own spelling
+            # for "no field location applies"); a missing or non-string pointer stays absent
+            # instead of being fabricated.
+            pointer = first.get("pointer")
             return RatesEngineError(
                 code=code,
                 message=message if isinstance(message, str) else "",
-                detail=first.get("detail"),
+                detail={"pointer": pointer} if isinstance(pointer, str) else None,
             )
 
     # The engine claimed a refusal but did not deliver the structured envelope: that is
@@ -321,7 +333,7 @@ def _refusal(stdout: str, stderr: str, cli: Path, operation: str) -> RatesEngine
         code=ENGINE_TRANSPORT_FAILURE,
         message=(
             "the Shiori Rates Engine exited 2 without a structured errors[0] "
-            "{code,message,detail} refusal"
+            "{code,message,pointer} refusal"
         ),
         detail={
             "operation": operation,

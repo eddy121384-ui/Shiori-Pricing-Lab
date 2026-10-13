@@ -16,11 +16,13 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import shiori_pricing_lab.rates_bridge.engine as rates_bridge_engine
 from shiori_pricing_lab.rates_bridge import (
     SHA256_HEX_LENGTH,
     RatesEngineError,
@@ -370,6 +372,131 @@ def test_invoke_and_engine_identity_report_a_missing_cli(tmp_path):
         engine_identity(cli_path=absent)
     assert identity_error.value.code == "ENGINE_CLI_NOT_FOUND"
     assert identity_error.value.detail["operation"] == "engine-identity"
+
+
+def _stub_engine_process(monkeypatch, *, returncode, stdout="", stderr=""):
+    """Replace the engine module's ``subprocess.run`` and record the argv/stdin it received.
+
+    ``invoke`` is still driven through its real seam -- ``cli_path`` naming an existing file --
+    and only the OS process launch is replaced, so the exact bytes a real CLI writes on stdout
+    can be delivered deterministically on Windows and POSIX alike. The fake keeps the binary
+    pipe contract (byte streams), which is what ``invoke`` decodes as UTF-8.
+    """
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            argv, returncode, stdout=stdout.encode("utf-8"), stderr=stderr.encode("utf-8")
+        )
+
+    monkeypatch.setattr(rates_bridge_engine.subprocess, "run", _run)
+    return calls
+
+
+# A byte-realistic exit-2 refusal: the member set and canonical key order of
+# ``Envelope::to_canonical`` in cpp/rates_engine/tools/rates_engine_cli/main.cpp, whose error
+# objects carry ``{code, message, pointer}`` and never a ``detail`` member.
+_CLI_REFUSAL_STDOUT = (
+    '{"errors":[{"code":"WRONG_TYPE","message":"/market_snapshot/curves/0/tenors/0 must be a '
+    'number","pointer":"/market_snapshot/curves/0"}],"payload":null,'
+    '"schema_version":"RATES_KERNEL_INPUT_V1","status":"FAILED","warnings":[]}'
+)
+
+
+def test_invoke_preserves_the_cli_refusal_pointer(tmp_path, monkeypatch):
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    calls = _stub_engine_process(monkeypatch, returncode=2, stdout=_CLI_REFUSAL_STDOUT)
+
+    request = {"schema_version": "RATES_KERNEL_INPUT_V1"}
+    with pytest.raises(RatesEngineError) as refusal:
+        invoke(request, cli_path=cli)
+
+    error = refusal.value
+    assert error.code == "WRONG_TYPE"
+    assert error.message == "/market_snapshot/curves/0/tenors/0 must be a number"
+    assert error.detail == {"pointer": "/market_snapshot/curves/0"}
+    assert error.to_dict() == {
+        "code": "WRONG_TYPE",
+        "message": "/market_snapshot/curves/0/tenors/0 must be a number",
+        "detail": {"pointer": "/market_snapshot/curves/0"},
+    }
+
+    # The refusal was reached through the unchanged CLI invocation surface.
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [str(cli), "--operation", "validate-kernel-input"]
+    assert kwargs["input"] == dumps_bytes(request)
+
+
+def test_invoke_refusal_without_a_pointer_does_not_fabricate_one(tmp_path, monkeypatch):
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    envelope = (
+        '{"errors":[{"code":"CLI_INTERNAL_ERROR","message":"the transport itself failed"}],'
+        '"payload":null,"schema_version":"RATES_ENGINE_CLI_V1","status":"FAILED","warnings":[]}'
+    )
+    _stub_engine_process(monkeypatch, returncode=2, stdout=envelope)
+
+    with pytest.raises(RatesEngineError) as refusal:
+        invoke({}, cli_path=cli)
+
+    assert refusal.value.code == "CLI_INTERNAL_ERROR"
+    assert refusal.value.message == "the transport itself failed"
+    assert refusal.value.detail is None
+
+
+def test_invoke_refusal_with_a_non_string_pointer_is_ignored(tmp_path, monkeypatch):
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    envelope = (
+        '{"errors":[{"code":"WRONG_TYPE","message":"m","pointer":null}],"payload":null,'
+        '"schema_version":"RATES_ENGINE_CLI_V1","status":"FAILED","warnings":[]}'
+    )
+    _stub_engine_process(monkeypatch, returncode=2, stdout=envelope)
+
+    with pytest.raises(RatesEngineError) as refusal:
+        invoke({}, cli_path=cli)
+
+    assert refusal.value.code == "WRONG_TYPE"
+    assert refusal.value.detail is None
+
+
+def test_invoke_exit_two_without_a_structured_refusal_stays_a_transport_failure(
+    tmp_path, monkeypatch
+):
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    _stub_engine_process(monkeypatch, returncode=2, stdout="not JSON at all", stderr="boom")
+
+    with pytest.raises(RatesEngineError) as failure:
+        invoke({}, cli_path=cli)
+
+    assert failure.value.code == "ENGINE_TRANSPORT_FAILURE"
+    assert failure.value.detail == {
+        "operation": "validate-kernel-input",
+        "cli_path": str(cli),
+        "exit_code": 2,
+        "stdout": "not JSON at all",
+        "stderr": "boom",
+    }
+
+
+def test_invoke_refusal_without_a_code_is_not_given_an_invented_one(tmp_path, monkeypatch):
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    envelope = (
+        '{"errors":[{"message":"no code at all","pointer":"/market_snapshot"}],"payload":null,'
+        '"schema_version":"RATES_ENGINE_CLI_V1","status":"FAILED","warnings":[]}'
+    )
+    _stub_engine_process(monkeypatch, returncode=2, stdout=envelope)
+
+    with pytest.raises(RatesEngineError) as failure:
+        invoke({}, cli_path=cli)
+
+    assert failure.value.code == "ENGINE_TRANSPORT_FAILURE"
+    assert failure.value.detail["exit_code"] == 2
 
 
 # --------------------------------------------------------------------------------------

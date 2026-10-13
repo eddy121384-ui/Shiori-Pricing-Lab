@@ -1,11 +1,13 @@
 #include "shiori_rates/dto/result.hpp"
 
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include "shiori_rates/dto/codec_traits.hpp"
 #include "shiori_rates/dto/error.hpp"
 #include "shiori_rates/dto/fingerprint.hpp"
+#include "shiori_rates/dto/kernel_input.hpp"
 
 namespace Shiori::rates::dto {
 
@@ -124,6 +126,46 @@ void require_diagnostics(const CanonicalValue& node, const std::string& pointer,
     items.push_back(record.to_canonical());
   }
   return CanonicalValue::make_array(std::move(items));
+}
+
+// docs/33 section 12.2 (line 908) and section 5.1 (line 315): a result's `valuation_context_id` is an
+// EXACT echo of the V1 identity derived from `{valuation_date, reporting_currency}`, and section 5.1
+// line 315 fixes that preimage membership. Re-deriving it here - through the DTO layer's one existing
+// implementation of that recipe, `compute_valuation_context_id` - is what stops a stale or fabricated
+// context id from riding along, including when the caller recomputes the result fingerprint over the
+// fabricated content. The recipe itself is never restated in this file.
+void require_valuation_context_identity(const std::string& id, const Date& valuation_date,
+                                        Currency result_currency, const std::string& pointer) {
+  ValuationContext derived;
+  derived.valuation_context_id = id;
+  derived.valuation_date = valuation_date;
+  derived.reporting_currency = result_currency;
+  if (id != compute_valuation_context_id(derived)) {
+    fail(ContractViolationKind::kIdentityMismatch, child(pointer, "valuation_context_id"),
+         "valuation_context_id must be the digest of its exact V1 preimage "
+         "{valuation_date, reporting_currency}");
+  }
+}
+
+// docs/33 section 15.4 (line 1232): the canonical measure order is the approved tuple
+// `(measure_id, canonical bump_spec.bump_target serialization, canonical RiskBucketCoordinate
+// serialization)`, and a structured NOT_APPLICABLE sorts before PRESENT within each of the two
+// structured components. Every component is compared through its canonical representation: the
+// structured pair by its canonical JSON serialization, and `measure_id` by its canonical enum token.
+// That matches the sibling tuple of the same paragraph, whose enum component is defined as "the PRESENT
+// canonical enum token" (line 1226), and it is the only implementation-independent reading: the token
+// vocabulary is contract-published whereas a declaration order is not, which is why the contract
+// publishes that order inline wherever it means declaration order (line 1229, strikes:
+// "ATM < YIELD_OFFSET_BP < ABSOLUTE_STRIKE < LOG_MONEYNESS"). The `present ? 1 : 0` components implement
+// "NOT_APPLICABLE sorts before PRESENT" explicitly instead of relying on a serialization accident.
+using MeasureOrderKey = std::tuple<std::string, int, std::string, int, std::string>;
+
+[[nodiscard]] MeasureOrderKey measure_order_key(const RiskMeasure& measure) {
+  return MeasureOrderKey{std::string(enum_to_token(measure.measure_id)),
+                         measure.bump_spec.bump_target.present ? 1 : 0,
+                         measure.bump_spec.bump_target.to_canonical().dump(),
+                         measure.bucket_coordinate.present ? 1 : 0,
+                         measure.bucket_coordinate.to_canonical().dump()};
 }
 
 }  // namespace
@@ -260,6 +302,17 @@ InputsIdentity InputsIdentity::from_canonical(const CanonicalValue& node, const 
     fail(ContractViolationKind::kUnknownSchemaVersion,
          child(pointer, "resolved_swap_schema_version"),
          "inputs_identity must name a schema version this build knows");
+  }
+  // docs/33 section 12.2 line 933 names RESOLVED_SWAP_V1 as this field's value ("# RESOLVED_SWAP_V1
+  // etc."), and docs/32 section 2 line 86 fixes RESOLVED_SWAP_V1 as the ResolvedSwap wire version
+  // whose unknown values consumers refuse. Recognition of a token is not enough: any other known
+  // contract token (for example CURVE_SET_V1) is the version of a DIFFERENT contract and cannot be
+  // echoed as the version of the embedded ResolvedSwap.
+  if (parsed != SchemaVersion::kResolvedSwapV1) {
+    fail(ContractViolationKind::kUnknownSchemaVersion,
+         child(pointer, "resolved_swap_schema_version"),
+         "inputs_identity.resolved_swap_schema_version must be the supported ResolvedSwap wire "
+         "version RESOLVED_SWAP_V1; a different known contract token names a different contract");
   }
   result.model_input_id = ValueOrReason<std::string>::from_canonical(
       node.at("model_input_id", pointer), child(pointer, "model_input_id"));
@@ -443,6 +496,10 @@ PricingResult PricingResult::from_canonical(const CanonicalValue& node, const st
 }
 
 void PricingResult::validate_rules(const std::string& pointer) const {
+  // Section 12.2 / section 5.1: the context id is re-derived from its exact V1 preimage rather than
+  // trusted, so a fabricated or stale id is refused even though its type is a non-empty string.
+  require_valuation_context_identity(valuation_context_id, valuation_date, result_currency,
+                                     pointer);
   // Section 12.3: SUCCESS / SUCCESS_WITH_WARNINGS requires PRESENT(HeadlineValue); FAILED requires
   // NULL_WITH_REASON(UNAVAILABLE, PRICING_FAILED) and at least one error.
   const bool success = status == PricingStatus::kSuccess ||
@@ -465,6 +522,17 @@ void PricingResult::validate_rules(const std::string& pointer) const {
       fail(ContractViolationKind::kInvalidTaggedUnionState, child(pointer, "headline"),
            "a FAILED result requires headline reason category UNAVAILABLE");
     }
+    // Section 12.3 line 953 requires the EXACT pair NULL_WITH_REASON(category=UNAVAILABLE,
+    // code=PRICING_FAILED): "never bare null, omission, or zero". The category alone is not the
+    // contract state, so another code in the same category (for example ENGINE_ERROR) is refused
+    // rather than accepted as an equivalent failure. The code string is taken verbatim from the
+    // contract; no new reason code is introduced or renamed.
+    if (headline.reason.code != "PRICING_FAILED") {
+      fail(ContractViolationKind::kInvalidTaggedUnionState,
+           child(child(pointer, "headline"), "reason"),
+           "a FAILED result requires the exact reason code PRICING_FAILED under category "
+           "UNAVAILABLE");
+    }
     if (errors.empty()) {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "errors"),
            "a FAILED result must carry at least one error");
@@ -485,6 +553,22 @@ void PricingResult::validate_rules(const std::string& pointer) const {
   if (par_rate.present && par_rate.value.unit != Unit::kDecimalAnnual) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "par_rate"),
          "a PRESENT par_rate requires unit=DECIMAL_ANNUAL");
+  }
+  // Section 12.3 line 955: currency-denominated headline units require
+  // `headline.currency=PRESENT(result_currency)`. Presence alone is enforced where the headline is
+  // decoded; equality with the enclosing `result_currency` is an enclosing-object rule and is
+  // enforced here, so a headline may not silently disagree with the currency of the result that
+  // carries it.
+  if (headline.present) {
+    const HeadlineValue& headline_value = headline.value;
+    const bool currency_denominated = headline_value.unit == Unit::kCurrencyAmount ||
+                                      headline_value.unit == Unit::kCurrencyAmountPerBasisPoint;
+    if (currency_denominated && headline_value.currency.present &&
+        headline_value.currency.value != result_currency) {
+      fail(ContractViolationKind::kIdentityMismatch,
+           child(child(child(pointer, "headline"), "value"), "currency"),
+           "a currency-denominated headline must carry the enclosing result_currency");
+    }
   }
   // Section 12.3: when the headline designates a supplemental metric, that metric must be PRESENT
   // and exactly equal the headline value + unit.
@@ -941,6 +1025,10 @@ RiskResult RiskResult::from_canonical(const CanonicalValue& node, const std::str
 }
 
 void RiskResult::validate_rules(const std::string& pointer) const {
+  // Section 13.2 / section 5.1: the context id is re-derived from its exact V1 preimage rather than
+  // trusted, so a fabricated or stale id is refused even though its type is a non-empty string.
+  require_valuation_context_identity(valuation_context_id, valuation_date, result_currency,
+                                     pointer);
   const bool success = status == PricingStatus::kSuccess ||
                        status == PricingStatus::kSuccessWithWarnings;
   if (success) {
@@ -955,6 +1043,27 @@ void RiskResult::validate_rules(const std::string& pointer) const {
   } else if (errors.empty()) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "errors"),
          "a FAILED risk result must carry at least one error");
+  }
+  // Section 15.4 line 1232: `measures` is a fingerprint-relevant array with a schema-defined
+  // canonical order, so document order is never hashed as if it were canonical - two equivalent
+  // results written in different orders would otherwise replay to different fingerprints. The array
+  // must be STRICTLY ascending by the approved tuple and exact duplicate keys are refused; the array
+  // is refused rather than sorted, because reordering a result is the caller's contract, not the
+  // decoder's silent repair.
+  for (std::size_t index = 1; index < measures.size(); ++index) {
+    const MeasureOrderKey previous = measure_order_key(measures[index - 1]);
+    const MeasureOrderKey current = measure_order_key(measures[index]);
+    const std::string offending = pointer_index(child(pointer, "measures"), index);
+    if (previous == current) {
+      fail(ContractViolationKind::kInvariantViolation, offending,
+           "a duplicate exact (measure_id, bump_spec.bump_target, bucket_coordinate) measure key "
+           "is forbidden");
+    }
+    if (!(previous < current)) {
+      fail(ContractViolationKind::kInvariantViolation, offending,
+           "measures must be strictly ascending by (measure_id, canonical bump_spec.bump_target "
+           "serialization, canonical RiskBucketCoordinate serialization)");
+    }
   }
   // Section 13.2: bucket coordinates and bump targets must agree with the selected role map.
   for (std::size_t index = 0; index < measures.size(); ++index) {
@@ -1005,6 +1114,45 @@ void RiskResult::validate_rules(const std::string& pointer) const {
                child(measure_pointer, "bucket_coordinate"),
                "a FORECAST tenor bucket must match its curve_role_map entry");
         }
+      }
+    } else if (measure.bucket_coordinate.present &&
+               measure.bucket_coordinate.value.kind() == RiskBucketKind::kVolNode) {
+      // Section 13.2 line 1028: `VOL_NODE.volatility_input_id` MUST equal the consumed
+      // VolatilityInput id. This variant was previously unchecked, so any arbitrary input id could
+      // name a vol surface the result never consumed. The PRESENT/NULL_WITH_REASON state of the
+      // referenced input is part of the applicability rule, not only the id equality: a VOL_NODE
+      // coordinate whose input is not PRESENT is an inapplicable coordinate and is refused.
+      const auto& vol_node =
+          std::get<VolNodeBucketCoordinate>(measure.bucket_coordinate.value.body);
+      if (!inputs_identity.volatility_input_id.present) {
+        fail(ContractViolationKind::kIdentityMismatch,
+             child(measure_pointer, "bucket_coordinate"),
+             "a VOL_NODE bucket requires inputs_identity.volatility_input_id to be PRESENT; no "
+             "consumed VolatilityInput is named, so the coordinate is inapplicable");
+      }
+      if (vol_node.volatility_input_id != inputs_identity.volatility_input_id.value) {
+        fail(ContractViolationKind::kIdentityMismatch,
+             child(measure_pointer, "bucket_coordinate"),
+             "VOL_NODE.volatility_input_id must equal the consumed "
+             "inputs_identity.volatility_input_id");
+      }
+    } else if (measure.bucket_coordinate.present &&
+               measure.bucket_coordinate.value.kind() == RiskBucketKind::kModelParameter) {
+      // Section 13.2 line 1032: `MODEL_PARAMETER.model_input_id` MUST equal the consumed ModelInput
+      // id, with the same fail-closed rule for a coordinate whose referenced input is not PRESENT.
+      const auto& model_parameter =
+          std::get<ModelParameterBucketCoordinate>(measure.bucket_coordinate.value.body);
+      if (!inputs_identity.model_input_id.present) {
+        fail(ContractViolationKind::kIdentityMismatch,
+             child(measure_pointer, "bucket_coordinate"),
+             "a MODEL_PARAMETER bucket requires inputs_identity.model_input_id to be PRESENT; no "
+             "consumed ModelInput is named, so the coordinate is inapplicable");
+      }
+      if (model_parameter.model_input_id != inputs_identity.model_input_id.value) {
+        fail(ContractViolationKind::kIdentityMismatch,
+             child(measure_pointer, "bucket_coordinate"),
+             "MODEL_PARAMETER.model_input_id must equal the consumed "
+             "inputs_identity.model_input_id");
       }
     }
   }

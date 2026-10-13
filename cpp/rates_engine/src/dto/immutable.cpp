@@ -34,7 +34,12 @@ std::shared_ptr<const FrozenKernelInput> freeze_kernel_input(RatesKernelInput va
   assign_derived_identities(value);
   auto frozen = std::make_shared<FrozenKernelInput>();
   frozen->canonical_bytes = value.to_canonical().dump();
-  frozen->content_fingerprint = fingerprint_of_canonical_bytes(frozen->canonical_bytes);
+  // #225 section 15.4: an object's own content_fingerprint is excluded from its own preimage, so the
+  // published fingerprint is the derived contract value recomputed just above. The complete canonical
+  // bytes are preserved as the immutable document; their full-document digest is a different value and
+  // must never be substituted here, because cache keys and replay records consume this fingerprint as
+  // the contract's inputs_fingerprint.
+  frozen->content_fingerprint = value.content_fingerprint;
   frozen->owning_value = std::move(value);
   return frozen;
 }

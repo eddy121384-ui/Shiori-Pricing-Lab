@@ -747,11 +747,35 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
     }
     return nullptr;
   };
+  // The offending curve's OWN locator inside the embedded curve set: a refusal must be attributable
+  // to the curve that is unusable, not only to the selection map that named it. Called only after a
+  // curve id has already resolved, so the result always identifies a real curve entry.
+  const auto curve_pointer_for = [this, &curves_pointer](const std::string& curve_id) -> std::string {
+    for (std::size_t index = 0; index < market_snapshot.curve_set.curves.size(); ++index) {
+      if (market_snapshot.curve_set.curves[index].common().curve_id == curve_id) {
+        return pointer_index(curves_pointer, index);
+      }
+    }
+    return curves_pointer;
+  };
+  // Section 7.2: a curve whose `value_type` is `PAR_RATE_DISPLAY_ONLY_NEVER_PRICE` is display-only by
+  // contract and can never be consumed as a pricing input (section 16 names that case under
+  // `INVALID_PRODUCT`). The prohibition is a property of the curve, not of the role it was given, so
+  // it is enforced for BOTH valuation roles before any role-compatibility rule can look satisfied.
+  const auto require_pricing_usable = [&curve_pointer_for](const CurveCommon& curve) {
+    if (curve.value_type == PillarValueType::kParRateDisplayOnlyNeverPrice) {
+      fail(ContractViolationKind::kInvariantViolation, curve_pointer_for(curve.curve_id),
+           "a curve whose value_type is PAR_RATE_DISPLAY_ONLY_NEVER_PRICE is display-only and can "
+           "never be consumed as a pricing input; it may not be selected for valuation in either "
+           "role");
+    }
+  };
   const CurveCommon* discount = find_curve(curve_selection.discount_curve_id);
   if (discount == nullptr) {
     fail(ContractViolationKind::kIdentityMismatch, child(pointer, "curve_selection"),
          "discount_curve_id must resolve to an embedded curve in market_snapshot.curve_set");
   }
+  require_pricing_usable(*discount);
   if (discount->curve_role != CurveRole::kDiscount &&
       discount->curve_role != CurveRole::kDiscountAndForecastReferenceOnly) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "curve_selection"),
@@ -763,6 +787,7 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
       fail(ContractViolationKind::kIdentityMismatch, child(pointer, "curve_selection"),
            "every forecast_curve_by_index target must resolve to an embedded curve");
     }
+    require_pricing_usable(*forecast);
     if (forecast->curve_role != CurveRole::kForecast &&
         forecast->curve_role != CurveRole::kDiscountAndForecastReferenceOnly) {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "curve_selection"),
@@ -772,6 +797,25 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "curve_selection"),
            "a forecast target's PRESENT index_id must exactly equal the map key");
     }
+  }
+  // Section 5.1: `forecast_curve_by_index` is keyed by the floating index the valuation requires
+  // ("required floating index -> explicit selected forecast curve"), and the kernel MUST NOT choose the
+  // first eligible curve, infer selection from array position, or derive a preferred curve internally.
+  // V1 values exactly two product shapes and each prices a floating leg whose index is
+  // `resolved_swap.floating_index` - the vanilla swap itself, or the underlying swap of a swaption - so
+  // an invocation that does not name a forecast curve for that index leaves the floating leg
+  // unforecastable and cannot be completed later without the inference the contract forbids; the map
+  // entry is therefore a required field of a selected curve_selection.
+  const std::string required_forecast_index = std::string(enum_to_token(resolved_swap.floating_index));
+  const std::string forecast_selection_pointer =
+      child(child(pointer, "curve_selection"), "forecast_curve_by_index");
+  if (curve_selection.forecast_curve_by_index.find(required_forecast_index) ==
+      curve_selection.forecast_curve_by_index.end()) {
+    fail(ContractViolationKind::kMissingRequiredField,
+         pointer_child(forecast_selection_pointer, required_forecast_index),
+         "a selected OIS/swaption must explicitly resolve the resolved swap's floating index to a "
+         "forecast curve; an absent or empty forecast_curve_by_index leaves the floating leg "
+         "unforecastable and no curve may be inferred");
   }
 
   // Section 5.1: exact product applicability. Applicability is structural, never a market default.

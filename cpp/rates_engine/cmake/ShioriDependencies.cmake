@@ -239,7 +239,7 @@ function(shiori_dependencies_fetchcontent)
   endif()
 
   # QuantLib is acquired through the same hash-verified mechanism, then its exact version is asserted.
-  shiori_fetchcontent_declare(quantlib
+  shiori_fetchcontent_declare_url(quantlib
     "${SHIORI_QUANTLIB_URL}" "${SHIORI_QUANTLIB_ARCHIVE_SHA256}")
 
   # Boost: never vendored (Issue #226 section 2.6). In the fallback it must be supplied by an
