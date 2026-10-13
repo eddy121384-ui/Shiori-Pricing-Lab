@@ -13,6 +13,12 @@ name: C++ rates engine
 #   * `fetch-depth: 0` is required: the engine's build identity reports the git revision.
 #
 # This workflow does not touch python-tests.yml; the Python side of the repository is validated there.
+#
+# Cross-language contract scope: the C++ DTO is the byte-canonical counterpart of the Python rates
+# bridge, and its behaviour is fixed by the authoritative #223-#226 contracts. A change to either side
+# can silently break that agreement, so the trigger list below also includes the bridge package, its
+# parity tests, and those four contract documents. Without them a PR touching only the Python
+# serializer or a contract doc would run no C++ leg at all and the agreement would be unproven.
 
 on:
   push:
@@ -20,10 +26,26 @@ on:
     paths:
       - "cpp/rates_engine/**"
       - ".github/workflows/cpp-rates-engine.yml"
+      # Python counterpart of the C++ canonical serializer and its parity tests.
+      - "src/shiori_pricing_lab/rates_bridge/**"
+      - "tests/test_rates_bridge*.py"
+      # Authoritative Rates contracts implemented by this engine (#223-#226).
+      - "docs/31_rates_reuse_boundary_223.md"
+      - "docs/32_usd_sofr_ois_convention_224.md"
+      - "docs/33_rates_market_model_result_contracts_225.md"
+      - "docs/34_cpp_rates_build_quantlib_concurrency_cache_benchmark_226.md"
   pull_request:
     paths:
       - "cpp/rates_engine/**"
       - ".github/workflows/cpp-rates-engine.yml"
+      # Python counterpart of the C++ canonical serializer and its parity tests.
+      - "src/shiori_pricing_lab/rates_bridge/**"
+      - "tests/test_rates_bridge*.py"
+      # Authoritative Rates contracts implemented by this engine (#223-#226).
+      - "docs/31_rates_reuse_boundary_223.md"
+      - "docs/32_usd_sofr_ois_convention_224.md"
+      - "docs/33_rates_market_model_result_contracts_225.md"
+      - "docs/34_cpp_rates_build_quantlib_concurrency_cache_benchmark_226.md"
   workflow_dispatch:
 
 permissions:

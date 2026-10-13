@@ -20,11 +20,14 @@ namespace {
 }
 
 // The exact required-component set of #226 sections 7.2/7.6. An empty component means "unknown
-// identity", which section 7.6 makes NON-REUSABLE.
+// identity", which section 7.6 makes NON-REUSABLE. `quantlib_macro_configuration` belongs to that set
+// because #226 P4 (line 427) puts the pinned QuantLib identity - version AND its macro configuration
+// (§12.3 G-2, line 1942: "the version alone is insufficient") - in the section 7.2 cache key, and
+// CT3b (line 1479) requires an entry whose required identity is unknown to be unusable.
 constexpr std::string_view kRequiredComponents[] = {
-    "inputs_fingerprint", "engine_version", "methodology_id",  "methodology_version",
-    "quantlib_version",   "acquisition_mode", "dependency_baseline_and_triplet",
-    "build_numeric_flags"};
+    "inputs_fingerprint", "engine_version", "methodology_id", "methodology_version",
+    "quantlib_version", "quantlib_macro_configuration", "acquisition_mode",
+    "dependency_baseline_and_triplet", "build_numeric_flags"};
 
 }  // namespace
 

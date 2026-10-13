@@ -144,6 +144,50 @@ TEST(CanonicalParse, RefusesMalformedDuplicatedOrUnrepresentableInput) {
             ContractViolationKind::kNumericNotRepresentable);
 }
 
+TEST(CanonicalParse, ReportsTheFullRfc6901PointerOfADuplicateMember) {
+  const auto refusal = [](const char* text) {
+    try {
+      (void)Shiori::rates::dto::parse_canonical_json(text);
+    } catch (const ContractViolation& violation) {
+      return violation;
+    }
+    ADD_FAILURE() << "a duplicated-member document must be refused: " << text;
+    return ContractViolation(ContractViolationKind::kUnknownSchemaVersion, "<no refusal>",
+                             "no refusal was thrown");
+  };
+
+  // Root-level duplicate: unchanged, the member's own pointer (`/a`, never a nested path).
+  const ContractViolation root = refusal(R"({"a":1,"a":2})");
+  EXPECT_EQ(root.kind(), ContractViolationKind::kDuplicateKey);
+  EXPECT_EQ(root.pointer(), "/a");
+
+  // A nested repeat is reported at its FULL RFC 6901 path, not as a root-relative `/value`: a refusal
+  // that cannot say which object repeated the member cannot be diagnosed.
+  const ContractViolation nested = refusal(R"({"outer":{"value":1,"value":2}})");
+  EXPECT_EQ(nested.kind(), ContractViolationKind::kDuplicateKey);
+  EXPECT_EQ(nested.pointer(), "/outer/value");
+
+  // Inside an array the element index is part of the pointer, and a scalar sibling must still count
+  // (the duplicate is element 1, not element 0).
+  const ContractViolation in_array = refusal(R"({"list":[1,{"a":1,"a":2}]})");
+  EXPECT_EQ(in_array.kind(), ContractViolationKind::kDuplicateKey);
+  EXPECT_EQ(in_array.pointer(), "/list/1/a");
+  EXPECT_EQ(refusal(R"({"outer":[{"a":1,"a":2}]})").pointer(), "/outer/0/a");
+
+  // The key's own reference token is RFC 6901-escaped: `/` becomes `~1` and `~` becomes `~0`, at every
+  // nesting level.
+  EXPECT_EQ(refusal(R"({"a/b":1,"a/b":2})").pointer(), "/a~1b");
+  EXPECT_EQ(refusal(R"({"a~b":1,"a~b":2})").pointer(), "/a~0b");
+  EXPECT_EQ(refusal(R"({"x":{"a~/b":1,"a~/b":2}})").pointer(), "/x/a~0~1b");
+
+  // Malformed input keeps precedence over duplication: the duplicate scan continues past a repeat so
+  // a document that is only a syntax error surrounded by duplicates is still refused as the malformed
+  // document it is.
+  const ContractViolation malformed = refusal(R"({"a":1,"a":2,})");
+  EXPECT_EQ(malformed.kind(), ContractViolationKind::kWrongType);
+  EXPECT_EQ(malformed.pointer(), "");
+}
+
 TEST(CanonicalParse, AcceptsDistinctKeysAtEveryNestingLevel) {
   // The Stage 0 duplicate scan must never refuse valid input. The same key name in two DIFFERENT
   // objects is not a duplicate, and neither is a key repeated across sibling array elements, so these

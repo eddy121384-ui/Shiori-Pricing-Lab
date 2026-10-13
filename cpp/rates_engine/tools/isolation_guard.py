@@ -25,7 +25,9 @@ A QuantLib include in a comment or string literal is not a dependency, and a rea
 split across lines with a trailing backslash or hidden behind a comment gap. A naive pattern search
 gives both false positives (failing on a comment that merely documents the rule) and false negatives
 (missing a continued include). This scanner first removes comments and literals while PRESERVING
-line structure, then parses ``#include`` directives on logical lines.
+line structure, then parses ``#include`` directives on logical lines. The quoted operand of an
+``#include`` is the single literal it keeps, so ``#include "ql/..."`` is rejected exactly like
+``#include <ql/...>`` instead of being blanked out from under the include scan.
 The guard also reports a plain ``QuantLib::`` mention in a file that may not depend on QuantLib, and
 ``--self-test`` proves the guard is able to fail, including the raw-string and continuation traps.
 A guard that cannot fail is not evidence.
@@ -73,8 +75,46 @@ class Finding:
         }
 
 
+def is_quoted_include_operand(text: str, index: int) -> bool:
+    """True when the ``"`` at ``index`` opens the operand of an ``#include`` directive.
+
+    ``#include "ql/settings.hpp"`` is a dependency, while a plain ``"ql/settings.hpp"`` in ordinary
+    code is not, so the stripping pass must keep this one literal visible to the include scan. The
+    operand may be separated from the keyword by whitespace or by a line continuation, and the
+    keyword must be preceded by ``#`` (not merely be a suffix of a longer identifier), so a
+    ``"ql/..."`` literal elsewhere in the file is never mistaken for a directive.
+    """
+    cursor = index - 1
+    while cursor >= 0:
+        if text[cursor] in " \t\r\f\v":
+            cursor -= 1
+            continue
+        if text[cursor] == "\n":
+            probe = cursor - 1
+            while probe >= 0 and text[probe] in " \t\r":
+                probe -= 1
+            if probe >= 0 and text[probe] == "\\":
+                cursor = probe - 1
+                continue
+        break
+
+    if cursor < 6 or text[cursor - 6 : cursor + 1] != "include":
+        return False
+    probe = cursor - 7
+    if probe >= 0 and (text[probe].isalnum() or text[probe] == "_"):
+        return False
+    while probe >= 0 and text[probe] in " \t\r\f\v":
+        probe -= 1
+    return probe >= 0 and text[probe] == "#"
+
+
 def strip_comments_and_literals(text: str) -> str:
     """Return ``text`` with comments and string/char/raw literals replaced by spaces.
+
+    A quoted operand of a preprocessor ``#include`` is the single exception: it is preserved so the
+    directive scan can reject ``#include "ql/..."`` exactly as it rejects ``#include <ql/...>``. An
+    ordinary ``"ql/..."`` literal, one inside a comment or raw string, or one reached only through a
+    macro continuation is still blanked and therefore never reported.
 
     Newlines are preserved so that reported line numbers still refer to the original file, and every
     replaced character becomes a space so a stripped literal cannot be reconstructed from the scan.
@@ -134,6 +174,10 @@ def strip_comments_and_literals(text: str) -> str:
                 if text[cursor] == "\n":
                     break
                 cursor += 1
+            if quote == '"' and is_quoted_include_operand(text, index):
+                # Keep the operand of ``#include "ql/..."``: it is a directive, not a literal.
+                index = cursor
+                continue
             blank(index, cursor)
             index = cursor
             continue
@@ -277,6 +321,18 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
         False,
     ),
     (
+        "src/engine/trap_prod_quoted_include.cpp",
+        '#include "ql/settings.hpp"\nint x;\n',
+        ["QUANTLIB_INCLUDE"],
+        False,
+    ),
+    (
+        "src/engine/trap_prod_quoted_include_continuation.cpp",
+        '#include \\\n  "ql/quantlib.hpp"\n',
+        ["QUANTLIB_INCLUDE"],
+        False,
+    ),
+    (
         "src/engine/trap_prod_symbol.cpp",
         '#include "x.hpp"\nQuantLib::Date d;\n',
         ["SYMBOL_MENTION"],
@@ -288,6 +344,23 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
         "/* #include <ql/time/date.hpp> */\n"
         'const char* s = R"raw(#include <ql/time/date.hpp>)raw";\n'
         'const char* q = "#include <ql/time/date.hpp>";\n',
+        [],
+        True,
+    ),
+    (
+        "src/engine/trap_quoted_include_clean.cpp",
+        # The quoted form must not be reported when it is not a preprocessor include.
+        'const char* s = "ql/settings.hpp";\n'
+        'const char* t = "#include \\"ql/settings.hpp\\"";\n'
+        "// #include \"ql/settings.hpp\"\n"
+        "/* #include \"ql/settings.hpp\" */\n"
+        'const char* r = R"(#include "ql/settings.hpp")";\n'
+        'const char* r2 = R"tag(#include "ql/settings.hpp")tag";\n'
+        "#define QL_PATH \\\n"
+        '    "ql/settings.hpp"\n'
+        '#define RATES_include "ql/settings.hpp"\n'
+        'const char* u = "ql/settings.hpp \\\n'
+        'still one literal";\n',
         [],
         True,
     ),
@@ -312,6 +385,12 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
         True,
     ),
     (
+        "tests/adapter/allowed_quoted.cpp",
+        '#include "ql/settings.hpp"\n',
+        [],
+        True,
+    ),
+    (
         "tests/defaults/allowed.cpp",
         "#include <ql/version.hpp>\n",
         [],
@@ -320,6 +399,12 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
     (
         "tests/dto/not_allowed.cpp",
         "#include <ql/time/date.hpp>\n",
+        ["QUANTLIB_INCLUDE"],
+        False,
+    ),
+    (
+        "tests/dto/quoted_not_allowed.cpp",
+        '#include "ql/time/date.hpp"\n',
         ["QUANTLIB_INCLUDE"],
         False,
     ),
@@ -392,7 +477,9 @@ def run_self_test() -> int:
 
         dirty_root = root / "dirty_tree"
         (dirty_root / "src/dto").mkdir(parents=True, exist_ok=True)
-        (dirty_root / "src/dto/bad.cpp").write_text("#include <ql/date.hpp>\n", encoding="utf-8")
+        (dirty_root / "src/dto/bad.cpp").write_text(
+            '#include <ql/date.hpp>\n#include "ql/settings.hpp"\n', encoding="utf-8"
+        )
         dirty_findings, dirty_files = scan_tree(dirty_root)
         if not dirty_findings or dirty_files != 1:
             failures += 1

@@ -147,6 +147,47 @@ void require_valuation_context_identity(const std::string& id, const Date& valua
   }
 }
 
+// docs/33 section 16 (line 1257): `errors` is the machine-dispatchable domain-code channel, and its
+// vocabulary is exactly the eleven `RatesErrorCode` tokens ("Error-code vocabulary (minimum; extension
+// requires methodology review)"). A producer can re-hash any content, so the fingerprint fence cannot
+// carry this rule: an unapproved token is refused HERE, at the offending `errors/<i>/code`, using the
+// DTO layer's one existing token table (`rates_error_code_from_token`). `warnings` is deliberately NOT
+// validated: section 16 keeps the warning vocabulary open (for example `FORWARD_STARTING` /
+// `DATA_QUALITY`), and `DiagnosticRecord::from_canonical` decodes both lists, so the closed check must
+// live at the result level rather than in the record decoder.
+void require_closed_error_vocabulary(const std::vector<DiagnosticRecord>& errors,
+                                     const std::string& pointer) {
+  for (std::size_t index = 0; index < errors.size(); ++index) {
+    RatesErrorCode decoded = RatesErrorCode::kEngineError;
+    if (!rates_error_code_from_token(errors[index].code, decoded)) {
+      fail(ContractViolationKind::kUnknownEnumToken,
+           child(pointer_index(child(pointer, "errors"), index), "code"),
+           "errors[].code must be one of the closed eleven-token RatesErrorCode vocabulary of "
+           "docs/33 section 16; an unapproved machine-dispatchable code is refused");
+    }
+  }
+}
+
+// docs/33 section 16 (lines 1253-1255): "SUCCESS - valued, no warnings" and "SUCCESS_WITH_WARNINGS -
+// valued with machine-readable warnings". The warning list is the only thing that distinguishes the two
+// valued statuses, so a status that contradicts it is refused at `warnings`. FAILED owns its own error
+// rule and gains no warning rule here.
+void require_status_warning_rule(PricingStatus status, const std::vector<DiagnosticRecord>& warnings,
+                                 const std::string& pointer) {
+  if (status == PricingStatus::kSuccess) {
+    if (!warnings.empty()) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "warnings"),
+           "a SUCCESS result must not carry warnings; a valued result with warnings is "
+           "SUCCESS_WITH_WARNINGS");
+    }
+    return;
+  }
+  if (status == PricingStatus::kSuccessWithWarnings && warnings.empty()) {
+    fail(ContractViolationKind::kInvariantViolation, child(pointer, "warnings"),
+         "a SUCCESS_WITH_WARNINGS result must carry at least one machine-readable warning");
+  }
+}
+
 // docs/33 section 15.4 (line 1232): the canonical measure order is the approved tuple
 // `(measure_id, canonical bump_spec.bump_target serialization, canonical RiskBucketCoordinate
 // serialization)`, and a structured NOT_APPLICABLE sorts before PRESENT within each of the two
@@ -500,6 +541,11 @@ void PricingResult::validate_rules(const std::string& pointer) const {
   // trusted, so a fabricated or stale id is refused even though its type is a non-empty string.
   require_valuation_context_identity(valuation_context_id, valuation_date, result_currency,
                                      pointer);
+  // Section 16: the error channel is closed and the status/warning pair must be coherent. Both are
+  // whole-document rules, so they are enforced here rather than in `DiagnosticRecord::from_canonical`,
+  // which also serves the open warning vocabulary.
+  require_closed_error_vocabulary(errors, pointer);
+  require_status_warning_rule(status, warnings, pointer);
   // Section 12.3: SUCCESS / SUCCESS_WITH_WARNINGS requires PRESENT(HeadlineValue); FAILED requires
   // NULL_WITH_REASON(UNAVAILABLE, PRICING_FAILED) and at least one error.
   const bool success = status == PricingStatus::kSuccess ||
@@ -594,6 +640,18 @@ void PricingResult::validate_rules(const std::string& pointer) const {
       if (pair.metric->value.value != value.value || pair.metric->value.unit != value.unit) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, pair.field),
              "the designated supplemental metric must exactly equal the headline value and unit");
+      }
+      // Section 12.3 line 956: the designated metric must agree with the headline
+      // "currency/sign semantics where applicable", and disagreement fails closed. When the headline
+      // designates the supplemental PV, the two sign conventions must be exactly equal - both the
+      // ValueOrReason states (including a NULL_WITH_REASON reason) and the PRESENT token. This is pure
+      // identity of the carried tokens: no sign convention is defined, ranked or corrected here, which
+      // is why the rule is stated on the PV's own sign-convention member.
+      if (value.semantics == HeadlineSemantics::kPresentValue &&
+          !(value.sign_convention == pv_sign_convention)) {
+        fail(ContractViolationKind::kIdentityMismatch, child(pointer, "pv_sign_convention"),
+             "the headline designates the supplemental PV, so pv_sign_convention must carry exactly "
+             "the headline sign_convention union state and PRESENT token");
       }
     }
   }
@@ -1029,6 +1087,10 @@ void RiskResult::validate_rules(const std::string& pointer) const {
   // trusted, so a fabricated or stale id is refused even though its type is a non-empty string.
   require_valuation_context_identity(valuation_context_id, valuation_date, result_currency,
                                      pointer);
+  // Section 16, the same two rules as PricingResult: the closed error vocabulary and the
+  // status/warning coherence.
+  require_closed_error_vocabulary(errors, pointer);
+  require_status_warning_rule(status, warnings, pointer);
   const bool success = status == PricingStatus::kSuccess ||
                        status == PricingStatus::kSuccessWithWarnings;
   if (success) {

@@ -208,6 +208,27 @@ void expect_round_trip(const Dto& value, const char* what) {
   return entry;
 }
 
+// A HISTORICAL entry with a PRESENT publication_date. `HISTORICAL` requires a PRESENT value, source
+// and version with projection fields NULL_WITH_REASON(NOT_APPLICABLE_HISTORICAL) (docs/33 line 586);
+// the publication date is the field sections 8.3/8.4 (docs/33 lines 594 and 613) constrain against
+// the embedding store's valuation date, so it is a parameter here.
+[[nodiscard]] FixingEntry make_historical_entry(const FloatingIndex index, const char* observation_date,
+                                                const char* publication_date) {
+  FixingEntry entry = make_entry(index, observation_date);
+  entry.observation_state = ObservationState::kHistorical;
+  entry.value = present_decimal_rate(kSyntheticDecimalRate);
+  entry.source = ValueOrReason<MarketSource>::of(MarketSource::kSyntheticFixture);
+  entry.version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string(publication_date)));
+  entry.publication_timestamp = ValueOrReason<Timestamp>::of(Timestamp(std::string(kCapturedAt)));
+  entry.projection_method_id = ValueOrReason<std::string>::none(not_applicable_historical_reason());
+  entry.projection_method_version =
+      ValueOrReason<std::string>::none(not_applicable_historical_reason());
+  entry.projection_inputs_ref =
+      ValueOrReason<ProjectionInputsRef>::none(not_applicable_historical_reason());
+  return entry;
+}
+
 [[nodiscard]] ValueOrReason<ProjectionInputsRef> present_projection_reference(
     const std::string& curve_set_id, const std::string& forecast_curve_id) {
   return ValueOrReason<ProjectionInputsRef>::of(
@@ -624,6 +645,66 @@ TEST(FixingObservationStateConformance, RefusesAHistoricalRecordSourcedFromACurv
                   "HISTORICAL sourced from CURVE_PROJECTION");
   EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
   EXPECT_EQ(violation.pointer(), "/source");
+}
+
+TEST(FixingObservationStateConformance, AcceptsAHistoricalRecordPublishedOnOrBeforeTheValuationDate) {
+  // Docs/33 line 594 defines HISTORICAL as published on/before the valuation date, so the store's
+  // valuation date itself (the line 610 same-day case) and an earlier publication are both accepted.
+  // Different indices keep the two entries distinct economic keys in ascending order; every identity
+  // is re-hashed by make_fixing_store, so the only property under test is the publication date.
+  const FixingStore store = make_fixing_store(
+      {make_historical_entry(FloatingIndex::kEurEstr, "2024-01-10", "2024-01-15"),
+       make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12")},
+      {MarketSource::kSyntheticFixture});
+
+  const CanonicalValue encoded = store.to_canonical();
+  const FixingStore decoded = FixingStore::from_canonical(encoded, "");
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
+  ASSERT_EQ(decoded.entries.size(), 2U);
+  ASSERT_TRUE(decoded.entries[0].publication_date.present);
+  ASSERT_TRUE(decoded.entries[1].publication_date.present);
+  EXPECT_EQ(decoded.entries[0].publication_date.value.text, "2024-01-15");
+  EXPECT_EQ(decoded.entries[1].publication_date.value.text, "2024-01-12");
+}
+
+TEST(FixingObservationStateConformance, RefusesAHistoricalRecordPublishedAfterTheValuationDate) {
+  // Docs/33 line 613: a HISTORICAL entry whose publication availability is after the valuation context
+  // is a malformed snapshot (UNPUBLISHED_FIXING_STORED_AS_HISTORY), and line 611 routes
+  // `publication_date > valuation_date` to the forecast path only. The document is REFUSED where the
+  // store's valuation date is available; it is never silently rewritten as PROJECTED/forecast, so a
+  // future observation can never become an authoritative market input.
+  FixingEntry entry = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-16");
+  FixingStore store = make_fixing_store({entry}, {MarketSource::kSyntheticFixture});
+  // Re-hashing keeps every declared identity self-consistent, so the refusal can only be the date rule
+  // and not a stale fixing_store_id / content_fingerprint.
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "a HISTORICAL entry published after the store's valuation date");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/entries/0/publication_date");
+  EXPECT_NE(violation.message().find("UNPUBLISHED_FIXING_STORED_AS_HISTORY"), std::string::npos)
+      << violation.message();
+}
+
+TEST(FixingObservationStateConformance, KeepsTheForecastPathForAPublicationDateAfterValuation) {
+  // Line 611: for a non-HISTORICAL entry, `publication_date > valuation_date` IS the forecast path
+  // (FORECAST_REQUIRED or a complete PROJECTED), so the new HISTORICAL rule must leave every other
+  // state untouched. A MISSING/FORECAST_REQUIRED entry with a future publication still round-trips.
+  FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
+  entry.observation_state = ObservationState::kForecastRequired;
+  entry.value = ValueOrReason<NumericWithUnit>::none(to_be_projected_reason());
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-16")));
+  FixingStore store = make_fixing_store({entry}, {});
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const FixingStore decoded = FixingStore::from_canonical(encoded, "");
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
+  ASSERT_EQ(decoded.entries.size(), 1U);
+  EXPECT_EQ(decoded.entries[0].observation_state, ObservationState::kForecastRequired);
 }
 
 TEST(FixingObservationStateConformance, AcceptsACompleteProjectedAuditRecord) {

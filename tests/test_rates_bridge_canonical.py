@@ -16,6 +16,8 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -497,6 +499,93 @@ def test_invoke_refusal_without_a_code_is_not_given_an_invented_one(tmp_path, mo
 
     assert failure.value.code == "ENGINE_TRANSPORT_FAILURE"
     assert failure.value.detail["exit_code"] == 2
+
+
+# --------------------------------------------------------------------------------------
+# N9: the validated CLI file -- never a same-named executable on PATH -- is what executes.
+#
+# ``invoke`` validates a directory-less name such as ``shiori_rates_cli`` with ``is_file()``
+# against the current directory, but the pre-N9 bridge passed that same slash-free string as
+# ``argv[0]``: ``subprocess.run`` resolves a directory-less name through ``PATH`` (POSIX
+# ``execvp``, the Windows search path), so a different, same-named binary could run. The
+# tests below pin the canonicalized absolute ``argv[0]``; the process launch stays stubbed,
+# so no real executable is ever spawned.
+# --------------------------------------------------------------------------------------
+
+
+def test_invoke_canonicalizes_a_relative_cli_name_to_an_absolute_path(tmp_path, monkeypatch):
+    """A bare relative name is validated in the cwd and executed as that exact file."""
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    calls = _stub_engine_process(monkeypatch, returncode=0, stdout="{}")
+
+    assert invoke({}, cli_path="shiori_rates_cli") == {}
+
+    argv, _kwargs = calls[0]
+    assert argv == [str(cli.resolve()), "--operation", "validate-kernel-input"]
+    assert os.path.isabs(argv[0])
+    assert Path(argv[0]) == cli
+
+
+def test_invoke_executes_the_validated_file_not_a_same_named_executable_on_path(
+    tmp_path, monkeypatch
+):
+    """A decoy ``shiori_rates_cli`` earlier on ``PATH`` must not be what gets executed."""
+    validated_dir = tmp_path / "validated"
+    decoy_dir = tmp_path / "decoy"
+    validated_dir.mkdir()
+    decoy_dir.mkdir()
+    validated_cli = validated_dir / "shiori_rates_cli"
+    validated_cli.write_text("", encoding="utf-8")
+    decoy_cli = decoy_dir / "shiori_rates_cli"
+    decoy_cli.write_text("", encoding="utf-8")
+
+    monkeypatch.chdir(validated_dir)
+    monkeypatch.setenv("PATH", str(decoy_dir) + os.pathsep + os.environ.get("PATH", ""))
+    calls = _stub_engine_process(monkeypatch, returncode=0, stdout="{}")
+
+    assert invoke({}, cli_path="shiori_rates_cli") == {}
+
+    argv, _kwargs = calls[0]
+    assert argv[0] == str(validated_cli.resolve())
+    assert argv[0] != str(decoy_cli.resolve())
+    assert Path(argv[0]).parent == validated_dir.resolve()
+
+    if os.name != "nt":
+        # Non-vacuity where the ambiguity was real: execvp's PATH search would have found
+        # the decoy for the pre-N9 directory-less name. (Windows CreateProcess already
+        # prefers the current directory, so the decoy is not reachable there.)
+        assert shutil.which("shiori_rates_cli") == str(decoy_cli)
+
+
+def test_invoke_reports_the_resolved_cli_path_in_a_transport_failure(tmp_path, monkeypatch):
+    """The failure detail names the resolved file, matching the executed ``argv[0]``."""
+    cli = tmp_path / "shiori_rates_cli"
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _stub_engine_process(monkeypatch, returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(RatesEngineError) as failure:
+        invoke({}, cli_path="shiori_rates_cli")
+
+    assert failure.value.code == "ENGINE_TRANSPORT_FAILURE"
+    assert failure.value.detail["cli_path"] == str(cli.resolve())
+    assert os.path.isabs(failure.value.detail["cli_path"])
+
+
+def test_invoke_missing_relative_cli_keeps_engine_cli_not_found_detail(tmp_path, monkeypatch):
+    """Resolution happens only after validation: the not-found detail keeps the given name."""
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(RatesEngineError) as missing:
+        invoke({}, cli_path="no_such_shiori_rates_cli")
+
+    assert missing.value.code == "ENGINE_CLI_NOT_FOUND"
+    assert missing.value.detail == {
+        "operation": "validate-kernel-input",
+        "cli_path": "no_such_shiori_rates_cli",
+    }
 
 
 # --------------------------------------------------------------------------------------

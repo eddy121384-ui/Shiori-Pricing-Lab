@@ -202,54 +202,73 @@ CanonicalValue convert(const nlohmann::json& input, const std::string& pointer) 
 // the parser hands over every object key once per source occurrence, decoded but before it can be
 // inserted into any map, so a repeated member is refused at EVERY nesting level - including in a
 // document that carries no version tag at all, which is what places duplicate detection in Stage 0
-// rather than in any schema decision. The pass interprets nothing: values are ignored and only the
-// object nesting is tracked.
+// rather than in any schema decision. The pass interprets no value: it tracks only the container
+// nesting, so an object's member set and an array's element index are known when a key is reported.
 //
 // The class deliberately implements the parser's SAX callbacks directly (no inheritance): the parser
 // only requires the callbacks to exist with the pinned signatures, which `sax_parse` checks at
 // compile time.
+//
+// The refusal pointer is the FULL RFC 6901 pointer of the repeated member, not a root-relative
+// segment: a nested duplicate such as `{"outer":{"a":1,"a":2}}` is reported at `/outer/a`, and a
+// duplicate inside an array element at `/list/0/a`. The current container path is tracked in a SAX
+// frame stack because the parser emits no pointer of its own. The same local RFC 6901 escaping rule
+// the rest of the document vocabulary uses applies to the key's own reference token, so a member name
+// containing `/` or `~` is reported as `~1` / `~0`. The pointer is built from DATA, never inferred
+// from the raw source text, so a decoded escape (`\u0061`) reports the decoded member name.
 // ---------------------------------------------------------------------------------------------
+[[nodiscard]] std::string escape_pointer_segment(std::string_view segment) {
+  // RFC 6901 section 3: `~` is escaped first as `~0` and `/` as `~1`; no other byte is escaped.
+  std::string escaped;
+  escaped.reserve(segment.size());
+  for (const char character : segment) {
+    if (character == '~') {
+      escaped += "~0";
+    } else if (character == '/') {
+      escaped += "~1";
+    } else {
+      escaped += character;
+    }
+  }
+  return escaped;
+}
+
 class DuplicateKeySax {
  public:
-  bool null() { return true; }
-  bool boolean(bool) { return true; }
-  bool number_integer(std::int64_t) { return true; }
-  bool number_unsigned(std::uint64_t) { return true; }
-  bool number_float(double, const std::string&) { return true; }
-  bool string(std::string&) { return true; }
-  bool binary(nlohmann::json::binary_t&) { return true; }
+  bool null() { return note_value_complete(); }
+  bool boolean(bool) { return note_value_complete(); }
+  bool number_integer(std::int64_t) { return note_value_complete(); }
+  bool number_unsigned(std::uint64_t) { return note_value_complete(); }
+  bool number_float(double, const std::string&) { return note_value_complete(); }
+  bool string(std::string&) { return note_value_complete(); }
+  bool binary(nlohmann::json::binary_t&) { return note_value_complete(); }
 
-  bool start_object(std::size_t) {
-    object_keys_.emplace_back();
-    return true;
-  }
+  bool start_object(std::size_t) { return start_container(/*is_object=*/true); }
+  bool start_array(std::size_t) { return start_container(/*is_object=*/false); }
 
   bool key(std::string& value) {
     // A `key` event is only ever emitted inside an object, so the top frame is the containing one. The
     // emptiness test is not reachable through the parser's state machine, but a key with no containing
     // object cannot be attributed to anything, so it is refused rather than trusted with a back().
-    if (object_keys_.empty()) {
+    if (stack_.empty() || !stack_.back().is_object) {
       malformed_ = true;
       return false;
     }
-    if (!object_keys_.back().insert(value).second && !duplicate_seen_) {
+    Frame& frame = stack_.back();
+    frame.pending_child_pointer = pointer_child(frame.pointer, escape_pointer_segment(value));
+    if (!frame.member_keys.insert(value).second && !duplicate_seen_) {
       duplicate_seen_ = true;
-      // The same locator the programmatic duplicate refusal in `make_object` reports: the key's own
-      // pointer segment.
-      duplicate_pointer_ = pointer_child("", value);
+      // The same locator the programmatic duplicate refusal in `make_object` reports for a top-level
+      // member, extended with the full object path so a nested repeat stays diagnosable.
+      duplicate_pointer_ = frame.pending_child_pointer;
     }
     // Parsing continues after a duplicate so that an input that is ALSO malformed is still refused as
     // the malformed document it is.
     return true;
   }
 
-  bool end_object() {
-    object_keys_.pop_back();
-    return true;
-  }
-
-  bool start_array(std::size_t) { return true; }
-  bool end_array() { return true; }
+  bool end_object() { return end_container(); }
+  bool end_array() { return end_container(); }
 
   bool parse_error(std::size_t, const std::string&, const nlohmann::json::exception&) {
     malformed_ = true;
@@ -261,8 +280,51 @@ class DuplicateKeySax {
   [[nodiscard]] bool is_malformed() const noexcept { return malformed_; }
 
  private:
-  // One key set per open object, in nesting order.
-  std::vector<std::set<std::string>> object_keys_;
+  // One frame per open container, in nesting order. A frame carries the RFC 6901 pointer OF ITS OWN
+  // container plus the state needed to locate its children: an object's seen key set and the pointer
+  // of the member value that follows the most recent `key`, or an array's next element index.
+  struct Frame {
+    bool is_object = false;
+    std::string pointer;
+    std::set<std::string> member_keys;
+    std::string pending_child_pointer;
+    std::size_t next_index = 0;
+  };
+
+  [[nodiscard]] bool start_container(const bool is_object) {
+    std::string child_pointer;
+    if (!stack_.empty()) {
+      const Frame& parent = stack_.back();
+      child_pointer = parent.is_object ? parent.pending_child_pointer
+                                       : pointer_index(parent.pointer, parent.next_index);
+    }
+    // An empty stack means the document root, whose pointer is the empty string.
+    Frame frame;
+    frame.is_object = is_object;
+    frame.pointer = std::move(child_pointer);
+    stack_.push_back(std::move(frame));
+    return true;
+  }
+
+  // An array counts a child as soon as that child's value is complete, whether it is a scalar or a
+  // container; an object's member values need no index.
+  [[nodiscard]] bool note_value_complete() {
+    if (!stack_.empty() && !stack_.back().is_object) {
+      ++stack_.back().next_index;
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool end_container() {
+    if (stack_.empty()) {
+      malformed_ = true;
+      return false;
+    }
+    stack_.pop_back();
+    return note_value_complete();
+  }
+
+  std::vector<Frame> stack_;
   std::string duplicate_pointer_;
   bool duplicate_seen_ = false;
   bool malformed_ = false;

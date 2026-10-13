@@ -190,6 +190,16 @@ def invoke(
             },
         )
 
+    # N9: the executable that *executes* must be the file that was just validated. A
+    # slash-free name (e.g. "shiori_rates_cli") is checked by ``is_file()`` against the
+    # current directory, but the same directory-less string handed to ``subprocess.run``
+    # is resolved through ``PATH`` (POSIX ``execvp``, the Windows search path) -- a
+    # different, same-named binary could run. Canonicalizing to an absolute path here,
+    # after validation and before the payload/argv are built, pins execution to the
+    # accepted file. The check above is unchanged, so ENGINE_CLI_NOT_FOUND still means
+    # "no such file", and its detail keeps the caller's spelling.
+    cli = cli.resolve()
+
     payload = _request_bytes(request)
     argv = [str(cli), "--operation", operation]
 

@@ -65,8 +65,9 @@ TEST(CacheKey, IsRefusedWhenARequiredComponentIsEmpty) {
   // Every required component must be enforced the same way: an expression like "the framework version
   // is optional" is how a cache starts mixing incompatible results.
   const char* const required[] = {"inputs_fingerprint", "methodology_id", "methodology_version",
-                                  "quantlib_version", "acquisition_mode",
-                                  "dependency_baseline_and_triplet", "build_numeric_flags"};
+                                  "quantlib_version", "quantlib_macro_configuration",
+                                  "acquisition_mode", "dependency_baseline_and_triplet",
+                                  "build_numeric_flags"};
   for (const char* name : required) {
     CacheKeyComponents partial = complete_components();
     if (std::string(name) == "inputs_fingerprint") {
@@ -77,6 +78,8 @@ TEST(CacheKey, IsRefusedWhenARequiredComponentIsEmpty) {
       partial.methodology_version.clear();
     } else if (std::string(name) == "quantlib_version") {
       partial.quantlib_version.clear();
+    } else if (std::string(name) == "quantlib_macro_configuration") {
+      partial.quantlib_macro_configuration.clear();
     } else if (std::string(name) == "acquisition_mode") {
       partial.acquisition_mode.clear();
     } else if (std::string(name) == "dependency_baseline_and_triplet") {
@@ -93,6 +96,30 @@ TEST(CacheKey, IsRefusedWhenARequiredComponentIsEmpty) {
     EXPECT_THROW((void)CacheKey::from_components(partial, ""),
                  Shiori::rates::dto::ContractViolation);
   }
+}
+
+TEST(CacheKey, TreatsAnUnknownQuantLibMacroConfigurationAsNonReusable) {
+  // #226 P4 (line 427) puts the pinned QuantLib identity in the section 7.2 cache key, and G-2 (line
+  // 1942) makes the macro configuration part of it because "the version alone is insufficient"; CT3b
+  // (line 1479) requires an entry whose required identity is unknown to be unusable. POSITIVE case:
+  // an explicit known configuration is reusable.
+  const CacheKey known = CacheKey::from_components(complete_components(), "");
+  EXPECT_TRUE(known.is_reusable());
+  EXPECT_EQ(known.components.quantlib_macro_configuration, "QL_ENABLE_SESSIONS=OFF");
+
+  // NEGATIVE case: an empty (unknown) configuration is not reusable, it is refused at construction,
+  // and the refusal names the missing component rather than leaving an anonymous failure.
+  CacheKeyComponents unknown = complete_components();
+  unknown.quantlib_macro_configuration.clear();
+  EXPECT_THROW((void)CacheKey::from_components(unknown, ""),
+               Shiori::rates::dto::ContractViolation);
+
+  CacheKey unusable;
+  unusable.components = unknown;
+  unusable.digest = unusable.compute_digest();
+  std::string reason;
+  EXPECT_FALSE(unusable.is_reusable(&reason));
+  EXPECT_NE(reason.find("quantlib_macro_configuration"), std::string::npos) << reason;
 }
 
 TEST(CacheKey, DistinguishesEveryComponentThatMustNotCollide) {

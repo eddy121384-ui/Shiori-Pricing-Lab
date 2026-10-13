@@ -1268,6 +1268,33 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
       }
     }
   }
+  // Section 8.3 (docs/33 line 594) defines HISTORICAL as "Fixing published on/before valuation date
+  // and captured", and section 8.4 (line 613) makes a HISTORICAL entry whose publication availability
+  // is after the valuation context a malformed snapshot: refuse with reason
+  // UNPUBLISHED_FIXING_STORED_AS_HISTORY. Section 8.4's `publication_date > valuation_date` row (line
+  // 611) routes such an observation to the forecast path only (FORECAST_REQUIRED or a complete
+  // PROJECTED), so a future publication is NEVER silently rewritten here as a forecast and never
+  // becomes an authoritative market input. The check lives here because only the store owns
+  // `valuation_date`; `FixingEntry::from_canonical` cannot see it. It follows the section 8.2
+  // duplicate rule, so a repeated economic key is still reported as a duplicate, and it precedes the
+  // section 15.4 order rule so the state refusal is not masked by an acquisition-order complaint: an
+  // entry whose state contradicts the valuation date is refused for that contradiction. A
+  // NULL_WITH_REASON(unknown) publication_date is a different documented case (line 612) and is
+  // deliberately untouched, as is every non-HISTORICAL state. Both dates are canonical fixed-width
+  // `YYYY-MM-DD`, so the text comparison the ordering rule below uses is also chronological order.
+  for (std::size_t index = 0; index < result.entries.size(); ++index) {
+    const FixingEntry& entry = result.entries[index];
+    if (entry.observation_state != ObservationState::kHistorical ||
+        !entry.publication_date.present) {
+      continue;
+    }
+    if (result.valuation_date.text < entry.publication_date.value.text) {
+      fail(ContractViolationKind::kInvariantViolation,
+           child(pointer_index(child(pointer, "entries"), index), "publication_date"),
+           "UNPUBLISHED_FIXING_STORED_AS_HISTORY: a HISTORICAL observation's publication_date is "
+           "after the fixing store's valuation_date");
+    }
+  }
   // Section 15.4 (docs/33 line 1228): entries are in ascending `(index_id, observation_date)`. The
   // duplicate scan above owns the repeated-economic-key refusal (unchanged); this scan refuses an
   // inverted or equal-ordering pair, so a producer's acquisition order can never reach a fingerprint

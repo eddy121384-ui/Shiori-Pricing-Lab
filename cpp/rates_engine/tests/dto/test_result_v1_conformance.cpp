@@ -60,6 +60,7 @@ using Shiori::rates::dto::NumericWithUnit;
 using Shiori::rates::dto::PricingResult;
 using Shiori::rates::dto::PricingStatus;
 using Shiori::rates::dto::ProductType;
+using Shiori::rates::dto::RatesErrorCode;
 using Shiori::rates::dto::ReasonCategory;
 using Shiori::rates::dto::ReplayIdentity;
 using Shiori::rates::dto::RiskBucketCoordinate;
@@ -110,6 +111,30 @@ constexpr std::string_view kFixtureSettlementTermsId = "SYNTHETIC_CONTRACT_FIXTU
 constexpr std::string_view kFixtureOtherContractToken = "CURVE_SET_V1";
 constexpr std::string_view kPricingFailedReasonCode = "PRICING_FAILED";
 constexpr std::string_view kOtherUnavailableCode = "ENGINE_ERROR";
+// docs/33 section 16 keeps the warning vocabulary OPEN (its own examples are FORWARD_STARTING and
+// DATA_QUALITY), so this token is machine-readable but deliberately NOT one of the eleven error codes:
+// it proves the closed error check never reaches `warnings`.
+constexpr std::string_view kFixtureWarningCode = "DATA_QUALITY";
+// A shape-only token that is NOT in the section 16 error table. It claims no domain meaning; it exists
+// only so the closed-vocabulary rule has an unapproved code to refuse.
+constexpr std::string_view kUnapprovedErrorCode = "SHAPE_PROBE_NOT_A_SECTION_16_CODE";
+// `sign_convention` / `pv_sign_convention` are open convention tokens (#225 section 12.2 leaves the
+// vocabulary unfixed and keeps the legacy receive/pay rule REFERENCE ONLY), so the mismatch probe uses
+// a shape-only token rather than naming or inventing a real sign convention.
+constexpr std::string_view kOtherSignConventionToken = "SHAPE_ONLY_OTHER_SIGN_CONVENTION";
+
+// The closed section 16 error vocabulary, taken from the DTO layer's own table so the fixture cannot
+// drift from it. The static assertion is the second half of the pin: eleven codes, no more, no less.
+constexpr RatesErrorCode kApprovedErrorCodes[] = {
+    RatesErrorCode::kUnsupportedProduct,        RatesErrorCode::kMissingMarketData,
+    RatesErrorCode::kValuationDateMismatch,     RatesErrorCode::kCurrencyMismatch,
+    RatesErrorCode::kMarketSnapshotMismatch,    RatesErrorCode::kInvalidProduct,
+    RatesErrorCode::kMissingReferenceData,      RatesErrorCode::kSameDayFixingRuleUnresolved,
+    RatesErrorCode::kUnknownSchemaVersion,      RatesErrorCode::kUnknownMethodologyVersion,
+    RatesErrorCode::kEngineError,
+};
+static_assert(sizeof(kApprovedErrorCodes) / sizeof(kApprovedErrorCodes[0]) == 11,
+              "the approved V1 error vocabulary is exactly the eleven section 16 codes");
 
 // ---------------------------------------------------------------------------------------------
 // Small builders
@@ -369,6 +394,21 @@ constexpr std::string_view kOtherUnavailableCode = "ENGINE_ERROR";
   result.status = PricingStatus::kSuccess;
   result.engine = fixture_engine();
   result.replay = fixture_replay();
+  assign_derived_identities(result);
+  return result;
+}
+
+// FAILED with exactly one error record and no measures: a failure computes no sensitivity, and section
+// 16 requires >=1 structured error. The error code is a parameter so the closed-vocabulary rule can be
+// probed with both an approved and an unapproved token.
+[[nodiscard]] RiskResult failed_risk_result(const std::string& error_code) {
+  RiskResult result = risk_result_fixture();
+  result.status = PricingStatus::kFailed;
+  result.measures.clear();
+  DiagnosticRecord error;
+  error.code = error_code;
+  error.message = "SYNTHETIC CONTRACT FIXTURE ERROR RECORD";
+  result.errors.push_back(std::move(error));
   assign_derived_identities(result);
   return result;
 }
@@ -721,4 +761,234 @@ TEST(RiskResultModelParameterBucket, RefusesAnInapplicableCoordinateWhenNoInputI
 
   expect_refusal(decode_risk_result(absent.to_canonical()),
                  ContractViolationKind::kIdentityMismatch, "/measures/2/bucket_coordinate");
+}
+
+// ---------------------------------------------------------------------------------------------
+// N3 - the eleven section 16 error codes are the only machine-dispatchable `errors` tokens
+// docs/33 section 16 (lines 1257-1271) + include/shiori_rates/dto/error.hpp channel 1.
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultErrorVocabulary, AcceptsEveryApprovedV1ErrorToken) {
+  for (const RatesErrorCode code : kApprovedErrorCodes) {
+    PricingResult result = failed_pricing_result(std::string(kPricingFailedReasonCode));
+    ASSERT_FALSE(result.errors.empty());
+    result.errors[0].code = std::string(to_token(code));
+    assign_derived_identities(result);
+
+    const Refusal refusal = decode_pricing_result(result.to_canonical());
+    EXPECT_FALSE(refusal.refused) << to_token(code) << " refused at " << refusal.pointer << ": "
+                                  << refusal.message;
+  }
+}
+
+TEST(PricingResultErrorVocabulary, RefusesAnUnapprovedErrorCodeAfterRehash) {
+  PricingResult result = failed_pricing_result(std::string(kPricingFailedReasonCode));
+  ASSERT_FALSE(result.errors.empty());
+  result.errors[0].code = std::string(kUnapprovedErrorCode);
+  assign_derived_identities(result);
+
+  const Refusal refusal = decode_pricing_result(result.to_canonical());
+  expect_refusal(refusal, ContractViolationKind::kUnknownEnumToken, "/errors/0/code");
+  // The refusal must name the closed vocabulary so a producer learns which table it must draw from.
+  EXPECT_NE(refusal.message.find("closed"), std::string::npos) << refusal.message;
+  EXPECT_NE(refusal.message.find("vocabulary"), std::string::npos) << refusal.message;
+}
+
+TEST(RiskResultErrorVocabulary, AcceptsEveryApprovedV1ErrorToken) {
+  for (const RatesErrorCode code : kApprovedErrorCodes) {
+    const RiskResult result = failed_risk_result(std::string(to_token(code)));
+    const Refusal refusal = decode_risk_result(result.to_canonical());
+    EXPECT_FALSE(refusal.refused) << to_token(code) << " refused at " << refusal.pointer << ": "
+                                  << refusal.message;
+  }
+}
+
+TEST(RiskResultErrorVocabulary, RefusesAnUnapprovedErrorCodeAfterRehash) {
+  RiskResult result = failed_risk_result(std::string(kUnapprovedErrorCode));
+  ASSERT_FALSE(result.errors.empty());
+  assign_derived_identities(result);
+
+  const Refusal refusal = decode_risk_result(result.to_canonical());
+  expect_refusal(refusal, ContractViolationKind::kUnknownEnumToken, "/errors/0/code");
+  EXPECT_NE(refusal.message.find("vocabulary"), std::string::npos) << refusal.message;
+}
+
+TEST(ResultErrorVocabulary, LeavesTheOpenWarningVocabularyUnvalidated) {
+  // DATA_QUALITY is a section 16 example warning, not one of the eleven error codes: if the closed
+  // check ever reached `warnings`, this accepted document would be refused. Both result types must keep
+  // the warning channel independent of the error channel.
+  PricingResult pricing = successful_pricing_result(Currency::kUsd);
+  pricing.status = PricingStatus::kSuccessWithWarnings;
+  DiagnosticRecord pricing_warning;
+  pricing_warning.code = std::string(kFixtureWarningCode);
+  pricing_warning.message = "SYNTHETIC CONTRACT FIXTURE WARNING RECORD";
+  pricing.warnings.push_back(std::move(pricing_warning));
+  assign_derived_identities(pricing);
+  const Refusal pricing_refusal = decode_pricing_result(pricing.to_canonical());
+  EXPECT_FALSE(pricing_refusal.refused) << pricing_refusal.pointer << ": " << pricing_refusal.message;
+
+  RiskResult risk = risk_result_fixture();
+  risk.status = PricingStatus::kSuccessWithWarnings;
+  DiagnosticRecord risk_warning;
+  risk_warning.code = std::string(kFixtureWarningCode);
+  risk_warning.message = "SYNTHETIC CONTRACT FIXTURE WARNING RECORD";
+  risk.warnings.push_back(std::move(risk_warning));
+  assign_derived_identities(risk);
+  const Refusal risk_refusal = decode_risk_result(risk.to_canonical());
+  EXPECT_FALSE(risk_refusal.refused) << risk_refusal.pointer << ": " << risk_refusal.message;
+}
+
+// ---------------------------------------------------------------------------------------------
+// N4 - SUCCESS carries no warnings; SUCCESS_WITH_WARNINGS carries a non-empty warning list
+// docs/33 section 16 (lines 1253-1254); one pair of tests per status and result type.
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultStatusWarnings, AcceptsASuccessWithoutWarnings) {
+  const PricingResult fixture = successful_pricing_result(Currency::kUsd);
+  ASSERT_EQ(fixture.status, PricingStatus::kSuccess);
+  ASSERT_TRUE(fixture.warnings.empty());
+
+  const Refusal refusal = decode_pricing_result(fixture.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+TEST(PricingResultStatusWarnings, RefusesASuccessCarryingAWarningAfterRehash) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  DiagnosticRecord warning;
+  warning.code = std::string(kFixtureWarningCode);
+  warning.message = "SYNTHETIC CONTRACT FIXTURE WARNING RECORD";
+  result.warnings.push_back(std::move(warning));
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/warnings");
+}
+
+TEST(PricingResultStatusWarnings, AcceptsSuccessWithWarningsCarryingAWarning) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.status = PricingStatus::kSuccessWithWarnings;
+  DiagnosticRecord warning;
+  warning.code = std::string(kFixtureWarningCode);
+  warning.message = "SYNTHETIC CONTRACT FIXTURE WARNING RECORD";
+  result.warnings.push_back(std::move(warning));
+  assign_derived_identities(result);
+
+  const Refusal refusal = decode_pricing_result(result.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+TEST(PricingResultStatusWarnings, RefusesSuccessWithWarningsAndNoWarningAfterRehash) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.status = PricingStatus::kSuccessWithWarnings;
+  ASSERT_TRUE(result.warnings.empty());
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/warnings");
+}
+
+TEST(RiskResultStatusWarnings, AcceptsASuccessWithoutWarnings) {
+  const RiskResult fixture = risk_result_fixture();
+  ASSERT_EQ(fixture.status, PricingStatus::kSuccess);
+  ASSERT_TRUE(fixture.warnings.empty());
+
+  const Refusal refusal = decode_risk_result(fixture.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+TEST(RiskResultStatusWarnings, RefusesASuccessCarryingAWarningAfterRehash) {
+  RiskResult result = risk_result_fixture();
+  DiagnosticRecord warning;
+  warning.code = std::string(kFixtureWarningCode);
+  warning.message = "SYNTHETIC CONTRACT FIXTURE WARNING RECORD";
+  result.warnings.push_back(std::move(warning));
+  assign_derived_identities(result);
+
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/warnings");
+}
+
+TEST(RiskResultStatusWarnings, AcceptsSuccessWithWarningsCarryingAWarning) {
+  RiskResult result = risk_result_fixture();
+  result.status = PricingStatus::kSuccessWithWarnings;
+  DiagnosticRecord warning;
+  warning.code = std::string(kFixtureWarningCode);
+  warning.message = "SYNTHETIC CONTRACT FIXTURE WARNING RECORD";
+  result.warnings.push_back(std::move(warning));
+  assign_derived_identities(result);
+
+  const Refusal refusal = decode_risk_result(result.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+TEST(RiskResultStatusWarnings, RefusesSuccessWithWarningsAndNoWarningAfterRehash) {
+  RiskResult result = risk_result_fixture();
+  result.status = PricingStatus::kSuccessWithWarnings;
+  ASSERT_TRUE(result.warnings.empty());
+  assign_derived_identities(result);
+
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/warnings");
+}
+
+// ---------------------------------------------------------------------------------------------
+// N5 - a PRESENT_VALUE headline and the designated PV agree on sign semantics
+// docs/33 section 12.3 line 956 ("... exactly equal the headline value+unit (and currency/sign
+// semantics where applicable); disagreement fails closed").
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultHeadlinePvSignConvention, AcceptsTheMatchingSignConvention) {
+  const PricingResult fixture = successful_pricing_result(Currency::kUsd);
+  ASSERT_TRUE(fixture.headline.present);
+  ASSERT_EQ(fixture.headline.value.semantics, HeadlineSemantics::kPresentValue);
+  ASSERT_TRUE(fixture.pv.present);
+  ASSERT_TRUE(fixture.headline.value.sign_convention.present);
+  ASSERT_TRUE(fixture.pv_sign_convention.present);
+  EXPECT_EQ(fixture.headline.value.sign_convention.value, fixture.pv_sign_convention.value);
+
+  const Refusal refusal = decode_pricing_result(fixture.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+TEST(PricingResultHeadlinePvSignConvention, RefusesADifferentSignConventionTokenAfterRehash) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.headline.value.sign_convention =
+      ValueOrReason<std::string>::of(std::string(kOtherSignConventionToken));
+  // Same PRESENT state on both sides; only the carried token differs, so the refusal cannot be driven
+  // by the union state.
+  ASSERT_TRUE(result.pv_sign_convention.present);
+  ASSERT_NE(result.headline.value.sign_convention.value, result.pv_sign_convention.value);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kIdentityMismatch, "/pv_sign_convention");
+}
+
+TEST(PricingResultHeadlinePvSignConvention, RefusesAMismatchedUnionStateAfterRehash) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  // The PV is PRESENT, so the existing rule already forces PRESENT `pv_sign_convention`; the headline
+  // carries the structured NOT_APPLICABLE state instead, so only the state-agreement rule refuses this.
+  result.headline.value.sign_convention = ValueOrReason<std::string>::not_applicable();
+  ASSERT_TRUE(result.pv_sign_convention.present);
+  ASSERT_FALSE(result.headline.value.sign_convention.present);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kIdentityMismatch, "/pv_sign_convention");
+}
+
+TEST(PricingResultHeadlinePvSignConvention, DoesNotApplyToANonPvDesignation) {
+  // The rule is scoped to the headline that designates the supplemental PV. A PAR_RATE headline leaves
+  // `pv` structured NOT_APPLICABLE, so the headline's own sign convention is not compared against the
+  // unused `pv_sign_convention` - even though the two differ here.
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.headline.value.semantics = HeadlineSemantics::kParRate;
+  result.headline.value.unit = Unit::kDecimalAnnual;
+  result.headline.value.currency = ValueOrReason<Currency>::not_applicable();
+  result.pv = ValueOrReason<NumericWithUnit>::not_applicable();
+  result.pv_sign_convention = ValueOrReason<std::string>::not_applicable();
+  result.par_rate = ValueOrReason<NumericWithUnit>::of(NumericWithUnit(0.0, Unit::kDecimalAnnual));
+  ASSERT_TRUE(result.headline.value.sign_convention.present);
+  ASSERT_FALSE(result.pv_sign_convention.present);
+  assign_derived_identities(result);
+
+  const Refusal refusal = decode_pricing_result(result.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
 }
