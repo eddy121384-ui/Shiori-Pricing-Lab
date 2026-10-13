@@ -356,7 +356,7 @@ if(SHIORI_BUILD_BENCHMARKS)
     target_include_directories(${_target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_include_directories(${_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks")
     target_link_libraries(${_target}
-      PRIVATE ${_group_libraries} shiori_rates_quantlib_adapter benchmark::benchmark)
+      PRIVATE ${_group_libraries} shiori_rates_core shiori_rates_quantlib_adapter benchmark::benchmark)
     if(SHIORI_BUILD_TESTS)
       # A smoke test asserts only that the benchmark RAN and emitted its metadata. #226 section 10.8
       # forbids an absolute-time pass/fail gate, so no timing threshold is asserted here.
