@@ -20,7 +20,7 @@ const char* const kDocument = R"({"curve_selection":{"discount_curve_id":"dc","f
 
 void BmParseCanonicalDocument(benchmark::State& state) {
   for (auto _ : state) {
-    const auto value = Shiori::rates::dto::parse_canonical_json(kDocument);
+    auto value = Shiori::rates::dto::parse_canonical_json(kDocument);
     benchmark::DoNotOptimize(value);
   }
 }
@@ -29,7 +29,7 @@ BENCHMARK(BmParseCanonicalDocument);
 void BmDumpCanonicalDocument(benchmark::State& state) {
   const auto value = Shiori::rates::dto::parse_canonical_json(kDocument);
   for (auto _ : state) {
-    const std::string text = value.dump();
+    std::string text = value.dump();
     benchmark::DoNotOptimize(text);
   }
 }
@@ -38,7 +38,7 @@ BENCHMARK(BmDumpCanonicalDocument);
 void BmFingerprintCanonicalBytes(benchmark::State& state) {
   const std::string bytes = Shiori::rates::dto::parse_canonical_json(kDocument).dump();
   for (auto _ : state) {
-    const std::string digest = Shiori::rates::dto::fingerprint_of_canonical_bytes(bytes);
+    std::string digest = Shiori::rates::dto::fingerprint_of_canonical_bytes(bytes);
     benchmark::DoNotOptimize(digest);
   }
 }

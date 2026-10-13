@@ -21,6 +21,11 @@
 
 namespace Shiori::benchmarks {
 
+// The envelope is built from the DTO's canonical types. They live in Shiori::rates::dto, which is not
+// an enclosing scope here, so name them explicitly instead of spelling the namespace at every use.
+using Shiori::rates::dto::CanonicalMembers;
+using Shiori::rates::dto::CanonicalValue;
+
 inline void print_m4_metadata(const char* benchmark_name) {
   const auto& build = Shiori::rates::engine::build_identity();
   const auto& quantlib = Shiori::rates::adapter::quantlib_identity();

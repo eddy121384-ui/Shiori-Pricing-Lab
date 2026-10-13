@@ -34,7 +34,7 @@ BENCHMARK(BmParseAndReject);
 
 void BmCanonicalizeBytes(benchmark::State& state) {
   for (auto _ : state) {
-    const std::string bytes =
+    std::string bytes =
         Shiori::rates::dto::parse_canonical_json(kRejectedDocument).dump();
     benchmark::DoNotOptimize(bytes);
   }
