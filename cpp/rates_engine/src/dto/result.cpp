@@ -413,13 +413,23 @@ HeadlineValue HeadlineValue::from_canonical(const CanonicalValue& node, const st
                                                            child(pointer, "currency"));
   result.sign_convention = ValueOrReason<std::string>::from_canonical(
       node.at("sign_convention", pointer), child(pointer, "sign_convention"));
-  // Section 12.3: currency-denominated units require PRESENT(result_currency); dimensionless/rate
-  // headlines use structured NOT_APPLICABLE unless the approved unit explicitly includes currency.
+  // Section 12.3 (line 955) states currency applicability in both directions, and line 947 annotates
+  // the field the same way: currency-denominated headline units require PRESENT(result_currency), while
+  // dimensionless/rate headlines use structured NOT_APPLICABLE unless their approved unit explicitly
+  // includes currency. In the enum only CURRENCY_AMOUNT and CURRENCY_AMOUNT_PER_BASIS_POINT are
+  // currency-denominated, so every other unit must carry the structured NOT_APPLICABLE state and a
+  // PRESENT currency there is contradictory metadata on the authoritative headline. This is the
+  // symmetric half of the existing check; the enclosing result-level comparison of the PRESENT currency
+  // against `result_currency` is unchanged.
   const bool currency_denominated =
       result.unit == Unit::kCurrencyAmount || result.unit == Unit::kCurrencyAmountPerBasisPoint;
   if (currency_denominated && !result.currency.present) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "currency"),
          "a currency-denominated headline unit requires PRESENT currency");
+  }
+  if (!currency_denominated && result.currency.present) {
+    fail(ContractViolationKind::kInvariantViolation, child(pointer, "currency"),
+         "a non-currency headline unit requires structured NOT_APPLICABLE currency");
   }
   return result;
 }

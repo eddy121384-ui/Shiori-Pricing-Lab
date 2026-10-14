@@ -571,6 +571,72 @@ TEST(PricingResultHeadlineCurrency, RefusesADifferentCurrencyAfterRehash) {
                  ContractViolationKind::kIdentityMismatch, "/headline/value/currency");
 }
 
+// The symmetric half of the headline currency rule (docs/33 section 12.3 lines 947 and 955): only
+// `CURRENCY_AMOUNT` and `CURRENCY_AMOUNT_PER_BASIS_POINT` are currency-denominated, so every other
+// rate/dimensionless unit carries structured NOT_APPLICABLE currency and a PRESENT currency there is
+// contradictory metadata on the authoritative headline.
+[[nodiscard]] PricingResult rate_headline_result(const Unit unit,
+                                                 ValueOrReason<Currency> currency) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  HeadlineValue headline;
+  headline.semantics = HeadlineSemantics::kParRate;
+  headline.value = 0.0;  // shape probe: this lane computes no price
+  headline.unit = unit;
+  headline.currency = std::move(currency);
+  headline.sign_convention = ValueOrReason<std::string>::of(std::string(kUnresolvedToken));
+  result.headline = ValueOrReason<HeadlineValue>::of(std::move(headline));
+  // A successful headline that designates par_rate requires the supplemental metric PRESENT and exactly
+  // equal to the headline value+unit (docs/33 line 956).
+  result.par_rate = ValueOrReason<NumericWithUnit>::of(NumericWithUnit(0.0, unit));
+  assign_derived_identities(result);
+  return result;
+}
+
+TEST(PricingResultHeadlineCurrency, AcceptsStructuredNotApplicableCurrencyForARateHeadline) {
+  const PricingResult fixture =
+      rate_headline_result(Unit::kDecimalAnnual, ValueOrReason<Currency>::not_applicable());
+  ASSERT_TRUE(fixture.headline.present);
+  EXPECT_FALSE(fixture.headline.value.currency.present);
+
+  const Refusal refusal = decode_pricing_result(fixture.to_canonical());
+  EXPECT_FALSE(refusal.refused) << std::string(to_token(refusal.kind)) << " at " << refusal.pointer
+                                << ": " << refusal.message;
+}
+
+TEST(PricingResultHeadlineCurrency, RefusesAPresentCurrencyOnADimensionlessHeadline) {
+  PricingResult present_currency =
+      rate_headline_result(Unit::kDecimalAnnual, ValueOrReason<Currency>::of(Currency::kUsd));
+  ASSERT_TRUE(present_currency.headline.present);
+  ASSERT_TRUE(present_currency.headline.value.currency.present);
+  // Re-hashed after the change, so the refusal is the applicability rule and not the fingerprint fence.
+  assign_derived_identities(present_currency);
+
+  expect_refusal(decode_pricing_result(present_currency.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/headline/value/currency");
+}
+
+TEST(PricingResultHeadlineCurrency, KeepsPresentCurrencyForBothCurrencyDenominatedUnits) {
+  // Scope guard: the forward branch and the CURRENCY_AMOUNT_PER_BASIS_POINT behaviour are preserved, so
+  // the new inverse branch cannot be over-applied. CURRENCY_AMOUNT is exercised by the
+  // enclosing-currency test above; the basis-point unit is reached through the headline semantics whose
+  // supplemental metric owns it (a PRESENT par_rate requires DECIMAL_ANNUAL, docs/33 line 956 rules).
+  PricingResult basis_point = successful_pricing_result(Currency::kUsd);
+  HeadlineValue headline;
+  headline.semantics = HeadlineSemantics::kAnnuityPvbp;
+  headline.value = 0.0;  // shape probe: this lane computes no price
+  headline.unit = Unit::kCurrencyAmountPerBasisPoint;
+  headline.currency = ValueOrReason<Currency>::of(Currency::kUsd);
+  headline.sign_convention = ValueOrReason<std::string>::of(std::string(kUnresolvedToken));
+  basis_point.headline = ValueOrReason<HeadlineValue>::of(std::move(headline));
+  basis_point.annuity_pvbp = ValueOrReason<NumericWithUnit>::of(
+      NumericWithUnit(0.0, Unit::kCurrencyAmountPerBasisPoint));
+  assign_derived_identities(basis_point);
+
+  const Refusal refusal = decode_pricing_result(basis_point.to_canonical());
+  EXPECT_FALSE(refusal.refused) << std::string(to_token(refusal.kind)) << " at " << refusal.pointer
+                                << ": " << refusal.message;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Finding 6 - a FAILED headline is exactly UNAVAILABLE / PRICING_FAILED
 // docs/33 section 12.3 line 953.

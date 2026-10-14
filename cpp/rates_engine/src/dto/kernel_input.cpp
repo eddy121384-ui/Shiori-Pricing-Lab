@@ -357,11 +357,27 @@ SettlementProvenance SettlementProvenance::from_canonical(const CanonicalValue& 
   if (!refs_node.is_array()) {
     fail_wrong_type(child(pointer, "evidence_refs"), "array", refs_node.type_name());
   }
-  for (const CanonicalValue& item : refs_node.as_array().items) {
+  const auto& ref_items = refs_node.as_array().items;
+  result.evidence_refs.reserve(ref_items.size());
+  for (std::size_t index = 0; index < ref_items.size(); ++index) {
+    const CanonicalValue& item = ref_items[index];
     if (!item.is_string()) {
       fail_wrong_type(child(pointer, "evidence_refs"), "string", item.type_name());
     }
     result.evidence_refs.push_back(item.as_string());
+    // docs/33 section 15.4 line 1233: set-semantic provenance lists such as `evidence_refs` are
+    // lexicographically sorted and duplicate-free before serialization. This list is part of
+    // `settlement_terms_identity_preimage` (line 451), so an inverse order or a repeat would mint a
+    // different `settlement_terms_id` for the same evidence set. The decoder refuses at the offending
+    // element's own pointer; it never silently sorts, which would hide the producer's malformed input
+    // while changing the identity they would compute. Same rule and message as the sibling
+    // `require_string_list` in market.cpp.
+    if (index > 0 && !(result.evidence_refs[index - 1] < result.evidence_refs[index])) {
+      fail(ContractViolationKind::kInvariantViolation,
+           pointer_index(child(pointer, "evidence_refs"), index),
+           "a set-semantic list must be strictly ascending (lexicographically sorted and "
+           "duplicate-free) before serialization");
+    }
   }
   result.methodology_id = require_methodology_text(node.at("methodology_id", pointer),
                                                    child(pointer, "methodology_id"),

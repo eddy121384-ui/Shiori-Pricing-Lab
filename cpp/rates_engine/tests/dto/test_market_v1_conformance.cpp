@@ -852,6 +852,106 @@ TEST(FixingObservationStateConformance, AcceptsAMissingRecordAndRefusesAMissingR
   EXPECT_EQ(source_violation.pointer(), "/source");
 }
 
+// docs/33 line 588: a MISSING observation asserts the required historical fixing is not held, so
+// `quote_timestamp` and `version` carry structured missing/unavailable reasons and neither may be
+// PRESENT. The value/source refusals above are preserved unchanged.
+TEST(FixingObservationStateConformance, RefusesAMissingRecordCarryingAQuoteTimestampOrAVersion) {
+  const FixingEntry missing = make_entry(FloatingIndex::kUsdSofr, "2024-01-10");
+
+  FixingEntry with_quote = missing;
+  with_quote.quote_timestamp = ValueOrReason<Timestamp>::of(Timestamp(std::string(kCapturedAt)));
+  const CanonicalValue quote_node = with_quote.to_canonical();
+  const ContractViolation quote_violation =
+      refusal_for([&quote_node] { (void)FixingEntry::from_canonical(quote_node, ""); },
+                  "MISSING carrying a PRESENT quote_timestamp");
+  EXPECT_EQ(quote_violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(quote_violation.pointer(), "/quote_timestamp");
+
+  FixingEntry with_version = missing;
+  with_version.version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
+  const CanonicalValue version_node = with_version.to_canonical();
+  const ContractViolation version_violation =
+      refusal_for([&version_node] { (void)FixingEntry::from_canonical(version_node, ""); },
+                  "MISSING carrying a PRESENT version");
+  EXPECT_EQ(version_violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(version_violation.pointer(), "/version");
+}
+
+TEST(FixingObservationStateConformance, KeepsPresentQuoteTimestampAndVersionForAHistoricalRecord) {
+  // docs/33 line 586 requires a HISTORICAL entry to carry a PRESENT `source` and `version`, so the new
+  // MISSING-only rule must not reach the other states. A PRESENT quote timestamp is a legitimate
+  // captured fact for a historical observation.
+  FixingEntry historical =
+      make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-10", "2024-01-10");
+  historical.quote_timestamp = ValueOrReason<Timestamp>::of(Timestamp(std::string(kCapturedAt)));
+  expect_round_trip(historical, "HISTORICAL with a PRESENT version and quote timestamp");
+}
+
+// ---------------------------------------------------------------------------------------------
+// `provenance.sources` is the exact unique union of the PRESENT entry sources (docs/33 section 8.4)
+// ---------------------------------------------------------------------------------------------
+TEST(FixingStoreProvenanceSources, AcceptsTheExactUniqueUnionInAnyOrderAndTheEmptyUnion) {
+  FixingEntry first = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-09", "2024-01-09");
+  FixingEntry second = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-10", "2024-01-10");
+  second.source = ValueOrReason<MarketSource>::of(MarketSource::kScreenTranscription);
+
+  // Two PRESENT entry sources, so the declared list carries both. The V1 contract prescribes no order
+  // for this list, so a non-ascending order must still be accepted.
+  const FixingStore distinct = make_fixing_store(
+      {first, second}, {MarketSource::kScreenTranscription, MarketSource::kSyntheticFixture});
+  expect_round_trip(distinct, "the exact unique union in a non-ascending order");
+
+  // A forecast-only / MISSING-only store carries no PRESENT entry source, so the empty union is the
+  // exact answer rather than a missing list.
+  const FixingStore missing_only =
+      make_fixing_store({make_entry(FloatingIndex::kUsdSofr, "2024-01-10")}, {});
+  expect_round_trip(missing_only, "the legitimate empty union");
+}
+
+TEST(FixingStoreProvenanceSources, RefusesADuplicatedListThatHidesAnOmittedSource) {
+  FixingEntry first = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-09", "2024-01-09");
+  FixingEntry second = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-10", "2024-01-10");
+  second.source = ValueOrReason<MarketSource>::of(MarketSource::kScreenTranscription);
+
+  // `[A, A]` against the real union `{A, B}`: the union's size, every declared element a member, and B
+  // omitted - so only the duplicate-free rule can refuse it. The store is built and re-hashed through
+  // `make_fixing_store`, so the refusal cannot be a stale-fingerprint artifact.
+  const FixingStore hides_a_source = make_fixing_store(
+      {first, second}, {MarketSource::kSyntheticFixture, MarketSource::kSyntheticFixture});
+  const CanonicalValue hidden_node = hides_a_source.to_canonical();
+  const ContractViolation hidden_violation =
+      refusal_for([&hidden_node] { (void)FixingStore::from_canonical(hidden_node, ""); },
+                  "a duplicated sources list hiding an omitted source");
+  EXPECT_EQ(hidden_violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(hidden_violation.pointer(), "/provenance/sources/1");
+}
+
+TEST(FixingStoreProvenanceSources, RefusesARepeatAndKeepsTheOversizedClaimRefusal) {
+  const FixingEntry single =
+      make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-10", "2024-01-10");
+
+  // A repeat in a single-source union is refused at the repeated element.
+  const FixingStore repeated = make_fixing_store(
+      {single}, {MarketSource::kSyntheticFixture, MarketSource::kSyntheticFixture});
+  const CanonicalValue repeated_node = repeated.to_canonical();
+  const ContractViolation repeated_violation =
+      refusal_for([&repeated_node] { (void)FixingStore::from_canonical(repeated_node, ""); },
+                  "a single-source union declared twice");
+  EXPECT_EQ(repeated_violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(repeated_violation.pointer(), "/provenance/sources/1");
+
+  // Pre-existing refusal preserved: a declared source that no entry carries is refused even though the
+  // list is duplicate-free.
+  const FixingStore claims_extra = make_fixing_store(
+      {single}, {MarketSource::kSyntheticFixture, MarketSource::kScreenTranscription});
+  const CanonicalValue extra_node = claims_extra.to_canonical();
+  const ContractViolation extra_violation =
+      refusal_for([&extra_node] { (void)FixingStore::from_canonical(extra_node, ""); },
+                  "a declared source that no entry carries");
+  EXPECT_EQ(extra_violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(extra_violation.pointer(), "/provenance");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Finding 2: curve schema / role binding (docs/33 sections 7.1.1, 7.2, 7.3)
 // ---------------------------------------------------------------------------------------------

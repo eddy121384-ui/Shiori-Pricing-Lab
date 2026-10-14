@@ -1139,9 +1139,10 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
       break;
     }
     case ObservationState::kMissing: {
-      // Line 588: value, source and the projection fields carry structured missing/unavailable
-      // reasons; line 597 states MISSING has no numeric value and a structured source reason. No
-      // projection methodology may convert MISSING into history.
+      // Line 588: value, source, quote_timestamp and version carry structured missing/unavailable
+      // reasons; line 597 states MISSING has no numeric value and a structured source reason. MISSING
+      // asserts the required historical fixing IS NOT HELD, so none of those four fields may claim a
+      // concrete fact. No projection methodology may convert MISSING into history.
       if (result.value.present) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
              "a MISSING observation must not carry a PRESENT value");
@@ -1150,6 +1151,16 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
              "a MISSING observation carries a structured source/unavailability reason, never a "
              "PRESENT source");
+      }
+      if (result.quote_timestamp.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "quote_timestamp"),
+             "a MISSING observation carries a structured missing/unavailable quote_timestamp, never a "
+             "PRESENT quote timestamp: MISSING asserts the required historical fixing is not held");
+      }
+      if (result.version.present) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "version"),
+             "a MISSING observation carries a structured missing/unavailable version, never a PRESENT "
+             "version: MISSING asserts the required historical fixing is not held");
       }
       require_projection_not_present(result, pointer, "MISSING");
       break;
@@ -1187,8 +1198,22 @@ FixingStoreProvenance FixingStoreProvenance::from_canonical(const CanonicalValue
   const auto& items = sources_node.as_array().items;
   result.sources.reserve(items.size());
   for (std::size_t index = 0; index < items.size(); ++index) {
-    result.sources.push_back(enum_from_canonical<MarketSource>(
-        items[index], pointer_index(child(pointer, "sources"), index)));
+    const MarketSource source = enum_from_canonical<MarketSource>(
+        items[index], pointer_index(child(pointer, "sources"), index));
+    // docs/33 section 8.4: `provenance.sources` is the deterministic union of the PRESENT entry
+    // sources, and the union comparison in `FixingStore::from_canonical` is size + membership. That is
+    // only exact set equality when the declared list is duplicate-free: `[A, A]` against a true union
+    // `{A, B}` has the union's size and every declared element is a member, yet B is omitted and the
+    // store validates. The V1 contract prescribes no order for this list, so uniqueness alone is
+    // enforced here - no ordering is invented.
+    for (const MarketSource seen : result.sources) {
+      if (seen == source) {
+        fail(ContractViolationKind::kInvariantViolation,
+             pointer_index(child(pointer, "sources"), index),
+             "provenance.sources must be the duplicate-free union of PRESENT entry sources");
+      }
+    }
+    result.sources.push_back(source);
   }
   result.assembled_by = require_non_empty_string(node.at("assembled_by", pointer),
                                                  child(pointer, "assembled_by"),
@@ -1316,7 +1341,11 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
            "economic key");
     }
   }
-  // Section 8.4: provenance.sources is the deterministic union of the PRESENT entry sources.
+  // Section 8.4: provenance.sources is the deterministic union of the PRESENT entry sources. The
+  // decoded list is already duplicate-free (`FixingStoreProvenance::from_canonical`), so the size check
+  // plus the membership check below are exact set equality: declared subset of the union with equal
+  // cardinality cannot omit a member. An empty union stays legitimate - a forecast-only or MISSING-only
+  // store carries no PRESENT entry source - and is accepted when the declared list is empty too.
   std::vector<MarketSource> union_sources;
   for (const FixingEntry& entry : result.entries) {
     if (!entry.source.present) {
