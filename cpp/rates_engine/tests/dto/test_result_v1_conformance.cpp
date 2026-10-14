@@ -22,6 +22,7 @@
 // object rather than an invented node vocabulary.
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -405,6 +406,11 @@ static_assert(sizeof(kApprovedErrorCodes) / sizeof(kApprovedErrorCodes[0]) == 11
   RiskResult result = risk_result_fixture();
   result.status = PricingStatus::kFailed;
   result.measures.clear();
+  // Section 13.4 (line 1051): a FAILED result carries no measure, so nothing in this document consumes
+  // a ModelInput and the identity must stay structured NOT_APPLICABLE rather than keep claiming the
+  // model input the successful fixture consumed. The volatility/exercise/settlement identities stay
+  // PRESENT: they echo the Phase-2 swaption kernel input identically in both statuses.
+  result.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
   DiagnosticRecord error;
   error.code = error_code;
   error.message = "SYNTHETIC CONTRACT FIXTURE ERROR RECORD";
@@ -744,6 +750,10 @@ TEST(RiskResultMeasureOrder, OrdersDifferentMeasuresByTheirCanonicalEnumToken) {
   dv01.measure_id = RiskMeasureId::kDv01;
   canonical.measures.push_back(std::move(delta));
   canonical.measures.push_back(std::move(dv01));
+  // Section 13.4 line 1051: the replaced measure set no longer contains the MODEL_PARAMETER bucket that
+  // consumed the ModelInput, so the identity must stop claiming it. The two parallel rows test the
+  // ordering rule and nothing else.
+  canonical.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
   assign_derived_identities(canonical);
 
   const Refusal accepted = decode_risk_result(canonical.to_canonical());
@@ -1057,4 +1067,287 @@ TEST(PricingResultHeadlinePvSignConvention, DoesNotApplyToANonPvDesignation) {
 
   const Refusal refusal = decode_pricing_result(result.to_canonical());
   EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finding 6b - a non-currency headline carries the structured NOT_APPLICABLE *category*
+// docs/33 section 12.3 lines 947 and 955.
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultHeadlineCurrency, RefusesAGenericReasonCategoryOnADimensionlessHeadline) {
+  // Line 955 names the state itself ("dimensionless/rate headlines use structured NOT_APPLICABLE"), and
+  // line 947 annotates the field the same way. A generic failure category is therefore not an
+  // equivalent: each of the other four categories reports a different, untrue condition (a data outage,
+  // missing market data, an unresolved methodology or a failed capture) for a currency that is simply
+  // inapplicable to the unit.
+  const ReasonCategory wrong_categories[] = {ReasonCategory::kUnavailable,
+                                             ReasonCategory::kMissingMarketData,
+                                             ReasonCategory::kUnresolvedMethodology,
+                                             ReasonCategory::kFailedCapture};
+  for (const ReasonCategory category : wrong_categories) {
+    PricingResult result = rate_headline_result(
+        Unit::kDecimalAnnual,
+        ValueOrReason<Currency>::none(StructuredReason(category, "FIXTURE_CURRENCY_REASON")));
+    ASSERT_TRUE(result.headline.present);
+    ASSERT_FALSE(result.headline.value.currency.present)
+        << "the fixture must carry NULL_WITH_REASON, not a value";
+    // Re-hashed, so the refusal is the applicability rule and not the fingerprint fence.
+    assign_derived_identities(result);
+
+    const Refusal refusal = decode_pricing_result(result.to_canonical());
+    EXPECT_TRUE(refusal.refused) << "a reason category must not stand in for NOT_APPLICABLE";
+    EXPECT_EQ(std::string(to_token(refusal.kind)),
+              std::string(to_token(ContractViolationKind::kInvalidTaggedUnionState)))
+        << refusal.pointer << ": " << refusal.message;
+    EXPECT_EQ(refusal.pointer, "/headline/value/currency") << refusal.message;
+  }
+
+  // Scope guard: the contract's own NOT_APPLICABLE state and the currency-denominated PRESENT state
+  // remain accepted, so the rule is exactly the category of this one field and nothing wider.
+  const Refusal not_applicable = decode_pricing_result(
+      rate_headline_result(Unit::kDecimalAnnual, ValueOrReason<Currency>::not_applicable())
+          .to_canonical());
+  EXPECT_FALSE(not_applicable.refused) << not_applicable.pointer << ": " << not_applicable.message;
+  const Refusal present = decode_pricing_result(
+      successful_pricing_result(Currency::kUsd).to_canonical());
+  EXPECT_FALSE(present.refused) << present.pointer << ": " << present.message;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finding 3 - `curve_role_map.discount_curve_id` is a mandatory echo, never omitted or invented
+// docs/33 section 12.2 line 926, section 12.4 line 962, section 5.1 line 309.
+// ---------------------------------------------------------------------------------------------
+namespace {
+// The canonical locators below rewrite ONE member of the produced document and leave every sibling
+// byte untouched, which is exactly the document a producer that re-hashes can hand to the decoder.
+[[nodiscard]] CanonicalValue with_object_member(const CanonicalValue& object, const std::string& key,
+                                                CanonicalValue replacement) {
+  CanonicalMembers members;
+  bool replaced = false;
+  for (const auto& member : object.as_object().members) {
+    if (member.first == key) {
+      members.emplace_back(key, std::move(replacement));
+      replaced = true;
+    } else {
+      members.push_back(member);
+    }
+  }
+  if (!replaced) {
+    members.emplace_back(key, std::move(replacement));
+  }
+  return CanonicalValue::make_object(std::move(members));
+}
+
+[[nodiscard]] CanonicalValue without_object_member(const CanonicalValue& object,
+                                                   const std::string& key) {
+  CanonicalMembers members;
+  for (const auto& member : object.as_object().members) {
+    if (member.first != key) {
+      members.push_back(member);
+    }
+  }
+  return CanonicalValue::make_object(std::move(members));
+}
+
+// Replaces `discount_curve_id` inside inputs_identity.curve_role_map with `replacement`, or removes the
+// key entirely when `replacement` is nullopt.
+[[nodiscard]] CanonicalValue with_discount_curve_id(const CanonicalValue& document,
+                                                    const std::optional<CanonicalValue>& replacement) {
+  const CanonicalValue* identity = document.find("inputs_identity");
+  const CanonicalValue* role_map = identity->find("curve_role_map");
+  const CanonicalValue mutated_role_map = replacement.has_value()
+                                              ? with_object_member(*role_map, "discount_curve_id",
+                                                                   *replacement)
+                                              : without_object_member(*role_map, "discount_curve_id");
+  return with_object_member(document, "inputs_identity",
+                            with_object_member(*identity, "curve_role_map", mutated_role_map));
+}
+}  // namespace
+
+TEST(PricingResultCurveRoleMap, AcceptsTheExactEchoOfTheMandatoryDiscountSelection) {
+  const PricingResult fixture = successful_pricing_result(Currency::kUsd);
+  ASSERT_TRUE(fixture.inputs_identity.curve_role_map.discount_curve_id.has_value());
+  ASSERT_FALSE(fixture.inputs_identity.curve_role_map.discount_curve_id->empty());
+
+  const CanonicalValue document = fixture.to_canonical();
+  const Refusal refusal = decode_pricing_result(document);
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+
+  const PricingResult decoded = PricingResult::from_canonical(document, "");
+  EXPECT_EQ(decoded.inputs_identity.curve_role_map.discount_curve_id,
+            fixture.inputs_identity.curve_role_map.discount_curve_id);
+  EXPECT_EQ(decoded.inputs_identity.curve_role_map.forecast_curve_by_index,
+            fixture.inputs_identity.curve_role_map.forecast_curve_by_index);
+  EXPECT_EQ(decoded.to_canonical().dump(), document.dump());
+}
+
+TEST(PricingResultCurveRoleMap, RefusesAnAbsentDiscountCurveIdEvenWhenRehashed) {
+  // Section 12.4 line 962: a result that cannot name every PRESENT kernel input is not replayable and
+  // fails validation. The kernel `curve_selection.discount_curve_id` is mandatory (section 5.1 line
+  // 309), so an omitted key is a missing required field reported on the curve map itself - the
+  // fingerprint fence cannot carry this rule because the document's fingerprint is recomputable.
+  const CanonicalValue document =
+      with_discount_curve_id(successful_pricing_result(Currency::kUsd).to_canonical(), std::nullopt);
+  expect_refusal(decode_pricing_result(document), ContractViolationKind::kMissingRequiredField,
+                 "/inputs_identity/curve_role_map/discount_curve_id");
+}
+
+TEST(PricingResultCurveRoleMap, RefusesANullOrEmptyDiscountCurveIdEvenWhenRehashed) {
+  // A bare null is not the PRESENT selection either, and an empty string names no curve: the value is
+  // required to be the exact non-empty echo of the consumed selection, so no default is substituted.
+  const CanonicalValue null_document = with_discount_curve_id(
+      successful_pricing_result(Currency::kUsd).to_canonical(), CanonicalValue(nullptr));
+  expect_refusal(decode_pricing_result(null_document), ContractViolationKind::kWrongType,
+                 "/inputs_identity/curve_role_map/discount_curve_id");
+
+  const CanonicalValue empty_document = with_discount_curve_id(
+      successful_pricing_result(Currency::kUsd).to_canonical(),
+      CanonicalValue(std::string()));
+  expect_refusal(decode_pricing_result(empty_document), ContractViolationKind::kInvariantViolation,
+                 "/inputs_identity/curve_role_map/discount_curve_id");
+}
+
+TEST(RiskResultCurveRoleMap, RefusesAMissingDiscountCurveIdEvenWhenRehashed) {
+  // The same identity rule applies to the risk result (section 13.2 line 1000: "exact echo of
+  // RatesKernelInput.curve_selection"); the risk measure loop reads the same member.
+  const CanonicalValue document =
+      with_discount_curve_id(risk_result_fixture().to_canonical(), std::nullopt);
+  expect_refusal(decode_risk_result(document), ContractViolationKind::kMissingRequiredField,
+                 "/inputs_identity/curve_role_map/discount_curve_id");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finding 4 - the result input identity echoes the kernel applicability
+// docs/33 section 5.1 lines 305-307, section 12.4 line 962, section 13.4 line 1051.
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultInputsIdentityApplicability, RefusesAnOisIdentityClaimingTheDerivativeOnlyInputs) {
+  // Section 5.1 line 306: for an OIS the volatility input, exercise terms, settlement terms and model
+  // input are structured NULL_WITH_REASON(NOT_APPLICABLE). Line 1051 makes the result echo that state,
+  // so an OIS result may not claim any of them as consumed - each is refused at its own pointer.
+  struct OptionalInput {
+    ValueOrReason<std::string> InputsIdentity::*field;
+    const char* pointer;
+  };
+  const OptionalInput fields[] = {
+      {&InputsIdentity::volatility_input_id, "/inputs_identity/volatility_input_id"},
+      {&InputsIdentity::exercise_terms_id, "/inputs_identity/exercise_terms_id"},
+      {&InputsIdentity::settlement_terms_id, "/inputs_identity/settlement_terms_id"},
+      {&InputsIdentity::model_input_id, "/inputs_identity/model_input_id"}};
+  for (const OptionalInput& input : fields) {
+    PricingResult result = successful_pricing_result(Currency::kUsd);
+    ASSERT_EQ(result.product_type, ProductType::kOis);
+    result.inputs_identity.*input.field = ValueOrReason<std::string>::of(std::string("FIXTURE_ID"));
+    assign_derived_identities(result);
+
+    const Refusal refusal = decode_pricing_result(result.to_canonical());
+    EXPECT_TRUE(refusal.refused) << input.pointer << " must not be claimable by an OIS result";
+    EXPECT_EQ(std::string(to_token(refusal.kind)),
+              std::string(to_token(ContractViolationKind::kInvalidTaggedUnionState)))
+        << refusal.pointer << ": " << refusal.message;
+    EXPECT_EQ(refusal.pointer, input.pointer) << refusal.message;
+  }
+}
+
+TEST(PricingResultInputsIdentityApplicability, RefusesASwaptionIdentityOmittingAConsumedInput) {
+  // Section 5.1 line 307: the Phase-2 swaption shape consumes a volatility input, exercise terms and
+  // settlement terms, so a swaption result that reports them as not applicable cannot name every
+  // PRESENT kernel input and is not replayable (line 962).
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.product_type = ProductType::kSwaption;
+  ASSERT_FALSE(result.inputs_identity.volatility_input_id.present);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/inputs_identity/volatility_input_id");
+}
+
+TEST(PricingResultInputsIdentityApplicability, RefusesAPresentModelInputOnASwaptionResult) {
+  // The Phase-2 pricing path carries `model_input` as structured NOT_APPLICABLE (section 5.1 line 307),
+  // and a pricing result consumes no ModelInput: there is no measure that could name one. A PRESENT
+  // model identity is therefore the fabricated consumed-input claim line 1051 calls malformed.
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.product_type = ProductType::kSwaption;
+  result.inputs_identity.volatility_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureVolatilityInputId));
+  result.inputs_identity.exercise_terms_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureExerciseTermsId));
+  result.inputs_identity.settlement_terms_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureSettlementTermsId));
+  result.inputs_identity.model_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureModelInputId));
+  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState, "/inputs_identity/model_input_id");
+}
+
+TEST(PricingResultInputsIdentityApplicability, AcceptsTheSwaptionShapeWithTheStructuredModelState) {
+  // The contract-valid Phase-2 swaption identity: the three consumed payloads are PRESENT and the model
+  // input stays structured NOT_APPLICABLE. This is the positive half of the two refusals above.
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.product_type = ProductType::kSwaption;
+  result.inputs_identity.volatility_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureVolatilityInputId));
+  result.inputs_identity.exercise_terms_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureExerciseTermsId));
+  result.inputs_identity.settlement_terms_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureSettlementTermsId));
+  result.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
+  assign_derived_identities(result);
+
+  const CanonicalValue document = result.to_canonical();
+  const Refusal refusal = decode_pricing_result(document);
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+  const PricingResult decoded = PricingResult::from_canonical(document, "");
+  EXPECT_TRUE(decoded.inputs_identity.volatility_input_id.present);
+  EXPECT_TRUE(decoded.inputs_identity.exercise_terms_id.present);
+  EXPECT_TRUE(decoded.inputs_identity.settlement_terms_id.present);
+  EXPECT_FALSE(decoded.inputs_identity.model_input_id.present);
+}
+
+TEST(RiskResultInputsIdentityApplicability, RefusesAPresentModelInputThatNoMeasureConsumes) {
+  // Section 13.2 line 1032 makes a MODEL_PARAMETER bucket the only thing that consumes a ModelInput, so
+  // a risk result whose measures no longer name one must not keep claiming it: PRESENT means "carries
+  // the exact consumed object's id" (line 1051), and nothing here consumes it.
+  RiskResult result = risk_result_fixture();
+  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
+  // The two remaining measures are kept in the section 15.4 canonical order (the same order the fixture
+  // uses), so the only property under test is that nothing consumes the model input any more.
+  result.measures.clear();
+  result.measures.push_back(bucketed_tenor_measure());
+  result.measures.push_back(parallel_measure());
+  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState, "/inputs_identity/model_input_id");
+}
+
+TEST(RiskResultInputsIdentityApplicability, RefusesAnOisIdentityClaimingTheDerivativeOnlyInputs) {
+  // The risk result echoes the same kernel applicability as the pricing result (section 13.4 line
+  // 1051), so an OIS risk identity claiming a volatility input is refused at that field. The per-measure
+  // VOL_NODE rule is satisfied by the fixture, which is why the refusal is the identity rule.
+  RiskResult result = risk_result_fixture();
+  result.product_type = ProductType::kOis;
+  ASSERT_TRUE(result.inputs_identity.volatility_input_id.present);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/inputs_identity/volatility_input_id");
+}
+
+TEST(RiskResultInputsIdentityApplicability, KeepsTheConsumedInputCoverageAndTheFailedShape) {
+  // Scope guard: the approved swaption shape that consumes a volatility input and a model input stays
+  // accepted (section 13.2 lines 1028/1032), and a FAILED risk result - which carries no measure and
+  // therefore consumes no ModelInput - is accepted with the structured NOT_APPLICABLE model state.
+  const Refusal consumed = decode_risk_result(risk_result_fixture().to_canonical());
+  EXPECT_FALSE(consumed.refused) << consumed.pointer << ": " << consumed.message;
+
+  const RiskResult failed = failed_risk_result(std::string(kOtherUnavailableCode));
+  ASSERT_TRUE(failed.measures.empty());
+  ASSERT_FALSE(failed.inputs_identity.model_input_id.present);
+  const Refusal failed_refusal = decode_risk_result(failed.to_canonical());
+  EXPECT_FALSE(failed_refusal.refused) << failed_refusal.pointer << ": " << failed_refusal.message;
 }

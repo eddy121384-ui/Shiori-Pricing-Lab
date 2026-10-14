@@ -121,6 +121,24 @@ ResolvedSwap ResolvedSwap::from_canonical(const CanonicalValue& node, const std:
   (void)result.spread.require_unit(Unit::kDecimalAnnual, child(pointer, "spread"));
   result.floating_index = enum_from_canonical<FloatingIndex>(node.at("floating_index", pointer),
                                                              child(pointer, "floating_index"));
+  // docs/32 section 6 (lines 166-167) marks exactly two convention parameters CONFIRMED for the V1
+  // scope: `USD_SOFR_OIS_V1` denotes `currency: USD` and `floating_index: USD_SOFR`. Every other
+  // convention parameter stays UNRESOLVED (RED-02) and is deliberately not enforced here; the
+  // ConventionSet is authoritative with no per-trade overrides (docs/32 section 2 R2, RESOLVED), so a
+  // swap that claims this convention set while carrying another currency or another index is refused
+  // as a contradicted claim. Neither field is rewritten or relabelled to match the convention set.
+  if (result.convention_set_id == ConventionSetId::kUsdSofrOisV1) {
+    if (result.currency != Currency::kUsd) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "currency"),
+           "convention set USD_SOFR_OIS_V1 denotes currency=USD; another currency contradicts the "
+           "authoritative convention set");
+    }
+    if (result.floating_index != FloatingIndex::kUsdSofr) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "floating_index"),
+           "convention set USD_SOFR_OIS_V1 denotes floating_index=USD_SOFR; another index "
+           "contradicts the authoritative convention set");
+    }
+  }
   const CanonicalValue& resolved_node = node.at("resolved", pointer);
   if (!resolved_node.is_object()) {
     fail_wrong_type(child(pointer, "resolved"), "object", resolved_node.type_name());
@@ -862,6 +880,18 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
       fail(ContractViolationKind::kIdentityMismatch,
            child(child(pointer, "valuation_product"), "underlying_product_id"),
            "underlying_product_id must equal resolved_swap.product_id");
+    }
+    // Section 5.1 line 303: `valuation_product.product_id` identifies the derivative trade/position and
+    // "the derivative id MUST NOT be inferred from or substituted by the underlying id". Equality with
+    // the underlying id is the vanilla-swap shape and is exactly what this branch must not accept, so
+    // the two halves of that sentence are enforced together: the PRESENT equivalence above and this
+    // distinctness rule. Nothing is renamed or reassigned - a collapsed identity is refused.
+    if (valuation_product.product_id == resolved_swap.product_id) {
+      fail(ContractViolationKind::kIdentityMismatch,
+           child(child(pointer, "valuation_product"), "product_id"),
+           "a derivative's valuation_product.product_id must be distinct from the underlying "
+           "resolved_swap.product_id; the derivative identity is never substituted by the underlying "
+           "id");
     }
     if (!exercise_terms.present) {
       fail(ContractViolationKind::kInvalidTaggedUnionState, child(pointer, "exercise_terms"),

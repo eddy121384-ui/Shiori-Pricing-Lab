@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace Shiori::rates::adapter {
 
@@ -113,6 +114,14 @@ class QuantLibSettingsGuard {
 //
 // Re-entering the gate on a thread that already holds it is refused rather than deadlocked: a
 // deadlock would be an unavailable-engine failure with no diagnosis.
+//
+// THREAD OWNERSHIP: the gate owns a process-wide `std::mutex`. Unlocking a `std::mutex` from a thread
+// that does not own it is undefined behavior, so a held gate is never released from another thread. A
+// held gate may be moved only within the thread that acquired it (that is what `acquire`'s
+// return-by-value does); a move on another thread is refused, and a held gate destroyed on a foreign
+// thread gives up ownership WITHOUT unlocking and latches the fail-closed poison, so the process is
+// refused instead of being released into an unserialized state. A mutex is never unlocked on a
+// non-owner thread, and another thread's re-entrancy marker is never cleared.
 // ---------------------------------------------------------------------------------------------
 inline constexpr bool kProductionParallelPricingEnabled = false;
 
@@ -141,9 +150,20 @@ class SerializationGate {
   static void reset_counters_for_testing() noexcept;
 
  private:
+  // Releases the gate when this object holds it on the calling thread. When the gate is held by a
+  // FOREIGN thread, ownership is given up WITHOUT unlocking (which would be undefined behavior) and the
+  // fail-closed poison is latched instead; the return value reports whether the mutex was released
+  // normally. Callers use it from the destructor and from move assignment, so both paths share exactly
+  // one release rule.
+  [[nodiscard]] bool release_on_owner_thread() noexcept;
+
   std::unique_lock<std::mutex> lock_;
   std::string operation_;
   bool held_ = false;
+  // The thread that locked `lock_`; meaningful only while `held_`. Set by `acquire` and carried by a
+  // same-thread move. A default (not-any) id is never the calling thread, so an unheld gate cannot be
+  // mistaken for one this thread owns.
+  std::thread::id owner_{};
 };
 
 }  // namespace Shiori::rates::adapter

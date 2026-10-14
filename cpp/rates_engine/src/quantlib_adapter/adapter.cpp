@@ -194,6 +194,26 @@ void latch_fail_closed_poison(std::string& refusal_reason, bool& satisfied, cons
   }
 }
 
+// The cross-thread gate refusal is a fail-closed state, not a diagnosable caller error: the process can
+// no longer be shown to be serialized, so every later QuantLib-touching operation must be refused. Like
+// `latch_fail_closed_poison` above it runs in a context that cannot throw (the gate destructor is
+// implicitly noexcept), so attribution is best-effort while the flag is the fail-closed action.
+constexpr char kCrossThreadGateRefusal[] =
+    "a held SerializationGate was moved or destroyed on a thread that does not own it; the process-wide "
+    "gate mutex is never unlocked from a foreign thread and the adapter fails closed";
+
+void latch_gate_poison() noexcept {
+  try {
+    const std::lock_guard<std::mutex> lock(g_poison_mutex);
+    if (g_poison_reason.empty()) {
+      g_poison_reason = kCrossThreadGateRefusal;
+    }
+  } catch (...) {
+    // Attribution is best-effort; the poison flag below is the fail-closed action.
+  }
+  g_poisoned.store(true, std::memory_order_release);
+}
+
 // Best-effort restoration of the state captured before installation failed. The assignment writes the
 // raw value BEFORE it notifies (`ql/utilities/observablevalue.hpp` `operator=`), so the captured state
 // is restored even when the notification throws again; the failed notification is what the caller
@@ -287,30 +307,67 @@ void unpoison_adapter_for_testing() {
 // ---------------------------------------------------------------------------------------------
 // SerializationGate
 // ---------------------------------------------------------------------------------------------
-SerializationGate::~SerializationGate() {
-  if (held_) {
-    thread_holds_gate() = false;
-    held_ = false;
-    lock_.unlock();
+SerializationGate::~SerializationGate() { (void)release_on_owner_thread(); }
+
+// The one release rule shared by the destructor and move assignment. `std::mutex` must be unlocked by
+// the thread that locked it (unlocking it elsewhere is undefined behavior), so a gate held by a foreign
+// thread is NOT unlocked here: ownership is given up with `unique_lock::release()` - which detaches the
+// lock without unlocking - the thread-local re-entrancy marker of the OWNING thread is left untouched,
+// and the fail-closed poison is latched so every later operation is refused instead of running without
+// the serialization guarantee. The mutex is deliberately left locked: no thread may legally unlock it,
+// and the poison check in `acquire` refuses before ever touching the mutex again, so nothing can block
+// on it.
+bool SerializationGate::release_on_owner_thread() noexcept {
+  if (!held_) {
+    return true;
   }
+  if (owner_ != std::this_thread::get_id()) {
+    lock_.release();
+    held_ = false;
+    owner_ = std::thread::id{};
+    latch_gate_poison();
+    return false;
+  }
+  thread_holds_gate() = false;
+  held_ = false;
+  owner_ = std::thread::id{};
+  lock_.unlock();
+  return true;
 }
 
-SerializationGate::SerializationGate(SerializationGate&& other) noexcept
-    : lock_(std::move(other.lock_)), operation_(std::move(other.operation_)), held_(other.held_) {
+SerializationGate::SerializationGate(SerializationGate&& other) noexcept {
+  // A held gate is only movable on its own thread. On any other thread the transfer is refused: the
+  // destination stays unheld and owns nothing, the source keeps its ownership so it can still be
+  // released legally on its own thread, and the fail-closed poison is latched.
+  if (other.held_ && other.owner_ != std::this_thread::get_id()) {
+    latch_gate_poison();
+    return;
+  }
+  lock_ = std::move(other.lock_);
+  operation_ = std::move(other.operation_);
+  held_ = other.held_;
+  owner_ = other.owner_;
   other.held_ = false;
+  other.owner_ = std::thread::id{};
 }
 
 SerializationGate& SerializationGate::operator=(SerializationGate&& other) noexcept {
-  if (this != &other) {
-    if (held_) {
-      thread_holds_gate() = false;
-      lock_.unlock();
-    }
-    lock_ = std::move(other.lock_);
-    operation_ = std::move(other.operation_);
-    held_ = other.held_;
-    other.held_ = false;
+  if (this == &other) {
+    return *this;
   }
+  if (other.held_ && other.owner_ != std::this_thread::get_id()) {
+    // Refused before this gate's own lock is given up, so the object being assigned to stays exactly as
+    // it was and the source keeps its ownership.
+    latch_gate_poison();
+    return *this;
+  }
+  (void)release_on_owner_thread();
+  lock_ = std::move(other.lock_);
+  operation_ = std::move(other.operation_);
+  held_ = other.held_;
+  owner_ = other.owner_;
+  other.held_ = false;
+  other.owner_ = std::thread::id{};
   return *this;
 }
 
@@ -335,6 +392,7 @@ SerializationGate SerializationGate::acquire(std::string_view operation) {
   gate.lock_ = std::unique_lock<std::mutex>(gate_mutex(), std::adopt_lock);
   thread_holds_gate() = true;
   gate.held_ = true;
+  gate.owner_ = std::this_thread::get_id();
   // Post-lock poison recheck (docs/34 section 5.5 C2: the gate must never be released into a usable
   // state, and every subsequent request must be refused). The pre-lock check above refuses every
   // request ISSUED after the adapter was poisoned, but a request that was already waiting on this

@@ -689,6 +689,95 @@ TEST(FixingObservationStateConformance, RefusesAHistoricalRecordPublishedAfterTh
       << violation.message();
 }
 
+TEST(FixingObservationStateConformance, RefusesAHistoricalEntryWithUnknownPublicationAvailability) {
+  // Docs/33 line 612: "Publication availability required but `publication_date` is `NULL_WITH_REASON` /
+  // unknown -> Fail closed; do not reinterpret `observation_date` as publication date and do not
+  // silently decide history vs forecast." A HISTORICAL entry is exactly the state in which publication
+  // availability is required (line 594: "published on/before valuation date and captured"), so the
+  // unknown state is refused at its own field pointer. The contract fixes NO reason code for this row,
+  // so the late-publication token (line 613) is deliberately not reused and nothing is invented.
+  FixingEntry entry = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12");
+  entry.publication_date =
+      ValueOrReason<Date>::none(fixture_missing_reason("FIXTURE_PUBLICATION_AVAILABILITY_UNKNOWN"));
+  FixingStore store = make_fixing_store({entry}, {MarketSource::kSyntheticFixture});
+  // Re-hashing keeps every declared identity self-consistent, so the refusal can only be the unknown
+  // publication-availability rule and not a stale fixing_store_id / content_fingerprint.
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "a HISTORICAL entry with unknown publication availability");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvalidTaggedUnionState);
+  EXPECT_EQ(violation.pointer(), "/entries/0/publication_date");
+  EXPECT_EQ(violation.message().find("UNPUBLISHED_FIXING_STORED_AS_HISTORY"), std::string::npos)
+      << "line 612 prescribes no reason code, so the line 613 code must not be reused: "
+      << violation.message();
+}
+
+TEST(FixingObservationStateConformance,
+     RefusesUnknownPublicationAvailabilityAtTheRehashedOffendingEntryAlone) {
+  // The refusal is per entry and attributable, not a rejection of the document shape: two HISTORICAL
+  // entries with different indices, only entry 0 (the canonical EUR_ESTR key) has unknown publication
+  // availability. Its twin with the field PRESENT is accepted, so the refusal is caused by that one
+  // field rather than by the surrounding snapshot.
+  FixingEntry unknown = make_historical_entry(FloatingIndex::kEurEstr, "2024-01-10", "2024-01-12");
+  unknown.publication_date =
+      ValueOrReason<Date>::none(fixture_missing_reason("FIXTURE_PUBLICATION_AVAILABILITY_UNKNOWN"));
+  FixingEntry published = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12");
+
+  FixingStore refused = make_fixing_store({unknown, published}, {MarketSource::kSyntheticFixture});
+  assign_derived_identities(refused);
+  const CanonicalValue refused_encoded = refused.to_canonical();
+  const ContractViolation violation =
+      refusal_for([&refused_encoded] { (void)FixingStore::from_canonical(refused_encoded, ""); },
+                  "the EUR_ESTR entry with unknown publication availability");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvalidTaggedUnionState);
+  EXPECT_EQ(violation.pointer(), "/entries/0/publication_date");
+
+  FixingEntry known = make_historical_entry(FloatingIndex::kEurEstr, "2024-01-10", "2024-01-12");
+  FixingStore accepted = make_fixing_store({known, published}, {MarketSource::kSyntheticFixture});
+  assign_derived_identities(accepted);
+  const CanonicalValue accepted_encoded = accepted.to_canonical();
+  const FixingStore decoded = FixingStore::from_canonical(accepted_encoded, "");
+  EXPECT_EQ(decoded.to_canonical().dump(), accepted_encoded.dump());
+}
+
+TEST(FixingObservationStateConformance, KeepsEveryNonHistoricalStateWithUnknownPublicationAvailability) {
+  // Scope guard for line 612: publication availability is only "required" where the state claims a
+  // captured publication. A MISSING, FORECAST_REQUIRED and PROJECTED record keep their unknown
+  // publication_date exactly as before - the new rule neither reinterprets `observation_date` nor
+  // silently promotes a forecast record to history, and it must not reject the forecast path.
+  FixingEntry missing = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
+
+  FixingEntry forecast_required = make_entry(FloatingIndex::kEurEstr, "2024-01-10");
+  forecast_required.observation_state = ObservationState::kForecastRequired;
+  forecast_required.value = ValueOrReason<NumericWithUnit>::none(to_be_projected_reason());
+
+  FixingEntry projected = make_entry(FloatingIndex::kGbpSonia, "2024-01-09");
+  projected.observation_state = ObservationState::kProjected;
+  projected.value = present_decimal_rate(kSyntheticDecimalRate);
+  projected.source = ValueOrReason<MarketSource>::of(MarketSource::kCurveProjection);
+  projected.quote_timestamp = ValueOrReason<Timestamp>::of(Timestamp(std::string(kCapturedAt)));
+  projected.projection_method_id = ValueOrReason<std::string>::of(std::string("FIXTURE_PROJECTION_METHOD"));
+  projected.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
+  projected.projection_inputs_ref = present_projection_reference("fixture-curve-set", "fixture-curve");
+
+  // The store provenance union is the exact unique union of PRESENT entry sources (docs/33 section
+  // 8.4), and only the PROJECTED audit record carries a PRESENT source here.
+  FixingStore store = make_fixing_store({forecast_required, projected, missing},
+                                        {MarketSource::kCurveProjection});
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const FixingStore decoded = FixingStore::from_canonical(encoded, "");
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
+  ASSERT_EQ(decoded.entries.size(), 3U);
+  EXPECT_FALSE(decoded.entries[0].publication_date.present);
+  EXPECT_FALSE(decoded.entries[1].publication_date.present);
+  EXPECT_FALSE(decoded.entries[2].publication_date.present);
+}
+
 TEST(FixingObservationStateConformance, KeepsTheForecastPathForAPublicationDateAfterValuation) {
   // Line 611: for a non-HISTORICAL entry, `publication_date > valuation_date` IS the forecast path
   // (FORECAST_REQUIRED or a complete PROJECTED), so the new HISTORICAL rule must leave every other

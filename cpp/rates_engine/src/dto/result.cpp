@@ -147,6 +147,61 @@ void require_valuation_context_identity(const std::string& id, const Date& valua
   }
 }
 
+// docs/33 section 12.4 (line 962) and section 13.4 (line 1051) make the result-side input identity an
+// exact echo of the consumed `RatesKernelInput`: "Input identity also names the exact market/curve/
+// fixing and optional vol/exercise/settlement/model/calibration identities ... A result that cannot
+// name every PRESENT kernel input is not replayable and fails validation", and "Every optional input
+// identity MUST echo the corresponding `RatesKernelInput` applicability state: PRESENT carries the
+// exact consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`.
+// Omission, bare null, or fabricated ids are malformed." The applicability being echoed is the exact
+// Phase-2 table of section 5.1 lines 305-307: an OIS consumes none of the four optional inputs, while a
+// SWAPTION consumes the volatility input, the exercise terms and the settlement terms and (on the
+// pricing path) carries `model_input` as structured NOT_APPLICABLE. This is a whole-document rule
+// because it relates `product_type` to four independent union members; it runs AFTER the per-measure
+// coordinate rules of section 13.2, so a measure that references an input the identity does not name is
+// still reported at that measure's own coordinate.
+//
+// `model_input_consumed` is true when this result documents a measure whose `bucket_coordinate` is the
+// section 13.2 `MODEL_PARAMETER` variant (line 1032: "`model_input_id: <string> # MUST equal the
+// consumed ModelInput id"). A pricing result has no measures and therefore never consumes one. The
+// PRESENT state is required exactly when such a measure consumes the ModelInput, and the structured
+// NOT_APPLICABLE state is required otherwise: a PRESENT identity with nothing consuming it is the
+// fabricated consumed-input claim line 1051 calls malformed.
+void require_inputs_identity_applicability(const InputsIdentity& identity, ProductType product_type,
+                                           bool model_input_consumed, const std::string& pointer) {
+  const std::string base = child(pointer, "inputs_identity");
+  const bool derivative = product_type == ProductType::kSwaption;
+  struct PayloadInput {
+    const ValueOrReason<std::string>* field;
+    const char* name;
+  };
+  const PayloadInput payload_inputs[] = {
+      {&identity.volatility_input_id, "volatility_input_id"},
+      {&identity.exercise_terms_id, "exercise_terms_id"},
+      {&identity.settlement_terms_id, "settlement_terms_id"}};
+  for (const PayloadInput& input : payload_inputs) {
+    const std::string field_pointer = child(base, input.name);
+    if (!derivative) {
+      (void)input.field->require_null_with_reason(field_pointer, ReasonCategory::kNotApplicable);
+      continue;
+    }
+    if (!input.field->present) {
+      fail(ContractViolationKind::kInvalidTaggedUnionState, field_pointer,
+           "a SWAPTION result must name every consumed kernel input: this identity is "
+           "NULL_WITH_REASON but the Phase-2 swaption shape consumes it");
+    }
+  }
+  const std::string model_pointer = child(base, "model_input_id");
+  if (model_input_consumed) {
+    if (!identity.model_input_id.present) {
+      fail(ContractViolationKind::kInvalidTaggedUnionState, model_pointer,
+           "a MODEL_PARAMETER bucket consumes a ModelInput, so this identity must name it as PRESENT");
+    }
+    return;
+  }
+  (void)identity.model_input_id.require_null_with_reason(model_pointer, ReasonCategory::kNotApplicable);
+}
+
 // docs/33 section 16 (line 1257): `errors` is the machine-dispatchable domain-code channel, and its
 // vocabulary is exactly the eleven `RatesErrorCode` tokens ("Error-code vocabulary (minimum; extension
 // requires methodology review)"). A producer can re-hash any content, so the fingerprint fence cannot
@@ -227,11 +282,16 @@ CanonicalValue CurveRoleMap::to_canonical() const {
 CurveRoleMap CurveRoleMap::from_canonical(const CanonicalValue& node, const std::string& pointer) {
   require_only_keys(node, pointer, {"discount_curve_id", "forecast_curve_by_index"});
   CurveRoleMap result;
-  const CanonicalValue* discount_node = node.find("discount_curve_id");
-  if (discount_node != nullptr && !discount_node->is_null()) {
-    result.discount_curve_id =
-        require_text(*discount_node, child(pointer, "discount_curve_id"), "string curve id");
-  }
+  // Sections 12.2/12.4 (lines 926 and 962): `curve_role_map` is the exact echo of
+  // `RatesKernelInput.curve_selection` and "result never invents selection". The kernel-side
+  // `curve_selection` is mandatory and its `discount_curve_id` must resolve to an embedded discounting
+  // curve (section 5.1 line 309), so there is no result shape in which the discount curve is absent: a
+  // missing key fails as a missing required field, a bare `null` fails as the wrong type, and an empty
+  // string fails as an empty field. The result therefore never carries an invented or omitted discount
+  // curve, and no default is substituted.
+  result.discount_curve_id = require_text(node.at("discount_curve_id", pointer),
+                                          child(pointer, "discount_curve_id"),
+                                          "non-empty discount curve id");
   const CanonicalValue& forecast_node = node.at("forecast_curve_by_index", pointer);
   if (!forecast_node.is_object()) {
     fail_wrong_type(child(pointer, "forecast_curve_by_index"), "object", forecast_node.type_name());
@@ -430,6 +490,16 @@ HeadlineValue HeadlineValue::from_canonical(const CanonicalValue& node, const st
   if (!currency_denominated && result.currency.present) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "currency"),
          "a non-currency headline unit requires structured NOT_APPLICABLE currency");
+  }
+  if (!currency_denominated) {
+    // Line 955 names the exact state ("dimensionless/rate headlines use structured NOT_APPLICABLE"), so
+    // the category is part of the requirement rather than an implementation detail: a generic
+    // UNAVAILABLE / MISSING_MARKET_DATA / UNRESOLVED_METHODOLOGY / FAILED_CAPTURE reason is not the
+    // NOT_APPLICABLE applicability state and would misreport a deliberately inapplicable currency as a
+    // data or methodology failure. Only this field's category is constrained here; no other reason
+    // field is broadened.
+    (void)result.currency.require_null_with_reason(child(pointer, "currency"),
+                                                  ReasonCategory::kNotApplicable);
   }
   return result;
 }
@@ -665,6 +735,10 @@ void PricingResult::validate_rules(const std::string& pointer) const {
       }
     }
   }
+  // Section 12.4 (line 962): the result's input identity must echo the consumed kernel input's
+  // applicability. A pricing result carries no measure and therefore consumes no ModelInput, so its
+  // `model_input_id` must be the structured NOT_APPLICABLE state (section 5.1 line 307's Phase-2 path).
+  require_inputs_identity_applicability(inputs_identity, product_type, false, pointer);
 }
 
 std::string pricing_result_content_fingerprint(const PricingResult& result) {
@@ -1228,6 +1302,19 @@ void RiskResult::validate_rules(const std::string& pointer) const {
       }
     }
   }
+  // Section 13.4 (line 1051): the same echo rule as the pricing result, evaluated after the per-measure
+  // coordinate rules above so a coordinate that references an unnamed input is still reported at its own
+  // measure. A ModelInput is consumed by this result exactly when a MODEL_PARAMETER bucket names it
+  // (section 13.2 line 1032); otherwise the identity must stay structured NOT_APPLICABLE.
+  bool model_input_consumed = false;
+  for (const RiskMeasure& measure : measures) {
+    if (measure.bucket_coordinate.present &&
+        measure.bucket_coordinate.value.kind() == RiskBucketKind::kModelParameter) {
+      model_input_consumed = true;
+      break;
+    }
+  }
+  require_inputs_identity_applicability(inputs_identity, product_type, model_input_consumed, pointer);
 }
 
 std::string risk_result_content_fingerprint(const RiskResult& result) {

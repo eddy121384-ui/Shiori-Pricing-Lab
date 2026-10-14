@@ -457,3 +457,126 @@ TEST(KernelInputSelectionConformance, RehashedDocumentsCannotBypassTheDisplayOnl
   // refusal is caused by that representation and not by the surrounding document.
   EXPECT_TRUE(try_decode(build_kernel_input(KernelInputOptions{})).has_value());
 }
+
+// ---------------------------------------------------------------------------------------------
+// CONFIRMED V1 convention binding (docs/32 section 6 lines 166-167)
+//
+// `USD_SOFR_OIS_V1` denotes `currency: USD` and `floating_index: USD_SOFR`; every other convention
+// parameter remains UNRESOLVED (RED-02) and is not enforced here. The ConventionSet is authoritative
+// (docs/32 section 2 R2), so a swap that claims it while carrying another currency or index is a
+// contradicted claim: it is refused rather than coerced, and neither field is relabelled.
+// ---------------------------------------------------------------------------------------------
+TEST(KernelInputConventionBinding, AcceptsTheConfirmedUsdSofrBindingAndKeepsTheDocument) {
+  const RatesKernelInput fixture = build_kernel_input(KernelInputOptions{});
+  const std::optional<RatesKernelInput> decoded = try_decode(fixture);
+  ASSERT_TRUE(decoded.has_value()) << "the confirmed USD + USD_SOFR binding must be accepted";
+  EXPECT_EQ(decoded->resolved_swap.convention_set_id, ConventionSetId::kUsdSofrOisV1);
+  EXPECT_EQ(decoded->resolved_swap.currency, Currency::kUsd);
+  EXPECT_EQ(decoded->resolved_swap.floating_index, FloatingIndex::kUsdSofr);
+  // Nothing is rewritten to match the convention set: the encoded document is reproduced byte-exactly.
+  EXPECT_EQ(decoded->to_canonical().dump(), fixture.to_canonical().dump());
+}
+
+TEST(KernelInputConventionBinding, RefusesAUsdSofrOisConventionSetCarryingAnotherCurrency) {
+  RatesKernelInput fixture = build_kernel_input(KernelInputOptions{});
+  // The swap keeps the USD_SOFR_OIS_V1 convention set and claims EUR instead. Changing only the
+  // embedded swap's currency leaves the rest of the document self-consistent, and re-hashing proves the
+  // refusal cannot be attributed to a stale resolved_swap / kernel fingerprint.
+  fixture.resolved_swap.currency = Currency::kEur;
+  Shiori::rates::dto::assign_derived_identities(fixture);
+  EXPECT_EQ(Shiori::rates::dto::kernel_input_content_fingerprint(fixture), fixture.content_fingerprint);
+
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/resolved_swap/currency");
+  EXPECT_NE(refusal.message().find("USD_SOFR_OIS_V1"), std::string::npos) << refusal.message();
+  EXPECT_NE(refusal.message().find("currency=USD"), std::string::npos) << refusal.message();
+}
+
+TEST(KernelInputConventionBinding, RefusesAUsdSofrOisConventionSetCarryingAnotherIndex) {
+  RatesKernelInput fixture = build_kernel_input(KernelInputOptions{});
+  fixture.resolved_swap.floating_index = FloatingIndex::kEurEstr;
+  Shiori::rates::dto::assign_derived_identities(fixture);
+  EXPECT_EQ(Shiori::rates::dto::kernel_input_content_fingerprint(fixture), fixture.content_fingerprint);
+
+  // The refusal is the convention binding, not the curve-selection obligation that a different index
+  // would also trigger later: it is reported at the swap's own field.
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/resolved_swap/floating_index");
+  EXPECT_NE(refusal.message().find("floating_index=USD_SOFR"), std::string::npos) << refusal.message();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Derivative identity distinctness (docs/33 section 5.1 line 303)
+//
+// "For a derivative over that swap, `valuation_product.product_id` identifies the derivative
+// trade/position, `underlying_product_id` MUST be PRESENT and equal `resolved_swap.product_id`, and the
+// derivative id MUST NOT be inferred from or substituted by the underlying id." The vanilla-swap shape
+// (`product_id == resolved_swap.product_id`) is therefore refused in the derivative branch.
+// ---------------------------------------------------------------------------------------------
+namespace {
+// Re-shapes the contract-valid OIS fixture into the derivative branch of the section 5.1 applicability
+// table WITHOUT inventing a swaption payload: only the product identity is changed and the underlying
+// reference is made PRESENT and equal to the embedded swap id, exactly as line 303 requires. The
+// document is then refused for the derivative payloads it does not carry, which keeps the identity rule
+// separable from the payload rules.
+[[nodiscard]] RatesKernelInput build_derivative_identity_probe(std::string derivative_id) {
+  RatesKernelInput input = build_kernel_input(KernelInputOptions{});
+  input.valuation_product.product_type = ProductType::kSwaption;
+  input.valuation_product.product_id = std::move(derivative_id);
+  input.valuation_product.underlying_product_id =
+      ValueOrReason<std::string>::of(input.resolved_swap.product_id);
+  Shiori::rates::dto::assign_derived_identities(input);
+  return input;
+}
+}  // namespace
+
+TEST(DerivativeIdentityConformance, RefusesADerivativeWhoseProductIdIsTheUnderlyingSwapId) {
+  RatesKernelInput fixture = build_derivative_identity_probe("SYNTHETIC_OIS_PLACEHOLDER");
+  ASSERT_EQ(fixture.valuation_product.product_id, fixture.resolved_swap.product_id);
+  ASSERT_TRUE(fixture.valuation_product.underlying_product_id.present);
+  EXPECT_EQ(Shiori::rates::dto::kernel_input_content_fingerprint(fixture), fixture.content_fingerprint);
+
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kIdentityMismatch);
+  EXPECT_EQ(refusal.pointer(), "/valuation_product/product_id");
+  EXPECT_NE(refusal.message().find("distinct"), std::string::npos) << refusal.message();
+}
+
+TEST(DerivativeIdentityConformance, KeepsRequiringTheDerivativePayloadsForADistinctIdentity) {
+  RatesKernelInput fixture =
+      build_derivative_identity_probe("SYNTHETIC_SWAPTION_DERIVATIVE_PLACEHOLDER");
+  ASSERT_NE(fixture.valuation_product.product_id, fixture.resolved_swap.product_id);
+  EXPECT_EQ(Shiori::rates::dto::kernel_input_content_fingerprint(fixture), fixture.content_fingerprint);
+
+  // A distinct derivative id passes the distinctness rule, so the NEXT rule in the derivative branch is
+  // what refuses this document: the missing PRESENT exercise terms. That is the evidence that a
+  // legitimate derivative identity is not rejected as if it were collapsed with the underlying one, and
+  // that the derivative payloads stay mandatory.
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvalidTaggedUnionState);
+  EXPECT_EQ(refusal.pointer(), "/exercise_terms");
+  EXPECT_NE(refusal.message().find("swaption requires PRESENT exercise terms"), std::string::npos)
+      << refusal.message();
+}
+
+TEST(DerivativeIdentityConformance, KeepsTheExplicitUnderlyingIdAndTheOisEqualityRule) {
+  // Retained behaviour, both halves of line 303: a derivative without a PRESENT underlying id is still
+  // refused at that field, and a vanilla OIS whose product id differs from the embedded swap id keeps
+  // its own equality refusal (the OIS branch is untouched by the distinctness rule).
+  RatesKernelInput derivative =
+      build_derivative_identity_probe("SYNTHETIC_SWAPTION_DERIVATIVE_PLACEHOLDER");
+  derivative.valuation_product.underlying_product_id = ValueOrReason<std::string>::not_applicable();
+  Shiori::rates::dto::assign_derived_identities(derivative);
+  const ContractViolation missing_underlying = refusal_for(derivative);
+  EXPECT_EQ(missing_underlying.kind(), ContractViolationKind::kInvalidTaggedUnionState);
+  EXPECT_EQ(missing_underlying.pointer(), "/valuation_product/underlying_product_id");
+
+  RatesKernelInput ois = build_kernel_input(KernelInputOptions{});
+  ois.valuation_product.product_id = "SYNTHETIC_OTHER_OIS_ID";
+  Shiori::rates::dto::assign_derived_identities(ois);
+  const ContractViolation ois_equality = refusal_for(ois);
+  EXPECT_EQ(ois_equality.kind(), ContractViolationKind::kIdentityMismatch);
+  EXPECT_EQ(ois_equality.pointer(), "/valuation_product");
+}

@@ -1303,19 +1303,31 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
   // `valuation_date`; `FixingEntry::from_canonical` cannot see it. It follows the section 8.2
   // duplicate rule, so a repeated economic key is still reported as a duplicate, and it precedes the
   // section 15.4 order rule so the state refusal is not masked by an acquisition-order complaint: an
-  // entry whose state contradicts the valuation date is refused for that contradiction. A
-  // NULL_WITH_REASON(unknown) publication_date is a different documented case (line 612) and is
-  // deliberately untouched, as is every non-HISTORICAL state. Both dates are canonical fixed-width
-  // `YYYY-MM-DD`, so the text comparison the ordering rule below uses is also chronological order.
+  // entry whose state contradicts the valuation date is refused for that contradiction. Section 8.4's
+  // other row (line 612) covers publication availability that is UNKNOWN: "Publication availability
+  // required but `publication_date` is `NULL_WITH_REASON` / unknown -> Fail closed; do not reinterpret
+  // `observation_date` as publication date and do not silently decide history vs forecast." A
+  // HISTORICAL entry is exactly the case where publication availability is required (section 8.3 line
+  // 594 defines it as published and captured), so an unknown publication_date there is refused at its
+  // own field pointer instead of being skipped; the contract prescribes no reason code for that row, so
+  // none is invented. Every non-HISTORICAL state is untouched, and `observation_date` is never
+  // substituted for publication availability. Both dates are canonical fixed-width `YYYY-MM-DD`, so the
+  // text comparison the ordering rule below uses is also chronological order.
   for (std::size_t index = 0; index < result.entries.size(); ++index) {
     const FixingEntry& entry = result.entries[index];
-    if (entry.observation_state != ObservationState::kHistorical ||
-        !entry.publication_date.present) {
+    if (entry.observation_state != ObservationState::kHistorical) {
       continue;
     }
+    const std::string publication_pointer =
+        child(pointer_index(child(pointer, "entries"), index), "publication_date");
+    if (!entry.publication_date.present) {
+      fail(ContractViolationKind::kInvalidTaggedUnionState, publication_pointer,
+           "a HISTORICAL observation requires PRESENT publication availability; an unknown "
+           "publication_date cannot be admitted as a captured fixing and is never reinterpreted from "
+           "observation_date");
+    }
     if (result.valuation_date.text < entry.publication_date.value.text) {
-      fail(ContractViolationKind::kInvariantViolation,
-           child(pointer_index(child(pointer, "entries"), index), "publication_date"),
+      fail(ContractViolationKind::kInvariantViolation, publication_pointer,
            "UNPUBLISHED_FIXING_STORED_AS_HISTORY: a HISTORICAL observation's publication_date is "
            "after the fixing store's valuation_date");
     }
