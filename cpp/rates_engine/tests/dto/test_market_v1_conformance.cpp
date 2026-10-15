@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -645,6 +646,95 @@ TEST(FixingObservationStateConformance, RefusesAHistoricalRecordSourcedFromACurv
                   "HISTORICAL sourced from CURVE_PROJECTION");
   EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
   EXPECT_EQ(violation.pointer(), "/source");
+}
+
+TEST(FixingObservationStateConformance, AcceptsExactlyTheThreeApprovedAuthoritativeHistoricalSources) {
+  // Docs/33 line 594 names the PRESENT source of a HISTORICAL observation as an authoritative market
+  // source, line 562 fixes the PRESENT vocabulary to five tokens, and line 596 reserves CURVE_PROJECTION
+  // for the audit-only PROJECTED state. The approved set is therefore exactly these three, and the two
+  // remaining vocabulary members are refused (CURVE_PROJECTION by the test above, RESEARCH_ADAPTER by the
+  // test below): MarketSource has no other member, so those three tests cover the vocabulary exhaustively.
+  for (const MarketSource source :
+       {MarketSource::kBloombergDapi, MarketSource::kScreenTranscription,
+        MarketSource::kSyntheticFixture}) {
+    FixingEntry entry = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12");
+    entry.source = ValueOrReason<MarketSource>::of(source);
+
+    const CanonicalValue encoded = entry.to_canonical();
+    const FixingEntry decoded = FixingEntry::from_canonical(encoded, "");
+    EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
+    ASSERT_TRUE(decoded.source.present);
+    EXPECT_EQ(decoded.source.value, source);
+    // The allow-list accepts a source; it never rewrites the state or the provenance that carried it.
+    EXPECT_EQ(decoded.observation_state, ObservationState::kHistorical);
+  }
+}
+
+TEST(FixingObservationStateConformance, RefusesAHistoricalRecordSourcedFromAResearchAdapter) {
+  // RESEARCH_ADAPTER is a legal provenance value for snapshots and curves (docs/33 lines 660/799), but it
+  // is not an approved authoritative fixing source: accepting it would let an unapproved derived source
+  // become a fixing consumed by pricing. The entry is refused at the source field itself, and the
+  // observation state is never reinterpreted to make the document fit.
+  FixingEntry entry = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12");
+  entry.source = ValueOrReason<MarketSource>::of(MarketSource::kResearchAdapter);
+
+  const CanonicalValue encoded = entry.to_canonical();
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingEntry::from_canonical(encoded, ""); },
+                  "HISTORICAL sourced from RESEARCH_ADAPTER");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/source");
+}
+
+TEST(FixingObservationStateConformance,
+     RefusesAResearchAdapterHistoryEvenWhenEveryDeclaredIdentityIsRehashed) {
+  // The re-hashed negative fixture: `make_fixing_store` recomputes every derived identity (the store id,
+  // each entry's fingerprint and the provenance source union) over this document, so the document is
+  // self-consistent and the refusal cannot be attributed to a stale fingerprint. A source allow-list is a
+  // decode-time property of the entry, so a producer can never launder a research source into an
+  // authoritative fixing by recomputing identities over contract-invalid content.
+  FixingEntry entry = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12");
+  entry.source = ValueOrReason<MarketSource>::of(MarketSource::kResearchAdapter);
+  FixingStore store = make_fixing_store({entry}, {MarketSource::kResearchAdapter});
+  assign_derived_identities(store);
+
+  const CanonicalValue encoded = store.to_canonical();
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "a re-hashed HISTORICAL entry sourced from RESEARCH_ADAPTER");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/entries/0/source");
+}
+
+TEST(CurvePillarNumericExactness, KeepsAnExactIntegerOrdinateAndRefusesANonExactOne) {
+  // The pillar ordinate is a binary64 field like every other numeric market member, so the integer form
+  // is subject to the same exactness rule `NumericWithUnit` applies: an integer binary64 cannot hold
+  // exactly is refused at this pillar's own `/value` pointer rather than silently rounded, and an
+  // exactly representable large integer is preserved exactly.
+  CurvePillar pillar;
+  pillar.pillar_date = Date(std::string("2025-01-15"));
+  pillar.maturity_label = ValueOrReason<std::string>::not_applicable();
+  pillar.value_state = ValueState::kResolved;
+  pillar.value = 0.0125;
+  pillar.source_column = ValueOrReason<std::string>::not_applicable();
+
+  const CanonicalValue accepted = pillar.to_canonical();
+  EXPECT_EQ(CurvePillar::from_canonical(accepted, "").to_canonical().dump(), accepted.dump());
+
+  // Canonical-tree surgery presents an integer token in an otherwise valid pillar.
+  const CanonicalValue not_exact =
+      with_member(accepted, "value", CanonicalValue(std::int64_t{9007199254740993LL}));
+  const ContractViolation violation =
+      refusal_for([&not_exact] { (void)CurvePillar::from_canonical(not_exact, ""); },
+                  "a pillar ordinate that binary64 cannot hold exactly");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/value");
+
+  const CanonicalValue representable =
+      with_member(accepted, "value", CanonicalValue(std::int64_t{9007199254740994LL}));
+  const CurvePillar preserved = CurvePillar::from_canonical(representable, "");
+  ASSERT_TRUE(preserved.value.has_value());
+  EXPECT_EQ(*preserved.value, 9007199254740994.0);
 }
 
 TEST(FixingObservationStateConformance, AcceptsAHistoricalRecordPublishedOnOrBeforeTheValuationDate) {

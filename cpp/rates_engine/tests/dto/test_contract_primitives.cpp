@@ -223,3 +223,72 @@ TEST(NumericWithUnit, RefusesAUnitThatDisagreesWithTheFieldSemantics) {
   // conversion the contract never approved.
   EXPECT_THROW((void)as_percent.require_unit(ratio, ""), ContractViolation);
 }
+
+TEST(NumericWithUnit, KeepsEveryIntegerBinary64HoldsExactlyAndRefusesTheRest) {
+  using Shiori::rates::dto::ContractViolationKind;
+  using Shiori::rates::dto::NumericWithUnit;
+
+  // A JSON integer is an exact canonical number form and the member stores binary64, so the decode must
+  // be exact or refused: silently rounding would make the in-memory value (and every identity derived
+  // from it) describe a number the document does not contain.
+  auto decode = [](const std::string& integer_text) {
+    return NumericWithUnit::from_canonical(
+        Shiori::rates::dto::parse_canonical_json(
+            std::string(R"({"unit":"DECIMAL_ANNUAL","value":)") + integer_text + "}"),
+        "");
+  };
+  auto refusal = [](const std::string& integer_text) {
+    try {
+      (void)NumericWithUnit::from_canonical(
+          Shiori::rates::dto::parse_canonical_json(
+              std::string(R"({"unit":"DECIMAL_ANNUAL","value":)") + integer_text + "}"),
+          "");
+    } catch (const ContractViolation& violation) {
+      return violation;
+    }
+    ADD_FAILURE() << "expected a refusal for the non-exact integer " << integer_text;
+    return ContractViolation(ContractViolationKind::kInvariantViolation, "<no refusal>",
+                             "no refusal was thrown");
+  };
+
+  // Boundary: 2^53 is the largest magnitude at which EVERY integer is exact, and it is accepted.
+  EXPECT_EQ(decode("9007199254740992").value, 9007199254740992.0);
+  EXPECT_EQ(decode("-9007199254740992").value, -9007199254740992.0);
+  // Above 2^53 the binary64 spacing is 2, then 4, ... so exact values are accepted rather than refused:
+  // 2^53 + 2, 2^54 (spacing 4), 2^54 + 4, and the negative limit -2^63 = INT64_MIN, the largest
+  // magnitude the integer representation can hold and one binary64 holds exactly.
+  EXPECT_EQ(decode("9007199254740994").value, 9007199254740994.0);
+  EXPECT_EQ(decode("18014398509481984").value, 18014398509481984.0);
+  EXPECT_EQ(decode("18014398509481988").value, 18014398509481988.0);
+  EXPECT_EQ(decode("-9223372036854775808").value, -9223372036854775808.0);
+  // INT64_MAX = 2^63 - 1 and INT64_MIN + 1 = -(2^63 - 1) are NOT exactly representable: the near-limit
+  // cases are refused in integer arithmetic, with no float-to-integer cast anywhere.
+  EXPECT_EQ(refusal("9223372036854775807").kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal("9223372036854775807").pointer(), "/value");
+  EXPECT_EQ(refusal("-9223372036854775807").pointer(), "/value");
+  // The first two non-exact integers above the boundary, and one further up.
+  for (const char* not_exact : {"9007199254740993", "-9007199254740993", "9007199254740995",
+                                "18014398509481985", "9223372036854775806"}) {
+    const ContractViolation violation = refusal(not_exact);
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation) << not_exact;
+    EXPECT_EQ(violation.pointer(), "/value") << not_exact;
+    EXPECT_FALSE(violation.message().empty());
+  }
+
+  // Floating values are untouched by the integer rule: a finite float token is a binary64 literal and is
+  // stored as parsed, including values no integer in this range could name. (A decimal literal with more
+  // precision than binary64 holds is already rounded by the JSON front end before any DTO decoder sees it;
+  // the integer form is the case where the exact value IS still available to the decoder, which is
+  // exactly what this rule closes.)
+  EXPECT_EQ(decode("0.0425").value, 0.0425);
+  EXPECT_EQ(decode("1e308").value, 1e308);
+  EXPECT_EQ(decode("2.2250738585072014e-308").value, 2.2250738585072014e-308);
+  // An accepted large integer survives a re-encode/re-decode with the SAME binary64 value, so no
+  // precision is lost on the accepted path either. (The re-encoded token is the canonical form of a
+  // binary64 member, unchanged by this rule.)
+  const NumericWithUnit accepted = decode("9007199254740994");
+  const NumericWithUnit round_tripped = NumericWithUnit::from_canonical(
+      Shiori::rates::dto::parse_canonical_json(accepted.to_canonical().dump()), "");
+  EXPECT_EQ(round_tripped.value, accepted.value);
+  EXPECT_EQ(round_tripped.unit, accepted.unit);
+}

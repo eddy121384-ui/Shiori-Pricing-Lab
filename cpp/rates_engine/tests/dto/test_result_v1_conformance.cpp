@@ -94,6 +94,10 @@ using Shiori::rates::dto::to_token;
 // ---------------------------------------------------------------------------------------------
 constexpr std::string_view kFixtureValuationDate = "2024-01-01";
 constexpr std::string_view kFixtureProductId = "SYNTHETIC_CONTRACT_FIXTURE_SWAP";
+// The SWAPTION's own product id. docs/33 lines 931/962 require the top-level `product_id` to identify the
+// DERIVATIVE and `inputs_identity.resolved_swap_product_id` to identify the UNDERLYING swap it exercises,
+// so the two ids are distinct by construction and the derivative is never identified by the swap id.
+constexpr std::string_view kFixtureSwaptionProductId = "SYNTHETIC_CONTRACT_FIXTURE_SWAPTION";
 constexpr std::string_view kFixtureEngineName = "SYNTHETIC_CONTRACT_FIXTURE_ENGINE";
 constexpr std::string_view kFixtureEngineVersion = "SHAPE_ONLY_NOT_A_RELEASE";
 constexpr std::string_view kFixtureMethod = "SCHEMA_VALIDATION_ONLY";
@@ -381,7 +385,9 @@ static_assert(sizeof(kApprovedErrorCodes) / sizeof(kApprovedErrorCodes[0]) == 11
 // `bump_target`, and the remaining rows are ordered by `measure_id`.
 [[nodiscard]] RiskResult risk_result_fixture() {
   RiskResult result;
-  result.product_id = std::string(kFixtureProductId);
+  // A swaption result identifies the DERIVATIVE; the underlying swap is named by the embedded
+  // `inputs_identity.resolved_swap_product_id` (docs/33 lines 931/962).
+  result.product_id = std::string(kFixtureSwaptionProductId);
   result.product_type = ProductType::kSwaption;
   result.valuation_date = fixture_date();
   result.result_currency = Currency::kUsd;
@@ -1284,9 +1290,12 @@ TEST(PricingResultInputsIdentityApplicability, RefusesAPresentModelInputOnASwapt
 
 TEST(PricingResultInputsIdentityApplicability, AcceptsTheSwaptionShapeWithTheStructuredModelState) {
   // The contract-valid Phase-2 swaption identity: the three consumed payloads are PRESENT and the model
-  // input stays structured NOT_APPLICABLE. This is the positive half of the two refusals above.
+  // input stays structured NOT_APPLICABLE. This is the positive half of the two refusals above. The
+  // top-level `product_id` names the DERIVATIVE, distinct from the underlying swap the identity echoes
+  // (docs/33 lines 931/962), so this is also the accepted swaption side of the product-linkage rule.
   PricingResult result = successful_pricing_result(Currency::kUsd);
   result.product_type = ProductType::kSwaption;
+  result.product_id = std::string(kFixtureSwaptionProductId);
   result.inputs_identity.volatility_input_id =
       ValueOrReason<std::string>::of(std::string(kFixtureVolatilityInputId));
   result.inputs_identity.exercise_terms_id =
@@ -1304,6 +1313,7 @@ TEST(PricingResultInputsIdentityApplicability, AcceptsTheSwaptionShapeWithTheStr
   EXPECT_TRUE(decoded.inputs_identity.exercise_terms_id.present);
   EXPECT_TRUE(decoded.inputs_identity.settlement_terms_id.present);
   EXPECT_FALSE(decoded.inputs_identity.model_input_id.present);
+  EXPECT_NE(decoded.product_id, decoded.inputs_identity.resolved_swap_product_id);
 }
 
 TEST(RiskResultInputsIdentityApplicability, RefusesAPresentModelInputThatNoMeasureConsumes) {
@@ -1350,4 +1360,297 @@ TEST(RiskResultInputsIdentityApplicability, KeepsTheConsumedInputCoverageAndTheF
   ASSERT_FALSE(failed.inputs_identity.model_input_id.present);
   const Refusal failed_refusal = decode_risk_result(failed.to_canonical());
   EXPECT_FALSE(failed_refusal.refused) << failed_refusal.pointer << ": " << failed_refusal.message;
+}
+
+namespace {
+
+// The contract-valid Phase-2 swaption pricing shape: the three consumed payloads PRESENT and the model
+// input structured NOT_APPLICABLE (section 5.1 line 307). The top-level `product_id` is the DERIVATIVE id,
+// so each linkage probe below changes exactly one id.
+[[nodiscard]] PricingResult swaption_pricing_result() {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.product_type = ProductType::kSwaption;
+  result.product_id = std::string(kFixtureSwaptionProductId);
+  result.inputs_identity.volatility_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureVolatilityInputId));
+  result.inputs_identity.exercise_terms_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureExerciseTermsId));
+  result.inputs_identity.settlement_terms_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureSettlementTermsId));
+  result.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
+  return result;
+}
+
+// A FAILED, measure-free risk result moved to the OIS shape (section 5.1 line 306: the four optional
+// inputs are structured NOT_APPLICABLE), with the caller owning `product_id`.
+[[nodiscard]] RiskResult ois_failed_risk_result() {
+  RiskResult result = failed_risk_result(std::string(kOtherUnavailableCode));
+  result.product_type = ProductType::kOis;
+  result.product_id = std::string(kFixtureProductId);
+  result.inputs_identity.volatility_input_id = ValueOrReason<std::string>::not_applicable();
+  result.inputs_identity.exercise_terms_id = ValueOrReason<std::string>::not_applicable();
+  result.inputs_identity.settlement_terms_id = ValueOrReason<std::string>::not_applicable();
+  return result;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Finding 4 - a calibration identity echoes a consumed ModelInput, and only in that direction
+// docs/33 lines 795/811, section 12.4 line 962, section 13.4 line 1051.
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultInputsIdentityApplicability,
+     RefusesAFabricatedCalibrationIdWithoutAConsumedModelInput) {
+  // Lines 795/811 attach calibration evidence to a ModelInput (`calibration_ref` is PRESENT iff the
+  // embedded calibration payload is PRESENT), and line 962 makes every optional result identity an exact
+  // echo of the consumed kernel input. With no ModelInput consumed nothing can have consumed a
+  // calibration result, so a PRESENT calibration id is precisely the fabricated consumed-input claim line
+  // 1051 calls malformed: it is refused at its own pointer and never silently cleared to make the
+  // document validate. No calibration objective, optimizer or tolerance is involved.
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  ASSERT_FALSE(result.inputs_identity.model_input_id.present);
+  result.inputs_identity.calibration_result_id =
+      ValueOrReason<std::string>::of(std::string("SYNTHETIC_CONTRACT_FIXTURE_CALIBRATION"));
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/inputs_identity/calibration_result_id");
+
+  // The same field carrying a NON-NOT_APPLICABLE structured reason is refused at the same pointer: the
+  // echo rule requires the structured NOT_APPLICABLE state, not merely the absence of a value.
+  PricingResult wrong_category = successful_pricing_result(Currency::kUsd);
+  wrong_category.inputs_identity.calibration_result_id = ValueOrReason<std::string>::none(
+      StructuredReason(ReasonCategory::kUnavailable, "FIXTURE_CALIBRATION_UNAVAILABLE"));
+  assign_derived_identities(wrong_category);
+  expect_refusal(decode_pricing_result(wrong_category.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/inputs_identity/calibration_result_id");
+}
+
+TEST(RiskResultInputsIdentityApplicability,
+     RefusesAFabricatedCalibrationIdWithoutAConsumedModelInput) {
+  // The same rule in the risk lane (line 1051). The fixture FAILED and carries no measure, so nothing
+  // consumes a ModelInput and a PRESENT calibration id cannot echo any consumed object.
+  RiskResult result = failed_risk_result(std::string(kOtherUnavailableCode));
+  ASSERT_FALSE(result.inputs_identity.model_input_id.present);
+  result.inputs_identity.calibration_result_id =
+      ValueOrReason<std::string>::of(std::string("SYNTHETIC_CONTRACT_FIXTURE_CALIBRATION"));
+  assign_derived_identities(result);
+
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/inputs_identity/calibration_result_id");
+}
+
+TEST(InputsIdentityApplicability, DoesNotRequireACalibrationIdJustBecauseAModelInputIsConsumed) {
+  // The rule is ONE-directional, and no calibration methodology is introduced: a consumed ModelInput does
+  // NOT require a PRESENT `calibration_result_id`, because lines 795/811 make `calibration_ref` PRESENT
+  // exactly when the embedded calibration payload is present and the approved contract never makes every
+  // model calibration-derived. The swaption risk fixture consumes a model input, keeps the calibration
+  // identity structured NOT_APPLICABLE, and stays accepted.
+  const RiskResult result = risk_result_fixture();
+  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
+  ASSERT_FALSE(result.inputs_identity.calibration_result_id.present);
+  const Refusal refusal = decode_risk_result(result.to_canonical());
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finding 5 - the result product identity agrees with the embedded ResolvedSwap identity
+// docs/33 section 12.4 line 962, section 13.4 line 1051, section 5.1 line 303.
+// ---------------------------------------------------------------------------------------------
+TEST(PricingResultProductIdentityLinkage, RefusesAnOisResultWhoseProductIdIsNotTheResolvedSwapId) {
+  // Line 962: for a vanilla swap the top-level `product_id` IS the embedded ResolvedSwap's product id, so
+  // an OIS result that names anything else cannot echo any consumable request. The refusal is
+  // `kIdentityMismatch` at the result's own `product_id`, and the accepted OIS fixture in the rest of this
+  // suite is the positive twin that isolates the id relationship.
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  ASSERT_EQ(result.product_type, ProductType::kOis);
+  ASSERT_EQ(result.product_id, result.inputs_identity.resolved_swap_product_id);
+  result.product_id = std::string(kFixtureSwaptionProductId);
+  ASSERT_NE(result.product_id, result.inputs_identity.resolved_swap_product_id);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kIdentityMismatch, "/product_id");
+}
+
+TEST(PricingResultProductIdentityLinkage,
+     RefusesASwaptionResultThatNamesTheUnderlyingSwapAsItsOwnProduct) {
+  // Lines 931/962: for a derivative the top-level `product_id` identifies the DERIVATIVE while the
+  // identity's `resolved_swap_product_id` identifies the underlying swap it exercises, so the two ids must
+  // differ. Substituting the underlying id for the derivative is exactly the substitution section 5.1 line
+  // 303 forbids.
+  PricingResult result = swaption_pricing_result();
+  ASSERT_NE(result.product_id, result.inputs_identity.resolved_swap_product_id);
+  result.product_id = result.inputs_identity.resolved_swap_product_id;
+  assign_derived_identities(result);
+
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kIdentityMismatch, "/product_id");
+}
+
+TEST(PricingResultProductIdentityLinkage, AcceptsADistinctDerivativeIdOverTheUnderlyingSwap) {
+  // The positive half: a distinct derivative id over an explicitly named underlying swap is accepted, and
+  // the underlying swap is still identified by the identity member (never dropped, never renamed).
+  PricingResult result = swaption_pricing_result();
+  assign_derived_identities(result);
+
+  const CanonicalValue document = result.to_canonical();
+  const Refusal refusal = decode_pricing_result(document);
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+  const PricingResult decoded = PricingResult::from_canonical(document, "");
+  EXPECT_EQ(decoded.product_type, ProductType::kSwaption);
+  EXPECT_EQ(decoded.product_id, std::string(kFixtureSwaptionProductId));
+  EXPECT_EQ(decoded.inputs_identity.resolved_swap_product_id, std::string(kFixtureProductId));
+  EXPECT_NE(decoded.product_id, decoded.inputs_identity.resolved_swap_product_id);
+}
+
+TEST(RiskResultProductIdentityLinkage,
+     AcceptsTheDerivativeIdOverTheUnderlyingSwapAndRefusesTheSwapIdItself) {
+  // Line 1051 makes the risk lane identical: the swaption fixture identifies the derivative and echoes the
+  // underlying swap, and stays accepted; renaming the result with the underlying swap's id is refused.
+  const RiskResult fixture = risk_result_fixture();
+  ASSERT_EQ(fixture.product_type, ProductType::kSwaption);
+  ASSERT_NE(fixture.product_id, fixture.inputs_identity.resolved_swap_product_id);
+  const Refusal accepted = decode_risk_result(fixture.to_canonical());
+  EXPECT_FALSE(accepted.refused) << accepted.pointer << ": " << accepted.message;
+
+  RiskResult renamed = fixture;
+  renamed.product_id = fixture.inputs_identity.resolved_swap_product_id;
+  assign_derived_identities(renamed);
+  expect_refusal(decode_risk_result(renamed.to_canonical()),
+                 ContractViolationKind::kIdentityMismatch, "/product_id");
+}
+
+TEST(RiskResultProductIdentityLinkage, RefusesAnOisRiskResultWhoseProductIdIsNotTheResolvedSwapId) {
+  RiskResult result = ois_failed_risk_result();
+  ASSERT_EQ(result.product_id, result.inputs_identity.resolved_swap_product_id);
+  result.product_id = std::string(kFixtureSwaptionProductId);
+  assign_derived_identities(result);
+
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kIdentityMismatch, "/product_id");
+
+  // Only the id was wrong: the same OIS document with the embedded swap id is accepted.
+  RiskResult consistent = ois_failed_risk_result();
+  assign_derived_identities(consistent);
+  const Refusal accepted = decode_risk_result(consistent.to_canonical());
+  EXPECT_FALSE(accepted.refused) << accepted.pointer << ": " << accepted.message;
+}
+
+namespace {
+
+// The canonical `ValueOrReason<T>` PRESENT envelope around an already-built value node.
+[[nodiscard]] CanonicalValue present_envelope(CanonicalValue value) {
+  CanonicalMembers members;
+  members.emplace_back("state", CanonicalValue(std::string("PRESENT")));
+  members.emplace_back("value", std::move(value));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+[[nodiscard]] CanonicalValue numeric_with_unit_node(Unit unit, CanonicalValue value) {
+  CanonicalMembers members;
+  members.emplace_back("unit", CanonicalValue(std::string(enum_to_token(unit))));
+  members.emplace_back("value", std::move(value));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+// Replaces one member of `measures[index]`.
+[[nodiscard]] CanonicalValue with_measure_member(const CanonicalValue& document, std::size_t index,
+                                                 const std::string& key, CanonicalValue replacement) {
+  const auto& source_items = document.find("measures")->as_array().items;
+  Shiori::rates::dto::CanonicalItems items;
+  items.reserve(source_items.size());
+  for (std::size_t position = 0; position < source_items.size(); ++position) {
+    items.push_back(position == index ? with_object_member(source_items[position], key, replacement)
+                                      : source_items[position]);
+  }
+  return with_object_member(document, "measures", CanonicalValue::make_array(std::move(items)));
+}
+
+// Replaces `measures[index].bump_spec.bump_size`.
+[[nodiscard]] CanonicalValue with_bump_size(const CanonicalValue& document, std::size_t index,
+                                            CanonicalValue replacement) {
+  const CanonicalValue* measure = &document.find("measures")->as_array().items[index];
+  return with_measure_member(
+      document, index, "bump_spec",
+      with_object_member(*measure->find("bump_spec"), "bump_size", std::move(replacement)));
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------------------
+// The binary64 exactness rule applies to every double-valued DTO field, in both result lanes
+// ---------------------------------------------------------------------------------------------
+TEST(ResultNumericExactness, RefusesANonExactIntegerValueAtEachDoubleValuedFieldPointer) {
+  // An integer JSON token is an exact canonical number form, and these fields store binary64: an integer
+  // binary64 cannot hold exactly must be refused at the field's own pointer instead of being silently
+  // rounded. The canonical form of an integral double is itself an integer token (the serializer prints
+  // plain digits for a 21-digit-or-shorter magnitude), so this is a decode path the DTO's own round trip
+  // uses - not a hypothetical input. Canonical-tree surgery keeps every other member self-consistent; the
+  // field rule is checked while decoding, before the document fingerprint fence.
+  const CanonicalValue not_exact = CanonicalValue(std::int64_t{9007199254740993LL});  // 2^53 + 1
+  const CanonicalValue pricing = successful_pricing_result(Currency::kUsd).to_canonical();
+
+  expect_refusal(decode_pricing_result(with_object_member(
+                     pricing, "pv",
+                     present_envelope(numeric_with_unit_node(Unit::kCurrencyAmount, not_exact)))),
+                 ContractViolationKind::kInvariantViolation, "/pv/value/value");
+
+  const CanonicalValue* headline_inner = pricing.find("headline")->find("value");
+  expect_refusal(decode_pricing_result(with_object_member(
+                     pricing, "headline",
+                     present_envelope(with_object_member(*headline_inner, "value", not_exact)))),
+                 ContractViolationKind::kInvariantViolation, "/headline/value/value");
+
+  const CanonicalValue risk = risk_result_fixture().to_canonical();
+  expect_refusal(decode_risk_result(with_measure_member(risk, 0, "value", not_exact)),
+                 ContractViolationKind::kInvariantViolation, "/measures/0/value");
+  expect_refusal(decode_risk_result(with_bump_size(risk, 0, not_exact)),
+                 ContractViolationKind::kInvariantViolation, "/measures/0/bump_spec/bump_size");
+}
+
+TEST(ResultNumericExactness, KeepsAnExactlyRepresentableLargeIntegerAndLeavesTheFenceToTheFingerprint) {
+  // The accepted twin of the refusals above: 2^53 + 2 IS exactly representable, and the DTO's own canonical
+  // form of it is the integer token, so the exact integer path must decode exactly and round-trip
+  // byte-identically. Nothing is rounded and no field is rewritten. The headline carries the same value
+  // and unit as `pv` because section 12.3 requires the designated supplemental metric to agree with the
+  // headline exactly, so only the numeric representation is under test here.
+  PricingResult integral = successful_pricing_result(Currency::kUsd);
+  integral.headline.value.value = 9007199254740994.0;
+  integral.pv =
+      ValueOrReason<NumericWithUnit>::of(NumericWithUnit(9007199254740994.0, Unit::kCurrencyAmount));
+  assign_derived_identities(integral);
+
+  const CanonicalValue document = integral.to_canonical();
+  ASSERT_NE(document.dump().find("\"value\":9007199254740994"), std::string::npos)
+      << "the fixture must exercise the integer-token decode path: " << document.dump();
+  const Refusal accepted = decode_pricing_result(document);
+  EXPECT_FALSE(accepted.refused) << accepted.pointer << ": " << accepted.message;
+  const PricingResult decoded = PricingResult::from_canonical(document, "");
+  ASSERT_TRUE(decoded.pv.present);
+  EXPECT_EQ(decoded.pv.value.value, 9007199254740994.0);
+  EXPECT_EQ(decoded.to_canonical().dump(), document.dump());
+
+  // The same exact value placed in an otherwise unchanged document passes the FIELD rule and is caught
+  // only by the fingerprint fence, which no longer describes the mutated document. The invoice and the
+  // headline are moved together so the section 12.3 agreement rule is satisfied and nothing but the fence
+  // can refuse this document: that is the proof the rule refuses non-exact integers specifically, not
+  // "integer-valued fields".
+  const CanonicalValue original = successful_pricing_result(Currency::kUsd).to_canonical();
+  const CanonicalValue* original_headline_inner = original.find("headline")->find("value");
+  const CanonicalValue exact_integer = CanonicalValue(std::int64_t{9007199254740994LL});
+  const CanonicalValue exact_leaf = with_object_member(
+      with_object_member(original, "pv",
+                         present_envelope(
+                             numeric_with_unit_node(Unit::kCurrencyAmount, exact_integer))),
+      "headline",
+      present_envelope(with_object_member(*original_headline_inner, "value", exact_integer)));
+  const Refusal fence_only = decode_pricing_result(exact_leaf);
+  ASSERT_TRUE(fence_only.refused);
+  EXPECT_EQ(fence_only.kind, ContractViolationKind::kFingerprintMismatch)
+      << fence_only.pointer << ": " << fence_only.message;
+  EXPECT_EQ(fence_only.pointer, "/replay/content_fingerprint");
 }

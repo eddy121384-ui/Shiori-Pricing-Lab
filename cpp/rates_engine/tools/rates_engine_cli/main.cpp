@@ -206,7 +206,15 @@ int usage(std::string_view message) {
   telemetry.metadata.acquisition_mode = build.acquisition_mode;
   telemetry.metadata.vcpkg_baseline = build.vcpkg_baseline;
   telemetry.metadata.vcpkg_triplet = build.vcpkg_triplet;
+  // Two DISTINCT instrumentation facts (docs/34 M4 line 1768, sections 5.7 T3/11.3). `build_sanitizers`
+  // is this build's own sanitizer mode from the build identity; `dependency_instrumentation` is the
+  // dependency closure's state, derived ONLY from the pinned triplet token by the one telemetry-layer
+  // implementation (source-backed for the two pinned sanitizer triplets, explicit UNVERIFIED otherwise).
+  // The Shiori sanitizer mode is never used to infer the dependency's state.
+  telemetry.metadata.dependency_instrumentation =
+      diagnostics::dependency_instrumentation_for_triplet(build.vcpkg_triplet);
   telemetry.metadata.build_type = build.build_type;
+  telemetry.metadata.build_sanitizers = build.sanitizers;
   telemetry.metadata.compiler = build.compiler + "/" + build.compiler_version;
   telemetry.metadata.numeric_flags = build.numeric_flags;
   telemetry.metadata.benchmark_name = "none";

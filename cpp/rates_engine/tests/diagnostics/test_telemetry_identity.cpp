@@ -30,6 +30,7 @@ using Shiori::rates::diagnostics::CacheLayerObservation;
 using Shiori::rates::diagnostics::PhaseTiming;
 using Shiori::rates::diagnostics::RuntimeTelemetry;
 using Shiori::rates::diagnostics::assign_derived_identities;
+using Shiori::rates::diagnostics::dependency_instrumentation_for_triplet;
 using Shiori::rates::diagnostics::telemetry_content_fingerprint;
 using Shiori::rates::dto::CacheState;
 using Shiori::rates::dto::CanonicalValue;
@@ -51,7 +52,13 @@ using Shiori::rates::dto::parse_canonical_json;
   telemetry.metadata.acquisition_mode = "vcpkg-manifest";
   telemetry.metadata.vcpkg_baseline = "0000000000000000000000000000000000000000";
   telemetry.metadata.vcpkg_triplet = "x64-windows";
+  // Two DISTINCT instrumentation facts: the Shiori build's own sanitizer mode and the dependency
+  // closure's instrumentation state. `x64-windows` is not one of the two pinned sanitizer triplets, so
+  // the only honest dependency state here is the explicit no-evidence token, and it must never be filled
+  // in from the Shiori mode.
+  telemetry.metadata.dependency_instrumentation = "UNVERIFIED";
   telemetry.metadata.build_type = "Release";
+  telemetry.metadata.build_sanitizers = "NONE";
   telemetry.metadata.compiler = "msvc/19.44";
   telemetry.metadata.numeric_flags = "/fp:precise (fast-math forbidden)";
   telemetry.metadata.benchmark_name = "none";
@@ -117,6 +124,30 @@ using Shiori::rates::dto::parse_canonical_json;
   }
   token[0] = (token[0] == 'a') ? 'b' : 'a';
   return token;
+}
+
+// Removes one `"member":"value"` pair from an already-canonical document, together with one adjacent
+// comma, so the remaining document is still valid canonical JSON. A missing needle is a test bug and is
+// reported rather than silently leaving the member in place.
+[[nodiscard]] std::string drop_string_member(const std::string& json, const std::string& member,
+                                             const std::string& value) {
+  const std::string needle = "\"" + member + "\":\"" + value + "\"";
+  const std::size_t position = json.find(needle);
+  if (position == std::string::npos) {
+    ADD_FAILURE() << "member " << member << " with value " << value << " is not present in " << json;
+    return json;
+  }
+  std::string result = json;
+  std::size_t begin = position;
+  std::size_t length = needle.size();
+  if (begin > 0 && result[begin - 1] == ',') {
+    --begin;
+    ++length;
+  } else if (begin + length < result.size() && result[begin + length] == ',') {
+    ++length;
+  }
+  result.erase(begin, length);
+  return result;
 }
 
 // Every document handed to this helper MUST be refused, so a missing refusal fails the test instead
@@ -231,4 +262,79 @@ TEST(LaneBTelemetryIdentity, KeepsTheStageOneVersionFence) {
   const ContractViolation non_string = refusal_for_telemetry(R"({"telemetry_version":1})");
   EXPECT_EQ(non_string.kind(), ContractViolationKind::kUnknownSchemaVersion);
   EXPECT_EQ(non_string.pointer(), "/telemetry_version");
+}
+
+// ------------------------------------------------------------------------------------------------
+// M4 dependency-instrumentation fact (docs/34 section 10.5 line 1768, sections 5.7 T3/11.3).
+// ------------------------------------------------------------------------------------------------
+
+TEST(LaneBTelemetryInstrumentation, NamesTheDependencyStateOnlyFromSourceBackedTriplets) {
+  // The two pinned sanitizer triplets set the sanitizer in VCPKG_CXX_FLAGS/VCPKG_C_FLAGS/
+  // VCPKG_LINKER_FLAGS for the whole dependency closure, so those two triplet tokens are the only ones
+  // that back a named dependency state.
+  EXPECT_EQ(dependency_instrumentation_for_triplet("x64-linux-shiori-tsan"), "THREAD");
+  EXPECT_EQ(dependency_instrumentation_for_triplet("x64-linux-shiori-asan"), "ADDRESS+UNDEFINED");
+
+  // Every other triplet - the non-sanitizer Shiori triplets, the Windows triplet, and the NONE fallback
+  // used when no vcpkg triplet is configured - reports the EXPLICIT no-evidence state. It is never
+  // upgraded to a named instrumentation state and never downgraded to a claim of "uninstrumented",
+  // because a runtime check here cannot prove the absence of instrumentation in a pre-built library.
+  for (const std::string& triplet :
+       {std::string("x64-windows-static"), std::string("x64-linux-shiori-gcc"),
+        std::string("x64-linux-shiori-clang"), std::string("NONE"), std::string("x64-linux"),
+        std::string("x64-linux-shiori-tsan-dbg"), std::string("")}) {
+    EXPECT_EQ(dependency_instrumentation_for_triplet(triplet), "UNVERIFIED") << triplet;
+  }
+}
+
+TEST(LaneBTelemetryInstrumentation, KeepsTheTwoInstrumentationFactsDistinct) {
+  // A Shiori-only sanitizer build must never be readable as an instrumented dependency: the two facts
+  // are separate members with separate evidence, and both survive the wire round trip unchanged.
+  RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  telemetry.metadata.build_sanitizers = "THREAD";
+  telemetry.metadata.dependency_instrumentation = "UNVERIFIED";
+  assign_derived_identities(telemetry);
+  const std::string encoded = telemetry.to_canonical().dump();
+
+  const RuntimeTelemetry decoded =
+      RuntimeTelemetry::from_canonical(parse_canonical_json(encoded), "");
+  EXPECT_EQ(decoded.metadata.build_sanitizers, "THREAD");
+  EXPECT_EQ(decoded.metadata.dependency_instrumentation, "UNVERIFIED");
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded);
+
+  // Each fact participates in the fingerprint independently, so a measurement can never be compared
+  // across a change in either one.
+  const std::string baseline = telemetry_content_fingerprint(telemetry);
+  RuntimeTelemetry other_build_mode = telemetry;
+  other_build_mode.metadata.build_sanitizers = "ADDRESS+UNDEFINED";
+  EXPECT_NE(telemetry_content_fingerprint(other_build_mode), baseline);
+
+  RuntimeTelemetry other_dependency_state = telemetry;
+  other_dependency_state.metadata.dependency_instrumentation = "THREAD";
+  EXPECT_NE(telemetry_content_fingerprint(other_dependency_state), baseline);
+}
+
+TEST(LaneBTelemetryInstrumentation, RefusesAV1DocumentThatOmitsEitherInstrumentationFact) {
+  // The completed V1 metadata shape is ONE shape: both instrumentation facts are required, so a partial
+  // or pre-completion document is refused at the missing member's own pointer instead of being silently
+  // defaulted to an empty or inferred state.
+  const RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  const std::string encoded = telemetry.to_canonical().dump();
+
+  const ContractViolation no_build_mode =
+      refusal_for_telemetry(drop_string_member(encoded, "build_sanitizers", "NONE"));
+  EXPECT_EQ(no_build_mode.kind(), ContractViolationKind::kMissingRequiredField);
+  EXPECT_EQ(no_build_mode.pointer(), "/metadata/build_sanitizers");
+
+  const ContractViolation no_dependency_state =
+      refusal_for_telemetry(drop_string_member(encoded, "dependency_instrumentation", "UNVERIFIED"));
+  EXPECT_EQ(no_dependency_state.kind(), ContractViolationKind::kMissingRequiredField);
+  EXPECT_EQ(no_dependency_state.pointer(), "/metadata/dependency_instrumentation");
+
+  // A bare-null or empty replacement is refused too: neither fact may be blank on the wire.
+  const std::string emptied = tamper_top_level_string_member(
+      encoded, "dependency_instrumentation", "UNVERIFIED", "");
+  const ContractViolation empty_dependency_state = refusal_for_telemetry(emptied);
+  EXPECT_EQ(empty_dependency_state.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(empty_dependency_state.pointer(), "/metadata/dependency_instrumentation");
 }

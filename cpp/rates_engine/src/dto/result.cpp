@@ -1,5 +1,6 @@
 #include "shiori_rates/dto/result.hpp"
 
+#include <cstdint>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -15,6 +16,42 @@ namespace {
 
 [[nodiscard]] std::string child(const std::string& pointer, const char* key) {
   return pointer_child(pointer, key);
+}
+
+// The same binary64 exactness rule `NumericWithUnit::from_canonical` applies in `numeric.cpp`, applied to
+// this file's bare double fields (`headline.value`, `pv/par_rate/annuity_pvbp.value`,
+// `components[].value`, `measures[].value`, `bump_spec.bump_size`). A JSON integer is an exact canonical
+// number form, so an integer that binary64 cannot hold exactly must be REFUSED at this field's own
+// pointer instead of being silently rounded (`9007199254740993` would become `9007199254740992`, and
+// every identity recomputed from the rounded value would describe a number the document does not
+// contain). Every integer with |v| <= 2^53 is exact; above that a value is exact exactly when it is a
+// multiple of the binary64 spacing at its magnitude. Integer-only arithmetic: no double->int
+// conversion, so no out-of-range cast near INT64_MIN/INT64_MAX.
+[[nodiscard]] double require_binary64_number(const CanonicalValue& node, const std::string& pointer) {
+  if (!node.is_integer()) {
+    return node.as_double();
+  }
+  const std::int64_t raw = node.as_integer();
+  constexpr std::int64_t kTwoTo53 = 9007199254740992LL;  // 2^53
+  if (raw >= -kTwoTo53 && raw <= kTwoTo53) {
+    return static_cast<double>(raw);
+  }
+  const std::uint64_t magnitude = raw < 0 ? static_cast<std::uint64_t>(-(raw + 1)) + 1U
+                                          : static_cast<std::uint64_t>(raw);
+  unsigned exponent = 0;  // floor(log2(magnitude)); >= 53 because |raw| > 2^53 here
+  for (std::uint64_t probe = magnitude; probe > 1U; probe >>= 1U) {
+    ++exponent;
+  }
+  // The binary64 spacing at magnitude 2^e is 2^(e - 52), so the value is exact exactly when its low
+  // (e - 52) bits are zero; e is in [53, 63] here, so the shift is always in range.
+  const unsigned dropped_bits = exponent - 52U;
+  if ((magnitude & ((std::uint64_t{1} << dropped_bits) - 1U)) == 0U) {
+    return static_cast<double>(raw);
+  }
+  fail(ContractViolationKind::kInvariantViolation, pointer,
+       "an integer-valued numeric field must be exactly representable as binary64; this integer would "
+       "be silently rounded, so the canonical field would not round-trip and every identity derived "
+       "from it would describe a different number");
 }
 
 [[nodiscard]] std::string require_text(const CanonicalValue& node, const std::string& pointer,
@@ -197,9 +234,50 @@ void require_inputs_identity_applicability(const InputsIdentity& identity, Produ
       fail(ContractViolationKind::kInvalidTaggedUnionState, model_pointer,
            "a MODEL_PARAMETER bucket consumes a ModelInput, so this identity must name it as PRESENT");
     }
+    // The inverse is deliberately NOT implied: a PRESENT ModelInput does not require a PRESENT
+    // `calibration_result_id`. Lines 795/811 make `ModelInput.calibration_ref` PRESENT exactly when the
+    // embedded calibration payload is PRESENT, and the approved contract never makes every model
+    // calibration-derived, so no such rule is added here.
     return;
   }
   (void)identity.model_input_id.require_null_with_reason(model_pointer, ReasonCategory::kNotApplicable);
+  // Lines 795/811 attach calibration evidence to a ModelInput (`calibration_ref` is PRESENT iff the
+  // embedded calibration result is PRESENT), and section 12.4 line 962 / section 13.4 line 1051 make every
+  // optional result identity an exact echo of the consumed kernel input: "PRESENT carries the exact
+  // consumed object's id; NOT_APPLICABLE remains structured `NULL_WITH_REASON(NOT_APPLICABLE)`.
+  // Omission, bare null, or fabricated ids are malformed." With no ModelInput consumed there is nothing
+  // that could have consumed a calibration, so a PRESENT `calibration_result_id` is a fabricated
+  // consumed-input claim of exactly that shape and is refused at its own pointer. No calibration
+  // objective, optimizer, tolerance or methodology is involved.
+  const std::string calibration_pointer = child(base, "calibration_result_id");
+  (void)identity.calibration_result_id.require_null_with_reason(calibration_pointer,
+                                                               ReasonCategory::kNotApplicable);
+}
+
+// docs/33 section 12.4 (line 962) and section 13.4 (line 1051): "A result's `product_id/product_type`
+// MUST echo `RatesKernelInput.valuation_product`, and `inputs_identity.resolved_swap_product_id` MUST
+// equal the embedded `RatesKernelInput.resolved_swap.product_id` (the same as top-level product_id for a
+// vanilla swap; the underlying id for a derivative)". The kernel side already locks the same shape
+// (`RatesKernelInput::validate_invariants`: OIS equality, and derivative distinctness from the underlying
+// swap), so a result whose two ids contradict it cannot echo any valid consumed request: an accepted
+// result is replay-linked to exactly one shape, and section 5.1 line 303 forbids substituting the
+// derivative identity with the underlying one. Both lanes share this rule; nothing is renamed.
+void require_product_identity_linkage(const std::string& product_id, ProductType product_type,
+                                      const InputsIdentity& identity, const std::string& pointer) {
+  if (product_type == ProductType::kSwaption) {
+    if (product_id == identity.resolved_swap_product_id) {
+      fail(ContractViolationKind::kIdentityMismatch, child(pointer, "product_id"),
+           "a swaption result's product_id identifies the derivative and must be distinct from "
+           "inputs_identity.resolved_swap_product_id, which names the underlying swap; the derivative "
+           "identity is never substituted by the underlying id");
+    }
+    return;
+  }
+  if (product_id != identity.resolved_swap_product_id) {
+    fail(ContractViolationKind::kIdentityMismatch, child(pointer, "product_id"),
+         "a vanilla OIS result's product_id must equal inputs_identity.resolved_swap_product_id, the "
+         "embedded ResolvedSwap product identity it echoes");
+  }
 }
 
 // docs/33 section 16 (line 1257): `errors` is the machine-dispatchable domain-code channel, and its
@@ -467,7 +545,7 @@ HeadlineValue HeadlineValue::from_canonical(const CanonicalValue& node, const st
   if (!value_node.is_float() && !value_node.is_integer()) {
     fail_wrong_type(child(pointer, "value"), "number", value_node.type_name());
   }
-  result.value = value_node.as_double();
+  result.value = require_binary64_number(value_node, child(pointer, "value"));
   result.unit = enum_from_canonical<Unit>(node.at("unit", pointer), child(pointer, "unit"));
   result.currency = ValueOrReason<Currency>::from_canonical(node.at("currency", pointer),
                                                            child(pointer, "currency"));
@@ -522,7 +600,7 @@ ComponentPv ComponentPv::from_canonical(const CanonicalValue& node, const std::s
   if (!value_node.is_float() && !value_node.is_integer()) {
     fail_wrong_type(child(pointer, "value"), "number", value_node.type_name());
   }
-  result.value = value_node.as_double();
+  result.value = require_binary64_number(value_node, child(pointer, "value"));
   result.unit = enum_from_canonical<Unit>(node.at("unit", pointer), child(pointer, "unit"));
   result.sign_convention_ref = ValueOrReason<std::string>::from_canonical(
       node.at("sign_convention_ref", pointer), child(pointer, "sign_convention_ref"));
@@ -739,6 +817,10 @@ void PricingResult::validate_rules(const std::string& pointer) const {
   // applicability. A pricing result carries no measure and therefore consumes no ModelInput, so its
   // `model_input_id` must be the structured NOT_APPLICABLE state (section 5.1 line 307's Phase-2 path).
   require_inputs_identity_applicability(inputs_identity, product_type, false, pointer);
+  // Section 12.4 (line 962): the top-level product identity and the identity echo must describe the same
+  // consumed request - equal for a vanilla OIS, a distinct derivative id over the underlying swap for a
+  // swaption.
+  require_product_identity_linkage(product_id, product_type, inputs_identity, pointer);
 }
 
 std::string pricing_result_content_fingerprint(const PricingResult& result) {
@@ -1005,7 +1087,7 @@ RiskBumpSpec RiskBumpSpec::from_canonical(const CanonicalValue& node, const std:
   if (!size_node.is_float() && !size_node.is_integer()) {
     fail_wrong_type(child(pointer, "bump_size"), "number", size_node.type_name());
   }
-  result.bump_size = size_node.as_double();
+  result.bump_size = require_binary64_number(size_node, child(pointer, "bump_size"));
   result.bump_unit = enum_from_canonical<Unit>(node.at("bump_unit", pointer),
                                               child(pointer, "bump_unit"));
   result.bump_target = ValueOrReason<RiskBumpTarget>::from_canonical(
@@ -1043,7 +1125,7 @@ RiskMeasure RiskMeasure::from_canonical(const CanonicalValue& node, const std::s
   if (!value_node.is_float() && !value_node.is_integer()) {
     fail_wrong_type(child(pointer, "value"), "number", value_node.type_name());
   }
-  result.value = value_node.as_double();
+  result.value = require_binary64_number(value_node, child(pointer, "value"));
   result.unit = enum_from_canonical<Unit>(node.at("unit", pointer), child(pointer, "unit"));
   result.bump_spec = RiskBumpSpec::from_canonical(node.at("bump_spec", pointer),
                                                   child(pointer, "bump_spec"));
@@ -1315,6 +1397,9 @@ void RiskResult::validate_rules(const std::string& pointer) const {
     }
   }
   require_inputs_identity_applicability(inputs_identity, product_type, model_input_consumed, pointer);
+  // Section 13.4 (line 1051): the same product/product-identity linkage rule as the pricing result, so a
+  // risk result cannot accept an id pair that no valid consumed request could have produced.
+  require_product_identity_linkage(product_id, product_type, inputs_identity, pointer);
 }
 
 std::string risk_result_content_fingerprint(const RiskResult& result) {

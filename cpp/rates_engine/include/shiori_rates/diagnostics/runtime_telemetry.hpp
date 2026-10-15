@@ -66,6 +66,24 @@ struct PhaseTiming {
 
 // M4 metadata (docs/34 section 10.5): the dependency/configuration identity that must accompany
 // every measurement so a number cannot be compared across an unknown configuration.
+//
+// Two DISTINCT instrumentation facts are carried, because conflating them would invent evidence
+// (docs/34 sections 5.7 T3 and 11.3: a sanitizer run over an UNINSTRUMENTED dependency is not race
+// evidence, and M4 requires the dependency's instrumentation state precisely so an instrumented run
+// cannot be mistaken for ordinary evidence):
+//   * `build_sanitizers` is the SHIORI build's own sanitizer mode, exactly as reported by
+//     `BuildIdentity.sanitizers` (NONE | THREAD | ADDRESS+UNDEFINED). It says nothing about the
+//     dependency closure.
+//   * `dependency_instrumentation` is the dependency/QuantLib closure's instrumentation state, named only
+//     when the PINNED vcpkg triplet source backs it: `triplets/x64-linux-shiori-tsan.cmake` sets
+//     `-fsanitize=thread` in VCPKG_CXX_FLAGS/VCPKG_C_FLAGS/VCPKG_LINKER_FLAGS for the whole closure and
+//     `triplets/x64-linux-shiori-asan.cmake` does the same for address+undefined, each with its own
+//     binary-cache identity (docs/34 line 375, section 5.7 T3 / section 11.3). Any other triplet - and
+//     every non-vcpkg acquisition path - reports `UNVERIFIED`, which means "this build carries no
+//     source-backed evidence", never "the dependency is uninstrumented". It is NEVER derived from
+//     `build_sanitizers`, so a Shiori-only sanitizer build is not readable as an instrumented
+//     dependency. The triplet token itself is already reported as `vcpkg_triplet`, so the mapping is
+//     auditable.
 struct MeasurementMetadata {
   std::string engine_version;
   std::string quantlib_version;
@@ -73,7 +91,9 @@ struct MeasurementMetadata {
   std::string acquisition_mode;
   std::string vcpkg_baseline;
   std::string vcpkg_triplet;
+  std::string dependency_instrumentation;
   std::string build_type;
+  std::string build_sanitizers;
   std::string compiler;
   std::string numeric_flags;
   std::string benchmark_name;
@@ -98,6 +118,13 @@ struct RuntimeTelemetry {
   [[nodiscard]] static RuntimeTelemetry from_canonical(const dto::CanonicalValue& node,
                                                        const std::string& pointer);
 };
+
+// The one implementation of the `dependency_instrumentation` mapping documented above: it names the
+// dependency closure's instrumentation state from the pinned vcpkg triplet token ALONE - never from the
+// Shiori sanitizer mode, the compiler, or the absence of evidence - and returns the explicit
+// `UNVERIFIED` state when no source-backed triplet evidence exists. Kept here (rather than spelled at
+// the emission site) so the producer and its tests share exactly one rule.
+[[nodiscard]] std::string dependency_instrumentation_for_triplet(const std::string& vcpkg_triplet);
 
 // Locked non-recursive Lane B self-identity (Sophira owner decision 6117299766 section B):
 //   * `telemetry_content_fingerprint` is the digest of the canonical content with BOTH the document's

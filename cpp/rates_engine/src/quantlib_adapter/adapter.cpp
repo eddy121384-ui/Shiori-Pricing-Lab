@@ -66,8 +66,20 @@ std::atomic<std::int64_t>& counter_ref(int index) {
 
 [[nodiscard]] std::string quantlib_macro_configuration() {
   std::vector<std::string> flags;
-  // Only macros that change observable QuantLib behaviour are listed. A macro this build does not
-  // define reports OFF, which is an accurate statement about this binary.
+  // Only macros that change observable QuantLib behaviour are listed, and the set is exactly the docs/34
+  // section 5.5 C10 macro set: QL_ENABLE_SESSIONS, QL_ENABLE_THREAD_SAFE_OBSERVER_PATTERN,
+  // QL_FASTER_LAZY_OBJECTS, QL_THROW_IN_CYCLES, QL_ENABLE_OPENMP. The section 10.5 M4 identity requires
+  // the macro configuration because those switches change lazy-notification behaviour, failure behaviour
+  // and parallel execution, so two dependency builds differing only in one of them are NOT the same
+  // dependency (section 4.4: some of them change class layouts, so a mismatch is an ODR violation).
+  // Each token is read from the QuantLib headers THIS translation unit compiled against - the same
+  // resolved pinned dependency whose version the configure-time assertion checks - and a macro this build
+  // does not define reports OFF.
+  //
+  // DISCLOSED LIMIT: this reports the configuration the headers describe. It cannot detect a PRE-BUILT
+  // library binary whose own compile-time flags disagree with the headers it shipped with (docs/34
+  // U-H2); preventing that substitution is the job of the pinned baseline/triplet provisioning and the
+  // configure-time version assertion, and nothing here claims more than the header evidence.
 #if defined(QL_ENABLE_SESSIONS)
   constexpr bool kSessions = true;
 #else
@@ -77,6 +89,21 @@ std::atomic<std::int64_t>& counter_ref(int index) {
   constexpr bool kThreadSafeObserver = true;
 #else
   constexpr bool kThreadSafeObserver = false;
+#endif
+#if defined(QL_FASTER_LAZY_OBJECTS)
+  constexpr bool kFasterLazyObjects = true;
+#else
+  constexpr bool kFasterLazyObjects = false;
+#endif
+#if defined(QL_THROW_IN_CYCLES)
+  constexpr bool kThrowInCycles = true;
+#else
+  constexpr bool kThrowInCycles = false;
+#endif
+#if defined(QL_ENABLE_OPENMP)
+  constexpr bool kEnableOpenMp = true;
+#else
+  constexpr bool kEnableOpenMp = false;
 #endif
 #if defined(QL_HIGH_RESOLUTION_DATE)
   constexpr bool kHighResolutionDate = true;
@@ -95,6 +122,9 @@ std::atomic<std::int64_t>& counter_ref(int index) {
 #endif
   flags.push_back(macro_flag("QL_ENABLE_SESSIONS", kSessions));
   flags.push_back(macro_flag("QL_ENABLE_THREAD_SAFE_OBSERVER_PATTERN", kThreadSafeObserver));
+  flags.push_back(macro_flag("QL_FASTER_LAZY_OBJECTS", kFasterLazyObjects));
+  flags.push_back(macro_flag("QL_THROW_IN_CYCLES", kThrowInCycles));
+  flags.push_back(macro_flag("QL_ENABLE_OPENMP", kEnableOpenMp));
   flags.push_back(macro_flag("QL_HIGH_RESOLUTION_DATE", kHighResolutionDate));
   flags.push_back(macro_flag("QL_DISABLE_DEPRECATED", kDisableDeprecated));
   flags.push_back(macro_flag("QL_USE_INDEXED_COUPON", kIndexedCoupon));

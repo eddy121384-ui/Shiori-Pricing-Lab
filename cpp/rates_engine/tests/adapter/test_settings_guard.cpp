@@ -5,7 +5,9 @@
 // directly lives in tests/defaults/, which is one of the two directories allowed to include QuantLib.
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <string>
+#include <vector>
 
 #include "shiori_rates/dto/error.hpp"
 #include "shiori_rates/quantlib_adapter/adapter.hpp"
@@ -14,6 +16,22 @@ namespace {
 
 using Shiori::rates::adapter::QuantLibSettingsGuard;
 using Shiori::rates::adapter::SerializationGate;
+
+// The `;`-separated `NAME=ON|OFF` macro configuration, split into its tokens.
+[[nodiscard]] std::vector<std::string> macro_tokens(const std::string& configuration) {
+  std::vector<std::string> tokens;
+  std::string current;
+  for (const char character : configuration) {
+    if (character == ';') {
+      tokens.push_back(current);
+      current.clear();
+    } else {
+      current += character;
+    }
+  }
+  tokens.push_back(current);
+  return tokens;
+}
 
 }  // namespace
 
@@ -110,6 +128,33 @@ TEST(DependencyIdentity, ReportsAPinnedAndCompleteIdentity) {
   // different macros is a different dependency (G-2).
   EXPECT_NE(identity.macro_configuration.find("QL_ENABLE_SESSIONS="), std::string::npos)
       << identity.macro_configuration;
+  // docs/34 section 5.5 C10 names five behaviour switches. All five are reported, and each token states
+  // the value this translation unit compiled against, read from the resolved QuantLib headers (the same
+  // evidence channel as the version pin) rather than an assumed default. Section 4.4 is why they matter:
+  // a mismatch changes class layout, so two builds differing in one switch are not the same dependency.
+  for (const char* required :
+       {"QL_ENABLE_SESSIONS=", "QL_ENABLE_THREAD_SAFE_OBSERVER_PATTERN=",
+        "QL_FASTER_LAZY_OBJECTS=", "QL_THROW_IN_CYCLES=", "QL_ENABLE_OPENMP=",
+        "QL_HIGH_RESOLUTION_DATE=", "QL_DISABLE_DEPRECATED=", "QL_USE_INDEXED_COUPON="}) {
+    EXPECT_NE(identity.macro_configuration.find(required), std::string::npos)
+        << required << " is absent from " << identity.macro_configuration;
+  }
+
+  // The configuration is a non-empty, sorted, duplicate-free list of `NAME=ON|OFF` tokens: a switch can
+  // never be reported without its value, no token is ever inferred, and the string stays byte-stable.
+  const std::vector<std::string> tokens = macro_tokens(identity.macro_configuration);
+  ASSERT_FALSE(tokens.empty());
+  for (std::size_t index = 0; index < tokens.size(); ++index) {
+    if (index > 0) {
+      EXPECT_LT(tokens[index - 1], tokens[index])
+          << "the macro configuration must be sorted and duplicate-free at " << tokens[index];
+    }
+    const std::size_t equals = tokens[index].find('=');
+    ASSERT_NE(equals, std::string::npos) << tokens[index] << " reports no value";
+    const std::string value = tokens[index].substr(equals + 1);
+    EXPECT_TRUE(value == "ON" || value == "OFF")
+        << tokens[index] << " must report the compiled ON/OFF value";
+  }
   // The identity has to state the process-global surface the adapter is guarding.
   EXPECT_NE(identity.global_settings_quantifiable.find("evaluation_date"), std::string::npos);
   EXPECT_TRUE(Shiori::rates::adapter::quantlib_linked());

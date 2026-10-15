@@ -1,5 +1,6 @@
 #include "shiori_rates/dto/market.hpp"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -14,6 +15,41 @@ namespace {
 
 [[nodiscard]] std::string child(const std::string& pointer, const char* key) {
   return pointer_child(pointer, key);
+}
+
+// The same binary64 exactness rule `NumericWithUnit::from_canonical` applies in `numeric.cpp`, applied to
+// this file's bare double field (`CurvePillar.value`, the `value_state=RESOLVED` pillar value). A JSON
+// integer is an exact canonical number form, so an integer that binary64 cannot hold exactly must be
+// REFUSED at this field's own pointer instead of being silently rounded (`9007199254740993` would become
+// `9007199254740992`, and any identity recomputed from the rounded value would describe a number the
+// document does not contain). Every integer with |v| <= 2^53 is exact; above that a value is exact
+// exactly when it is a multiple of the binary64 spacing at its magnitude. Integer-only arithmetic: no
+// double->int conversion, so no out-of-range cast near INT64_MIN/INT64_MAX.
+[[nodiscard]] double require_binary64_number(const CanonicalValue& node, const std::string& pointer) {
+  if (!node.is_integer()) {
+    return node.as_double();
+  }
+  const std::int64_t raw = node.as_integer();
+  constexpr std::int64_t kTwoTo53 = 9007199254740992LL;  // 2^53
+  if (raw >= -kTwoTo53 && raw <= kTwoTo53) {
+    return static_cast<double>(raw);
+  }
+  const std::uint64_t magnitude = raw < 0 ? static_cast<std::uint64_t>(-(raw + 1)) + 1U
+                                          : static_cast<std::uint64_t>(raw);
+  unsigned exponent = 0;  // floor(log2(magnitude)); >= 53 because |raw| > 2^53 here
+  for (std::uint64_t probe = magnitude; probe > 1U; probe >>= 1U) {
+    ++exponent;
+  }
+  // The binary64 spacing at magnitude 2^e is 2^(e - 52), so the value is exact exactly when its low
+  // (e - 52) bits are zero; e is in [53, 63] here, so the shift is always in range.
+  const unsigned dropped_bits = exponent - 52U;
+  if ((magnitude & ((std::uint64_t{1} << dropped_bits) - 1U)) == 0U) {
+    return static_cast<double>(raw);
+  }
+  fail(ContractViolationKind::kInvariantViolation, pointer,
+       "an integer-valued numeric field must be exactly representable as binary64; this integer would "
+       "be silently rounded, so the canonical field would not round-trip and every identity derived "
+       "from it would describe a different number");
 }
 
 [[nodiscard]] std::string require_non_empty_string(const CanonicalValue& node,
@@ -291,7 +327,7 @@ CurvePillar CurvePillar::from_canonical(const CanonicalValue& node, const std::s
     if (!value_node.is_float() && !value_node.is_integer()) {
       fail_wrong_type(child(pointer, "value"), "number", value_node.type_name());
     }
-    result.value = value_node.as_double();
+    result.value = require_binary64_number(value_node, child(pointer, "value"));
     if (reason_node != nullptr && !reason_node->is_null()) {
       fail(ContractViolationKind::kInvalidTaggedUnionState, child(pointer, "unresolved_reason"),
            "value_state=RESOLVED forbids an unresolved reason");
@@ -1083,6 +1119,22 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
       if (result.source.value == MarketSource::kCurveProjection) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
              "CURVE_PROJECTION marks an audit-only PROJECTED record and is never stored as history");
+      }
+      // Line 594 names the PRESENT HISTORICAL source as an authoritative MARKET source, line 562 fixes
+      // the PRESENT vocabulary, and line 596 reserves CURVE_PROJECTION for the audit-only PROJECTED
+      // state. The approved set for history is therefore an allow-list, not "anything except
+      // projection": RESEARCH_ADAPTER is a legal provenance value for snapshots and curves (lines
+      // 660/799), but it is not an approved authoritative fixing source, and accepting it would let an
+      // unapproved derived source become a fixing consumed by pricing. Nothing is rewritten to fit.
+      const bool approved_historical_source =
+          result.source.value == MarketSource::kBloombergDapi ||
+          result.source.value == MarketSource::kScreenTranscription ||
+          result.source.value == MarketSource::kSyntheticFixture;
+      if (!approved_historical_source) {
+        fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
+             "a HISTORICAL observation accepts only the approved authoritative market sources "
+             "BLOOMBERG_DAPI, SCREEN_TRANSCRIPTION and SYNTHETIC_FIXTURE; a research or other derived "
+             "source is never an authoritative captured fixing");
       }
       if (!result.version.present) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "version"),

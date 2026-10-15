@@ -192,6 +192,15 @@ TEST(QuantLibDefaults, IdentityNamesTheGlobalStateTheBoundaryOwns) {
   EXPECT_NE(identity.macro_configuration.find("QL_ENABLE_SESSIONS="), std::string::npos);
   EXPECT_NE(identity.macro_configuration.find("QL_ENABLE_THREAD_SAFE_OBSERVER_PATTERN="),
             std::string::npos);
+  // The rest of the docs/34 section 5.5 C10 behaviour set, including the three switches that change lazy
+  // notification, failure and parallel-execution behaviour: each is reported with the value this
+  // translation unit compiled against the resolved QuantLib headers, never an inferred default.
+  EXPECT_NE(identity.macro_configuration.find("QL_FASTER_LAZY_OBJECTS="), std::string::npos)
+      << identity.macro_configuration;
+  EXPECT_NE(identity.macro_configuration.find("QL_THROW_IN_CYCLES="), std::string::npos)
+      << identity.macro_configuration;
+  EXPECT_NE(identity.macro_configuration.find("QL_ENABLE_OPENMP="), std::string::npos)
+      << identity.macro_configuration;
   // The guard's subject has to be named: an unstated process-global surface is not audited.
   EXPECT_NE(identity.global_settings_quantifiable.find("evaluation_date"), std::string::npos);
   EXPECT_NE(identity.global_settings_quantifiable.find("enforces_todays_historic_fixings"),

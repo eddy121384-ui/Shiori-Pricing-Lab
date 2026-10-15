@@ -95,6 +95,28 @@ CanonicalValue PhaseTiming::to_canonical() const {
   return CanonicalValue::make_object(std::move(members));
 }
 
+std::string dependency_instrumentation_for_triplet(const std::string& vcpkg_triplet) {
+  // Source-backed only. The two pinned sanitizer triplets set the sanitizer flags for the ENTIRE
+  // dependency closure (triplets/x64-linux-shiori-tsan.cmake and x64-linux-shiori-asan.cmake set them in
+  // VCPKG_CXX_FLAGS/VCPKG_C_FLAGS/VCPKG_LINKER_FLAGS) and each owns a separate binary-cache identity
+  // (docs/34 line 375, section 5.7 T3 / section 11.3), so a non-instrumented dependency binary cannot be
+  // substituted silently under those triplet names. The
+  // token vocabulary matches `BuildIdentity.sanitizers` (THREAD / ADDRESS+UNDEFINED) for the two states
+  // that are actually evidenced.
+  //
+  // Nothing else is inferred: not from `build_sanitizers` (a Shiori-only sanitizer build says nothing
+  // about the dependency), not from the compiler, and not from missing evidence - which is reported as
+  // the explicit UNVERIFIED state rather than as "uninstrumented", because no runtime check here can
+  // prove the absence of instrumentation in a pre-built library.
+  if (vcpkg_triplet == "x64-linux-shiori-tsan") {
+    return "THREAD";
+  }
+  if (vcpkg_triplet == "x64-linux-shiori-asan") {
+    return "ADDRESS+UNDEFINED";
+  }
+  return "UNVERIFIED";
+}
+
 CanonicalValue MeasurementMetadata::to_canonical() const {
   CanonicalMembers members;
   members.emplace_back("engine_version", CanonicalValue(engine_version));
@@ -104,7 +126,9 @@ CanonicalValue MeasurementMetadata::to_canonical() const {
   members.emplace_back("acquisition_mode", CanonicalValue(acquisition_mode));
   members.emplace_back("vcpkg_baseline", CanonicalValue(vcpkg_baseline));
   members.emplace_back("vcpkg_triplet", CanonicalValue(vcpkg_triplet));
+  members.emplace_back("dependency_instrumentation", CanonicalValue(dependency_instrumentation));
   members.emplace_back("build_type", CanonicalValue(build_type));
+  members.emplace_back("build_sanitizers", CanonicalValue(build_sanitizers));
   members.emplace_back("compiler", CanonicalValue(compiler));
   members.emplace_back("numeric_flags", CanonicalValue(numeric_flags));
   members.emplace_back("benchmark_name", CanonicalValue(benchmark_name));
@@ -191,8 +215,9 @@ RuntimeTelemetry RuntimeTelemetry::from_canonical(const CanonicalValue& node,
   dto::require_only_keys(metadata_node, dto::pointer_child(pointer, "metadata"),
                          {"engine_version", "quantlib_version",
                           "quantlib_macro_configuration", "acquisition_mode", "vcpkg_baseline",
-                          "vcpkg_triplet", "build_type", "compiler", "numeric_flags",
-                          "benchmark_name", "fixture_id"});
+                          "vcpkg_triplet", "dependency_instrumentation", "build_type",
+                          "build_sanitizers", "compiler", "numeric_flags", "benchmark_name",
+                          "fixture_id"});
   result.metadata.engine_version =
       require_text(metadata_node.at("engine_version", dto::pointer_child(pointer, "metadata")),
                    dto::pointer_child(dto::pointer_child(pointer, "metadata"), "engine_version"),
@@ -220,10 +245,20 @@ RuntimeTelemetry RuntimeTelemetry::from_canonical(const CanonicalValue& node,
       require_text(metadata_node.at("vcpkg_triplet", dto::pointer_child(pointer, "metadata")),
                    dto::pointer_child(dto::pointer_child(pointer, "metadata"), "vcpkg_triplet"),
                    "string vcpkg triplet");
+  result.metadata.dependency_instrumentation =
+      require_text(metadata_node.at("dependency_instrumentation",
+                                    dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"),
+                                      "dependency_instrumentation"),
+                   "string dependency instrumentation state");
   result.metadata.build_type =
       require_text(metadata_node.at("build_type", dto::pointer_child(pointer, "metadata")),
                    dto::pointer_child(dto::pointer_child(pointer, "metadata"), "build_type"),
                    "string build type");
+  result.metadata.build_sanitizers =
+      require_text(metadata_node.at("build_sanitizers", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "build_sanitizers"),
+                   "string build sanitizer mode");
   result.metadata.compiler =
       require_text(metadata_node.at("compiler", dto::pointer_child(pointer, "metadata")),
                    dto::pointer_child(dto::pointer_child(pointer, "metadata"), "compiler"),
