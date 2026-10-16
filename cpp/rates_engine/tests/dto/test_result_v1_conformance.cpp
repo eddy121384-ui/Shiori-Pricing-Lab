@@ -1688,7 +1688,11 @@ TEST(ResultOptionalIdentity, RefusesEmptyPresentInputIdsInPricingAndRiskAfterReh
 }
 
 TEST(ResultOptionalIdentity, PreservesValidNonemptyAndNotApplicableInputIds) {
-  const Refusal pricing = decode_pricing_result(swaption_pricing_result().to_canonical());
+  PricingResult swaption = swaption_pricing_result();
+  // This builder sets the synthetic derivative shape; as with other positive tests, recompute its
+  // fingerprint after assigning the final swaption identity before testing valid decode.
+  assign_derived_identities(swaption);
+  const Refusal pricing = decode_pricing_result(swaption.to_canonical());
   EXPECT_FALSE(pricing.refused) << pricing.pointer << ": " << pricing.message;
   const Refusal risk = decode_risk_result(risk_result_fixture().to_canonical());
   EXPECT_FALSE(risk.refused) << risk.pointer << ": " << risk.message;
