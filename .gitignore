@@ -56,3 +56,12 @@ Thumbs.db
 # are runtime workstation evidence and are never committed.
 /shiori_bond_yield_field_probe_output/
 /shiori_bond_yield_history_acceptance_output/
+
+# Market Data Reconnection Phase 1 probe evidence
+# (tools/bloomberg_swaption_vol_probe.py, tools/lseg_swaption_vol_probe.py).
+# Unlike the directories above, these reports CAN carry licensed vendor market
+# values and the operator's own inputs. They are workstation-only evidence:
+# never committed, never attached to a PR, never pasted into an external
+# model or service.
+/shiori_swaption_vol_probe_output/
+/shiori_lseg_swaption_vol_probe_output/
