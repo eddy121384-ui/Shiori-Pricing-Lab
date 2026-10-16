@@ -391,9 +391,12 @@ TEST(LaneBTelemetryPhaseTiming, RefusesANonExactIntegerElapsedTime) {
   const RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
   const std::string encoded = telemetry.to_canonical().dump();  // "milliseconds":0.125
 
-  // 2^53 + 1, 2^53 + 3, 2^54 + 1 and -(2^53 + 1) are all integers binary64 cannot hold exactly.
-  for (const std::string& token : {"9007199254740993", "9007199254740995", "18014398509481985",
-                                   "-9007199254740993"}) {
+  // 2^53 + 1, 2^53 + 3, 2^54 + 1 and -(2^53 + 1) are all integers binary64 cannot hold exactly. The
+  // elements are spelled as std::string so the loop binds a reference to the element rather than
+  // constructing a temporary per iteration (GCC -Wrange-loop-construct is an error in this build).
+  for (const std::string& token :
+       {std::string("9007199254740993"), std::string("9007199254740995"),
+        std::string("18014398509481985"), std::string("-9007199254740993")}) {
     const ContractViolation violation =
         refusal_for_telemetry(with_phase_milliseconds_token(encoded, "0.125", token));
     // The field rule fires during decode, BEFORE the stale-content fence is reached: the refusal is
