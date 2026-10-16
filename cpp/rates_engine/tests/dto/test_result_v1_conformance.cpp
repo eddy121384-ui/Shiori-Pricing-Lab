@@ -1654,3 +1654,63 @@ TEST(ResultNumericExactness, KeepsAnExactlyRepresentableLargeIntegerAndLeavesThe
       << fence_only.pointer << ": " << fence_only.message;
   EXPECT_EQ(fence_only.pointer, "/replay/content_fingerprint");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Final review: replay identity must never name an empty PRESENT input, and FAILED is not valued.
+// ---------------------------------------------------------------------------------------------
+TEST(ResultOptionalIdentity, RefusesEmptyPresentInputIdsInPricingAndRiskAfterRehash) {
+  struct OptionalId {
+    ValueOrReason<std::string> InputsIdentity::*field;
+    const char* name;
+  };
+  const OptionalId fields[] = {
+      {&InputsIdentity::volatility_input_id, "volatility_input_id"},
+      {&InputsIdentity::exercise_terms_id, "exercise_terms_id"},
+      {&InputsIdentity::settlement_terms_id, "settlement_terms_id"},
+      {&InputsIdentity::model_input_id, "model_input_id"},
+      {&InputsIdentity::calibration_result_id, "calibration_result_id"},
+  };
+  for (const OptionalId& input : fields) {
+    const std::string pointer = "/inputs_identity/" + std::string(input.name) + "/value";
+
+    PricingResult pricing = swaption_pricing_result();
+    pricing.inputs_identity.*input.field = ValueOrReason<std::string>::of("");
+    assign_derived_identities(pricing);
+    expect_refusal(decode_pricing_result(pricing.to_canonical()),
+                   ContractViolationKind::kInvariantViolation, pointer);
+
+    RiskResult risk = risk_result_fixture();
+    risk.inputs_identity.*input.field = ValueOrReason<std::string>::of("");
+    assign_derived_identities(risk);
+    expect_refusal(decode_risk_result(risk.to_canonical()),
+                   ContractViolationKind::kInvariantViolation, pointer);
+  }
+}
+
+TEST(ResultOptionalIdentity, PreservesValidNonemptyAndNotApplicableInputIds) {
+  const Refusal pricing = decode_pricing_result(swaption_pricing_result().to_canonical());
+  EXPECT_FALSE(pricing.refused) << pricing.pointer << ": " << pricing.message;
+  const Refusal risk = decode_risk_result(risk_result_fixture().to_canonical());
+  EXPECT_FALSE(risk.refused) << risk.pointer << ": " << risk.message;
+  const Refusal ois = decode_pricing_result(successful_pricing_result(Currency::kUsd).to_canonical());
+  EXPECT_FALSE(ois.refused) << ois.pointer << ": " << ois.message;
+}
+
+TEST(RiskResultFailedStatus, RefusesValuedMeasuresDespiteARehashedFailedDocument) {
+  RiskResult result = failed_risk_result(std::string(kOtherUnavailableCode));
+  ASSERT_TRUE(result.measures.empty());
+  ASSERT_FALSE(result.errors.empty());
+  result.measures.push_back(bucketed_tenor_measure());
+  assign_derived_identities(result);
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/measures");
+}
+
+TEST(RiskResultFailedStatus, KeepsUnvaluedFailureAndValuedSuccessValid) {
+  const RiskResult failed = failed_risk_result(std::string(kOtherUnavailableCode));
+  ASSERT_TRUE(failed.measures.empty());
+  EXPECT_FALSE(decode_risk_result(failed.to_canonical()).refused);
+  const RiskResult success = risk_result_fixture();
+  ASSERT_FALSE(success.measures.empty());
+  EXPECT_FALSE(decode_risk_result(success.to_canonical()).refused);
+}

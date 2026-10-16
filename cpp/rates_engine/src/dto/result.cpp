@@ -497,6 +497,26 @@ InputsIdentity InputsIdentity::from_canonical(const CanonicalValue& node, const 
       node.at("model_input_id", pointer), child(pointer, "model_input_id"));
   result.calibration_result_id = ValueOrReason<std::string>::from_canonical(
       node.at("calibration_result_id", pointer), child(pointer, "calibration_result_id"));
+  // Section 12.4 / 13.4: PRESENT optional identities must name an actual consumed input.
+  // A PRESENT empty string is not an identity, even if the result is independently re-hashed.
+  // This rule belongs only to input-id fields, not to every generic ValueOrReason<string>.
+  struct OptionalId {
+    const ValueOrReason<std::string>* field;
+    const char* name;
+  };
+  const OptionalId ids[] = {
+      {&result.volatility_input_id, "volatility_input_id"},
+      {&result.exercise_terms_id, "exercise_terms_id"},
+      {&result.settlement_terms_id, "settlement_terms_id"},
+      {&result.model_input_id, "model_input_id"},
+      {&result.calibration_result_id, "calibration_result_id"},
+  };
+  for (const OptionalId& id : ids) {
+    if (id.field->present && id.field->value.empty()) {
+      fail(ContractViolationKind::kInvariantViolation, child(child(pointer, id.name), "value"),
+           "a PRESENT input identity must be a nonempty string");
+    }
+  }
   return result;
 }
 
@@ -1268,9 +1288,15 @@ void RiskResult::validate_rules(const std::string& pointer) const {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "errors"),
            "a successful risk result must not carry errors");
     }
-  } else if (errors.empty()) {
-    fail(ContractViolationKind::kInvariantViolation, child(pointer, "errors"),
-         "a FAILED risk result must carry at least one error");
+  } else {
+    if (errors.empty()) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "errors"),
+           "a FAILED risk result must carry at least one error");
+    }
+    if (!measures.empty()) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "measures"),
+           "a FAILED risk result is not valued and must not carry measures");
+    }
   }
   // Section 15.4 line 1232: `measures` is a fingerprint-relevant array with a schema-defined
   // canonical order, so document order is never hashed as if it were canonical - two equivalent

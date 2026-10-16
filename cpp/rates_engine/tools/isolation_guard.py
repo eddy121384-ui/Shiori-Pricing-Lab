@@ -246,19 +246,30 @@ def scan_text(relative_path: str, text: str) -> list[Finding]:
         if match is None:
             continue
         target = match.group(1).strip()
-        if not QUANTLIB_INCLUDE.match(target):
-            continue
         if allowed:
             continue
-        findings.append(
-            Finding(
-                "QUANTLIB_INCLUDE",
-                "error",
-                relative_path,
-                line_number,
-                f"{tier} file may not include QuantLib: {target}",
+        if QUANTLIB_INCLUDE.match(target):
+            findings.append(
+                Finding(
+                    "QUANTLIB_INCLUDE",
+                    "error",
+                    relative_path,
+                    line_number,
+                    f"{tier} file may not include QuantLib: {target}",
+                )
             )
-        )
+        elif not target.startswith(("<", '"')):
+            # Macro operands are expanded by the C++ preprocessor. Without resolving that expansion,
+            # the scanner cannot prove this include is free of QuantLib; reject it fail closed.
+            findings.append(
+                Finding(
+                    "UNRESOLVED_INCLUDE",
+                    "error",
+                    relative_path,
+                    line_number,
+                    f"{tier} file uses a non-literal include operand: {target}",
+                )
+            )
 
     if not allowed:
         for match in QUANTLIB_SYMBOL.finditer(stripped):
@@ -377,6 +388,30 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
         "#include \\\n  <ql/date.hpp>\n",
         ["QUANTLIB_INCLUDE"],
         False,
+    ),
+    (
+        "src/engine/trap_macro_ql_include.cpp",
+        '#define QL_HEADER <ql/settings.hpp>\n#include QL_HEADER\n',
+        ["UNRESOLVED_INCLUDE"],
+        False,
+    ),
+    (
+        "src/engine/trap_macro_ql_include_continuation.cpp",
+        '#define QL_HEADER <ql/settings.hpp>\n#include \\\n  QL_HEADER\n',
+        ["UNRESOLVED_INCLUDE"],
+        False,
+    ),
+    (
+        "src/engine/trap_macro_defined_but_unused.cpp",
+        '#define QL_HEADER <ql/settings.hpp>\nint untouched;\n',
+        [],
+        True,
+    ),
+    (
+        "tests/adapter/allowed_macro_ql_include.cpp",
+        '#define QL_HEADER <ql/settings.hpp>\n#include QL_HEADER\n',
+        [],
+        True,
     ),
     (
         "tests/adapter/allowed.cpp",
