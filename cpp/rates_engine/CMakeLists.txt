@@ -45,6 +45,15 @@ include(ShioriBuildIdentity)
 shiori_generate_build_identity(
   "${CMAKE_CURRENT_BINARY_DIR}/generated/shiori_rates/engine/build_identity_generated.hpp")
 
+# The reported source identity must be auditable from a CI log, not inferred from the artifact: a clean
+# CI build was being stamped `<sha>-dirty` because the workflow provisions vcpkg inside the workspace.
+# Echo the value the generated header actually carries (no new artifact, no new input).
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/generated/shiori_rates/engine/build_identity_generated.hpp"
+     _shiori_identity_text)
+string(REGEX MATCH "SHIORI_GIT_REVISION \"([^\"]*)\"" _shiori_identity_revision_match
+       "${_shiori_identity_text}")
+message(STATUS "SHIORI: source identity ${CMAKE_MATCH_1}")
+
 # =============================================================================================
 # shiori_rates_dto — the versioned DTO / JSON contract. NO QuantLib, ever.
 # =============================================================================================
@@ -302,8 +311,9 @@ if(SHIORI_BUILD_TESTS)
       "(cpp-isolation-guard). It is not skipped silently: the job is required.")
   endif()
 
-  # The CLI envelope is part of the #227 contract (exit 0 on success, exit 2 for a usage error), so it
-  # is exercised here rather than only by hand. These operations need no stdin.
+  # The CLI envelope is part of the #227 contract (exit 0 on success, 2 for a contract refusal, 3 for a
+  # usage error - `tools/rates_engine_cli/main.cpp` lines 6-10), so it is exercised here rather than only
+  # by hand. These operations need no stdin.
   add_test(NAME cli_contract_version
     COMMAND $<TARGET_FILE:shiori_rates_cli> --operation version)
   set_tests_properties(cli_contract_version PROPERTIES
@@ -319,14 +329,36 @@ if(SHIORI_BUILD_TESTS)
   set_tests_properties(cli_contract_quantlib_identity PROPERTIES
     LABELS "cli" TIMEOUT 60
     PASS_REGULAR_EXPRESSION "\"schema_version\":\"QUANTLIB_IDENTITY_V1\"")
-  # An unknown operation is a usage error, not an internal failure: the process must exit non-zero and
-  # must not claim success in its envelope.
+  # An unknown operation is a usage error, not an internal failure: the process must exit 3, write its
+  # diagnostics to stderr, and emit NO envelope on stdout. `WILL_FAIL` + `PASS_REGULAR_EXPRESSION`
+  # could not assert that (the output match decides the result, then `WILL_FAIL` inverts it, so it
+  # asserted the absence of the pattern and never looked at the exit code), so the three facts are
+  # asserted independently by a script that invokes the unchanged CLI.
+  set(_shiori_cli_usage_error_assertion
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli/assert_cli_usage_error.cmake")
   add_test(NAME cli_contract_usage_error
-    COMMAND $<TARGET_FILE:shiori_rates_cli> --operation definitely-not-an-operation)
-  set_tests_properties(cli_contract_usage_error PROPERTIES
-    LABELS "cli" TIMEOUT 60
-    WILL_FAIL TRUE
-    PASS_REGULAR_EXPRESSION "\"status\":\"FAILED\"")
+    COMMAND "${CMAKE_COMMAND}" "-DCLI=$<TARGET_FILE:shiori_rates_cli>"
+            -P "${_shiori_cli_usage_error_assertion}")
+  set_tests_properties(cli_contract_usage_error PROPERTIES LABELS "cli" TIMEOUT 60)
+  # Negative controls for that assertion: it must REFUSE a "CLI" that exits 0 silently and one that
+  # exits 0 while claiming a successful envelope. Here `WILL_FAIL` is correct precisely because no
+  # PASS_REGULAR_EXPRESSION is set, so the assertion script's nonzero exit is the whole test result.
+  add_test(NAME cli_contract_usage_error_decoy_zero_exit
+    COMMAND "${CMAKE_COMMAND}" -DDECOY=ZERO_EXIT -P "${_shiori_cli_usage_error_assertion}")
+  set_tests_properties(cli_contract_usage_error_decoy_zero_exit PROPERTIES
+    LABELS "cli" TIMEOUT 60 WILL_FAIL TRUE)
+  add_test(NAME cli_contract_usage_error_decoy_fake_success
+    COMMAND "${CMAKE_COMMAND}" -DDECOY=FAKE_SUCCESS -P "${_shiori_cli_usage_error_assertion}")
+  set_tests_properties(cli_contract_usage_error_decoy_fake_success PROPERTIES
+    LABELS "cli" TIMEOUT 60 WILL_FAIL TRUE)
+  # The reported source identity comes from `git status --porcelain` (cmake/ShioriBuildIdentity.cmake),
+  # and CI provisions vcpkg inside the workspace. This asserts the narrow ignore rules in the real
+  # checkout: provisioning directories stay invisible while genuine untracked content stays visible.
+  add_test(NAME ci_provisioning_identity_ignore
+    COMMAND "${CMAKE_COMMAND}" "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/../.."
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ci/assert_provisioning_paths_are_ignored.cmake")
+  set_tests_properties(ci_provisioning_identity_ignore PROPERTIES
+    LABELS "identity" TIMEOUT 120)
 endif()
 
 # =============================================================================================

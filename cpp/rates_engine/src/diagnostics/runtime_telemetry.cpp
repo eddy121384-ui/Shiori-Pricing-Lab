@@ -45,6 +45,51 @@ using dto::CanonicalValue;
   return node.as_integer();
 }
 
+// Every integer with |v| <= 2^53 is exact. Above that a value is exact exactly when it is a multiple of
+// the binary64 spacing at its magnitude: for |v| in [2^b, 2^(b+1)) the spacing is 2^(b-52), so the value
+// is representable iff its low (b-52) bits are zero. The check is integer-only - there is no double to
+// integer conversion anywhere, so there is no out-of-range/undefined cast near INT64_MIN/INT64_MAX.
+[[nodiscard]] bool integer_is_exactly_representable_as_binary64(std::int64_t value) noexcept {
+  constexpr std::int64_t kTwoTo53 = 9007199254740992LL;  // 2^53: exact for every integer at or below
+  if (value >= -kTwoTo53 && value <= kTwoTo53) {
+    return true;
+  }
+  // INT64_MIN is handled without overflow: -(value + 1) is a legal negation, then the +1 restores the
+  // magnitude in the unsigned domain.
+  const std::uint64_t magnitude = value < 0
+                                      ? static_cast<std::uint64_t>(-(value + 1)) + 1U
+                                      : static_cast<std::uint64_t>(value);
+  unsigned exponent = 0;  // floor(log2(magnitude)); >= 53 because the early return handles |v| <= 2^53
+  for (std::uint64_t probe = magnitude; probe > 1U; probe >>= 1U) {
+    ++exponent;
+  }
+  // The binary64 spacing at magnitude 2^e is 2^(e - 52), so the value is exact exactly when its low
+  // (e - 52) bits are zero. e is in [53, 63] here, so the shift is always in range for a 64-bit mask.
+  const unsigned dropped_bits = exponent - 52U;
+  return (magnitude & ((std::uint64_t{1} << dropped_bits) - 1U)) == 0U;
+}
+
+// The one decode rule for a double-valued field, exactly the rule the #225 DTO decoders apply
+// (`src/dto/numeric.cpp`, `market.cpp`, `result.cpp`): an integer node must be exactly representable as
+// binary64, a floating node is stored as-is. A non-exact integer is REFUSED at the field's own pointer
+// instead of being rounded, because the rounded value is not the number the document contains - and a
+// document carrying the fingerprint of the rounded value would then decode successfully while
+// reserialization changed the field. Kept as a file-local copy because the DTO modules deliberately
+// expose no shared floating-point codec.
+[[nodiscard]] double require_binary64_number(const CanonicalValue& node, const std::string& pointer) {
+  if (node.is_integer()) {
+    const std::int64_t raw = node.as_integer();
+    if (!integer_is_exactly_representable_as_binary64(raw)) {
+      dto::fail(dto::ContractViolationKind::kInvariantViolation, pointer,
+                "an integer-valued numeric field must be exactly representable as binary64; this "
+                "integer would be silently rounded, so the canonical field would not round-trip and "
+                "every identity derived from it would describe a different number");
+    }
+    return static_cast<double>(raw);
+  }
+  return node.as_double();
+}
+
 [[nodiscard]] const char* cache_state_token(dto::CacheState state) {
   return dto::enum_to_token(state);
 }
@@ -346,12 +391,13 @@ RuntimeTelemetry RuntimeTelemetry::from_canonical(const CanonicalValue& node,
                                   dto::pointer_child(phase_pointer, "phase_id"),
                                   "string phase id");
     const CanonicalValue& ms_node = phase_node.at("milliseconds", phase_pointer);
+    const std::string ms_pointer = dto::pointer_child(phase_pointer, "milliseconds");
     if (!ms_node.is_float() && !ms_node.is_integer()) {
-      dto::fail_wrong_type(dto::pointer_child(phase_pointer, "milliseconds"), "number",
-                           ms_node.type_name());
+      dto::fail_wrong_type(ms_pointer, "number", ms_node.type_name());
     }
-    phase.milliseconds = ms_node.is_float() ? ms_node.as_double()
-                                            : static_cast<double>(ms_node.as_integer());
+    // An elapsed-time value is a double-valued DTO field like any other: an integer token is admitted
+    // only when binary64 holds it exactly, so a rounded reading can never be reported as the reading.
+    phase.milliseconds = require_binary64_number(ms_node, ms_pointer);
     result.phases.push_back(std::move(phase));
   }
 

@@ -150,6 +150,23 @@ using Shiori::rates::dto::parse_canonical_json;
   return result;
 }
 
+// Replaces one phase's `milliseconds` token in an already-canonical document, so the only difference
+// from the encoded document is that one numeric token. A missing needle is a test bug and is reported
+// rather than silently returning the untampered text.
+[[nodiscard]] std::string with_phase_milliseconds_token(const std::string& json,
+                                                        const std::string& original_token,
+                                                        const std::string& replacement_token) {
+  const std::string needle = "\"milliseconds\":" + original_token;
+  const std::size_t position = json.find(needle);
+  if (position == std::string::npos) {
+    ADD_FAILURE() << "milliseconds token " << original_token << " is not present in " << json;
+    return json;
+  }
+  std::string result = json;
+  result.replace(position, needle.size(), "\"milliseconds\":" + replacement_token);
+  return result;
+}
+
 // Every document handed to this helper MUST be refused, so a missing refusal fails the test instead
 // of being folded into a sentinel that could be confused with a real refusal.
 [[nodiscard]] ContractViolation refusal_for_telemetry(const std::string& json) {
@@ -337,4 +354,72 @@ TEST(LaneBTelemetryInstrumentation, RefusesAV1DocumentThatOmitsEitherInstrumenta
   const ContractViolation empty_dependency_state = refusal_for_telemetry(emptied);
   EXPECT_EQ(empty_dependency_state.kind(), ContractViolationKind::kInvariantViolation);
   EXPECT_EQ(empty_dependency_state.pointer(), "/metadata/dependency_instrumentation");
+}
+
+// ------------------------------------------------------------------------------------------------
+// Phase timing exactness: `phases[i].milliseconds` is a double-valued DTO field like any other, so an
+// integer token is admitted only when binary64 holds it exactly. Before this rule an integer above
+// 2^53 was silently rounded, and a document carrying the fingerprint of the ROUNDED value validated
+// while reserialization changed the field.
+// ------------------------------------------------------------------------------------------------
+
+TEST(LaneBTelemetryPhaseTiming, KeepsAnExactlyRepresentableIntegerElapsedTime) {
+  RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  // 2^53 + 2 and 2^54 + 4 are integers binary64 holds exactly, so the canonical writer emits them as
+  // integer tokens and the decoder must read them back unchanged.
+  telemetry.phases[0].milliseconds = 9007199254740994.0;
+  PhaseTiming second;
+  second.phase_id = "price";
+  second.milliseconds = 18014398509481988.0;
+  telemetry.phases.push_back(second);
+  assign_derived_identities(telemetry);
+  const std::string encoded = telemetry.to_canonical().dump();
+
+  // The wire really does carry integer tokens, so the path under test is the integer decode path.
+  EXPECT_NE(encoded.find("\"milliseconds\":9007199254740994"), std::string::npos);
+  EXPECT_NE(encoded.find("\"milliseconds\":18014398509481988"), std::string::npos);
+
+  const RuntimeTelemetry decoded =
+      RuntimeTelemetry::from_canonical(parse_canonical_json(encoded), "");
+  ASSERT_EQ(decoded.phases.size(), 2U);
+  EXPECT_EQ(decoded.phases[0].milliseconds, 9007199254740994.0);
+  EXPECT_EQ(decoded.phases[1].milliseconds, 18014398509481988.0);
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded);
+}
+
+TEST(LaneBTelemetryPhaseTiming, RefusesANonExactIntegerElapsedTime) {
+  const RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  const std::string encoded = telemetry.to_canonical().dump();  // "milliseconds":0.125
+
+  // 2^53 + 1, 2^53 + 3, 2^54 + 1 and -(2^53 + 1) are all integers binary64 cannot hold exactly.
+  for (const std::string& token : {"9007199254740993", "9007199254740995", "18014398509481985",
+                                   "-9007199254740993"}) {
+    const ContractViolation violation =
+        refusal_for_telemetry(with_phase_milliseconds_token(encoded, "0.125", token));
+    // The field rule fires during decode, BEFORE the stale-content fence is reached: the refusal is
+    // attributed to the timing pointer and is not a fingerprint mismatch.
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation) << token;
+    EXPECT_EQ(violation.pointer(), "/phases/0/milliseconds") << token;
+  }
+}
+
+TEST(LaneBTelemetryPhaseTiming, RefusesANonExactIntegerElapsedTimeEvenWhenTheFingerprintMatches) {
+  // The dangerous case the rule exists for: the declared `content_fingerprint` is the fingerprint of the
+  // value a ROUNDING decoder would produce, so such a decoder would agree with the declared label and
+  // accept a document whose canonical field no longer round-trips.
+  RuntimeTelemetry telemetry = cli_lane_b_telemetry_with_identities();
+  telemetry.phases[0].milliseconds = 9007199254740992.0;  // 2^53, exactly representable
+  assign_derived_identities(telemetry);
+  const std::string encoded = telemetry.to_canonical().dump();
+
+  // The untampered document is consistent: its declared label is the fingerprint of the in-memory value,
+  // which is also what a rounding decoder would recompute for the forged token below.
+  const RuntimeTelemetry decoded =
+      RuntimeTelemetry::from_canonical(parse_canonical_json(encoded), "");
+  EXPECT_EQ(telemetry_content_fingerprint(decoded), telemetry.content_fingerprint);
+
+  const ContractViolation violation = refusal_for_telemetry(
+      with_phase_milliseconds_token(encoded, "9007199254740992", "9007199254740993"));
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/phases/0/milliseconds");
 }
