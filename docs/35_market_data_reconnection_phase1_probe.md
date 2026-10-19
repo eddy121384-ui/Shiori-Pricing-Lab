@@ -197,9 +197,12 @@ checkout's own `src/` on `sys.path` at import time, so they also run from a
 bare checkout — and they must, because the reused `bloomberg_dapi_probe`
 imports `shiori_pricing_lab` at module level. Without that bootstrap the CLI
 would die on an import traceback instead of printing the diagnostics in §4.
-Two tests guard it (`test_the_cli_starts_without_an_editable_install` in both
-test modules), with `PYTHONPATH` scrubbed so a developer's environment cannot
-mask a regression.
+One test per probe guards it, and it is written so it can actually fail: the
+subprocess removes the checkout's `src/` from `sys.path` first and then
+asserts the probe's own bootstrap puts it back. A plain `--help` smoke test
+cannot fail here, because the documented `pip install -e` makes the import
+succeed whether or not the bootstrap exists. `PYTHONPATH` is scrubbed too, so
+a developer's environment cannot mask a regression.
 
 ### 3.1 Stage A — connectivity and authorisation only (start here)
 
@@ -286,6 +289,16 @@ Each run prints a summary and writes two files into the output directory:
 
 ## 4. Failure diagnosis
 
+**Which failures leave a report.** Exit `0` always writes both report files, and
+so does exit `1`. The `1` case is the refused session — no Bloomberg service and
+no desktop session could be opened — and it still writes a report in which every
+item is `NOT_ESTABLISHED`, because that is the most likely first-run outcome and
+the per-service `open_error` is what §4.1 tells you to read. Exit `2` is a
+precondition failure — the SDK or the client package is not installed for the
+interpreter running the probe — and writes **no** report: there is nothing to
+record beyond the message already on stderr. Read the rows below that name an
+exit code from stderr rather than from a report file.
+
 ### 4.1 Bloomberg
 
 | Symptom in the report | Meaning | Action |
@@ -324,9 +337,47 @@ faked with module objects carrying real `ModuleSpec`s so
 .venv\Scripts\python -m pytest tests/test_bloomberg_swaption_vol_probe.py tests/test_lseg_swaption_vol_probe.py -q
 ```
 
-Float-free, deterministic: every timestamp is injected
-(`run_value_probes(..., clock=...)`, `market_data_probe_evidence.utc_now`),
-so no test reads the system clock.
+Float-free, deterministic: every timestamp is injected. The Bloomberg probe
+takes `run_value_probes(..., clock=...)`, and its default is resolved at call
+time from `market_data_probe_evidence.utc_now`, so monkeypatching that seam
+works; the LSEG probe is driven with fixed `fetched_at` values. No test reads
+the system clock.
+
+The two suites also guard the probes' own bootstrap and their no-leak guard:
+one test removes the checkout's `src/` from `sys.path` in a subprocess and
+asserts the probe's own bootstrap puts it back (a plain `--help` smoke test
+cannot fail here once the package is `pip install -e`'d), and one test feeds an
+operator-supplied `--ipa-param` value that the client echoes back in an error,
+then asserts the value is absent from the written report.
+
+### 5.1 One defect this phase found in the shared no-leak guard
+
+Both probes sanitize the *whole* report through
+`bloomberg_input_sourcing_probe.sanitize_external_text`'s tree wrapper, so
+Phase 1 also exercised that guard on report-shaped text — including the run's
+own timestamps. That surfaced a real false positive:
+`_HOST_PORT_PATTERN`'s host body admitted `-` and digits, so it matched the
+time-of-day inside every ISO-8601 instant and destroyed it.
+`2026-01-01T00:00:00Z` came out as `<redacted host>:00Z`, and
+`2026-07-28T00:00:01+00:00` as `<redacted host>:01+<redacted host>`.
+
+That is disqualifying for this phase specifically: deliverable #3 requires the
+report to carry the data date and the fetch time, and Bloomberg text such as
+`data as of 2026-01-01 09:30:00` was being mangled the same way. The pattern
+now requires a host to be a letter-initial name (`my-host`, `bbg-host.local`,
+`localhost`, `bbcomm.exe`) or a dotted-quad IPv4, so every host:port shape the
+guard's own regression tests use is still redacted while timestamps and clock
+times survive. Two regression tests were added to
+`tests/test_bloomberg_input_sourcing_probe.py`, and that file's existing 85
+tests still pass. Known narrow gap, accepted and commented in place: a
+digit-initial non-IPv4 hostname (`3com:8194`) is no longer caught by this
+pattern; bare IPv4 is still caught by its own pattern.
+
+This is a change to a shared file, so it is called out explicitly rather than
+buried. The edit is one regex plus a comment, it changes nothing under `src/`,
+and `tools/bloomberg_input_sourcing_probe.py` is the only existing file this PR
+modifies outside the four new probe/report files, their tests, and this
+document.
 
 ---
 
@@ -337,9 +388,19 @@ so no test reads the system clock.
 - No Black-76, no `PRICE_VOL` contract change, no vol conversion, no
   interpolation, no calibration, no auto-fill.
 - No SQLite schema change and no new persistence path.
-- Both probes import nothing from `shiori_pricing_lab.pricing` or
-  `shiori_pricing_lab.data`.
-- Neither probe assigns a verdict.
+- Neither probe *calls* anything under `shiori_pricing_lab.pricing` or
+  `shiori_pricing_lab.data`. Both do *import* production modules, because they
+  deliberately reuse the repository's existing probe helpers: the shared
+  evidence module reaches `bloomberg_dapi_probe`, which imports
+  `shiori_pricing_lab.data.bloomberg_bond_quote` at module level, and
+  `bloomberg_vcub_field_hunter` imports
+  `shiori_pricing_lab.app.standalone_option_workbench`. Loading those modules
+  changes no state; the guarantee Phase 1 needs is that no production
+  *behaviour* changes and that no module under `src/` imports either probe.
+- Neither probe assigns a verdict. Both encode that as a JSON `null`
+  (`verdict: null`, `verdict_assigned: false`), matching
+  `bloomberg_vcub_field_hunter`, so `"UNRESOLVED"` never reads as a reached
+  conclusion.
 
 ---
 

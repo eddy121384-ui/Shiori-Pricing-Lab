@@ -9,9 +9,25 @@ session, and what does the installed client actually offer?
 Bounded, read-only workstation diagnostic CLI -- **not** part of the
 production pricing, vol, ingestion or workbench path, and never imported by
 any of them. This run opens no SQLite database, writes no vol surface,
-changes no production field mapping, and reaches no Black-76 code. It calls
-no LSEG write/object-creation path (no UDF/formula/basket creation, no
-streaming subscription): it opens a session, reads, and closes it.
+changes no production field mapping, and calls no pricing entry point. It
+calls no LSEG write/object-creation path (no UDF/formula/basket creation, no
+streaming subscription).
+
+What "read-only" does *not* mean here, stated precisely because an auditor
+will rely on it. The probe calls the session opener, so it does not *close*
+a session the operator may already have open -- there is no unconditional
+``close_session`` call, because closing the workstation's own Workspace
+session is not this probe's business. And this file deliberately *reuses*
+the repository's probe helpers, so at *import* time it pulls in production
+modules: ``bloomberg_vcub_field_hunter`` imports
+``shiori_pricing_lab.app.standalone_option_workbench``, and the shared
+evidence module reaches ``bloomberg_dapi_probe``, which imports
+``shiori_pricing_lab.data.bloomberg_bond_quote`` at module level. Importing
+this probe therefore loads those modules; it never alters them and never
+calls a pricing, Black-76 or persistence entry point from them. The
+guarantee the phase actually needs -- no production behaviour changes, no
+module under ``src/`` importing this file, no schema or field map touched --
+holds.
 
 **Everything about the client is discovered, never assumed.** The library
 was renamed twice upstream and at least one official documentation example
@@ -85,11 +101,13 @@ runbook, the discovery route for obtaining a RIC, and the failure-diagnosis
 table.
 
 **Deliberately not in this file.** No verdict, no candidate ranking, no
-fuzzy label matching (an exact string match or ``NOT_FOUND``, never "the
+fuzzy label matching (an exact string match or a reported miss, never "the
 closest column"). No surface construction, interpolation, calibration, vol
-conversion, Black-76, auto-fill, persistence, or schema change. No import of
-anything under ``shiori_pricing_lab.pricing`` or
-``shiori_pricing_lab.data``.
+conversion, Black-76, auto-fill, persistence, or schema change. No *call*
+into anything under ``shiori_pricing_lab.pricing`` or
+``shiori_pricing_lab.data`` -- those modules are still *imported*
+transitively by the reused helpers, which is a cost of reuse and not a
+licence to call them.
 """
 
 from __future__ import annotations
@@ -100,6 +118,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import math
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -115,6 +134,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bloomberg_input_sourcing_probe import sanitize_external_text  # noqa: E402
 from market_data_probe_evidence import (  # noqa: E402
+    AppliedOverride,
     AuthorizationStatus,
     EvidenceClass,
     ReportItem,
@@ -245,6 +265,80 @@ class LabelLookup:
     matched: bool
     value: str | None
     available_labels: tuple[str, ...] = field(default_factory=tuple)
+    #: Why the lookup did not match. Kept out of ``available_labels`` so that
+    #: field means only one thing -- the labels the table really carries --
+    #: and a report consumer keying on labels never receives prose.
+    note: str | None = None
+
+
+#: Substrings the client's own reported ``open_state`` uses when it is *not*
+#: open. Only used to downgrade a claim, never to upgrade one: a state this
+#: probe does not recognise stays "the opener returned without raising", which
+#: is exactly what this run observed.
+_CLOSED_STATE_MARKERS = (
+    "closed",
+    "disconnect",
+    "expired",
+    "not open",
+    "no default session",
+)
+
+
+def _open_state_says_closed(open_state: str | None) -> bool:
+    if not open_state:
+        return False
+    text = open_state.lower()
+    return any(marker in text for marker in _CLOSED_STATE_MARKERS)
+
+
+def _session_established(session: SessionOutcome) -> bool:
+    """Whether this run established a session, as the client itself reports it.
+
+    Three distinct ways this is false, and all three must be treated as
+    false: no opener was found (``attempted`` is False), the opener raised, or
+    the opener returned but the client's own ``open_state`` says the session is
+    not open. Reporting "a session was established" for the third case would
+    be the probe asserting something the client contradicts.
+    """
+
+    if not session.attempted or session.error_code or session.error_message:
+        return False
+    return not _open_state_says_closed(session.open_state)
+
+
+def _is_finite_number(value) -> bool:
+    """Whether a located cell carries a real magnitude.
+
+    ``NaN`` is the normal way a vendor table says "this pillar is empty", and
+    it is not a value: ``str(nan)`` is ``'nan'``, which would otherwise be
+    reported as a matched pillar.
+    """
+
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        # Not a number at all (a date, a string) -- still a real cell content,
+        # so it counts as populated. Only None and non-finite floats do not.
+        return not isinstance(value, float)
+
+
+def _returned_a_value(snapshot: TableSnapshot) -> bool:
+    """Whether this read produced a vendor value worth calling evidence.
+
+    Deliberately stricter than "the client did not raise". A vendor table with
+    zero cells is the routine answer for a RIC/field pair that yields nothing,
+    and a response this probe could not read is a probe limitation -- neither
+    is a returned value, so neither may promote the phase's `value` or
+    `authorization` items to ``VENDOR_RETURNED``.
+    """
+
+    if snapshot.error_code or snapshot.error_message:
+        return False
+    if snapshot.shape is None or snapshot.shape[0] <= 0 or snapshot.shape[1] <= 0:
+        return False
+    return not any("__preview_unavailable__" in row for row in snapshot.preview)
 
 
 def discover_client_modules(candidate_names: tuple[str, ...]) -> tuple[ClientModule, ...]:
@@ -429,14 +523,18 @@ def _safe_signature(callable_object) -> str | None:
 
 
 def _volatility_type_members(enum_module) -> tuple[str, ...]:
-    """Every enum member the installed package publishes about volatility type.
+    """Every member of every volatility-named enum the installed package publishes.
 
-    Reported as ``EnumClass.member -> value`` strings for *every* enum class
-    in the candidate enum modules that has a member whose name mentions
-    volatility, together with any class named for volatility type. The
-    member is never selected here: upstream has more than one
-    volatility-type enum with different meanings, and only a human (or a
-    later, separately-approved phase) may decide which applies.
+    Reported as ``EnumClass.member -> value`` strings. The **class** name is
+    what decides inclusion, not the member name: an enum called
+    ``VolatilityType`` whose members are ``NORMAL`` / ``LOG_NORMAL`` is exactly
+    the thing this phase needs, and filtering on member names would have
+    dropped it and reported that the package publishes no such enum.
+
+    Only members the package actually publishes appear here. When a
+    volatility-named class yields nothing, it is reported in ``notes`` by the
+    caller instead -- this function never puts probe-authored text into a list
+    the report labels as vendor-returned evidence.
     """
 
     found: list[str] = []
@@ -448,26 +546,22 @@ def _volatility_type_members(enum_module) -> tuple[str, ...]:
     for name in names:
         if name.startswith("_"):
             continue
+        if "volatil" not in name.lower():
+            continue
         candidate = getattr(enum_module, name, None)
         if not inspect.isclass(candidate):
             continue
         try:
             members = list(candidate)
         except TypeError:
+            # A volatility-named class that is not an iterable enum (a plain
+            # class, or an alias). Nothing published to report.
             continue
-        rendered: list[str] = []
         for member in members:
             member_name = getattr(member, "name", None)
             if not isinstance(member_name, str):
                 continue
-            if "volatil" not in member_name.lower():
-                continue
-            rendered.append(f"{name}.{member_name} -> {getattr(member, 'value', None)!r}")
-        if rendered:
-            found.extend(rendered)
-
-        if "volatilitytype" in name.lower() and not rendered:
-            found.append(f"{name} -> <no volatility-named members found>")
+            found.append(f"{name}.{member_name} -> {getattr(member, 'value', None)!r}")
 
     return tuple(dict.fromkeys(found))
 
@@ -565,7 +659,24 @@ def discover_surface_capability(client_module_name: str | None) -> SurfaceCapabi
             notes.append(sanitize_external_text(f"{module_path}: {type(exc).__name__}: {exc}"))
             continue
         enum_modules_found.append(module_path)
-        volatility_type_members.extend(_volatility_type_members(enum_module))
+        members = _volatility_type_members(enum_module)
+        volatility_type_members.extend(members)
+        if not members:
+            # Reported as a probe note, not as a vendor-returned member: the
+            # package published nothing here, and probe-authored text must not
+            # appear in an item the report labels VENDOR_RETURNED.
+            volatility_named = sorted(
+                name
+                for name in dir(enum_module)
+                if not name.startswith("_")
+                and "volatil" in name.lower()
+                and inspect.isclass(getattr(enum_module, name, None))
+            )
+            if volatility_named:
+                notes.append(
+                    f"{module_path}: volatility-named classes {volatility_named} expose no "
+                    "enumerable members to this probe"
+                )
 
     return SurfaceCapability(
         client_module=client_module_name,
@@ -620,6 +731,13 @@ def _read_table(
     tenor_label: str | None = None,
 ) -> tuple[TableSnapshot, LabelLookup | None]:
     """One ``get_data``-shaped read, reporting the client's own error verbatim.
+
+    ``get_data(universe=..., fields=...)`` is the shape this probe *attempts*,
+    not a shape it verified: the installed client's real signature is the
+    thing being learned, and a client that spells these differently raises --
+    which is recorded below as a finding rather than papered over. Nothing
+    here inspects the signature first, because that would require deciding in
+    advance which keyword names count as "the same" call.
 
     Returns the bounded snapshot and, when the operator named a coordinate,
     the exact-label lookup performed against *this same* returned frame. The
@@ -708,18 +826,45 @@ def _lookup_label(frame, expiry_label: str | None, tenor_label: str | None) -> L
 
     available: list[str] = []
     try:
-        index_labels = {str(label): label for label in frame.index}
-        column_labels = {str(column): column for column in frame.columns}
+        index_labels = [str(label) for label in frame.index]
+        column_labels = [str(column) for column in frame.columns]
         available = sorted(set(index_labels) | set(column_labels))
 
-        # Orientation is not assumed: the declared pair may be (index, column)
-        # or (column, index), and both are tried. Neither is preferred --
-        # if both resolve, the value must agree or the lookup is ambiguous.
+        # A duplicate label cannot be located unambiguously: two columns both
+        # named "5Y" give a Series, not a pillar. Reported rather than
+        # stringified into a "matched" value.
+        duplicate_index = len(index_labels) != len(set(index_labels))
+        duplicate_columns = len(column_labels) != len(set(column_labels))
+        if duplicate_index or duplicate_columns:
+            return LabelLookup(
+                source="get_data",
+                expiry_label=expiry_label,
+                tenor_label=tenor_label,
+                matched=False,
+                value=None,
+                available_labels=tuple(available[: MAX_PREVIEW_COLUMNS * 2]),
+                note=(
+                    "DUPLICATE LABELS: this table repeats "
+                    f"{'index' if duplicate_index else 'column'} labels, so no single pillar can "
+                    "be identified from a name alone"
+                ),
+            )
+
+        index_positions = {label: position for position, label in enumerate(index_labels)}
+        column_positions = {label: position for position, label in enumerate(column_labels)}
+
+        # Orientation is not assumed: the declared pair may be (row, column) or
+        # (column, row), and both are tried. Neither is preferred -- if both
+        # resolve, the value must agree or the lookup is ambiguous.
         candidates: list[object] = []
-        if expiry_label in index_labels and tenor_label in column_labels:
-            candidates.append(frame.loc[index_labels[expiry_label], column_labels[tenor_label]])
-        if tenor_label in index_labels and expiry_label in column_labels:
-            candidates.append(frame.loc[index_labels[tenor_label], column_labels[expiry_label]])
+        if expiry_label in index_positions and tenor_label in column_positions:
+            candidates.append(
+                frame.iat[index_positions[expiry_label], column_positions[tenor_label]]
+            )
+        if tenor_label in index_positions and expiry_label in column_positions:
+            candidates.append(
+                frame.iat[index_positions[tenor_label], column_positions[expiry_label]]
+            )
         if not candidates:
             return LabelLookup(
                 source="get_data",
@@ -727,7 +872,30 @@ def _lookup_label(frame, expiry_label: str | None, tenor_label: str | None) -> L
                 tenor_label=tenor_label,
                 matched=False,
                 value=None,
-                available_labels=tuple(available[:MAX_PREVIEW_COLUMNS * 2]),
+                available_labels=tuple(available[: MAX_PREVIEW_COLUMNS * 2]),
+                note=(
+                    "NOT_FOUND: no label in this table exactly matches the declared coordinate; "
+                    "the labels it does carry are listed. No nearest-looking label was used."
+                    + (f" (labels truncated to {MAX_PREVIEW_COLUMNS * 2})"
+                       if len(available) > MAX_PREVIEW_COLUMNS * 2 else "")
+                ),
+            )
+
+        # A pillar the vendor left empty (NaN/None) carries no value, so a
+        # lookup that found the right cell must not report "nan" as the answer.
+        unpopulated = [candidate for candidate in candidates if not _is_finite_number(candidate)]
+        if unpopulated:
+            return LabelLookup(
+                source="get_data",
+                expiry_label=expiry_label,
+                tenor_label=tenor_label,
+                matched=False,
+                value=None,
+                available_labels=(),
+                note=(
+                    "FOUND BUT EMPTY: the declared coordinate resolves to a cell this table "
+                    "leaves unpopulated (NaN/None), so it carries no observed value"
+                ),
             )
 
         rendered = {str(candidate) for candidate in candidates}
@@ -738,8 +906,10 @@ def _lookup_label(frame, expiry_label: str | None, tenor_label: str | None) -> L
                 tenor_label=tenor_label,
                 matched=False,
                 value=None,
-                available_labels=(
-                    f"AMBIGUOUS: both orientations resolved and disagree: {sorted(rendered)}",
+                available_labels=(),
+                note=(
+                    "AMBIGUOUS: both orientations resolved and disagree: "
+                    f"{sorted(rendered)}; neither is presented as the answer"
                 ),
             )
         return LabelLookup(
@@ -757,7 +927,11 @@ def _lookup_label(frame, expiry_label: str | None, tenor_label: str | None) -> L
             tenor_label=tenor_label,
             matched=False,
             value=None,
-            available_labels=(sanitize_external_text(f"{type(exc).__name__}: {exc}"),),
+            available_labels=(),
+            note=sanitize_external_text(
+                f"the lookup failed internally ({type(exc).__name__}: {exc}); this is a probe "
+                "failure, not a NOT_FOUND from the vendor"
+            ),
         )
 
 
@@ -791,7 +965,15 @@ def run_surface_probe(
         return None
 
     fetched_at = utc_now()
-    source = f"{capability.definition_callable}(**operator_supplied)"
+    # The exact call this run sent, name by name -- not a placeholder. The
+    # values are sanitized below like every other field, so an operator-supplied
+    # value that the guard knows about is redacted while the parameter *names*
+    # survive as the provenance record.
+    source = (
+        f"{capability.definition_callable}("
+        + ", ".join(f"{name}={value}" for name, value in parameters)
+        + ")"
+    )
     kwargs = dict(parameters)
     try:
         result = definition(**kwargs)
@@ -812,6 +994,7 @@ def run_surface_probe(
 
     frame = _extract_frame(result)
     if frame is None:
+        rendered_repr = sanitize_external_text(repr(result))
         return (
             TableSnapshot(
                 source=source,
@@ -822,7 +1005,9 @@ def run_surface_probe(
                 error_message=(
                     "the surface definition returned an object this probe cannot read as a "
                     "table; its repr is reported instead of guessing an accessor: "
-                    + sanitize_external_text(repr(result))[:500]
+                    + rendered_repr[:500]
+                    + (f" [truncated at 500 of {len(rendered_repr)} characters]" 
+                       if len(rendered_repr) > 500 else "")
                 ),
                 fetched_at=fetched_at,
             ),
@@ -883,9 +1068,12 @@ def build_report_items(
 ) -> tuple[ReportItem, ...]:
     """The phase's report items for the LSEG route, with the evidence behind each."""
 
-    session_established = session.attempted and not session.error_code and not session.error_message
+    session_established = _session_established(session)
+    # A read counts as vendor evidence only if it actually carries cells --
+    # see `_returned_a_value`. An empty table and an unreadable response are
+    # both non-answers, and neither may promote an item to VENDOR_RETURNED.
     successful_reads = tuple(
-        snapshot for snapshot in snapshots if not snapshot.error_code and not snapshot.error_message
+        snapshot for snapshot in snapshots if _returned_a_value(snapshot)
     )
     if successful_reads:
         authorization_state = AuthorizationStatus.FIELD_LEVEL_OBSERVED
@@ -894,7 +1082,13 @@ def build_report_items(
     else:
         authorization_state = AuthorizationStatus.NOT_ESTABLISHED
 
-    if session_established:
+    if successful_reads and not session_established:
+        authorization_detail = (
+            f"status={authorization_state.value}. A read is reported below, but this run "
+            "established no session, so the probe cannot say what authorised it; treat the "
+            "read as unattributed rather than as field-level entitlement."
+        )
+    elif session_established:
         authorization_detail = (
             f"status={authorization_state.value}. A returned field is the only per-field "
             "entitlement evidence; a refused field is reported with the client's own error "
@@ -929,9 +1123,11 @@ def build_report_items(
         ),
         ReportItem(
             item="authorization",
+            # Both halves are required: a value the vendor returned *and* a
+            # session this run actually opened to return it through.
             evidence_class=(
                 EvidenceClass.VENDOR_RETURNED
-                if successful_reads
+                if successful_reads and session_established
                 else EvidenceClass.NOT_ESTABLISHED
             ),
             detail=authorization_detail,
@@ -942,13 +1138,19 @@ def build_report_items(
                 EvidenceClass.VENDOR_RETURNED if successful_reads else EvidenceClass.NOT_ESTABLISHED
             ),
             detail=(
-                f"{len(successful_reads)} read(s) returned a table; each snapshot in "
+                f"{len(successful_reads)} read(s) returned a non-empty table; each snapshot in "
                 "table_snapshots carries a bounded preview, its shape and its labels."
                 if successful_reads
                 else (
-                    "no read returned a table."
-                    if attempted_value_probe
-                    else "no candidate was supplied, so no value was requested."
+                    "no read returned a usable table: either nothing was returned, the returned "
+                    "table had no cells, or the response could not be read as a table. See "
+                    "table_snapshots for which, with the client's own error where there was one."
+                    if snapshots
+                    else (
+                        "no read was attempted."
+                        if attempted_value_probe
+                        else "no candidate was supplied, so no value was requested."
+                    )
                 )
             ),
         ),
@@ -1026,9 +1228,11 @@ def build_report(
     *,
     attempted_value_probe: bool,
     generated_at: str,
+    applied_overrides: tuple[AppliedOverride, ...] = (),
 ) -> dict:
     """Assemble the whole run into one sanitized, JSON-serializable record."""
 
+    applied = applied_overrides
     fetched_at = snapshots[-1].fetched_at if snapshots else generated_at
     items = build_report_items(
         session,
@@ -1039,7 +1243,7 @@ def build_report(
         fetched_at=fetched_at,
     )
 
-    return {
+    payload = {
         "probe": PROBE_NAME,
         "probe_version": PROBE_VERSION,
         "phase": PHASE,
@@ -1053,16 +1257,24 @@ def build_report(
         "table_snapshots": [sanitize_tree(asdict(item)) for item in snapshots],
         "label_lookups": [sanitize_tree(asdict(item)) for item in lookups],
         "required_report_items": items_to_dict(items),
-        "verdict": "UNRESOLVED",
+        "verdict": None,
+        "verdict_assigned": False,
         "verdict_note": (
-            "This probe assigns no verdict. It reports what the installed client exposes and "
-            "what any operator-supplied read returned. Whether that constitutes a usable route "
-            "to a USD swaption normal vol is Eddy's judgment on this report. A returned value "
-            "is evidence of a value only -- the report deliberately does not label it a normal "
-            "vol in bp, because that is a claim about the field's meaning that no returned "
-            "number can settle (Annex A.8.1)."
+            "This probe assigns no verdict, and encodes that the same way the sibling tool "
+            "does: verdict is null. It reports what the installed client exposes and what any "
+            "operator-supplied read returned. Whether that constitutes a usable route to a USD "
+            "swaption normal vol is Eddy's judgment on this report. A returned value is evidence "
+            "of a value only -- the report deliberately does not label it a normal vol in bp, "
+            "because that is a claim about the field's meaning that no returned number can "
+            "settle (Annex A.8.1)."
         ),
     }
+
+    # One last pass over the *whole* payload, with this run's operator inputs
+    # registered as overrides first: `required_report_items` and the capability
+    # block carry vendor-published text and the declared coordinate carries
+    # operator input, none of which the per-block guards above cover.
+    return sanitize_tree(payload, applied)
 
 
 def render_markdown(data: dict) -> str:
@@ -1071,7 +1283,8 @@ def render_markdown(data: dict) -> str:
         "",
         f"- generated_at: {data['generated_at']}",
         f"- read_only: {data['read_only']}",
-        f"- verdict: **{data['verdict']}**",
+        f"- verdict: {json.dumps(data['verdict'])} (verdict_assigned: "
+        f"{json.dumps(data['verdict_assigned'])}) -- this probe assigns no verdict",
         "",
         "## Client modules on this interpreter",
         "",
@@ -1139,7 +1352,8 @@ def render_markdown(data: dict) -> str:
             lines.append(
                 f"- {lookup['source']}: expiry={lookup['expiry_label']!r} "
                 f"tenor={lookup['tenor_label']!r} matched={lookup['matched']} "
-                f"value={lookup['value']} available={lookup['available_labels']}"
+                f"value={lookup['value']} available={lookup['available_labels']} "
+                f"note={lookup['note']}"
             )
     else:
         lines.append("- no label lookup was requested")
@@ -1260,12 +1474,46 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _reject_duplicate_parameter_names(parameters: tuple[tuple[str, str], ...]) -> None:
+    """Refuse a repeated ``--ipa-param`` name rather than silently keeping the last.
+
+    ``dict(parameters)`` would drop the earlier value without a word, and the
+    report's provenance line would then show a call this run never made.
+    """
+
+    seen: list[str] = []
+    for name, _value in parameters:
+        if name in seen:
+            raise SystemExit(
+                f"error: --ipa-param {name} was supplied more than once; this probe will not "
+                "guess which value you meant"
+            )
+        seen.append(name)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
     rics = tuple(args.ric) if args.ric else ()
     fields = tuple(args.field) if args.field else ()
     ipa_parameters = tuple(args.ipa_param) if args.ipa_param else ()
+
+    _reject_duplicate_parameter_names(ipa_parameters)
+
+    # The operator-supplied surface parameters are registered as overrides, so
+    # the no-leak guard scrubs them if the client echoes them back: an
+    # `--ipa-param` value is operator input that can hold a proxy or app
+    # credential, and without this it would be scrubbed only when it happened to
+    # match the guard's credential-shaped pattern.
+    #
+    # Deliberately *not* `--ric`/`--field`: a RIC is a market identifier the
+    # operator typed on his own command line, not a secret, and registering a
+    # short token like `1Y` as an override value would redact that string
+    # everywhere it legitimately appears in the report.
+    applied_overrides = tuple(
+        AppliedOverride(field=name, value=value, source="user_supplied")
+        for name, value in ipa_parameters
+    )
 
     coordinate = TargetCoordinate(
         expiry=args.expiry,
@@ -1372,7 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"  shape={surface_snapshot.shape} "
                         f"columns={surface_snapshot.columns}"
                     )
-        elif not rics:
+        elif not ipa_parameters:
             print("no --ipa-param supplied, so the surface definition was not called; "
                   "its real parameter names are in the report's definition_signature")
 
@@ -1385,11 +1633,12 @@ def main(argv: list[str] | None = None) -> int:
         tuple(lookups),
         attempted_value_probe=bool(rics and fields) or bool(ipa_parameters),
         generated_at=generated_at,
+        applied_overrides=applied_overrides,
     )
     json_path, markdown_path = write_report(data, Path(args.output_dir))
 
     print("")
-    print(f"verdict: {data['verdict']} (this probe assigns none -- see the report)")
+    print(f"verdict: {json.dumps(data['verdict'])} (this probe assigns none -- see the report)")
     print(f"wrote {json_path}")
     print(f"wrote {markdown_path}")
     print(

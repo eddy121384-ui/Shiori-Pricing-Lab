@@ -393,7 +393,57 @@ def test_ambiguous_label_orientation_is_refused_rather_than_picked(monkeypatch):
     assert lookup is not None
     assert lookup.matched is False
     assert lookup.value is None
-    assert any("AMBIGUOUS" in label for label in lookup.available_labels)
+    assert "AMBIGUOUS" in (lookup.note or "")
+    assert lookup.available_labels == ()
+
+
+def test_duplicate_labels_are_refused_rather_than_collapsed(monkeypatch):
+    """Two columns sharing a name cannot name one pillar."""
+
+    duplicated = pd.DataFrame(
+        [[1.0, 2.0], [3.0, 4.0]], index=["5Y", "10Y"], columns=["1Y", "1Y"]
+    )
+    client = _install_fake_client(monkeypatch, get_data=lambda universe, fields: duplicated)
+
+    _snapshot, lookup = module._read_table(  # noqa: SLF001
+        client, universe=["R"], fields=["F"], expiry_label="1Y", tenor_label="5Y",
+    )
+
+    assert lookup is not None
+    assert lookup.matched is False
+    assert lookup.value is None
+    assert "DUPLICATE LABELS" in (lookup.note or "")
+
+
+def test_an_empty_pillar_is_not_a_matched_value(monkeypatch):
+    """NaN is how a vendor table says 'no value here', and 'nan' is not an answer."""
+
+    sparse = pd.DataFrame({"1Y": [float("nan")]}, index=["5Y"])
+    client = _install_fake_client(monkeypatch, get_data=lambda universe, fields: sparse)
+
+    _snapshot, lookup = module._read_table(  # noqa: SLF001
+        client, universe=["R"], fields=["F"], expiry_label="1Y", tenor_label="5Y",
+    )
+
+    assert lookup is not None
+    assert lookup.matched is False
+    assert lookup.value is None
+    assert "FOUND BUT EMPTY" in (lookup.note or "")
+
+
+def test_a_non_numeric_pillar_is_still_a_value(monkeypatch):
+    """Only None/non-finite floats are non-values -- a date or string is real content."""
+
+    dated = pd.DataFrame({"1Y": ["2026-01-01"]}, index=["5Y"])
+    client = _install_fake_client(monkeypatch, get_data=lambda universe, fields: dated)
+
+    _snapshot, lookup = module._read_table(  # noqa: SLF001
+        client, universe=["R"], fields=["F"], expiry_label="1Y", tenor_label="5Y",
+    )
+
+    assert lookup is not None
+    assert lookup.matched is True
+    assert lookup.value == "2026-01-01"
 
 
 def test_a_client_error_on_get_data_is_reported_not_raised(monkeypatch):
@@ -605,7 +655,10 @@ def test_report_declares_itself_read_only_and_assigns_no_verdict():
 
     assert report["read_only"] is True
     assert report["production_paths_touched"] == []
-    assert report["verdict"] == "UNRESOLVED"
+    # The no-verdict encoding the sibling tool established is a JSON null, not
+    # the string "UNRESOLVED".
+    assert report["verdict"] is None
+    assert report["verdict_assigned"] is False
     assert report["phase"] == "MARKET_DATA_RECONNECTION_PHASE_1"
     json.dumps(report)
 
@@ -753,6 +806,282 @@ def test_label_lookup_dataclass_is_constructible_empty():
     )
 
     assert lookup.available_labels == ()
+    assert lookup.note is None
+
+
+# --------------------------------------------------------------------------
+# Classification: what counts as a session, and what counts as a value
+# --------------------------------------------------------------------------
+
+
+def test_a_client_that_never_reports_an_open_state_is_still_established():
+    """Only a state the client *contradicts* downgrades the claim."""
+
+    session = SessionOutcome(
+        attempted=True,
+        entry_point="open_session",
+        open_state=None,
+        error_code=None,
+        error_message=None,
+        session_object="lseg.data (imported)",
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            session,
+            _capability(),
+            TargetCoordinate(),
+            (),
+            attempted_value_probe=False,
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert items["connection"].evidence_class is EvidenceClass.PROBE_OBSERVED
+
+
+def test_a_closed_open_state_is_not_an_established_session():
+    """The client's own state says closed -- so the probe must not claim open."""
+
+    session = SessionOutcome(
+        attempted=True,
+        entry_point="open_session",
+        open_state="OpenState.Closed",
+        error_code=None,
+        error_message=None,
+        session_object="lseg.data (imported)",
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            session,
+            _capability(),
+            TargetCoordinate(),
+            (),
+            attempted_value_probe=False,
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert items["connection"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert "no desktop session was established" in items["connection"].detail
+    assert items["authorization"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert "SERVICE_LEVEL_ONLY" not in items["authorization"].detail
+
+
+def test_a_read_without_a_session_is_unattributed_not_vendor_entitlement():
+    """`get_data` can work with no `open_session` shape -- that is not entitlement."""
+
+    session = SessionOutcome(
+        attempted=False,
+        entry_point=None,
+        open_state=None,
+        error_code=None,
+        error_message="no open_session-shaped entry point",
+        session_object=None,
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            session,
+            _capability(),
+            TargetCoordinate(),
+            (_snapshot(),),
+            attempted_value_probe=True,
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    # The value itself is still vendor-returned; the *entitlement* claim is not.
+    assert items["value"].evidence_class is EvidenceClass.VENDOR_RETURNED
+    assert items["authorization"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert "unattributed" in items["authorization"].detail
+
+
+def test_an_empty_table_is_not_a_returned_value():
+    empty = TableSnapshot(
+        source="get_data",
+        shape=(0, 0),
+        columns=(),
+        row_labels=(),
+        preview=(),
+        fetched_at="2026-01-01T00:00:00Z",
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            _session_outcome(),
+            _capability(),
+            TargetCoordinate(),
+            (empty,),
+            attempted_value_probe=True,
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert items["value"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert items["authorization"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert "SERVICE_LEVEL_ONLY" in items["authorization"].detail
+
+
+def test_an_unreadable_response_is_not_a_returned_value():
+    unreadable = TableSnapshot(
+        source="get_data",
+        shape=(2, 3),
+        columns=("a",),
+        row_labels=("b",),
+        preview=({"__preview_unavailable__": "AttributeError: no df"},),
+        fetched_at="2026-01-01T00:00:00Z",
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            _session_outcome(),
+            _capability(),
+            TargetCoordinate(),
+            (unreadable,),
+            attempted_value_probe=True,
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert items["value"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert items["authorization"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+
+
+def test_probe_authored_prose_is_not_in_a_vendor_returned_item():
+    """An empty member list means no item at all -- not an item full of our prose."""
+
+    capability = SurfaceCapability(
+        client_module=_CLIENT,
+        candidate_module_paths=(_SURFACE_MODULE,),
+        available_module=_SURFACE_MODULE,
+        definition_callable=None,
+        definition_signature=None,
+        enum_modules_found=(_ENUM_MODULE,),
+        volatility_type_members=(),
+        discovery_callables=(),
+        notes=("no volatility members published",),
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            _session_outcome(),
+            capability,
+            TargetCoordinate(),
+            (),
+            attempted_value_probe=False,
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert "client_published_volatility_types" not in items
+    assert "no volatility members published" in capability.notes
+
+
+def test_a_volatility_named_enum_with_plain_members_is_reported(monkeypatch):
+    """The members are what matters; filtering on member *names* dropped NORMAL."""
+
+    class VolatilityType(enum.Enum):
+        NORMAL = "NormalVolatility"
+        LOG_NORMAL = "LogNormalVolatility"
+
+    enum_module = _install_module(monkeypatch, "enum_shape_case", VolatilityType=VolatilityType)
+
+    members = module._volatility_type_members(enum_module)  # noqa: SLF001
+
+    assert "VolatilityType.NORMAL -> 'NormalVolatility'" in members
+    assert len(members) == 2
+
+
+def test_an_enum_with_no_members_is_reported_as_a_note_not_a_member(monkeypatch):
+    """A volatility-named class with nothing to enumerate must not fabricate a member."""
+
+    class VolatilityType:
+        pass
+
+    _install_module(monkeypatch, _SURFACE_MODULE, Definition=lambda **kwargs: None)
+    _install_module(monkeypatch, _ENUM_MODULE, VolatilityType=VolatilityType)
+    _install_fake_client(monkeypatch)
+
+    capability = discover_surface_capability(_CLIENT)
+
+    assert capability.volatility_type_members == ()
+    assert any("expose no enumerable members" in note for note in capability.notes)
+
+
+def _install_callable_surface(monkeypatch, definition) -> None:
+    """Register a surface module whose `Definition` is really called by the probe."""
+
+    _install_module(monkeypatch, "lseg.content.ipa.surfaces.swaption", Definition=definition)
+    monkeypatch.setattr(
+        module, "CANDIDATE_SURFACE_MODULES", ("lseg.content.ipa.surfaces.swaption",)
+    )
+
+
+def test_a_parameter_value_the_operator_sent_is_scrubbed_from_the_report(monkeypatch, tmp_path):
+    """A `--ipa-param` value is operator input; the no-leak guard must know it."""
+
+    def _definition(**kwargs):
+        raise RuntimeError(f"could not authenticate proxy_secret={kwargs['proxy_secret']}")
+
+    _install_callable_surface(monkeypatch, _definition)
+    _install_fake_client(monkeypatch, open_session=lambda: None)
+
+    assert main(
+        [
+            "--ipa-param",
+            "proxy_secret=SUPER-SECRET-THING",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    ) == 0
+
+    text = (tmp_path / "lseg_swaption_vol_probe.json").read_text("utf-8")
+    assert "SUPER-SECRET-THING" not in text
+    assert "proxy_secret" in text
+
+
+def test_a_duplicate_ipa_parameter_name_is_refused(monkeypatch, tmp_path):
+    _install_fake_client(monkeypatch, open_session=lambda: None)
+
+    with pytest.raises(SystemExit, match="more than once"):
+        main(
+            [
+                "--ipa-param",
+                "name=first",
+                "--ipa-param",
+                "name=second",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+
+
+def test_the_report_records_which_parameters_were_actually_sent(monkeypatch, tmp_path):
+    """Names survive as provenance; the value is scrubbed because it is operator input."""
+
+    def _definition(**kwargs):
+        return pd.DataFrame({"1Y": [1.0]}, index=["5Y"])
+
+    _install_callable_surface(monkeypatch, _definition)
+    _install_fake_client(monkeypatch, open_session=lambda: None)
+
+    assert main(
+        [
+            "--ipa-param",
+            "attr_name=NormalVolatility",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    ) == 0
+
+    report = json.loads((tmp_path / "lseg_swaption_vol_probe.json").read_text("utf-8"))
+    sources = [snapshot["source"] for snapshot in report["table_snapshots"]]
+    assert sources, "the call must be recorded even when its value is scrubbed"
+    assert "attr_name=" in sources[0]
+    assert "NormalVolatility" not in sources[0]
+    assert report["required_report_items"][2]["evidence_class"] == "VENDOR_RETURNED"
 
 
 @pytest.mark.parametrize("raw", ["NOVALUE", "=VALUE"])

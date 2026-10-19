@@ -641,8 +641,114 @@ def test_built_report_declares_itself_read_only_and_assigns_no_verdict():
 
     assert report["read_only"] is True
     assert report["production_paths_touched"] == []
-    assert report["verdict"] == "UNRESOLVED"
+    # The no-verdict encoding the sibling tool established is a JSON null, not
+    # the string "UNRESOLVED": a string reads as a verdict that was reached.
+    assert report["verdict"] is None
+    assert report["verdict_assigned"] is False
     assert report["phase"] == "MARKET_DATA_RECONNECTION_PHASE_1"
+
+
+def test_a_request_error_only_batch_stays_at_service_level_authorization():
+    """A failed envelope answered nothing about the field, so it is not field evidence."""
+
+    unanswered = (
+        ValueProbeRecord(
+            security="OPERATOR-SUPPLIED-TICKER",
+            field="OPERATOR_SUPPLIED_FIELD",
+            overrides=(),
+            status="request_error",
+            value=None,
+            detail="securityError: INVALID_SECURITY",
+            fetched_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            _session(),
+            TargetCoordinate(),
+            unanswered,
+            (),
+            fetched_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    assert items["authorization"].evidence_class is EvidenceClass.VENDOR_RETURNED
+    assert "SERVICE_LEVEL_ONLY" in items["authorization"].detail
+    assert "FIELD_LEVEL_OBSERVED" not in items["authorization"].detail
+    assert items["value"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+
+
+def test_an_empty_returned_string_is_not_a_value():
+    empty = (
+        ValueProbeRecord(
+            security="OPERATOR-SUPPLIED-TICKER",
+            field="OPERATOR_SUPPLIED_FIELD",
+            overrides=(),
+            status="returned",
+            value="",
+            detail=None,
+            fetched_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+    items = _items_by_name(
+        build_report_items(
+            _session(), TargetCoordinate(), empty, (), fetched_at="2026-01-01T00:00:00Z"
+        )
+    )
+
+    assert items["value"].evidence_class is EvidenceClass.NOT_ESTABLISHED
+    assert "no probed cell returned a value" in items["value"].detail
+
+
+def test_documented_overrides_are_read_from_the_real_expansion_shape():
+    """The reused helper's `build_report` dict, not a guessed key pattern."""
+
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class _Discovery:
+        documentation_expansion: dict
+
+    discovery = _Discovery(
+        documentation_expansion={
+            "primary_fields": ["OPERATOR_SUPPLIED_FIELD"],
+            "primary_descriptions": [
+                {
+                    "field": "OPERATOR_SUPPLIED_FIELD",
+                    "status": "documented",
+                    "mnemonic": "OPERATOR_SUPPLIED_FIELD",
+                    "description": "a field",
+                    "datatype": "Float",
+                    "overrides": ["OPERATOR_SUPPLIED_OVERRIDE"],
+                    "documentation": "",
+                    "detail": None,
+                }
+            ],
+            "primary_error": None,
+            "override_fields": ["OPERATOR_SUPPLIED_OVERRIDE"],
+            "override_descriptions": [],
+            "override_error": None,
+        }
+    )
+
+    documented = module._documented_override_evidence(discovery)
+
+    assert documented == ("OPERATOR_SUPPLIED_FIELD -> OPERATOR_SUPPLIED_OVERRIDE",)
+
+
+def test_no_documented_overrides_is_an_empty_tuple_not_a_guess():
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class _Discovery:
+        documentation_expansion: dict
+
+    discovery = _Discovery(documentation_expansion={"primary_descriptions": []})
+
+    assert module._documented_override_evidence(discovery) == ()
+    assert module._documented_override_evidence(None) == ()
 
 
 def test_report_is_json_serializable():
@@ -661,32 +767,42 @@ def test_report_is_json_serializable():
 # --------------------------------------------------------------------------
 
 
-def test_the_cli_starts_without_an_editable_install():
+_BOOTSTRAP_PROBE = (
+    "import pathlib, sys\n"
+    "repo = pathlib.Path(sys.argv[1])\n"
+    "src = str(repo / 'src')\n"
+    "# Drop the checkout's own src/ first, so the probe's bootstrap is the only\n"
+    "# thing under test that can put it back. Merely running the CLI cannot test\n"
+    "# this: the runbook installs the package with `pip install -e`, which makes\n"
+    "# the import succeed whether or not the bootstrap exists.\n"
+    "sys.path[:] = [p for p in sys.path if pathlib.Path(p) != repo / 'src']\n"
+    "import bloomberg_swaption_vol_probe\n"
+    "print('BOOTSTRAP_OK' if src in sys.path else 'BOOTSTRAP_MISSING')\n"
+)
+
+
+def test_the_bootstrap_puts_the_checkout_src_on_sys_path():
     """Guards the bootstrap at the top of the probe.
 
     `bloomberg_dapi_probe` (reused) imports `shiori_pricing_lab` at module
-    level and has no bootstrap of its own. Without the probe's own `src/`
-    bootstrap, running the CLI in a checkout that was never `pip install -e`'d
-    dies on an ImportError traceback with exit 1, instead of reaching the
-    diagnostics this file exists to print. `PYTHONPATH` is scrubbed so a
-    developer's own environment cannot make this pass spuriously.
+    level and has no bootstrap of its own, so a checkout that was never
+    `pip install -e`'d dies on an ImportError traceback instead of reaching the
+    diagnostics this file prints. `PYTHONPATH` is scrubbed as well, so a
+    developer's environment cannot mask a regression.
     """
 
     environment = {k: v for k, v in os.environ.items() if k.upper() != "PYTHONPATH"}
+    environment["PYTHONPATH"] = str(_REPO_ROOT / "tools")
     completed = subprocess.run(
-        [
-            sys.executable,
-            str(_REPO_ROOT / "tools" / "bloomberg_swaption_vol_probe.py"),
-            "--help",
-        ],
+        [sys.executable, "-c", _BOOTSTRAP_PROBE, str(_REPO_ROOT)],
         cwd=str(_REPO_ROOT),
         env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
         check=False,
     )
 
-    assert completed.returncode == 0
+    assert "BOOTSTRAP_OK" in completed.stdout, completed.stderr
 
 
 def test_main_reports_an_install_error_when_blpapi_is_missing(monkeypatch, capsys):
@@ -703,6 +819,18 @@ def test_main_fails_closed_when_no_service_opens(monkeypatch, tmp_path, capsys):
     assert "no Bloomberg DAPI service could be opened" in capsys.readouterr().err
 
 
+def test_a_refused_session_still_writes_the_failure_report(monkeypatch, tmp_path):
+    """The likeliest first-run outcome must still leave an artifact to read."""
+
+    _install_fake_blpapi(monkeypatch, start=False)
+
+    assert main(["--session-only", "--output-dir", str(tmp_path)]) == 1
+
+    report = json.loads((tmp_path / "bloomberg_swaption_vol_probe.json").read_text("utf-8"))
+    assert report["authorization_status"] == "NOT_ESTABLISHED"
+    assert (tmp_path / "bloomberg_swaption_vol_probe.md").exists()
+
+
 def test_session_only_writes_a_report_and_sends_no_value_request(monkeypatch, tmp_path, capsys):
     factory = _install_fake_blpapi(monkeypatch)
 
@@ -710,11 +838,70 @@ def test_session_only_writes_a_report_and_sends_no_value_request(monkeypatch, tm
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert "no --security/--field supplied" in captured.out
+    assert "--session-only: sending no field search and no value request" in captured.out
     assert (tmp_path / "bloomberg_swaption_vol_probe.json").exists()
     assert (tmp_path / "bloomberg_swaption_vol_probe.md").exists()
     # Only the service-introspection sessions ran; no ReferenceDataRequest was sent.
     assert all(not hasattr(session, "_sent") for session in factory.created)
+
+
+def test_session_only_beats_supplied_candidates(monkeypatch, tmp_path, capsys):
+    """`--session-only` is documented as 'no value request' -- so it must be, even then."""
+
+    factory = _install_fake_blpapi(monkeypatch)
+
+    exit_code = main(
+        [
+            "--session-only",
+            "--security",
+            "OPERATOR-SUPPLIED-TICKER",
+            "--field",
+            "OPERATOR_SUPPLIED_FIELD",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert "--session-only: sending no field search and no value request" in capsys.readouterr().out
+    assert all(not hasattr(session, "_sent") for session in factory.created)
+    report = json.loads((tmp_path / "bloomberg_swaption_vol_probe.json").read_text("utf-8"))
+    assert report["value_probes"] == []
+    assert report["required_report_items"][2]["detail"].startswith("no candidate was supplied")
+
+
+def test_a_half_supplied_candidate_names_the_missing_flag(monkeypatch, tmp_path, capsys):
+    factory = _install_fake_blpapi(monkeypatch)
+
+    exit_code = main(
+        [
+            "--security",
+            "OPERATOR-SUPPLIED-TICKER",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "--security was supplied but --field was not" in captured.out
+    assert all(not hasattr(session, "_sent") for session in factory.created)
+
+
+def test_a_failed_field_discovery_keeps_its_reason_in_the_report(monkeypatch, tmp_path):
+    _install_fake_blpapi(monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "run_field_discovery",
+        lambda terms: (_ for _ in ()).throw(RuntimeError("apiflds said no")),
+    )
+
+    assert main(["--output-dir", str(tmp_path)]) == 0
+
+    report = json.loads((tmp_path / "bloomberg_swaption_vol_probe.json").read_text("utf-8"))
+    assert report["field_discovery"] is None
+    assert "apiflds said no" in report["discovery_failure_reason"]
 
 
 def test_main_with_no_candidate_reports_that_it_requested_no_value(monkeypatch, tmp_path, capsys):

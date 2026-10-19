@@ -1181,6 +1181,31 @@ def test_sanitizer_still_redacts_a_host_port_pair_as_a_host_not_a_dangling_key()
     assert "host=<redacted>" not in sanitized
 
 
+def test_sanitizer_does_not_mistake_a_timestamp_for_a_host_port():
+    # The host body used to admit `-` and digits, so the time-of-day inside
+    # every ISO-8601 instant matched host:port and was destroyed:
+    # "2026-07-28T00:00:01+00:00" became "<redacted host>:01+<redacted host>".
+    # A probe report whose whole point is recording when it ran and what date
+    # the vendor said the data was for cannot afford that false positive.
+    for timestamp in (
+        "2026-01-01T00:00:00Z",
+        "2026-07-28T00:00:01+00:00",
+        "2026-07-28 09:30:00",
+    ):
+        sanitized = sanitize_external_text(f"received_at={timestamp}")
+
+        assert timestamp in sanitized, sanitized
+        assert "<redacted host>" not in sanitized
+
+
+def test_sanitizer_still_redacts_a_hostname_with_a_hyphen_and_a_domain():
+    for host_port in ("my-host:8194", "bbg-host.example.com:8194", "localhost:8194"):
+        sanitized = sanitize_external_text(f"session failed against {host_port}")
+
+        assert host_port not in sanitized, host_port
+        assert "<redacted host>" in sanitized
+
+
 def test_sanitizer_removes_a_windows_unc_path():
     sanitized = sanitize_external_text(
         r"could not read \\bbg-fileserver\share\eddy\session.log during startup"

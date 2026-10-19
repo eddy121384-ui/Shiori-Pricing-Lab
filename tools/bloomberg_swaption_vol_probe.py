@@ -4,7 +4,19 @@ Reconnection Phase 1).
 Bounded, read-only workstation diagnostic CLI -- **not** part of the
 production pricing, vol, ingestion or workbench path, and never imported by
 any of them. This run writes no vol surface, changes no production field
-mapping, opens no SQLite database, and reaches no Black-76 code.
+mapping, opens no SQLite database, and calls no pricing entry point.
+
+What "read-only" does *not* mean here, stated precisely because an auditor
+will rely on it: this file deliberately **reuses** the repository's existing
+probe helpers, and at *import* time those helpers pull in production modules.
+``bloomberg_vcub_field_hunter`` imports
+``shiori_pricing_lab.app.standalone_option_workbench``, and the shared
+evidence module reaches ``bloomberg_dapi_probe``, which imports
+``shiori_pricing_lab.data.bloomberg_bond_quote`` at module level. So importing
+this probe loads those modules; it just never alters them and never calls a
+pricing, Black-76 or persistence entry point from them. The guarantee the
+phase actually needs -- no production behaviour changes, nothing under
+``src/`` imports this file, no schema or field map is touched -- holds.
 
 **The one question.** Can Shiori obtain a real USD swaption *normal*
 volatility -- the first target being 1Y expiry x 5Y tenor, ATM, MID --
@@ -108,8 +120,11 @@ workstation runbook and the failure-diagnosis table.
 "closest match". No vol-surface construction, no interpolation, no
 calibration, no ``sigma_vcub`` -> yield-vol -> price-vol conversion, no
 Black-76, no ``PRICE_VOL`` contract change, no auto-fill, no persistence, no
-schema or production field-map change, and no import of anything under
-``shiori_pricing_lab.pricing`` or ``shiori_pricing_lab.data``.
+schema or production field-map change, and no *call* into anything under
+``shiori_pricing_lab.pricing`` or ``shiori_pricing_lab.data``. Those modules
+are still *imported* transitively by the reused helpers -- see the module
+docstring's precision note above -- which is a cost of reuse, not a licence to
+call them.
 """
 
 from __future__ import annotations
@@ -138,6 +153,7 @@ from bloomberg_dapi_probe import _send_request  # noqa: E402
 from bloomberg_input_sourcing_probe import sanitize_external_text  # noqa: E402
 from bloomberg_vcub_field_hunter import (  # noqa: E402
     DEFAULT_VCUB_SEARCH_TERMS,
+    MAX_CANDIDATE_PROBES,
     hunt_vol_fields,
     probe_candidate_values,
 )
@@ -170,10 +186,15 @@ DEFAULT_OUTPUT_DIRNAME = "shiori_swaption_vol_probe_output"
 JSON_FILENAME = "bloomberg_swaption_vol_probe.json"
 MARKDOWN_FILENAME = "bloomberg_swaption_vol_probe.md"
 
-#: ``//blp/refdata`` refuses more than one security x field product beyond
-#: this through ``probe_candidate_values``'s own cap; stated here so the
-#: operator learns the bound before composing a command.
-MAX_VALUE_PROBES = 40
+#: The bound ``probe_candidate_values`` actually enforces, aliased rather than
+#: restated: a second hard-coded 40 here would silently drift from the cap the
+#: helper really applies, and the operator would be told the wrong limit.
+MAX_VALUE_PROBES = MAX_CANDIDATE_PROBES
+
+#: Field outcomes in which Bloomberg itself answered about the field. A
+#: ``request_error`` is deliberately not one of them: the request failed at the
+#: envelope, so nothing was learned about the field's entitlement.
+_ANSWERED_FIELD_STATUSES = frozenset({"returned", "absent", "field_exception"})
 
 PROBE_NAME = "bloomberg_swaption_vol_probe"
 PROBE_VERSION = "PHASE1_V1"
@@ -333,7 +354,7 @@ def run_value_probes(
     overrides: tuple[tuple[str, str], ...] = (),
     *,
     probe=None,
-    clock=utc_now,
+    clock=None,
 ) -> tuple[ValueProbeRecord, ...]:
     """Probe exactly the operator-supplied candidates, recording every outcome.
 
@@ -358,7 +379,11 @@ def run_value_probes(
     )
 
     raw = probe_candidate_values(securities, fields, overrides, probe=probe)
-    fetched_at = clock()
+    # ``clock or utc_now`` rather than a ``clock=utc_now`` default: a default
+    # binds the function object at import time, so monkeypatching
+    # ``market_data_probe_evidence.utc_now`` -- the seam that file advertises --
+    # would have no effect on this call.
+    read_at = (clock or utc_now)()
 
     records: list[ValueProbeRecord] = []
     for outcome in raw:
@@ -373,20 +398,39 @@ def run_value_probes(
                 status=outcome.status,
                 value=sanitize_external_text(outcome.value, applied),
                 detail=sanitize_external_text(outcome.detail, applied),
-                fetched_at=fetched_at,
+                fetched_at=read_at,
             )
         )
     return tuple(records)
 
 
+def _returned_a_value(record: ValueProbeRecord) -> bool:
+    """Whether this cell carries a magnitude.
+
+    A ``returned`` status with an empty string is not a value:
+    ``bloomberg_dapi_probe.probe_fields`` sets ``returned`` only when the field
+    element exists, and an empty element is an absence, not a magnitude.
+    """
+
+    return record.status == "returned" and bool((record.value or "").strip())
+
+
 def _authorization_status(
     session: SessionReport, value_probes: tuple[ValueProbeRecord, ...]
 ) -> AuthorizationStatus:
-    """How far entitlement was actually established, from this run's own evidence."""
+    """How far entitlement was actually established, from this run's own evidence.
+
+    Only a status Bloomberg itself produced counts as field-level evidence.
+    ``request_error`` is deliberately excluded: a request that failed at the
+    envelope (an invalid security, a timeout, a dead session) answered
+    *nothing*, so treating it as an observed field would present an untested
+    field as an entitled one. A run whose every cell is ``request_error`` stays
+    at service level, which is exactly what it established.
+    """
 
     if not any(outcome.opened for outcome in session.outcomes):
         return AuthorizationStatus.NOT_ESTABLISHED
-    if not value_probes:
+    if not any(record.status in _ANSWERED_FIELD_STATUSES for record in value_probes):
         return AuthorizationStatus.SERVICE_LEVEL_ONLY
     return AuthorizationStatus.FIELD_LEVEL_OBSERVED
 
@@ -394,10 +438,18 @@ def _authorization_status(
 def _documented_override_evidence(discovery) -> tuple[str, ...]:
     """Bloomberg's own documented override ids, gathered from the expansion.
 
-    Best-effort and evidence-only: these are the ids *Bloomberg published*
-    for the matched fields, reported so a human can see which mnemonics ask
-    for expiry/tenor/strike parameters. Nothing here asserts that any of
-    them is the parameter this phase needs.
+    Best-effort and evidence-only: these are the ids *Bloomberg published* for
+    the matched fields, reported so a human can see which mnemonics ask for
+    expiry/tenor/strike parameters. Nothing here asserts that any of them is
+    the parameter this phase needs.
+
+    The expansion's shape is the reused
+    :func:`bloomberg_curve_field_documentation_probe.build_report` dict: a
+    ``primary_descriptions`` / ``override_descriptions`` pair, where each entry
+    carries ``mnemonic`` (or ``field``) and its own ``overrides`` list. Read
+    from those keys rather than by pattern-matching key names -- an earlier
+    revision matched keys *ending in* ``"override"``, which none of them do, so
+    it silently reported "Bloomberg documents no overrides" for every run.
     """
 
     expansion = getattr(discovery, "documentation_expansion", None)
@@ -405,21 +457,25 @@ def _documented_override_evidence(discovery) -> tuple[str, ...]:
         return ()
 
     found: list[str] = []
+    for section in ("primary_descriptions", "override_descriptions"):
+        entries = expansion.get(section)
+        if not isinstance(entries, (list, tuple)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            mnemonic = entry.get("mnemonic") or entry.get("field")
+            override_ids = entry.get("overrides")
+            if not isinstance(override_ids, (list, tuple)):
+                continue
+            for override_id in override_ids:
+                if not isinstance(override_id, str) or not override_id.strip():
+                    continue
+                override_id = override_id.strip()
+                found.append(
+                    f"{mnemonic} -> {override_id}" if mnemonic else override_id
+                )
 
-    def _walk(value) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if isinstance(key, str) and key.lower().endswith("override"):
-                    if isinstance(item, (list, tuple)):
-                        for entry in item:
-                            if isinstance(entry, str) and entry.strip():
-                                found.append(entry.strip())
-                _walk(item)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                _walk(item)
-
-    _walk(expansion)
     return tuple(dict.fromkeys(found))
 
 
@@ -444,8 +500,8 @@ def build_report_items(
     """
 
     any_service_opened = any(outcome.opened for outcome in session.outcomes)
-    returned = tuple(record for record in value_probes if record.status == "returned")
-    opined = tuple(record for record in value_probes if record.status != "returned")
+    returned = tuple(record for record in value_probes if _returned_a_value(record))
+    opined = tuple(record for record in value_probes if not _returned_a_value(record))
 
     def _declared(item: str, declared: str | None, note: str) -> ReportItem:
         if declared is None:
@@ -555,8 +611,11 @@ def build_report_items(
             item="fetched_at",
             evidence_class=EvidenceClass.PROBE_OBSERVED,
             detail=(
-                f"{fetched_at} -- this run's own UTC clock when the value request returned. It is "
-                "when the probe ran, never the market data's own date."
+                f"{fetched_at} -- this run's own UTC clock, read once as the value stage "
+                "returned. It is when the probe ran, never the market data's own date. Note a "
+                "multi-security run sends its cells sequentially and stamps them all with this "
+                "one post-batch reading; per-cell detail carries its own fetched_at, and none "
+                "of them is a quote time."
             ),
         )
     )
@@ -604,6 +663,7 @@ def build_report(
     *,
     generated_at: str,
     search_terms: tuple[str, ...] = DEFAULT_SEARCH_TERMS,
+    discovery_failure_reason: str | None = None,
 ) -> dict:
     """Assemble the whole run into one sanitized, JSON-serializable record."""
 
@@ -622,7 +682,7 @@ def build_report(
         fetched_at=value_probes[-1].fetched_at if value_probes else generated_at,
     )
 
-    return {
+    payload = {
         "probe": PROBE_NAME,
         "probe_version": PROBE_VERSION,
         "phase": PHASE,
@@ -633,19 +693,29 @@ def build_report(
         "authorization_status": _authorization_status(session, value_probes).value,
         "target_coordinate_declared_by_operator": sanitize_tree(asdict(coordinate), applied),
         "field_discovery": _discovery_to_dict(discovery, applied, search_terms),
+        "discovery_failure_reason": sanitize_external_text(discovery_failure_reason, applied),
         "documented_overrides": list(documented_overrides),
         "value_probes": [sanitize_tree(asdict(record), applied) for record in value_probes],
         "required_report_items": items_to_dict(items),
-        "verdict": "UNRESOLVED",
+        "verdict": None,
+        "verdict_assigned": False,
         "verdict_note": (
             "This probe assigns no verdict, exactly as tools/bloomberg_vcub_field_hunter.py "
-            "established: whether the recorded evidence adds up to a usable non-visual route to "
-            "a USD swaption normal vol is Eddy's judgment on this report. In particular a "
-            "returned value is evidence of a value only -- the report deliberately does not "
-            "label it a normal vol in bp, because that is a claim about the field's meaning "
-            "that no returned number can settle (Annex A.8.1)."
+            "established, and encodes that the same way that tool does: verdict is null. "
+            "Whether the recorded evidence adds up to a usable non-visual route to a USD "
+            "swaption normal vol is Eddy's judgment on this report. In particular a returned "
+            "value is evidence of a value only -- the report deliberately does not label it a "
+            "normal vol in bp, because that is a claim about the field's meaning that no "
+            "returned number can settle (Annex A.8.1)."
         ),
     }
+
+    # One last pass over the *whole* payload, not just the blocks built above:
+    # `required_report_items` carries Bloomberg-published override ids and
+    # vendor-published enum text, and the declared coordinate carries operator
+    # input. Sanitizing the assembled record means a future field cannot be
+    # added outside the guard by accident.
+    return sanitize_tree(payload, applied)
 
 
 def render_markdown(data: dict) -> str:
@@ -657,7 +727,8 @@ def render_markdown(data: dict) -> str:
         f"- generated_at: {data['generated_at']}",
         f"- read_only: {data['read_only']}",
         f"- authorization_status: **{data['authorization_status']}**",
-        f"- verdict: **{data['verdict']}**",
+        f"- verdict: {json.dumps(data['verdict'])} (verdict_assigned: "
+        f"{json.dumps(data['verdict_assigned'])}) -- this probe assigns no verdict",
         "",
         "## Session / services",
         "",
@@ -732,7 +803,6 @@ def write_report(data: dict, output_dir: Path) -> tuple[Path, Path]:
     json_path.write_text(render_json(data), encoding="utf-8")
     markdown_path.write_text(render_markdown(data), encoding="utf-8")
     return json_path, markdown_path
-
 
 def _parse_override(raw: str) -> tuple[str, str]:
     if "=" not in raw:
@@ -881,9 +951,30 @@ def main(argv: list[str] | None = None) -> int:
             "docs/35_market_data_reconnection_phase1_probe.md)",
             file=sys.stderr,
         )
+        # Write the failure record anyway: this is the most likely first-run
+        # outcome on a fresh workstation, and the diagnosis table tells the
+        # operator to read the per-service open_error out of the report. A
+        # refused session is fully representable -- every item simply stays
+        # NOT_ESTABLISHED.
+        data = build_report(
+            session,
+            coordinate,
+            None,
+            (),
+            generated_at=generated_at,
+            search_terms=search_terms,
+        )
+        json_path, markdown_path = write_report(data, Path(args.output_dir))
+        print(f"wrote {json_path}")
+        print(f"wrote {markdown_path}")
+        print(
+            "note: these reports can contain licensed market values and operator inputs -- keep "
+            "them on the approved workstation; the output directory is git-ignored"
+        )
         return 1
 
     discovery = None
+    discovery_failure_reason = None
     if not args.session_only and not args.skip_discovery:
         print(f"Searching //blp/apiflds for: {list(search_terms)}")
         try:
@@ -892,20 +983,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         except RuntimeError as exc:
-            print(f"warning: field discovery failed: {sanitize_external_text(str(exc))}",
-                  file=sys.stderr)
+            # Kept in the report, not only on stderr: "the search failed and
+            # here is why" must stay distinguishable from "--skip-discovery"
+            # in the artifact the operator sends back.
+            discovery_failure_reason = sanitize_external_text(str(exc))
+            print(
+                f"warning: field discovery failed: {discovery_failure_reason}",
+                file=sys.stderr,
+            )
             discovery = None
         else:
             confirmed = getattr(discovery, "search_capability_confirmed", False)
             print(f"  search capability confirmed: {confirmed}")
             for mnemonic in getattr(discovery, "marker_relevant_mnemonics", ()):
-                print(f"    candidate mnemonic: {mnemonic}")
+                print(f"    candidate mnemonic: {sanitize_external_text(str(mnemonic))}")
             blocker = getattr(discovery, "blocker_note", None)
             if blocker:
                 print(f"  blocker: {sanitize_external_text(blocker)}")
 
     value_probes: tuple[ValueProbeRecord, ...] = ()
-    if securities and fields:
+    # `--session-only` promises "send no field search and no value request",
+    # so it gates the value stage too. Without this, a `--session-only
+    # --security X --field Y` run would send a licensed ReferenceDataRequest
+    # while reporting itself as a connectivity check.
+    if securities and fields and not args.session_only:
         print(f"Probing {len(securities)} security x {len(fields)} field combination(s)")
         try:
             value_probes = run_value_probes(securities, fields, overrides)
@@ -917,9 +1018,19 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         for record in value_probes:
             print(
-                f"  {record.security} / {record.field}: {record.status} "
+                f"  {sanitize_external_text(record.security)} / "
+                f"{sanitize_external_text(record.field)}: {record.status} "
                 f"{record.value or record.detail or ''}"
             )
+    elif args.session_only:
+        print("--session-only: sending no field search and no value request")
+    elif securities or fields:
+        supplied = "--security" if securities else "--field"
+        missing = "--field" if securities else "--security"
+        print(
+            f"{supplied} was supplied but {missing} was not, so no value was requested; this "
+            "probe needs both and never invents the other one"
+        )
     else:
         print(
             "no --security/--field supplied, so no value was requested; "
@@ -933,12 +1044,13 @@ def main(argv: list[str] | None = None) -> int:
         value_probes,
         generated_at=generated_at,
         search_terms=search_terms,
+        discovery_failure_reason=discovery_failure_reason,
     )
     json_path, markdown_path = write_report(data, Path(args.output_dir))
 
     print("")
     print(f"authorization_status: {data['authorization_status']}")
-    print(f"verdict: {data['verdict']} (this probe assigns none -- see the report)")
+    print(f"verdict: {json.dumps(data['verdict'])} (this probe assigns none -- see the report)")
     print(f"wrote {json_path}")
     print(f"wrote {markdown_path}")
     print(
