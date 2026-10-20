@@ -57,7 +57,7 @@ QUANTLIB_INCLUDE = re.compile(r"^[<\"](?:[^\"<>]*/)?ql(?:\.hpp|/[^\"<>]*)[>\"]$"
 QUANTLIB_SYMBOL = re.compile(r"\bQuantLib\s*::|^\s*namespace\s+QuantLib\b", re.MULTILINE)
 MACRO_DEFINITION = re.compile(r"^\s*#\s*define\s+[A-Za-z_]\w*")
 MACRO_NAMESPACE_USE = re.compile(
-    r"\bnamespace\s+([A-Z_][A-Z0-9_]*)\b|\b([A-Z_][A-Z0-9_]*)\s*::"
+    r"\bnamespace\s+([A-Z_][A-Z0-9_]*)\b|\b([A-Z_][A-Z0-9_]+)\s*::"
 )
 
 
