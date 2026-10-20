@@ -443,7 +443,7 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
     (
         "src/dto/macro_quantlib_type.cpp",
         '#define QL_DATE QuantLib::Date\nQL_DATE* leak();\n',
-        ["MACRO_BOUNDARY"],
+        ["MACRO_BOUNDARY", "SYMBOL_MENTION"],
         False,
     ),
     (
