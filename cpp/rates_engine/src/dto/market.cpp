@@ -1252,18 +1252,14 @@ FixingStoreProvenance FixingStoreProvenance::from_canonical(const CanonicalValue
   for (std::size_t index = 0; index < items.size(); ++index) {
     const MarketSource source = enum_from_canonical<MarketSource>(
         items[index], pointer_index(child(pointer, "sources"), index));
-    // docs/33 section 8.4: `provenance.sources` is the deterministic union of the PRESENT entry
-    // sources, and the union comparison in `FixingStore::from_canonical` is size + membership. That is
-    // only exact set equality when the declared list is duplicate-free: `[A, A]` against a true union
-    // `{A, B}` has the union's size and every declared element is a member, yet B is omitted and the
-    // store validates. The V1 contract prescribes no order for this list, so uniqueness alone is
-    // enforced here - no ordering is invented.
-    for (const MarketSource seen : result.sources) {
-      if (seen == source) {
-        fail(ContractViolationKind::kInvariantViolation,
-             pointer_index(child(pointer, "sources"), index),
-             "provenance.sources must be the duplicate-free union of PRESENT entry sources");
-      }
+    // Section 8.4's deterministic source union participates in the fixing-store fingerprint.
+    // As with other canonical set-like arrays, the ordering is strict by published enum token.
+    // Reject noncanonical input rather than repairing it after its fingerprint has been declared.
+    if (!result.sources.empty() &&
+        std::string(enum_to_token(result.sources.back())) >= std::string(enum_to_token(source))) {
+      fail(ContractViolationKind::kInvariantViolation,
+           pointer_index(child(pointer, "sources"), index),
+           "provenance.sources must be strictly ascending by canonical token, with no duplicates");
     }
     result.sources.push_back(source);
   }

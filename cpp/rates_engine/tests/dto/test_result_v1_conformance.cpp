@@ -377,12 +377,8 @@ static_assert(sizeof(kApprovedErrorCodes) / sizeof(kApprovedErrorCodes[0]) == 11
   return measure;
 }
 
-// The section 15.4 canonical order for this fixture is
-//   [ BUCKETED_TENOR DV01 (target NOT_APPLICABLE) , PARALLEL_BP DV01 (target PRESENT) ,
-//     MODEL_PARAM GAMMA , VOL_POINT VEGA ]
-// because the approved tuple is (measure_id, target state, target serialization, bucket state, bucket
-// serialization): the all-DV01 prefix is ordered by "structured NOT_APPLICABLE before PRESENT" on
-// `bump_target`, and the remaining rows are ordered by `measure_id`.
+// V1-valid shape: two DV01s (N/A bump target before PRESENT), then VOL_POINT VEGA.
+// MODEL_PARAM remains reserved in the wire contract; no RatesKernelInput V1 consumes ModelInput.
 [[nodiscard]] RiskResult risk_result_fixture() {
   RiskResult result;
   // A swaption result identifies the DERIVATIVE; the underlying swap is named by the embedded
@@ -395,9 +391,9 @@ static_assert(sizeof(kApprovedErrorCodes) / sizeof(kApprovedErrorCodes[0]) == 11
       derived_valuation_context_id(result.valuation_date, result.result_currency);
   result.measures.push_back(bucketed_tenor_measure());
   result.measures.push_back(parallel_measure());
-  result.measures.push_back(model_parameter_measure(std::string(kFixtureModelInputId)));
   result.measures.push_back(vol_point_measure(std::string(kFixtureVolatilityInputId)));
   result.inputs_identity = fixture_inputs_identity(true);
+  result.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
   result.status = PricingStatus::kSuccess;
   result.engine = fixture_engine();
   result.replay = fixture_replay();
@@ -681,7 +677,7 @@ TEST(PricingResultFailedHeadline, RefusesAnotherCodeUnderTheRequiredCategory) {
 // ---------------------------------------------------------------------------------------------
 TEST(RiskResultMeasureOrder, AcceptsTheCanonicalOrderAndKeepsAFingerprintStable) {
   const RiskResult fixture = risk_result_fixture();
-  ASSERT_EQ(fixture.measures.size(), 4U);
+  ASSERT_EQ(fixture.measures.size(), 3U);
   // The fixture's own arrangement is the documented canonical one: the all-DV01 prefix puts the
   // structured NOT_APPLICABLE `bump_target` first.
   EXPECT_EQ(fixture.measures[0].measure_id, RiskMeasureId::kDv01);
@@ -705,7 +701,7 @@ TEST(RiskResultMeasureOrder, AcceptsTheCanonicalOrderAndKeepsAFingerprintStable)
 
 TEST(RiskResultMeasureOrder, RefusesAnInvertedNotApplicableBeforePresentPair) {
   RiskResult inverted = risk_result_fixture();
-  ASSERT_EQ(inverted.measures.size(), 4U);
+  ASSERT_EQ(inverted.measures.size(), 3U);
   // Swap the two all-DV01 rows: this inverts exactly one component, the `bump_target` state
   // (NOT_APPLICABLE must sort before PRESENT), so the inversion cannot be excused by `measure_id`.
   std::swap(inverted.measures[0], inverted.measures[1]);
@@ -721,7 +717,7 @@ TEST(RiskResultMeasureOrder, RefusesADuplicateMeasureKeyAfterRehash) {
   RiskResult duplicated = risk_result_fixture();
   const RiskMeasure duplicate = duplicated.measures[1];
   duplicated.measures.insert(duplicated.measures.begin() + 2, duplicate);
-  ASSERT_EQ(duplicated.measures.size(), 5U);
+  ASSERT_EQ(duplicated.measures.size(), 4U);
   // Byte-identical keys: same measure_id, same canonical bump_target, same canonical bucket.
   ASSERT_EQ(duplicated.measures[1].to_canonical().dump(),
             duplicated.measures[2].to_canonical().dump());
@@ -756,9 +752,7 @@ TEST(RiskResultMeasureOrder, OrdersDifferentMeasuresByTheirCanonicalEnumToken) {
   dv01.measure_id = RiskMeasureId::kDv01;
   canonical.measures.push_back(std::move(delta));
   canonical.measures.push_back(std::move(dv01));
-  // Section 13.4 line 1051: the replaced measure set no longer contains the MODEL_PARAMETER bucket that
-  // consumed the ModelInput, so the identity must stop claiming it. The two parallel rows test the
-  // ordering rule and nothing else.
+  // The identity remains NOT_APPLICABLE for ModelInput, as required by all V1 kernel invocations.
   canonical.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
   assign_derived_identities(canonical);
 
@@ -776,9 +770,9 @@ TEST(RiskResultMeasureOrder, OrdersDifferentMeasuresByTheirCanonicalEnumToken) {
 
 TEST(RiskResultVolNodeBucket, AcceptsTheConsumedVolatilityInputId) {
   const RiskResult fixture = risk_result_fixture();
-  ASSERT_EQ(fixture.measures.size(), 4U);
+  ASSERT_EQ(fixture.measures.size(), 3U);
   const auto& coordinate =
-      std::get<VolNodeBucketCoordinate>(fixture.measures[3].bucket_coordinate.value.body);
+      std::get<VolNodeBucketCoordinate>(fixture.measures[2].bucket_coordinate.value.body);
   ASSERT_TRUE(fixture.inputs_identity.volatility_input_id.present);
   EXPECT_EQ(coordinate.volatility_input_id, fixture.inputs_identity.volatility_input_id.value);
 
@@ -790,13 +784,13 @@ TEST(RiskResultVolNodeBucket, AcceptsTheConsumedVolatilityInputId) {
 TEST(RiskResultVolNodeBucket, RefusesAnotherVolatilityInputIdAfterRehash) {
   RiskResult mismatched = risk_result_fixture();
   auto& coordinate =
-      std::get<VolNodeBucketCoordinate>(mismatched.measures[3].bucket_coordinate.value.body);
+      std::get<VolNodeBucketCoordinate>(mismatched.measures[2].bucket_coordinate.value.body);
   coordinate.volatility_input_id = std::string(kFixtureOtherVolatilityInputId);
   ASSERT_NE(coordinate.volatility_input_id, mismatched.inputs_identity.volatility_input_id.value);
   assign_derived_identities(mismatched);
 
   expect_refusal(decode_risk_result(mismatched.to_canonical()),
-                 ContractViolationKind::kIdentityMismatch, "/measures/3/bucket_coordinate");
+                 ContractViolationKind::kIdentityMismatch, "/measures/2/bucket_coordinate");
 }
 
 TEST(RiskResultVolNodeBucket, RefusesAnInapplicableCoordinateWhenNoInputIsConsumed) {
@@ -805,44 +799,42 @@ TEST(RiskResultVolNodeBucket, RefusesAnInapplicableCoordinateWhenNoInputIsConsum
   assign_derived_identities(absent);
 
   expect_refusal(decode_risk_result(absent.to_canonical()),
-                 ContractViolationKind::kIdentityMismatch, "/measures/3/bucket_coordinate");
-}
-
-// ---------------------------------------------------------------------------------------------
-// Finding 3 - a MODEL_PARAMETER bucket names the consumed ModelInput
-// docs/33 section 13.2 line 1032.
-// ---------------------------------------------------------------------------------------------
-TEST(RiskResultModelParameterBucket, AcceptsTheConsumedModelInputId) {
-  const RiskResult fixture = risk_result_fixture();
-  const auto& coordinate =
-      std::get<ModelParameterBucketCoordinate>(fixture.measures[2].bucket_coordinate.value.body);
-  ASSERT_TRUE(fixture.inputs_identity.model_input_id.present);
-  EXPECT_EQ(coordinate.model_input_id, fixture.inputs_identity.model_input_id.value);
-
-  const Refusal refusal = decode_risk_result(fixture.to_canonical());
-  EXPECT_FALSE(refusal.refused) << std::string(to_token(refusal.kind)) << " at " << refusal.pointer
-                                << ": " << refusal.message;
-}
-
-TEST(RiskResultModelParameterBucket, RefusesAnotherModelInputIdAfterRehash) {
-  RiskResult mismatched = risk_result_fixture();
-  auto& coordinate =
-      std::get<ModelParameterBucketCoordinate>(mismatched.measures[2].bucket_coordinate.value.body);
-  coordinate.model_input_id = std::string(kFixtureOtherModelInputId);
-  ASSERT_NE(coordinate.model_input_id, mismatched.inputs_identity.model_input_id.value);
-  assign_derived_identities(mismatched);
-
-  expect_refusal(decode_risk_result(mismatched.to_canonical()),
                  ContractViolationKind::kIdentityMismatch, "/measures/2/bucket_coordinate");
 }
 
-TEST(RiskResultModelParameterBucket, RefusesAnInapplicableCoordinateWhenNoInputIsConsumed) {
-  RiskResult absent = risk_result_fixture();
-  absent.inputs_identity.model_input_id = ValueOrReason<std::string>::not_applicable();
-  assign_derived_identities(absent);
+// ---------------------------------------------------------------------------------------------
+// V1 MODEL_PARAM is a reserved DTO shape, but no valid V1 kernel can supply a ModelInput.
+// ---------------------------------------------------------------------------------------------
+TEST(RiskResultModelParameterBucket, RefusesAnOtherwiseMatchingModelParameterResult) {
+  RiskResult result = risk_result_fixture();
+  result.measures.insert(result.measures.begin() + 2,
+                         model_parameter_measure(std::string(kFixtureModelInputId)));
+  result.inputs_identity.model_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureModelInputId));
+  assign_derived_identities(result);
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/measures/2/bucket_coordinate");
+}
 
-  expect_refusal(decode_risk_result(absent.to_canonical()),
-                 ContractViolationKind::kIdentityMismatch, "/measures/2/bucket_coordinate");
+TEST(RiskResultModelParameterBucket, RefusesModelParameterEvenWhenModelIdentityIsNotApplicable) {
+  RiskResult result = risk_result_fixture();
+  result.measures.insert(result.measures.begin() + 2,
+                         model_parameter_measure(std::string(kFixtureModelInputId)));
+  assign_derived_identities(result);
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/measures/2/bucket_coordinate");
+}
+
+TEST(RiskResultModelParameterBucket, RefusesAFabricatedModelInputWithoutAnyModelMeasure) {
+  RiskResult result = risk_result_fixture();
+  result.inputs_identity.model_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureOtherModelInputId));
+  assign_derived_identities(result);
+  expect_refusal(decode_risk_result(result.to_canonical()),
+                 ContractViolationKind::kInvalidTaggedUnionState,
+                 "/inputs_identity/model_input_id");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1317,19 +1309,11 @@ TEST(PricingResultInputsIdentityApplicability, AcceptsTheSwaptionShapeWithTheStr
 }
 
 TEST(RiskResultInputsIdentityApplicability, RefusesAPresentModelInputThatNoMeasureConsumes) {
-  // Section 13.2 line 1032 makes a MODEL_PARAMETER bucket the only thing that consumes a ModelInput, so
-  // a risk result whose measures no longer name one must not keep claiming it: PRESENT means "carries
-  // the exact consumed object's id" (line 1051), and nothing here consumes it.
   RiskResult result = risk_result_fixture();
-  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
-  // The two remaining measures are kept in the section 15.4 canonical order (the same order the fixture
-  // uses), so the only property under test is that nothing consumes the model input any more.
-  result.measures.clear();
-  result.measures.push_back(bucketed_tenor_measure());
-  result.measures.push_back(parallel_measure());
-  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
+  ASSERT_FALSE(result.inputs_identity.model_input_id.present);
+  result.inputs_identity.model_input_id =
+      ValueOrReason<std::string>::of(std::string(kFixtureModelInputId));
   assign_derived_identities(result);
-
   expect_refusal(decode_risk_result(result.to_canonical()),
                  ContractViolationKind::kInvalidTaggedUnionState, "/inputs_identity/model_input_id");
 }
@@ -1349,9 +1333,8 @@ TEST(RiskResultInputsIdentityApplicability, RefusesAnOisIdentityClaimingTheDeriv
 }
 
 TEST(RiskResultInputsIdentityApplicability, KeepsTheConsumedInputCoverageAndTheFailedShape) {
-  // Scope guard: the approved swaption shape that consumes a volatility input and a model input stays
-  // accepted (section 13.2 lines 1028/1032), and a FAILED risk result - which carries no measure and
-  // therefore consumes no ModelInput - is accepted with the structured NOT_APPLICABLE model state.
+  // The approved V1 swaption shape may consume a volatility input but not a ModelInput;
+  // a FAILED result is unvalued with the same structured NOT_APPLICABLE model state.
   const Refusal consumed = decode_risk_result(risk_result_fixture().to_canonical());
   EXPECT_FALSE(consumed.refused) << consumed.pointer << ": " << consumed.message;
 
@@ -1443,14 +1426,9 @@ TEST(RiskResultInputsIdentityApplicability,
                  "/inputs_identity/calibration_result_id");
 }
 
-TEST(InputsIdentityApplicability, DoesNotRequireACalibrationIdJustBecauseAModelInputIsConsumed) {
-  // The rule is ONE-directional, and no calibration methodology is introduced: a consumed ModelInput does
-  // NOT require a PRESENT `calibration_result_id`, because lines 795/811 make `calibration_ref` PRESENT
-  // exactly when the embedded calibration payload is present and the approved contract never makes every
-  // model calibration-derived. The swaption risk fixture consumes a model input, keeps the calibration
-  // identity structured NOT_APPLICABLE, and stays accepted.
+TEST(InputsIdentityApplicability, KeepsModelAndCalibrationIdsNotApplicableForCurrentKernelV1) {
   const RiskResult result = risk_result_fixture();
-  ASSERT_TRUE(result.inputs_identity.model_input_id.present);
+  ASSERT_FALSE(result.inputs_identity.model_input_id.present);
   ASSERT_FALSE(result.inputs_identity.calibration_result_id.present);
   const Refusal refusal = decode_risk_result(result.to_canonical());
   EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
@@ -1717,4 +1695,46 @@ TEST(RiskResultFailedStatus, KeepsUnvaluedFailureAndValuedSuccessValid) {
   const RiskResult success = risk_result_fixture();
   ASSERT_FALSE(success.measures.empty());
   EXPECT_FALSE(decode_risk_result(success.to_canonical()).refused);
+}
+
+TEST(PricingResultFailedStatus, RefusesAllPresentSupplementalValuesAfterRehash) {
+  PricingResult pv = failed_pricing_result(std::string(kPricingFailedReasonCode));
+  pv.pv = ValueOrReason<NumericWithUnit>::of(NumericWithUnit(0.0, Unit::kCurrencyAmount));
+  assign_derived_identities(pv);
+  expect_refusal(decode_pricing_result(pv.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/pv");
+
+  PricingResult sign = failed_pricing_result(std::string(kPricingFailedReasonCode));
+  sign.pv_sign_convention = ValueOrReason<std::string>::of(std::string(kUnresolvedToken));
+  assign_derived_identities(sign);
+  expect_refusal(decode_pricing_result(sign.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/pv_sign_convention");
+
+  PricingResult components = failed_pricing_result(std::string(kPricingFailedReasonCode));
+  components.component_pvs = ValueOrReason<std::vector<ComponentPv>>::of({});
+  assign_derived_identities(components);
+  expect_refusal(decode_pricing_result(components.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/component_pvs");
+
+  PricingResult annuity = failed_pricing_result(std::string(kPricingFailedReasonCode));
+  annuity.annuity_pvbp =
+      ValueOrReason<NumericWithUnit>::of(NumericWithUnit(0.0, Unit::kCurrencyAmountPerBasisPoint));
+  assign_derived_identities(annuity);
+  expect_refusal(decode_pricing_result(annuity.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/annuity_pvbp");
+
+  PricingResult rate = failed_pricing_result(std::string(kPricingFailedReasonCode));
+  rate.par_rate = ValueOrReason<NumericWithUnit>::of(NumericWithUnit(0.0, Unit::kDecimalAnnual));
+  assign_derived_identities(rate);
+  expect_refusal(decode_pricing_result(rate.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, "/par_rate");
+}
+
+TEST(PricingResultFailedStatus, KeepsUnvaluedFailureAndValuedSuccessValid) {
+  const Refusal failed = decode_pricing_result(
+      failed_pricing_result(std::string(kPricingFailedReasonCode)).to_canonical());
+  EXPECT_FALSE(failed.refused) << failed.pointer << ": " << failed.message;
+  const Refusal success = decode_pricing_result(
+      successful_pricing_result(Currency::kUsd).to_canonical());
+  EXPECT_FALSE(success.refused) << success.pointer << ": " << success.message;
 }

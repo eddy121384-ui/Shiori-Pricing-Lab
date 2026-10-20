@@ -1069,22 +1069,41 @@ TEST(FixingObservationStateConformance, KeepsPresentQuoteTimestampAndVersionForA
 // ---------------------------------------------------------------------------------------------
 // `provenance.sources` is the exact unique union of the PRESENT entry sources (docs/33 section 8.4)
 // ---------------------------------------------------------------------------------------------
-TEST(FixingStoreProvenanceSources, AcceptsTheExactUniqueUnionInAnyOrderAndTheEmptyUnion) {
+TEST(FixingStoreProvenanceSources, AcceptsTheCanonicalUnionAndTheEmptyUnion) {
   FixingEntry first = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-09", "2024-01-09");
   FixingEntry second = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-10", "2024-01-10");
   second.source = ValueOrReason<MarketSource>::of(MarketSource::kScreenTranscription);
 
-  // Two PRESENT entry sources, so the declared list carries both. The V1 contract prescribes no order
-  // for this list, so a non-ascending order must still be accepted.
+  // Two PRESENT sources: the canonical enum-token order is SCREEN_TRANSCRIPTION,
+  // SYNTHETIC_FIXTURE. Only this order may contribute to one reproducible store identity.
   const FixingStore distinct = make_fixing_store(
       {first, second}, {MarketSource::kScreenTranscription, MarketSource::kSyntheticFixture});
-  expect_round_trip(distinct, "the exact unique union in a non-ascending order");
+  expect_round_trip(distinct, "the exact canonical source union");
 
   // A forecast-only / MISSING-only store carries no PRESENT entry source, so the empty union is the
   // exact answer rather than a missing list.
   const FixingStore missing_only =
       make_fixing_store({make_entry(FloatingIndex::kUsdSofr, "2024-01-10")}, {});
   expect_round_trip(missing_only, "the legitimate empty union");
+}
+
+TEST(FixingStoreProvenanceSources, RefusesPermutedDuplicateFreeSourcesEvenWhenRehashed) {
+  FixingEntry first = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-09", "2024-01-09");
+  FixingEntry second = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-10", "2024-01-10");
+  second.source = ValueOrReason<MarketSource>::of(MarketSource::kScreenTranscription);
+  const FixingStore valid = make_fixing_store(
+      {first, second}, {MarketSource::kScreenTranscription, MarketSource::kSyntheticFixture});
+  const FixingStore permuted = make_fixing_store(
+      {first, second}, {MarketSource::kSyntheticFixture, MarketSource::kScreenTranscription});
+  ASSERT_NE(valid.fixing_store_id, permuted.fixing_store_id)
+      << "the pre-fix problem was two distinct fingerprints for one source union";
+  expect_round_trip(valid, "lexically ascending canonical source tokens");
+  const CanonicalValue document = permuted.to_canonical();
+  const ContractViolation refusal =
+      refusal_for([&document] { (void)FixingStore::from_canonical(document, ""); },
+                  "permuted canonical source union");
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/provenance/sources/1");
 }
 
 TEST(FixingStoreProvenanceSources, RefusesADuplicatedListThatHidesAnOmittedSource) {
@@ -1122,7 +1141,7 @@ TEST(FixingStoreProvenanceSources, RefusesARepeatAndKeepsTheOversizedClaimRefusa
   // Pre-existing refusal preserved: a declared source that no entry carries is refused even though the
   // list is duplicate-free.
   const FixingStore claims_extra = make_fixing_store(
-      {single}, {MarketSource::kSyntheticFixture, MarketSource::kScreenTranscription});
+      {single}, {MarketSource::kScreenTranscription, MarketSource::kSyntheticFixture});
   const CanonicalValue extra_node = claims_extra.to_canonical();
   const ContractViolation extra_violation =
       refusal_for([&extra_node] { (void)FixingStore::from_canonical(extra_node, ""); },

@@ -211,6 +211,9 @@ struct KernelInputOptions {
   bool display_only_discount = false;
   bool display_only_forecast = false;
   bool embed_unselected_display_only_curve = false;
+  bool foreign_selected_discount = false;
+  bool foreign_selected_forecast = false;
+  bool foreign_unselected_forecast = false;
 };
 
 // Builds a contract-valid RATES_KERNEL_INPUT_V1 OIS invocation. Curve order follows the canonical
@@ -266,13 +269,21 @@ struct KernelInputOptions {
   CurveFlavor discount_flavor;
   discount_flavor.role = CurveRole::kDiscount;
   discount_flavor.display_only = options.display_only_discount;
-  input.market_snapshot.curve_set.curves.push_back(synthetic_curve(discount_flavor));
+  Curve discount = synthetic_curve(discount_flavor);
+  if (options.foreign_selected_discount) {
+    std::get<DiscountCurve>(discount.body).common.currency = Currency::kEur;
+  }
+  input.market_snapshot.curve_set.curves.push_back(std::move(discount));
 
   CurveFlavor forecast_flavor;
   forecast_flavor.role = CurveRole::kForecast;
   forecast_flavor.forward = true;
   forecast_flavor.display_only = options.display_only_forecast;
-  input.market_snapshot.curve_set.curves.push_back(synthetic_curve(forecast_flavor));
+  Curve forecast = synthetic_curve(forecast_flavor);
+  if (options.foreign_selected_forecast) {
+    std::get<ForwardCurve>(forecast.body).common.currency = Currency::kEur;
+  }
+  input.market_snapshot.curve_set.curves.push_back(std::move(forecast));
 
   if (options.embed_unselected_display_only_curve) {
     // A different, tenor-dimensioned index keeps the canonical order deterministic
@@ -283,7 +294,11 @@ struct KernelInputOptions {
     embedded_flavor.forward = true;
     embedded_flavor.display_only = true;
     embedded_flavor.index = FloatingIndex::kUsdSofrTerm3M;
-    input.market_snapshot.curve_set.curves.push_back(synthetic_curve(embedded_flavor));
+    Curve extra = synthetic_curve(embedded_flavor);
+    if (options.foreign_unselected_forecast) {
+      std::get<ForwardCurve>(extra.body).common.currency = Currency::kEur;
+    }
+    input.market_snapshot.curve_set.curves.push_back(std::move(extra));
   }
 
   input.market_snapshot.fixing_store.valuation_date = iso_date(kValuationDate);
@@ -579,4 +594,35 @@ TEST(DerivativeIdentityConformance, KeepsTheExplicitUnderlyingIdAndTheOisEqualit
   const ContractViolation ois_equality = refusal_for(ois);
   EXPECT_EQ(ois_equality.kind(), ContractViolationKind::kIdentityMismatch);
   EXPECT_EQ(ois_equality.pointer(), "/valuation_product");
+}
+
+TEST(KernelInputSelectedCurrency, AcceptsAnUnselectedForeignCurrencyCurveWithoutFxPricing) {
+  KernelInputOptions options;
+  options.embed_unselected_display_only_curve = true;
+  options.foreign_unselected_forecast = true;
+  const RatesKernelInput fixture = build_kernel_input(options);
+  ASSERT_EQ(fixture.market_snapshot.curve_set.curves.size(), std::size_t{3});
+  EXPECT_EQ(fixture.market_snapshot.curve_set.curves[2].common().currency, Currency::kEur);
+  EXPECT_TRUE(try_decode(fixture).has_value())
+      << "V1 restricts the currency of selected inputs, not unrelated embedded curves";
+}
+
+TEST(KernelInputSelectedCurrency, RefusesForeignSelectedDiscountAfterRehash) {
+  KernelInputOptions options;
+  options.foreign_selected_discount = true;
+  const RatesKernelInput fixture = build_kernel_input(options);
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/market_snapshot/curve_set/curves/0");
+  EXPECT_NE(refusal.message().find("selected discount curve currency"), std::string::npos);
+}
+
+TEST(KernelInputSelectedCurrency, RefusesForeignSelectedForecastAfterRehash) {
+  KernelInputOptions options;
+  options.foreign_selected_forecast = true;
+  const RatesKernelInput fixture = build_kernel_input(options);
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/market_snapshot/curve_set/curves/1");
+  EXPECT_NE(refusal.message().find("selected forecast curve currency"), std::string::npos);
 }

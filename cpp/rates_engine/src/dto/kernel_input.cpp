@@ -764,12 +764,6 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
   }
   const std::string curve_set_pointer = child(child(pointer, "market_snapshot"), "curve_set");
   const std::string curves_pointer = child(curve_set_pointer, "curves");
-  for (std::size_t index = 0; index < market_snapshot.curve_set.curves.size(); ++index) {
-    if (market_snapshot.curve_set.curves[index].common().currency != trade_currency) {
-      fail(ContractViolationKind::kInvariantViolation, pointer_index(curves_pointer, index),
-           "every curve currency must equal resolved_swap.currency in V1");
-    }
-  }
 
   // Section 5.1: curve_selection must resolve inside the embedded curve set, and each role must
   // permit its use. The kernel must not choose the first eligible curve or infer from array order.
@@ -810,6 +804,10 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
          "discount_curve_id must resolve to an embedded curve in market_snapshot.curve_set");
   }
   require_pricing_usable(*discount);
+  if (discount->currency != trade_currency) {
+    fail(ContractViolationKind::kInvariantViolation, curve_pointer_for(discount->curve_id),
+         "selected discount curve currency must equal resolved_swap.currency in V1");
+  }
   if (discount->curve_role != CurveRole::kDiscount &&
       discount->curve_role != CurveRole::kDiscountAndForecastReferenceOnly) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "curve_selection"),
@@ -822,6 +820,10 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
            "every forecast_curve_by_index target must resolve to an embedded curve");
     }
     require_pricing_usable(*forecast);
+    if (forecast->currency != trade_currency) {
+      fail(ContractViolationKind::kInvariantViolation, curve_pointer_for(forecast->curve_id),
+           "selected forecast curve currency must equal resolved_swap.currency in V1");
+    }
     if (forecast->curve_role != CurveRole::kForecast &&
         forecast->curve_role != CurveRole::kDiscountAndForecastReferenceOnly) {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "curve_selection"),

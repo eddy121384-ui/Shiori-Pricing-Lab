@@ -198,14 +198,11 @@ void require_valuation_context_identity(const std::string& id, const Date& valua
 // coordinate rules of section 13.2, so a measure that references an input the identity does not name is
 // still reported at that measure's own coordinate.
 //
-// `model_input_consumed` is true when this result documents a measure whose `bucket_coordinate` is the
-// section 13.2 `MODEL_PARAMETER` variant (line 1032: "`model_input_id: <string> # MUST equal the
-// consumed ModelInput id"). A pricing result has no measures and therefore never consumes one. The
-// PRESENT state is required exactly when such a measure consumes the ModelInput, and the structured
-// NOT_APPLICABLE state is required otherwise: a PRESENT identity with nothing consuming it is the
-// fabricated consumed-input claim line 1051 calls malformed.
+// The V1 kernel's executable applicability table permits no ModelInput for OIS or Phase-2
+// SWAPTION. Although the risk DTO reserves MODEL_PARAMETER for a later kernel schema, no current
+// risk result may fabricate its consumption; its model and calibration identities are both N/A.
 void require_inputs_identity_applicability(const InputsIdentity& identity, ProductType product_type,
-                                           bool model_input_consumed, const std::string& pointer) {
+                                           const std::string& pointer) {
   const std::string base = child(pointer, "inputs_identity");
   const bool derivative = product_type == ProductType::kSwaption;
   struct PayloadInput {
@@ -229,17 +226,8 @@ void require_inputs_identity_applicability(const InputsIdentity& identity, Produ
     }
   }
   const std::string model_pointer = child(base, "model_input_id");
-  if (model_input_consumed) {
-    if (!identity.model_input_id.present) {
-      fail(ContractViolationKind::kInvalidTaggedUnionState, model_pointer,
-           "a MODEL_PARAMETER bucket consumes a ModelInput, so this identity must name it as PRESENT");
-    }
-    // The inverse is deliberately NOT implied: a PRESENT ModelInput does not require a PRESENT
-    // `calibration_result_id`. Lines 795/811 make `ModelInput.calibration_ref` PRESENT exactly when the
-    // embedded calibration payload is PRESENT, and the approved contract never makes every model
-    // calibration-derived, so no such rule is added here.
-    return;
-  }
+  // Neither OIS nor Phase-2 SWAPTION can consume ModelInput in RatesKernelInput V1.
+  // MODEL_PARAMETER remains a reserved DTO wire shape until a later kernel schema enables it.
   (void)identity.model_input_id.require_null_with_reason(model_pointer, ReasonCategory::kNotApplicable);
   // Lines 795/811 attach calibration evidence to a ModelInput (`calibration_ref` is PRESENT iff the
   // embedded calibration result is PRESENT), and section 12.4 line 962 / section 13.4 line 1051 make every
@@ -761,6 +749,27 @@ void PricingResult::validate_rules(const std::string& pointer) const {
       fail(ContractViolationKind::kInvariantViolation, child(pointer, "errors"),
            "a FAILED result must carry at least one error");
     }
+    // Section 16: FAILED is not valued; supplemental fields may not leak stale priced results.
+    if (pv.present) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "pv"),
+           "a FAILED result must not carry a PRESENT pv");
+    }
+    if (pv_sign_convention.present) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "pv_sign_convention"),
+           "a FAILED result has no pv whose sign convention can be asserted");
+    }
+    if (component_pvs.present) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "component_pvs"),
+           "a FAILED result must not carry PRESENT component_pvs");
+    }
+    if (annuity_pvbp.present) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "annuity_pvbp"),
+           "a FAILED result must not carry a PRESENT annuity_pvbp");
+    }
+    if (par_rate.present) {
+      fail(ContractViolationKind::kInvariantViolation, child(pointer, "par_rate"),
+           "a FAILED result must not carry a PRESENT par_rate");
+    }
   }
   // Section 12.3: every PRESENT PV uses CURRENCY_AMOUNT plus result_currency plus a PRESENT sign
   // convention.
@@ -836,7 +845,7 @@ void PricingResult::validate_rules(const std::string& pointer) const {
   // Section 12.4 (line 962): the result's input identity must echo the consumed kernel input's
   // applicability. A pricing result carries no measure and therefore consumes no ModelInput, so its
   // `model_input_id` must be the structured NOT_APPLICABLE state (section 5.1 line 307's Phase-2 path).
-  require_inputs_identity_applicability(inputs_identity, product_type, false, pointer);
+  require_inputs_identity_applicability(inputs_identity, product_type, pointer);
   // Section 12.4 (line 962): the top-level product identity and the identity echo must describe the same
   // consumed request - equal for a vanilla OIS, a distinct derivative id over the underlying swap for a
   // swaption.
@@ -1392,37 +1401,14 @@ void RiskResult::validate_rules(const std::string& pointer) const {
       }
     } else if (measure.bucket_coordinate.present &&
                measure.bucket_coordinate.value.kind() == RiskBucketKind::kModelParameter) {
-      // Section 13.2 line 1032: `MODEL_PARAMETER.model_input_id` MUST equal the consumed ModelInput
-      // id, with the same fail-closed rule for a coordinate whose referenced input is not PRESENT.
-      const auto& model_parameter =
-          std::get<ModelParameterBucketCoordinate>(measure.bucket_coordinate.value.body);
-      if (!inputs_identity.model_input_id.present) {
-        fail(ContractViolationKind::kIdentityMismatch,
-             child(measure_pointer, "bucket_coordinate"),
-             "a MODEL_PARAMETER bucket requires inputs_identity.model_input_id to be PRESENT; no "
-             "consumed ModelInput is named, so the coordinate is inapplicable");
-      }
-      if (model_parameter.model_input_id != inputs_identity.model_input_id.value) {
-        fail(ContractViolationKind::kIdentityMismatch,
-             child(measure_pointer, "bucket_coordinate"),
-             "MODEL_PARAMETER.model_input_id must equal the consumed "
-             "inputs_identity.model_input_id");
-      }
+      // The V1 kernel cannot supply ModelInput, so no model-parameter measure is realizable.
+      fail(ContractViolationKind::kInvalidTaggedUnionState,
+           child(measure_pointer, "bucket_coordinate"),
+           "MODEL_PARAMETER risk is not applicable to RATES_KERNEL_INPUT_V1");
     }
   }
-  // Section 13.4 (line 1051): the same echo rule as the pricing result, evaluated after the per-measure
-  // coordinate rules above so a coordinate that references an unnamed input is still reported at its own
-  // measure. A ModelInput is consumed by this result exactly when a MODEL_PARAMETER bucket names it
-  // (section 13.2 line 1032); otherwise the identity must stay structured NOT_APPLICABLE.
-  bool model_input_consumed = false;
-  for (const RiskMeasure& measure : measures) {
-    if (measure.bucket_coordinate.present &&
-        measure.bucket_coordinate.value.kind() == RiskBucketKind::kModelParameter) {
-      model_input_consumed = true;
-      break;
-    }
-  }
-  require_inputs_identity_applicability(inputs_identity, product_type, model_input_consumed, pointer);
+  // All result identities must echo a V1-legal kernel input; model and calibration are N/A.
+  require_inputs_identity_applicability(inputs_identity, product_type, pointer);
   // Section 13.4 (line 1051): the same product/product-identity linkage rule as the pricing result, so a
   // risk result cannot accept an id pair that no valid consumed request could have produced.
   require_product_identity_linkage(product_id, product_type, inputs_identity, pointer);
