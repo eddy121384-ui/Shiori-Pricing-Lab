@@ -1,5 +1,6 @@
 #include "shiori_rates/dto/market.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
