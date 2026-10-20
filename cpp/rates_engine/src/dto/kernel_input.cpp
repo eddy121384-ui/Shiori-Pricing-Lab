@@ -460,10 +460,20 @@ SettlementTerms SettlementTerms::from_canonical(const CanonicalValue& node,
       fail(ContractViolationKind::kInvalidTaggedUnionState, child(pointer, "settlement_method"),
            "CASH settlement requires a PRESENT settlement method");
     }
+    if (result.settlement_method.value.empty()) {
+      fail(ContractViolationKind::kInvariantViolation,
+           child(child(pointer, "settlement_method"), "value"),
+           "a PRESENT CASH settlement method must be nonempty");
+    }
     if (!result.settlement_method_version.present) {
       fail(ContractViolationKind::kInvalidTaggedUnionState,
            child(pointer, "settlement_method_version"),
            "CASH settlement requires a PRESENT settlement method version");
+    }
+    if (result.settlement_method_version.value.empty()) {
+      fail(ContractViolationKind::kInvariantViolation,
+           child(child(pointer, "settlement_method_version"), "value"),
+           "a PRESENT CASH settlement method version must be nonempty");
     }
     if (!result.cash_settlement_methodology.present) {
       fail(ContractViolationKind::kInvalidTaggedUnionState,

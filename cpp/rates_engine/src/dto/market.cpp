@@ -737,8 +737,17 @@ CurveSetProvenance CurveSetProvenance::from_canonical(const CanonicalValue& node
   const auto& items = sources_node.as_array().items;
   result.sources.reserve(items.size());
   for (std::size_t index = 0; index < items.size(); ++index) {
-    result.sources.push_back(enum_from_canonical<MarketSource>(
-        items[index], pointer_index(child(pointer, "sources"), index)));
+    const MarketSource source = enum_from_canonical<MarketSource>(
+        items[index], pointer_index(child(pointer, "sources"), index));
+    // The source union contributes to CurveSet identity: only one token-sorted, duplicate-free
+    // encoding is valid, regardless of the acquisition order of the embedded curves.
+    if (!result.sources.empty() &&
+        std::string(enum_to_token(result.sources.back())) >= std::string(enum_to_token(source))) {
+      fail(ContractViolationKind::kInvariantViolation,
+           pointer_index(child(pointer, "sources"), index),
+           "CurveSet provenance.sources must be strictly ascending by canonical token");
+    }
+    result.sources.push_back(source);
   }
   result.adapter_versions = require_string_map(node.at("adapter_versions", pointer),
                                                child(pointer, "adapter_versions"),
@@ -885,6 +894,23 @@ CurveSet CurveSet::from_canonical(const CanonicalValue& node, const std::string&
       fail(ContractViolationKind::kInvariantViolation, curve_pointer,
            "every curve valuation_date must equal the enclosing CurveSet valuation_date");
     }
+  }
+  // Section 7.1: sources must be the exact union of the embedded curves' declared sources.
+  // Comparing the canonical enum-token sets rejects invented/missing sources even after rehashing.
+  std::vector<std::string> expected_sources;
+  for (const Curve& curve : result.curves) {
+    expected_sources.emplace_back(enum_to_token(curve.common().source_provenance.source));
+  }
+  std::sort(expected_sources.begin(), expected_sources.end());
+  expected_sources.erase(std::unique(expected_sources.begin(), expected_sources.end()),
+                         expected_sources.end());
+  std::vector<std::string> declared_sources;
+  for (const MarketSource source : result.provenance.sources) {
+    declared_sources.emplace_back(enum_to_token(source));
+  }
+  if (declared_sources != expected_sources) {
+    fail(ContractViolationKind::kInvariantViolation, child(child(pointer, "provenance"), "sources"),
+         "CurveSet provenance.sources must equal the canonical union of its curve sources");
   }
   // Section 7.3: a forward curve requires a PRESENT index id; a DISCOUNT_AND_FORECAST_REFERENCE_ONLY
   // curve must carry one too, so any forecast use can be validated deterministically.

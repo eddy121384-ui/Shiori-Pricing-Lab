@@ -55,6 +55,10 @@ TEST_QUANTLIB_ALLOWLIST = ("tests/adapter/", "tests/defaults/")
 
 QUANTLIB_INCLUDE = re.compile(r"^[<\"](?:[^\"<>]*/)?ql(?:\.hpp|/[^\"<>]*)[>\"]$")
 QUANTLIB_SYMBOL = re.compile(r"\bQuantLib\s*::|^\s*namespace\s+QuantLib\b", re.MULTILINE)
+MACRO_DEFINITION = re.compile(r"^\s*#\s*define\s+[A-Za-z_]\w*")
+MACRO_NAMESPACE_USE = re.compile(
+    r"\bnamespace\s+([A-Z_][A-Z0-9_]*)\b|\b([A-Z_][A-Z0-9_]*)\s*::"
+)
 
 
 @dataclass(frozen=True)
@@ -284,6 +288,35 @@ def scan_text(relative_path: str, text: str) -> list[Finding]:
                 )
             )
 
+        # C++ macros can turn a benign-looking source signature into a QuantLib type.
+        # A static scanner cannot safely expand a macro that forms a namespace/type.
+        # Reject the suspicious definition or use, rather than certifying the file as isolated.
+        for line_number, line in enumerate(stripped.split("\n"), 1):
+            if MACRO_DEFINITION.match(line) and (
+                re.search(r"\bQuantLib\b", line) or "##" in line
+            ):
+                findings.append(
+                    Finding(
+                        "MACRO_BOUNDARY",
+                        "error",
+                        relative_path,
+                        line_number,
+                        "macro can expand or construct a QuantLib namespace/type token",
+                    )
+                )
+            if line.lstrip().startswith("#"):
+                continue
+            if MACRO_NAMESPACE_USE.search(line):
+                findings.append(
+                    Finding(
+                        "MACRO_BOUNDARY",
+                        "error",
+                        relative_path,
+                        line_number,
+                        "macro-shaped identifier in a namespace or qualified type; cannot prove isolation",
+                    )
+                )
+
     return findings
 
 
@@ -400,6 +433,45 @@ SELF_TEST_CASES: list[tuple[str, str, list[str], bool]] = [
         '#define QL_HEADER <ql/settings.hpp>\n#include \\\n  QL_HEADER\n',
         ["UNRESOLVED_INCLUDE"],
         False,
+    ),
+    (
+        "include/shiori_rates/macro_quantlib_namespace.hpp",
+        '#define QL_NAMESPACE QuantLib\nnamespace QL_NAMESPACE { class Date; }\nQL_NAMESPACE::Date* leak();\n',
+        ["MACRO_BOUNDARY"],
+        False,
+    ),
+    (
+        "src/dto/macro_quantlib_type.cpp",
+        '#define QL_DATE QuantLib::Date\nQL_DATE* leak();\n',
+        ["MACRO_BOUNDARY"],
+        False,
+    ),
+    (
+        "include/shiori_rates/macro_from_another_header.hpp",
+        'namespace QL_NAMESPACE { class Date; }\nQL_NAMESPACE::Date* leak();\n',
+        ["MACRO_BOUNDARY"],
+        False,
+    ),
+    (
+        "src/dto/token_paste.cpp",
+        '#define MAKE_NAME(a,b) a##b\nnamespace MAKE_NAME(Quant,Lib) {}\n',
+        ["MACRO_BOUNDARY"],
+        False,
+    ),
+    (
+        "include/shiori_rates/macro_comment_literal_clean.hpp",
+        '// #define QL_NAMESPACE QuantLib\n'
+        'const char* x = "QL_NAMESPACE::Date #define P QuantLib";\n'
+        'const char* r = R"(namespace QL_NAMESPACE { })";\n'
+        'namespace Shiori::rates::dto {}\n',
+        [],
+        True,
+    ),
+    (
+        "tests/adapter/allowed_macro_type.cpp",
+        '#define QL_NAMESPACE QuantLib\nnamespace QL_NAMESPACE { class Date; }\n',
+        [],
+        True,
     ),
     (
         "src/engine/trap_macro_defined_but_unused.cpp",

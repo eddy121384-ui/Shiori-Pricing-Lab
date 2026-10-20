@@ -28,6 +28,7 @@
 #include "shiori_rates/dto/error.hpp"
 #include "shiori_rates/dto/kernel_input.hpp"
 #include "shiori_rates/dto/market.hpp"
+#include "shiori_rates/dto/value_or_reason.hpp"
 
 namespace {
 
@@ -36,6 +37,11 @@ using Shiori::rates::dto::ContractViolation;
 using Shiori::rates::dto::ContractViolationKind;
 using Shiori::rates::dto::MarketSource;
 using Shiori::rates::dto::SettlementProvenance;
+using Shiori::rates::dto::SettlementType;
+using Shiori::rates::dto::CashSettlementMethodology;
+using Shiori::rates::dto::Date;
+using Shiori::rates::dto::ValueOrReason;
+using Shiori::rates::dto::assign_derived_identities;
 using Shiori::rates::dto::SettlementTerms;
 using Shiori::rates::dto::settlement_terms_content_fingerprint;
 using Shiori::rates::dto::settlement_terms_identity_preimage;
@@ -119,4 +125,61 @@ TEST(SettlementProvenanceSetSemantics, TheEvidenceOrderChangesTheSettlementIdent
   rebuilt_terms.source_methodology_provenance = provenance_with({"E-0001", "E-0002"});
   EXPECT_EQ(settlement_terms_content_fingerprint(rebuilt_terms),
             settlement_terms_content_fingerprint(canonical_terms));
+}
+
+namespace {
+
+// Contract-shape only: every methodology value uses the explicitly unresolved V1 token.
+[[nodiscard]] SettlementTerms synthetic_cash_settlement_terms() {
+  SettlementTerms terms;
+  terms.settlement_type = SettlementType::kCash;
+  terms.settlement_method = ValueOrReason<std::string>::of(std::string(kUnresolved));
+  terms.settlement_method_version = ValueOrReason<std::string>::of(std::string(kUnresolved));
+  CashSettlementMethodology methodology;
+  methodology.methodology_id = kUnresolved;
+  methodology.methodology_version = kUnresolved;
+  methodology.settlement_rate_source = kUnresolved;
+  methodology.settlement_date_rule = kUnresolved;
+  terms.cash_settlement_methodology = ValueOrReason<CashSettlementMethodology>::of(methodology);
+  terms.settlement_date = ValueOrReason<Date>::not_applicable();
+  terms.source_methodology_provenance = provenance_with({});
+  assign_derived_identities(terms);
+  return terms;
+}
+
+}  // namespace
+
+TEST(CashSettlementMethodTokens, AcceptsNonemptyUnresolvedMethodAndVersion) {
+  const SettlementTerms fixture = synthetic_cash_settlement_terms();
+  const CanonicalValue encoded = fixture.to_canonical();
+  const SettlementTerms decoded = SettlementTerms::from_canonical(encoded, "");
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
+}
+
+TEST(CashSettlementMethodTokens, RefusesRehashedEmptyPresentMethod) {
+  SettlementTerms terms = synthetic_cash_settlement_terms();
+  terms.settlement_method = ValueOrReason<std::string>::of("");
+  assign_derived_identities(terms);
+  const CanonicalValue encoded = terms.to_canonical();
+  try {
+    (void)SettlementTerms::from_canonical(encoded, "");
+    FAIL() << "rehashed empty PRESENT CASH settlement method must be refused";
+  } catch (const ContractViolation& violation) {
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+    EXPECT_EQ(violation.pointer(), "/settlement_method/value");
+  }
+}
+
+TEST(CashSettlementMethodTokens, RefusesRehashedEmptyPresentMethodVersion) {
+  SettlementTerms terms = synthetic_cash_settlement_terms();
+  terms.settlement_method_version = ValueOrReason<std::string>::of("");
+  assign_derived_identities(terms);
+  const CanonicalValue encoded = terms.to_canonical();
+  try {
+    (void)SettlementTerms::from_canonical(encoded, "");
+    FAIL() << "rehashed empty PRESENT CASH settlement method version must be refused";
+  } catch (const ContractViolation& violation) {
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+    EXPECT_EQ(violation.pointer(), "/settlement_method_version/value");
+  }
 }

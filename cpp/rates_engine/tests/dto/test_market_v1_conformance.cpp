@@ -1447,3 +1447,50 @@ TEST(ProjectedTypedReference, RefusesAReferenceToADiscountOnlyCurve) {
 }
 
 }  // namespace
+
+TEST(CurveSetProvenanceSources, RefusesInventedSourceEvenAfterRehash) {
+  CurveSet fabricated = make_curve_set(sorted_curves({make_discount_curve(CurveRole::kDiscount)}));
+  fabricated.provenance.sources = {MarketSource::kBloombergDapi};
+  assign_derived_identities(fabricated);
+  const CanonicalValue document = fabricated.to_canonical();
+  const ContractViolation refusal = refusal_for(
+      [&document] { (void)CurveSet::from_canonical(document, ""); },
+      "fabricated Bloomberg source not carried by an embedded curve");
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/provenance/sources");
+}
+
+TEST(CurveSetProvenanceSources, RefusesDuplicateSourceEvenAfterRehash) {
+  CurveSet duplicated = make_curve_set(sorted_curves({make_discount_curve(CurveRole::kDiscount)}));
+  duplicated.provenance.sources = {MarketSource::kSyntheticFixture,
+                                   MarketSource::kSyntheticFixture};
+  assign_derived_identities(duplicated);
+  const CanonicalValue document = duplicated.to_canonical();
+  const ContractViolation refusal = refusal_for(
+      [&document] { (void)CurveSet::from_canonical(document, ""); },
+      "duplicate CurveSet source union");
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/provenance/sources/1");
+}
+
+TEST(CurveSetProvenanceSources, AcceptsExactCanonicalUnionAndRefusesItsPermutation) {
+  Curve forward = make_forward_curve(FloatingIndex::kUsdSofr);
+  std::get<ForwardCurve>(forward.body).common.source_provenance.source = MarketSource::kBloombergDapi;
+  assign_derived_identities(forward);
+  CurveSet exact = make_curve_set(sorted_curves({
+      make_discount_curve(CurveRole::kDiscount), forward}));
+  exact.provenance.sources = {MarketSource::kBloombergDapi, MarketSource::kSyntheticFixture};
+  assign_derived_identities(exact);
+  expect_round_trip(exact, "exact CurveSet provenance source union in canonical token order");
+
+  CurveSet reversed = exact;
+  std::reverse(reversed.provenance.sources.begin(), reversed.provenance.sources.end());
+  assign_derived_identities(reversed);
+  ASSERT_NE(exact.curve_set_id, reversed.curve_set_id);
+  const CanonicalValue document = reversed.to_canonical();
+  const ContractViolation refusal = refusal_for(
+      [&document] { (void)CurveSet::from_canonical(document, ""); },
+      "reversed but duplicate-free CurveSet source union");
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(refusal.pointer(), "/provenance/sources/1");
+}
