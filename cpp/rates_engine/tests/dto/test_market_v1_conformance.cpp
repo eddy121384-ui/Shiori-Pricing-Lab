@@ -8,12 +8,14 @@
 //   * sections 8.2/8.3 (docs/33 lines 583-601): `PROJECTED` is the COMPLETE audit-only forecast
 //     record and `FORECAST_REQUIRED` is the not-yet-projected state. The decoder used to accept a
 //     projected number as `FORECAST_REQUIRED` and to refuse the complete `PROJECTED` record.
-//   * sections 8.3/8.4 (docs/33 lines 594-613): a PRESENT `publication_date` decides the row of the
+//   * sections 8.3/8.4 (docs/33 lines 594-613): `publication_date` decides the row of the
 //     state/publication matrix for EVERY state, not only for HISTORICAL. A forecast-path state
-//     (`FORECAST_REQUIRED` / `PROJECTED`) is admissible only when that publication availability is
-//     strictly after the store's valuation date; a publication before it means the fixing is already
-//     due as history, and a publication equal to it is the same-day case that fails closed while the
-//     same-day rule stays unresolved (section 8.5, RED-225-F1).
+//     (`FORECAST_REQUIRED` / `PROJECTED`) is admissible only when publication availability is a PRESENT
+//     date strictly after the store's valuation date; a date before it means the fixing is already due
+//     as history, a date equal to it is the same-day case that fails closed while the same-day rule
+//     stays unresolved (section 8.5, RED-225-F1), and an UNKNOWN availability is the line 612 row and
+//     fails closed as well - it is never reinterpreted from `observation_date`. `MISSING` keeps the
+//     legal representation line 609 gives it.
 //   * sections 7.2/7.3 (docs/33 lines 439 and 496): `DISCOUNT_CURVE_V1` permits
 //     `DISCOUNT | DISCOUNT_AND_FORECAST_REFERENCE_ONLY`; `FORWARD_CURVE_V1` requires `FORECAST`.
 //   * section 15.4 (docs/33 lines 1233-1234): set-semantic provenance lists and
@@ -85,6 +87,7 @@ using Shiori::rates::dto::ValueOrReason;
 using Shiori::rates::dto::ValueState;
 using Shiori::rates::dto::VolatilityInput;
 using Shiori::rates::dto::assign_derived_identities;
+using Shiori::rates::dto::compute_fixing_store_identities;
 using Shiori::rates::dto::enum_to_token;
 using Shiori::rates::dto::not_applicable_reason;
 using Shiori::rates::dto::unresolved_methodology_reason;
@@ -839,17 +842,34 @@ TEST(FixingObservationStateConformance,
   EXPECT_EQ(decoded.to_canonical().dump(), accepted_encoded.dump());
 }
 
-TEST(FixingObservationStateConformance, KeepsEveryNonHistoricalStateWithUnknownPublicationAvailability) {
-  // Scope guard for line 612: publication availability is only "required" where the state claims a
-  // captured publication. A MISSING, FORECAST_REQUIRED and PROJECTED record keep their unknown
-  // publication_date exactly as before - the new rule neither reinterprets `observation_date` nor
-  // silently promotes a forecast record to history, and it must not reject the forecast path.
-  FixingEntry missing = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
-
+TEST(FixingObservationStateConformance, RefusesForecastStatesWithUnknownPublicationAvailability) {
+  // Line 612: "Publication availability required but `publication_date` is `NULL_WITH_REASON` / unknown
+  // -> Fail closed; do not reinterpret `observation_date` as publication date and do not silently decide
+  // history vs forecast." The line 611 forecast path exists only for a `publication_date` AFTER the
+  // valuation date, so a forecast-path record whose availability is unknown leaves that decision
+  // undecided and is refused at its own field. The earlier expectation - that every non-HISTORICAL state
+  // keeps an unknown publication_date - was too permissive for the forecast path. Every store below is
+  // re-hashed by `make_fixing_store`, and the declared fingerprint is checked against the recomputed one
+  // before each refusal, so no refusal here can be a fingerprint disagreement.
+  //
+  // (1) FORECAST_REQUIRED with unknown publication availability is refused.
   FixingEntry forecast_required = make_entry(FloatingIndex::kEurEstr, "2024-01-10");
   forecast_required.observation_state = ObservationState::kForecastRequired;
   forecast_required.value = ValueOrReason<NumericWithUnit>::none(to_be_projected_reason());
+  const FixingStore required_store = make_fixing_store({forecast_required}, {});
+  EXPECT_EQ(compute_fixing_store_identities(required_store).content_fingerprint,
+            required_store.content_fingerprint);
+  const CanonicalValue required_encoded = required_store.to_canonical();
+  const ContractViolation required_violation =
+      refusal_for([&required_encoded] { (void)FixingStore::from_canonical(required_encoded, ""); },
+                  "a FORECAST_REQUIRED entry with unknown publication availability");
+  EXPECT_EQ(required_violation.kind(), ContractViolationKind::kInvalidTaggedUnionState);
+  EXPECT_EQ(required_violation.pointer(), "/entries/0/publication_date");
+  EXPECT_NE(required_violation.kind(), ContractViolationKind::kFingerprintMismatch)
+      << "the refusal must be the semantic line 612 rule, not a stale declared fingerprint";
 
+  // (2) PROJECTED with unknown publication availability is refused the same way: the complete
+  // audit-only forecast record is on the same forecast path.
   FixingEntry projected = make_entry(FloatingIndex::kGbpSonia, "2024-01-09");
   projected.observation_state = ObservationState::kProjected;
   projected.value = present_decimal_rate(kSyntheticDecimalRate);
@@ -858,20 +878,44 @@ TEST(FixingObservationStateConformance, KeepsEveryNonHistoricalStateWithUnknownP
   projected.projection_method_id = ValueOrReason<std::string>::of(std::string("FIXTURE_PROJECTION_METHOD"));
   projected.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
   projected.projection_inputs_ref = present_projection_reference("fixture-curve-set", "fixture-curve");
+  const FixingStore projected_store =
+      make_fixing_store({projected}, {MarketSource::kCurveProjection});
+  EXPECT_EQ(compute_fixing_store_identities(projected_store).content_fingerprint,
+            projected_store.content_fingerprint);
+  const CanonicalValue projected_encoded = projected_store.to_canonical();
+  const ContractViolation projected_violation =
+      refusal_for([&projected_encoded] { (void)FixingStore::from_canonical(projected_encoded, ""); },
+                  "a PROJECTED entry with unknown publication availability");
+  EXPECT_EQ(projected_violation.kind(), ContractViolationKind::kInvalidTaggedUnionState);
+  EXPECT_EQ(projected_violation.pointer(), "/entries/0/publication_date");
 
-  // The store provenance union is the exact unique union of PRESENT entry sources (docs/33 section
-  // 8.4), and only the PROJECTED audit record carries a PRESENT source here.
-  FixingStore store = make_fixing_store({forecast_required, projected, missing},
-                                        {MarketSource::kCurveProjection});
-  assign_derived_identities(store);
-  const CanonicalValue encoded = store.to_canonical();
+  // (3) MISSING with unknown publication availability stays a LEGAL representation: line 609 makes such
+  // a record's outcome the kernel's MISSING_MARKET_DATA failure, so the snapshot itself is not
+  // malformed and must not be refused by this rule.
+  const FixingEntry missing = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
+  const FixingStore missing_store = make_fixing_store({missing}, {});
+  const CanonicalValue missing_encoded = missing_store.to_canonical();
+  const FixingStore missing_decoded = FixingStore::from_canonical(missing_encoded, "");
+  EXPECT_EQ(missing_decoded.to_canonical().dump(), missing_encoded.dump());
+  ASSERT_EQ(missing_decoded.entries.size(), 1U);
+  EXPECT_EQ(missing_decoded.entries[0].observation_state, ObservationState::kMissing);
+  EXPECT_FALSE(missing_decoded.entries[0].publication_date.present);
 
-  const FixingStore decoded = FixingStore::from_canonical(encoded, "");
-  EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
-  ASSERT_EQ(decoded.entries.size(), 3U);
-  EXPECT_FALSE(decoded.entries[0].publication_date.present);
-  EXPECT_FALSE(decoded.entries[1].publication_date.present);
-  EXPECT_FALSE(decoded.entries[2].publication_date.present);
+  // (4) The legal forecast path is untouched: the SAME FORECAST_REQUIRED record with a publication date
+  // strictly after the store's valuation date still round-trips byte-exactly, so (1) and (4) differ only
+  // in the publication-availability field.
+  FixingEntry future = make_entry(FloatingIndex::kEurEstr, "2024-01-10");
+  future.observation_state = ObservationState::kForecastRequired;
+  future.value = ValueOrReason<NumericWithUnit>::none(to_be_projected_reason());
+  future.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-16")));
+  const FixingStore future_store = make_fixing_store({future}, {});
+  const CanonicalValue future_encoded = future_store.to_canonical();
+  const FixingStore future_decoded = FixingStore::from_canonical(future_encoded, "");
+  EXPECT_EQ(future_decoded.to_canonical().dump(), future_encoded.dump());
+  ASSERT_EQ(future_decoded.entries.size(), 1U);
+  EXPECT_EQ(future_decoded.entries[0].observation_state, ObservationState::kForecastRequired);
+  ASSERT_TRUE(future_decoded.entries[0].publication_date.present);
+  EXPECT_EQ(future_decoded.entries[0].publication_date.value.text, "2024-01-16");
 }
 
 TEST(FixingObservationStateConformance, KeepsTheForecastPathForAPublicationDateAfterValuation) {
@@ -1432,6 +1476,9 @@ TEST(ProjectedTypedReference, AcceptsAReferenceThatResolvesToTheSiblingForecastC
   entry.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
   entry.projection_inputs_ref =
       present_projection_reference(curve_set.curve_set_id, std::string(forward.curve_id()));
+  // Section 8.4 line 611: a forecast-path record needs a PRESENT publication availability after the
+  // valuation date, so the fixture carries the legal forecast date rather than an unknown one.
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-16")));
 
   const FixingStore fixing_store =
       make_fixing_store({entry}, {MarketSource::kCurveProjection});
@@ -1458,6 +1505,8 @@ TEST(ProjectedTypedReference, AcceptsAReferenceToACombinedRoleCurve) {
   entry.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
   entry.projection_inputs_ref =
       present_projection_reference(curve_set.curve_set_id, std::string(combined.curve_id()));
+  // Legal forecast path: PRESENT publication availability strictly after the store's valuation date.
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-16")));
 
   const FixingStore fixing_store =
       make_fixing_store({entry}, {MarketSource::kCurveProjection});
@@ -1482,6 +1531,9 @@ namespace {
   entry.projection_method_id = ValueOrReason<std::string>::of(std::string("FIXTURE_PROJECTION_METHOD"));
   entry.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
   entry.projection_inputs_ref = present_projection_reference(curve_set_id, forecast_curve_id);
+  // The reference negatives must reach the reference rule, so the PROJECTED entry carries the legal
+  // forecast publication date (strictly after the store's valuation date) rather than an unknown one.
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-16")));
   const FixingStore fixing_store =
       make_fixing_store({entry}, {MarketSource::kCurveProjection});
   MarketSnapshot snapshot = make_snapshot(curve_set, fixing_store);
