@@ -33,6 +33,10 @@
 //     a swaption), so an absent entry cannot be completed later without the inference the contract
 //     forbids. Only the ENTRY is required: the referenced curve still has to pass the role/index and
 //     display-only rules, and an unselected curve elsewhere in the curve set is still accepted.
+//   * EXACT KEY SET — the selected key set must EQUAL that required index set, because a well-formed
+//     selection for an index the V1 product does not consume is still an unapproved selection that
+//     would be folded into the request identity. An extra selection is refused at the map itself, while
+//     a curve that is merely carried in the curve set without being selected stays legal.
 //
 // FIXTURE POLICY: everything below is a CONTRACT-ONLY synthetic fixture (`SYNTHETIC_FIXTURE` source):
 // curves carry the contract's own `UNRESOLVED` methodology tokens, per-period schedules and fixing
@@ -214,6 +218,13 @@ struct KernelInputOptions {
   bool foreign_selected_discount = false;
   bool foreign_selected_forecast = false;
   bool foreign_unselected_forecast = false;
+  // A second FORECAST curve for a DIFFERENT index (`USD_SOFR_TERM_3M`) than the embedded swap's
+  // floating index. Unlike the display-only embed above it is PRICING-USABLE and carries the swap's
+  // currency, so it isolates the selected-key-set rule from the display-only and currency rules.
+  bool embed_unselected_usd_term_forecast_curve = false;
+  // Additionally names that curve in `forecast_curve_by_index`, i.e. an extra selection the V1 product
+  // cannot consume.
+  bool select_usd_term_forecast = false;
 };
 
 // Builds a contract-valid RATES_KERNEL_INPUT_V1 OIS invocation. Curve order follows the canonical
@@ -301,6 +312,19 @@ struct KernelInputOptions {
     input.market_snapshot.curve_set.curves.push_back(std::move(extra));
   }
 
+  // A pricing-usable FORECAST curve for the OTHER USD index, carried in the curve set and (optionally)
+  // named by the selection. It sorts after the required forecast curve in the canonical
+  // `(curve_role, index_id_sort_key, curve_id)` order ("USD_SOFR" < "USD_SOFR_TERM_3M").
+  std::size_t usd_term_forecast_curve = 0;
+  if (options.embed_unselected_usd_term_forecast_curve || options.select_usd_term_forecast) {
+    CurveFlavor term_flavor;
+    term_flavor.role = CurveRole::kForecast;
+    term_flavor.forward = true;
+    term_flavor.index = FloatingIndex::kUsdSofrTerm3M;
+    input.market_snapshot.curve_set.curves.push_back(synthetic_curve(term_flavor));
+    usd_term_forecast_curve = input.market_snapshot.curve_set.curves.size() - 1;
+  }
+
   input.market_snapshot.fixing_store.valuation_date = iso_date(kValuationDate);
   // The same-day rule is RED-225-F1 (docs/33 section 8.5): entirely unresolved, so every leaf carries
   // the contract's token and no cutoff/timezone is invented.
@@ -333,6 +357,13 @@ struct KernelInputOptions {
   input.curve_selection.forecast_curve_by_index[std::string(
       Shiori::rates::dto::enum_to_token(input.resolved_swap.floating_index))] =
       std::string(input.market_snapshot.curve_set.curves[1].curve_id());
+  if (options.select_usd_term_forecast) {
+    // A second entry, keyed by the OTHER USD index and naming a curve whose PRESENT index_id matches
+    // that key exactly, so the extra selection is well-formed in every per-entry respect.
+    input.curve_selection.forecast_curve_by_index[std::string(
+        Shiori::rates::dto::enum_to_token(FloatingIndex::kUsdSofrTerm3M))] =
+        std::string(input.market_snapshot.curve_set.curves[usd_term_forecast_curve].curve_id());
+  }
   Shiori::rates::dto::assign_derived_identities(input);
   return input;
 }
@@ -410,6 +441,58 @@ TEST(KernelInputSelectionConformance, RefusesAnOisWithoutAForecastSelectionForIt
   const std::string index_token =
       std::string(Shiori::rates::dto::enum_to_token(fixture.resolved_swap.floating_index));
   EXPECT_EQ(refusal.pointer(), "/curve_selection/forecast_curve_by_index/" + index_token);
+}
+
+TEST(KernelInputSelectionConformance, RefusesAForecastSelectionForAnIndexTheProductDoesNotConsume) {
+  // The corrected gap: the map only had to CONTAIN the required index, so a well-formed extra selection
+  // for an index the V1 product never consumes was accepted and folded into the request identity. The
+  // selected key set must equal the required index set. The extra curve here is pricing-usable, carries
+  // the swap's currency, has the FORECAST role and a PRESENT index_id equal to its map key, so no other
+  // rule can refuse this document; the document is re-hashed, so the refusal cannot be a fingerprint
+  // artifact either.
+  KernelInputOptions options;
+  options.select_usd_term_forecast = true;
+  const RatesKernelInput fixture = build_kernel_input(options);
+  ASSERT_EQ(fixture.curve_selection.forecast_curve_by_index.size(), std::size_t{2});
+  EXPECT_EQ(Shiori::rates::dto::kernel_input_content_fingerprint(fixture),
+            fixture.content_fingerprint);
+
+  const ContractViolation refusal = refusal_for(fixture);
+  EXPECT_EQ(refusal.kind(), ContractViolationKind::kInvariantViolation);
+  // The refusal names the selection map itself, not one of the curves: neither curve is unusable.
+  EXPECT_EQ(refusal.pointer(), "/curve_selection/forecast_curve_by_index");
+  // Nothing is dropped or re-keyed to make the document fit: both the required key and the extra key
+  // are still present in the fixture that was refused.
+  EXPECT_NE(fixture.curve_selection.forecast_curve_by_index.find(std::string(
+                Shiori::rates::dto::enum_to_token(fixture.resolved_swap.floating_index))),
+            fixture.curve_selection.forecast_curve_by_index.end());
+  EXPECT_NE(fixture.curve_selection.forecast_curve_by_index.find(
+                std::string(Shiori::rates::dto::enum_to_token(FloatingIndex::kUsdSofrTerm3M))),
+            fixture.curve_selection.forecast_curve_by_index.end());
+}
+
+TEST(KernelInputSelectionConformance, AcceptsTheRequiredSelectionAndKeepsAnUnselectedExtraCurve) {
+  // The accepted legal shape: exactly one entry, keyed by the required floating index and naming a
+  // pricing-usable FORECAST curve. A second USD FORECAST curve may stay EMBEDDED in the curve set (V1
+  // restricts what may be SELECTED, not what a snapshot may carry) as long as it is not selected, and
+  // nothing about the legal selection is added, removed or defaulted.
+  KernelInputOptions options;
+  options.embed_unselected_usd_term_forecast_curve = true;
+  const RatesKernelInput fixture = build_kernel_input(options);
+  ASSERT_EQ(fixture.market_snapshot.curve_set.curves.size(), std::size_t{3});
+  ASSERT_EQ(fixture.curve_selection.forecast_curve_by_index.size(), std::size_t{1});
+  EXPECT_EQ(fixture.curve_selection.forecast_curve_by_index.count(
+                std::string(Shiori::rates::dto::enum_to_token(FloatingIndex::kUsdSofrTerm3M))),
+            std::size_t{0});
+
+  const std::optional<RatesKernelInput> decoded = try_decode(fixture);
+  ASSERT_TRUE(decoded.has_value())
+      << "an unselected pricing-usable curve may be carried, and the required selection is legal";
+  EXPECT_EQ(decoded->curve_selection.forecast_curve_by_index,
+            fixture.curve_selection.forecast_curve_by_index);
+  EXPECT_EQ(decoded->curve_selection.forecast_curve_by_index.size(), std::size_t{1});
+  // Byte-exact round trip: the legal selection is preserved exactly as the producer wrote it.
+  EXPECT_EQ(decoded->to_canonical().dump(), fixture.to_canonical().dump());
 }
 
 TEST(KernelInputSelectionConformance, RefusesADisplayOnlyCurveSelectedAsTheDiscountCurve) {

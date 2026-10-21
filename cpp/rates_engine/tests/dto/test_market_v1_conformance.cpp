@@ -8,6 +8,12 @@
 //   * sections 8.2/8.3 (docs/33 lines 583-601): `PROJECTED` is the COMPLETE audit-only forecast
 //     record and `FORECAST_REQUIRED` is the not-yet-projected state. The decoder used to accept a
 //     projected number as `FORECAST_REQUIRED` and to refuse the complete `PROJECTED` record.
+//   * sections 8.3/8.4 (docs/33 lines 594-613): a PRESENT `publication_date` decides the row of the
+//     state/publication matrix for EVERY state, not only for HISTORICAL. A forecast-path state
+//     (`FORECAST_REQUIRED` / `PROJECTED`) is admissible only when that publication availability is
+//     strictly after the store's valuation date; a publication before it means the fixing is already
+//     due as history, and a publication equal to it is the same-day case that fails closed while the
+//     same-day rule stays unresolved (section 8.5, RED-225-F1).
 //   * sections 7.2/7.3 (docs/33 lines 439 and 496): `DISCOUNT_CURVE_V1` permits
 //     `DISCOUNT | DISCOUNT_AND_FORECAST_REFERENCE_ONLY`; `FORWARD_CURVE_V1` requires `FORECAST`.
 //   * section 15.4 (docs/33 lines 1233-1234): set-semantic provenance lists and
@@ -884,6 +890,102 @@ TEST(FixingObservationStateConformance, KeepsTheForecastPathForAPublicationDateA
   EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
   ASSERT_EQ(decoded.entries.size(), 1U);
   EXPECT_EQ(decoded.entries[0].observation_state, ObservationState::kForecastRequired);
+}
+
+TEST(FixingObservationStateConformance, RefusesAForecastRequiredEntryPublishedBeforeTheValuationDate) {
+  // The corrected gap: the publication-availability matrix was only enforced for HISTORICAL entries, so
+  // a FORECAST_REQUIRED record whose publication availability is BEFORE the store's valuation date was
+  // accepted even though docs/33 line 608/609 make that fixing already due as history (consume it as
+  // captured, or fail the valuation with MISSING_MARKET_DATA) - never project it. Line 611 defines the
+  // forecast path as `publication_date > valuation_date`, so this document is refused for the
+  // state/publication contradiction at the entry's own field. Re-hashing keeps every identity
+  // self-consistent, so the refusal cannot be a stale-fingerprint artifact.
+  FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
+  entry.observation_state = ObservationState::kForecastRequired;
+  entry.value = ValueOrReason<NumericWithUnit>::none(to_be_projected_reason());
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-12")));
+  FixingStore store = make_fixing_store({entry}, {});
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "a FORECAST_REQUIRED entry published before the store's valuation date");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/entries/0/publication_date");
+  EXPECT_EQ(violation.message().find("SAME_DAY_FIXING_RULE_UNRESOLVED"), std::string::npos)
+      << "the strictly-before row is not the same-day row: " << violation.message();
+}
+
+TEST(FixingObservationStateConformance, RefusesAProjectedAuditRecordPublishedBeforeTheValuationDate) {
+  // The same rule for the complete audit-only forecast record: PROJECTED also asserts a
+  // not-yet-available observation (docs/33 lines 585/596), so a publication availability before the
+  // valuation date contradicts it exactly as it does FORECAST_REQUIRED. Only that one field differs
+  // from the accepted complete PROJECTED record, so the refusal is caused by the publication date and
+  // not by the payload shape.
+  FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-10");
+  entry.observation_state = ObservationState::kProjected;
+  entry.value = present_decimal_rate(kSyntheticDecimalRate);
+  entry.source = ValueOrReason<MarketSource>::of(MarketSource::kCurveProjection);
+  entry.quote_timestamp = ValueOrReason<Timestamp>::of(Timestamp(std::string(kCapturedAt)));
+  entry.projection_method_id = ValueOrReason<std::string>::of(std::string("FIXTURE_PROJECTION_METHOD"));
+  entry.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
+  entry.projection_inputs_ref = present_projection_reference("fixture-curve-set", "fixture-curve");
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-10")));
+
+  FixingStore store = make_fixing_store({entry}, {MarketSource::kCurveProjection});
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "a complete PROJECTED record published before the store's valuation date");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/entries/0/publication_date");
+}
+
+TEST(FixingObservationStateConformance, RefusesASameDayPublicationOnTheForecastPath) {
+  // The docs/33 line 610 same-day row: the publication availability EQUALS the store's valuation date,
+  // so whether the fixing already counts as captured depends on the same-day cutoff/timezone rule, and
+  // section 8.5 keeps that rule unresolved (RED-225-F1). "Until then same-day use fails closed", so the
+  // document is refused with the contract's own token (lines 610/626) instead of the fixing being
+  // admitted on the forecast path. The strictly-before row above is deliberately a different refusal.
+  FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-15");
+  entry.observation_state = ObservationState::kForecastRequired;
+  entry.value = ValueOrReason<NumericWithUnit>::none(to_be_projected_reason());
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string(kValuationDate)));
+  FixingStore store = make_fixing_store({entry}, {});
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "a FORECAST_REQUIRED entry published on the store's valuation date");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/entries/0/publication_date");
+  EXPECT_NE(violation.message().find("SAME_DAY_FIXING_RULE_UNRESOLVED"), std::string::npos)
+      << violation.message();
+}
+
+TEST(FixingObservationStateConformance, KeepsAMissingRecordWhoseFixingIsAlreadyDueAsHistory) {
+  // Scope guard for the new forecast-path rule: line 609 makes a MISSING entry (or an absent one) whose
+  // publication availability is before the valuation date a legal DOCUMENT whose outcome is the
+  // kernel's MISSING_MARKET_DATA failure - the observation is never forecast, but the snapshot itself
+  // is not malformed. The rule above is therefore scoped to the forecast-path states and must not
+  // refuse this record. Line 612's "fail closed" applies to an UNKNOWN publication availability, and
+  // even then only where availability is required, so neither reading reaches this entry.
+  FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-12")));
+  FixingStore store = make_fixing_store({entry}, {});
+  assign_derived_identities(store);
+  const CanonicalValue encoded = store.to_canonical();
+
+  const FixingStore decoded = FixingStore::from_canonical(encoded, "");
+  EXPECT_EQ(decoded.to_canonical().dump(), encoded.dump());
+  ASSERT_EQ(decoded.entries.size(), 1U);
+  EXPECT_EQ(decoded.entries[0].observation_state, ObservationState::kMissing);
+  ASSERT_TRUE(decoded.entries[0].publication_date.present);
+  EXPECT_EQ(decoded.entries[0].publication_date.value.text, "2024-01-12");
 }
 
 TEST(FixingObservationStateConformance, AcceptsACompleteProjectedAuditRecord) {

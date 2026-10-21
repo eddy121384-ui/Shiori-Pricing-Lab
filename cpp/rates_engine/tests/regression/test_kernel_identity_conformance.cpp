@@ -17,6 +17,11 @@
 //      of the re-derived contract fingerprint. Cache keys and replay records consume that value as
 //      the contract's `inputs_fingerprint` (#226 section 7.2 K1), so publishing a different digest
 //      would give replay and the cache a value no peer can reproduce from the preimage rule.
+//   3. `dto::freeze_kernel_input` re-derived every identity but performed no validation, and
+//      re-derivation is exactly what hides a caller's SEMANTIC mutation: the freshly derived fingerprint
+//      agreed with content (a reporting currency that no longer matches the swap, an out-of-order entry
+//      list) that the contract decoder refuses. Publication now re-validates the re-derived document
+//      through that same decoder before it is frozen.
 //
 // THE CONTRACT FINGERPRINT IS A DERIVED VALUE, NEVER AN ASSERTED ONE
 // These tests pin all three identities that the contract requires to be the same value - the declared
@@ -579,4 +584,60 @@ TEST(KernelIdentityConformance, FreezePublishesTheReDerivedFingerprintNotAStaleD
   const PublishedKernelInput published = PublishedKernelInput::publish(stale);
   EXPECT_EQ(published.content_fingerprint(), fixture.declared_fingerprint);
   EXPECT_EQ(published.canonical_view(), fixture.canonical_bytes);
+}
+
+// ---------------------------------------------------------------------------------------------
+// (D.iv) Re-derivation is what HIDES a semantic mutation: every identity - including the fingerprint -
+// agrees with the mutated content, so a caller could hand `publish` a document no validator ever
+// accepted and receive a valid-looking immutable request. Publication must re-validate the re-derived
+// document through the contract decoder and refuse it.
+// ---------------------------------------------------------------------------------------------
+TEST(KernelIdentityConformance, RefusesToPublishAReDerivedDocumentThatTheDecoderRefuses) {
+  RatesKernelInput mutated = make_kernel_input_fixture().value;
+  ASSERT_EQ(mutated.valuation_context.reporting_currency, mutated.resolved_swap.currency);
+  // A semantic mutation, not an identity field: `reporting_currency` no longer matches the swap's
+  // currency, which docs/33 section 5.1 forbids in single-currency V1 ("no FX contract exists").
+  mutated.valuation_context.reporting_currency = Currency::kEur;
+  assign_derived_identities(mutated);
+  // Every identity is self-consistent again - the declared fingerprint is the digest of this mutated
+  // document's own preimage - so only the semantic rule can refuse it.
+  EXPECT_EQ(kernel_input_content_fingerprint(mutated), mutated.content_fingerprint);
+
+  // The mutation is a real contract violation, not a fixture error: the decoder refuses the document.
+  bool decoder_refused = false;
+  try {
+    (void)RatesKernelInput::from_canonical(mutated.to_canonical(), "");
+  } catch (const Shiori::rates::dto::ContractViolation& violation) {
+    decoder_refused = true;
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+    EXPECT_EQ(violation.pointer(), "/valuation_context");
+  }
+  EXPECT_TRUE(decoder_refused) << "the decoder must refuse the mutated document";
+
+  // The corrected behaviour: publication must not wrap it in a valid-looking immutable input.
+  bool publish_refused = false;
+  try {
+    (void)PublishedKernelInput::publish(mutated);
+  } catch (const Shiori::rates::dto::ContractViolation& violation) {
+    publish_refused = true;
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+    EXPECT_EQ(violation.pointer(), "/valuation_context");
+  }
+  EXPECT_TRUE(publish_refused) << "publish must not accept a document the decoder refuses";
+
+  // `publish` is `freeze_kernel_input`, so the same refusal holds one level down.
+  bool freeze_refused = false;
+  try {
+    (void)freeze_kernel_input(mutated);
+  } catch (const Shiori::rates::dto::ContractViolation&) {
+    freeze_refused = true;
+  }
+  EXPECT_TRUE(freeze_refused) << "freeze must not accept a document the decoder refuses";
+
+  // The unmutated fixture still publishes: the refusal is the semantic mutation, not the new step.
+  const KernelInputFixture valid = make_kernel_input_fixture();
+  const PublishedKernelInput accepted = PublishedKernelInput::publish(valid.value);
+  EXPECT_TRUE(accepted.valid());
+  EXPECT_EQ(accepted.content_fingerprint(), valid.declared_fingerprint);
+  EXPECT_EQ(accepted.canonical_view(), valid.canonical_bytes);
 }
