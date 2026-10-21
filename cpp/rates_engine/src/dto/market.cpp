@@ -1398,13 +1398,18 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
   // availability EQUAL to the valuation date is the line 610 same-day case, and section 8.5 leaves the
   // same-day rule unresolved (RED-225-F1 fixes no cutoff/timezone), so "until then same-day use fails
   // closed": it is refused with the contract's own `SAME_DAY_FIXING_RULE_UNRESOLVED` token (lines
-  // 610/626) instead of being admitted on the forecast path. Nothing is rewritten, reinterpreted from
-  // `observation_date`, promoted to history or demoted to a forecast; only a PRESENT publication
-  // availability can contradict a forecast state, so an unknown one keeps its line 612 handling for
-  // every state. A non-HISTORICAL state that is not on the forecast path (MISSING) is untouched: line
-  // 609 keeps such a record legal at the document level because its outcome is the kernel's
-  // `MISSING_MARKET_DATA` failure, not a malformed snapshot. Both dates are canonical fixed-width
-  // `YYYY-MM-DD`, so the text comparison the ordering rule below uses is also chronological order.
+  // 610/626) instead of being admitted on the forecast path. An availability that is UNKNOWN is the line
+  // 612 row for these states as well: the contract requires publication availability there and
+  // prescribes "fail closed; do not reinterpret `observation_date` as publication date and do not
+  // silently decide history vs forecast", and an undecided history-vs-forecast choice is exactly what a
+  // forecast-path record may not carry, so the field is refused at its own pointer. The same
+  // `ContractViolation` kind the HISTORICAL unknown row uses is reused and no reason code is invented,
+  // because the contract fixes none for line 612. Nothing is rewritten, reinterpreted from
+  // `observation_date`, promoted to history or demoted to a forecast. A non-HISTORICAL state that is not
+  // on the forecast path (MISSING) is untouched: line 609 keeps such a record legal at the document
+  // level because its outcome is the kernel's `MISSING_MARKET_DATA` failure, not a malformed snapshot.
+  // Both dates are canonical fixed-width `YYYY-MM-DD`, so the text comparison the ordering rule below
+  // uses is also chronological order.
   for (std::size_t index = 0; index < result.entries.size(); ++index) {
     const FixingEntry& entry = result.entries[index];
     const std::string publication_pointer =
@@ -1428,7 +1433,10 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
       continue;
     }
     if (!entry.publication_date.present) {
-      continue;
+      fail(ContractViolationKind::kInvalidTaggedUnionState, publication_pointer,
+           "a FORECAST_REQUIRED / PROJECTED observation requires PRESENT publication availability; the "
+           "forecast path exists only for a publication_date after the valuation date, so an unknown "
+           "one leaves history vs forecast undecided and is never reinterpreted from observation_date");
     }
     if (result.valuation_date.text == entry.publication_date.value.text) {
       fail(ContractViolationKind::kInvariantViolation, publication_pointer,
