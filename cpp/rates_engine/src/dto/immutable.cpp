@@ -35,6 +35,15 @@ std::shared_ptr<const FrozenKernelInput> freeze_kernel_input(RatesKernelInput va
   // Re-derive every nested identity and the top-level fingerprint from the owned value, so a caller
   // cannot publish a payload whose declared identity disagrees with its content.
   assign_derived_identities(value);
+  // Re-derivation is exactly what can HIDE a caller's semantic mutation: an edited
+  // `valuation_context.reporting_currency`, a curve selection that no longer matches the embedded swap,
+  // an entry list outside its canonical order - none of those are identity fields, so the freshly
+  // derived fingerprint agrees with content no validator has ever accepted, and `publish` would wrap an
+  // invalid request in a valid-looking immutable input. Publication therefore re-validates the
+  // re-derived document by reusing the contract decoder - the same entry point the CLI and every peer
+  // read a document through - and publishes the DECODED value. No second validation path is introduced,
+  // nothing is repaired or normalised, and a document the decoder refuses can never be frozen.
+  value = RatesKernelInput::from_canonical(value.to_canonical(), "");
   auto frozen = std::make_shared<FrozenKernelInput>();
   frozen->canonical_bytes = value.to_canonical().dump();
   // #225 section 15.4: an object's own content_fingerprint is excluded from its own preimage, so the

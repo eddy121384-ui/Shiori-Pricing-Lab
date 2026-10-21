@@ -1385,26 +1385,62 @@ FixingStore FixingStore::from_canonical(const CanonicalValue& node, const std::s
   // HISTORICAL entry is exactly the case where publication availability is required (section 8.3 line
   // 594 defines it as published and captured), so an unknown publication_date there is refused at its
   // own field pointer instead of being skipped; the contract prescribes no reason code for that row, so
-  // none is invented. Every non-HISTORICAL state is untouched, and `observation_date` is never
-  // substituted for publication availability. Both dates are canonical fixed-width `YYYY-MM-DD`, so the
-  // text comparison the ordering rule below uses is also chronological order.
+  // none is invented.
+  //
+  // The same matrix governs the FORECAST path, which is the only remaining row a PRESENT publication
+  // availability can fall into. Section 8.4 line 611 defines that path as `publication_date >
+  // valuation_date`: FORECAST_REQUIRED and PROJECTED both assert that the observation is not yet
+  // available as history at the valuation instant, so a PRESENT publication availability that is ON OR
+  // BEFORE the valuation date contradicts the state it is attached to. An availability BEFORE the
+  // valuation date means the fixing is already due as history - line 608/609 either consumes it as
+  // captured (HISTORICAL) or fails the valuation with `MISSING_MARKET_DATA` - so it can never be
+  // projected as a future forecast and is refused here rather than silently treated as one. An
+  // availability EQUAL to the valuation date is the line 610 same-day case, and section 8.5 leaves the
+  // same-day rule unresolved (RED-225-F1 fixes no cutoff/timezone), so "until then same-day use fails
+  // closed": it is refused with the contract's own `SAME_DAY_FIXING_RULE_UNRESOLVED` token (lines
+  // 610/626) instead of being admitted on the forecast path. Nothing is rewritten, reinterpreted from
+  // `observation_date`, promoted to history or demoted to a forecast; only a PRESENT publication
+  // availability can contradict a forecast state, so an unknown one keeps its line 612 handling for
+  // every state. A non-HISTORICAL state that is not on the forecast path (MISSING) is untouched: line
+  // 609 keeps such a record legal at the document level because its outcome is the kernel's
+  // `MISSING_MARKET_DATA` failure, not a malformed snapshot. Both dates are canonical fixed-width
+  // `YYYY-MM-DD`, so the text comparison the ordering rule below uses is also chronological order.
   for (std::size_t index = 0; index < result.entries.size(); ++index) {
     const FixingEntry& entry = result.entries[index];
-    if (entry.observation_state != ObservationState::kHistorical) {
-      continue;
-    }
     const std::string publication_pointer =
         child(pointer_index(child(pointer, "entries"), index), "publication_date");
-    if (!entry.publication_date.present) {
-      fail(ContractViolationKind::kInvalidTaggedUnionState, publication_pointer,
-           "a HISTORICAL observation requires PRESENT publication availability; an unknown "
-           "publication_date cannot be admitted as a captured fixing and is never reinterpreted from "
-           "observation_date");
+    if (entry.observation_state == ObservationState::kHistorical) {
+      if (!entry.publication_date.present) {
+        fail(ContractViolationKind::kInvalidTaggedUnionState, publication_pointer,
+             "a HISTORICAL observation requires PRESENT publication availability; an unknown "
+             "publication_date cannot be admitted as a captured fixing and is never reinterpreted from "
+             "observation_date");
+      }
+      if (result.valuation_date.text < entry.publication_date.value.text) {
+        fail(ContractViolationKind::kInvariantViolation, publication_pointer,
+             "UNPUBLISHED_FIXING_STORED_AS_HISTORY: a HISTORICAL observation's publication_date is "
+             "after the fixing store's valuation_date");
+      }
+      continue;
     }
-    if (result.valuation_date.text < entry.publication_date.value.text) {
+    if (entry.observation_state != ObservationState::kForecastRequired &&
+        entry.observation_state != ObservationState::kProjected) {
+      continue;
+    }
+    if (!entry.publication_date.present) {
+      continue;
+    }
+    if (result.valuation_date.text == entry.publication_date.value.text) {
       fail(ContractViolationKind::kInvariantViolation, publication_pointer,
-           "UNPUBLISHED_FIXING_STORED_AS_HISTORY: a HISTORICAL observation's publication_date is "
-           "after the fixing store's valuation_date");
+           "SAME_DAY_FIXING_RULE_UNRESOLVED: a FORECAST_REQUIRED / PROJECTED observation publishes on "
+           "the fixing store's valuation_date; the same-day rule is unresolved (section 8.5) and a "
+           "same-day fixing cannot be admitted on the forecast path");
+    }
+    if (entry.publication_date.value.text < result.valuation_date.text) {
+      fail(ContractViolationKind::kInvariantViolation, publication_pointer,
+           "a FORECAST_REQUIRED / PROJECTED observation's publication_date is before the fixing "
+           "store's valuation_date: the fixing is already due as history (section 8.4) and cannot be "
+           "projected as a future forecast");
     }
   }
   // Section 15.4 (docs/33 line 1228): entries are in ascending `(index_id, observation_date)`. The

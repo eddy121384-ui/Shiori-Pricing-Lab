@@ -863,6 +863,22 @@ void RatesKernelInput::validate_invariants(const std::string& pointer) const {
          "forecast curve; an absent or empty forecast_curve_by_index leaves the floating leg "
          "unforecastable and no curve may be inferred");
   }
+  // Section 5.1: the map is keyed by the floating index the valuation REQUIRES, and the kernel must not
+  // choose a curve, infer a selection, or derive a preferred curve internally. The per-entry loop above
+  // validates each selection on its own terms, but a well-formed selection for an index the product
+  // does not consume is still an unapproved selection: V1 values exactly two product shapes and each
+  // prices one floating leg, `resolved_swap.floating_index`, so no rule exists that could use a second
+  // entry - carrying it into the request identity would only bind the kernel fingerprint (and every
+  // downstream replay/risk binding) to a curve the product never consumes. The selected key set must
+  // therefore EQUAL the required index set, which for a V1 product is exactly the single required key
+  // proven present just above. The check is a refusal only: no entry is added, removed, re-keyed or
+  // re-pointed, and a curve that is merely carried in `curve_set` without being selected stays legal.
+  if (curve_selection.forecast_curve_by_index.size() != 1) {
+    fail(ContractViolationKind::kInvariantViolation, forecast_selection_pointer,
+         "a V1 OIS/swaption must select exactly the resolved swap's floating index in "
+         "forecast_curve_by_index; a selection for an index the product does not consume is never "
+         "inferred, defaulted, added or dropped");
+  }
 
   // Section 5.1: exact product applicability. Applicability is structural, never a market default.
   const bool is_ois = valuation_product.product_type == ProductType::kOis;
